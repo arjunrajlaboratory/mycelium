@@ -1,0 +1,22 @@
+{
+  "name": "mycelium",
+  "owner": {
+    "name": "Arjun Raj Laboratory",
+    "url": "https://github.com/arjunrajlaboratory"
+  },
+  "metadata": {
+    "description": "Self-documenting, self-improving framework for analytical repositories",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "mycelium",
+      "description": "Living repository skill for self-documenting analytical frameworks",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skill"
+      ]
+    }
+  ]
+}
