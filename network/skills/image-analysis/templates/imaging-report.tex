@@ -1,0 +1,120 @@
+% Image Analysis Report Template
+% Extends the core mycelium report template with imaging-specific sections.
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{natbib}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{siunitx}            % For consistent unit formatting
+
+\title{Image Analysis: [Title]}
+\author{[Author(s)]}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+[Summarize: biological question, imaging modality, number of images/conditions analyzed,
+segmentation approach, key quantitative findings, main conclusion.]
+\end{abstract}
+
+\section{Introduction}
+
+[Biological context. What was imaged and why? What quantitative measurements
+are needed to answer the question?]
+
+\section{Methods}
+
+\subsection{Image Acquisition}
+
+\begin{itemize}
+    \item \textbf{Microscope}: [model]
+    \item \textbf{Objective}: [magnification, NA]
+    \item \textbf{Pixel size}: \SI{[X]}{\micro\meter/pixel}
+    \item \textbf{Modality}: [widefield/confocal/light-sheet]
+    \item \textbf{Channels}: [list with excitation/emission]
+    \item \textbf{Exposure}: [time per channel]
+\end{itemize}
+
+\subsection{Image Preprocessing}
+
+[Describe background subtraction, illumination correction, registration.
+Document parameters for each step.]
+
+\subsection{Segmentation}
+
+[Describe segmentation method, software version, all parameters.
+Reference validation results.]
+
+% \begin{figure}[htbp]
+%     \centering
+%     \begin{subfigure}{0.32\textwidth}
+%         \includegraphics[width=\textwidth]{../outputs/figures/raw_example.png}
+%         \caption{Raw image.}
+%     \end{subfigure}
+%     \begin{subfigure}{0.32\textwidth}
+%         \includegraphics[width=\textwidth]{../outputs/figures/segmentation_overlay.png}
+%         \caption{Segmentation overlay.}
+%     \end{subfigure}
+%     \begin{subfigure}{0.32\textwidth}
+%         \includegraphics[width=\textwidth]{../outputs/figures/segmentation_labels.png}
+%         \caption{Label image.}
+%     \end{subfigure}
+%     \caption{Representative segmentation result.}
+%     \label{fig:segmentation}
+% \end{figure}
+
+\subsection{Quantification}
+
+[Describe features measured, normalization applied, physical units used.]
+
+\subsection{Statistical Analysis}
+
+[Describe statistical methods for comparing conditions. Reference core
+statistical conventions. Document sample sizes at each level (images,
+objects, biological replicates).]
+
+\section{Results}
+
+\subsection{Quality Control}
+
+[Summarize image QC: number of images acquired, excluded, and why.
+Show representative QC figures.]
+
+\subsection{Segmentation Validation}
+
+[Report segmentation performance metrics against ground truth if available.
+Show representative good and challenging cases.]
+
+\subsection{Quantitative Analysis}
+
+[Report measurements and comparisons. Show violin/box plots for per-object
+measurements. Report effect sizes and confidence intervals.]
+
+% \begin{figure}[htbp]
+%     \centering
+%     \includegraphics[width=0.8\textwidth]{../outputs/figures/measurement_comparison.pdf}
+%     \caption{[Description of quantitative comparison between conditions.]}
+%     \label{fig:measurements}
+% \end{figure}
+
+\section{Discussion}
+
+[Interpret results. Discuss segmentation limitations. Consider biological
+implications. Propose follow-up experiments or analyses.]
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

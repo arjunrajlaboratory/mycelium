@@ -1,0 +1,22 @@
+# Analysis Manifest Entry Template
+# Copy this block into analysis/MANIFEST.md for each new analysis.
+# Fill in all fields. Delete comments before committing.
+
+### [analysis-name]
+# ```yaml
+# name: [analysis-name]                   # Unique identifier, lowercase with hyphens
+# status: [draft|active|complete|archived]
+# created: [YYYY-MM-DD]
+# last_updated: [YYYY-MM-DD]
+# datasets: [dataset-1, dataset-2]        # References to data/MANIFEST.md entries
+# algorithms: [algorithm-1]               # References to algorithms/MANIFEST.md entries
+# parent_analysis: [parent-name|null]     # null if this is a root analysis
+# key_findings:
+#   - [Finding 1]
+#   - [Finding 2]
+# report: analysis/[analysis-name]/reports/[report-name].tex   # null if no report yet
+# tags: [tag1, tag2, tag3]
+# ```
+#
+# [Prose description: 2-3 sentences about the analysis, its motivation,
+# and key results. Reference parent analysis if applicable.]

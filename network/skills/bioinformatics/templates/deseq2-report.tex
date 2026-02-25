@@ -1,0 +1,145 @@
+% Bioinformatics Report Template — Differential Expression with DESeq2
+% Extends the core mycelium report template with bioinformatics-specific sections.
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{natbib}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{longtable}         % For gene tables spanning multiple pages
+
+\title{Differential Expression Analysis: [Title]}
+\author{[Author(s)]}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+[Summarize: biological question, experimental design (N samples, conditions),
+key DE results (N genes at FDR threshold), top enriched pathways, main conclusion.]
+\end{abstract}
+
+\section{Introduction}
+
+[Biological context. Why was this analysis performed? What is the hypothesis
+or question? Reference relevant prior work.]
+
+\section{Methods}
+
+\subsection{Experimental Design}
+
+[Describe samples, conditions, replicates, known covariates. Include a table
+if helpful.]
+
+% \begin{table}[htbp]
+%     \centering
+%     \caption{Sample overview.}
+%     \begin{tabular}{llll}
+%         \toprule
+%         Sample ID & Condition & Batch & Notes \\
+%         \midrule
+%         S1 & treated & B1 & \\
+%         \bottomrule
+%     \end{tabular}
+% \end{table}
+
+\subsection{Data Processing}
+
+\begin{itemize}
+    \item \textbf{Genome}: [assembly, annotation version]
+    \item \textbf{Alignment}: [STAR/HISAT2/Salmon version and parameters]
+    \item \textbf{Quantification}: [featureCounts/tximport version]
+    \item \textbf{QC}: FastQC v[X], MultiQC v[X]
+\end{itemize}
+
+\subsection{Differential Expression}
+
+DESeq2 v[version] \citep{Love2014} was used for differential expression analysis.
+Genes with fewer than [10] total counts across all samples were filtered before
+analysis. The design formula was \texttt{$\sim$ [covariates + condition]}.
+Log fold change shrinkage was applied using the apeglm method \citep{Zhu2019}.
+Genes were considered differentially expressed at an adjusted $p$-value (Benjamini-Hochberg)
+$< 0.05$ and $|\log_2\text{FC}| > 1$.
+
+\subsection{Enrichment Analysis}
+
+[Method: fgsea/clusterProfiler. Gene sets: MSigDB Hallmark/KEGG/Reactome.
+Describe ranking metric and significance threshold.]
+
+\section{Results}
+
+\subsection{Quality Control}
+
+[Summarize QC results. Reference MultiQC report in supplementary. Note any
+samples excluded and why.]
+
+% \begin{figure}[htbp]
+%     \centering
+%     \includegraphics[width=0.6\textwidth]{../outputs/figures/pca_plot.pdf}
+%     \caption{PCA of normalized expression values, colored by condition.}
+%     \label{fig:pca}
+% \end{figure}
+
+\subsection{Differential Expression}
+
+[Report number of DE genes. Show volcano plot and MA plot.]
+
+% \begin{figure}[htbp]
+%     \centering
+%     \begin{subfigure}{0.48\textwidth}
+%         \includegraphics[width=\textwidth]{../outputs/figures/volcano_plot.pdf}
+%         \caption{Volcano plot.}
+%     \end{subfigure}
+%     \begin{subfigure}{0.48\textwidth}
+%         \includegraphics[width=\textwidth]{../outputs/figures/ma_plot.pdf}
+%         \caption{MA plot.}
+%     \end{subfigure}
+%     \caption{Differential expression results. Significant genes (FDR $< 0.05$,
+%     $|\log_2\text{FC}| > 1$) highlighted in red.}
+%     \label{fig:de}
+% \end{figure}
+
+% Top DE genes table
+% \begin{table}[htbp]
+%     \centering
+%     \caption{Top 10 differentially expressed genes by adjusted $p$-value.}
+%     \begin{tabular}{lrrr}
+%         \toprule
+%         Gene & $\log_2$FC & $p_{\text{adj}}$ & Mean Expression \\
+%         \midrule
+%         [gene] & & & \\
+%         \bottomrule
+%     \end{tabular}
+% \end{table}
+
+\subsection{Pathway Enrichment}
+
+[Report top enriched pathways. Show enrichment dot plot.]
+
+% \begin{figure}[htbp]
+%     \centering
+%     \includegraphics[width=0.8\textwidth]{../outputs/figures/enrichment_dotplot.pdf}
+%     \caption{Top enriched pathways by normalized enrichment score.}
+%     \label{fig:enrichment}
+% \end{figure}
+
+\section{Discussion}
+
+[Interpret results in biological context. Compare with prior work.
+Discuss limitations (sample size, batch effects, genome annotation).
+Propose next steps.]
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

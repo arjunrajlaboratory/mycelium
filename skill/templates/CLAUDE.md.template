@@ -1,0 +1,74 @@
+# CLAUDE.md — Mycelium Living Repository
+
+This repository is a **mycelium-enabled living repository**. It carries its own memory and grows smarter over time through structured traces of every action.
+
+## Quick Orientation
+
+1. **Read `.living/` first** — This is the repository's accumulated intelligence:
+   - `.living/decisions.md` — Why past choices were made
+   - `.living/learnings.md` — Gotchas, surprises, and insights from previous work
+   - `.living/conventions.md` — Repo-specific convention overrides
+2. **Read `ENVIRONMENTS_INSTALLATIONS.md`** — Environment setup, dependencies, and installation gotchas
+3. **Read the relevant `MANIFEST.md`** — Each top-level directory has a manifest registering its contents
+
+## Active Domain Skills
+
+<!-- Updated by install_domain_skill.py -->
+<!-- Check .living/skills/ACTIVE_SKILLS.yaml for the full list -->
+
+No domain skills installed yet. Install with mycelium's `install-skill` mode.
+
+## Repository Structure
+
+```
+├── algorithms/    — Reusable computational methods (see algorithms/MANIFEST.md)
+├── analysis/      — Analytical work (see analysis/MANIFEST.md)
+├── data/          — Data assets: raw (immutable), processed, metadata (see data/MANIFEST.md)
+├── reference_material/ — External references (see reference_material/MANIFEST.md)
+└── .living/       — Repository memory layer
+```
+
+## Workflow
+
+### Before Starting Work
+
+1. Read `.living/learnings.md` for known gotchas relevant to your task
+2. Read `.living/decisions.md` for past reasoning that may inform your approach
+3. Read the `MANIFEST.md` for the area you'll be working in
+4. Check `.living/conventions.md` for any repo-specific overrides
+5. If a domain skill is active, read its conventions in `.living/skills/[domain]/`
+
+### While Working
+
+- Follow analysis conventions: every analysis gets its own folder with README, scripts, outputs, reports
+- Follow statistical conventions: report effect sizes, confidence intervals, document assumptions
+- Use marimo for exploration, Python scripts for reproducible pipelines
+- Every analysis must have a `run.sh` or `run.py` that reproduces final outputs
+
+### After Every Significant Action (Post-Action Hook Protocol)
+
+**This is critical.** After completing any significant step:
+
+1. **Update manifests**: Update the relevant `MANIFEST.md` with new/changed entries
+2. **Update READMEs**: Update or create the `README.md` in the affected subfolder
+3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md`
+4. **Log learnings**: If something unexpected happened, append to `.living/learnings.md`
+5. **Validate**: Run `validate_structure.py` to confirm repo structure is correct
+6. **Skill feedback**: Note whether domain skill conventions were helpful or had gaps
+
+## Data Conventions
+
+- `data/raw/` is **IMMUTABLE** — never modify original files
+- Every dataset has metadata in `data/metadata/[dataset-name]/`
+- Every dataset has a manifest entry in `data/MANIFEST.md`
+- Large files are gitignored with download instructions documented
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `ENVIRONMENTS_INSTALLATIONS.md` | How to set up the environment |
+| `.living/decisions.md` | Why choices were made |
+| `.living/learnings.md` | Accumulated insights and gotchas |
+| `.living/conventions.md` | Repo-specific convention overrides |
+| `*/MANIFEST.md` | Registry of contents in each directory |

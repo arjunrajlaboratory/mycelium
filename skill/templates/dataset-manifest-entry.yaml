@@ -1,0 +1,27 @@
+# Dataset Manifest Entry Template
+# Copy this block into data/MANIFEST.md for each new dataset.
+# Fill in all fields. Delete comments before committing.
+
+### [dataset-name]
+# ```yaml
+# name: [dataset-name]                    # Unique identifier, lowercase with hyphens
+# type: [clinical|genomic|imaging|survey|simulation|other]
+# source: [Where the data came from]
+# date_acquired: [YYYY-MM-DD]
+# format: [CSV|TSV|FASTQ|TIFF|Parquet|etc. Note number of files if multiple]
+# rows: [number of rows/records, if tabular]
+# columns: [number of columns, if tabular]
+# size: [human-readable file size, e.g., "4.2 GB"]
+# raw_path: data/raw/[dataset-name]/
+# processed_path: data/processed/[dataset-name]/   # Delete if no processed version
+# metadata_path: data/metadata/[dataset-name]/
+# status: [raw|validated|processed|archived]
+# known_issues:
+#   - [Issue 1]
+#   - [Issue 2]
+# access_restrictions: [none|institutional-only|dua-required|other]
+# tags: [tag1, tag2, tag3]
+# ```
+#
+# [Prose description: 2-3 sentences about the dataset, its significance,
+# and any important context. Mention known issues and how they affect analyses.]
