@@ -1,0 +1,11 @@
+---
+name: bioinformatics
+version: 0.1.0
+description: >
+  Domain conventions for bioinformatics analyses including RNA-seq,
+  single-cell, and genomics workflows. Covers quality control, differential
+  expression methodology, gene set enrichment, and visualization standards.
+author: mycelium
+dependencies: []
+tags: [bioinformatics, genomics, rnaseq, single-cell, deseq2, gene-expression]
+---

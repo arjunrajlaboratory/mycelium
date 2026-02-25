@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.whl
+.venv/
+venv/
+env/
+.env
+*.ipynb_checkpoints/
+
+# LaTeX
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.nav
+*.snm
+*.vrb
+
+# Data (large files — document in README how to obtain)
+*.fastq
+*.fastq.gz
+*.bam
+*.bam.bai
+*.sam
+*.vcf
+*.vcf.gz
+*.bed
+*.bedgraph
+*.bigwig
+*.h5ad
+*.h5
+*.hdf5
+*.parquet
+*.feather
+*.tif
+*.tiff
+*.czi
+*.nd2
+*.lif
+*.zarr/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# R
+.Rhistory
+.Rdata
+.RData
+.Rproj.user/
+
+# Conda
+*.conda
+conda-meta/
+
+# Misc
+*.csv.gz
+*.tsv.gz
+*.zip
+*.tar.gz
+*.tar.bz2

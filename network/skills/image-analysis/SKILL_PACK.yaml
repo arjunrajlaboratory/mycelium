@@ -1,0 +1,11 @@
+---
+name: image-analysis
+version: 0.1.0
+description: >
+  Domain conventions for image analysis including segmentation,
+  quantification, preprocessing standards, and benchmarking protocols.
+  Covers fluorescence microscopy, brightfield, and general imaging workflows.
+author: mycelium
+dependencies: []
+tags: [image-analysis, segmentation, microscopy, fluorescence, quantification]
+---

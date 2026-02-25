@@ -1,0 +1,94 @@
+% Mycelium Report Template
+% Copy to analysis/[name]/reports/ and fill in placeholders.
+
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}          % Professional tables (no vertical lines)
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{natbib}            % Citations
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}        % For sub-figures
+
+% --- Metadata ---
+\title{[Report Title]}
+\author{[Author(s)]}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+% --- Abstract ---
+\begin{abstract}
+[One paragraph summarizing the question, approach, key findings, and implications.
+Keep to 150--250 words.]
+\end{abstract}
+
+% --- Introduction ---
+\section{Introduction}
+
+[Context and motivation. What question does this analysis address? Why does it matter?
+Reference relevant prior analyses in this repository if applicable.]
+
+% --- Methods ---
+\section{Methods}
+
+\subsection{Data}
+[Describe datasets used. Reference data/MANIFEST.md entries by name.
+Include sample sizes.]
+
+\subsection{Analysis}
+[Describe the analytical approach. Reference algorithms/MANIFEST.md entries.
+Include all parameters and software versions.]
+
+\subsection{Statistical Methods}
+[Describe statistical tests, correction methods, significance thresholds.
+Follow statistical-conventions.md: report effect sizes, CIs, assumptions checked.]
+
+% --- Results ---
+\section{Results}
+
+[Present findings with figures and tables. No interpretation here — save that
+for the Discussion. Reference figures as Figure~\ref{fig:example}.]
+
+% Example figure inclusion:
+% \begin{figure}[htbp]
+%     \centering
+%     \includegraphics[width=0.8\textwidth]{../outputs/figure_name.pdf}
+%     \caption{[Descriptive caption including key takeaway.]}
+%     \label{fig:example}
+% \end{figure}
+
+% Example table:
+% \begin{table}[htbp]
+%     \centering
+%     \caption{[Descriptive caption.]}
+%     \label{tab:example}
+%     \begin{tabular}{lrrr}
+%         \toprule
+%         Feature & Estimate & 95\% CI & $p_{\text{adj}}$ \\
+%         \midrule
+%         [row 1] & & & \\
+%         [row 2] & & & \\
+%         \bottomrule
+%     \end{tabular}
+% \end{table}
+
+% --- Discussion ---
+\section{Discussion}
+
+[Interpret results. Compare with prior work. Discuss limitations. Identify
+next steps and open questions.]
+
+% --- References ---
+\bibliographystyle{plainnat}
+\bibliography{references}       % references.bib in same directory
+
+\end{document}
