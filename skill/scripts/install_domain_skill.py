@@ -9,6 +9,9 @@ Usage:
 """
 
 import argparse
+import shutil
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -41,17 +44,20 @@ def find_network_dir(network_dir: Path | None) -> Path | None:
     if network_dir and network_dir.exists():
         return network_dir
 
-    # TODO: Search common locations:
-    #   - Adjacent to target repo
-    #   - In ~/.mycelium/network/
-    #   - In the mycelium repo itself
-    print("  TODO: Auto-detect network directory location")
-    return network_dir
+    # Search common locations
+    candidates = [
+        Path(__file__).resolve().parent.parent.parent / "network" / "skills",
+        Path.home() / ".mycelium" / "network" / "skills",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return None
 
 
 def list_available_skills(network_dir: Path) -> list[str]:
     """List available domain skill packs."""
-    # TODO: Scan network_dir for subdirectories with SKILL_PACK.yaml
     skills = []
     if network_dir and network_dir.exists():
         for subdir in sorted(network_dir.iterdir()):
@@ -65,35 +71,83 @@ def copy_skill(network_dir: Path, domain: str, target_dir: Path):
     source = network_dir / domain
     dest = target_dir / ".living" / "skills" / domain
 
-    # TODO: Copy all files from source to dest
-    # TODO: Skip SKILL_PACK.yaml metadata (or copy it for reference)
-    # TODO: Handle existing installation (update vs skip)
-    print(f"  Would copy: {source} → {dest}")
-    print(f"  Files to copy:")
-    if source.exists():
-        for f in sorted(source.rglob("*")):
-            if f.is_file():
-                print(f"    - {f.relative_to(source)}")
+    if dest.exists():
+        print(f"  Updating existing installation at {dest}")
+        shutil.rmtree(dest)
+
+    shutil.copytree(source, dest)
+
+    copied = [f for f in sorted(dest.rglob("*")) if f.is_file()]
+    print(f"  Copied {len(copied)} files to {dest}")
+    for f in copied:
+        print(f"    - {f.relative_to(dest)}")
 
 
 def update_active_skills(target_dir: Path, domain: str):
     """Update .living/skills/ACTIVE_SKILLS.yaml with the new skill."""
     yaml_path = target_dir / ".living" / "skills" / "ACTIVE_SKILLS.yaml"
-    # TODO: Parse existing YAML
-    # TODO: Add new skill entry with name, version, install date, path
-    # TODO: Write updated YAML
-    print(f"  Would update: {yaml_path}")
-    print(f"  New entry: {domain}")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Read existing content or start fresh
+    existing_lines = []
+    if yaml_path.exists():
+        existing_lines = yaml_path.read_text().splitlines()
+
+    # Check if this domain already has an entry and remove it
+    filtered = []
+    skip = False
+    for line in existing_lines:
+        if line.strip().startswith(f"- name: {domain}"):
+            skip = True
+            continue
+        if skip and line.startswith("  "):
+            continue
+        skip = False
+        filtered.append(line)
+
+    # Add the new entry
+    entry = (
+        f"- name: {domain}\n"
+        f"  path: .living/skills/{domain}/\n"
+        f"  installed: {now}"
+    )
+
+    if not filtered or filtered == [""]:
+        filtered = ["# Active domain skills", entry]
+    else:
+        filtered.append(entry)
+
+    yaml_path.write_text("\n".join(filtered) + "\n")
+    print(f"  Updated {yaml_path}")
 
 
 def update_claude_md(target_dir: Path, domain: str):
     """Update CLAUDE.md to reference the new domain conventions."""
     claude_md = target_dir / "CLAUDE.md"
-    # TODO: Find the "Active Domain Skills" section
-    # TODO: Add reference to the newly installed skill
-    # TODO: Point to .living/skills/{domain}/ for conventions
-    print(f"  Would update: {claude_md}")
-    print(f"  Adding reference to {domain} domain conventions")
+    if not claude_md.exists():
+        print(f"  Skipping CLAUDE.md update (file not found)")
+        return
+
+    content = claude_md.read_text()
+    skill_ref = f"- [{domain}](.living/skills/{domain}/)"
+
+    # Already referenced?
+    if skill_ref in content:
+        print(f"  CLAUDE.md already references {domain}")
+        return
+
+    # Insert into Active Domain Skills section if it exists
+    section_header = "## Active Domain Skills"
+    if section_header in content:
+        content = content.replace(
+            section_header,
+            f"{section_header}\n\n{skill_ref}",
+        )
+    else:
+        content += f"\n\n{section_header}\n\n{skill_ref}\n"
+
+    claude_md.write_text(content)
+    print(f"  Updated {claude_md}")
 
 
 def main():
@@ -105,21 +159,21 @@ def main():
 
     # Verify mycelium structure exists
     if not (target_dir / ".living").exists():
-        print("Error: This doesn't appear to be a mycelium-enabled repo.")
+        print("Error: This doesn't appear to be a mycelium-enabled project.")
         print("Run init_repo.py first.")
-        return
+        sys.exit(1)
 
     network_dir = find_network_dir(args.network_dir)
     if not network_dir:
         print("\nAvailable skills could not be listed (network directory not found).")
         print("Specify --network-dir pointing to the mycelium network/skills/ directory.")
-        return
+        sys.exit(1)
 
     available = list_available_skills(network_dir)
     if args.domain not in available:
         print(f"\nSkill '{args.domain}' not found in network.")
         print(f"Available skills: {', '.join(available) if available else 'none found'}")
-        return
+        sys.exit(1)
 
     print(f"\nInstalling {args.domain} skill pack...")
     copy_skill(network_dir, args.domain, target_dir)

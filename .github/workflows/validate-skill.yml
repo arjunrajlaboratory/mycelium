@@ -70,7 +70,7 @@ jobs:
 
       - name: Run validate_structure.py
         run: |
-          python skill/scripts/validate_structure.py --target-dir . || true
+          python skill/scripts/validate_structure.py --target-dir .
 
       - name: Lint markdown files
         uses: DavidAnson/markdownlint-cli2-action@v19
