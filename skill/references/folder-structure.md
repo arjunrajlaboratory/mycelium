@@ -32,9 +32,12 @@ project-root/
 │   ├── raw/                               # Immutable originals
 │   ├── processed/                         # Cleaned/transformed
 │   └── metadata/                          # Schemas, data dictionaries, provenance
-└── reference_material/
-    ├── MANIFEST.md
-    └── ...
+├── reference_material/
+│   ├── MANIFEST.md
+│   └── ...
+└── todo/
+    ├── TODOLIST.md                         # Master list of future work items
+    └── [item-name].md                      # Detailed writeup for a todo item
 ```
 
 ## Directory Purposes
@@ -66,6 +69,10 @@ Each analysis gets its own subdirectory with a standardized structure. Analyses 
 ### `reference_material/` — External References
 
 Papers, documentation, external datasets used for comparison, or any reference material relevant to the project.
+
+### `todo/` — Future Work Items
+
+A lightweight tracker for future work. `TODOLIST.md` is the master list; each item can optionally have a detailed writeup in a separate `[item-name].md` file in the same directory. Use this to capture ideas, follow-ups, and deferred tasks so nothing falls through the cracks.
 
 ## MANIFEST.md Format
 

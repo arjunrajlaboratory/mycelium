@@ -87,7 +87,7 @@ def check_living_directory(target_dir: Path, result: ValidationResult):
 
 def check_top_level_directories(target_dir: Path, result: ValidationResult):
     """Check that all four top-level directories exist."""
-    required_dirs = ["algorithms", "analysis", "data", "reference_material"]
+    required_dirs = ["algorithms", "analysis", "data", "reference_material", "todo"]
 
     for dir_name in required_dirs:
         dir_path = target_dir / dir_name
@@ -140,6 +140,13 @@ def check_analysis_readmes(target_dir: Path, result: ValidationResult):
                 result.warning(f"analysis/{subdir.name}/ has no README.md")
 
 
+def check_todo_directory(target_dir: Path, result: ValidationResult):
+    """Check that todo/TODOLIST.md exists."""
+    todolist_path = target_dir / "todo" / "TODOLIST.md"
+    if not todolist_path.exists():
+        result.error("todo/TODOLIST.md does not exist")
+
+
 def check_environments_file(target_dir: Path, result: ValidationResult):
     """Check that ENVIRONMENTS_INSTALLATIONS.md exists at root."""
     env_path = target_dir / "ENVIRONMENTS_INSTALLATIONS.md"
@@ -181,6 +188,9 @@ def main():
 
     print("Checking analysis READMEs...")
     check_analysis_readmes(target_dir, result)
+
+    print("Checking todo directory...")
+    check_todo_directory(target_dir, result)
 
     print("Checking ENVIRONMENTS_INSTALLATIONS.md...")
     check_environments_file(target_dir, result)
