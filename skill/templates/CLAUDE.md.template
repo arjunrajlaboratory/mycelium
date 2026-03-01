@@ -25,6 +25,7 @@ No domain skills installed yet. Install with mycelium's `install-skill` mode.
 ├── analysis/      — Analytical work (see analysis/MANIFEST.md)
 ├── data/          — Data assets: raw (immutable), processed, metadata (see data/MANIFEST.md)
 ├── reference_material/ — External references (see reference_material/MANIFEST.md)
+├── todo/          — Future work items (see todo/TODOLIST.md)
 └── .living/       — Repository memory layer
 ```
 
@@ -53,8 +54,9 @@ No domain skills installed yet. Install with mycelium's `install-skill` mode.
 2. **Update READMEs**: Update or create the `README.md` in the affected subfolder
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md`
 4. **Log learnings**: If something unexpected happened, append to `.living/learnings.md`
-5. **Validate**: Run `validate_structure.py` to confirm repo structure is correct
-6. **Skill feedback**: Note whether domain skill conventions were helpful or had gaps
+5. **Log todos**: If future work is identified, add items to `todo/TODOLIST.md` (create a detailed `todo/[item].md` writeup for complex items)
+6. **Validate**: Run `validate_structure.py` to confirm repo structure is correct
+7. **Skill feedback**: Note whether domain skill conventions were helpful or had gaps
 
 ## Data Conventions
 
@@ -71,4 +73,5 @@ No domain skills installed yet. Install with mycelium's `install-skill` mode.
 | `.living/decisions.md` | Why choices were made |
 | `.living/learnings.md` | Accumulated insights and gotchas |
 | `.living/conventions.md` | Repo-specific convention overrides |
+| `todo/TODOLIST.md` | Master list of future work items |
 | `*/MANIFEST.md` | Registry of contents in each directory |

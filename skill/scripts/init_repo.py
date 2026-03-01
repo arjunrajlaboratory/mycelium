@@ -54,6 +54,7 @@ def create_directory_structure(target_dir: Path):
         "data/processed",
         "data/metadata",
         "reference_material",
+        "todo",
     ]
 
     for dir_name in directories:
@@ -74,6 +75,20 @@ def create_manifests(target_dir: Path):
                 "<!-- Add entries below using the appropriate manifest entry template. -->\n"
             )
             print(f"  Created: {dir_name}/MANIFEST.md")
+
+
+def create_todo_list(target_dir: Path):
+    """Create todo/TODOLIST.md for tracking future work items."""
+    todolist_path = target_dir / "todo" / "TODOLIST.md"
+    if not todolist_path.exists():
+        todolist_path.write_text(
+            "# Todo List\n\n"
+            "Master list of future work items. Each item can have a detailed writeup\n"
+            "in a separate `.md` file in this directory.\n\n"
+            "## Items\n\n"
+            "<!-- Add todo items below. Link to detailed writeups as needed. -->\n"
+        )
+        print("  Created: todo/TODOLIST.md")
 
 
 def create_living_layer(target_dir: Path):
@@ -174,6 +189,9 @@ def main():
 
     print("\nCreating manifests...")
     create_manifests(target_dir)
+
+    print("\nCreating todo list...")
+    create_todo_list(target_dir)
 
     print("\nInitializing living layer...")
     create_living_layer(target_dir)
