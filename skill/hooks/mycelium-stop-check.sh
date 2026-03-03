@@ -38,21 +38,23 @@ fi
 
 SESSION_START_TS=$(cat "$TIMESTAMP_FILE")
 
-# Check if this was a trivial session by looking at git diff size
-# Count lines changed since session start (staged + unstaged)
-CHANGES=$(git diff --stat HEAD 2>/dev/null | tail -1 || echo "")
-STAGED=$(git diff --cached --stat HEAD 2>/dev/null | tail -1 || echo "")
+# Count uncommitted changes (git diff HEAD includes both staged and unstaged)
+UNCOMMITTED_STAT=$(git diff --stat HEAD 2>/dev/null | tail -1 || echo "")
+UNCOMMITTED_FILES=0
+if echo "$UNCOMMITTED_STAT" | grep -q "file"; then
+  UNCOMMITTED_FILES=$(echo "$UNCOMMITTED_STAT" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo "0")
+fi
 
-# Extract number of files changed and insertions
-FILES_CHANGED=0
-if echo "$CHANGES" | grep -q "file"; then
-  FILES_CHANGED=$(echo "$CHANGES" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo "0")
+# Count committed changes made during this session (catches work that was committed mid-session)
+COMMITTED_FILES=0
+if [ -n "$SESSION_START_TS" ]; then
+  COMMITTED_LOG=$(git log --after="@${SESSION_START_TS}" --pretty=format: --name-only 2>/dev/null | sort -u | sed '/^$/d' || true)
+  if [ -n "$COMMITTED_LOG" ]; then
+    COMMITTED_FILES=$(echo "$COMMITTED_LOG" | wc -l | tr -d ' ')
+  fi
 fi
-STAGED_FILES=0
-if echo "$STAGED" | grep -q "file"; then
-  STAGED_FILES=$(echo "$STAGED" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo "0")
-fi
-TOTAL_FILES=$((FILES_CHANGED + STAGED_FILES))
+
+TOTAL_FILES=$((UNCOMMITTED_FILES + COMMITTED_FILES))
 
 # If fewer than 3 files changed, consider it trivial
 if [ "$TOTAL_FILES" -lt 3 ]; then
