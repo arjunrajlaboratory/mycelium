@@ -56,6 +56,17 @@ No domain skills installed yet. Install with mycelium's `install-skill` mode.
 5. **Validate**: Run `validate_structure.py` to confirm repo structure is correct
 6. **Skill feedback**: Note whether domain skill conventions were helpful or had gaps
 
+### Automated Enforcement
+
+If Claude Code hooks are installed (see mycelium `skill/hooks/`), the Stop hook will block session end if `.living/` was not updated after significant work. This ensures the post-action protocol is never silently skipped, even in long sessions where earlier context is compacted.
+
+### Subagent-Driven Workflows
+
+When using subagent-driven development (main context coordinates, subagents implement):
+- After all subagent batches complete, dispatch a **crystallization subagent** to log decisions and learnings to `.living/`
+- The Stop hook catches sessions where this step is forgotten
+- Subagents themselves do not need mycelium awareness — only the main context manages the living layer
+
 ## Data Conventions
 
 - `data/raw/` is **IMMUTABLE** — never modify original files

@@ -15,9 +15,7 @@ from pathlib import Path
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Scaffold a mycelium-enabled living repository."
-    )
+    parser = argparse.ArgumentParser(description="Scaffold a mycelium-enabled living repository.")
     parser.add_argument(
         "--target-dir",
         type=Path,
@@ -108,9 +106,7 @@ def create_living_layer(target_dir: Path):
     skills_yaml = living_dir / "skills" / "ACTIVE_SKILLS.yaml"
     if not skills_yaml.exists():
         skills_yaml.write_text(
-            "# Active Domain Skills\n"
-            "# Updated by install_domain_skill.py\n\n"
-            "active_skills: []\n"
+            "# Active Domain Skills\n# Updated by install_domain_skill.py\n\nactive_skills: []\n"
         )
         print("  Created: .living/skills/ACTIVE_SKILLS.yaml")
 
@@ -187,7 +183,8 @@ def main():
     print("  1. Generate CLAUDE.md from the template")
     print("  2. Install domain skills if needed (install-skill mode)")
     print("  3. Run validate_structure.py to confirm setup")
-    print("  4. Start working — the repo is now alive!")
+    print("  4. Install enforcement hooks (see skill/hooks/) for automated .living/ checks")
+    print("  5. Start working — the repo is now alive!")
 
 
 if __name__ == "__main__":
