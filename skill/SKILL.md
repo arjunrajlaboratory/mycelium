@@ -176,6 +176,8 @@ Mycelium ships optional hook scripts in `hooks/` that enforce the post-action pr
 | `mycelium-health.sh` | SessionStart | Warns if `.living/` is missing or incomplete; records session timestamp |
 | `mycelium-stop-check.sh` | Stop | Blocks session end if significant work was done without updating `.living/` |
 
+**Significance heuristic**: The stop hook counts files changed during the session — both uncommitted changes (`git diff HEAD`) and files touched in commits made since session start (`git log --after=@$TIMESTAMP`). If the total is 3+ files and neither `.living/learnings.md` nor `.living/decisions.md` was modified after the session-start timestamp, the hook blocks.
+
 **Installation**: Register the hooks in your project's `.claude/settings.local.json`:
 
 ```json
