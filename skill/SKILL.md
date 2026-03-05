@@ -167,6 +167,61 @@ When invoked, determine which mode the user needs based on their request, then f
 5. **Validate**: Run `scripts/validate_structure.py` to confirm repo still conforms.
 6. **Skill feedback**: If any domain skill conventions were relevant, note whether they were helpful or had gaps.
 
+### Automated Enforcement (Claude Code Hooks)
+
+Mycelium ships optional hook scripts in `hooks/` that enforce the post-action protocol automatically:
+
+| Hook | Event | Purpose |
+|------|-------|---------|
+| `mycelium-health.sh` | SessionStart | Warns if `.living/` is missing or incomplete; records session timestamp |
+| `mycelium-stop-check.sh` | Stop | Blocks session end if significant work was done without updating `.living/` |
+
+**Significance heuristic**: The stop hook counts files changed during the session — both uncommitted changes (`git diff HEAD`) and files touched in commits made since session start (`git log --after=@$TIMESTAMP`). If the total is 3+ files and neither `.living/learnings.md` nor `.living/decisions.md` was modified after the session-start timestamp, the hook blocks.
+
+**Installation**: Register the hooks in your project's `.claude/settings.local.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/mycelium/skill/hooks/mycelium-health.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/mycelium/skill/hooks/mycelium-stop-check.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Replace `/path/to/mycelium/` with the absolute path to your mycelium clone.
+
+### Subagent-Driven Sessions
+
+When work is dispatched to subagents (main context = coordination only):
+
+1. **Subagents do not need mycelium awareness** — they focus on their implementation task and report results back.
+2. **After all subagent batches complete**, the main context dispatches a crystallization subagent (lightweight model) that:
+   - Reviews the summary of what was accomplished
+   - Appends entries to `.living/learnings.md` and `.living/decisions.md`
+   - Checks cross-project relevance (if applicable)
+3. **The Stop hook enforces this** — it blocks session end if `.living/` wasn't updated after significant work, catching sessions where the crystallization step was forgotten.
+
 ---
 
 ## Troubleshooting
