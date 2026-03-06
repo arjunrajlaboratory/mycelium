@@ -15,7 +15,9 @@ Browse, install, and contribute skill packs for mycelium-enabled repositories.
 
 ## Installing a Skill Pack
 
-From within a mycelium-enabled repository:
+**Core packs** (`robust-analysis`, `report-generator`) are installed automatically when you run `mycelium init`. No action needed.
+
+**Domain packs** are installed on demand. From within a mycelium-enabled repository:
 
 ```bash
 python /path/to/mycelium/skill/scripts/install_domain_skill.py \

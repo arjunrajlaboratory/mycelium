@@ -72,9 +72,10 @@ When invoked, determine which mode the user needs based on their request, then f
 7. Consult active domain skill conventions if applicable.
 8. Consult `references/analysis-conventions.md` for structure.
 9. Consult `references/statistical-conventions.md` for methodology.
-10. Use marimo for exploratory work, plain Python scripts for reproducible pipelines.
-11. Every analysis must have a `run.sh` or `run.py` that reproduces final outputs.
-12. Run post-action hook protocol after significant steps.
+10. **If `robust-analysis` is installed** (check `.living/skills/robust-analysis/`), follow its conventions: strict execution mode, validation checks, sensitivity sweeps for every decision, null hypothesis testing, and adversarial probing of conclusions. Its `analysis-conventions.md` is the entry point; consult detail files as each step requires them.
+11. Use marimo for exploratory work, plain Python scripts for reproducible pipelines.
+12. Every analysis must have a `run.sh` or `run.py` that reproduces final outputs.
+13. Run post-action hook protocol after significant steps.
 
 ---
 
@@ -101,15 +102,17 @@ When invoked, determine which mode the user needs based on their request, then f
 
 **Trigger**: "install domain skill", "add bioinformatics skill", "install skill pack"
 
-**Purpose**: Install a domain skill from the mycelium network into the current repo.
+**Purpose**: Install a skill pack from the mycelium network into the current repo.
+
+**Context**: Core packs (`robust-analysis`, `report-generator`) are auto-installed during `init`. This mode is primarily for adding domain packs after initialization, but can also be used to manually install or reinstall any pack.
 
 **Steps**:
 1. Consult `references/marketplace-guide.md`.
-2. List available skills from `network/skills/`.
+2. List available skills from `network/skills/`, noting which are core (already installed) and which are domain (available to add).
 3. User selects which to install.
 4. Run `scripts/install_domain_skill.py` to copy conventions into `.living/skills/[domain]/`.
 5. Update `.living/skills/ACTIVE_SKILLS.yaml`.
-6. Update `CLAUDE.md` to reference new domain conventions.
+6. Update `CLAUDE.md` to reference new skill conventions.
 
 ---
 

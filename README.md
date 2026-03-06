@@ -48,7 +48,7 @@ Open Claude Code in any project directory and say:
 
 > "Set up mycelium" or "Initialize living repo"
 
-This scaffolds the living repository structure: directories, manifests, the `.living/` memory layer, and a `CLAUDE.md` that encodes the framework's protocols.
+This scaffolds the living repository structure: directories, manifests, the `.living/` memory layer, and a `CLAUDE.md` that encodes the framework's protocols. **Core skill packs** (`robust-analysis` and `report-generator`) are installed automatically — every repo gets defensive analysis practices and structured report generation out of the box.
 
 ### 3. Install domain skills (optional)
 
@@ -93,7 +93,20 @@ Every directory has a `MANIFEST.md` — a registry of its contents with structur
 
 ## The Network
 
-Mycelium includes a marketplace of domain-specific skill packs:
+Mycelium includes a marketplace of skill packs — some core (auto-installed), some domain-specific (opt-in):
+
+### Core Packs (batteries included)
+
+These are installed automatically during `mycelium init`:
+
+| Skill Pack | Description |
+|------------|-------------|
+| [robust-analysis](network/skills/robust-analysis/) | Defensive execution, validation checks, sensitivity sweeps, null hypothesis testing |
+| [report-generator](network/skills/report-generator/) | Structured LaTeX PDF report generation with provenance |
+
+### Domain Packs (opt-in)
+
+Install these for field-specific conventions:
 
 | Skill Pack | Description |
 |------------|-------------|

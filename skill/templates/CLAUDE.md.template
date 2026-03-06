@@ -11,12 +11,19 @@ This repository is a **mycelium-enabled living repository**. It carries its own 
 2. **Read `ENVIRONMENTS_INSTALLATIONS.md`** — Environment setup, dependencies, and installation gotchas
 3. **Read the relevant `MANIFEST.md`** — Each top-level directory has a manifest registering its contents
 
-## Active Domain Skills
+## Installed Skill Packs
 
 <!-- Updated by install_domain_skill.py -->
 <!-- Check .living/skills/ACTIVE_SKILLS.yaml for the full list -->
 
-No domain skills installed yet. Install with mycelium's `install-skill` mode.
+### Core (auto-installed)
+
+- **robust-analysis** — Defensive execution practices: strict error handling, data validation checks, parameter sensitivity sweeps, null hypothesis testing, adversarial self-challenge. See `.living/skills/robust-analysis/analysis-conventions.md` for the entry point.
+- **report-generator** — Structured LaTeX PDF report generation. See `.living/skills/report-generator/analysis-conventions.md` for the workflow.
+
+### Domain (opt-in)
+
+No domain skills installed yet. Install with mycelium's `install-skill` mode (e.g., "install bioinformatics skill").
 
 ## Repository Structure
 
@@ -43,6 +50,8 @@ No domain skills installed yet. Install with mycelium's `install-skill` mode.
 
 - Follow analysis conventions: every analysis gets its own folder with README, scripts, outputs, reports
 - Follow statistical conventions: report effect sizes, confidence intervals, document assumptions
+- **Follow robust-analysis conventions** (`.living/skills/robust-analysis/`): fail loudly on unexpected data, assert shapes/types/ranges, log row counts at every step, run sensitivity analyses for every decision, test null hypotheses via permutation/bootstrap
+- **Do not subset data** without explicit user confirmation and justification
 - Use marimo for exploration, Python scripts for reproducible pipelines
 - Every analysis must have a `run.sh` or `run.py` that reproduces final outputs
 
