@@ -10,12 +10,13 @@ Browse, install, and contribute skill packs for mycelium-enabled repositories.
 |------------|---------|------|-------------|
 | [robust-analysis](skills/robust-analysis/) | 0.1.0 | core | Defensive execution, validation, sensitivity sweeps, null hypothesis testing |
 | [report-generator](skills/report-generator/) | 0.1.0 | core | Structured LaTeX PDF report generation with provenance |
+| [idea-generator](skills/idea-generator/) | 0.1.0 | core | Persona-based creative ideation for new analysis directions |
 | [bioinformatics](skills/bioinformatics/) | 0.1.0 | domain | RNA-seq, single-cell, genomics workflows |
 | [image-analysis](skills/image-analysis/) | 0.1.0 | domain | Segmentation, quantification, imaging QC |
 
 ## Installing a Skill Pack
 
-**Core packs** (`robust-analysis`, `report-generator`) are installed automatically when you run `mycelium init`. No action needed.
+**Core packs** (`robust-analysis`, `report-generator`, `idea-generator`) are installed automatically when you run `mycelium init`. No action needed.
 
 **Domain packs** are installed on demand. From within a mycelium-enabled repository:
 

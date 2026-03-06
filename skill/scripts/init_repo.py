@@ -10,8 +10,15 @@ Usage:
 """
 
 import argparse
+import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 
 def parse_args():
@@ -142,6 +149,91 @@ def create_living_layer(target_dir: Path):
         print("  Created: .living/skills/ACTIVE_SKILLS.yaml")
 
 
+def find_network_skills_dir() -> Path | None:
+    """Locate the network/skills/ directory relative to this script."""
+    candidates = [
+        Path(__file__).resolve().parent.parent.parent / "network" / "skills",
+        Path.home() / ".mycelium" / "network" / "skills",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def get_core_skill_packs(network_dir: Path) -> list[str]:
+    """Return names of skill packs marked core: true in the network."""
+    core_packs = []
+    for skill_dir in sorted(network_dir.iterdir()):
+        pack_yaml = skill_dir / "SKILL_PACK.yaml"
+        if not pack_yaml.exists():
+            continue
+        # Parse YAML front matter (between --- delimiters) or plain YAML
+        content = pack_yaml.read_text()
+        if yaml:
+            # Strip YAML front matter delimiters if present
+            text = content.strip()
+            if text.startswith("---"):
+                text = text[3:]
+                end = text.find("---")
+                if end != -1:
+                    text = text[:end]
+            data = yaml.safe_load(text)
+            if isinstance(data, dict) and data.get("core") is True:
+                core_packs.append(skill_dir.name)
+        else:
+            # Fallback: simple text check
+            if "core: true" in content:
+                core_packs.append(skill_dir.name)
+    return core_packs
+
+
+def install_core_skill_packs(target_dir: Path):
+    """Auto-install all core skill packs from the network."""
+    network_dir = find_network_skills_dir()
+    if not network_dir:
+        print("  Warning: Could not locate mycelium network/skills/ directory.")
+        print("  Core skill packs were not auto-installed.")
+        print("  Install them manually with install_domain_skill.py.")
+        return
+
+    core_packs = get_core_skill_packs(network_dir)
+    if not core_packs:
+        print("  No core skill packs found in network.")
+        return
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    skills_dir = target_dir / ".living" / "skills"
+    yaml_path = skills_dir / "ACTIVE_SKILLS.yaml"
+
+    entries = []
+    for pack_name in core_packs:
+        source = network_dir / pack_name
+        dest = skills_dir / pack_name
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(source, dest)
+        copied = [f for f in sorted(dest.rglob("*")) if f.is_file()]
+        print(f"  Installed {pack_name} ({len(copied)} files)")
+        entries.append(
+            f"- name: {pack_name}\n"
+            f"  path: .living/skills/{pack_name}/\n"
+            f"  installed: {now}\n"
+            f"  core: true"
+        )
+
+    # Write ACTIVE_SKILLS.yaml with core entries
+    yaml_content = (
+        "# Active Skills\n"
+        "# Updated by init_repo.py and install_domain_skill.py\n\n"
+        "active_skills:\n"
+        + "\n".join(entries)
+        + "\n"
+    )
+    yaml_path.write_text(yaml_content)
+    print(f"  Updated ACTIVE_SKILLS.yaml with {len(core_packs)} core packs")
+
+
 def create_environments_file(target_dir: Path):
     """Create ENVIRONMENTS_INSTALLATIONS.md at repo root."""
     env_path = target_dir / "ENVIRONMENTS_INSTALLATIONS.md"
@@ -210,6 +302,9 @@ def main():
 
     print("\nCreating environment documentation...")
     create_environments_file(target_dir)
+
+    print("\nInstalling core skill packs...")
+    install_core_skill_packs(target_dir)
 
     print("\n" + "=" * 50)
     print("Mycelium initialization complete!")
