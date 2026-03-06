@@ -24,12 +24,13 @@ When invoked, determine which mode the user needs based on their request, then f
 1. Check if repo already has mycelium structure (look for `.living/` directory).
 2. **New repo**: Run full scaffold using `scripts/init_repo.py`.
 3. **Existing repo**: Run in restructure mode — audit current structure, propose migration plan, ask user to confirm before proceeding.
-4. Ask which domain skills to install from the network.
-5. Generate `CLAUDE.md` for the repo (from `templates/CLAUDE.md.template`) that encodes the living repo protocol.
-6. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
-7. Create initial empty manifests (`MANIFEST.md`) in each top-level directory.
-8. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`.
-9. After completion: run `scripts/validate_structure.py` to confirm everything is correct.
+4. **Auto-install core skill packs**: Install all packs with `core: true` in their `SKILL_PACK.yaml` (currently `robust-analysis` and `report-generator`). These provide batteries-included practices every repo should have.
+5. Ask which **domain** skills to install from the network (e.g., bioinformatics, image-analysis).
+6. Generate `CLAUDE.md` for the repo (from `templates/CLAUDE.md.template`) that encodes the living repo protocol.
+7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
+8. Create initial empty manifests (`MANIFEST.md`) in each top-level directory.
+9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`.
+10. After completion: run `scripts/validate_structure.py` to confirm everything is correct.
 
 **References to consult**:
 - `references/folder-structure.md` — canonical target structure
@@ -79,18 +80,20 @@ When invoked, determine which mode the user needs based on their request, then f
 
 ## Mode: `report`
 
-**Trigger**: "write report", "generate report", "write up results"
+**Trigger**: "write report", "generate report", "write up results", "create a report", "generate a PDF", "make a LaTeX report"
 
-**Purpose**: Generate a LaTeX writeup from an analysis.
+**Purpose**: Generate a structured LaTeX PDF report from an analysis.
 
 **Steps**:
-1. Consult `references/writing-conventions.md`.
-2. Read the analysis `README.md` and `outputs/`.
-3. Use `templates/report-template.tex` as the skeleton.
-4. Pull figures from the analysis `outputs/` directory.
-5. Follow statistical reporting conventions from `references/statistical-conventions.md`.
-6. Place report in `analysis/[name]/reports/`.
-7. Update analysis manifest entry with report status.
+1. **If the `report-generator` skill pack is installed** (check `.living/skills/report-generator/`), follow its conventions — they provide detailed section-by-section guidance, a richer template, and a compilation workflow. The skill pack's `analysis-conventions.md` is the entry point.
+2. **If not installed**, fall back to `references/writing-conventions.md` and `templates/report-template.tex`.
+3. Gather context: read the analysis `README.md`, `outputs/`, `.living/decisions.md`, and `git log`.
+4. Copy the template to `analysis/[name]/reports/[name]-report.tex`.
+5. Fill in each section following the report structure (Problem Statement, Methods with Definitions/Overview/Detail, Results, Conclusions, Provenance, Appendix).
+6. Pull figures from `outputs/figures/` and supplementary figures from `outputs/figures/supplementary/`.
+7. Compile: `pdflatex` twice (with `bibtex` between passes if citations are used).
+8. Verify the PDF renders correctly (no unresolved references, all figures present).
+9. Update analysis manifest entry with report status.
 
 ---
 

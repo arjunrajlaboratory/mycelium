@@ -1,13 +1,17 @@
 # Mycelium Network — Domain Skill Marketplace
 
-Browse, install, and contribute domain-specific skill packs for mycelium-enabled repositories.
+Browse, install, and contribute skill packs for mycelium-enabled repositories.
+
+**Core packs** are auto-installed during `mycelium init` — they provide batteries-included practices every analysis repo should have. **Domain packs** are opt-in specializations for specific fields.
 
 ## Available Skill Packs
 
-| Skill Pack | Version | Description |
-|------------|---------|-------------|
-| [bioinformatics](skills/bioinformatics/) | 0.1.0 | RNA-seq, single-cell, genomics workflows |
-| [image-analysis](skills/image-analysis/) | 0.1.0 | Segmentation, quantification, imaging QC |
+| Skill Pack | Version | Type | Description |
+|------------|---------|------|-------------|
+| [robust-analysis](skills/robust-analysis/) | 0.1.0 | core | Defensive execution, validation, sensitivity sweeps, null hypothesis testing |
+| [report-generator](skills/report-generator/) | 0.1.0 | core | Structured LaTeX PDF report generation with provenance |
+| [bioinformatics](skills/bioinformatics/) | 0.1.0 | domain | RNA-seq, single-cell, genomics workflows |
+| [image-analysis](skills/image-analysis/) | 0.1.0 | domain | Segmentation, quantification, imaging QC |
 
 ## Installing a Skill Pack
 
