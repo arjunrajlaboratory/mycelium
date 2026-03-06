@@ -16,29 +16,47 @@ project-root/
 │   │   └── ACTIVE_SKILLS.yaml
 │   └── generated-skills/                  # Auto-generated from crystallize mode
 ├── algorithms/
-│   ├── MANIFEST.md                        # Registry with YAML entries
+│   ├── ALGORITHM_MANIFEST.md              # Registry with YAML entries
 │   └── [algorithm-name]/
-│       ├── README.md
+│       ├── ALGORITHM_NAME.md              # UPPER_SNAKE_CASE of folder name
 │       └── ...
 ├── analysis/
-│   ├── MANIFEST.md
+│   ├── ANALYSIS_MANIFEST.md
 │   └── [analysis-name]/
-│       ├── README.md                      # Summary, status, findings, open questions
+│       ├── ANALYSIS_NAME.md               # UPPER_SNAKE_CASE of folder name
 │       ├── scripts/                       # Marimo notebooks and/or Python scripts
 │       ├── outputs/                       # Figures, tables, intermediate results
 │       └── reports/                       # LaTeX writeups
 ├── data/
-│   ├── MANIFEST.md
+│   ├── DATA_MANIFEST.md
 │   ├── raw/                               # Immutable originals
 │   ├── processed/                         # Cleaned/transformed
 │   └── metadata/                          # Schemas, data dictionaries, provenance
 ├── reference_material/
-│   ├── MANIFEST.md
+│   ├── REFERENCE_MANIFEST.md
 │   └── ...
 └── todo/
-    ├── TODOLIST.md                         # Master list of future work items
-    └── [item-name].md                      # Detailed writeup for a todo item
+    ├── TODO_REGISTRY.md                    # Master registry of all todo items
+    ├── TODO_ITEM_TEMPLATE.md               # Template for new items
+    └── [item-name].md                      # Detailed writeup per item
 ```
+
+## Naming Conventions
+
+### Manifest files
+
+Each top-level directory has a descriptive manifest: `ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`. The prefix makes manifests instantly identifiable in search results.
+
+### Subdirectory documentation
+
+Every subdirectory (analysis, algorithm, dataset) has a documentation file named after the folder in UPPER_SNAKE_CASE. For example:
+- `analysis/snp-analysis/` → `SNP_ANALYSIS.md`
+- `algorithms/deseq2-wrapper/` → `DESEQ2_WRAPPER.md`
+- `data/raw/patient-cohort-2024/` → `PATIENT_COHORT_2024.md`
+
+This makes documents discoverable in search — a list of 20 `README.md` files tells you nothing, while `SNP_ANALYSIS.md`, `DOSE_RESPONSE.md`, `PATHWAY_ENRICHMENT.md` are self-documenting.
+
+**Conversion rule**: Replace hyphens with underscores, uppercase everything. `my-analysis-name` → `MY_ANALYSIS_NAME.md`.
 
 ## Directory Purposes
 
@@ -54,11 +72,11 @@ This is the heart of a mycelium-enabled repo. It stores the accumulated intellig
 
 ### `algorithms/` — Reusable Computational Methods
 
-Algorithms that could be used across multiple analyses. Each gets its own subdirectory with a `README.md` documenting its purpose, inputs, outputs, and parameters.
+Algorithms that could be used across multiple analyses. Each gets its own subdirectory with a documentation file (UPPER_SNAKE_CASE of the folder name, e.g., `DESEQ2_WRAPPER.md`) documenting its purpose, inputs, outputs, and parameters.
 
 ### `analysis/` — Analytical Work
 
-Each analysis gets its own subdirectory with a standardized structure. Analyses can reference parent analyses to form lineage chains. The `MANIFEST.md` provides a registry of all analyses with their status and relationships.
+Each analysis gets its own subdirectory with a standardized structure. Analyses can reference parent analyses to form lineage chains. The `ANALYSIS_MANIFEST.md` provides a registry of all analyses with their status and relationships.
 
 ### `data/` — Data Assets
 
@@ -72,16 +90,18 @@ Papers, documentation, external datasets used for comparison, or any reference m
 
 ### `todo/` — Future Work Items
 
-A lightweight tracker for future work. `TODOLIST.md` is the master list; each item can optionally have a detailed writeup in a separate `[item-name].md` file in the same directory. Use this to capture ideas, follow-ups, and deferred tasks so nothing falls through the cracks.
+A structured tracker for future work, ideas, and planned improvements. `TODO_REGISTRY.md` is the master registry — a table of all items with their priority, status, category, date, and author. Each item has its own `[item-name].md` file with a full writeup (description, motivation, proposed approach, acceptance criteria). `TODO_ITEM_TEMPLATE.md` provides the template for new items.
 
-## MANIFEST.md Format
+Priority levels: `critical`, `high`, `medium`, `low`, `idea`. Status values: `open`, `in-progress`, `blocked`, `complete`, `wont-do`. Use the mycelium `todo-idea` mode (or `/todo-idea`) to add new items interactively.
 
-Each top-level directory contains a `MANIFEST.md` that serves as a registry. Entries use YAML blocks with prose annotations.
+## Manifest Format
+
+Each top-level directory contains a descriptive manifest file (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, etc.) that serves as a registry. Entries use YAML blocks with prose annotations.
 
 ### Example: Data Manifest Entry
 
 ```yaml
-# data/MANIFEST.md
+# data/DATA_MANIFEST.md
 
 ## Datasets
 
@@ -109,7 +129,7 @@ Cohort data covering 12,847 patients over a 4-year period. Includes demographics
 ### Example: Analysis Manifest Entry
 
 ```yaml
-# analysis/MANIFEST.md
+# analysis/ANALYSIS_MANIFEST.md
 
 ## Analyses
 
@@ -135,7 +155,7 @@ Initial differential expression analysis comparing treatment responders vs non-r
 ### Example: Algorithm Manifest Entry
 
 ```yaml
-# algorithms/MANIFEST.md
+# algorithms/ALGORITHM_MANIFEST.md
 
 ## Algorithms
 
@@ -162,7 +182,7 @@ Standardized DESeq2 wrapper that enforces consistent preprocessing, filtering, a
 
 1. **Raw data is sacred.** Never modify files in `data/raw/`. If something needs fixing, document the issue and create a corrected version in `data/processed/`.
 
-2. **Everything is registered.** If it exists in the repo, it has a manifest entry. No orphan analyses, no mystery datasets.
+2. **Everything is registered.** If it exists in the repo, it has a manifest entry (in the appropriate `*_MANIFEST.md`). No orphan analyses, no mystery datasets.
 
 3. **Decisions are documented.** The `.living/decisions.md` log ensures that future sessions understand not just *what* was done, but *why*.
 

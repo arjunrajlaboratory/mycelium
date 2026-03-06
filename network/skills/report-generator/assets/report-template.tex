@@ -1,0 +1,204 @@
+% Mycelium Report Template — Report Generator Skill Pack
+% Copy to analysis/[name]/reports/[name]-report.tex and replace %%PLACEHOLDER%% markers.
+
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}              % Professional tables
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{natbib}                % Citations
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}            % Sub-figures
+\usepackage{float}                 % [H] placement
+\usepackage{longtable}             % Multi-page tables
+\usepackage{listings}              % Code listings
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+% --- Metadata ---
+\title{%%TITLE%%}
+\author{%%AUTHOR%%}
+\date{%%DATE%%}
+
+\begin{document}
+
+% =============================================================================
+% TITLE PAGE
+% =============================================================================
+\maketitle
+
+% =============================================================================
+% ABSTRACT
+% =============================================================================
+\begin{abstract}
+%%ABSTRACT%%
+% Lead with the scientific question, not the method.
+% State the key finding last.
+% No undefined acronyms. 150--250 words, 1--2 paragraphs.
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+% =============================================================================
+% PROBLEM STATEMENT
+% =============================================================================
+\section{Problem Statement}
+
+%%PROBLEM_STATEMENT%%
+% Frame the question in plain English.
+% Define every concept a non-specialist would need.
+% Explain why the answer matters and what a good answer would look like.
+
+% =============================================================================
+% METHODS
+% =============================================================================
+\section{Methods}
+
+% --- Definitions ---
+\subsection{Definitions}
+
+%%DEFINITIONS%%
+% Define every mathematical symbol, technical term, and domain-specific concept.
+% Format: \textbf{Term} (symbol if applicable): Definition. Units. Range.
+% Group related definitions together.
+% Example:
+% \textbf{Log2 fold change} ($\log_2 \text{FC}$): The base-2 logarithm of the
+% ratio of expression between two conditions. Range: $(-\infty, +\infty)$.
+
+% --- Overview ---
+\subsection{Overview}
+
+%%METHODS_OVERVIEW%%
+% 2--3 sentences a non-specialist could follow.
+% No tool names, no parameters, no version numbers.
+
+% --- Technical Detail ---
+\subsection{Technical Detail}
+
+%%METHODS_DETAIL%%
+% Datasets: name, source, size.
+% Software: tool, version, citation.
+% Parameters: value and rationale (including defaults).
+% Statistical methods: test, assumptions, correction, threshold.
+% Reference sensitivity analysis in the appendix where applicable.
+
+% =============================================================================
+% RESULTS
+% =============================================================================
+\section{Results}
+
+%%RESULTS%%
+% Each result follows the pattern:
+% 1. State the question being tested
+% 2. Describe what you'd expect under competing hypotheses
+% 3. Report findings with figures and tables
+% 4. Conclude in relation to the question
+%
+% Figure template:
+% \begin{figure}[H]
+%     \centering
+%     \includegraphics[width=0.8\textwidth]{../outputs/figures/FIGURE_NAME.pdf}
+%     \caption{[What it shows]. [How to read it]. [Key takeaway].}
+%     \label{fig:LABEL}
+% \end{figure}
+%
+% Table template:
+% \begin{table}[H]
+%     \centering
+%     \caption{[Description].}
+%     \label{tab:LABEL}
+%     \begin{tabular}{lrrr}
+%         \toprule
+%         Feature & Estimate & 95\% CI & $p_{\text{adj}}$ \\
+%         \midrule
+%         Row 1 & & & \\
+%         \bottomrule
+%     \end{tabular}
+% \end{table}
+
+% =============================================================================
+% CONCLUSIONS
+% =============================================================================
+\section{Conclusions}
+
+%%CONCLUSIONS%%
+% Map each conclusion back to the problem statement.
+% State caveats explicitly.
+% Distinguish what the data shows from what it suggests.
+
+% =============================================================================
+% NEXT STEPS (optional — delete if not applicable)
+% =============================================================================
+\section{Next Steps}
+
+%%NEXT_STEPS%%
+% Only include if there are clear, actionable follow-up analyses.
+% Delete this entire section if there is nothing concrete to say.
+
+% =============================================================================
+% PROVENANCE
+% =============================================================================
+\section{Provenance}
+
+\begin{description}
+\item[Analysis directory] \texttt{%%ANALYSIS_DIR%%}
+\item[Key scripts] ~
+  \begin{itemize}
+%%SCRIPT_LIST%%
+%   \item \texttt{scripts/01\_preprocess.py} --- Data cleaning and QC
+%   \item \texttt{scripts/02\_analysis.py} --- Main analysis
+  \end{itemize}
+\item[Git commit] \texttt{%%GIT_COMMIT%%}
+\item[Analysis period] %%ANALYSIS_PERIOD%%
+\item[Analyst] %%ANALYST%%
+\item[Report generated] \today
+\item[Software environment] See \texttt{ENVIRONMENTS\_INSTALLATIONS.md}
+\end{description}
+
+% =============================================================================
+% APPENDIX (optional — include if sensitivity analyses exist)
+% =============================================================================
+\appendix
+
+\section{Parameter Sensitivity}
+
+%%APPENDIX_SENSITIVITY%%
+% Include supplementary figures from outputs/figures/supplementary/:
+% - Threshold sensitivity sweeps
+% - Method comparisons
+% - Subsample stability
+% - Random seed stability
+%
+% Example:
+% \subsection{P-value Threshold Sensitivity}
+% Figure~\ref{fig:pvalue_sensitivity} shows the number of significant genes
+% across adjusted p-value thresholds.
+%
+% \begin{figure}[H]
+%     \centering
+%     \includegraphics[width=0.8\textwidth]{../outputs/figures/supplementary/threshold_sensitivity_pvalue.png}
+%     \caption{Significant gene count vs. adjusted p-value threshold.
+%     Dashed red line: chosen threshold (0.05).}
+%     \label{fig:pvalue_sensitivity}
+% \end{figure}
+
+% =============================================================================
+% REFERENCES
+% =============================================================================
+\bibliographystyle{plainnat}
+\bibliography{references}          % references.bib in same directory
+
+\end{document}

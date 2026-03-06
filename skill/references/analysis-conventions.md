@@ -8,22 +8,22 @@ Every analysis gets its own subfolder under `analysis/`:
 
 ```
 analysis/
-├── MANIFEST.md
+├── ANALYSIS_MANIFEST.md
 └── my-analysis-name/
-    ├── README.md          # Purpose, status, datasets, findings, open questions
-    ├── scripts/           # Marimo notebooks and/or Python scripts
-    ├── outputs/           # Figures, tables, intermediate results
-    └── reports/           # LaTeX writeups
+    ├── MY_ANALYSIS_NAME.md   # UPPER_SNAKE_CASE of folder name
+    ├── scripts/              # Marimo notebooks and/or Python scripts
+    ├── outputs/              # Figures, tables, intermediate results
+    └── reports/              # LaTeX writeups
 ```
 
-## README.md Requirements
+## Analysis Documentation Requirements
 
-Every analysis must have a `README.md` (use the analysis-readme template) containing:
+Every analysis must have a documentation file named in UPPER_SNAKE_CASE of the folder name (e.g., `analysis/snp-analysis/` → `SNP_ANALYSIS.md`). Use the analysis-readme template and rename accordingly. The file must contain:
 
 - **Purpose**: What question does this analysis answer?
 - **Status**: One of `draft`, `active`, `complete`, `archived`
-- **Datasets used**: References to `data/MANIFEST.md` entries
-- **Algorithms used**: References to `algorithms/MANIFEST.md` entries
+- **Datasets used**: References to `data/DATA_MANIFEST.md` entries
+- **Algorithms used**: References to `algorithms/ALGORITHM_MANIFEST.md` entries
 - **Key findings**: Bullet-point summary of results (updated as work progresses)
 - **Open questions**: What remains unresolved or needs follow-up
 - **Parent analysis**: If this builds on prior work, reference it by name
@@ -76,15 +76,15 @@ draft → active → complete → archived
 - **complete**: Analysis has produced final results and a report
 - **archived**: Analysis is no longer actively maintained but preserved for reference
 
-Update the status in both the analysis `README.md` and the `analysis/MANIFEST.md` entry.
+Update the status in both the analysis documentation file and the `analysis/ANALYSIS_MANIFEST.md` entry.
 
 ## Building on Parent Analyses
 
 When an analysis extends or refines a previous one:
 
-1. Reference the parent analysis by name in the README and manifest entry
+1. Reference the parent analysis by name in the documentation file and manifest entry
 2. Do not copy data or code from the parent — reference it by path
-3. Document what's different and why in the README
+3. Document what's different and why in the documentation file
 4. The manifest entry should include `parent_analysis: parent-name`
 
 This creates an analysis lineage that's easy to trace.

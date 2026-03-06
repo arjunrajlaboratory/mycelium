@@ -61,18 +61,34 @@ def create_directory_structure(target_dir: Path):
         print(f"  Created: {dir_name}/")
 
 
+def dir_to_manifest_name(dir_name: str) -> str:
+    """Convert a directory name to its manifest filename.
+
+    E.g., 'analysis' -> 'ANALYSIS_MANIFEST.md', 'reference_material' -> 'REFERENCE_MANIFEST.md'
+    """
+    prefix = dir_name.upper().replace("-", "_")
+    # Use singular form for readability
+    singular = {
+        "ALGORITHMS": "ALGORITHM",
+        "REFERENCE_MATERIAL": "REFERENCE",
+    }
+    prefix = singular.get(prefix, prefix)
+    return f"{prefix}_MANIFEST.md"
+
+
 def create_manifests(target_dir: Path):
-    """Create empty MANIFEST.md files in each top-level directory."""
+    """Create descriptive manifest files in each top-level directory."""
     manifest_dirs = ["algorithms", "analysis", "data", "reference_material"]
 
     for dir_name in manifest_dirs:
-        manifest_path = target_dir / dir_name / "MANIFEST.md"
+        manifest_filename = dir_to_manifest_name(dir_name)
+        manifest_path = target_dir / dir_name / manifest_filename
         if not manifest_path.exists():
             manifest_path.write_text(
                 f"# {dir_name.replace('_', ' ').title()} Manifest\n\n"
                 "<!-- Add entries below using the appropriate manifest entry template. -->\n"
             )
-            print(f"  Created: {dir_name}/MANIFEST.md")
+            print(f"  Created: {dir_name}/{manifest_filename}")
 
 
 def create_todo_list(target_dir: Path):

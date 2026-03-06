@@ -5,9 +5,9 @@ description: >
   Scaffolds living repositories where every analysis, dataset, and decision
   is registered and discoverable. Use when user says "set up mycelium",
   "initialize living repo", "ingest dataset", "start new analysis",
-  "crystallize learnings", "install domain skill", or wants to restructure
-  an existing repository into a self-documenting framework. Also use when
-  user mentions "living dataset", "living repo", or "mycelium".
+  "crystallize learnings", "install domain skill", "todo idea", or wants
+  to restructure an existing repository into a self-documenting framework.
+  Also use when user mentions "living dataset", "living repo", or "mycelium".
 ---
 
 # Mycelium — Living Repository Skill
@@ -24,12 +24,14 @@ When invoked, determine which mode the user needs based on their request, then f
 1. Check if repo already has mycelium structure (look for `.living/` directory).
 2. **New repo**: Run full scaffold using `scripts/init_repo.py`.
 3. **Existing repo**: Run in restructure mode — audit current structure, propose migration plan, ask user to confirm before proceeding.
-4. Ask which domain skills to install from the network.
-5. Generate `CLAUDE.md` for the repo (from `templates/CLAUDE.md.template`) that encodes the living repo protocol.
-6. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
-7. Create initial empty manifests (`MANIFEST.md`) in each top-level directory.
-8. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`.
-9. After completion: run `scripts/validate_structure.py` to confirm everything is correct.
+4. **Auto-install core skill packs**: Scan `network/skills/*/SKILL_PACK.yaml` for packs with `core: true` and install each one using `scripts/install_domain_skill.py`. Currently the core packs are `robust-analysis` and `report-generator`. These provide batteries-included practices every repo should have.
+5. Ask which **domain** skills to install from the network (e.g., bioinformatics, image-analysis). Domain packs are those without `core: true`.
+6. Generate `CLAUDE.md` for the repo (from `templates/CLAUDE.md.template`) that encodes the living repo protocol.
+7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
+8. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
+9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`.
+10. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
+11. After completion: run `scripts/validate_structure.py` to confirm everything is correct.
 
 **References to consult**:
 - `references/folder-structure.md` — canonical target structure
@@ -49,7 +51,7 @@ When invoked, determine which mode the user needs based on their request, then f
 3. If a domain skill is active, check its conventions for domain-specific validation.
 4. Place raw data in `data/raw/[dataset-name]/`.
 5. Generate metadata (schema, provenance, summary statistics) in `data/metadata/[dataset-name]/`.
-6. Update `data/MANIFEST.md` with new entry (use `templates/dataset-manifest-entry.yaml`).
+6. Update `data/DATA_MANIFEST.md` with new entry (use `templates/dataset-manifest-entry.yaml`).
 7. Log any decisions about data cleaning or exclusion to `.living/decisions.md`.
 8. Run the post-action hook protocol (see below).
 
@@ -62,35 +64,39 @@ When invoked, determine which mode the user needs based on their request, then f
 **Purpose**: Start a new analysis or continue an existing one.
 
 **Steps**:
-1. Read `analysis/MANIFEST.md` to understand existing analyses.
-2. Read `data/MANIFEST.md` to understand available data.
-3. Read `algorithms/MANIFEST.md` to understand available algorithms.
-4. **Continuing existing**: Navigate to `analysis/[name]/` and read its `README.md`.
-5. **New**: Create `analysis/[name]/` with `README.md`, `scripts/`, `outputs/`, `reports/`.
+1. Read `analysis/ANALYSIS_MANIFEST.md` to understand existing analyses.
+2. Read `data/DATA_MANIFEST.md` to understand available data.
+3. Read `algorithms/ALGORITHM_MANIFEST.md` to understand available algorithms.
+4. **Continuing existing**: Navigate to `analysis/[name]/` and read its documentation file (UPPER_SNAKE_CASE of folder name, e.g., `SNP_ANALYSIS.md`).
+5. **New**: Create `analysis/[name]/` with documentation file (UPPER_SNAKE_CASE.md), `scripts/`, `outputs/`, `reports/`.
 6. If building on a parent analysis, record the lineage in the manifest entry.
 7. Consult active domain skill conventions if applicable.
 8. Consult `references/analysis-conventions.md` for structure.
 9. Consult `references/statistical-conventions.md` for methodology.
-10. Use marimo for exploratory work, plain Python scripts for reproducible pipelines.
-11. Every analysis must have a `run.sh` or `run.py` that reproduces final outputs.
-12. Run post-action hook protocol after significant steps.
+10. **If `robust-analysis` is installed** (check `.living/skills/robust-analysis/`), follow its conventions: strict execution mode, validation checks, sensitivity sweeps for every decision, null hypothesis testing, and adversarial probing of conclusions. Its `analysis-conventions.md` is the entry point; consult detail files as each step requires them.
+11. Use marimo for exploratory work, plain Python scripts for reproducible pipelines.
+12. Every analysis must have a `run.sh` or `run.py` that reproduces final outputs.
+13. Run post-action hook protocol after significant steps.
 
 ---
 
 ## Mode: `report`
 
-**Trigger**: "write report", "generate report", "write up results"
+**Trigger**: "write report", "generate report", "write up results", "create a report", "generate a PDF", "make a LaTeX report"
 
-**Purpose**: Generate a LaTeX writeup from an analysis.
+**Purpose**: Generate a structured LaTeX PDF report from an analysis.
 
 **Steps**:
-1. Consult `references/writing-conventions.md`.
-2. Read the analysis `README.md` and `outputs/`.
-3. Use `templates/report-template.tex` as the skeleton.
-4. Pull figures from the analysis `outputs/` directory.
-5. Follow statistical reporting conventions from `references/statistical-conventions.md`.
-6. Place report in `analysis/[name]/reports/`.
-7. Update analysis manifest entry with report status.
+1. Gather context: read the analysis documentation file (UPPER_SNAKE_CASE.md), `outputs/`, `.living/decisions.md`, and `git log`.
+2. **Choose the report pathway**:
+   - **If `report-generator` is installed** (check `.living/skills/report-generator/`): Follow its `analysis-conventions.md` as the entry point. Use the template from `.living/skills/report-generator/assets/report-template.tex`. The report structure is: Title, Abstract, TOC, Problem Statement, Methods (Definitions/Overview/Technical Detail), Results, Conclusions, Next Steps, Provenance, Appendix. Consult `references/section-guide.md` for detailed writing guidance per section.
+   - **If not installed**: Fall back to `references/writing-conventions.md` and `templates/report-template.tex`. The fallback structure is: Title, Abstract, Introduction, Methods (Data/Analysis/Statistical Methods), Results, Discussion, References.
+3. Copy the chosen template to `analysis/[name]/reports/[name]-report.tex`.
+4. Fill in each section following the chosen structure.
+5. Pull figures from `outputs/figures/` and supplementary figures from `outputs/figures/supplementary/`.
+6. Compile: `pdflatex` twice (with `bibtex` between passes if citations are used).
+7. Verify the PDF renders correctly (no unresolved references, all figures present).
+8. Update analysis manifest entry with report status.
 
 ---
 
@@ -98,15 +104,17 @@ When invoked, determine which mode the user needs based on their request, then f
 
 **Trigger**: "install domain skill", "add bioinformatics skill", "install skill pack"
 
-**Purpose**: Install a domain skill from the mycelium network into the current repo.
+**Purpose**: Install a skill pack from the mycelium network into the current repo.
+
+**Context**: Core packs (`robust-analysis`, `report-generator`) are auto-installed during `init`. This mode is primarily for adding domain packs after initialization, but can also be used to manually install or reinstall any pack.
 
 **Steps**:
 1. Consult `references/marketplace-guide.md`.
-2. List available skills from `network/skills/`.
+2. List available skills from `network/skills/`, noting which are core (already installed) and which are domain (available to add).
 3. User selects which to install.
 4. Run `scripts/install_domain_skill.py` to copy conventions into `.living/skills/[domain]/`.
 5. Update `.living/skills/ACTIVE_SKILLS.yaml`.
-6. Update `CLAUDE.md` to reference new domain conventions.
+6. Update `CLAUDE.md` to reference new skill conventions.
 
 ---
 
@@ -156,16 +164,41 @@ When invoked, determine which mode the user needs based on their request, then f
 
 ---
 
+## Mode: `todo-idea`
+
+**Trigger**: "todo idea", "add todo", "I have an idea", "track this for later", "/todo-idea"
+
+**Purpose**: Capture a future work item, idea, or planned improvement in the project's `todo/` directory.
+
+**Steps**:
+1. Ask the user (if not already provided):
+   - **Title**: Brief name for the item
+   - **Description**: What is this about?
+   - **Priority**: critical, high, medium, low, or idea (default: idea)
+   - **Category**: e.g., validation, feature, refactor, analysis, infrastructure
+   - **Motivation**: Why is this worth doing?
+2. Generate a kebab-case filename from the title (e.g., "Compare Public Data" → `compare-public-data.md`).
+3. Create `todo/[filename].md` using the template at `todo/TODO_ITEM_TEMPLATE.md`. Fill in all fields from user input. Set status to `open`. Set date to today. Set author to the user's name (ask if unknown).
+4. Add a row to the registry table in `todo/TODO_REGISTRY.md` with: item title, priority, status, category, date, author, and a link to the file.
+5. Confirm the item was added and show the user the registry entry.
+
+**Notes**:
+- If `todo/` or `todo/TODO_REGISTRY.md` doesn't exist yet, create them first (use the structure from the mycelium `todo/` directory as reference).
+- Users can also update existing items by asking to change their status or priority — edit both the item file and registry row.
+
+---
+
 ## Post-Action Hook Protocol
 
 **This is what makes the repo "living." Execute after ANY significant action** (analysis step, data ingestion, algorithm implementation, report generation):
 
-1. **Update manifests**: Update the relevant `MANIFEST.md` with new/changed entries.
-2. **Update READMEs**: Update or create the `README.md` in the affected subfolder with current status, key findings, open questions.
+1. **Update manifests**: Update the relevant manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, etc.) with new/changed entries.
+2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder with current status, key findings, open questions.
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md` using the decision log template.
 4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template.
-5. **Validate**: Run `scripts/validate_structure.py` to confirm repo still conforms.
-6. **Skill feedback**: If any domain skill conventions were relevant, note whether they were helpful or had gaps.
+5. **Log todos**: If future work is identified during the action, add items to `todo/TODO_REGISTRY.md` (and create detailed `todo/[item].md` files for complex items).
+6. **Validate**: Run `scripts/validate_structure.py` to confirm repo still conforms.
+7. **Skill feedback**: If any domain skill conventions were relevant, note whether they were helpful or had gaps.
 
 ### Automated Enforcement (Claude Code Hooks)
 
@@ -228,7 +261,7 @@ When work is dispatched to subagents (main context = coordination only):
 
 | Problem | Solution |
 |---------|----------|
-| `validate_structure.py` fails after init | Check that all four top-level directories exist and each has a `MANIFEST.md`. Re-run init if needed. |
+| `validate_structure.py` fails after init | Check that all four top-level directories exist and each has its manifest (`ANALYSIS_MANIFEST.md`, etc.). Re-run init if needed. |
 | Domain skill conventions conflict with core | Domain conventions take precedence. Update `.living/conventions.md` to document the override. |
 | `.living/` directory missing | Run `init` mode to scaffold the living layer. Never create it manually — the script sets up required files. |
 | Manifest entry format errors | Check `templates/dataset-manifest-entry.yaml` or `templates/analysis-manifest-entry.yaml` for the correct format. |

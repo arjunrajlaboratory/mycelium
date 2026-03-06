@@ -17,7 +17,7 @@ Domain-specific conventions for bioinformatics analyses. These extend the core m
 
 ```
 analysis/rnaseq-experiment-name/
-├── README.md
+├── RNASEQ_EXPERIMENT_NAME.md
 ├── run.sh
 ├── scripts/
 │   ├── 01_qc.sh                    # FastQC + MultiQC

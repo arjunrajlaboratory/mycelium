@@ -122,29 +122,48 @@ def update_active_skills(target_dir: Path, domain: str):
 
 
 def update_claude_md(target_dir: Path, domain: str):
-    """Update CLAUDE.md to reference the new domain conventions."""
+    """Update CLAUDE.md to reference the new skill conventions."""
     claude_md = target_dir / "CLAUDE.md"
     if not claude_md.exists():
         print(f"  Skipping CLAUDE.md update (file not found)")
         return
 
     content = claude_md.read_text()
-    skill_ref = f"- [{domain}](.living/skills/{domain}/)"
+    skill_ref = f"- **{domain}** — See `.living/skills/{domain}/analysis-conventions.md`"
 
     # Already referenced?
-    if skill_ref in content:
+    if f".living/skills/{domain}/" in content:
         print(f"  CLAUDE.md already references {domain}")
         return
 
-    # Insert into Active Domain Skills section if it exists
-    section_header = "## Active Domain Skills"
-    if section_header in content:
+    # Try the new template format first: "### Domain (opt-in)" subsection
+    domain_subsection = "### Domain (opt-in)"
+    no_skills_placeholder = "No domain skills installed yet."
+    # Also support legacy format
+    legacy_header = "## Active Domain Skills"
+
+    if domain_subsection in content:
+        # New template format — insert skill ref under Domain subsection
+        if no_skills_placeholder in content:
+            content = content.replace(
+                no_skills_placeholder,
+                skill_ref,
+            )
+        else:
+            # Already has domain skills listed, append after the subsection header
+            content = content.replace(
+                domain_subsection,
+                f"{domain_subsection}\n\n{skill_ref}",
+            )
+    elif legacy_header in content:
+        # Legacy template format
         content = content.replace(
-            section_header,
-            f"{section_header}\n\n{skill_ref}",
+            legacy_header,
+            f"{legacy_header}\n\n{skill_ref}",
         )
     else:
-        content += f"\n\n{section_header}\n\n{skill_ref}\n"
+        # Neither format found — append a new section
+        content += f"\n\n## Installed Skill Packs\n\n{skill_ref}\n"
 
     claude_md.write_text(content)
     print(f"  Updated {claude_md}")

@@ -48,7 +48,7 @@ Open Claude Code in any project directory and say:
 
 > "Set up mycelium" or "Initialize living repo"
 
-This scaffolds the living repository structure: directories, manifests, the `.living/` memory layer, and a `CLAUDE.md` that encodes the framework's protocols.
+This scaffolds the living repository structure: directories, manifests, the `.living/` memory layer, and a `CLAUDE.md` that encodes the framework's protocols. **Core skill packs** (`robust-analysis` and `report-generator`) are installed automatically — every repo gets defensive analysis practices and structured report generation out of the box.
 
 ### 3. Install domain skills (optional)
 
@@ -75,25 +75,41 @@ After initialization, your project has this structure:
 project-root/
 ├── CLAUDE.md                     # AI agent instructions
 ├── ENVIRONMENTS_INSTALLATIONS.md # Environment setup and dependencies
+├── todo/                         # Future work tracking
+│   ├── TODO_REGISTRY.md          # Master registry of all items
+│   └── [item].md                 # Detailed writeup per item
 ├── .living/                      # The memory layer
 │   ├── decisions.md              # Why choices were made
 │   ├── learnings.md              # Gotchas, surprises, insights
 │   ├── conventions.md            # Project-specific overrides
-│   └── skills/                   # Installed domain skills
-├── algorithms/                   # Reusable methods (with MANIFEST.md)
-├── analysis/                     # Analytical work (with MANIFEST.md)
-├── data/                         # Data assets (with MANIFEST.md)
+│   └── skills/                   # Installed skill packs
+├── algorithms/                   # Reusable methods (with ALGORITHM_MANIFEST.md)
+├── analysis/                     # Analytical work (with ANALYSIS_MANIFEST.md)
+├── data/                         # Data assets (with DATA_MANIFEST.md)
 │   ├── raw/                      # Immutable originals
 │   ├── processed/                # Transformed data
 │   └── metadata/                 # Schemas, provenance
-└── reference_material/           # External references (with MANIFEST.md)
+└── reference_material/           # External references (with REFERENCE_MANIFEST.md)
 ```
 
-Every directory has a `MANIFEST.md` — a registry of its contents with structured metadata. Nothing is orphaned.
+Every directory has a descriptive manifest — a registry of its contents with structured metadata. Nothing is orphaned. Every subdirectory has a documentation file named in UPPER_SNAKE_CASE of the folder name (e.g., `analysis/snp-analysis/SNP_ANALYSIS.md`), making documents instantly discoverable in search.
 
 ## The Network
 
-Mycelium includes a marketplace of domain-specific skill packs:
+Mycelium includes a marketplace of skill packs — some core (auto-installed), some domain-specific (opt-in):
+
+### Core Packs (batteries included)
+
+These are installed automatically during `mycelium init`:
+
+| Skill Pack | Description |
+|------------|-------------|
+| [robust-analysis](network/skills/robust-analysis/) | Defensive execution, validation checks, sensitivity sweeps, null hypothesis testing |
+| [report-generator](network/skills/report-generator/) | Structured LaTeX PDF report generation with provenance |
+
+### Domain Packs (opt-in)
+
+Install these for field-specific conventions:
 
 | Skill Pack | Description |
 |------------|-------------|

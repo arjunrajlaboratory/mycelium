@@ -1,5 +1,5 @@
 # Analysis Manifest Entry Template
-# Copy this block into analysis/MANIFEST.md for each new analysis.
+# Copy this block into analysis/ANALYSIS_MANIFEST.md for each new analysis.
 # Fill in all fields. Delete comments before committing.
 
 ### [analysis-name]
