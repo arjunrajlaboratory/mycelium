@@ -46,10 +46,11 @@ def create_raw_directory(target_dir: Path, name: str, source: str):
     raw_dir = target_dir / "data" / "raw" / name
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    readme_path = raw_dir / "README.md"
-    # TODO: Generate README with source info, acquisition date, instructions
+    doc_name = name.upper().replace("-", "_") + ".md"
+    doc_path = raw_dir / doc_name
+    # TODO: Generate documentation file with source info, acquisition date, instructions
     print(f"  Created: data/raw/{name}/")
-    print(f"  Would create README at: {readme_path}")
+    print(f"  Would create doc at: {doc_path}")
     print(f"  Source: {source}")
     print(f"  Place raw data files in: {raw_dir}")
 
@@ -69,7 +70,7 @@ def create_metadata(target_dir: Path, name: str, dataset_type: str):
 
 def update_data_manifest(target_dir: Path, name: str, dataset_type: str, source: str):
     """Add an entry to data/MANIFEST.md."""
-    manifest_path = target_dir / "data" / "MANIFEST.md"
+    manifest_path = target_dir / "data" / "DATA_MANIFEST.md"
     # TODO: Read existing manifest
     # TODO: Append new entry using dataset-manifest-entry.yaml template
     # TODO: Fill in known fields (name, type, source, date, paths)
@@ -106,7 +107,7 @@ def main():
     print(f"  1. Place raw data files in data/raw/{args.name}/")
     print(f"  2. Fill in data/metadata/{args.name}/schema.yaml")
     print(f"  3. Update data/metadata/{args.name}/summary_stats.md")
-    print(f"  4. Review the manifest entry in data/MANIFEST.md")
+    print(f"  4. Review the manifest entry in data/DATA_MANIFEST.md")
     print(f"  5. Log any decisions to .living/decisions.md")
 
 

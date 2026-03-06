@@ -1,6 +1,8 @@
 # [Analysis Name]
 
-<!-- Replace bracketed placeholders with actual content -->
+<!-- NAMING: Save this file as UPPER_SNAKE_CASE of the folder name.
+     e.g., analysis/snp-analysis/ → SNP_ANALYSIS.md
+     Replace bracketed placeholders with actual content. -->
 
 ## Purpose
 
@@ -13,12 +15,12 @@
 
 ## Datasets
 
-<!-- Reference entries from data/MANIFEST.md -->
+<!-- Reference entries from data/DATA_MANIFEST.md -->
 - `[dataset-name]` — [brief description of how it's used in this analysis]
 
 ## Algorithms
 
-<!-- Reference entries from algorithms/MANIFEST.md -->
+<!-- Reference entries from algorithms/ALGORITHM_MANIFEST.md -->
 - `[algorithm-name]` — [brief description of how it's applied]
 
 ## Parent Analysis

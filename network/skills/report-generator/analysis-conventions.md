@@ -22,7 +22,7 @@ If not installed, guide the user to install the **full** TeX Live distribution:
 ## Workflow
 
 1. **Gather context** from the analysis project:
-   - Read the analysis `README.md` and `specification.md` (if present)
+   - Read the analysis documentation file (UPPER_SNAKE_CASE.md) and `specification.md` (if present)
    - Read `.living/decisions.md` for key analytical choices
    - Inventory `outputs/figures/` and `outputs/tables/` for available assets
    - Check `git log` for provenance information

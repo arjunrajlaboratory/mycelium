@@ -9,7 +9,7 @@ This repository is a **mycelium-enabled living repository**. It carries its own 
    - `.living/learnings.md` — Gotchas, surprises, and insights from previous work
    - `.living/conventions.md` — Repo-specific convention overrides
 2. **Read `ENVIRONMENTS_INSTALLATIONS.md`** — Environment setup, dependencies, and installation gotchas
-3. **Read the relevant `MANIFEST.md`** — Each top-level directory has a manifest registering its contents
+3. **Read the relevant manifest** — Each top-level directory has a descriptive manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`)
 
 ## Installed Skill Packs
 
@@ -28,10 +28,10 @@ No domain skills installed yet. Install with mycelium's `install-skill` mode (e.
 ## Repository Structure
 
 ```
-├── algorithms/    — Reusable computational methods (see algorithms/MANIFEST.md)
-├── analysis/      — Analytical work (see analysis/MANIFEST.md)
-├── data/          — Data assets: raw (immutable), processed, metadata (see data/MANIFEST.md)
-├── reference_material/ — External references (see reference_material/MANIFEST.md)
+├── algorithms/    — Reusable computational methods (see ALGORITHM_MANIFEST.md)
+├── analysis/      — Analytical work (see ANALYSIS_MANIFEST.md)
+├── data/          — Data assets: raw (immutable), processed, metadata (see DATA_MANIFEST.md)
+├── reference_material/ — External references (see REFERENCE_MANIFEST.md)
 ├── todo/          — Future work items (see todo/TODOLIST.md)
 └── .living/       — Repository memory layer
 ```
@@ -42,13 +42,13 @@ No domain skills installed yet. Install with mycelium's `install-skill` mode (e.
 
 1. Read `.living/learnings.md` for known gotchas relevant to your task
 2. Read `.living/decisions.md` for past reasoning that may inform your approach
-3. Read the `MANIFEST.md` for the area you'll be working in
+3. Read the manifest for the area you'll be working in (e.g., `ANALYSIS_MANIFEST.md`)
 4. Check `.living/conventions.md` for any repo-specific overrides
 5. If a domain skill is active, read its conventions in `.living/skills/[domain]/`
 
 ### While Working
 
-- Follow analysis conventions: every analysis gets its own folder with README, scripts, outputs, reports
+- Follow analysis conventions: every analysis gets its own folder with UPPER_SNAKE_CASE.md documentation, scripts, outputs, reports
 - Follow statistical conventions: report effect sizes, confidence intervals, document assumptions
 - **Follow robust-analysis conventions** (`.living/skills/robust-analysis/`): fail loudly on unexpected data, assert shapes/types/ranges, log row counts at every step, run sensitivity analyses for every decision, test null hypotheses via permutation/bootstrap
 - **Do not subset data** without explicit user confirmation and justification
@@ -59,8 +59,8 @@ No domain skills installed yet. Install with mycelium's `install-skill` mode (e.
 
 **This is critical.** After completing any significant step:
 
-1. **Update manifests**: Update the relevant `MANIFEST.md` with new/changed entries
-2. **Update READMEs**: Update or create the `README.md` in the affected subfolder
+1. **Update manifests**: Update the relevant manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, etc.) with new/changed entries
+2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md`
 4. **Log learnings**: If something unexpected happened, append to `.living/learnings.md`
 5. **Log todos**: If future work is identified, add items to `todo/TODOLIST.md` (create a detailed `todo/[item].md` writeup for complex items)
@@ -82,7 +82,7 @@ When using subagent-driven development (main context coordinates, subagents impl
 
 - `data/raw/` is **IMMUTABLE** — never modify original files
 - Every dataset has metadata in `data/metadata/[dataset-name]/`
-- Every dataset has a manifest entry in `data/MANIFEST.md`
+- Every dataset has a manifest entry in `data/DATA_MANIFEST.md`
 - Large files are gitignored with download instructions documented
 
 ## Key Files
@@ -94,4 +94,4 @@ When using subagent-driven development (main context coordinates, subagents impl
 | `.living/learnings.md` | Accumulated insights and gotchas |
 | `.living/conventions.md` | Repo-specific convention overrides |
 | `todo/TODOLIST.md` | Master list of future work items |
-| `*/MANIFEST.md` | Registry of contents in each directory |
+| `*/*_MANIFEST.md` | Registry of contents in each directory |

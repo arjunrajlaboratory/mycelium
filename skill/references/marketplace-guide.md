@@ -99,7 +99,7 @@ After installing a domain pack:
 
 ## Convention Cascade
 
-When conventions exist at multiple levels, they cascade with this priority:
+When conventions exist at multiple levels, they cascade with this priority (this applies to both core and domain packs):
 
 ```
 Repo-local (.living/conventions.md)  ← highest priority

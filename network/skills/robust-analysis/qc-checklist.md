@@ -69,5 +69,5 @@ Run after the analysis is complete, before reporting results.
 
 - [ ] **All decisions logged** in `.living/decisions.md`
 - [ ] **All filtering/subsetting operations** justified with row counts
-- [ ] **Analysis README** updated with methods, results, and robustness checks
-- [ ] **Manifest** updated with current analysis status
+- [ ] **Analysis documentation file** (UPPER_SNAKE_CASE.md) updated with methods, results, and robustness checks
+- [ ] **ANALYSIS_MANIFEST.md** updated with current analysis status

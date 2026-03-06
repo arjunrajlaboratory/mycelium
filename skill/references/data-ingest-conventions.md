@@ -14,10 +14,10 @@ Files in `data/raw/` are **never modified** after initial placement. If raw data
 data/raw/[dataset-name]/
 ├── file1.csv
 ├── file2.csv
-└── README.md          # Brief note on source and acquisition
+└── DATASET_NAME.md    # UPPER_SNAKE_CASE of folder name
 ```
 
-Each dataset gets its own subdirectory. Include a brief `README.md` noting where the data came from and when.
+Each dataset gets its own subdirectory. Include a documentation file (named in UPPER_SNAKE_CASE of the folder name, e.g., `PATIENT_COHORT_2024.md`) noting where the data came from and when.
 
 ### 2. Create metadata
 
@@ -37,7 +37,7 @@ data/metadata/[dataset-name]/
 
 ### 3. Update the manifest
 
-Add an entry to `data/MANIFEST.md` using the `dataset-manifest-entry.yaml` template. Include both the YAML block and a prose description.
+Add an entry to `data/DATA_MANIFEST.md` using the `dataset-manifest-entry.yaml` template. Include both the YAML block and a prose description.
 
 ### 4. Log decisions
 
@@ -47,7 +47,7 @@ If any choices were made during ingestion (e.g., excluding certain records, choo
 
 Processed data lives in `data/processed/[dataset-name]/`:
 
-- Document the processing steps in a `README.md` or processing script
+- Document the processing steps in the dataset's documentation file or processing script
 - Record the provenance: which raw dataset, what transformations, any parameters
 - If the processing is tied to a specific analysis, the processing script can live in the analysis's `scripts/` directory instead
 
@@ -56,12 +56,12 @@ Processed data lives in `data/processed/[dataset-name]/`:
 For files too large to commit to git:
 
 1. Add them to `.gitignore`
-2. Document how to obtain them in `data/raw/[dataset-name]/README.md`
+2. Document how to obtain them in the dataset's UPPER_SNAKE_CASE.md file
 3. Include download scripts if possible
 4. Note the expected file sizes and checksums (SHA256) for verification
 
 ```markdown
-# data/raw/large-dataset/README.md
+# data/raw/large-dataset/LARGE_DATASET.md
 
 ## Large Dataset
 
@@ -91,6 +91,6 @@ Before considering ingestion complete:
 - [ ] Schema documented with column descriptions and types
 - [ ] Provenance documented (source, date, method)
 - [ ] Known issues documented
-- [ ] `data/MANIFEST.md` updated with new entry
+- [ ] `data/DATA_MANIFEST.md` updated with new entry
 - [ ] Any decisions logged in `.living/decisions.md`
 - [ ] Large files handled appropriately (gitignored + documented)

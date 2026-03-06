@@ -8,7 +8,7 @@ Domain-specific conventions for image analysis. These extend the core mycelium a
 
 ```
 data/raw/[experiment-name]/
-├── README.md                    # Acquisition parameters, microscope, objective
+├── EXPERIMENT_NAME.md            # UPPER_SNAKE_CASE of folder; acquisition parameters, microscope, objective
 ├── images/                      # Original image files (TIFF, CZI, ND2, etc.)
 ├── metadata/                    # Microscope metadata exports
 └── plate_map.csv               # If plate-based: well-condition mapping

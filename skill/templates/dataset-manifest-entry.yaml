@@ -1,5 +1,5 @@
 # Dataset Manifest Entry Template
-# Copy this block into data/MANIFEST.md for each new dataset.
+# Copy this block into data/DATA_MANIFEST.md for each new dataset.
 # Fill in all fields. Delete comments before committing.
 
 ### [dataset-name]

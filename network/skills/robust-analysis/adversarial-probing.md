@@ -126,4 +126,4 @@ print(f"Held-out prediction accuracy: {agreement:.1%}")
 
 Run all five protocols for any finding that will be reported as a main result. For intermediate or exploratory findings, protocols 1 (breaking subset) and 3 (directionality) are the minimum.
 
-Document the results of adversarial probing in the analysis README under a "Robustness Checks" section. Findings that survive adversarial probing are reported with higher confidence. Findings that don't survive should be reported as preliminary or exploratory, with the limitations clearly stated.
+Document the results of adversarial probing in the analysis documentation file (UPPER_SNAKE_CASE.md) under a "Robustness Checks" section. Findings that survive adversarial probing are reported with higher confidence. Findings that don't survive should be reported as preliminary or exploratory, with the limitations clearly stated.

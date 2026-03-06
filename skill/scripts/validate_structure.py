@@ -97,24 +97,35 @@ def check_top_level_directories(target_dir: Path, result: ValidationResult):
             result.error(f"{dir_name} exists but is not a directory")
 
 
-def check_manifests(target_dir: Path, result: ValidationResult):
-    """Check that each top-level directory has a MANIFEST.md."""
-    manifest_dirs = ["algorithms", "analysis", "data", "reference_material"]
+MANIFEST_NAMES = {
+    "algorithms": "ALGORITHM_MANIFEST.md",
+    "analysis": "ANALYSIS_MANIFEST.md",
+    "data": "DATA_MANIFEST.md",
+    "reference_material": "REFERENCE_MANIFEST.md",
+}
 
-    for dir_name in manifest_dirs:
-        manifest_path = target_dir / dir_name / "MANIFEST.md"
+
+def check_manifests(target_dir: Path, result: ValidationResult):
+    """Check that each top-level directory has its descriptive manifest."""
+    for dir_name, manifest_name in MANIFEST_NAMES.items():
+        manifest_path = target_dir / dir_name / manifest_name
+        # Also check for legacy MANIFEST.md
+        legacy_path = target_dir / dir_name / "MANIFEST.md"
         if not manifest_path.exists():
-            result.error(f"{dir_name}/MANIFEST.md does not exist")
+            if legacy_path.exists():
+                result.warning(
+                    f"{dir_name}/MANIFEST.md exists but should be renamed to {manifest_name}"
+                )
+            else:
+                result.error(f"{dir_name}/{manifest_name} does not exist")
         elif manifest_path.stat().st_size == 0:
-            result.warning(f"{dir_name}/MANIFEST.md is empty")
+            result.warning(f"{dir_name}/{manifest_name} is empty")
 
 
 def check_manifest_format(target_dir: Path, result: ValidationResult):
-    """Check that MANIFEST.md files have valid content."""
-    manifest_dirs = ["algorithms", "analysis", "data", "reference_material"]
-
-    for dir_name in manifest_dirs:
-        manifest_path = target_dir / dir_name / "MANIFEST.md"
+    """Check that manifest files have valid content."""
+    for dir_name, manifest_name in MANIFEST_NAMES.items():
+        manifest_path = target_dir / dir_name / manifest_name
         if not manifest_path.exists():
             continue
 
@@ -124,20 +135,32 @@ def check_manifest_format(target_dir: Path, result: ValidationResult):
 
         # Check for a heading
         if not content.startswith("#"):
-            result.warning(f"{dir_name}/MANIFEST.md does not start with a heading")
+            result.warning(f"{dir_name}/{manifest_name} does not start with a heading")
 
 
-def check_analysis_readmes(target_dir: Path, result: ValidationResult):
-    """Check that any analysis subdirectory has a README.md."""
+def folder_to_doc_name(folder_name: str) -> str:
+    """Convert a folder name to its UPPER_SNAKE_CASE documentation filename."""
+    return folder_name.upper().replace("-", "_") + ".md"
+
+
+def check_analysis_docs(target_dir: Path, result: ValidationResult):
+    """Check that any analysis subdirectory has its documentation file."""
     analysis_dir = target_dir / "analysis"
     if not analysis_dir.exists():
         return
 
     for subdir in analysis_dir.iterdir():
         if subdir.is_dir() and subdir.name != ".git":
-            readme = subdir / "README.md"
-            if not readme.exists():
-                result.warning(f"analysis/{subdir.name}/ has no README.md")
+            expected_doc = folder_to_doc_name(subdir.name)
+            doc_path = subdir / expected_doc
+            legacy_readme = subdir / "README.md"
+            if not doc_path.exists():
+                if legacy_readme.exists():
+                    result.warning(
+                        f"analysis/{subdir.name}/README.md should be renamed to {expected_doc}"
+                    )
+                else:
+                    result.warning(f"analysis/{subdir.name}/ has no {expected_doc}")
 
 
 def check_todo_directory(target_dir: Path, result: ValidationResult):
@@ -186,8 +209,8 @@ def main():
     print("Checking manifest format...")
     check_manifest_format(target_dir, result)
 
-    print("Checking analysis READMEs...")
-    check_analysis_readmes(target_dir, result)
+    print("Checking analysis documentation files...")
+    check_analysis_docs(target_dir, result)
 
     print("Checking todo directory...")
     check_todo_directory(target_dir, result)

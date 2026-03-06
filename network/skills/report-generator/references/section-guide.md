@@ -201,6 +201,7 @@ Pull this information from:
 - `ls` of the scripts directory
 - `git rev-parse HEAD` for the current commit
 - `ENVIRONMENTS_INSTALLATIONS.md` for software versions
+- The analysis documentation file (UPPER_SNAKE_CASE.md) for the analysis description
 
 ---
 

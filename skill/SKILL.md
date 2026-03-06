@@ -28,7 +28,7 @@ When invoked, determine which mode the user needs based on their request, then f
 5. Ask which **domain** skills to install from the network (e.g., bioinformatics, image-analysis). Domain packs are those without `core: true`.
 6. Generate `CLAUDE.md` for the repo (from `templates/CLAUDE.md.template`) that encodes the living repo protocol.
 7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
-8. Create initial empty manifests (`MANIFEST.md`) in each top-level directory.
+8. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
 9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`.
 10. After completion: run `scripts/validate_structure.py` to confirm everything is correct.
 
@@ -50,7 +50,7 @@ When invoked, determine which mode the user needs based on their request, then f
 3. If a domain skill is active, check its conventions for domain-specific validation.
 4. Place raw data in `data/raw/[dataset-name]/`.
 5. Generate metadata (schema, provenance, summary statistics) in `data/metadata/[dataset-name]/`.
-6. Update `data/MANIFEST.md` with new entry (use `templates/dataset-manifest-entry.yaml`).
+6. Update `data/DATA_MANIFEST.md` with new entry (use `templates/dataset-manifest-entry.yaml`).
 7. Log any decisions about data cleaning or exclusion to `.living/decisions.md`.
 8. Run the post-action hook protocol (see below).
 
@@ -63,11 +63,11 @@ When invoked, determine which mode the user needs based on their request, then f
 **Purpose**: Start a new analysis or continue an existing one.
 
 **Steps**:
-1. Read `analysis/MANIFEST.md` to understand existing analyses.
-2. Read `data/MANIFEST.md` to understand available data.
-3. Read `algorithms/MANIFEST.md` to understand available algorithms.
-4. **Continuing existing**: Navigate to `analysis/[name]/` and read its `README.md`.
-5. **New**: Create `analysis/[name]/` with `README.md`, `scripts/`, `outputs/`, `reports/`.
+1. Read `analysis/ANALYSIS_MANIFEST.md` to understand existing analyses.
+2. Read `data/DATA_MANIFEST.md` to understand available data.
+3. Read `algorithms/ALGORITHM_MANIFEST.md` to understand available algorithms.
+4. **Continuing existing**: Navigate to `analysis/[name]/` and read its documentation file (UPPER_SNAKE_CASE of folder name, e.g., `SNP_ANALYSIS.md`).
+5. **New**: Create `analysis/[name]/` with documentation file (UPPER_SNAKE_CASE.md), `scripts/`, `outputs/`, `reports/`.
 6. If building on a parent analysis, record the lineage in the manifest entry.
 7. Consult active domain skill conventions if applicable.
 8. Consult `references/analysis-conventions.md` for structure.
@@ -86,7 +86,7 @@ When invoked, determine which mode the user needs based on their request, then f
 **Purpose**: Generate a structured LaTeX PDF report from an analysis.
 
 **Steps**:
-1. Gather context: read the analysis `README.md`, `outputs/`, `.living/decisions.md`, and `git log`.
+1. Gather context: read the analysis documentation file (UPPER_SNAKE_CASE.md), `outputs/`, `.living/decisions.md`, and `git log`.
 2. **Choose the report pathway**:
    - **If `report-generator` is installed** (check `.living/skills/report-generator/`): Follow its `analysis-conventions.md` as the entry point. Use the template from `.living/skills/report-generator/assets/report-template.tex`. The report structure is: Title, Abstract, TOC, Problem Statement, Methods (Definitions/Overview/Technical Detail), Results, Conclusions, Next Steps, Provenance, Appendix. Consult `references/section-guide.md` for detailed writing guidance per section.
    - **If not installed**: Fall back to `references/writing-conventions.md` and `templates/report-template.tex`. The fallback structure is: Title, Abstract, Introduction, Methods (Data/Analysis/Statistical Methods), Results, Discussion, References.
@@ -167,8 +167,8 @@ When invoked, determine which mode the user needs based on their request, then f
 
 **This is what makes the repo "living." Execute after ANY significant action** (analysis step, data ingestion, algorithm implementation, report generation):
 
-1. **Update manifests**: Update the relevant `MANIFEST.md` with new/changed entries.
-2. **Update READMEs**: Update or create the `README.md` in the affected subfolder with current status, key findings, open questions.
+1. **Update manifests**: Update the relevant manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, etc.) with new/changed entries.
+2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder with current status, key findings, open questions.
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md` using the decision log template.
 4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template.
 5. **Validate**: Run `scripts/validate_structure.py` to confirm repo still conforms.
@@ -235,7 +235,7 @@ When work is dispatched to subagents (main context = coordination only):
 
 | Problem | Solution |
 |---------|----------|
-| `validate_structure.py` fails after init | Check that all four top-level directories exist and each has a `MANIFEST.md`. Re-run init if needed. |
+| `validate_structure.py` fails after init | Check that all four top-level directories exist and each has its manifest (`ANALYSIS_MANIFEST.md`, etc.). Re-run init if needed. |
 | Domain skill conventions conflict with core | Domain conventions take precedence. Update `.living/conventions.md` to document the override. |
 | `.living/` directory missing | Run `init` mode to scaffold the living layer. Never create it manually — the script sets up required files. |
 | Manifest entry format errors | Check `templates/dataset-manifest-entry.yaml` or `templates/analysis-manifest-entry.yaml` for the correct format. |

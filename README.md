@@ -79,17 +79,17 @@ project-root/
 │   ├── decisions.md              # Why choices were made
 │   ├── learnings.md              # Gotchas, surprises, insights
 │   ├── conventions.md            # Project-specific overrides
-│   └── skills/                   # Installed domain skills
-├── algorithms/                   # Reusable methods (with MANIFEST.md)
-├── analysis/                     # Analytical work (with MANIFEST.md)
-├── data/                         # Data assets (with MANIFEST.md)
+│   └── skills/                   # Installed skill packs
+├── algorithms/                   # Reusable methods (with ALGORITHM_MANIFEST.md)
+├── analysis/                     # Analytical work (with ANALYSIS_MANIFEST.md)
+├── data/                         # Data assets (with DATA_MANIFEST.md)
 │   ├── raw/                      # Immutable originals
 │   ├── processed/                # Transformed data
 │   └── metadata/                 # Schemas, provenance
-└── reference_material/           # External references (with MANIFEST.md)
+└── reference_material/           # External references (with REFERENCE_MANIFEST.md)
 ```
 
-Every directory has a `MANIFEST.md` — a registry of its contents with structured metadata. Nothing is orphaned.
+Every directory has a descriptive manifest — a registry of its contents with structured metadata. Nothing is orphaned. Every subdirectory has a documentation file named in UPPER_SNAKE_CASE of the folder name (e.g., `analysis/snp-analysis/SNP_ANALYSIS.md`), making documents instantly discoverable in search.
 
 ## The Network
 
