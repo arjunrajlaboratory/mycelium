@@ -5,9 +5,10 @@ description: >
   Scaffolds living repositories where every analysis, dataset, and decision
   is registered and discoverable. Use when user says "set up mycelium",
   "initialize living repo", "ingest dataset", "start new analysis",
-  "crystallize learnings", "install domain skill", "todo idea", or wants
-  to restructure an existing repository into a self-documenting framework.
-  Also use when user mentions "living dataset", "living repo", or "mycelium".
+  "crystallize learnings", "install domain skill", "todo idea",
+  "generate ideas", "brainstorm", or wants to restructure an existing
+  repository into a self-documenting framework. Also use when user mentions
+  "living dataset", "living repo", or "mycelium".
 ---
 
 # Mycelium — Living Repository Skill
@@ -24,7 +25,7 @@ When invoked, determine which mode the user needs based on their request, then f
 1. Check if repo already has mycelium structure (look for `.living/` directory).
 2. **New repo**: Run full scaffold using `scripts/init_repo.py`.
 3. **Existing repo**: Run in restructure mode — audit current structure, propose migration plan, ask user to confirm before proceeding.
-4. **Auto-install core skill packs**: Scan `network/skills/*/SKILL_PACK.yaml` for packs with `core: true` and install each one using `scripts/install_domain_skill.py`. Currently the core packs are `robust-analysis` and `report-generator`. These provide batteries-included practices every repo should have.
+4. **Auto-install core skill packs**: Scan `network/skills/*/SKILL_PACK.yaml` for packs with `core: true` and install each one using `scripts/install_domain_skill.py`. Currently the core packs are `robust-analysis`, `report-generator`, and `idea-generator`. These provide batteries-included practices every repo should have.
 5. Ask which **domain** skills to install from the network (e.g., bioinformatics, image-analysis). Domain packs are those without `core: true`.
 6. Generate `CLAUDE.md` for the repo (from `templates/CLAUDE.md.template`) that encodes the living repo protocol.
 7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
@@ -161,6 +162,35 @@ When invoked, determine which mode the user needs based on their request, then f
 2. Draft a structured GitHub issue using the appropriate template.
 3. Categorize as `convention-gap`, `skill-improvement`, or `new-domain-request`.
 4. Present to user for review before filing.
+
+---
+
+## Mode: `generate-ideas`
+
+**Trigger**: "generate ideas", "brainstorm", "creative ideas", "persona brainstorm", "idea generation", "new analysis directions"
+
+**Purpose**: Generate creative analysis ideas by having diverse disciplinary personas review existing data and findings.
+
+**Steps**:
+1. **Check for the skill pack**: Verify `idea-generator` is installed (check `.living/skills/idea-generator/`). If not, install it first.
+2. **Context gathering**: Read all manifests (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`), analysis documentation files, and any experimental design documents. Compile a comprehensive context summary of what the project contains, what has been analyzed, and what was found.
+3. **Persona selection**: Present the persona catalog from the skill pack's `persona-catalog.md`. Ask the user if they want to:
+   - Use all 15 default personas
+   - Select a subset
+   - Add custom personas
+   - Adjust ideas per persona (default: 2)
+4. **Directory setup**: Create `analysis/ideas/[session-name]/` where session-name is date-stamped and descriptive (e.g., `2026-03-06-cross-disciplinary-brainstorm`).
+5. **Parallel subagent launch**: Launch subagents in batches of ~5. Each subagent receives the context summary, their assigned persona description, and the idea template from the skill pack's `idea-template.md`. Each writes a file like `01_statistical-physicist.md` with their ideas.
+6. **Compilation**: After all subagents complete, build `00_index.md` with a table of all ideas (persona, title, feasibility, one-line summary), grouped by feasibility. Follow the index template in the skill pack's `execution-protocol.md`.
+7. **Register the session**: Add an entry to `analysis/ANALYSIS_MANIFEST.md` for the ideation session.
+8. **Present to user**: Show the index and ask if they want to promote any ideas to `todo/` items or deep-dive into any idea.
+9. Run post-action hook protocol.
+
+**References to consult**:
+- `.living/skills/idea-generator/analysis-conventions.md` — entry point
+- `.living/skills/idea-generator/execution-protocol.md` — detailed procedure
+- `.living/skills/idea-generator/persona-catalog.md` — persona descriptions
+- `.living/skills/idea-generator/idea-template.md` — output template for subagents
 
 ---
 

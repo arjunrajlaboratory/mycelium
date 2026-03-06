@@ -1,0 +1,14 @@
+---
+name: idea-generator
+version: 0.1.0
+core: true
+description: >
+  Creative ideation engine that generates novel analysis directions by adopting
+  diverse disciplinary personas. Each persona reviews existing data and analyses
+  through its unique lens, then proposes structured, actionable ideas. Uses
+  parallel subagents to produce dozens of cross-disciplinary ideas efficiently.
+  Domain-agnostic — works with any analytical project.
+author: mycelium
+dependencies: []
+tags: [ideation, creativity, brainstorming, personas, cross-disciplinary, subagents, parallel]
+---
