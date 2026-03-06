@@ -5,9 +5,9 @@ description: >
   Scaffolds living repositories where every analysis, dataset, and decision
   is registered and discoverable. Use when user says "set up mycelium",
   "initialize living repo", "ingest dataset", "start new analysis",
-  "crystallize learnings", "install domain skill", or wants to restructure
-  an existing repository into a self-documenting framework. Also use when
-  user mentions "living dataset", "living repo", or "mycelium".
+  "crystallize learnings", "install domain skill", "todo idea", or wants
+  to restructure an existing repository into a self-documenting framework.
+  Also use when user mentions "living dataset", "living repo", or "mycelium".
 ---
 
 # Mycelium — Living Repository Skill
@@ -30,7 +30,8 @@ When invoked, determine which mode the user needs based on their request, then f
 7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
 8. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
 9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`.
-10. After completion: run `scripts/validate_structure.py` to confirm everything is correct.
+10. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
+11. After completion: run `scripts/validate_structure.py` to confirm everything is correct.
 
 **References to consult**:
 - `references/folder-structure.md` — canonical target structure
@@ -163,6 +164,30 @@ When invoked, determine which mode the user needs based on their request, then f
 
 ---
 
+## Mode: `todo-idea`
+
+**Trigger**: "todo idea", "add todo", "I have an idea", "track this for later", "/todo-idea"
+
+**Purpose**: Capture a future work item, idea, or planned improvement in the project's `todo/` directory.
+
+**Steps**:
+1. Ask the user (if not already provided):
+   - **Title**: Brief name for the item
+   - **Description**: What is this about?
+   - **Priority**: critical, high, medium, low, or idea (default: idea)
+   - **Category**: e.g., validation, feature, refactor, analysis, infrastructure
+   - **Motivation**: Why is this worth doing?
+2. Generate a kebab-case filename from the title (e.g., "Compare Public Data" → `compare-public-data.md`).
+3. Create `todo/[filename].md` using the template at `todo/TODO_ITEM_TEMPLATE.md`. Fill in all fields from user input. Set status to `open`. Set date to today. Set author to the user's name (ask if unknown).
+4. Add a row to the registry table in `todo/TODO_REGISTRY.md` with: item title, priority, status, category, date, author, and a link to the file.
+5. Confirm the item was added and show the user the registry entry.
+
+**Notes**:
+- If `todo/` or `todo/TODO_REGISTRY.md` doesn't exist yet, create them first (use the structure from the mycelium `todo/` directory as reference).
+- Users can also update existing items by asking to change their status or priority — edit both the item file and registry row.
+
+---
+
 ## Post-Action Hook Protocol
 
 **This is what makes the repo "living." Execute after ANY significant action** (analysis step, data ingestion, algorithm implementation, report generation):
@@ -171,8 +196,9 @@ When invoked, determine which mode the user needs based on their request, then f
 2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder with current status, key findings, open questions.
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md` using the decision log template.
 4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template.
-5. **Validate**: Run `scripts/validate_structure.py` to confirm repo still conforms.
-6. **Skill feedback**: If any domain skill conventions were relevant, note whether they were helpful or had gaps.
+5. **Log todos**: If future work is identified during the action, add items to `todo/TODO_REGISTRY.md` (and create detailed `todo/[item].md` files for complex items).
+6. **Validate**: Run `scripts/validate_structure.py` to confirm repo still conforms.
+7. **Skill feedback**: If any domain skill conventions were relevant, note whether they were helpful or had gaps.
 
 ### Automated Enforcement (Claude Code Hooks)
 

@@ -32,7 +32,7 @@ No domain skills installed yet. Install with mycelium's `install-skill` mode (e.
 ├── analysis/      — Analytical work (see ANALYSIS_MANIFEST.md)
 ├── data/          — Data assets: raw (immutable), processed, metadata (see DATA_MANIFEST.md)
 ├── reference_material/ — External references (see REFERENCE_MANIFEST.md)
-├── todo/          — Future work items (see todo/TODOLIST.md)
+├── todo/          — Future work items and ideas (see todo/TODO_REGISTRY.md)
 └── .living/       — Repository memory layer
 ```
 
@@ -63,7 +63,7 @@ No domain skills installed yet. Install with mycelium's `install-skill` mode (e.
 2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md`
 4. **Log learnings**: If something unexpected happened, append to `.living/learnings.md`
-5. **Log todos**: If future work is identified, add items to `todo/TODOLIST.md` (create a detailed `todo/[item].md` writeup for complex items)
+5. **Log todos**: If future work is identified, add items to `todo/TODO_REGISTRY.md` (create a detailed `todo/[item].md` writeup for complex items)
 6. **Validate**: Run `validate_structure.py` to confirm repo structure is correct
 7. **Skill feedback**: Note whether domain skill conventions were helpful or had gaps
 
@@ -93,5 +93,5 @@ When using subagent-driven development (main context coordinates, subagents impl
 | `.living/decisions.md` | Why choices were made |
 | `.living/learnings.md` | Accumulated insights and gotchas |
 | `.living/conventions.md` | Repo-specific convention overrides |
-| `todo/TODOLIST.md` | Master list of future work items |
+| `todo/TODO_REGISTRY.md` | Master list of future work items |
 | `*/*_MANIFEST.md` | Registry of contents in each directory |

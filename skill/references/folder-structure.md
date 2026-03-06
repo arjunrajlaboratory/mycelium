@@ -36,8 +36,9 @@ project-root/
 │   ├── REFERENCE_MANIFEST.md
 │   └── ...
 └── todo/
-    ├── TODOLIST.md                         # Master list of future work items
-    └── [item-name].md                      # Detailed writeup for a todo item
+    ├── TODO_REGISTRY.md                    # Master registry of all todo items
+    ├── TODO_ITEM_TEMPLATE.md               # Template for new items
+    └── [item-name].md                      # Detailed writeup per item
 ```
 
 ## Naming Conventions
@@ -89,7 +90,9 @@ Papers, documentation, external datasets used for comparison, or any reference m
 
 ### `todo/` — Future Work Items
 
-A lightweight tracker for future work. `TODOLIST.md` is the master list; each item can optionally have a detailed writeup in a separate `[item-name].md` file in the same directory. Use this to capture ideas, follow-ups, and deferred tasks so nothing falls through the cracks.
+A structured tracker for future work, ideas, and planned improvements. `TODO_REGISTRY.md` is the master registry — a table of all items with their priority, status, category, date, and author. Each item has its own `[item-name].md` file with a full writeup (description, motivation, proposed approach, acceptance criteria). `TODO_ITEM_TEMPLATE.md` provides the template for new items.
+
+Priority levels: `critical`, `high`, `medium`, `low`, `idea`. Status values: `open`, `in-progress`, `blocked`, `complete`, `wont-do`. Use the mycelium `todo-idea` mode (or `/todo-idea`) to add new items interactively.
 
 ## Manifest Format
 

@@ -75,6 +75,9 @@ After initialization, your project has this structure:
 project-root/
 ├── CLAUDE.md                     # AI agent instructions
 ├── ENVIRONMENTS_INSTALLATIONS.md # Environment setup and dependencies
+├── todo/                         # Future work tracking
+│   ├── TODO_REGISTRY.md          # Master registry of all items
+│   └── [item].md                 # Detailed writeup per item
 ├── .living/                      # The memory layer
 │   ├── decisions.md              # Why choices were made
 │   ├── learnings.md              # Gotchas, surprises, insights
