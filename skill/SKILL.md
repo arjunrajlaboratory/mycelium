@@ -24,8 +24,8 @@ When invoked, determine which mode the user needs based on their request, then f
 1. Check if repo already has mycelium structure (look for `.living/` directory).
 2. **New repo**: Run full scaffold using `scripts/init_repo.py`.
 3. **Existing repo**: Run in restructure mode — audit current structure, propose migration plan, ask user to confirm before proceeding.
-4. **Auto-install core skill packs**: Install all packs with `core: true` in their `SKILL_PACK.yaml` (currently `robust-analysis` and `report-generator`). These provide batteries-included practices every repo should have.
-5. Ask which **domain** skills to install from the network (e.g., bioinformatics, image-analysis).
+4. **Auto-install core skill packs**: Scan `network/skills/*/SKILL_PACK.yaml` for packs with `core: true` and install each one using `scripts/install_domain_skill.py`. Currently the core packs are `robust-analysis` and `report-generator`. These provide batteries-included practices every repo should have.
+5. Ask which **domain** skills to install from the network (e.g., bioinformatics, image-analysis). Domain packs are those without `core: true`.
 6. Generate `CLAUDE.md` for the repo (from `templates/CLAUDE.md.template`) that encodes the living repo protocol.
 7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
 8. Create initial empty manifests (`MANIFEST.md`) in each top-level directory.
@@ -86,15 +86,16 @@ When invoked, determine which mode the user needs based on their request, then f
 **Purpose**: Generate a structured LaTeX PDF report from an analysis.
 
 **Steps**:
-1. **If the `report-generator` skill pack is installed** (check `.living/skills/report-generator/`), follow its conventions — they provide detailed section-by-section guidance, a richer template, and a compilation workflow. The skill pack's `analysis-conventions.md` is the entry point.
-2. **If not installed**, fall back to `references/writing-conventions.md` and `templates/report-template.tex`.
-3. Gather context: read the analysis `README.md`, `outputs/`, `.living/decisions.md`, and `git log`.
-4. Copy the template to `analysis/[name]/reports/[name]-report.tex`.
-5. Fill in each section following the report structure (Problem Statement, Methods with Definitions/Overview/Detail, Results, Conclusions, Provenance, Appendix).
-6. Pull figures from `outputs/figures/` and supplementary figures from `outputs/figures/supplementary/`.
-7. Compile: `pdflatex` twice (with `bibtex` between passes if citations are used).
-8. Verify the PDF renders correctly (no unresolved references, all figures present).
-9. Update analysis manifest entry with report status.
+1. Gather context: read the analysis `README.md`, `outputs/`, `.living/decisions.md`, and `git log`.
+2. **Choose the report pathway**:
+   - **If `report-generator` is installed** (check `.living/skills/report-generator/`): Follow its `analysis-conventions.md` as the entry point. Use the template from `.living/skills/report-generator/assets/report-template.tex`. The report structure is: Title, Abstract, TOC, Problem Statement, Methods (Definitions/Overview/Technical Detail), Results, Conclusions, Next Steps, Provenance, Appendix. Consult `references/section-guide.md` for detailed writing guidance per section.
+   - **If not installed**: Fall back to `references/writing-conventions.md` and `templates/report-template.tex`. The fallback structure is: Title, Abstract, Introduction, Methods (Data/Analysis/Statistical Methods), Results, Discussion, References.
+3. Copy the chosen template to `analysis/[name]/reports/[name]-report.tex`.
+4. Fill in each section following the chosen structure.
+5. Pull figures from `outputs/figures/` and supplementary figures from `outputs/figures/supplementary/`.
+6. Compile: `pdflatex` twice (with `bibtex` between passes if citations are used).
+7. Verify the PDF renders correctly (no unresolved references, all figures present).
+8. Update analysis manifest entry with report status.
 
 ---
 

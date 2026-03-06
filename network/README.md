@@ -39,16 +39,20 @@ See the main [CONTRIBUTING.md](../CONTRIBUTING.md) for full guidelines.
 
 ## Skill Pack Structure
 
-Each skill pack contains:
+Every skill pack must contain a `SKILL_PACK.yaml` and an `analysis-conventions.md` entry point. Beyond that, the structure varies by pack. Common patterns:
 
 ```
-domain-name/
-├── SKILL_PACK.yaml            # Metadata (name, version, description, tags)
-├── analysis-conventions.md    # Domain-specific analysis conventions
-├── statistical-conventions.md # Domain-specific statistical methods (optional)
-├── qc-checklist.md            # Quality control checklist
-└── templates/                 # Domain-specific templates
+pack-name/
+├── SKILL_PACK.yaml            # Required: metadata (name, version, core, description, tags)
+├── analysis-conventions.md    # Required: entry point (hub file with progressive disclosure)
+├── qc-checklist.md            # Recommended: quality control checklist
+├── [detail-files].md          # Topic-specific deep dives linked from the hub
+├── references/                # Optional: detailed reference docs
+├── templates/                 # Optional: report/analysis templates
+└── assets/                    # Optional: LaTeX templates, scripts, etc.
 ```
+
+Core packs include `core: true` in their `SKILL_PACK.yaml`. See existing packs for examples of the progressive disclosure pattern.
 
 ## Requesting a New Domain
 
