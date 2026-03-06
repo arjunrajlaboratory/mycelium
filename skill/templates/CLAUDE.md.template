@@ -20,6 +20,7 @@ This repository is a **mycelium-enabled living repository**. It carries its own 
 
 - **robust-analysis** — Defensive execution practices: strict error handling, data validation checks, parameter sensitivity sweeps, null hypothesis testing, adversarial self-challenge. See `.living/skills/robust-analysis/analysis-conventions.md` for the entry point.
 - **report-generator** — Structured LaTeX PDF report generation. See `.living/skills/report-generator/analysis-conventions.md` for the workflow.
+- **idea-generator** — Persona-based creative ideation for new analysis directions. See `.living/skills/idea-generator/analysis-conventions.md` for the entry point.
 
 ### Domain (opt-in)
 
