@@ -1,5 +1,4 @@
 ---
-name: ideas
 description: >
   Generate creative analysis ideas by having diverse disciplinary personas
   review existing data and findings. Uses parallel subagents for efficient
@@ -14,7 +13,7 @@ Generate creative analysis ideas by routing to installed idea convention packs, 
 
 ## Steps
 
-1. **Check for convention pack**: Verify an idea convention pack is installed (check `.living/conventions/idea-generator/`). If not installed, install it first using `/mycelium:skill` install-convention mode.
+1. **Check for convention pack**: Verify an idea convention pack is installed (check `.living/conventions/idea-generator/`). If not installed, install it first using `/mycelium:core` install-convention mode.
 
 2. **Context gathering**: Read all manifests (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`), analysis documentation files, and any experimental design documents. Compile a comprehensive context summary of what the project contains, what has been analyzed, and what was found.
 
@@ -42,8 +41,8 @@ Generate creative analysis ideas by routing to installed idea convention packs, 
 8. **Register the session**: Add an entry to `analysis/ANALYSIS_MANIFEST.md` for the ideation session.
 
 9. **Present to user**: Show the index and ask if they want to:
-   - Promote any ideas to `todo/` items (via `/mycelium:skill` todo-idea mode)
+   - Promote any ideas to `todo/` items (via `/mycelium:core` todo-idea mode)
    - Deep-dive into any idea
    - Run another session with different personas
 
-10. **Run post-action hook protocol** (see `/mycelium:skill` for the full protocol).
+10. **Run post-action hook protocol** (see `/mycelium:core` for the full protocol).

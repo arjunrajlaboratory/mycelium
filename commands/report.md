@@ -1,5 +1,4 @@
 ---
-name: report
 description: >
   Generate a structured report (typically LaTeX PDF) from an analysis in a
   mycelium-enabled repository. Routes to installed report convention packs
@@ -25,7 +24,7 @@ Generate a structured report from an analysis, routing to the appropriate report
    - Read `.living/conventions/ACTIVE_CONVENTIONS.yaml` to see what's installed.
    - **If `report-generator` is installed** (check `.living/conventions/report-generator/`): Follow its `analysis-conventions.md` as the entry point. Use the template from `.living/conventions/report-generator/assets/report-template.tex`. The report structure is: Title, Abstract, TOC, Problem Statement, Methods (Definitions/Overview/Technical Detail), Results, Conclusions, Next Steps, Provenance, Appendix. Consult `references/section-guide.md` for detailed writing guidance per section. Run through `qc-checklist.md` before finalizing.
    - **If other report conventions are installed** (future packs like `internal-memo`, `slide-deck`, etc.): Present the user with the available report styles and let them choose.
-   - **If no report convention is installed**: Fall back to core `references/writing-conventions.md` and `templates/report-template.tex`. The fallback structure is: Title, Abstract, Introduction, Methods (Data/Analysis/Statistical Methods), Results, Discussion, References.
+   - **If no report convention is installed**: Fall back to core `skills/core/references/writing-conventions.md` and `skills/core/templates/report-template.tex`. The fallback structure is: Title, Abstract, Introduction, Methods (Data/Analysis/Statistical Methods), Results, Discussion, References.
 
 3. **Copy the chosen template** to `analysis/[name]/reports/[name]-report.tex`.
 
