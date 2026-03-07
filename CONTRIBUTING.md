@@ -1,18 +1,18 @@
 # Contributing to Mycelium
 
-Thank you for your interest in contributing to mycelium! This project thrives on community contributions, especially domain-specific skill packs.
+Thank you for your interest in contributing to mycelium! This project thrives on community contributions, especially domain-specific convention packs.
 
 ## Ways to Contribute
 
-### 1. Contribute a New Domain Skill Pack
+### 1. Contribute a New Convention Pack
 
-This is the most impactful contribution. If you have expertise in a domain (proteomics, epidemiology, geospatial analysis, NLP, etc.), you can package your conventions into a skill pack.
+This is the most impactful contribution. If you have expertise in a domain (proteomics, epidemiology, geospatial analysis, NLP, etc.), you can package your conventions into a convention pack.
 
 **From scratch:**
 
 1. Create a directory under `network/community-contributed/your-domain/`
 2. Include:
-   - `SKILL_PACK.yaml` — metadata (name, version, description, author, tags)
+   - `CONVENTION_PACK.yaml` — metadata (name, version, description, author, tags)
    - `analysis-conventions.md` — domain-specific analysis conventions
    - `qc-checklist.md` — quality control checklist for the domain
    - `templates/` — at least one domain-specific template
@@ -24,16 +24,16 @@ This is the most impactful contribution. If you have expertise in a domain (prot
 1. Work in your repo, accumulating learnings and decisions
 2. Use mycelium's `crystallize` mode to extract patterns
 3. Use `contribute` mode to package them
-4. Open a PR with the generated skill pack
+4. Open a PR with the generated convention pack
 
-### 2. Improve Existing Skill Packs
+### 2. Improve Existing Convention Packs
 
 - Fix errors in conventions
 - Add missing guidance
 - Update for new tools or methods
 - Add templates for common workflows
 
-Open an [issue](.github/ISSUE_TEMPLATE/skill-improvement.md) first to discuss the change, then submit a PR.
+Open an issue first to discuss the change, then submit a PR.
 
 ### 3. Report Convention Gaps
 
@@ -41,11 +41,11 @@ Found a convention that was wrong, missing, or led you astray? [File an issue](.
 
 ### 4. Request New Domains
 
-Need a skill pack for your domain? [Request it](.github/ISSUE_TEMPLATE/new-domain-request.md). Include example workflows and key conventions to help someone create it.
+Need a convention pack for your domain? [Request it](.github/ISSUE_TEMPLATE/new-domain-request.md). Include example workflows and key conventions to help someone create it.
 
 ### 5. Improve Core Infrastructure
 
-The core skill (`skill/`), scripts, templates, and documentation are all open for improvement. For significant changes, open an issue to discuss the approach before submitting a PR.
+The core skills (`skills/`), scripts, templates, and documentation are all open for improvement. For significant changes, open an issue to discuss the approach before submitting a PR.
 
 ## Development Guidelines
 
@@ -74,19 +74,19 @@ The core skill (`skill/`), scripts, templates, and documentation are all open fo
 
 ## Review Process
 
-### Domain Skill Packs (network/)
+### Convention Packs (network/)
 
 1. PR is submitted to `network/community-contributed/`
 2. Community review for quality, generality, and accuracy
 3. At least one domain expert should review
-4. After approval, moved to `network/skills/`
+4. After approval, moved to `network/conventions/`
 
-### Core Skill (skill/)
+### Core Skills (skills/)
 
 1. Open an issue discussing the change
 2. PR with the change
 3. Maintainer review
-4. Changes to SKILL.md require extra scrutiny — it affects all users
+4. Changes to SKILL.md files require extra scrutiny — they affect all users
 
 ## Code of Conduct
 

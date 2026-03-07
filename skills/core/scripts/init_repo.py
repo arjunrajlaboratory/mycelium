@@ -50,8 +50,8 @@ def create_directory_structure(target_dir: Path):
     """Create the canonical mycelium directory structure."""
     directories = [
         ".living",
-        ".living/skills",
-        ".living/generated-skills",
+        ".living/conventions",
+        ".living/generated-conventions",
         "algorithms",
         "analysis",
         "data",
@@ -129,7 +129,7 @@ def create_living_layer(target_dir: Path):
         ),
         "conventions.md": (
             "# Repo-Specific Conventions\n\n"
-            "Overrides to mycelium defaults or domain skill conventions.\n\n"
+            "Overrides to mycelium defaults or convention pack conventions.\n\n"
             "<!-- Document any project-specific convention overrides here. -->\n"
         ),
     }
@@ -140,20 +140,20 @@ def create_living_layer(target_dir: Path):
             file_path.write_text(content)
             print(f"  Created: .living/{filename}")
 
-    # Create ACTIVE_SKILLS.yaml
-    skills_yaml = living_dir / "skills" / "ACTIVE_SKILLS.yaml"
-    if not skills_yaml.exists():
-        skills_yaml.write_text(
-            "# Active Domain Skills\n# Updated by install_domain_skill.py\n\nactive_skills: []\n"
+    # Create ACTIVE_CONVENTIONS.yaml
+    conventions_yaml = living_dir / "conventions" / "ACTIVE_CONVENTIONS.yaml"
+    if not conventions_yaml.exists():
+        conventions_yaml.write_text(
+            "# Active Convention Packs\n# Updated by install_convention.py\n\nactive_conventions: []\n"
         )
-        print("  Created: .living/skills/ACTIVE_SKILLS.yaml")
+        print("  Created: .living/conventions/ACTIVE_CONVENTIONS.yaml")
 
 
-def find_network_skills_dir() -> Path | None:
-    """Locate the network/skills/ directory relative to this script."""
+def find_network_conventions_dir() -> Path | None:
+    """Locate the network/conventions/ directory relative to this script."""
     candidates = [
-        Path(__file__).resolve().parent.parent.parent / "network" / "skills",
-        Path.home() / ".mycelium" / "network" / "skills",
+        Path(__file__).resolve().parent.parent.parent / "network" / "conventions",
+        Path.home() / ".mycelium" / "network" / "conventions",
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -161,11 +161,11 @@ def find_network_skills_dir() -> Path | None:
     return None
 
 
-def get_core_skill_packs(network_dir: Path) -> list[str]:
-    """Return names of skill packs marked core: true in the network."""
+def get_core_convention_packs(network_dir: Path) -> list[str]:
+    """Return names of convention packs marked core: true in the network."""
     core_packs = []
-    for skill_dir in sorted(network_dir.iterdir()):
-        pack_yaml = skill_dir / "SKILL_PACK.yaml"
+    for conv_dir in sorted(network_dir.iterdir()):
+        pack_yaml = conv_dir / "CONVENTION_PACK.yaml"
         if not pack_yaml.exists():
             continue
         # Parse YAML front matter (between --- delimiters) or plain YAML
@@ -180,36 +180,36 @@ def get_core_skill_packs(network_dir: Path) -> list[str]:
                     text = text[:end]
             data = yaml.safe_load(text)
             if isinstance(data, dict) and data.get("core") is True:
-                core_packs.append(skill_dir.name)
+                core_packs.append(conv_dir.name)
         else:
             # Fallback: simple text check
             if "core: true" in content:
-                core_packs.append(skill_dir.name)
+                core_packs.append(conv_dir.name)
     return core_packs
 
 
-def install_core_skill_packs(target_dir: Path):
-    """Auto-install all core skill packs from the network."""
-    network_dir = find_network_skills_dir()
+def install_core_convention_packs(target_dir: Path):
+    """Auto-install all core convention packs from the network."""
+    network_dir = find_network_conventions_dir()
     if not network_dir:
-        print("  Warning: Could not locate mycelium network/skills/ directory.")
-        print("  Core skill packs were not auto-installed.")
-        print("  Install them manually with install_domain_skill.py.")
+        print("  Warning: Could not locate mycelium network/conventions/ directory.")
+        print("  Core convention packs were not auto-installed.")
+        print("  Install them manually with install_convention.py.")
         return
 
-    core_packs = get_core_skill_packs(network_dir)
+    core_packs = get_core_convention_packs(network_dir)
     if not core_packs:
-        print("  No core skill packs found in network.")
+        print("  No core convention packs found in network.")
         return
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    skills_dir = target_dir / ".living" / "skills"
-    yaml_path = skills_dir / "ACTIVE_SKILLS.yaml"
+    conventions_dir = target_dir / ".living" / "conventions"
+    yaml_path = conventions_dir / "ACTIVE_CONVENTIONS.yaml"
 
     entries = []
     for pack_name in core_packs:
         source = network_dir / pack_name
-        dest = skills_dir / pack_name
+        dest = conventions_dir / pack_name
         if dest.exists():
             shutil.rmtree(dest)
         shutil.copytree(source, dest)
@@ -217,21 +217,20 @@ def install_core_skill_packs(target_dir: Path):
         print(f"  Installed {pack_name} ({len(copied)} files)")
         entries.append(
             f"- name: {pack_name}\n"
-            f"  path: .living/skills/{pack_name}/\n"
+            f"  path: .living/conventions/{pack_name}/\n"
             f"  installed: {now}\n"
             f"  core: true"
         )
 
-    # Write ACTIVE_SKILLS.yaml with core entries
+    # Write ACTIVE_CONVENTIONS.yaml with core entries
     yaml_content = (
-        "# Active Skills\n"
-        "# Updated by init_repo.py and install_domain_skill.py\n\n"
-        "active_skills:\n"
+        "# Active Convention Packs\n"
+        "# Updated by init_repo.py and install_convention.py\n\n"
         + "\n".join(entries)
         + "\n"
     )
     yaml_path.write_text(yaml_content)
-    print(f"  Updated ACTIVE_SKILLS.yaml with {len(core_packs)} core packs")
+    print(f"  Updated ACTIVE_CONVENTIONS.yaml with {len(core_packs)} core packs")
 
 
 def create_environments_file(target_dir: Path):
@@ -303,16 +302,16 @@ def main():
     print("\nCreating environment documentation...")
     create_environments_file(target_dir)
 
-    print("\nInstalling core skill packs...")
-    install_core_skill_packs(target_dir)
+    print("\nInstalling core convention packs...")
+    install_core_convention_packs(target_dir)
 
     print("\n" + "=" * 50)
     print("Mycelium initialization complete!")
     print("\nNext steps:")
     print("  1. Generate CLAUDE.md from the template")
-    print("  2. Install domain skills if needed (install-skill mode)")
+    print("  2. Install domain conventions if needed (/mycelium:skill install-convention)")
     print("  3. Run validate_structure.py to confirm setup")
-    print("  4. Install enforcement hooks (see skill/hooks/) for automated .living/ checks")
+    print("  4. Install enforcement hooks (see skills/core/hooks/) for automated .living/ checks")
     print("  5. Start working — the repo is now alive!")
 
 

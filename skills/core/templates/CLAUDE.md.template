@@ -11,30 +11,39 @@ This repository is a **mycelium-enabled living repository**. It carries its own 
 2. **Read `ENVIRONMENTS_INSTALLATIONS.md`** — Environment setup, dependencies, and installation gotchas
 3. **Read the relevant manifest** — Each top-level directory has a descriptive manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`)
 
-## Installed Skill Packs
+## Installed Convention Packs
 
-<!-- Updated by install_domain_skill.py -->
-<!-- Check .living/skills/ACTIVE_SKILLS.yaml for the full list -->
+<!-- Updated by install_convention.py -->
+<!-- Check .living/conventions/ACTIVE_CONVENTIONS.yaml for the full list -->
 
 ### Core (auto-installed)
 
-- **robust-analysis** — Defensive execution practices: strict error handling, data validation checks, parameter sensitivity sweeps, null hypothesis testing, adversarial self-challenge. See `.living/skills/robust-analysis/analysis-conventions.md` for the entry point.
-- **report-generator** — Structured LaTeX PDF report generation. See `.living/skills/report-generator/analysis-conventions.md` for the workflow.
-- **idea-generator** — Persona-based creative ideation for new analysis directions. See `.living/skills/idea-generator/analysis-conventions.md` for the entry point.
+- **robust-analysis** — Defensive execution practices: strict error handling, data validation checks, parameter sensitivity sweeps, null hypothesis testing, adversarial self-challenge. See `.living/conventions/robust-analysis/analysis-conventions.md` for the entry point.
+- **report-generator** — Structured LaTeX PDF report generation. See `.living/conventions/report-generator/analysis-conventions.md` for the workflow.
+- **idea-generator** — Persona-based creative ideation for new analysis directions. See `.living/conventions/idea-generator/analysis-conventions.md` for the entry point.
 
 ### Domain (opt-in)
 
-No domain skills installed yet. Install with mycelium's `install-skill` mode (e.g., "install bioinformatics skill").
+No domain conventions installed yet. Install with mycelium's `install-convention` mode (e.g., "install bioinformatics conventions").
 
 ## Repository Structure
 
 ```
-├── algorithms/    — Reusable computational methods (see ALGORITHM_MANIFEST.md)
-├── analysis/      — Analytical work (see ANALYSIS_MANIFEST.md)
-├── data/          — Data assets: raw (immutable), processed, metadata (see DATA_MANIFEST.md)
+├── algorithms/         — Reusable computational methods (see ALGORITHM_MANIFEST.md)
+├── analysis/           — Analytical work (see ANALYSIS_MANIFEST.md)
+├── data/               — Data assets: raw (immutable), processed, metadata (see DATA_MANIFEST.md)
 ├── reference_material/ — External references (see REFERENCE_MANIFEST.md)
-├── todo/          — Future work items and ideas (see todo/TODO_REGISTRY.md)
-└── .living/       — Repository memory layer
+├── todo/               — Future work items and ideas (see todo/TODO_REGISTRY.md)
+└── .living/            — Repository memory layer
+    ├── decisions.md
+    ├── learnings.md
+    ├── conventions.md              — Repo-specific overrides
+    ├── conventions/                — Installed convention packs
+    │   ├── ACTIVE_CONVENTIONS.yaml
+    │   ├── robust-analysis/
+    │   ├── report-generator/
+    │   └── idea-generator/
+    └── generated-conventions/      — Conventions crystallized from learnings
 ```
 
 ## Workflow
@@ -45,13 +54,13 @@ No domain skills installed yet. Install with mycelium's `install-skill` mode (e.
 2. Read `.living/decisions.md` for past reasoning that may inform your approach
 3. Read the manifest for the area you'll be working in (e.g., `ANALYSIS_MANIFEST.md`)
 4. Check `.living/conventions.md` for any repo-specific overrides
-5. If a domain skill is active, read its conventions in `.living/skills/[domain]/`
+5. If a domain convention is active, read its conventions in `.living/conventions/[domain]/`
 
 ### While Working
 
 - Follow analysis conventions: every analysis gets its own folder with UPPER_SNAKE_CASE.md documentation, scripts, outputs, reports
 - Follow statistical conventions: report effect sizes, confidence intervals, document assumptions
-- **Follow robust-analysis conventions** (`.living/skills/robust-analysis/`): fail loudly on unexpected data, assert shapes/types/ranges, log row counts at every step, run sensitivity analyses for every decision, test null hypotheses via permutation/bootstrap
+- **Follow robust-analysis conventions** (`.living/conventions/robust-analysis/`): fail loudly on unexpected data, assert shapes/types/ranges, log row counts at every step, run sensitivity analyses for every decision, test null hypotheses via permutation/bootstrap
 - **Do not subset data** without explicit user confirmation and justification
 - Use marimo for exploration, Python scripts for reproducible pipelines
 - Every analysis must have a `run.sh` or `run.py` that reproduces final outputs
@@ -66,11 +75,11 @@ No domain skills installed yet. Install with mycelium's `install-skill` mode (e.
 4. **Log learnings**: If something unexpected happened, append to `.living/learnings.md`
 5. **Log todos**: If future work is identified, add items to `todo/TODO_REGISTRY.md` (create a detailed `todo/[item].md` writeup for complex items)
 6. **Validate**: Run `validate_structure.py` to confirm repo structure is correct
-7. **Skill feedback**: Note whether domain skill conventions were helpful or had gaps
+7. **Convention feedback**: Note whether convention pack practices were helpful or had gaps
 
 ### Automated Enforcement
 
-If Claude Code hooks are installed (see mycelium `skill/hooks/`), the Stop hook will block session end if `.living/` was not updated after significant work. This ensures the post-action protocol is never silently skipped, even in long sessions where earlier context is compacted.
+If Claude Code hooks are installed (see mycelium `skills/core/hooks/`), the Stop hook will block session end if `.living/` was not updated after significant work. This ensures the post-action protocol is never silently skipped, even in long sessions where earlier context is compacted.
 
 ### Subagent-Driven Workflows
 
@@ -94,5 +103,6 @@ When using subagent-driven development (main context coordinates, subagents impl
 | `.living/decisions.md` | Why choices were made |
 | `.living/learnings.md` | Accumulated insights and gotchas |
 | `.living/conventions.md` | Repo-specific convention overrides |
+| `.living/conventions/ACTIVE_CONVENTIONS.yaml` | Registry of installed convention packs |
 | `todo/TODO_REGISTRY.md` | Master list of future work items |
 | `*/*_MANIFEST.md` | Registry of contents in each directory |

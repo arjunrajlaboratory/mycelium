@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-07
+
+### Changed
+
+- **Architecture**: Separated skills (actions) from conventions (reference material)
+  - Skills are Claude Code slash commands: `/mycelium:skill`, `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`
+  - Convention packs are swappable markdown reference docs that skills route to
+- **Directory structure**: `skill/` -> `skills/core/`, `network/skills/` -> `network/conventions/`
+- **Convention packs**: `SKILL_PACK.yaml` -> `CONVENTION_PACK.yaml`
+- **In repos**: `.living/skills/` -> `.living/conventions/`, `ACTIVE_SKILLS.yaml` -> `ACTIVE_CONVENTIONS.yaml`
+- **Scripts**: `install_domain_skill.py` -> `install_convention.py`, `prepare_contribution.py` updated for conventions
+
+### Added
+
+- `/mycelium:analyze` — dedicated analysis skill that routes to installed analysis conventions
+- `/mycelium:report` — dedicated report skill that routes to installed report conventions
+- `/mycelium:ideas` — dedicated ideation skill that routes to installed idea conventions
+- `marketplace.json` now registers all four skills
+
 ## [0.1.0] - 2024-01-01
 
 ### Added

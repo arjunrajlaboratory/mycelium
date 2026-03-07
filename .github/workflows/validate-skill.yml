@@ -1,4 +1,4 @@
-name: Validate Skill
+name: Validate Skills and Conventions
 
 on:
   pull_request:
@@ -23,37 +23,42 @@ jobs:
         run: |
           pip install pyyaml
 
-      - name: Validate core SKILL.md frontmatter
+      - name: Validate SKILL.md frontmatter for all skills
         run: |
           python -c "
           import yaml
-          with open('skill/SKILL.md') as f:
-              content = f.read()
-          # Extract YAML frontmatter between --- delimiters
-          parts = content.split('---', 2)
-          if len(parts) < 3:
-              raise ValueError('SKILL.md missing YAML frontmatter (--- delimiters)')
-          meta = yaml.safe_load(parts[1])
-          assert 'name' in meta, 'SKILL.md frontmatter missing: name'
-          assert 'description' in meta, 'SKILL.md frontmatter missing: description'
-          print(f'SKILL.md valid: name={meta[\"name\"]}')
+          from pathlib import Path
+
+          for skill_dir in sorted(Path('skills').iterdir()):
+              skill_md = skill_dir / 'SKILL.md'
+              if not skill_md.exists():
+                  continue
+              with open(skill_md) as f:
+                  content = f.read()
+              parts = content.split('---', 2)
+              if len(parts) < 3:
+                  raise ValueError(f'{skill_md} missing YAML frontmatter (--- delimiters)')
+              meta = yaml.safe_load(parts[1])
+              assert 'name' in meta, f'{skill_md} frontmatter missing: name'
+              assert 'description' in meta, f'{skill_md} frontmatter missing: description'
+              print(f'{skill_md} valid: name={meta[\"name\"]}')
           "
 
-      - name: Validate skill pack YAML files
+      - name: Validate convention pack YAML files
         run: |
           python -c "
           import yaml
           from pathlib import Path
 
           required_fields = ['name', 'version', 'description', 'author', 'tags']
-          skills_dir = Path('network/skills')
+          conventions_dir = Path('network/conventions')
 
-          for pack_dir in sorted(skills_dir.iterdir()):
+          for pack_dir in sorted(conventions_dir.iterdir()):
               if not pack_dir.is_dir():
                   continue
-              yaml_path = pack_dir / 'SKILL_PACK.yaml'
+              yaml_path = pack_dir / 'CONVENTION_PACK.yaml'
               if not yaml_path.exists():
-                  print(f'WARNING: {pack_dir.name}/ has no SKILL_PACK.yaml')
+                  print(f'WARNING: {pack_dir.name}/ has no CONVENTION_PACK.yaml')
                   continue
               with open(yaml_path) as f:
                   content = f.read()
@@ -64,15 +69,15 @@ jobs:
               else:
                   meta = yaml.safe_load(content)
               for field in required_fields:
-                  assert field in meta, f'{pack_dir.name}/SKILL_PACK.yaml missing: {field}'
-              print(f'{pack_dir.name} SKILL_PACK.yaml valid (v{meta[\"version\"]})')
+                  assert field in meta, f'{pack_dir.name}/CONVENTION_PACK.yaml missing: {field}'
+              print(f'{pack_dir.name} CONVENTION_PACK.yaml valid (v{meta[\"version\"]})')
           "
 
       - name: Test init and validate scripts
         run: |
           tmpdir=$(mktemp -d)
-          python skill/scripts/init_repo.py --target-dir "$tmpdir"
-          python skill/scripts/validate_structure.py --target-dir "$tmpdir"
+          python skills/core/scripts/init_repo.py --target-dir "$tmpdir"
+          python skills/core/scripts/validate_structure.py --target-dir "$tmpdir"
 
       - name: Lint markdown files
         uses: DavidAnson/markdownlint-cli2-action@v19

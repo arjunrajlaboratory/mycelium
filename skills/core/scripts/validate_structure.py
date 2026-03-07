@@ -74,15 +74,15 @@ def check_living_directory(target_dir: Path, result: ValidationResult):
         if not (living_dir / filename).exists():
             result.error(f".living/{filename} does not exist")
 
-    skills_dir = living_dir / "skills"
-    if not skills_dir.exists():
-        result.warning(".living/skills/ directory does not exist")
-    elif not (skills_dir / "ACTIVE_SKILLS.yaml").exists():
-        result.warning(".living/skills/ACTIVE_SKILLS.yaml does not exist")
+    conventions_dir = living_dir / "conventions"
+    if not conventions_dir.exists():
+        result.warning(".living/conventions/ directory does not exist")
+    elif not (conventions_dir / "ACTIVE_CONVENTIONS.yaml").exists():
+        result.warning(".living/conventions/ACTIVE_CONVENTIONS.yaml does not exist")
 
-    generated_dir = living_dir / "generated-skills"
+    generated_dir = living_dir / "generated-conventions"
     if not generated_dir.exists():
-        result.warning(".living/generated-skills/ directory does not exist")
+        result.warning(".living/generated-conventions/ directory does not exist")
 
 
 def check_top_level_directories(target_dir: Path, result: ValidationResult):
