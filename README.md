@@ -34,7 +34,7 @@ claude plugin marketplace add arjunrajlaboratory/mycelium
 claude plugin install mycelium@mycelium
 ```
 
-This permanently registers the mycelium plugin with your Claude Code installation. The slash commands (`/mycelium:skill`, `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`) become available in all sessions.
+This permanently registers the mycelium plugin with your Claude Code installation. The slash commands (`/mycelium:core`, `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`) become available in all sessions.
 
 **Option B — Local / development install:**
 
@@ -108,7 +108,7 @@ Every directory has a descriptive manifest — a registry of its contents with s
 
 Mycelium separates **skills** (actions) from **conventions** (reference material):
 
-- **Skills** are Claude Code slash commands that execute workflows: `/mycelium:skill` (core orchestrator), `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`
+- **Skills** are Claude Code slash commands that execute workflows: `/mycelium:core` (core orchestrator), `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`
 - **Convention packs** are collections of markdown files that skills consult for methodology guidance. They're swappable — different report conventions, different analysis approaches.
 
 Skills route to whatever conventions are installed. Adding a new report style or analysis methodology is just adding markdown files — no plugin changes needed.
@@ -169,7 +169,8 @@ This is how the ecosystem improves: individual projects learn, patterns are extr
 
 This repository has two halves:
 
-- **[`skills/`](skills/)** — The Claude Code skills (actions). `core/` is the main orchestrator; `analyze/`, `report/`, and `ideas/` are dedicated action skills.
+- **[`commands/`](commands/)** — The Claude Code slash commands. `core.md` is the main orchestrator; `analyze.md`, `report.md`, and `ideas.md` are dedicated action skills.
+- **[`skills/core/`](skills/core/)** — Bundled resources (references, scripts, templates, hooks) used by the commands.
 - **[`network/`](network/)** — The marketplace of convention packs.
 
 ## License

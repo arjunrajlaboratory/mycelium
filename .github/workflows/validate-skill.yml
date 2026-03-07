@@ -23,25 +23,21 @@ jobs:
         run: |
           pip install pyyaml
 
-      - name: Validate SKILL.md frontmatter for all skills
+      - name: Validate command frontmatter
         run: |
           python -c "
           import yaml
           from pathlib import Path
 
-          for skill_dir in sorted(Path('skills').iterdir()):
-              skill_md = skill_dir / 'SKILL.md'
-              if not skill_md.exists():
-                  continue
-              with open(skill_md) as f:
+          for cmd_file in sorted(Path('commands').glob('*.md')):
+              with open(cmd_file) as f:
                   content = f.read()
               parts = content.split('---', 2)
               if len(parts) < 3:
-                  raise ValueError(f'{skill_md} missing YAML frontmatter (--- delimiters)')
+                  raise ValueError(f'{cmd_file} missing YAML frontmatter (--- delimiters)')
               meta = yaml.safe_load(parts[1])
-              assert 'name' in meta, f'{skill_md} frontmatter missing: name'
-              assert 'description' in meta, f'{skill_md} frontmatter missing: description'
-              print(f'{skill_md} valid: name={meta[\"name\"]}')
+              assert 'description' in meta, f'{cmd_file} frontmatter missing: description'
+              print(f'{cmd_file} valid: {meta[\"description\"][:60]}...')
           "
 
       - name: Validate convention pack YAML files

@@ -1,5 +1,4 @@
 ---
-name: skill
 description: >
   Self-documenting, self-improving analytical repository framework.
   Scaffolds living repositories where every analysis, dataset, and decision
@@ -29,20 +28,20 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 
 **Steps**:
 1. Check if repo already has mycelium structure (look for `.living/` directory).
-2. **New repo**: Run full scaffold using `scripts/init_repo.py`.
+2. **New repo**: Run full scaffold using `skills/core/scripts/init_repo.py`.
 3. **Existing repo**: Run in restructure mode — audit current structure, propose migration plan, ask user to confirm before proceeding.
-4. **Auto-install core convention packs**: Scan `network/conventions/*/CONVENTION_PACK.yaml` for packs with `core: true` and install each one using `scripts/install_convention.py`. Currently the core packs are `robust-analysis`, `report-generator`, and `idea-generator`. These provide batteries-included practices every repo should have.
+4. **Auto-install core convention packs**: Scan `network/conventions/*/CONVENTION_PACK.yaml` for packs with `core: true` and install each one using `skills/core/scripts/install_convention.py`. Currently the core packs are `robust-analysis`, `report-generator`, and `idea-generator`. These provide batteries-included practices every repo should have.
 5. Ask which **domain** conventions to install from the network (e.g., bioinformatics, image-analysis). Domain packs are those without `core: true`.
-6. Generate `CLAUDE.md` for the repo (from `templates/CLAUDE.md.template`) that encodes the living repo protocol.
+6. Generate `CLAUDE.md` for the repo (from `skills/core/templates/CLAUDE.md.template`) that encodes the living repo protocol.
 7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
 8. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
 9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`.
 10. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
-11. After completion: run `scripts/validate_structure.py` to confirm everything is correct.
+11. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
 
 **References to consult**:
-- `references/folder-structure.md` — canonical target structure
-- `references/environment-setup.md` — environment setup conventions
+- `skills/core/references/folder-structure.md` — canonical target structure
+- `skills/core/references/environment-setup.md` — environment setup conventions
 
 ---
 
@@ -53,12 +52,12 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 **Purpose**: Pull a new dataset into the analytical framework.
 
 **Steps**:
-1. Consult `references/data-ingest-conventions.md`.
+1. Consult `skills/core/references/data-ingest-conventions.md`.
 2. Determine data type, source, and format.
 3. If a domain convention is active, check its conventions for domain-specific validation.
 4. Place raw data in `data/raw/[dataset-name]/`.
 5. Generate metadata (schema, provenance, summary statistics) in `data/metadata/[dataset-name]/`.
-6. Update `data/DATA_MANIFEST.md` with new entry (use `templates/dataset-manifest-entry.yaml`).
+6. Update `data/DATA_MANIFEST.md` with new entry (use `skills/core/templates/dataset-manifest-entry.yaml`).
 7. Log any decisions about data cleaning or exclusion to `.living/decisions.md`.
 8. Run the post-action hook protocol (see below).
 
@@ -73,10 +72,10 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 **Context**: Core packs (`robust-analysis`, `report-generator`, `idea-generator`) are auto-installed during `init`. This mode is primarily for adding domain packs after initialization, but can also be used to manually install or reinstall any pack.
 
 **Steps**:
-1. Consult `references/marketplace-guide.md`.
+1. Consult `skills/core/references/marketplace-guide.md`.
 2. List available conventions from `network/conventions/`, noting which are core (already installed) and which are domain (available to add).
 3. User selects which to install.
-4. Run `scripts/install_convention.py` to copy conventions into `.living/conventions/[name]/`.
+4. Run `skills/core/scripts/install_convention.py` to copy conventions into `.living/conventions/[name]/`.
 5. Update `.living/conventions/ACTIVE_CONVENTIONS.yaml`.
 6. Update `CLAUDE.md` to reference new convention pack.
 
@@ -89,7 +88,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 **Purpose**: Review accumulated learnings and propose new conventions.
 
 **Steps**:
-1. Consult `references/skill-generation-guide.md`.
+1. Consult `skills/core/references/skill-generation-guide.md`.
 2. Read `.living/learnings.md` and `.living/decisions.md`.
 3. Identify recurring patterns (look for similar tags, repeated problems, evolving conventions).
 4. Propose new convention documents or checklists.
@@ -106,7 +105,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 **Purpose**: Package a repo-local generated convention for PR to the mycelium network.
 
 **Steps**:
-1. Run `scripts/prepare_contribution.py`.
+1. Run `skills/core/scripts/prepare_contribution.py`.
 2. Generalize repo-specific details into parameters.
 3. Create a properly formatted convention pack with `CONVENTION_PACK.yaml`.
 4. Generate PR description with provenance (anonymized).
@@ -161,7 +160,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md` using the decision log template.
 4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template.
 5. **Log todos**: If future work is identified during the action, add items to `todo/TODO_REGISTRY.md` (and create detailed `todo/[item].md` files for complex items).
-6. **Validate**: Run `scripts/validate_structure.py` to confirm repo still conforms.
+6. **Validate**: Run `skills/core/scripts/validate_structure.py` to confirm repo still conforms.
 7. **Convention feedback**: If any convention pack practices were relevant, note whether they were helpful or had gaps.
 
 ### Automated Enforcement (Claude Code Hooks)
@@ -228,7 +227,7 @@ When work is dispatched to subagents (main context = coordination only):
 | `validate_structure.py` fails after init | Check that all four top-level directories exist and each has its manifest (`ANALYSIS_MANIFEST.md`, etc.). Re-run init if needed. |
 | Domain conventions conflict with core | Domain conventions take precedence. Update `.living/conventions.md` to document the override. |
 | `.living/` directory missing | Run `init` mode to scaffold the living layer. Never create it manually — the script sets up required files. |
-| Manifest entry format errors | Check `templates/dataset-manifest-entry.yaml` or `templates/analysis-manifest-entry.yaml` for the correct format. |
-| `ENVIRONMENTS_INSTALLATIONS.md` not found | Run `init` mode or create it manually following `references/environment-setup.md`. |
+| Manifest entry format errors | Check `skills/core/templates/dataset-manifest-entry.yaml` or `skills/core/templates/analysis-manifest-entry.yaml` for the correct format. |
+| `ENVIRONMENTS_INSTALLATIONS.md` not found | Run `init` mode or create it manually following `skills/core/references/environment-setup.md`. |
 | Crystallize finds no patterns | This is normal for young repos. Continue logging learnings and decisions — patterns emerge over time. |
 | Install-convention can't find a domain | Check `network/conventions/` for available packs. File a `new-domain-request` issue if your domain isn't covered. |
