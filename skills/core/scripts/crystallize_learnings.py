@@ -80,7 +80,7 @@ def identify_patterns(
 
 def generate_convention(pattern: dict, target_dir: Path):
     """Generate a draft convention document from a pattern."""
-    # TODO: Create .living/generated-skills/[name]/ directory
+    # TODO: Create .living/generated-conventions/[name]/ directory
     # TODO: Generate convention.md with:
     #   - Clear convention statement
     #   - Rationale linked to source learnings
@@ -132,7 +132,7 @@ def main():
 
     print("\n" + "=" * 50)
     print("Crystallization complete!")
-    print("Review generated conventions in .living/generated-skills/")
+    print("Review generated conventions in .living/generated-conventions/")
     print("Use contribute mode to share useful conventions with the network.")
 
 

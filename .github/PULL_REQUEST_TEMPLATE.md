@@ -4,8 +4,8 @@
 
 ## Type of Change
 
-- [ ] New domain skill pack
-- [ ] Improvement to existing skill pack
+- [ ] New convention pack
+- [ ] Improvement to existing convention pack
 - [ ] Core skill update
 - [ ] Bug fix
 - [ ] Documentation update
@@ -18,19 +18,19 @@
 - [ ] Markdown files are well-formatted and use consistent heading levels
 - [ ] No sensitive or project-specific information included
 
-### For new domain skill packs
+### For new convention packs
 
-- [ ] `SKILL_PACK.yaml` is present with all required fields (name, version, description, author, tags)
+- [ ] `CONVENTION_PACK.yaml` is present with all required fields (name, version, description, author, tags)
 - [ ] Conventions are domain-specific, not duplicating core conventions
 - [ ] At least one template is included
 - [ ] QC checklist is included
 - [ ] Tested in a real mycelium-enabled repository
-- [ ] Placed in `network/community-contributed/` (will be moved to `network/skills/` after review)
+- [ ] Placed in `network/community-contributed/` (will be moved to `network/conventions/` after review)
 
-### For skill pack improvements
+### For convention pack improvements
 
 - [ ] Backwards compatible (or breaking change is justified and documented)
-- [ ] Version number updated in `SKILL_PACK.yaml`
+- [ ] Version number updated in `CONVENTION_PACK.yaml`
 - [ ] Examples updated if conventions changed
 
 ## Testing

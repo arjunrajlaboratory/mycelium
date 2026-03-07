@@ -6,16 +6,19 @@
   },
   "metadata": {
     "description": "Self-documenting, self-improving framework for analytical repositories",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "mycelium",
-      "description": "Living repository skill for self-documenting analytical frameworks",
+      "description": "Living repository framework with skills for analysis, reporting, ideation, and convention management",
       "source": "./",
       "strict": false,
       "skills": [
-        "./skill"
+        "./skills/core",
+        "./skills/analyze",
+        "./skills/report",
+        "./skills/ideas"
       ]
     }
   ]

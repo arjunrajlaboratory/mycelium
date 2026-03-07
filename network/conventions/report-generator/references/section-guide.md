@@ -207,7 +207,7 @@ Pull this information from:
 
 ## Appendix
 
-The appendix is for supplementary material that supports the main narrative but would interrupt it if placed inline. The most common use is sensitivity analysis figures from the robust-analysis skill pack.
+The appendix is for supplementary material that supports the main narrative but would interrupt it if placed inline. The most common use is sensitivity analysis figures from the robust-analysis convention pack.
 
 **What belongs here**:
 - Parameter sweep figures showing how results change across threshold values

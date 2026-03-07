@@ -18,29 +18,32 @@ Mycelium is named after the underground fungal networks that connect trees in a 
 
 - **Each project carries its own memory.** Decisions, learnings, and conventions are recorded as structured traces in the `.living/` directory, so every session starts with the accumulated intelligence of all previous sessions.
 - **Projects grow smarter over time.** Gotchas encountered once are never forgotten. Patterns detected in learnings crystallize into conventions. The project evolves.
-- **The network shares nutrients.** Domain-specific best practices (bioinformatics, image analysis, and more) are packaged as skill packs that any project can install. When one project discovers something generally useful, it can contribute back.
+- **The network shares nutrients.** Domain-specific best practices (bioinformatics, image analysis, and more) are packaged as convention packs that any project can install. When one project discovers something generally useful, it can contribute back.
 
 ## Quickstart
 
-### 1. Install the skill
+### 1. Install the plugin
 
 **Option A — Marketplace install (recommended):**
 
 ```bash
+# Add the mycelium marketplace (one-time)
 claude plugin marketplace add arjunrajlaboratory/mycelium
-claude plugin install mycelium
+
+# Install the plugin
+claude plugin install mycelium@mycelium
 ```
 
-This permanently registers the mycelium skill with your Claude Code installation.
+This permanently registers the mycelium plugin with your Claude Code installation. The slash commands (`/mycelium:skill`, `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`) become available in all sessions.
 
 **Option B — Local / development install:**
 
 ```bash
 git clone https://github.com/arjunrajlaboratory/mycelium.git
-claude --plugin-dir /path/to/mycelium/skill
+claude --plugin-dir /path/to/mycelium
 ```
 
-Replace `/path/to/mycelium` with the actual path where you cloned it. This loads the skill for a single session.
+Replace `/path/to/mycelium` with the actual path where you cloned it. This loads the plugin for a single session only.
 
 ### 2. Initialize your project
 
@@ -48,22 +51,28 @@ Open Claude Code in any project directory and say:
 
 > "Set up mycelium" or "Initialize living repo"
 
-This scaffolds the living repository structure: directories, manifests, the `.living/` memory layer, and a `CLAUDE.md` that encodes the framework's protocols. **Core skill packs** (`robust-analysis` and `report-generator`) are installed automatically — every repo gets defensive analysis practices and structured report generation out of the box.
+This scaffolds the living repository structure: directories, manifests, the `.living/` memory layer, and a `CLAUDE.md` that encodes the framework's protocols. **Core convention packs** (`robust-analysis`, `report-generator`, and `idea-generator`) are installed automatically — every repo gets defensive analysis practices, structured report generation, and creative ideation out of the box.
 
-### 3. Install domain skills (optional)
+### 3. Install domain conventions (optional)
 
-Once mycelium is running in your project, install domain-specific skill packs by telling Claude:
+Once mycelium is running in your project, install domain-specific convention packs by telling Claude:
 
-> "Install bioinformatics skill" or "Install image-analysis skill"
+> "Install bioinformatics conventions" or "Install image-analysis conventions"
 
-This uses mycelium's built-in `install-skill` mode to copy domain conventions into your project's `.living/skills/` directory.
+This uses mycelium's built-in `install-convention` mode to copy domain conventions into your project's `.living/conventions/` directory.
 
 ### 4. Start working
 
-Work normally — analyze data, write code, build algorithms. Mycelium's post-action hook protocol ensures that every significant step is traced:
+Work normally — analyze data, write code, build algorithms. Use the dedicated action skills:
+
+- `/mycelium:analyze` — start or continue an analysis (routes to installed conventions)
+- `/mycelium:report` — generate a structured report
+- `/mycelium:ideas` — brainstorm with disciplinary personas
+
+Mycelium's post-action hook protocol ensures that every significant step is traced:
 
 - Manifests are updated
-- READMEs reflect current status
+- Documentation reflects current status
 - Decisions are logged with rationale
 - Learnings capture gotchas and insights
 
@@ -82,7 +91,8 @@ project-root/
 │   ├── decisions.md              # Why choices were made
 │   ├── learnings.md              # Gotchas, surprises, insights
 │   ├── conventions.md            # Project-specific overrides
-│   └── skills/                   # Installed skill packs
+│   ├── conventions/              # Installed convention packs
+│   └── generated-conventions/    # Conventions crystallized from learnings
 ├── algorithms/                   # Reusable methods (with ALGORITHM_MANIFEST.md)
 ├── analysis/                     # Analytical work (with ANALYSIS_MANIFEST.md)
 ├── data/                         # Data assets (with DATA_MANIFEST.md)
@@ -94,37 +104,47 @@ project-root/
 
 Every directory has a descriptive manifest — a registry of its contents with structured metadata. Nothing is orphaned. Every subdirectory has a documentation file named in UPPER_SNAKE_CASE of the folder name (e.g., `analysis/snp-analysis/SNP_ANALYSIS.md`), making documents instantly discoverable in search.
 
+## Architecture
+
+Mycelium separates **skills** (actions) from **conventions** (reference material):
+
+- **Skills** are Claude Code slash commands that execute workflows: `/mycelium:skill` (core orchestrator), `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`
+- **Convention packs** are collections of markdown files that skills consult for methodology guidance. They're swappable — different report conventions, different analysis approaches.
+
+Skills route to whatever conventions are installed. Adding a new report style or analysis methodology is just adding markdown files — no plugin changes needed.
+
 ## The Network
 
-Mycelium includes a marketplace of skill packs — some core (auto-installed), some domain-specific (opt-in):
+Mycelium includes a marketplace of convention packs — some core (auto-installed), some domain-specific (opt-in):
 
 ### Core Packs (batteries included)
 
 These are installed automatically during `mycelium init`:
 
-| Skill Pack | Description |
-|------------|-------------|
-| [robust-analysis](network/skills/robust-analysis/) | Defensive execution, validation checks, sensitivity sweeps, null hypothesis testing |
-| [report-generator](network/skills/report-generator/) | Structured LaTeX PDF report generation with provenance |
+| Convention Pack | Description |
+|----------------|-------------|
+| [robust-analysis](network/conventions/robust-analysis/) | Defensive execution, validation checks, sensitivity sweeps, null hypothesis testing |
+| [report-generator](network/conventions/report-generator/) | Structured LaTeX PDF report generation with provenance |
+| [idea-generator](network/conventions/idea-generator/) | Persona-based creative ideation for new analysis directions |
 
 ### Domain Packs (opt-in)
 
 Install these for field-specific conventions:
 
-| Skill Pack | Description |
-|------------|-------------|
-| [bioinformatics](network/skills/bioinformatics/) | RNA-seq, single-cell, genomics workflows |
-| [image-analysis](network/skills/image-analysis/) | Segmentation, quantification, microscopy QC |
+| Convention Pack | Description |
+|----------------|-------------|
+| [bioinformatics](network/conventions/bioinformatics/) | RNA-seq, single-cell, genomics workflows |
+| [image-analysis](network/conventions/image-analysis/) | Segmentation, quantification, microscopy QC |
 
-Install a domain skill:
+Install a domain convention pack:
 
-> "Install bioinformatics skill"
+> "Install bioinformatics conventions"
 
 Domain conventions layer on top of core conventions, providing specialized guidance for your field.
 
-### Contributing Domain Skills
+### Contributing Convention Packs
 
-Have domain expertise? You can contribute skill packs:
+Have domain expertise? You can contribute convention packs:
 
 1. Work in a mycelium-enabled project — learnings accumulate naturally
 2. Run `crystallize` mode to extract patterns into conventions
@@ -136,7 +156,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 ## The Living Loop
 
 ```
-Accumulate → Crystallize → Contribute
+Accumulate -> Crystallize -> Contribute
 ```
 
 1. **Accumulate**: As you work, log decisions and learnings. The project's `.living/` directory grows.
@@ -149,8 +169,8 @@ This is how the ecosystem improves: individual projects learn, patterns are extr
 
 This repository has two halves:
 
-- **[`skill/`](skill/)** — The core Claude Code skill. This is what you install to enable mycelium in your projects.
-- **[`network/`](network/)** — The marketplace of domain-specific skill packs.
+- **[`skills/`](skills/)** — The Claude Code skills (actions). `core/` is the main orchestrator; `analyze/`, `report/`, and `ideas/` are dedicated action skills.
+- **[`network/`](network/)** — The marketplace of convention packs.
 
 ## License
 

@@ -1,17 +1,17 @@
-# Skill Generation Guide
+# Convention Generation Guide
 
-How the crystallize mode detects patterns in accumulated learnings and generates new conventions.
+How the crystallize mode detects patterns in accumulated learnings and generates new convention packs.
 
 ## The Lifecycle
 
 ```
-learning → pattern → convention → community contribution
+learning → pattern → convention pack → community contribution
 ```
 
 1. **Learnings accumulate**: As you work in a mycelium-enabled repo, gotchas, insights, and edge cases are logged in `.living/learnings.md`.
 2. **Patterns emerge**: Over time, similar learnings cluster around recurring themes.
 3. **Conventions crystallize**: The `crystallize` mode identifies these patterns and proposes formal conventions.
-4. **Community benefits**: Via `contribute` mode, repo-local conventions can be generalized and shared back to the network.
+4. **Community benefits**: Via `contribute` mode, repo-local conventions can be generalized and shared back to the network as convention packs.
 
 ## How Crystallize Works
 
@@ -39,10 +39,10 @@ For each identified pattern, drafts a convention document:
 
 ### 4. Stages for review
 
-Generated skills are placed in `.living/generated-skills/[name]/`:
+Generated conventions are placed in `.living/generated-conventions/[name]/`:
 
 ```
-.living/generated-skills/
+.living/generated-conventions/
 └── csv-encoding-conventions/
     ├── convention.md           # The proposed convention
     ├── ORIGIN.md               # Provenance: which learnings spawned this
@@ -51,7 +51,7 @@ Generated skills are placed in `.living/generated-skills/[name]/`:
 
 ## The ORIGIN.md Provenance Document
 
-Every generated skill must include an `ORIGIN.md` that links back to its source:
+Every generated convention must include an `ORIGIN.md` that links back to its source:
 
 ```markdown
 # Origin
@@ -74,12 +74,12 @@ for encoding validation during data ingestion would prevent repeated debugging.
 
 ## Promoting to the Network
 
-If a generated skill seems generally useful (not specific to your repo or data):
+If a generated convention seems generally useful (not specific to your repo or data):
 
 1. Use the `contribute` mode
 2. The `prepare_contribution.py` script will:
    - Generalize repo-specific details into parameters
-   - Create a properly formatted skill pack with `SKILL_PACK.yaml`
+   - Create a properly formatted convention pack with `CONVENTION_PACK.yaml`
    - Generate a PR description with anonymized provenance
    - Include test cases derived from the learnings
 3. Review the generated PR and submit to the mycelium network repository
