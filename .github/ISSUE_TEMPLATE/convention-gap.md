@@ -6,9 +6,9 @@ labels: convention-gap
 assignees: ''
 ---
 
-## Domain Skill Affected
+## Convention Pack Affected
 
-<!-- Which domain skill pack is this about? (e.g., bioinformatics, image-analysis, core) -->
+<!-- Which convention pack is this about? (e.g., bioinformatics, image-analysis, core) -->
 
 ## What Happened
 

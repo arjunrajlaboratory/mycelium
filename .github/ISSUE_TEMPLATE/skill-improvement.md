@@ -1,14 +1,14 @@
 ---
-name: Skill Improvement
-about: Suggest an improvement to an existing skill pack
+name: Convention Improvement
+about: Suggest an improvement to an existing convention pack
 title: "[Improvement] "
 labels: improvement
 assignees: ''
 ---
 
-## Skill Affected
+## Convention Pack Affected
 
-<!-- Which skill pack should be improved? (e.g., bioinformatics, image-analysis, core) -->
+<!-- Which convention pack should be improved? (e.g., bioinformatics, image-analysis, core) -->
 
 ## Current Behavior
 
@@ -28,6 +28,6 @@ assignees: ''
 
 ## Checklist
 
-- [ ] I've reviewed the current skill pack conventions
+- [ ] I've reviewed the current convention pack
 - [ ] This doesn't conflict with other conventions (or I've noted the conflict)
 - [ ] I can provide a real-world example supporting this change

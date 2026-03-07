@@ -1,6 +1,6 @@
 # Statistical Conventions
 
-Domain-agnostic statistical best practices for mycelium-enabled repositories. Domain-specific conventions (installed from network skill packs) override these when applicable.
+Domain-agnostic statistical best practices for mycelium-enabled repositories. Domain-specific conventions (installed from network convention packs) override these when applicable.
 
 ## Effect Sizes
 

@@ -1,6 +1,6 @@
 ---
 name: New Domain Request
-about: Request a skill pack for a domain that isn't covered yet
+about: Request a convention pack for a domain that isn't covered yet
 title: "[New Domain] "
 labels: new-domain
 assignees: ''
@@ -8,11 +8,11 @@ assignees: ''
 
 ## Domain Name
 
-<!-- What domain should this skill pack cover? (e.g., epidemiology, proteomics, NLP) -->
+<!-- What domain should this convention pack cover? (e.g., epidemiology, proteomics, NLP) -->
 
 ## Why It's Needed
 
-<!-- What problems would this skill pack solve? Who would benefit? -->
+<!-- What problems would this convention pack solve? Who would benefit? -->
 
 ## Key Conventions That Should Be Included
 
@@ -38,7 +38,7 @@ assignees: ''
 
 <!-- If yes, describe your experience with this domain. Community contributions are welcome! -->
 
-- [ ] Yes, I'd like to help create this skill pack
+- [ ] Yes, I'd like to help create this convention pack
 - [ ] No, but I can provide feedback on a draft
 
 ## Existing Resources
