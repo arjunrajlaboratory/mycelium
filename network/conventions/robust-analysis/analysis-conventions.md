@@ -58,7 +58,27 @@ Actively try to break your own conclusions. The strongest analysis is one that h
 
 ---
 
-## 6. Data Subsetting
+## 6. Spot Checks
+
+Aggregate statistics hide individual stories. For every main result, deep-dive into the most extreme data points (outliers) and trace them back to raw data to understand *why* they're extreme. Always include 1-2 baseline (non-outlier) comparisons so the reader can see what "normal" looks like alongside the extreme case.
+
+**Key practices**: Outlier deep-dives with full raw data narratives, baseline comparisons from the median, per-subgroup spot checks to catch results driven by a single extreme member.
+
+> See [spot-check-protocol.md](spot-check-protocol.md) for the full protocol with code examples.
+
+---
+
+## 7. Failure Mode Analysis
+
+When an algorithm fails or produces wrong values for a subset of the data, understanding *why* it fails is often more valuable than the cases where it succeeds. Never silently exclude failing cases — characterize the failure, trace the causal chain, and assess whether exclusion biases the results.
+
+**Key practices**: Characterize the failing subset vs. successes, step-by-step causal tracing on representative failures, impact assessment (does excluding failures change the conclusion?), fix-or-flag decision framework.
+
+> See [failure-mode-analysis.md](failure-mode-analysis.md) for the full protocol with code examples.
+
+---
+
+## 8. Data Subsetting
 
 Do not subset data unless absolutely necessary. Subsetting discards information, can introduce selection bias, and makes results harder to reproduce. If subsetting seems necessary, confirm with the user before proceeding and document the justification.
 

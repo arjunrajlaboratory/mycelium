@@ -6,9 +6,11 @@ description: >
   Domain-agnostic defensive practices for data analysis execution. Covers strict
   error handling (fail loudly, never silently recover), data validation checks,
   parameter sensitivity sweeps, null hypothesis testing via bootstrapping and
-  permutation, and adversarial self-challenge protocols. Designed to catch the
+  permutation, adversarial self-challenge protocols, spot-checking individual
+  data points (outlier deep-dives with baseline comparisons), and failure mode
+  analysis (tracing why algorithms fail on data subsets). Designed to catch the
   silent errors that produce beautiful figures from wrong data.
 author: mycelium
 dependencies: []
-tags: [data-analysis, defensive-coding, validation, sensitivity-analysis, bootstrapping, reproducibility, robustness]
+tags: [data-analysis, defensive-coding, validation, sensitivity-analysis, bootstrapping, reproducibility, robustness, spot-checks, failure-mode-analysis]
 ---

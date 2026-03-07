@@ -58,6 +58,20 @@ Run after the analysis is complete, before reporting results.
 - [ ] **Bootstrap CIs** computed for key estimates
 - [ ] **The null story** articulated — what would the data look like with no effect?
 
+### Spot Checks
+
+- [ ] **Outlier deep-dives** — top/bottom extreme data points traced back to raw data with diagnostic plots
+- [ ] **Baseline comparisons** — 1-2 non-outlier data points investigated with the same detail for contrast
+- [ ] **Outlier narratives written** — each outlier has a brief explanation of why it's extreme (informative vs. artifactual)
+- [ ] **Spot-check figures saved** to `outputs/figures/diagnostic/spot_checks/`
+
+### Failure Mode Analysis
+
+- [ ] **Failures characterized** — if any algorithm step failed or produced implausible values, the failing subset is identified and compared to successes
+- [ ] **Causal chain traced** — root cause of failure identified by step-by-step tracing on representative cases
+- [ ] **Impact assessed** — results compared with and without failing cases; non-random failure enrichment flagged
+- [ ] **Fix-or-flag decision documented** — failures either fixed at root cause, adapted for, or excluded with full documentation
+
 ### Adversarial Checks
 
 - [ ] **Directionality verified** — signs of effects are correct
