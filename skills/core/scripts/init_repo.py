@@ -12,7 +12,7 @@ Usage:
 import argparse
 import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 try:
@@ -202,7 +202,7 @@ def install_core_convention_packs(target_dir: Path):
         print("  No core convention packs found in network.")
         return
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     conventions_dir = target_dir / ".living" / "conventions"
     yaml_path = conventions_dir / "ACTIVE_CONVENTIONS.yaml"
 
@@ -225,12 +225,96 @@ def install_core_convention_packs(target_dir: Path):
     # Write ACTIVE_CONVENTIONS.yaml with core entries
     yaml_content = (
         "# Active Convention Packs\n"
-        "# Updated by init_repo.py and install_convention.py\n\n"
-        + "\n".join(entries)
-        + "\n"
+        "# Updated by init_repo.py and install_convention.py\n\n" + "\n".join(entries) + "\n"
     )
     yaml_path.write_text(yaml_content)
     print(f"  Updated ACTIVE_CONVENTIONS.yaml with {len(core_packs)} core packs")
+
+
+def find_mycelium_hooks_dir() -> Path | None:
+    """Locate the mycelium hooks directory relative to this script."""
+    candidates = [
+        Path(__file__).resolve().parent.parent / "hooks",
+        Path.home() / ".mycelium" / "skills" / "core" / "hooks",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "mycelium-health.sh").exists():
+            return candidate
+    return None
+
+
+def install_claude_hooks(target_dir: Path):
+    """Create or update .claude/settings.local.json with mycelium hooks.
+
+    Handles the innermost-wins rule: subproject settings must include
+    the complete hook set or parent hooks won't fire.
+    """
+    import json
+
+    hooks_dir = find_mycelium_hooks_dir()
+    if not hooks_dir:
+        print("  Warning: Could not locate mycelium hooks directory.")
+        print("  Hooks were not auto-installed. Install them manually.")
+        return
+
+    claude_dir = target_dir / ".claude"
+    claude_dir.mkdir(exist_ok=True)
+    settings_path = claude_dir / "settings.local.json"
+
+    # Load existing settings if present
+    if settings_path.exists():
+        settings = json.loads(settings_path.read_text())
+    else:
+        settings = {}
+
+    hooks = settings.setdefault("hooks", {})
+
+    # Define the three mycelium hooks with absolute paths
+    health_hook = str(hooks_dir / "mycelium-health.sh")
+    post_action_hook = str(hooks_dir / "mycelium-post-action.sh")
+    stop_hook = str(hooks_dir / "mycelium-stop-check.sh")
+
+    def _hook_entry(cmd: str) -> dict:
+        return {"type": "command", "command": cmd}
+
+    def _has_hook(hook_list: list, cmd: str) -> bool:
+        """Check if a hook command is already registered."""
+        return any(h.get("command") == cmd for entry in hook_list for h in entry.get("hooks", []))
+
+    # --- SessionStart: mycelium-health.sh ---
+    session_start = hooks.setdefault("SessionStart", [])
+    if not _has_hook(session_start, health_hook):
+        # Find existing catch-all matcher entry or create one
+        catch_all = next((e for e in session_start if e.get("matcher", "") == ""), None)
+        if catch_all is None:
+            catch_all = {"matcher": "", "hooks": []}
+            session_start.append(catch_all)
+        catch_all["hooks"].append(_hook_entry(health_hook))
+        print("  Registered: SessionStart → mycelium-health.sh")
+
+    # --- PostToolUse: mycelium-post-action.sh (matcher: Bash) ---
+    post_tool = hooks.setdefault("PostToolUse", [])
+    if not _has_hook(post_tool, post_action_hook):
+        # Find existing Bash matcher entry or create one
+        bash_entry = next((e for e in post_tool if e.get("matcher") == "Bash"), None)
+        if bash_entry is None:
+            bash_entry = {"matcher": "Bash", "hooks": []}
+            post_tool.append(bash_entry)
+        bash_entry["hooks"].append(_hook_entry(post_action_hook))
+        print("  Registered: PostToolUse (Bash) → mycelium-post-action.sh")
+
+    # --- Stop: mycelium-stop-check.sh ---
+    stop = hooks.setdefault("Stop", [])
+    if not _has_hook(stop, stop_hook):
+        catch_all = next((e for e in stop if e.get("matcher", "") == ""), None)
+        if catch_all is None:
+            catch_all = {"matcher": "", "hooks": []}
+            stop.append(catch_all)
+        catch_all["hooks"].append(_hook_entry(stop_hook))
+        print("  Registered: Stop → mycelium-stop-check.sh")
+
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    print("  Wrote: .claude/settings.local.json")
 
 
 def create_environments_file(target_dir: Path):
@@ -305,14 +389,16 @@ def main():
     print("\nInstalling core convention packs...")
     install_core_convention_packs(target_dir)
 
+    print("\nInstalling Claude Code hooks...")
+    install_claude_hooks(target_dir)
+
     print("\n" + "=" * 50)
     print("Mycelium initialization complete!")
     print("\nNext steps:")
     print("  1. Generate CLAUDE.md from the template")
     print("  2. Install domain conventions if needed (/mycelium:skill install-convention)")
     print("  3. Run validate_structure.py to confirm setup")
-    print("  4. Install enforcement hooks (see skills/core/hooks/) for automated .living/ checks")
-    print("  5. Start working — the repo is now alive!")
+    print("  4. Start working — the repo is now alive!")
 
 
 if __name__ == "__main__":
