@@ -170,9 +170,12 @@ Mycelium ships optional hook scripts in `hooks/` that enforce the post-action pr
 | Hook | Event | Purpose |
 |------|-------|---------|
 | `mycelium-health.sh` | SessionStart | Warns if `.living/` is missing or incomplete; records session timestamp |
+| `mycelium-post-action.sh` | PostToolUse (Bash) | Detects code execution and directs Claude to run the full post-action protocol |
 | `mycelium-stop-check.sh` | Stop | Blocks session end if significant work was done without updating `.living/` |
 
-**Significance heuristic**: The stop hook counts files changed during the session — both uncommitted changes (`git diff HEAD`) and files touched in commits made since session start (`git log --after=@$TIMESTAMP`). If the total is 3+ files and neither `.living/learnings.md` nor `.living/decisions.md` was modified after the session-start timestamp, the hook blocks.
+**Post-action enforcement**: The PostToolUse hook detects Python/R/Jupyter execution in Bash calls (excluding tests, linting, pip, one-liners) and injects a mandatory directive for Claude to execute the full post-action protocol — saving outputs, updating manifests, and logging to `.living/`. It is **debounced**: fires once per work cycle, then stays silent until `.living/` is updated (completing the cycle). This means Claude receives exactly one directive per burst of analysis work, not one per Bash call. The Stop hook serves as a safety net for non-analysis sessions.
+
+**Stop hook logic**: The stop hook only blocks if `mycelium-post-action.sh` fired during the session (indicated by the presence of `.claude/mycelium-reminded.tmp`) AND `.living/` was not updated afterward. Read-only sessions, config-only sessions, and sessions without code execution are never blocked. When `.living/` is updated after the post-action hook fires, the reminder file is cleaned up automatically at session end.
 
 **Installation**: Register the hooks in your project's `.claude/settings.local.json`:
 
@@ -186,6 +189,17 @@ Mycelium ships optional hook scripts in `hooks/` that enforce the post-action pr
           {
             "type": "command",
             "command": "/path/to/mycelium/skills/core/hooks/mycelium-health.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/mycelium/skills/core/hooks/mycelium-post-action.sh"
           }
         ]
       }

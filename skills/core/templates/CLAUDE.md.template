@@ -79,7 +79,15 @@ No domain conventions installed yet. Install with mycelium's `install-convention
 
 ### Automated Enforcement
 
-If Claude Code hooks are installed (see mycelium `skills/core/hooks/`), the Stop hook will block session end if `.living/` was not updated after significant work. This ensures the post-action protocol is never silently skipped, even in long sessions where earlier context is compacted.
+Mycelium hooks are auto-installed in `.claude/settings.local.json` during `init`:
+
+| Hook | Event | What it does |
+|------|-------|--------------|
+| `mycelium-health.sh` | SessionStart | Checks `.living/` health, records session timestamp |
+| `mycelium-post-action.sh` | PostToolUse (Bash) | Detects code execution and directs Claude to run the full post-action protocol (debounced: one directive per work cycle) |
+| `mycelium-stop-check.sh` | Stop | Safety net — blocks session end only if the post-action hook fired but `.living/` was never updated |
+
+The PostToolUse hook ensures the protocol runs automatically after analysis/data/algorithm work. Read-only and config-only sessions are never interrupted.
 
 ### Subagent-Driven Workflows
 
