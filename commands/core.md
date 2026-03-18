@@ -91,10 +91,11 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 1. Consult `skills/core/references/skill-generation-guide.md`.
 2. Read `.living/learnings.md` and `.living/decisions.md`.
 3. Identify recurring patterns (look for similar tags, repeated problems, evolving conventions).
-4. Propose new convention documents or checklists.
-5. Draft them in `.living/generated-conventions/[name]/`.
-6. Include `ORIGIN.md` linking back to the learnings that spawned it.
-7. Ask user if they want to contribute it back to the network.
+4. **Promote transferable knowledge**: For patterns that apply beyond the current project, write entries to the matching global domain file in `~/.claude/knowledge/{domain}.md` using the structured entry template (What/Evidence/When useful/Scope/Status/Last validated). Set `status: unreviewed` — the weekly audit will confirm.
+5. Propose new convention documents or checklists for project-specific patterns.
+6. Draft them in `.living/generated-conventions/[name]/`.
+7. Include `ORIGIN.md` linking back to the learnings that spawned it.
+8. Ask user if they want to contribute it back to the network.
 
 ---
 
@@ -158,7 +159,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 1. **Update manifests**: Update the relevant manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, etc.) with new/changed entries.
 2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder with current status, key findings, open questions.
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md` using the decision log template.
-4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template.
+4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template. **Knowledge promotion**: If the learning is transferable (would help in any project), also append to the matching global domain file in `~/.claude/knowledge/{domain}.md` with `status: unreviewed`. Use the structured entry template with a `when_useful` trigger condition.
 5. **Log todos**: If future work is identified during the action, add items to `todo/TODO_REGISTRY.md` (and create detailed `todo/[item].md` files for complex items).
 6. **Validate**: Run `skills/core/scripts/validate_structure.py` to confirm repo still conforms.
 7. **Convention feedback**: If any convention pack practices were relevant, note whether they were helpful or had gaps.
@@ -169,7 +170,7 @@ Mycelium ships optional hook scripts in `hooks/` that enforce the post-action pr
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `mycelium-health.sh` | SessionStart | Warns if `.living/` is missing or incomplete; records session timestamp |
+| `mycelium-health.sh` | SessionStart | Warns if `.living/` is missing or incomplete; records session timestamp; triggers weekly knowledge audit if `~/.claude/knowledge/.last-audit` is >7 days old |
 | `mycelium-post-action.sh` | PostToolUse (Bash) | Detects code execution and directs Claude to run the full post-action protocol |
 | `mycelium-stop-check.sh` | Stop | Blocks session end if significant work was done without updating `.living/` |
 
