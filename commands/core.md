@@ -36,7 +36,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 6. Generate `CLAUDE.md` for the repo (from `skills/core/templates/CLAUDE.md.template`) that encodes the living repo protocol.
 7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
 8. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
-9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`.
+9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`; create `.living/log/REGISTRY.md` (session log registry — tracks work across sessions).
 10. **Bootstrap knowledge system**: If `~/.claude/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py`. Append the domain routing table to the project's MEMORY.md if not already present (from `skills/core/templates/knowledge/domain-table.md`).
 11. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
 12. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.

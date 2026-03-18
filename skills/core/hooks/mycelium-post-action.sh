@@ -87,15 +87,25 @@ if [[ ! -d "$LIVING_DIR" ]]; then
   exit 0
 fi
 
-# --- Debounce: only fire once per work cycle ---
+# --- Build combined directive ---
 
+ACTIVE_LOG_FILE="$HOME/.claude/active-session-log.tmp"
+LOG_DIRECTIVE=""
+LIVING_DIRECTIVE=""
+
+# Part 1: Log append (always fires, no debounce)
+if [ -f "$ACTIVE_LOG_FILE" ]; then
+  LOG_PATH=$(cat "$ACTIVE_LOG_FILE")
+  LOG_DIRECTIVE="SESSION LOG UPDATE: Append a 2-3 line timestamped entry to ${LOG_PATH} describing what you just did, the result, and any notable outputs. Format: ### HH:MM — <action title> followed by bullet points with Command, Result, and Output fields as applicable."
+fi
+
+# Part 2: .living/ update reminder (debounced — existing behavior)
 REMINDER_FILE="$REPO_ROOT/.claude/mycelium-reminded.tmp"
 mkdir -p "$REPO_ROOT/.claude"
 
+SHOULD_REMIND=true
 if [[ -f "$REMINDER_FILE" ]]; then
   REMINDER_TS=$(cat "$REMINDER_FILE")
-
-  # Check if .living/ was updated since last reminder (cycle complete)
   LEARNINGS_MTIME=0
   DECISIONS_MTIME=0
   if [[ -f "$LIVING_DIR/learnings.md" ]]; then
@@ -104,24 +114,27 @@ if [[ -f "$REMINDER_FILE" ]]; then
   if [[ -f "$LIVING_DIR/decisions.md" ]]; then
     DECISIONS_MTIME=$(stat -f "%m" "$LIVING_DIR/decisions.md" 2>/dev/null || stat -c "%Y" "$LIVING_DIR/decisions.md" 2>/dev/null || echo "0")
   fi
-
   LATEST_LIVING=$((LEARNINGS_MTIME > DECISIONS_MTIME ? LEARNINGS_MTIME : DECISIONS_MTIME))
-
   if [[ "$LATEST_LIVING" -le "$REMINDER_TS" ]]; then
-    # Already reminded, .living/ not yet updated — stay silent
-    exit 0
+    SHOULD_REMIND=false
   fi
-  # .living/ was updated since reminder — reset, allow re-fire
 fi
 
-# --- Fire the directive ---
+if [[ "$SHOULD_REMIND" == true ]]; then
+  date +%s > "$REMINDER_FILE"
+  LIVING_DIRECTIVE="MYCELIUM POST-ACTION PROTOCOL — MANDATORY: You just executed analysis/data processing/algorithm code. Before continuing with other work, you MUST complete the following steps:\n\n1. Save outputs to the appropriate directory (analysis/[name]/outputs/, data/processed/, or algorithms/[name]/)\n2. Add or update the entry in the relevant manifest (analysis/ANALYSIS_MANIFEST.md, data/DATA_MANIFEST.md, or algorithms/ALGORITHM_MANIFEST.md)\n3. Update the subfolder documentation file (UPPER_SNAKE_CASE.md in the affected directory)\n4. Append to .living/learnings.md if anything unexpected was learned\n5. Append to .living/decisions.md if any non-obvious choices were made\n\nDo this NOW as part of your current response. Do not defer to later."
+fi
 
-# Record reminder timestamp
-date +%s > "$REMINDER_FILE"
+# Assemble and emit single JSON
+if [ -n "$LOG_DIRECTIVE" ] && [ -n "$LIVING_DIRECTIVE" ]; then
+  COMBINED="${LOG_DIRECTIVE}\n\n---\n\n${LIVING_DIRECTIVE}"
+elif [ -n "$LOG_DIRECTIVE" ]; then
+  COMBINED="$LOG_DIRECTIVE"
+elif [ -n "$LIVING_DIRECTIVE" ]; then
+  COMBINED="$LIVING_DIRECTIVE"
+else
+  exit 0
+fi
 
-# Emit directive as additionalContext — Claude treats this as a system instruction
-cat <<'JSON'
-{
-  "additionalContext": "MYCELIUM POST-ACTION PROTOCOL — MANDATORY: You just executed analysis/data processing/algorithm code. Before continuing with other work, you MUST complete the following steps:\n\n1. Save outputs to the appropriate directory (analysis/[name]/outputs/, data/processed/, or algorithms/[name]/)\n2. Add or update the entry in the relevant manifest (analysis/ANALYSIS_MANIFEST.md, data/DATA_MANIFEST.md, or algorithms/ALGORITHM_MANIFEST.md)\n3. Update the subfolder documentation file (UPPER_SNAKE_CASE.md in the affected directory)\n4. Append to .living/learnings.md if anything unexpected was learned\n5. Append to .living/decisions.md if any non-obvious choices were made\n\nDo this NOW as part of your current response. Do not defer to later."
-}
-JSON
+ESCAPED=$(printf '%s' "$COMBINED" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
+printf '{"additionalContext": %s}\n' "$ESCAPED"

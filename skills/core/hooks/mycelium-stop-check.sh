@@ -19,6 +19,64 @@ if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 
+# --- Session log finalization ---
+ACTIVE_LOG_FILE="$HOME/.claude/active-session-log.tmp"
+if [ -f "$ACTIVE_LOG_FILE" ]; then
+  LOG_PATH=$(cat "$ACTIVE_LOG_FILE")
+
+  if [ -f "$LOG_PATH" ]; then
+    # Compute session duration
+    LOG_REPO=$(dirname "$(dirname "$(dirname "$LOG_PATH")")")  # .living/log/file -> repo root
+    START_FILE="$LOG_REPO/.claude/session-start-ts.tmp"
+    NOW_TS=$(date +%s)
+    DURATION_MIN=0
+    if [ -f "$START_FILE" ]; then
+      START_TS=$(cat "$START_FILE")
+      DURATION_MIN=$(( (NOW_TS - START_TS) / 60 ))
+    fi
+
+    # Compute files changed since session start (committed + uncommitted + staged)
+    FILES_CHANGED=0
+    if [ -f "$START_FILE" ]; then
+      FILES_CHANGED_UNCOMMITTED=$(git -C "$LOG_REPO" diff --name-only 2>/dev/null | wc -l | tr -d ' ')
+      FILES_CHANGED_STAGED=$(git -C "$LOG_REPO" diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')
+      START_TS=$(cat "$START_FILE")
+      FILES_CHANGED_COMMITTED=$(git -C "$LOG_REPO" log --since="@${START_TS}" --name-only --pretty=format: 2>/dev/null | sort -u | { grep -v '^$' || true; } | wc -l | tr -d ' ')
+      FILES_CHANGED=$((FILES_CHANGED_UNCOMMITTED + FILES_CHANGED_STAGED + FILES_CHANGED_COMMITTED))
+    fi
+
+    # Short session check: skip finalization if < 5min and 0 files changed
+    if [ "$DURATION_MIN" -lt 5 ] && [ "$FILES_CHANGED" -eq 0 ]; then
+      rm -f "$LOG_PATH"
+      rm -f "$ACTIVE_LOG_FILE"
+      # No registry row, no finalization — clean exit
+    else
+      # Inject finalization directive
+      LOG_DIR=$(dirname "$LOG_PATH")
+      echo "SESSION LOG FINALIZATION — MANDATORY: Before stopping, you MUST complete these steps:"
+      echo ""
+      echo "1. Update the frontmatter in ${LOG_PATH}:"
+      echo "   - ended: $(date +%Y-%m-%dT%H:%M:%S%z)"
+      echo "   - duration_minutes: ${DURATION_MIN}"
+      echo "   - files_changed: ${FILES_CHANGED}"
+      echo "2. Write a '## Session Summary' section at the end of ${LOG_PATH} with:"
+      echo "   - **Completed**: what was accomplished"
+      echo "   - **Blocked**: anything unresolved"
+      echo "   - **Files changed**: ${FILES_CHANGED}"
+      echo "   - **Key outputs**: notable artifacts produced"
+      echo "3. Append a row to ${LOG_DIR}/REGISTRY.md with all fields filled."
+      echo "   IMPORTANT: Use the 'project' value from the log frontmatter as the Project column (the slug, not a human-friendly name)."
+      echo ""
+      echo "Do this NOW before the session ends."
+      # Clean up sentinel AFTER directive is emitted
+      rm -f "$ACTIVE_LOG_FILE"
+    fi
+  else
+    # Log file doesn't exist (was deleted?) — clean up sentinel
+    rm -f "$ACTIVE_LOG_FILE"
+  fi
+fi
+
 # Find git repo root from cwd
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 if [ -z "$REPO_ROOT" ]; then

@@ -22,7 +22,9 @@ except ImportError:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Scaffold a mycelium-enabled living repository.")
+    parser = argparse.ArgumentParser(
+        description="Scaffold a mycelium-enabled living repository."
+    )
     parser.add_argument(
         "--target-dir",
         type=Path,
@@ -52,6 +54,7 @@ def create_directory_structure(target_dir: Path):
         ".living",
         ".living/conventions",
         ".living/generated-conventions",
+        ".living/log",
         "algorithms",
         "analysis",
         "data",
@@ -140,6 +143,18 @@ def create_living_layer(target_dir: Path):
             file_path.write_text(content)
             print(f"  Created: .living/{filename}")
 
+    # Session log registry
+    registry_path = living_dir / "log" / "REGISTRY.md"
+    if not registry_path.exists():
+        registry_path.write_text(
+            "# Session Log Registry\n\n"
+            "| Date | Session ID | Project | Branch | Duration | Files Changed "
+            "| Summary | Key Outputs | Status | Tags | Log |\n"
+            "|------|-----------|---------|--------|----------|---------------"
+            "|---------|-------------|--------|------|-----|\n"
+        )
+        print("  Created: .living/log/REGISTRY.md")
+
     # Create ACTIVE_CONVENTIONS.yaml
     conventions_yaml = living_dir / "conventions" / "ACTIVE_CONVENTIONS.yaml"
     if not conventions_yaml.exists():
@@ -225,7 +240,9 @@ def install_core_convention_packs(target_dir: Path):
     # Write ACTIVE_CONVENTIONS.yaml with core entries
     yaml_content = (
         "# Active Convention Packs\n"
-        "# Updated by init_repo.py and install_convention.py\n\n" + "\n".join(entries) + "\n"
+        "# Updated by init_repo.py and install_convention.py\n\n"
+        + "\n".join(entries)
+        + "\n"
     )
     yaml_path.write_text(yaml_content)
     print(f"  Updated ACTIVE_CONVENTIONS.yaml with {len(core_packs)} core packs")
@@ -279,7 +296,11 @@ def install_claude_hooks(target_dir: Path):
 
     def _has_hook(hook_list: list, cmd: str) -> bool:
         """Check if a hook command is already registered."""
-        return any(h.get("command") == cmd for entry in hook_list for h in entry.get("hooks", []))
+        return any(
+            h.get("command") == cmd
+            for entry in hook_list
+            for h in entry.get("hooks", [])
+        )
 
     # --- SessionStart: mycelium-health.sh ---
     session_start = hooks.setdefault("SessionStart", [])
@@ -368,7 +389,9 @@ def main():
 
     if check_existing_structure(target_dir):
         print("\nThis repo already has a mycelium structure.")
-        print("Use --restructure to audit and update, or remove .living/ to start fresh.")
+        print(
+            "Use --restructure to audit and update, or remove .living/ to start fresh."
+        )
         sys.exit(1)
 
     print("\nCreating directory structure...")
@@ -396,7 +419,9 @@ def main():
     print("Mycelium initialization complete!")
     print("\nNext steps:")
     print("  1. Generate CLAUDE.md from the template")
-    print("  2. Install domain conventions if needed (/mycelium:skill install-convention)")
+    print(
+        "  2. Install domain conventions if needed (/mycelium:skill install-convention)"
+    )
     print("  3. Run validate_structure.py to confirm setup")
     print("  4. Start working — the repo is now alive!")
 
