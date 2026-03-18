@@ -1,0 +1,82 @@
+# Domain Registry — Progressive Disclosure Knowledge System
+# Each domain becomes a file at ~/.claude/knowledge/{name}.md
+# The init_knowledge.py script reads this to generate domain files.
+
+domains:
+  # Core domains (expected to accumulate entries quickly)
+  - name: skills
+    title: Skills
+    trigger: "When starting a task, considering which tool/skill to invoke, or when the mycelium system needs self-maintenance"
+    core: true
+    format: table  # Uses table format, not entry template
+
+  - name: external-apis
+    title: External APIs
+    trigger: "When calling external APIs, handling rate limits, managing API keys, or accessing publisher content"
+    core: true
+
+  - name: data-pipelines
+    title: Data Pipelines
+    trigger: "When designing DAG pipelines, implementing snapshots/restart, or handling stage errors"
+    core: true
+
+  - name: visualization
+    title: Visualization
+    trigger: "When creating plots, charts, dashboards, choosing color palettes, setting resolution, or formatting visual output"
+    core: true
+
+  - name: python-patterns
+    title: Python Patterns
+    trigger: "When writing async code, using Pydantic, configuring structlog, or applying type hints"
+    core: true
+
+  - name: debugging-patterns
+    title: Debugging Patterns
+    trigger: "When troubleshooting conda, matplotlib backends, pytest discovery, or import issues"
+    core: true
+
+  - name: data-analysis
+    title: Data Analysis
+    trigger: "When choosing statistical tests, normalizing data, running QC, validating results, or correcting for multiple comparisons"
+    core: true
+
+  - name: architecture-patterns
+    title: Architecture Patterns
+    trigger: "When designing system architecture, defining module boundaries, structuring APIs, or making build-vs-buy decisions"
+    core: true
+
+  # Growth domains (start empty, accumulate over time)
+  - name: llm-patterns
+    title: LLM Patterns
+    trigger: "When constructing prompts, managing tokens, selecting models, or tuning LLM behavior"
+    core: false
+
+  - name: git-workflows
+    title: Git Workflows
+    trigger: "When using worktrees, configuring hooks, managing commits, or creating PRs"
+    core: false
+
+  - name: environment-setup
+    title: Environment Setup
+    trigger: "When configuring conda, setting env vars, fixing PATH issues, or accessing VPN/institutional resources"
+    core: false
+
+  - name: testing-patterns
+    title: Testing Patterns
+    trigger: "When writing pytest tests, creating mocks, setting up async tests, or configuring test fixtures"
+    core: false
+
+  - name: data-formats
+    title: Data Formats
+    trigger: "When working with AnnData, JSON/YAML schemas, PDF parsing, or cross-project I/O patterns"
+    core: false
+
+  - name: output-workflows
+    title: Output Workflows
+    trigger: "When generating PDFs, formatting reports, preparing deliverables, or meeting submission requirements"
+    core: false
+
+  - name: documentation
+    title: Documentation
+    trigger: "When writing technical documentation, READMEs, prose style guides, or structuring written deliverables"
+    core: false

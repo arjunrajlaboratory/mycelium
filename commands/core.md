@@ -4,9 +4,10 @@ description: >
   Scaffolds living repositories where every analysis, dataset, and decision
   is registered and discoverable. Use when user says "set up mycelium",
   "initialize living repo", "ingest dataset", "install convention",
-  "crystallize learnings", "todo idea", or wants to restructure an existing
-  repository into a self-documenting framework. Also use when user mentions
-  "living dataset", "living repo", or "mycelium".
+  "crystallize learnings", "todo idea", "knowledge init",
+  "set up knowledge", "progressive disclosure", or wants to restructure
+  an existing repository into a self-documenting framework. Also use when
+  user mentions "living dataset", "living repo", or "mycelium".
 ---
 
 # Mycelium — Living Repository Skill (Core)
@@ -36,8 +37,9 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
 8. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
 9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`.
-10. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
-11. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
+10. **Bootstrap knowledge system**: If `~/.claude/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py`. Append the domain routing table to the project's MEMORY.md if not already present (from `skills/core/templates/knowledge/domain-table.md`).
+11. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
+12. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
 
 **References to consult**:
 - `skills/core/references/folder-structure.md` — canonical target structure
@@ -91,10 +93,11 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 1. Consult `skills/core/references/skill-generation-guide.md`.
 2. Read `.living/learnings.md` and `.living/decisions.md`.
 3. Identify recurring patterns (look for similar tags, repeated problems, evolving conventions).
-4. Propose new convention documents or checklists.
-5. Draft them in `.living/generated-conventions/[name]/`.
-6. Include `ORIGIN.md` linking back to the learnings that spawned it.
-7. Ask user if they want to contribute it back to the network.
+4. **Promote transferable knowledge**: For patterns that apply beyond the current project, write entries to the matching global domain file in `~/.claude/knowledge/{domain}.md` using the structured entry template (What/Evidence/When useful/Scope/Status/Last validated). Set `status: unreviewed` — the weekly audit will confirm.
+5. Propose new convention documents or checklists for project-specific patterns.
+6. Draft them in `.living/generated-conventions/[name]/`.
+7. Include `ORIGIN.md` linking back to the learnings that spawned it.
+8. Ask user if they want to contribute it back to the network.
 
 ---
 
@@ -151,6 +154,31 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 
 ---
 
+## Mode: `knowledge-init`
+
+**Trigger**: "knowledge init", "set up knowledge", "initialize knowledge system", "progressive disclosure"
+
+**Purpose**: Bootstrap the global progressive disclosure knowledge system (`~/.claude/knowledge/`).
+
+**Steps**:
+1. Run `skills/core/scripts/init_knowledge.py` to create domain files from templates. Existing files are preserved (idempotent).
+2. For each project with a `.living/` directory: run `skills/core/scripts/generate_index.py` to create/update `.living/INDEX.md`.
+3. Check each project's MEMORY.md (in `~/.claude/projects/*/memory/`). If missing the "Global Knowledge Domains" table, append it from `skills/core/templates/knowledge/domain-table.md`.
+4. Verify the knowledge system is functional: check `~/.claude/knowledge/.last-audit` exists, confirm domain file count, report summary.
+
+**Notes**:
+- This mode is **global** — it sets up `~/.claude/knowledge/` which is shared across all projects.
+- Safe to run multiple times. Existing domain files and their entries are never overwritten.
+- The weekly audit (triggered by `mycelium-health.sh`) handles ongoing maintenance: staleness checks, INDEX.md regeneration, skills sync, dedup.
+- Domain files start empty (header + trigger only). Entries accumulate through the post-action protocol's knowledge promotion step and the crystallize mode.
+
+**References to consult**:
+- `skills/core/templates/knowledge/domains.yaml` — domain registry (single source of truth for domain definitions)
+- `skills/core/templates/knowledge/domain-table.md` — MEMORY.md routing table template
+- `skills/core/templates/knowledge/entry-template.md` — entry format reference
+
+---
+
 ## Post-Action Hook Protocol
 
 **This is what makes the repo "living." Execute after ANY significant action** (analysis step, data ingestion, algorithm implementation, report generation):
@@ -158,7 +186,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 1. **Update manifests**: Update the relevant manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, etc.) with new/changed entries.
 2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder with current status, key findings, open questions.
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md` using the decision log template.
-4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template.
+4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template. **Knowledge promotion**: If the learning is transferable (would help in any project), also append to the matching global domain file in `~/.claude/knowledge/{domain}.md` with `status: unreviewed`. Use the structured entry template with a `when_useful` trigger condition.
 5. **Log todos**: If future work is identified during the action, add items to `todo/TODO_REGISTRY.md` (and create detailed `todo/[item].md` files for complex items).
 6. **Validate**: Run `skills/core/scripts/validate_structure.py` to confirm repo still conforms.
 7. **Convention feedback**: If any convention pack practices were relevant, note whether they were helpful or had gaps.
@@ -169,7 +197,7 @@ Mycelium ships optional hook scripts in `hooks/` that enforce the post-action pr
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `mycelium-health.sh` | SessionStart | Warns if `.living/` is missing or incomplete; records session timestamp |
+| `mycelium-health.sh` | SessionStart | Warns if `.living/` is missing or incomplete; records session timestamp; triggers weekly knowledge audit if `~/.claude/knowledge/.last-audit` is >7 days old |
 | `mycelium-post-action.sh` | PostToolUse (Bash) | Detects code execution and directs Claude to run the full post-action protocol |
 | `mycelium-stop-check.sh` | Stop | Blocks session end if significant work was done without updating `.living/` |
 
