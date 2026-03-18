@@ -65,6 +65,9 @@ desktop.ini
 *.swo
 *~
 
+# Claude Code session state (local only — never commit)
+.claude/
+
 # R
 .Rhistory
 .Rdata
