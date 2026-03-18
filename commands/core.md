@@ -4,9 +4,10 @@ description: >
   Scaffolds living repositories where every analysis, dataset, and decision
   is registered and discoverable. Use when user says "set up mycelium",
   "initialize living repo", "ingest dataset", "install convention",
-  "crystallize learnings", "todo idea", or wants to restructure an existing
-  repository into a self-documenting framework. Also use when user mentions
-  "living dataset", "living repo", or "mycelium".
+  "crystallize learnings", "todo idea", "knowledge init",
+  "set up knowledge", "progressive disclosure", or wants to restructure
+  an existing repository into a self-documenting framework. Also use when
+  user mentions "living dataset", "living repo", or "mycelium".
 ---
 
 # Mycelium — Living Repository Skill (Core)
