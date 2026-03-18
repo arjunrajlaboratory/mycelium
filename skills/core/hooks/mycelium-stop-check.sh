@@ -62,13 +62,23 @@ fi
 if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ]; then
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
+
+  # Check if session summary was written (non-blocking warning)
+  SESSION_FILE="$REPO_ROOT/.claude/last-session.md"
+  SESSION_START_FILE="$REPO_ROOT/.claude/session-start-ts.tmp"
+  if [ -f "$SESSION_START_FILE" ]; then
+    START_MTIME=$(stat -f "%m" "$SESSION_START_FILE" 2>/dev/null || stat -c "%Y" "$SESSION_START_FILE" 2>/dev/null || echo "0")
+    SESSION_MTIME=$(stat -f "%m" "$SESSION_FILE" 2>/dev/null || stat -c "%Y" "$SESSION_FILE" 2>/dev/null || echo "0")
+    if [ "$SESSION_MTIME" -lt "$START_MTIME" ] || [ ! -f "$SESSION_FILE" ]; then
+      echo "Session summary not written. Next session will lack context."
+      echo "Dispatch crystallization subagent or write .claude/last-session.md before stopping."
+    fi
+  fi
+
   exit 0
 fi
 
-# Block: analysis happened but .living/ was never updated
-cat <<'JSON'
-{
-  "decision": "block",
-  "reason": "MYCELIUM: The post-action hook detected analysis/data/algorithm work this session, but .living/ was not updated afterward. Before ending:\n\n1. Update the relevant manifest (ANALYSIS_MANIFEST.md, DATA_MANIFEST.md, or ALGORITHM_MANIFEST.md)\n2. Append to .living/learnings.md (insights, gotchas, edge cases)\n3. Append to .living/decisions.md (non-obvious choices made)\n\nThis ensures your work is registered and discoverable."
-}
-JSON
+# Warn (non-blocking): analysis happened but .living/ was never updated
+# Clean up reminder file so it doesn't fire again next session
+rm -f "$REMINDER_FILE"
+exit 0
