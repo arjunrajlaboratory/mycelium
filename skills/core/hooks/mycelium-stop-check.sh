@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # mycelium-stop-check.sh — Claude Code Stop hook
-# Safety net: blocks session end only if analysis was performed (post-action
-# hook fired) but .living/ was never updated. Does NOT block read-only,
-# config-only, or non-analysis sessions.
+# Safety net: warns if analysis was performed (post-action hook fired) but
+# .living/ was never updated. Also warns if session summary was not written.
+# Does NOT block read-only, config-only, or non-analysis sessions.
 #
 # Install: Add to .claude/settings.local.json under "Stop" hooks
 # Input: JSON on stdin with session metadata
-# Output: JSON with {"decision": "block", "reason": "..."} to prevent stop
+# Output: Non-blocking warnings to stdout (exit 0 in all paths)
 
 set -euo pipefail
 
@@ -79,6 +79,8 @@ if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ]; then
 fi
 
 # Warn (non-blocking): analysis happened but .living/ was never updated
+echo "Mycelium: post-action hook fired but .living/ was not updated."
+echo "Consider logging learnings/decisions before ending."
 # Clean up reminder file so it doesn't fire again next session
 rm -f "$REMINDER_FILE"
 exit 0
