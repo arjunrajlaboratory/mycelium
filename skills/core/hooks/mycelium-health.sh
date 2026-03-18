@@ -56,6 +56,24 @@ if [ "$SOURCE" != "startup" ]; then
   exit 0
 fi
 
+# --- Session resume: load last-session.md if recent ---
+SESSION_FILE="$REPO_ROOT/.claude/last-session.md"
+if [ -f "$SESSION_FILE" ]; then
+  SESSION_MTIME=$(stat -f "%m" "$SESSION_FILE" 2>/dev/null || stat -c "%Y" "$SESSION_FILE" 2>/dev/null || echo "0")
+  NOW_TS=$(date +%s)
+  SESSION_AGE_DAYS=$(( (NOW_TS - SESSION_MTIME) / 86400 ))
+  if [ "$SESSION_AGE_DAYS" -lt 7 ]; then
+    SESSION_CONTENT=$(cat "$SESSION_FILE")
+    if [ -n "$SESSION_CONTENT" ]; then
+      # Show resume to user immediately via stderr
+      echo "$SESSION_CONTENT" >&2
+      echo "---" >&2
+      # Add to agent context via MESSAGES accumulator
+      MESSAGES="${MESSAGES}${SESSION_CONTENT}\n\n"
+    fi
+  fi
+fi
+
 LIVING_DIR="$REPO_ROOT/.living"
 
 # Check 1: .living/ directory exists
