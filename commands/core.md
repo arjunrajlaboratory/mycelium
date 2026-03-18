@@ -36,8 +36,9 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
 8. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
 9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`.
-10. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
-11. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
+10. **Bootstrap knowledge system**: If `~/.claude/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py`. Append the domain routing table to the project's MEMORY.md if not already present (from `skills/core/templates/knowledge/domain-table.md`).
+11. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
+12. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
 
 **References to consult**:
 - `skills/core/references/folder-structure.md` — canonical target structure
@@ -149,6 +150,31 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 **Notes**:
 - If `todo/` or `todo/TODO_REGISTRY.md` doesn't exist yet, create them first (use the structure from the mycelium `todo/` directory as reference).
 - Users can also update existing items by asking to change their status or priority — edit both the item file and registry row.
+
+---
+
+## Mode: `knowledge-init`
+
+**Trigger**: "knowledge init", "set up knowledge", "initialize knowledge system", "progressive disclosure"
+
+**Purpose**: Bootstrap the global progressive disclosure knowledge system (`~/.claude/knowledge/`).
+
+**Steps**:
+1. Run `skills/core/scripts/init_knowledge.py` to create domain files from templates. Existing files are preserved (idempotent).
+2. For each project with a `.living/` directory: run `skills/core/scripts/generate_index.py` to create/update `.living/INDEX.md`.
+3. Check each project's MEMORY.md (in `~/.claude/projects/*/memory/`). If missing the "Global Knowledge Domains" table, append it from `skills/core/templates/knowledge/domain-table.md`.
+4. Verify the knowledge system is functional: check `~/.claude/knowledge/.last-audit` exists, confirm domain file count, report summary.
+
+**Notes**:
+- This mode is **global** — it sets up `~/.claude/knowledge/` which is shared across all projects.
+- Safe to run multiple times. Existing domain files and their entries are never overwritten.
+- The weekly audit (triggered by `mycelium-health.sh`) handles ongoing maintenance: staleness checks, INDEX.md regeneration, skills sync, dedup.
+- Domain files start empty (header + trigger only). Entries accumulate through the post-action protocol's knowledge promotion step and the crystallize mode.
+
+**References to consult**:
+- `skills/core/templates/knowledge/domains.yaml` — domain registry (single source of truth for domain definitions)
+- `skills/core/templates/knowledge/domain-table.md` — MEMORY.md routing table template
+- `skills/core/templates/knowledge/entry-template.md` — entry format reference
 
 ---
 
