@@ -93,8 +93,10 @@ project-root/
 │   ├── conventions.md            # Project-specific overrides
 │   ├── conventions/              # Installed convention packs
 │   ├── generated-conventions/    # Conventions crystallized from learnings
-│   └── log/                      # Append-only event log
-│       └── REGISTRY.md
+│   ├── log/                      # Append-only event log
+│   │   └── REGISTRY.md
+│   └── findings/                 # Scientific findings by topic
+│       └── {topic-slug}.md
 ├── algorithms/                   # Reusable methods (with ALGORITHM_MANIFEST.md)
 ├── analysis/                     # Analytical work (with ANALYSIS_MANIFEST.md)
 ├── data/                         # Data assets (with DATA_MANIFEST.md)
