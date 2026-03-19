@@ -53,6 +53,7 @@ ACTIVE_LOG_FILE="$HOME/.claude/active-session-log.tmp"
 if [ -d "$LIVING_DIR" ]; then
   # Ensure log directory and registry exist
   mkdir -p "$LOG_DIR"
+  mkdir -p "$LIVING_DIR/findings"
   if [ ! -f "$LOG_DIR/REGISTRY.md" ]; then
     cat > "$LOG_DIR/REGISTRY.md" << 'REGISTRY_EOF'
 # Session Log Registry
@@ -165,6 +166,26 @@ if [ -d "$SESSION_LOG_DIR" ] && [ -f "$SESSION_LOG_DIR/REGISTRY.md" ]; then
     SEPARATOR="|------|-----------|---------|--------|----------|---------------|---------|-------------|--------|------|-----|"
     LOG_CONTEXT="RECENT SESSION LOG (${PROJECT_SLUG}):\n${HEADER}\n${SEPARATOR}\n${RECENT_ROWS}\n\nFull logs: .living/log/"
     MESSAGES="${MESSAGES}${LOG_CONTEXT}\n\n"
+  fi
+fi
+
+# --- Load findings INDEX.md if meta-project exists ---
+if [ -d "$LIVING_DIR/findings" ]; then
+  # Walk up to find meta-project (parent directory with .living/)
+  META_ROOT=""
+  CHECK_DIR=$(dirname "$REPO_ROOT")
+  while [ "$CHECK_DIR" != "/" ] && [ "$CHECK_DIR" != "." ]; do
+    if [ -d "$CHECK_DIR/.living" ]; then
+      META_ROOT="$CHECK_DIR"
+      break
+    fi
+    CHECK_DIR=$(dirname "$CHECK_DIR")
+  done
+
+  # Load cross-project findings index if it exists
+  if [ -n "$META_ROOT" ] && [ -f "$META_ROOT/.living/findings/INDEX.md" ]; then
+    FINDINGS_INDEX=$(cat "$META_ROOT/.living/findings/INDEX.md")
+    MESSAGES="${MESSAGES}${FINDINGS_INDEX}\n\n"
   fi
 fi
 
