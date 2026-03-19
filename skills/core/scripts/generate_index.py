@@ -179,6 +179,43 @@ def generate_index(living_dir: Path) -> str:
 
             rows.append(("log/", f"{log_count} sessions", last_date, project_summary))
 
+    # --- Findings directory stats ---
+    findings_dir = living_dir / "findings"
+    if findings_dir.is_dir():
+        topic_files = [f for f in findings_dir.glob("*.md") if f.name != "INDEX.md"]
+        topic_count = len(topic_files)
+        if topic_count > 0:
+            last_topic = max(topic_files, key=lambda f: f.stat().st_mtime)
+            last_date = datetime.fromtimestamp(last_topic.stat().st_mtime).strftime(
+                "%Y-%m-%d"
+            )
+
+            # Count findings across all topics by counting ## F- headers
+            total_findings = 0
+            topic_names = []
+            for tf in sorted(
+                topic_files, key=lambda f: f.stat().st_mtime, reverse=True
+            ):
+                content = tf.read_text(encoding="utf-8", errors="replace")
+                finding_count = len(
+                    [line for line in content.splitlines() if line.startswith("## F-")]
+                )
+                total_findings += finding_count
+                topic_names.append(tf.stem)
+
+            topic_summary = ", ".join(topic_names[:5])
+            if len(topic_names) > 5:
+                topic_summary += f", +{len(topic_names) - 5} more"
+
+            rows.append(
+                (
+                    "findings/",
+                    f"{total_findings} findings across {topic_count} topics",
+                    last_date,
+                    topic_summary,
+                )
+            )
+
     # Build table
     lines: list[str] = [
         "# .living/ Index",
@@ -195,6 +232,23 @@ def generate_index(living_dir: Path) -> str:
     skills = skills_section(living_dir)
     if skills:
         lines.append(skills)
+
+    # --- Rebuild cross-project findings INDEX.md if meta-project exists ---
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    script_dir = Path(__file__).parent
+    crystallize_script = script_dir / "crystallize_findings.py"
+    if crystallize_script.exists():
+        subprocess.run(
+            [
+                sys.executable,
+                str(crystallize_script),
+                "--project-root",
+                str(living_dir.parent),
+            ],
+            capture_output=True,
+        )
 
     return "\n".join(lines)
 
