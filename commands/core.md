@@ -101,6 +101,30 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 
 ---
 
+## Mode: `crystallize-findings`
+
+**Trigger**: "crystallize findings", "extract findings", "log findings"
+
+**Purpose**: Extract scientific findings from recent work and organize them into topic-based files.
+
+**Steps**:
+1. Dispatch a **sonnet** subagent (max_turns: 15) with the following instructions:
+2. Read the current project's recent session log (`.living/log/` most recent file) and any generated analysis outputs.
+3. Identify scientific findings — empirical observations, validated/invalidated hypotheses, quantitative results, or methodological discoveries about the domain. **NOT** tooling/process insights (those go to `learnings.md`).
+4. For each finding, check for existing topics:
+   a. Walk up from repo root to find meta-project (parent dir with `.living/`).
+   b. Read `{meta-project}/.living/findings/INDEX.md` if it exists.
+   c. Semantically match the finding against existing topics.
+5. Route each finding:
+   - **Existing topic match** → append to `{project}/.living/findings/{topic-slug}.md` using the entry template from `skills/core/templates/findings-entry.md`.
+   - **No match** → create new `{project}/.living/findings/{topic-slug}.md` using the topic template from `skills/core/templates/findings-topic.md`.
+6. **Topic naming principle**: Prefer broad scientific questions. No project names, organ names, species names, or method names in slugs. Test: "Would a researcher in a different system recognize this as relevant?"
+7. Run `python3 skills/core/scripts/crystallize_findings.py` to rebuild the cross-project INDEX.md.
+8. **Consolidation pass** (if invoked explicitly): Scan all topics across all projects, flag potential duplicates (overlapping tags or similar descriptions), and suggest merges to the user.
+9. Return single-line summary: "Added N findings to M topics (N new topics created)."
+
+---
+
 ## Mode: `contribute`
 
 **Trigger**: "contribute convention", "share back", "submit to network"
