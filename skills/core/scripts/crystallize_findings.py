@@ -118,23 +118,44 @@ def parse_topic_file(path: Path) -> dict:
     }
 
 
-def build_cross_project_index(meta_root: Path) -> str:
-    """Scan all subprojects and build the cross-project INDEX.md content."""
-    # Find all subproject findings directories
-    topic_data: dict[str, dict] = {}  # topic_slug -> aggregated data
+def _find_subproject_findings_dirs(meta_root: Path) -> list[tuple[Path, str]]:
+    """Find all subproject findings directories, filtering hidden/irrelevant paths.
 
+    Returns list of (findings_dir, project_name) tuples.
+    Only includes direct children of meta_root to avoid misattribution.
+    """
+    results = []
     for findings_dir in sorted(meta_root.rglob(".living/findings")):
         if not findings_dir.is_dir():
             continue
-        # Determine project name from the directory structure
+        # Filter hidden directories and known irrelevant paths
+        relative = findings_dir.relative_to(meta_root)
+        if any(part.startswith(".") and part != ".living" for part in relative.parts):
+            continue
+        if any(
+            part in {".git", ".venv", "__pycache__", "node_modules"}
+            for part in relative.parts
+        ):
+            continue
         # findings_dir is {project}/.living/findings
         project_root = findings_dir.parent.parent
-        project_name = project_root.name
-
         # Skip meta-project's own findings dir
         if project_root == meta_root:
             continue
+        # Only include direct children of meta_root
+        if project_root.parent != meta_root:
+            continue
+        results.append((findings_dir, project_root.name))
+    return results
 
+
+def build_cross_project_index(meta_root: Path) -> str:
+    """Scan all subprojects and build the cross-project INDEX.md content."""
+    # Find all subproject findings directories (cached for reuse in staleness check)
+    topic_data: dict[str, dict] = {}  # topic_slug -> aggregated data
+    subproject_dirs = _find_subproject_findings_dirs(meta_root)
+
+    for findings_dir, project_name in subproject_dirs:
         for topic_file in sorted(findings_dir.glob("*.md")):
             if topic_file.name == "INDEX.md":
                 continue
@@ -173,11 +194,9 @@ def build_cross_project_index(meta_root: Path) -> str:
     stale_threshold = 90
     now_ts = datetime.now()
     for slug, data in topic_data.items():
-        # Check all topic files for this slug across projects
+        # Check all topic files for this slug across projects (reuse cached dirs)
         all_stale = True
-        for findings_dir in meta_root.rglob(".living/findings"):
-            if not findings_dir.is_dir() or findings_dir.parent.parent == meta_root:
-                continue
+        for findings_dir, _ in subproject_dirs:
             topic_file = findings_dir / f"{slug}.md"
             if topic_file.exists():
                 age_days = (

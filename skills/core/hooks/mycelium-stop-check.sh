@@ -125,7 +125,7 @@ if [ -d "$FINDINGS_DIR" ]; then
   fi
 fi
 
-# If either was updated after the post-action hook fired, protocol was followed
+# If any was updated after the post-action hook fired, protocol was followed
 if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$FINDINGS_UPDATED" = true ]; then
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
