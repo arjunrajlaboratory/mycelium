@@ -29,11 +29,7 @@ mycelium/
 │   │   ├── scripts/
 │   │   │   ├── init_repo.py
 │   │   │   ├── install_convention.py
-│   │   │   ├── validate_structure.py
-│   │   │   ├── crystallize_learnings.py
-│   │   │   ├── prepare_contribution.py
-│   │   │   ├── update_manifests.py
-│   │   │   └── ingest_dataset.py
+│   │   │   └── validate_structure.py
 │   │   ├── references/
 │   │   │   ├── folder-structure.md
 │   │   │   ├── environment-setup.md

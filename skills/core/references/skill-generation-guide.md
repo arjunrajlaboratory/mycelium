@@ -77,7 +77,7 @@ for encoding validation during data ingestion would prevent repeated debugging.
 If a generated convention seems generally useful (not specific to your repo or data):
 
 1. Use the `contribute` mode
-2. The `prepare_contribution.py` script will:
+2. The `contribute` mode (agent-driven) will:
    - Generalize repo-specific details into parameters
    - Create a properly formatted convention pack with `CONVENTION_PACK.yaml`
    - Generate a PR description with anonymized provenance
