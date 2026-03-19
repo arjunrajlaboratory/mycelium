@@ -81,7 +81,7 @@ If a generated convention seems generally useful (not specific to your repo or d
    - Generalize repo-specific details into parameters
    - Create a properly formatted convention pack with `CONVENTION_PACK.yaml`
    - Generate a PR description with anonymized provenance
-   - Include test cases derived from the learnings
+   - Include QC checklist derived from the learnings
 3. Review the generated PR and submit to the mycelium network repository
 
 ## When to Crystallize

@@ -5,16 +5,14 @@
 ---
 name: [pack-name]                          # Lowercase with hyphens. Must match the directory name.
 version: 0.1.0                             # Start at 0.1.0. Increment on breaking changes.
-core: false                                # Always false for contributed packs. true is reserved for mycelium maintainers.
+# core: true                              # Only for mycelium-maintained packs. Omit this field for contributed packs (defaults to false).
 description: >
   [2-4 sentences describing what practices this pack encodes. Be concrete: name the
   specific problem it solves and the domain(s) it applies to. Avoid vague language
   like "best practices" — say what the practices are.]
 author: [your-project-name or "anonymous"] # Identifies the contributing project. Can be anonymized.
-origin_project: [project-name or "anonymous"]  # Project where these conventions were crystallized.
 dependencies:
   - [pack-name]                            # Other packs that must be installed first. Empty list if none.
-min_learnings: [N]                         # Minimum number of source learnings that produced this pack.
 tags:
   - [tag1]                                 # Use lowercase. Include the domain, technique, and key concepts.
   - [tag2]

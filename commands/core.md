@@ -113,18 +113,25 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 2. Read the convention and its `ORIGIN.md` provenance document.
 3. **Generalize** the convention for broader use:
    - Replace repo-specific paths, dataset names, and project references with parameterized placeholders
+     (e.g., `/home/user/hospital-x/data/` → `[data-source-path]`, "Hospital X CSV exports" → "external tabular data sources")
    - Abstract project-specific context while preserving the core convention
    - Ensure examples are generic enough to apply outside the original project
-4. Create the convention pack directory at `network/community-contributed/[name]/`:
+   - See the encoding validation example in `skills/core/references/skill-generation-guide.md` for reference
+4. **Expand into pack structure** if the convention is complex:
+   - Simple conventions: the generated convention.md becomes `analysis-conventions.md` directly
+   - Complex conventions: split into a hub file (`analysis-conventions.md`) that links to detail files covering specific aspects
+   - See `network/conventions/robust-analysis/` for an example of a multi-file pack
+5. Create the convention pack directory at `network/community-contributed/[name]/`:
    - `CONVENTION_PACK.yaml` — use template at `skills/core/templates/convention-pack.yaml`
-   - `analysis-conventions.md` — the generalized convention (hub file)
-   - Additional reference files if the convention is complex
-   - `templates/` — any reusable templates
-5. Generate a PR description with:
+   - `analysis-conventions.md` — the generalized convention (hub file with progressive disclosure)
+   - `qc-checklist.md` — quality control checklist for applying the convention correctly
+   - Additional reference files for complex conventions (e.g., `statistical-conventions.md`)
+   - `templates/` — reusable templates if applicable
+6. Generate a PR description with:
    - What the convention covers and why it's useful
    - Anonymized provenance (number of learnings, time span, but no project names)
    - Which domains or workflows benefit
-6. Present the pack to the user for review before committing.
+7. Present the pack to the user for review before committing.
 
 ---
 
