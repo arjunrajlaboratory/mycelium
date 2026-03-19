@@ -55,6 +55,7 @@ def create_directory_structure(target_dir: Path):
         ".living/conventions",
         ".living/generated-conventions",
         ".living/log",
+        ".living/findings",
         "algorithms",
         "analysis",
         "data",
