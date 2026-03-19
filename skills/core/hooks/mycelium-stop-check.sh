@@ -116,8 +116,17 @@ if [ -f "$LIVING_DIR/decisions.md" ]; then
   fi
 fi
 
+FINDINGS_UPDATED=false
+FINDINGS_DIR="$LIVING_DIR/findings"
+if [ -d "$FINDINGS_DIR" ]; then
+  FINDINGS_MTIME=$(stat -f "%m" "$FINDINGS_DIR" 2>/dev/null || stat -c "%Y" "$FINDINGS_DIR" 2>/dev/null || echo "0")
+  if [ "$FINDINGS_MTIME" -gt "$REMINDER_TS" ]; then
+    FINDINGS_UPDATED=true
+  fi
+fi
+
 # If either was updated after the post-action hook fired, protocol was followed
-if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ]; then
+if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$FINDINGS_UPDATED" = true ]; then
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
 
