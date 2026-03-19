@@ -1,0 +1,30 @@
+# Dataset Schema Template
+# Copy to data/metadata/[dataset-name]/schema.yaml
+# Fill in all fields. Delete comments before committing.
+
+dataset_name: [dataset-name]               # Must match the directory name in data/raw/ and data/metadata/
+description: >
+  [1-3 sentences describing what the dataset contains, what it measures, and its
+  intended use. Mention the unit of observation (e.g., "one row per patient visit").]
+format: [CSV|TSV|Parquet|HDF5|other]       # File format of the raw data
+
+columns:
+    # Add one entry per column. Order should match column order in the file.
+
+  - name: [column_name]                    # Exact column header as it appears in the file
+    type: [int|float|str|bool|datetime|categorical]
+    description: [What this column represents. Be precise.]
+    units: [unit, e.g., "mg/dL", "seconds", "log2(TPM+1)"]  # Omit for non-numeric columns
+    nullable: [true|false]                 # Whether null/NaN values are expected
+    notes: >                               # Optional. Known quirks, encoding, or caveats.
+      [e.g., "Values above 1000 were capped during collection. See known_issues in provenance.md."]
+
+  - name: [column_name]
+    type: categorical
+    description: [What this column represents.]
+    nullable: [true|false]
+    values:                                # List known categories for categorical columns
+      - [value1]
+      - [value2]
+    notes: >
+      [Optional. Any encoding or ordering notes.]
