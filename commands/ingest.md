@@ -36,6 +36,7 @@ Pull a new dataset into the analytical framework, ensuring it is properly docume
    - `schema.yaml` — column descriptions, types, units
    - `provenance.md` — full source details, acquisition method, contact
    - `summary_stats.md` — row counts, column distributions, missing data summary
+   - Use the templates at `skills/core/templates/schema.yaml`, `skills/core/templates/provenance.md`, and `skills/core/templates/summary_stats.md` as starting points.
    - Required fields: source, date acquired, schema/column descriptions, known issues, access restrictions.
 
 7. **Update `data/DATA_MANIFEST.md`** with a new entry using `skills/core/templates/dataset-manifest-entry.yaml`.

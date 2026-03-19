@@ -58,7 +58,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 2. Determine data type, source, and format.
 3. If a domain convention is active, check its conventions for domain-specific validation.
 4. Place raw data in `data/raw/[dataset-name]/`.
-5. Generate metadata in `data/metadata/[dataset-name]/` using templates: `skills/core/templates/schema.yaml` for column definitions, `skills/core/templates/provenance.md` for source documentation, and `skills/core/templates/summary-stats.md` for statistical overview.
+5. Generate metadata in `data/metadata/[dataset-name]/` using templates: `skills/core/templates/schema.yaml` for column definitions, `skills/core/templates/provenance.md` for source documentation, and `skills/core/templates/summary_stats.md` for statistical overview.
 6. Update `data/DATA_MANIFEST.md` with new entry (use `skills/core/templates/dataset-manifest-entry.yaml`).
 7. Log any decisions about data cleaning or exclusion to `.living/decisions.md`.
 8. Run the post-action hook protocol (see below).

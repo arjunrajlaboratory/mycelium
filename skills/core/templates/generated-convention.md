@@ -3,13 +3,14 @@
 <!-- Fill in all sections. Delete this comment block before committing. -->
 
 ---
-name: [convention-name]                    # Lowercase with hyphens, e.g., "validate-before-transform"
-version: 0.1.0
-description: [One sentence: what this convention requires and why it exists.]
-source_learnings:
-  - "[YYYY-MM-DD] [Learning title from .living/learnings.md]"
-  - "[YYYY-MM-DD] [Learning title from .living/learnings.md]"
+id: [convention-name]                      # Lowercase with hyphens, e.g., "validate-before-transform"
+title: [One sentence: what this convention requires and why it exists.]
+status: proposed                           # proposed | active | deprecated
 created: [YYYY-MM-DD]
+source_learnings:
+  - YYYY-MM-DD
+  - YYYY-MM-DD
+description: [Optional longer description if the title alone is insufficient.]
 ---
 
 ## Convention
@@ -62,16 +63,30 @@ who hasn't seen the learnings should understand the real cost of ignoring this c
 
 <!-- This section explains the companion file, not the convention itself. -->
 <!-- An ORIGIN.md file lives alongside this convention.md in the same directory. -->
-<!-- ORIGIN.md records provenance: which project generated this convention, -->
-<!-- when, and what the crystallize run looked like. Format: -->
+<!-- ORIGIN.md records provenance: which learnings and decisions spawned this convention. -->
+<!-- Use the prose format below (matching the worked example in skill-generation-guide.md): -->
 
 <!--
 # ORIGIN.md format
 
-source_project: [project name or "anonymous"]
-crystallized_on: [YYYY-MM-DD]
-learnings_count: [number of .living/learnings.md entries reviewed]
-pattern_strength: [how many learnings exhibited the same pattern]
-contributed_to_network: [true|false]
-network_pack: [pack name if contributed, else omit]
+# Origin
+
+## Source Learnings
+
+- **YYYY-MM-DD**: "[Learning title]" — brief note on what it contributed
+- **YYYY-MM-DD**: "[Learning title]" — brief note on what it contributed
+
+## Source Decisions
+
+- **YYYY-MM-DD**: "[Decision title]" — (from decisions.md, if any)
+
+## Pattern
+
+[Describe the recurring pattern that justified crystallization: how many learnings,
+which tags they shared, whether multiple projects were involved, and why this
+pattern warrants a convention rather than an ad-hoc fix.]
+
+## Contributing Projects
+
+- [Project name or "Current project"] ([number of learnings])
 -->

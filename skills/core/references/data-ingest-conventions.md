@@ -28,7 +28,7 @@ data/metadata/[dataset-name]/
 └── summary_stats.md   # Row counts, column distributions, missing data summary
 ```
 
-Use the templates at `skills/core/templates/schema.yaml`, `skills/core/templates/provenance.md`, and `skills/core/templates/summary-stats.md` as starting points for each file.
+Use the templates at `skills/core/templates/schema.yaml`, `skills/core/templates/provenance.md`, and `skills/core/templates/summary_stats.md` as starting points for each file.
 
 **Required metadata fields:**
 - **Source**: Where the data came from (URL, database, collaborator, instrument)
