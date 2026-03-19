@@ -28,12 +28,16 @@ data/metadata/[dataset-name]/
 └── summary_stats.md   # Row counts, column distributions, missing data summary
 ```
 
+Use the templates at `skills/core/templates/schema.yaml`, `skills/core/templates/provenance.md`, and `skills/core/templates/summary-stats.md` as starting points for each file.
+
 **Required metadata fields:**
 - **Source**: Where the data came from (URL, database, collaborator, instrument)
 - **Date acquired**: When the data was obtained
 - **Schema/column descriptions**: What each field means, including units
 - **Known issues**: Missing data, encoding problems, known errors
 - **Access restrictions**: Any data use agreements or privacy considerations
+
+See `skills/core/templates/provenance.md` for the complete field list and format.
 
 ### 3. Update the manifest
 
@@ -89,6 +93,7 @@ Before considering ingestion complete:
 - [ ] Raw data placed in `data/raw/[dataset-name]/`
 - [ ] Metadata created in `data/metadata/[dataset-name]/`
 - [ ] Schema documented with column descriptions and types
+- [ ] Metadata files created from templates (`schema.yaml`, `provenance.md`, `summary_stats.md`)
 - [ ] Provenance documented (source, date, method)
 - [ ] Known issues documented
 - [ ] `data/DATA_MANIFEST.md` updated with new entry
