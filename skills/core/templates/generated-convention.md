@@ -13,7 +13,7 @@ source_learnings:
 description: [Optional longer description if the title alone is insufficient.]
 ---
 
-## Convention
+## Statement
 
 <!-- State clearly what to do. Use imperative voice. Be specific enough to be actionable. -->
 
@@ -30,9 +30,7 @@ who hasn't seen the learnings should understand the real cost of ignoring this c
 - [Link or reference to the learning entry that motivated this convention]
 - [Additional learning entries if multiple contributed]
 
-## Examples
-
-### Correct application
+## Correct Application
 
 ```
 <!-- Show what following the convention looks like. Use code, file paths, or prose as appropriate. -->
@@ -40,7 +38,7 @@ who hasn't seen the learnings should understand the real cost of ignoring this c
 
 [Brief explanation of why this example is correct.]
 
-### Incorrect application
+## Incorrect Application
 
 ```
 <!-- Show what violating the convention looks like. -->
@@ -48,7 +46,7 @@ who hasn't seen the learnings should understand the real cost of ignoring this c
 
 [Brief explanation of what goes wrong when this is ignored.]
 
-## Exceptions and edge cases
+## Exceptions
 
 <!-- Document when this convention does NOT apply. Every rule has limits. -->
 
@@ -56,6 +54,13 @@ who hasn't seen the learnings should understand the real cost of ignoring this c
 - **[Edge case 2]**: [Another exception, if any.]
 
 <!-- If there are no known exceptions, write: "No known exceptions." -->
+
+## Review
+
+<!-- Notes for the reviewer before promoting this convention to active status. -->
+<!-- e.g., "Confirm preferred library before promoting", "Verify this applies to all environments." -->
+
+[Any open questions or reviewer guidance for promoting this convention from proposed to active.]
 
 ---
 

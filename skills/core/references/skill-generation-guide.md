@@ -115,8 +115,8 @@ Explicit rules for deciding when a cluster of learnings warrants crystallization
 
 - **Minimum pattern strength**: 3+ learnings sharing a tag or theme before crystallization is warranted. Fewer than 3 is anecdote, not pattern.
 - **Cross-project boost**: If 2+ projects have learnings on the same topic, the threshold drops to 2 per project. The cross-project signal itself is evidence of a pattern — the problem is not local.
-- **Gap signals**: A single learning that explicitly notes "there's no convention for this" counts as 2 toward the threshold. The author already identified the gap; don't require them to encounter it a third time.
-- **Recency weighting**: Learnings from the last 30 days weigh more than older ones. Recent repetition suggests an active problem, not a historical one. An old cluster that has gone quiet may not warrant a convention yet.
+- **Gap signals**: A learning that explicitly identifies a missing convention — phrases like "there's no convention for", "we lack guidance on", "no standard approach for", or "had to figure this out from scratch" — counts as 2 toward the threshold. The author already recognized the pattern; one more related learning triggers crystallization.
+- **Recency weighting**: Learnings from the last 30 days count at full weight toward the threshold. Learnings older than 30 days count at half weight (e.g., 2 old learnings = 1 toward the threshold). This means 6 old learnings on the same topic still trigger crystallization, but 3 recent ones do too.
 - **Cross-project learnings**: Entries with `source:` fields from other projects count toward patterns in the current project. If a learning was important enough to propagate cross-project, it is a strong signal that a convention would generalize.
 
 When in doubt, err toward proposing a convention and letting the reviewer reject it. False positives (unnecessary conventions) are cheaper than false negatives (re-encountering the same problem without guidance).

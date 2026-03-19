@@ -12,3 +12,5 @@
 **Resolution**: [How it was handled, if applicable.]
 
 **Tags**: [relevant, tags, for, searchability]
+
+source: [optional — source project name, for cross-project learnings only]
