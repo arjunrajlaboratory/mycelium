@@ -92,7 +92,9 @@ project-root/
 │   ├── learnings.md              # Gotchas, surprises, insights
 │   ├── conventions.md            # Project-specific overrides
 │   ├── conventions/              # Installed convention packs
-│   └── generated-conventions/    # Conventions crystallized from learnings
+│   ├── generated-conventions/    # Conventions crystallized from learnings
+│   └── log/                      # Append-only event log
+│       └── REGISTRY.md
 ├── algorithms/                   # Reusable methods (with ALGORITHM_MANIFEST.md)
 ├── analysis/                     # Analytical work (with ANALYSIS_MANIFEST.md)
 ├── data/                         # Data assets (with DATA_MANIFEST.md)

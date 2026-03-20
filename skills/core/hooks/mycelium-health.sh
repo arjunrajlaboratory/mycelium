@@ -45,6 +45,87 @@ else
   echo "$(date +%s) auto-initialized" > "$KNOWLEDGE_DIR/.last-audit"
 fi
 
+# --- Session log setup (runs every invocation, idempotent) ---
+LIVING_DIR="$REPO_ROOT/.living"
+LOG_DIR="$LIVING_DIR/log"
+ACTIVE_LOG_FILE="$HOME/.claude/active-session-log.tmp"
+
+if [ -d "$LIVING_DIR" ]; then
+  # Ensure log directory and registry exist
+  mkdir -p "$LOG_DIR"
+  if [ ! -f "$LOG_DIR/REGISTRY.md" ]; then
+    cat > "$LOG_DIR/REGISTRY.md" << 'REGISTRY_EOF'
+# Session Log Registry
+
+| Date | Session ID | Project | Branch | Duration | Files Changed | Summary | Key Outputs | Status | Tags | Log |
+|------|-----------|---------|--------|----------|---------------|---------|-------------|--------|------|-----|
+REGISTRY_EOF
+  fi
+
+  # Check for incomplete log from interrupted previous session
+  if [ -f "$ACTIVE_LOG_FILE" ]; then
+    STALE_LOG=$(cat "$ACTIVE_LOG_FILE")
+    if [ -f "$STALE_LOG" ] && ! grep -q "## Session Summary" "$STALE_LOG"; then
+      MESSAGES="${MESSAGES}INCOMPLETE SESSION LOG: Previous session log at ${STALE_LOG} was never finalized. Please add a '## Session Summary' section and append a row to the registry before starting new work.\n\n"
+    fi
+  fi
+
+  # Create new log file only if no active session log exists (fresh process start)
+  if [ ! -f "$ACTIVE_LOG_FILE" ]; then
+    TODAY=$(date +%Y-%m-%d)
+    # Determine session counter for today
+    EXISTING_COUNT=0
+    for _f in "$LOG_DIR"/${TODAY}-*.md; do
+      [ -f "$_f" ] && [ "$(basename "$_f")" != "REGISTRY.md" ] && EXISTING_COUNT=$((EXISTING_COUNT + 1))
+    done
+    SESSION_NUM=$(printf "%03d" $((EXISTING_COUNT + 1)))
+
+    # Derive slug from project directory name
+    PROJECT_NAME=$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]' | tr ' _' '--' | tr -cd '[:alnum:]-')
+    SESSION_ID="${TODAY}-${SESSION_NUM}"
+    LOG_FILENAME="${SESSION_ID}-${PROJECT_NAME}.md"
+    LOG_PATH="$LOG_DIR/$LOG_FILENAME"
+
+    # Detect project and branch
+    BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    STARTED=$(date +%Y-%m-%dT%H:%M:%S%z)
+    TIME_SHORT=$(date +%H:%M)
+
+    # Find previous session log for this project (glob-safe, no pipefail risk)
+    PREV_LOG=""
+    for _pf in "$LOG_DIR"/*-${PROJECT_NAME}.md; do
+      [ -f "$_pf" ] && PREV_LOG="$_pf"
+    done
+    if [ -n "$PREV_LOG" ]; then
+      PREV_LINK="$(basename "$PREV_LOG")"
+    else
+      PREV_LINK="(first session)"
+    fi
+
+    # Write log file with frontmatter
+    cat > "$LOG_PATH" << LOG_EOF
+---
+session_id: ${SESSION_ID}
+project: ${PROJECT_NAME}
+branch: ${BRANCH}
+started: ${STARTED}
+ended:
+duration_minutes:
+files_changed:
+---
+
+## Session Log
+
+### ${TIME_SHORT} — Session started
+- Branch: \`${BRANCH}\`
+- Resuming from: ${PREV_LINK}
+LOG_EOF
+
+    # Store active log path globally
+    echo "$LOG_PATH" > "$ACTIVE_LOG_FILE"
+  fi
+fi
+
 # Only run .living/ health checks on fresh session starts
 SOURCE=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('source', ''))" 2>/dev/null || echo "")
 if [ "$SOURCE" != "startup" ]; then
@@ -56,7 +137,36 @@ if [ "$SOURCE" != "startup" ]; then
   exit 0
 fi
 
-LIVING_DIR="$REPO_ROOT/.living"
+# --- Session resume: load last-session.md if recent ---
+SESSION_FILE="$REPO_ROOT/.claude/last-session.md"
+if [ -f "$SESSION_FILE" ]; then
+  SESSION_MTIME=$(stat -f "%m" "$SESSION_FILE" 2>/dev/null || stat -c "%Y" "$SESSION_FILE" 2>/dev/null || echo "0")
+  NOW_TS=$(date +%s)
+  SESSION_AGE_DAYS=$(( (NOW_TS - SESSION_MTIME) / 86400 ))
+  if [ "$SESSION_AGE_DAYS" -lt 7 ]; then
+    SESSION_CONTENT=$(cat "$SESSION_FILE")
+    if [ -n "$SESSION_CONTENT" ]; then
+      # Show resume to user immediately via stderr
+      echo "$SESSION_CONTENT" >&2
+      echo "---" >&2
+      # Add to agent context via MESSAGES accumulator
+      MESSAGES="${MESSAGES}${SESSION_CONTENT}\n\n"
+    fi
+  fi
+fi
+
+# --- Load recent session log context (project-filtered) ---
+SESSION_LOG_DIR="$REPO_ROOT/.living/log"
+if [ -d "$SESSION_LOG_DIR" ] && [ -f "$SESSION_LOG_DIR/REGISTRY.md" ]; then
+  PROJECT_SLUG=$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]' | tr ' _' '--' | tr -cd '[:alnum:]-')
+  RECENT_ROWS=$({ grep "| $PROJECT_SLUG " "$SESSION_LOG_DIR/REGISTRY.md" || true; } 2>/dev/null | tail -5)
+  if [ -n "$RECENT_ROWS" ]; then
+    HEADER="| Date | Session ID | Project | Branch | Duration | Files Changed | Summary | Key Outputs | Status | Tags | Log |"
+    SEPARATOR="|------|-----------|---------|--------|----------|---------------|---------|-------------|--------|------|-----|"
+    LOG_CONTEXT="RECENT SESSION LOG (${PROJECT_SLUG}):\n${HEADER}\n${SEPARATOR}\n${RECENT_ROWS}\n\nFull logs: .living/log/"
+    MESSAGES="${MESSAGES}${LOG_CONTEXT}\n\n"
+  fi
+fi
 
 # Check 1: .living/ directory exists
 if [ ! -d "$LIVING_DIR" ]; then

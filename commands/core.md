@@ -36,7 +36,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 6. Generate `CLAUDE.md` for the repo (from `skills/core/templates/CLAUDE.md.template`) that encodes the living repo protocol.
 7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
 8. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
-9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`.
+9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`; create `.living/log/REGISTRY.md` (session log registry — tracks work across sessions).
 10. **Bootstrap knowledge system**: If `~/.claude/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py`. Append the domain routing table to the project's MEMORY.md if not already present (from `skills/core/templates/knowledge/domain-table.md`).
 11. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
 12. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
@@ -108,11 +108,29 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 **Purpose**: Package a repo-local generated convention for PR to the mycelium network.
 
 **Steps**:
-1. Run `skills/core/scripts/prepare_contribution.py`.
-2. Generalize repo-specific details into parameters.
-3. Create a properly formatted convention pack with `CONVENTION_PACK.yaml`.
-4. Generate PR description with provenance (anonymized).
-5. Include test cases derived from the learnings.
+1. Verify the generated convention exists in `.living/generated-conventions/[name]/` — if not, run `crystallize` mode first.
+2. Read the convention and its `ORIGIN.md` provenance document.
+3. **Generalize** the convention for broader use:
+   - Replace repo-specific paths, dataset names, and project references with parameterized placeholders
+     (e.g., `/home/user/hospital-x/data/` → `[data-source-path]`, "Hospital X CSV exports" → "external tabular data sources")
+   - Abstract project-specific context while preserving the core convention
+   - Ensure examples are generic enough to apply outside the original project
+   - See the encoding validation example in `skills/core/references/skill-generation-guide.md` for reference
+4. **Expand into pack structure** if the convention is complex:
+   - Simple conventions: the generated convention.md becomes `analysis-conventions.md` directly
+   - Complex conventions: split into a hub file (`analysis-conventions.md`) that links to detail files covering specific aspects
+   - See `network/conventions/robust-analysis/` for an example of a multi-file pack
+5. Create the convention pack directory at `network/community-contributed/[name]/`:
+   - `CONVENTION_PACK.yaml` — use template at `skills/core/templates/convention-pack.yaml`
+   - `analysis-conventions.md` — the generalized convention (hub file with progressive disclosure)
+   - `qc-checklist.md` — quality control checklist for applying the convention correctly
+   - Additional reference files for complex conventions (e.g., `statistical-conventions.md`)
+   - `templates/` — reusable templates if applicable
+6. Generate a PR description with:
+   - What the convention covers and why it's useful
+   - Anonymized provenance (number of learnings, time span, but no project names)
+   - Which domains or workflows benefit
+7. Present the pack to the user for review before committing.
 
 ---
 
@@ -190,6 +208,29 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 5. **Log todos**: If future work is identified during the action, add items to `todo/TODO_REGISTRY.md` (and create detailed `todo/[item].md` files for complex items).
 6. **Validate**: Run `skills/core/scripts/validate_structure.py` to confirm repo still conforms.
 7. **Convention feedback**: If any convention pack practices were relevant, note whether they were helpful or had gaps.
+8. **Write session summary**: Write or update `.claude/last-session.md` with a 5-section summary covering ALL work since session start. Use the session summary template:
+
+   ```markdown
+   SESSION RESUME — Last session (YYYY-MM-DD HH:MM):
+
+   ## What was worked on
+   - [Semantic summary of accomplishments — what was built/fixed/analyzed, not file lists]
+
+   ## Key decisions made
+   - [Decision]: [rationale] (see .living/decisions.md for full context)
+
+   ## Blockers & surprises
+   - [Resolved/Unresolved]: [what happened, resolution or current status]
+
+   ## Current state
+   - Branch: X | Tests: N passing | [environment notes]
+   - [Key metrics, uncommitted changes, data state]
+
+   ## Next steps
+   - [Actionable items with specific commands where relevant]
+   ```
+
+   **Full-session coverage**: Run `git log --since=<session-start-timestamp>` and `git diff --stat` to capture all work since session start. If crystallization fires multiple times in a session, each write rebuilds the summary covering the entire session (cumulative, not incremental). The summary should get more expansive as the session progresses.
 
 ### Automated Enforcement (Claude Code Hooks)
 
@@ -197,13 +238,13 @@ Mycelium ships optional hook scripts in `hooks/` that enforce the post-action pr
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `mycelium-health.sh` | SessionStart | Warns if `.living/` is missing or incomplete; records session timestamp; triggers weekly knowledge audit if `~/.claude/knowledge/.last-audit` is >7 days old |
+| `mycelium-health.sh` | SessionStart | Loads `.claude/last-session.md` for session resume (agent + user); warns if `.living/` is missing or incomplete; records session timestamp; triggers weekly knowledge audit if `~/.claude/knowledge/.last-audit` is >7 days old |
 | `mycelium-post-action.sh` | PostToolUse (Bash) | Detects code execution and directs Claude to run the full post-action protocol |
-| `mycelium-stop-check.sh` | Stop | Blocks session end if significant work was done without updating `.living/` |
+| `mycelium-stop-check.sh` | Stop | Checks `.living/` was updated after significant work; warns if session summary (`.claude/last-session.md`) was not written |
 
 **Post-action enforcement**: The PostToolUse hook detects Python/R/Jupyter execution in Bash calls (excluding tests, linting, pip, one-liners) and injects a mandatory directive for Claude to execute the full post-action protocol — saving outputs, updating manifests, and logging to `.living/`. It is **debounced**: fires once per work cycle, then stays silent until `.living/` is updated (completing the cycle). This means Claude receives exactly one directive per burst of analysis work, not one per Bash call. The Stop hook serves as a safety net for non-analysis sessions.
 
-**Stop hook logic**: The stop hook only blocks if `mycelium-post-action.sh` fired during the session (indicated by the presence of `.claude/mycelium-reminded.tmp`) AND `.living/` was not updated afterward. Read-only sessions, config-only sessions, and sessions without code execution are never blocked. When `.living/` is updated after the post-action hook fires, the reminder file is cleaned up automatically at session end.
+**Stop hook logic**: The stop hook checks if `mycelium-post-action.sh` fired during the session (indicated by the presence of `.claude/mycelium-reminded.tmp`). If `.living/` was not updated afterward, it warns. If `.living/` was updated but `.claude/last-session.md` was not written (or is older than the session start), it emits a non-blocking warning reminding you to write the session summary. Read-only sessions, config-only sessions, and sessions without code execution are never checked.
 
 **Installation**: Register the hooks in your project's `.claude/settings.local.json`:
 
@@ -254,9 +295,10 @@ Replace `/path/to/mycelium/` with the absolute path to your mycelium clone.
 When work is dispatched to subagents (main context = coordination only):
 
 1. **Subagents do not need mycelium awareness** — they focus on their implementation task and report results back.
-2. **After all subagent batches complete**, the main context dispatches a crystallization subagent (lightweight model) that:
+2. **After all subagent batches complete**, the main context dispatches a crystallization subagent that:
    - Reviews the summary of what was accomplished
    - Appends entries to `.living/learnings.md` and `.living/decisions.md`
+   - Writes `.claude/last-session.md` using the 5-section session summary template (covering ALL work since session start, not just the latest batch — run `git log --since=<session-start-ts>` and `git diff --stat` to ground the summary in facts)
    - Checks cross-project relevance (if applicable)
 3. **The Stop hook enforces this** — it blocks session end if `.living/` wasn't updated after significant work, catching sessions where the crystallization step was forgotten.
 
