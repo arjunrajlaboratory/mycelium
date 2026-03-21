@@ -53,6 +53,7 @@ ACTIVE_LOG_FILE="$HOME/.claude/active-session-log.tmp"
 if [ -d "$LIVING_DIR" ]; then
   # Ensure log directory and registry exist
   mkdir -p "$LOG_DIR"
+  mkdir -p "$LIVING_DIR/findings"
   if [ ! -f "$LOG_DIR/LOG_REGISTRY.md" ]; then
     cat > "$LOG_DIR/LOG_REGISTRY.md" << 'REGISTRY_EOF'
 # Session Log Registry

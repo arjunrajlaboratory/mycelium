@@ -44,8 +44,11 @@ No domain conventions installed yet. Install with mycelium's `install-convention
     │   ├── report-generator/
     │   └── idea-generator/
     ├── generated-conventions/      — Conventions crystallized from learnings
-    └── log/                        — Append-only event log
-        └── LOG_REGISTRY.md
+    ├── log/                        — Append-only event log
+    │   └── LOG_REGISTRY.md
+    └── findings/                   — Scientific findings by topic
+        ├── FINDINGS_REGISTRY.md
+        └── {topic-slug}.md
 ```
 
 ## Workflow
@@ -75,9 +78,10 @@ No domain conventions installed yet. Install with mycelium's `install-convention
 2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md`
 4. **Log learnings**: If something unexpected happened, append to `.living/learnings.md`
-5. **Log todos**: If future work is identified, add items to `todo/TODO_REGISTRY.md` (create a detailed `todo/[item].md` writeup for complex items)
-6. **Validate**: Run `validate_structure.py` to confirm repo structure is correct
-7. **Convention feedback**: Note whether convention pack practices were helpful or had gaps
+5. **Log findings**: If the work produced a scientific finding (empirical observation, validated/invalidated hypothesis, quantitative result, or domain discovery), crystallize it to `.living/findings/{topic}.md`. Check existing topics first for consistency. Prefer broad topic names. See `skills/core/templates/findings-entry.md` for format.
+6. **Log todos**: If future work is identified, add items to `todo/TODO_REGISTRY.md` (create a detailed `todo/[item].md` writeup for complex items)
+7. **Validate**: Run `validate_structure.py` to confirm repo structure is correct
+8. **Convention feedback**: Note whether convention pack practices were helpful or had gaps
 
 ### Automated Enforcement
 
