@@ -242,7 +242,7 @@ if [ -d "$LIVING_DIR" ]; then
     done
   fi
 
-  # Count findings topics
+  # Count findings topics (exclude INDEX.md and FINDINGS_REGISTRY.md)
   FINDINGS_COUNT=0
   if [ -d "$LIVING_DIR/findings" ]; then
     for _ff in "$LIVING_DIR/findings"/*.md; do
@@ -263,7 +263,7 @@ if [ -d "$LIVING_DIR" ]; then
     done
     if [ -n "$MOST_RECENT_LOG" ]; then
       LAST_SESSION_DATE=$(basename "$MOST_RECENT_LOG" | cut -d'-' -f1-3)
-      # Extract first timestamped entry content (lines after the first ### HH:MM header)
+      # Extract first timestamped entry content (bullet lines after the first ### HH:MM header)
       LAST_SESSION_SNIPPET=$(awk '/^### [0-9][0-9]:[0-9][0-9]/{found=1; next} found && /^-/{print; count++; if(count>=2) exit} found && /^###/{exit}' "$MOST_RECENT_LOG" 2>/dev/null | head -2 | sed 's/^- //' | tr '\n' ' ' | sed 's/  */ /g;s/ $//')
     fi
   fi

@@ -32,7 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Post-action hook protocol for living repository maintenance
 - Reference documents: folder structure, environment setup, analysis conventions, statistical conventions, writing conventions, data ingestion conventions, marketplace guide, skill generation guide
 - Templates: CLAUDE.md, analysis README, manifest entries, decision log, learning entry, LaTeX report, marimo notebook header, algorithm README
-- Scripts (stubs): init_repo, update_manifests, ingest_dataset, validate_structure, install_domain_skill, crystallize_learnings, prepare_contribution
+- Scripts (functional): init_repo, validate_structure, install_domain_skill
+- Scripts (stubs, later removed): update_manifests, ingest_dataset, crystallize_learnings, prepare_contribution — these workflows are now handled agent-driven via mode definitions in core.md
 - `validate_structure.py` — functional validation of mycelium repo structure
 - Bioinformatics domain skill pack: RNA-seq and single-cell conventions, statistical methods, QC checklist, templates
 - Image analysis domain skill pack: segmentation standards, preprocessing conventions, QC checklist, templates

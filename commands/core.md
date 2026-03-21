@@ -58,7 +58,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 2. Determine data type, source, and format.
 3. If a domain convention is active, check its conventions for domain-specific validation.
 4. Place raw data in `data/raw/[dataset-name]/`.
-5. Generate metadata (schema, provenance, summary statistics) in `data/metadata/[dataset-name]/`.
+5. Generate metadata in `data/metadata/[dataset-name]/` using templates: `skills/core/templates/schema.yaml` for column definitions, `skills/core/templates/provenance.md` for source documentation, and `skills/core/templates/summary_stats.md` for statistical overview.
 6. Update `data/DATA_MANIFEST.md` with new entry (use `skills/core/templates/dataset-manifest-entry.yaml`).
 7. Log any decisions about data cleaning or exclusion to `.living/decisions.md`.
 8. Run the post-action hook protocol (see below).
@@ -91,13 +91,14 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 
 **Steps**:
 1. Consult `skills/core/references/skill-generation-guide.md`.
-2. Read `.living/learnings.md` and `.living/decisions.md`.
-3. Identify recurring patterns (look for similar tags, repeated problems, evolving conventions).
-4. **Promote transferable knowledge**: For patterns that apply beyond the current project, write entries to the matching global domain file in `~/.claude/knowledge/{domain}.md` using the structured entry template (What/Evidence/When useful/Scope/Status/Last validated). Set `status: unreviewed` — the weekly audit will confirm.
-5. Propose new convention documents or checklists for project-specific patterns.
-6. Draft them in `.living/generated-conventions/[name]/`.
-7. Include `ORIGIN.md` linking back to the learnings that spawned it.
-8. Ask user if they want to contribute it back to the network.
+2. Consult `skills/core/templates/learning-entry.md` for the entry format used in learnings.md (entries start with `## [YYYY-MM-DD]` and have **Category**, **Tags** fields — use Tags for pattern clustering).
+3. Read `.living/learnings.md` and `.living/decisions.md`.
+4. Identify recurring patterns using the thresholds defined in `skill-generation-guide.md` — minimum 3 related entries sharing tags or themes. See the worked example in that guide for the complete input→output transformation.
+5. **Promote transferable knowledge**: For patterns that apply beyond the current project, write entries to the matching global domain file in `~/.claude/knowledge/{domain}.md` using the structured entry template (What/Evidence/When useful/Scope/Status/Last validated). Set `status: unreviewed` — the weekly audit will confirm.
+6. Propose new convention documents or checklists for project-specific patterns.
+7. Draft them in `.living/generated-conventions/[name]/` using the template at `skills/core/templates/generated-convention.md`.
+8. Include `ORIGIN.md` linking back to the learnings that spawned it.
+9. Ask user if they want to contribute it back to the network.
 
 ---
 
