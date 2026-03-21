@@ -361,17 +361,249 @@ def create_environments_file(target_dir: Path):
         print("  Created: ENVIRONMENTS_INSTALLATIONS.md")
 
 
-def audit_existing_structure(target_dir: Path):
+def audit_existing_structure(target_dir: Path) -> dict:
     """Audit an existing repo and report what needs to change."""
-    # TODO: Walk the directory tree and identify:
-    #   - Existing data directories that should map to data/raw/ or data/processed/
-    #   - Existing analysis scripts that should become analysis/[name]/ directories
-    #   - Existing documentation that could become reference_material/
-    #   - Files that don't fit the mycelium structure
+    # Directories to skip entirely during traversal
+    SKIP_DIRS = {
+        ".git",
+        "__pycache__",
+        ".venv",
+        "node_modules",
+        ".mypy_cache",
+        ".ruff_cache",
+    }
+
+    # Extension sets for classification
+    DATA_EXTS = {
+        ".csv",
+        ".tsv",
+        ".parquet",
+        ".h5",
+        ".h5ad",
+        ".hdf5",
+        ".zarr",
+        ".npy",
+        ".npz",
+        ".feather",
+        ".arrow",
+        ".xlsx",
+        ".xls",
+        ".fasta",
+        ".fastq",
+        ".bam",
+        ".bed",
+        ".vcf",
+        ".gff",
+        ".gtf",
+        ".mzML",
+        ".mzXML",
+    }
+    SCRIPT_EXTS = {".py", ".R", ".Rmd", ".ipynb", ".jl"}
+    DOC_EXTS = {".md", ".rst", ".txt", ".pdf", ".docx"}
+    ALGORITHM_DIR_NAMES = {"methods", "utils", "lib", "tools", "algorithms"}
+
+    # Mycelium-managed top-level directories (already placed)
+    PLACED_PREFIXES = {
+        "data",
+        "analysis",
+        "algorithms",
+        "reference_material",
+        ".living",
+        "todo",
+    }
+
+    # Sub-classification hints for data files
+    RAW_HINTS = {"raw", "original", "download", "downloads"}
+    PROCESSED_HINTS = {"processed", "clean", "filtered", "normalized"}
+    META_HINTS = {"meta", "metadata"}
+
+    def classify_data_destination(path: Path) -> str:
+        parts_lower = {p.lower() for p in path.parts}
+        if parts_lower & META_HINTS:
+            return "data_metadata"
+        if parts_lower & PROCESSED_HINTS:
+            return "data_processed"
+        # raw is the default, also matches explicit raw hints
+        return "data_raw"
+
+    def get_analysis_group(path: Path) -> str:
+        """Group analysis scripts by parent directory name or file stem."""
+        parent = path.parent.name
+        if parent and parent not in {".", ""} and parent != target_dir.name:
+            return parent
+        return path.stem
+
+    def get_algorithm_group(path: Path) -> str:
+        parent = path.parent.name
+        if parent and parent not in {".", ""} and parent != target_dir.name:
+            return parent
+        return path.stem
+
+    # Accumulate results
+    plan: dict = {
+        "data_raw": [],
+        "data_processed": [],
+        "data_metadata": [],
+        "analysis": {},
+        "reference_material": [],
+        "algorithms": {},
+        "already_placed": [],
+        "unclassified": [],
+        "total_scanned": 0,
+        "total_moves": 0,
+    }
+
     print("  Auditing existing structure...")
-    print("  TODO: Full audit implementation")
-    print("  Would scan for existing data, analyses, and documentation")
-    print("  Would propose a migration plan for user confirmation")
+
+    for path in sorted(target_dir.rglob("*")):
+        if not path.is_file():
+            continue
+
+        # Skip hidden directories and known noise dirs
+        rel = path.relative_to(target_dir)
+        parts = rel.parts
+        if any(p.startswith(".") and p not in {".living"} for p in parts[:-1]):
+            continue
+        if any(p in SKIP_DIRS for p in parts):
+            continue
+
+        plan["total_scanned"] += 1
+        ext = path.suffix.lower()
+        top_level = parts[0] if len(parts) > 1 else ""
+
+        # Already placed inside mycelium structure
+        if top_level in PLACED_PREFIXES:
+            plan["already_placed"].append(str(rel))
+            continue
+
+        # Data files
+        if ext in DATA_EXTS:
+            dest = classify_data_destination(rel)
+            suggested = f"{dest.replace('_', '/')}/{path.name}"
+            plan[dest].append((str(rel), suggested))
+            continue
+
+        # Algorithm/method files: .py in algorithm-named dirs
+        if ext == ".py" and top_level.lower() in ALGORITHM_DIR_NAMES:
+            group = get_algorithm_group(rel)
+            plan["algorithms"].setdefault(group, []).append(str(rel))
+            continue
+
+        # Analysis scripts
+        if ext in SCRIPT_EXTS:
+            # Skip setup.py and similar repo-level Python files at root
+            if (
+                len(parts) == 1
+                and ext == ".py"
+                and path.stem in {"setup", "conftest", "noxfile"}
+            ):
+                plan["unclassified"].append(str(rel))
+                continue
+            group = get_analysis_group(rel)
+            plan["analysis"].setdefault(group, []).append(str(rel))
+            continue
+
+        # Documentation
+        if ext in DOC_EXTS:
+            # Skip top-level READMEs and changelogs
+            if len(parts) == 1 and path.stem.upper() in {
+                "README",
+                "CHANGELOG",
+                "LICENSE",
+                "CONTRIBUTING",
+                "AUTHORS",
+            }:
+                plan["unclassified"].append(str(rel))
+                continue
+            plan["reference_material"].append(
+                (str(rel), f"reference_material/{path.name}")
+            )
+            continue
+
+        # Everything else
+        plan["unclassified"].append(str(rel))
+
+    # Compute total_moves
+    moves = (
+        len(plan["data_raw"])
+        + len(plan["data_processed"])
+        + len(plan["data_metadata"])
+        + sum(len(v) for v in plan["analysis"].values())
+        + len(plan["reference_material"])
+        + sum(len(v) for v in plan["algorithms"].values())
+    )
+    plan["total_moves"] = moves
+
+    # --- Print structured report ---
+    print("\n=== Audit Report ===")
+
+    # Data files
+    data_count = (
+        len(plan["data_raw"]) + len(plan["data_processed"]) + len(plan["data_metadata"])
+    )
+    print(f"\nDATA FILES ({data_count} files → data/)")
+    for bucket, label in [
+        ("data_raw", "data/raw/"),
+        ("data_processed", "data/processed/"),
+        ("data_metadata", "data/metadata/"),
+    ]:
+        if plan[bucket]:
+            print(f"  {label}:")
+            for current, _ in plan[bucket]:
+                parent = (
+                    str(Path(current).parent)
+                    if str(Path(current).parent) != "."
+                    else "root"
+                )
+                print(f"    - {current} (currently: {parent})")
+
+    # Analysis scripts
+    script_count = sum(len(v) for v in plan["analysis"].values())
+    print(f"\nANALYSIS SCRIPTS ({script_count} files → analysis/)")
+    for group, files in sorted(plan["analysis"].items()):
+        print(f"  analysis/{group}/:")
+        for f in files:
+            parent = str(Path(f).parent) if str(Path(f).parent) != "." else "root"
+            print(f"    - {f} (currently: {parent})")
+
+    # Reference material
+    ref_count = len(plan["reference_material"])
+    print(f"\nREFERENCE MATERIAL ({ref_count} files → reference_material/)")
+    for current, _ in plan["reference_material"]:
+        parent = (
+            str(Path(current).parent) if str(Path(current).parent) != "." else "root"
+        )
+        print(f"    - {current} (currently: {parent})")
+
+    # Algorithms
+    algo_count = sum(len(v) for v in plan["algorithms"].values())
+    print(f"\nALGORITHMS ({algo_count} files → algorithms/)")
+    for group, files in sorted(plan["algorithms"].items()):
+        print(f"  algorithms/{group}/:")
+        for f in files:
+            parent = str(Path(f).parent) if str(Path(f).parent) != "." else "root"
+            print(f"    - {f} (currently: {parent})")
+
+    # Already placed
+    placed_count = len(plan["already_placed"])
+    print(f"\nALREADY IN PLACE ({placed_count} files)")
+    for f in plan["already_placed"]:
+        print(f"    - {f}")
+
+    # Unclassified
+    unclass_count = len(plan["unclassified"])
+    print(f"\nUNCLASSIFIED ({unclass_count} files)")
+    for f in plan["unclassified"]:
+        print(f"    - {f}")
+
+    print(
+        f"\nSummary: {plan['total_scanned']} files scanned, "
+        f"{plan['total_moves']} would be moved, "
+        f"{placed_count} already placed, "
+        f"{unclass_count} unclassified"
+    )
+
+    return plan
 
 
 def main():
@@ -383,7 +615,10 @@ def main():
 
     if args.restructure:
         print("\nMode: Restructure existing repository")
-        audit_existing_structure(target_dir)
+        plan = audit_existing_structure(target_dir)
+        print(
+            f"\nRestructure plan: {plan['total_moves']} files to move, {len(plan['unclassified'])} unclassified."
+        )
         print("\nRestructure mode requires user confirmation before proceeding.")
         print("TODO: Implement interactive restructure workflow")
         return
