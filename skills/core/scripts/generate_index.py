@@ -117,9 +117,15 @@ def skills_section(living_dir: Path) -> str | None:
 
     entries = sorted(p.name for p in skills_dir.iterdir())
     if not entries:
-        return "## Local skills\nSee `.living/skills/` for project-specific skill packs.\n"
+        return (
+            "## Local skills\nSee `.living/skills/` for project-specific skill packs.\n"
+        )
 
-    lines = ["## Local skills", "See `.living/skills/` for project-specific skill packs.", ""]
+    lines = [
+        "## Local skills",
+        "See `.living/skills/` for project-specific skill packs.",
+        "",
+    ]
     for entry in entries:
         lines.append(f"- `{entry}`")
     return "\n".join(lines) + "\n"
@@ -129,7 +135,9 @@ def generate_index(living_dir: Path) -> str:
     """Build and return INDEX.md content."""
     today = datetime.now().strftime("%Y-%m-%d")
 
-    md_files = sorted(p for p in living_dir.glob("*.md") if p.name.lower() != "index.md")
+    md_files = sorted(
+        p for p in living_dir.glob("*.md") if p.name.lower() != "index.md"
+    )
 
     rows: list[tuple[str, str, str, str]] = []
 
@@ -144,6 +152,36 @@ def generate_index(living_dir: Path) -> str:
         topics = ", ".join(keywords) if keywords else "—"
 
         rows.append((md_path.name, label, updated, topics))
+
+    # Log directory stats
+    log_dir = living_dir / "log"
+    if log_dir.is_dir():
+        log_files = [
+            f
+            for f in log_dir.glob("*.md")
+            if f.name not in ("REGISTRY.md", "LOG_REGISTRY.md")
+        ]
+        log_count = len(log_files)
+        if log_count > 0:
+            last_log = max(log_files, key=lambda f: f.stat().st_mtime)
+            last_date = datetime.fromtimestamp(last_log.stat().st_mtime).strftime(
+                "%Y-%m-%d"
+            )
+
+            # Count sessions per project from filenames
+            project_counts: dict[str, int] = {}
+            for f in log_files:
+                parts = f.stem.split("-", 4)  # YYYY-MM-DD-NNN-slug
+                if len(parts) >= 5:
+                    slug = parts[4]
+                    project_counts[slug] = project_counts.get(slug, 0) + 1
+
+            project_summary = ", ".join(
+                f"{slug} ({count})"
+                for slug, count in sorted(project_counts.items(), key=lambda x: -x[1])
+            )
+
+            rows.append(("log/", f"{log_count} sessions", last_date, project_summary))
 
     # Build table
     lines: list[str] = [
@@ -166,7 +204,9 @@ def generate_index(living_dir: Path) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate .living/INDEX.md for a project.")
+    parser = argparse.ArgumentParser(
+        description="Generate .living/INDEX.md for a project."
+    )
     parser.add_argument(
         "--living-dir",
         required=True,

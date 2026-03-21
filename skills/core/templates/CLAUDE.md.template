@@ -43,7 +43,9 @@ No domain conventions installed yet. Install with mycelium's `install-convention
     │   ├── robust-analysis/
     │   ├── report-generator/
     │   └── idea-generator/
-    └── generated-conventions/      — Conventions crystallized from learnings
+    ├── generated-conventions/      — Conventions crystallized from learnings
+    └── log/                        — Append-only event log
+        └── LOG_REGISTRY.md
 ```
 
 ## Workflow
