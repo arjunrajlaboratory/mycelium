@@ -94,7 +94,7 @@ project-root/
 │   ├── conventions/              # Installed convention packs
 │   ├── generated-conventions/    # Conventions crystallized from learnings
 │   └── log/                      # Append-only event log
-│       └── REGISTRY.md
+│       └── LOG_REGISTRY.md
 ├── algorithms/                   # Reusable methods (with ALGORITHM_MANIFEST.md)
 ├── analysis/                     # Analytical work (with ANALYSIS_MANIFEST.md)
 ├── data/                         # Data assets (with DATA_MANIFEST.md)

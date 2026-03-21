@@ -64,7 +64,7 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
       echo "   - **Blocked**: anything unresolved"
       echo "   - **Files changed**: ${FILES_CHANGED}"
       echo "   - **Key outputs**: notable artifacts produced"
-      echo "3. Append a row to ${LOG_DIR}/REGISTRY.md with all fields filled."
+      echo "3. Append a row to ${LOG_DIR}/LOG_REGISTRY.md with all fields filled."
       echo "   IMPORTANT: Use the 'project' value from the log frontmatter as the Project column (the slug, not a human-friendly name)."
       echo ""
       echo "Do this NOW before the session ends."

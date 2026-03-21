@@ -45,7 +45,7 @@ No domain conventions installed yet. Install with mycelium's `install-convention
     │   └── idea-generator/
     ├── generated-conventions/      — Conventions crystallized from learnings
     └── log/                        — Append-only event log
-        └── REGISTRY.md
+        └── LOG_REGISTRY.md
 ```
 
 ## Workflow
