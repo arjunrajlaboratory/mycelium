@@ -413,7 +413,6 @@ def audit_existing_structure(target_dir: Path) -> dict:
     }
 
     # Sub-classification hints for data files
-    RAW_HINTS = {"raw", "original", "download", "downloads"}
     PROCESSED_HINTS = {"processed", "clean", "filtered", "normalized"}
     META_HINTS = {"meta", "metadata"}
 
@@ -423,7 +422,6 @@ def audit_existing_structure(target_dir: Path) -> dict:
             return "data_metadata"
         if parts_lower & PROCESSED_HINTS:
             return "data_processed"
-        # raw is the default, also matches explicit raw hints
         return "data_raw"
 
     def get_analysis_group(path: Path) -> str:
