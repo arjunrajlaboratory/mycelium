@@ -145,7 +145,7 @@ def create_living_layer(target_dir: Path):
             print(f"  Created: .living/{filename}")
 
     # Session log registry
-    registry_path = living_dir / "log" / "REGISTRY.md"
+    registry_path = living_dir / "log" / "LOG_REGISTRY.md"
     if not registry_path.exists():
         registry_path.write_text(
             "# Session Log Registry\n\n"
@@ -154,7 +154,7 @@ def create_living_layer(target_dir: Path):
             "|------|-----------|---------|--------|----------|---------------"
             "|---------|-------------|--------|------|-----|\n"
         )
-        print("  Created: .living/log/REGISTRY.md")
+        print("  Created: .living/log/LOG_REGISTRY.md")
 
     # Create ACTIVE_CONVENTIONS.yaml
     conventions_yaml = living_dir / "conventions" / "ACTIVE_CONVENTIONS.yaml"

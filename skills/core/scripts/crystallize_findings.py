@@ -157,7 +157,7 @@ def build_cross_project_index(meta_root: Path) -> str:
 
     for findings_dir, project_name in subproject_dirs:
         for topic_file in sorted(findings_dir.glob("*.md")):
-            if topic_file.name == "INDEX.md":
+            if topic_file.name in {"INDEX.md", "FINDINGS_REGISTRY.md"}:
                 continue
 
             info = parse_topic_file(topic_file)
@@ -234,6 +234,120 @@ def build_cross_project_index(meta_root: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
+def rebuild_project_registry(findings_dir: Path) -> None:
+    """Rebuild FINDINGS_REGISTRY.md for a single project's findings directory.
+
+    Scans all topic files, extracts per-finding metadata, and writes/overwrites
+    .living/findings/FINDINGS_REGISTRY.md with a sorted table of all findings.
+    """
+    rows: list[dict] = []
+
+    for topic_file in sorted(findings_dir.glob("*.md")):
+        if topic_file.name in {"INDEX.md", "FINDINGS_REGISTRY.md"}:
+            continue
+
+        topic_slug = topic_file.stem
+        content = topic_file.read_text(encoding="utf-8", errors="replace")
+        lines = content.splitlines()
+
+        # Split into per-finding sections by ## F-NNN headers
+        current_id: str | None = None
+        current_lines: list[str] = []
+        sections: list[tuple[str, list[str]]] = []
+
+        for line in lines:
+            match = re.match(r"^## (F-\d+)", line)
+            if match:
+                if current_id is not None:
+                    sections.append((current_id, current_lines))
+                current_id = match.group(1)
+                current_lines = []
+            elif current_id is not None:
+                current_lines.append(line)
+
+        if current_id is not None:
+            sections.append((current_id, current_lines))
+
+        for finding_id, finding_lines in sections:
+            claim = ""
+            status = "preliminary"
+            implications = ""
+            tags = ""
+            last_evidence_date = ""
+
+            in_evidence = False
+            for line in finding_lines:
+                claim_match = re.match(r"\*\*Claim:\*\*\s*(.*)", line)
+                if claim_match:
+                    claim = claim_match.group(1).strip()
+
+                status_match = re.match(r"\*\*Status:\*\*\s*(\w+)", line)
+                if status_match:
+                    status = status_match.group(1).lower()
+
+                impl_match = re.match(r"\*\*Implications:\*\*\s*(.*)", line)
+                if impl_match:
+                    implications = impl_match.group(1).strip()
+
+                tags_match = re.match(r"\*\*Tags:\*\*\s*(.*)", line)
+                if tags_match:
+                    tags = tags_match.group(1).strip()
+
+                # Detect Evidence Ledger table rows (| date | ... |)
+                if line.startswith("### Evidence Ledger"):
+                    in_evidence = True
+                    continue
+                if in_evidence and line.startswith("#"):
+                    in_evidence = False
+                if in_evidence:
+                    # Match table data rows: | YYYY-MM-DD | ...
+                    date_match = re.match(r"\|\s*(\d{4}-\d{2}-\d{2})\s*\|", line)
+                    if date_match:
+                        last_evidence_date = date_match.group(1)
+
+            rows.append(
+                {
+                    "id": finding_id,
+                    "claim": claim or "(no claim)",
+                    "status": status,
+                    "topic_slug": topic_slug,
+                    "implications": implications or "",
+                    "tags": tags or "",
+                    "last_updated": last_evidence_date,
+                }
+            )
+
+    if not rows:
+        return
+
+    # Sort by finding ID numerically
+    rows.sort(key=lambda r: int(r["id"].split("-")[1]))
+
+    template_header = (
+        "# Findings Registry\n"
+        "\n"
+        "> Per-project index of all scientific findings."
+        " See topic files for full evidence ledgers.\n"
+        "\n"
+        "| ID | Claim | Status | Topic | Implications | Tags | Last Updated |\n"
+        "|----|-------|--------|-------|--------------|------|--------------|"
+    )
+
+    table_rows = []
+    for r in rows:
+        table_rows.append(
+            f"| {r['id']} | {r['claim']} | {r['status']}"
+            f" | [{r['topic_slug']}]({r['topic_slug']}.md)"
+            f" | {r['implications']} | {r['tags']} | {r['last_updated']} |"
+        )
+
+    registry_path = findings_dir / "FINDINGS_REGISTRY.md"
+    registry_path.write_text(
+        template_header + "\n" + "\n".join(table_rows) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build cross-project findings INDEX.md"
@@ -272,6 +386,13 @@ def main() -> int:
     index_path = findings_dir / "INDEX.md"
     index_path.write_text(content, encoding="utf-8")
     print(f"INDEX.md written to {index_path}")
+
+    # Rebuild per-project FINDINGS_REGISTRY.md for each subproject
+    subproject_dirs = _find_subproject_findings_dirs(meta_root)
+    for subproject_findings_dir, project_name in subproject_dirs:
+        rebuild_project_registry(subproject_findings_dir)
+        print(f"FINDINGS_REGISTRY.md rebuilt for {project_name}")
+
     return 0
 
 

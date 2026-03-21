@@ -156,7 +156,11 @@ def generate_index(living_dir: Path) -> str:
     # Log directory stats
     log_dir = living_dir / "log"
     if log_dir.is_dir():
-        log_files = [f for f in log_dir.glob("*.md") if f.name != "REGISTRY.md"]
+        log_files = [
+            f
+            for f in log_dir.glob("*.md")
+            if f.name not in ("REGISTRY.md", "LOG_REGISTRY.md")
+        ]
         log_count = len(log_files)
         if log_count > 0:
             last_log = max(log_files, key=lambda f: f.stat().st_mtime)
@@ -182,7 +186,11 @@ def generate_index(living_dir: Path) -> str:
     # --- Findings directory stats ---
     findings_dir = living_dir / "findings"
     if findings_dir.is_dir():
-        topic_files = [f for f in findings_dir.glob("*.md") if f.name != "INDEX.md"]
+        topic_files = [
+            f
+            for f in findings_dir.glob("*.md")
+            if f.name not in {"INDEX.md", "FINDINGS_REGISTRY.md"}
+        ]
         topic_count = len(topic_files)
         if topic_count > 0:
             last_topic = max(topic_files, key=lambda f: f.stat().st_mtime)

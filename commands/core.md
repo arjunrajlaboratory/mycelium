@@ -36,7 +36,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 6. Generate `CLAUDE.md` for the repo (from `skills/core/templates/CLAUDE.md.template`) that encodes the living repo protocol.
 7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
 8. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
-9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`; create `.living/log/REGISTRY.md` (session log registry — tracks work across sessions).
+9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`; create `.living/log/LOG_REGISTRY.md` (session log registry — tracks work across sessions).
 10. **Bootstrap knowledge system**: If `~/.claude/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py`. Append the domain routing table to the project's MEMORY.md if not already present (from `skills/core/templates/knowledge/domain-table.md`).
 11. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
 12. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
@@ -119,9 +119,10 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
    - **Existing topic match** → append to `{project}/.living/findings/{topic-slug}.md` using the entry template from `skills/core/templates/findings-entry.md`.
    - **No match** → create new `{project}/.living/findings/{topic-slug}.md` using the topic template from `skills/core/templates/findings-topic.md`.
 6. **Topic naming principle**: Prefer broad scientific questions. No project names, organ names, species names, or method names in slugs. Test: "Would a researcher in a different system recognize this as relevant?"
-7. Run `python3 skills/core/scripts/crystallize_findings.py` to rebuild the cross-project INDEX.md.
-8. **Consolidation pass** (if invoked explicitly): Scan all topics across all projects, flag potential duplicates (overlapping tags or similar descriptions), and suggest merges to the user.
-9. Return single-line summary: "Added N findings to M topics (N new topics created)."
+7. **After writing each finding**, upsert a row in `.living/findings/FINDINGS_REGISTRY.md`. If the file doesn't exist, create it from `skills/core/templates/findings-registry.md`. Match on finding ID (F-NNN) — update the existing row if the ID is already present, or append a new row. Columns: ID, Claim, Status, Topic (link to topic file), Implications, Tags, Last Updated.
+8. Run `python3 skills/core/scripts/crystallize_findings.py` to rebuild the cross-project INDEX.md and regenerate all per-project FINDINGS_REGISTRY.md files from the topic file source of truth.
+9. **Consolidation pass** (if invoked explicitly): Scan all topics across all projects, flag potential duplicates (overlapping tags or similar descriptions), and suggest merges to the user.
+10. Return single-line summary: "Added N findings to M topics (N new topics created)."
 
 ---
 
