@@ -13,6 +13,7 @@ INPUT=$(cat)
 
 # Initialize message accumulator
 MESSAGES=""
+NOW_TS=$(date +%s)
 
 # Extract cwd from input
 CWD=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cwd', ''))" 2>/dev/null || echo "")
@@ -29,6 +30,20 @@ fi
 # Always record session-start timestamp for the stop hook
 mkdir -p "$REPO_ROOT/.claude"
 date +%s > "$REPO_ROOT/.claude/session-start-ts.tmp"
+
+# Clean up stale sentinels from crashed sessions
+# These are per-repo, so safe to clean on fresh session start
+if [ -f "$REPO_ROOT/.claude/mycelium-reminded.tmp" ]; then
+  # Check if the reminder is from a previous session (older than session-start-ts)
+  STALE_TS=$(cat "$REPO_ROOT/.claude/mycelium-reminded.tmp" 2>/dev/null || echo "0")
+  NOW_TS=$(date +%s)
+  STALE_AGE=$(( NOW_TS - STALE_TS ))
+  # If older than 1 hour, it's definitely stale (sessions rarely last >1h)
+  if [ "$STALE_AGE" -gt 3600 ]; then
+    rm -f "$REPO_ROOT/.claude/mycelium-reminded.tmp"
+    rm -f "$REPO_ROOT/.claude/mycelium-session-activity.tmp"
+  fi
+fi
 
 # --- Knowledge audit check (runs regardless of SOURCE) ---
 KNOWLEDGE_DIR="$HOME/.claude/knowledge"
@@ -48,9 +63,9 @@ fi
 # --- Session log setup (runs every invocation, idempotent) ---
 LIVING_DIR="$REPO_ROOT/.living"
 LOG_DIR="$LIVING_DIR/log"
-ACTIVE_LOG_FILE="$HOME/.claude/active-session-log.tmp"
 
 if [ -d "$LIVING_DIR" ]; then
+  ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
   # Ensure log directory and registry exist
   mkdir -p "$LOG_DIR"
   mkdir -p "$LIVING_DIR/findings"

@@ -57,7 +57,9 @@ fi
 
 mkdir -p "$REPO_ROOT/.claude"
 ACTIVITY_FILE="$REPO_ROOT/.claude/mycelium-session-activity.tmp"
-echo "$FILE_PATH" >> "$ACTIVITY_FILE"
+if ! grep -qxF "$FILE_PATH" "$ACTIVITY_FILE" 2>/dev/null; then
+  echo "$FILE_PATH" >> "$ACTIVITY_FILE"
+fi
 
 # --- Create reminder file if it doesn't exist (triggers stop hook) ---
 # Only on first activity — don't overwrite timestamp from post-action hook

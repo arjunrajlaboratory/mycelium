@@ -20,14 +20,17 @@ if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 
+# Determine repo root early (used by both log finalization and .living/ checks)
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+
 # --- Session log finalization ---
-ACTIVE_LOG_FILE="$HOME/.claude/active-session-log.tmp"
-if [ -f "$ACTIVE_LOG_FILE" ]; then
+ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
+if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
   LOG_PATH=$(cat "$ACTIVE_LOG_FILE")
 
   if [ -f "$LOG_PATH" ]; then
     # Compute session duration
-    LOG_REPO=$(dirname "$(dirname "$(dirname "$LOG_PATH")")")  # .living/log/file -> repo root
+    LOG_REPO="$REPO_ROOT"
     START_FILE="$LOG_REPO/.claude/session-start-ts.tmp"
     NOW_TS=$(date +%s)
     DURATION_MIN=0
@@ -55,6 +58,7 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
     if [ "$DURATION_MIN" -lt 5 ] && [ "$FILES_CHANGED" -eq 0 ]; then
       rm -f "$LOG_PATH"
       rm -f "$ACTIVE_LOG_FILE"
+      rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
       # No registry row, no finalization — clean exit
     else
       # Auto-finalize the session log (factual record — no Claude needed)
@@ -117,19 +121,20 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
         echo "| $(date +%Y-%m-%d) | ${SESSION_ID} | ${PROJECT_SLUG} | ${BRANCH} | ${DURATION_MIN}m | ${FILES_CHANGED} | ${SUMMARY} | | complete | | [log](${SESSION_ID}-${PROJECT_SLUG}.md) |" >> "$LOG_DIR/LOG_REGISTRY.md"
       fi
 
-      # Clean up sentinel
+      # Clean up sentinels
       rm -f "$ACTIVE_LOG_FILE"
+      rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
     fi
   else
-    # Log file doesn't exist (was deleted?) — clean up sentinel
+    # Log file doesn't exist (was deleted?) — clean up sentinels
     rm -f "$ACTIVE_LOG_FILE"
+    rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
   fi
 fi
 
-# Find git repo root from cwd
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+# Not in a git repo — nothing further to check
 if [ -z "$REPO_ROOT" ]; then
-  exit 0  # Not in a git repo, nothing to check
+  exit 0
 fi
 
 # If no .living/ directory, skip (SessionStart hook handles scaffolding)
@@ -190,14 +195,13 @@ if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$FIN
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
 
-  # Check if session summary was written (non-blocking warning)
+  # Check if session summary was written (non-blocking reminder)
+  # Note: session-start-ts.tmp is already deleted by log finalization, so use START_TS variable
   SESSION_FILE="$REPO_ROOT/.claude/last-session.md"
-  SESSION_START_FILE="$REPO_ROOT/.claude/session-start-ts.tmp"
-  if [ -f "$SESSION_START_FILE" ]; then
-    START_MTIME=$(stat -f "%m" "$SESSION_START_FILE" 2>/dev/null || stat -c "%Y" "$SESSION_START_FILE" 2>/dev/null || echo "0")
+  if [ -n "${START_TS:-}" ]; then
     SESSION_MTIME=$(stat -f "%m" "$SESSION_FILE" 2>/dev/null || stat -c "%Y" "$SESSION_FILE" 2>/dev/null || echo "0")
-    if [ "$SESSION_MTIME" -lt "$START_MTIME" ] || [ ! -f "$SESSION_FILE" ]; then
-      echo "Reminder: write .claude/last-session.md for next-session context."
+    if [ "$SESSION_MTIME" -lt "$START_TS" ] || [ ! -f "$SESSION_FILE" ]; then
+      printf '{"additionalContext": "Write .claude/last-session.md with a brief summary of what was worked on, current state, and next steps — this provides context for your next session."}\n'
     fi
   fi
 
