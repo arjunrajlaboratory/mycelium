@@ -240,36 +240,7 @@ if [ -f "$ACTIVITY_FILE" ]; then
   FILE_NAMES=$(sort -u "$ACTIVITY_FILE" | head -15 | xargs -I {} basename {} 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
 fi
 
-# --- Session-end triage instructions (used in both pass and block paths) ---
-read -r -d '' TRIAGE_INSTRUCTIONS << 'TRIAGE_EOF' || true
-MYCELIUM SESSION-END PROTOCOL — Dispatch a sonnet subagent (max_turns: 10) to:
-
-**Phase 1 — Triage** (ROUTE CORRECTLY — do NOT dump everything into learnings.md):
-- Empirical observations, measurements, quantitative results? → findings/{topic}.md (NOT learnings.md)
-- Standards/rules/patterns to follow in future work? → conventions.md (NOT learnings.md)
-- Unexpected behaviors, gotchas, one-time fixes? → learnings.md
-- Non-obvious design choices with tradeoffs? → decisions.md
-- Insights beyond this project? → also ~/.claude/knowledge/{domain}.md (status: unreviewed)
-
-  ROUTING RULE: If the entry contains a NUMBER (p-value, percentage, count, threshold)
-  or a BIOLOGICAL CLAIM, it belongs in findings/, not learnings.md.
-  If the entry says "always", "never", "must", or "should", it belongs in conventions.md.
-
-**Phase 2 — Record** (for each YES above, append to the appropriate file):
-- learnings.md: ### YYYY-MM-DD: {title} with Category/What happened/Why it matters/Resolution/Tags
-- decisions.md: ### YYYY-MM-DD: {title} with Context/Decision/Alternatives/Rationale/Consequences/Tags
-- conventions.md: ## {Section} / ### {Title} with Scope/Rule/Why
-- findings/{topic}.md: ## F-NNN: {claim} with Status/Claim/Implications/Tags + Evidence Ledger row
-  - Topic naming: broad scientific questions (not project/method names)
-  - Status: preliminary (1 entry), supported (2+ no contradictions), robust (3+ cross-dataset)
-
-**Phase 3 — Enhance last-session.md** (overwrite .claude/last-session.md with 5 sections):
-1. What was worked on (grounded in git log --since=@session-start)
-2. Key decisions made (with rationale)
-3. Blockers/surprises (resolved and unresolved)
-4. Current state (branch, tests, uncommitted changes)
-5. Next steps (specific actions, not vague)
-TRIAGE_EOF
+# --- Session-end triage (short signals — full protocol is in the mycelium skill) ---
 
 # If any was updated after the post-action hook fired, protocol was followed
 if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$CONVENTIONS_UPDATED" = true ] || [ "$FINDINGS_UPDATED" = true ]; then
@@ -277,16 +248,15 @@ if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$CON
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
 
-  # Emit non-blocking enhancement prompt (baseline last-session.md already written)
-  ENHANCE_MSG="SESSION COMPLETE (${FILE_COUNT} files: ${FILE_NAMES}). .living/ was updated — good. Now enhance .claude/last-session.md with semantic context:\n\n${TRIAGE_INSTRUCTIONS}"
+  # Emit non-blocking context (baseline last-session.md already written)
+  ENHANCE_MSG=".living/ updated. Enhance .claude/last-session.md (5 sections: work, decisions, blockers, state, next steps)."
   ESCAPED_ENHANCE=$(printf '%s' "$ENHANCE_MSG" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
   printf '{"additionalContext": %s}\n' "$ESCAPED_ENHANCE"
   exit 0
 fi
 
 # Block: work happened but .living/ was never updated
-REASON="STOP BLOCKED — ${FILE_COUNT} files changed (${FILE_NAMES}) but .living/ not updated.\n\n${TRIAGE_INSTRUCTIONS}"
+REASON="STOP BLOCKED — ${FILE_COUNT} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update last-session.md."
 
-# Use Python json.dumps to safely escape the reason string (handles newlines, special chars)
 ESCAPED_REASON=$(printf '%s' "$REASON" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
 printf '{"decision": "block", "reason": %s}\n' "$ESCAPED_REASON"
