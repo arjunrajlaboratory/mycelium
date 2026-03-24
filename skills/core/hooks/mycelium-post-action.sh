@@ -65,8 +65,8 @@ if echo "$COMMAND" | grep -qE 'python3?\s+-c\s+'; then
   exit 0
 fi
 
-# python -m (module execution — pytest/unittest already caught above)
-if echo "$COMMAND" | grep -qE 'python3?\s+-m\s+'; then
+# python -m (only skip known non-analysis modules)
+if echo "$COMMAND" | grep -qE 'python3?\s+-m\s+(pip|venv|ensurepip|compileall|site|http\.server|json\.tool|zipfile|tarfile|timeit|cProfile|pdb|doctest|pydoc)'; then
   exit 0
 fi
 
@@ -89,7 +89,7 @@ fi
 
 # --- Build combined directive ---
 
-ACTIVE_LOG_FILE="$HOME/.claude/active-session-log.tmp"
+ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
 LOG_DIRECTIVE=""
 LIVING_DIRECTIVE=""
 

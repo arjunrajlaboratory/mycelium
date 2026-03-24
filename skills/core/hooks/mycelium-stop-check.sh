@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # mycelium-stop-check.sh — Claude Code Stop hook
-# Safety net: warns if analysis was performed (post-action hook fired) but
-# .living/ was never updated. Also warns if session summary was not written.
-# Does NOT block read-only, config-only, or non-analysis sessions.
+# 1. Auto-finalizes session log in .living/log/ (factual record, guaranteed)
+# 2. Blocks session end if meaningful work was performed but .living/
+#    learnings/decisions were not updated (enforces reflection)
+# Does NOT block read-only or config-only sessions.
 #
 # Install: Add to .claude/settings.local.json under "Stop" hooks
 # Input: JSON on stdin with session metadata
-# Output: Non-blocking warnings to stdout (exit 0 in all paths)
+# Output: JSON with {"decision": "block", "reason": "..."} to prevent stop if needed
 
 set -euo pipefail
 
@@ -19,14 +20,26 @@ if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 
+# Determine repo root early (used by both log finalization and .living/ checks)
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+
 # --- Session log finalization ---
-ACTIVE_LOG_FILE="$HOME/.claude/active-session-log.tmp"
-if [ -f "$ACTIVE_LOG_FILE" ]; then
-  LOG_PATH=$(cat "$ACTIVE_LOG_FILE")
+ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
+if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
+  LOG_PATH=$(head -1 "$ACTIVE_LOG_FILE")
+  OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
+  OUR_TS=$(cat "$REPO_ROOT/.claude/session-start-ts.tmp" 2>/dev/null || echo "")
+
+  # Subagent detection: if owner timestamp exists and doesn't match ours, we're a subagent
+  if [ -n "$OWNER_TS" ] && [ -n "$OUR_TS" ] && [ "$OWNER_TS" != "$OUR_TS" ]; then
+      # Subagent: skip all finalization and .living/ checks
+      # File activity is tracked in the shared activity file for the primary session
+      exit 0
+  fi
 
   if [ -f "$LOG_PATH" ]; then
     # Compute session duration
-    LOG_REPO=$(dirname "$(dirname "$(dirname "$LOG_PATH")")")  # .living/log/file -> repo root
+    LOG_REPO="$REPO_ROOT"
     START_FILE="$LOG_REPO/.claude/session-start-ts.tmp"
     NOW_TS=$(date +%s)
     DURATION_MIN=0
@@ -35,52 +48,128 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
       DURATION_MIN=$(( (NOW_TS - START_TS) / 60 ))
     fi
 
-    # Compute files changed since session start (committed + uncommitted + staged)
+    # Compute files changed since session start (committed + uncommitted + staged + activity tracker)
     FILES_CHANGED=0
     if [ -f "$START_FILE" ]; then
-      FILES_CHANGED_UNCOMMITTED=$(git -C "$LOG_REPO" diff --name-only 2>/dev/null | wc -l | tr -d ' ')
-      FILES_CHANGED_STAGED=$(git -C "$LOG_REPO" diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')
+      FILES_CHANGED_UNCOMMITTED=$({ git -C "$LOG_REPO" diff --name-only 2>/dev/null || true; } | wc -l | tr -d ' ')
+      FILES_CHANGED_STAGED=$({ git -C "$LOG_REPO" diff --cached --name-only 2>/dev/null || true; } | wc -l | tr -d ' ')
       START_TS=$(cat "$START_FILE")
-      FILES_CHANGED_COMMITTED=$(git -C "$LOG_REPO" log --since="@${START_TS}" --name-only --pretty=format: 2>/dev/null | sort -u | { grep -v '^$' || true; } | wc -l | tr -d ' ')
+      FILES_CHANGED_COMMITTED=$({ git -C "$LOG_REPO" log --since="@${START_TS}" --name-only --pretty=format: 2>/dev/null || true; } | sort -u | { grep -v '^$' || true; } | wc -l | tr -d ' ')
       FILES_CHANGED=$((FILES_CHANGED_UNCOMMITTED + FILES_CHANGED_STAGED + FILES_CHANGED_COMMITTED))
+    fi
+    # Also count activity-tracked files (Edit/Write operations not yet in git)
+    ACTIVITY_FILE_CHECK="$LOG_REPO/.claude/mycelium-session-activity.tmp"
+    if [ -f "$ACTIVITY_FILE_CHECK" ] && [ "$FILES_CHANGED" -eq 0 ]; then
+      FILES_CHANGED=$(sort -u "$ACTIVITY_FILE_CHECK" | grep -c . || echo "0")
     fi
 
     # Short session check: skip finalization if < 5min and 0 files changed
     if [ "$DURATION_MIN" -lt 5 ] && [ "$FILES_CHANGED" -eq 0 ]; then
       rm -f "$LOG_PATH"
       rm -f "$ACTIVE_LOG_FILE"
+      rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
       # No registry row, no finalization — clean exit
     else
-      # Inject finalization directive
+      # Auto-finalize the session log (factual record — no Claude needed)
       LOG_DIR=$(dirname "$LOG_PATH")
-      echo "SESSION LOG FINALIZATION — MANDATORY: Before stopping, you MUST complete these steps:"
-      echo ""
-      echo "1. Update the frontmatter in ${LOG_PATH}:"
-      echo "   - ended: $(date +%Y-%m-%dT%H:%M:%S%z)"
-      echo "   - duration_minutes: ${DURATION_MIN}"
-      echo "   - files_changed: ${FILES_CHANGED}"
-      echo "2. Write a '## Session Summary' section at the end of ${LOG_PATH} with:"
-      echo "   - **Completed**: what was accomplished"
-      echo "   - **Blocked**: anything unresolved"
-      echo "   - **Files changed**: ${FILES_CHANGED}"
-      echo "   - **Key outputs**: notable artifacts produced"
-      echo "3. Append a row to ${LOG_DIR}/LOG_REGISTRY.md with all fields filled."
-      echo "   IMPORTANT: Use the 'project' value from the log frontmatter as the Project column (the slug, not a human-friendly name)."
-      echo ""
-      echo "Do this NOW before the session ends."
-      # Clean up sentinel AFTER directive is emitted
+      ENDED=$(date +%Y-%m-%dT%H:%M:%S%z)
+
+      # Update frontmatter in-place using sed
+      sed -i.bak "s|^ended:.*|ended: ${ENDED}|" "$LOG_PATH" 2>/dev/null
+      sed -i.bak "s|^duration_minutes:.*|duration_minutes: ${DURATION_MIN}|" "$LOG_PATH" 2>/dev/null
+      sed -i.bak "s|^files_changed:.*|files_changed: ${FILES_CHANGED}|" "$LOG_PATH" 2>/dev/null
+      rm -f "${LOG_PATH}.bak"
+
+      # Append file list from activity tracker or git diff
+      ACTIVITY_FILE="$LOG_REPO/.claude/mycelium-session-activity.tmp"
+      FILE_LIST_MD=""
+      GIT_FILES=""
+      if [ -f "$ACTIVITY_FILE" ]; then
+        FILE_LIST_MD=$(sort -u "$ACTIVITY_FILE" | sed 's|^|- `|;s|$|`|')
+      fi
+      if [ -z "$FILE_LIST_MD" ]; then
+        # Fallback to git diff
+        GIT_FILES=$(git -C "$LOG_REPO" diff --name-only HEAD 2>/dev/null || echo "")
+        if [ -n "$GIT_FILES" ]; then
+          FILE_LIST_MD=$(echo "$GIT_FILES" | sed 's|^|- `|;s|$|`|')
+        fi
+      fi
+      # Append a timestamped session-end entry (health hook extracts this for next-session context)
+      END_TIME_SHORT=$(date +%H:%M)
+      if [ -n "$FILE_LIST_MD" ]; then
+        # Build a readable summary for the timestamped entry
+        FILE_SUMMARY=""
+        if [ -f "$ACTIVITY_FILE" ]; then
+          FILE_SUMMARY=$(sort -u "$ACTIVITY_FILE" | head -3 | xargs -I {} basename {} 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+        fi
+        if [ -z "$FILE_SUMMARY" ] && [ -n "$GIT_FILES" ]; then
+          FILE_SUMMARY=$(echo "$GIT_FILES" | head -3 | xargs -I {} basename {} 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+        fi
+        if [ "$FILES_CHANGED" -gt 3 ]; then
+          FILE_SUMMARY="${FILE_SUMMARY} (+$((FILES_CHANGED - 3)) more)"
+        fi
+        printf "\n### %s — Session ended (%sm, %s files)\n- Modified: %s\n\n### Files Modified\n%s\n" "$END_TIME_SHORT" "$DURATION_MIN" "$FILES_CHANGED" "$FILE_SUMMARY" "$FILE_LIST_MD" >> "$LOG_PATH"
+      else
+        printf "\n### %s — Session ended (%sm, %s files)\n" "$END_TIME_SHORT" "$DURATION_MIN" "$FILES_CHANGED" >> "$LOG_PATH"
+      fi
+
+      # Append to LOG_REGISTRY.md
+      PROJECT_SLUG=$({ grep '^project:' "$LOG_PATH" || echo "project: unknown"; } | sed 's/^project: *//')
+      SESSION_ID=$({ grep '^session_id:' "$LOG_PATH" || echo "session_id: unknown"; } | sed 's/^session_id: *//')
+      BRANCH=$({ grep '^branch:' "$LOG_PATH" || echo "branch: unknown"; } | sed 's/^branch: *//')
+      # Summary from first 3 unique files
+      SUMMARY=""
+      if [ -f "$ACTIVITY_FILE" ]; then
+        SUMMARY=$(sort -u "$ACTIVITY_FILE" | head -3 | xargs -I {} basename {} 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+        UNIQUE_COUNT=$(sort -u "$ACTIVITY_FILE" | grep -c . || echo "0")
+        if [ "$UNIQUE_COUNT" -gt 3 ]; then
+          SUMMARY="${SUMMARY} (+$((UNIQUE_COUNT - 3)) more)"
+        fi
+      fi
+      if [ -f "$LOG_DIR/LOG_REGISTRY.md" ]; then
+        echo "| $(date +%Y-%m-%d) | ${SESSION_ID} | ${PROJECT_SLUG} | ${BRANCH} | ${DURATION_MIN}m | ${FILES_CHANGED} | ${SUMMARY} | | complete | | [log](${SESSION_ID}-${PROJECT_SLUG}.md) |" >> "$LOG_DIR/LOG_REGISTRY.md"
+      fi
+
+      # Auto-write last-session.md for next session context
+      _SESSION_FILE="$REPO_ROOT/.claude/last-session.md"
+      _WORK_LINES=""
+      # Try recent commit messages first
+      if [ -n "${START_TS:-}" ]; then
+          _WORK_LINES=$(git -C "$REPO_ROOT" log --since="@${START_TS}" --pretty=format:"- %s" 2>/dev/null | head -10)
+      fi
+      # Fall back to modified file list
+      if [ -z "$_WORK_LINES" ] && [ -f "$ACTIVITY_FILE" ]; then
+          _WORK_LINES=$(sort -u "$ACTIVITY_FILE" | head -10 | while read -r _f; do echo "- Modified \`$(basename "$_f")\`"; done)
+      fi
+      # Last resort: generic summary
+      if [ -z "$_WORK_LINES" ]; then
+          _WORK_LINES="- Session: ${FILES_CHANGED} files changed over ${DURATION_MIN}m"
+      fi
+      _UNCOMMITTED_COUNT=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+      _BRANCH_NOTE="Branch: \`${BRANCH}\`"
+      [ "$_UNCOMMITTED_COUNT" -gt 0 ] && _BRANCH_NOTE="${_BRANCH_NOTE}, ${_UNCOMMITTED_COUNT} uncommitted changes"
+      cat > "$_SESSION_FILE" << LAST_SESSION_EOF
+## What was worked on
+${_WORK_LINES}
+
+## Current state
+- ${_BRANCH_NOTE}
+LAST_SESSION_EOF
+
+      # Clean up sentinels
       rm -f "$ACTIVE_LOG_FILE"
+      rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
     fi
   else
-    # Log file doesn't exist (was deleted?) — clean up sentinel
+    # Log file doesn't exist (was deleted?) — clean up sentinels
     rm -f "$ACTIVE_LOG_FILE"
+    rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
   fi
 fi
 
-# Find git repo root from cwd
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+# Not in a git repo — nothing further to check
 if [ -z "$REPO_ROOT" ]; then
-  exit 0  # Not in a git repo, nothing to check
+  exit 0
 fi
 
 # If no .living/ directory, skip (SessionStart hook handles scaffolding)
@@ -89,18 +178,29 @@ if [ ! -d "$LIVING_DIR" ]; then
   exit 0
 fi
 
-# Check if the post-action hook fired during this session.
-# If it never fired, no analysis/data/algorithm work happened — nothing to enforce.
+# Check if any work was done this session.
+# Work detected by: mycelium-reminded.tmp (analysis or Edit/Write) or mycelium-session-activity.tmp
 REMINDER_FILE="$REPO_ROOT/.claude/mycelium-reminded.tmp"
-if [ ! -f "$REMINDER_FILE" ]; then
+ACTIVITY_FILE="$REPO_ROOT/.claude/mycelium-session-activity.tmp"
+if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
   exit 0
 fi
 
+# Use reminder timestamp if available, otherwise session start timestamp
+if [ -f "$REMINDER_FILE" ]; then
+  WORK_TS=$(cat "$REMINDER_FILE")
+elif [ -f "$REPO_ROOT/.claude/session-start-ts.tmp" ]; then
+  WORK_TS=$(cat "$REPO_ROOT/.claude/session-start-ts.tmp")
+else
+  WORK_TS=0
+fi
+
 # Post-action hook fired. Check if .living/ was updated AFTER the reminder.
-REMINDER_TS=$(cat "$REMINDER_FILE")
+REMINDER_TS="$WORK_TS"
 
 LEARNINGS_UPDATED=false
 DECISIONS_UPDATED=false
+CONVENTIONS_UPDATED=false
 
 if [ -f "$LIVING_DIR/learnings.md" ]; then
   LEARNINGS_MTIME=$(stat -f "%m" "$LIVING_DIR/learnings.md" 2>/dev/null || stat -c "%Y" "$LIVING_DIR/learnings.md" 2>/dev/null || echo "0")
@@ -116,6 +216,13 @@ if [ -f "$LIVING_DIR/decisions.md" ]; then
   fi
 fi
 
+if [ -f "$LIVING_DIR/conventions.md" ]; then
+  CONVENTIONS_MTIME=$(stat -f "%m" "$LIVING_DIR/conventions.md" 2>/dev/null || stat -c "%Y" "$LIVING_DIR/conventions.md" 2>/dev/null || echo "0")
+  if [ "$CONVENTIONS_MTIME" -gt "$REMINDER_TS" ]; then
+    CONVENTIONS_UPDATED=true
+  fi
+fi
+
 FINDINGS_UPDATED=false
 FINDINGS_DIR="$LIVING_DIR/findings"
 if [ -d "$FINDINGS_DIR" ]; then
@@ -125,29 +232,61 @@ if [ -d "$FINDINGS_DIR" ]; then
   fi
 fi
 
+# Build file context for triage instructions
+FILE_COUNT=0
+FILE_NAMES=""
+if [ -f "$ACTIVITY_FILE" ]; then
+  FILE_COUNT=$(sort -u "$ACTIVITY_FILE" | grep -c . || echo "0")
+  FILE_NAMES=$(sort -u "$ACTIVITY_FILE" | head -15 | xargs -I {} basename {} 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+fi
+
+# --- Session-end triage instructions (used in both pass and block paths) ---
+read -r -d '' TRIAGE_INSTRUCTIONS << 'TRIAGE_EOF' || true
+MYCELIUM SESSION-END PROTOCOL — Dispatch a sonnet subagent (max_turns: 10) to:
+
+**Phase 1 — Triage** (ROUTE CORRECTLY — do NOT dump everything into learnings.md):
+- Empirical observations, measurements, quantitative results? → findings/{topic}.md (NOT learnings.md)
+- Standards/rules/patterns to follow in future work? → conventions.md (NOT learnings.md)
+- Unexpected behaviors, gotchas, one-time fixes? → learnings.md
+- Non-obvious design choices with tradeoffs? → decisions.md
+- Insights beyond this project? → also ~/.claude/knowledge/{domain}.md (status: unreviewed)
+
+  ROUTING RULE: If the entry contains a NUMBER (p-value, percentage, count, threshold)
+  or a BIOLOGICAL CLAIM, it belongs in findings/, not learnings.md.
+  If the entry says "always", "never", "must", or "should", it belongs in conventions.md.
+
+**Phase 2 — Record** (for each YES above, append to the appropriate file):
+- learnings.md: ### YYYY-MM-DD: {title} with Category/What happened/Why it matters/Resolution/Tags
+- decisions.md: ### YYYY-MM-DD: {title} with Context/Decision/Alternatives/Rationale/Consequences/Tags
+- conventions.md: ## {Section} / ### {Title} with Scope/Rule/Why
+- findings/{topic}.md: ## F-NNN: {claim} with Status/Claim/Implications/Tags + Evidence Ledger row
+  - Topic naming: broad scientific questions (not project/method names)
+  - Status: preliminary (1 entry), supported (2+ no contradictions), robust (3+ cross-dataset)
+
+**Phase 3 — Enhance last-session.md** (overwrite .claude/last-session.md with 5 sections):
+1. What was worked on (grounded in git log --since=@session-start)
+2. Key decisions made (with rationale)
+3. Blockers/surprises (resolved and unresolved)
+4. Current state (branch, tests, uncommitted changes)
+5. Next steps (specific actions, not vague)
+TRIAGE_EOF
+
 # If any was updated after the post-action hook fired, protocol was followed
-if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$FINDINGS_UPDATED" = true ]; then
+if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$CONVENTIONS_UPDATED" = true ] || [ "$FINDINGS_UPDATED" = true ]; then
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
+  rm -f "$ACTIVITY_FILE"
 
-  # Check if session summary was written (non-blocking warning)
-  SESSION_FILE="$REPO_ROOT/.claude/last-session.md"
-  SESSION_START_FILE="$REPO_ROOT/.claude/session-start-ts.tmp"
-  if [ -f "$SESSION_START_FILE" ]; then
-    START_MTIME=$(stat -f "%m" "$SESSION_START_FILE" 2>/dev/null || stat -c "%Y" "$SESSION_START_FILE" 2>/dev/null || echo "0")
-    SESSION_MTIME=$(stat -f "%m" "$SESSION_FILE" 2>/dev/null || stat -c "%Y" "$SESSION_FILE" 2>/dev/null || echo "0")
-    if [ "$SESSION_MTIME" -lt "$START_MTIME" ] || [ ! -f "$SESSION_FILE" ]; then
-      echo "Session summary not written. Next session will lack context."
-      echo "Dispatch crystallization subagent or write .claude/last-session.md before stopping."
-    fi
-  fi
-
+  # Emit non-blocking enhancement prompt (baseline last-session.md already written)
+  ENHANCE_MSG="SESSION COMPLETE (${FILE_COUNT} files: ${FILE_NAMES}). .living/ was updated — good. Now enhance .claude/last-session.md with semantic context:\n\n${TRIAGE_INSTRUCTIONS}"
+  ESCAPED_ENHANCE=$(printf '%s' "$ENHANCE_MSG" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
+  printf '{"additionalContext": %s}\n' "$ESCAPED_ENHANCE"
   exit 0
 fi
 
-# Warn (non-blocking): analysis happened but .living/ was never updated
-echo "Mycelium: post-action hook fired but .living/ was not updated."
-echo "Consider logging learnings/decisions before ending."
-# Clean up reminder file so it doesn't fire again next session
-rm -f "$REMINDER_FILE"
-exit 0
+# Block: work happened but .living/ was never updated
+REASON="STOP BLOCKED — ${FILE_COUNT} files changed (${FILE_NAMES}) but .living/ not updated.\n\n${TRIAGE_INSTRUCTIONS}"
+
+# Use Python json.dumps to safely escape the reason string (handles newlines, special chars)
+ESCAPED_REASON=$(printf '%s' "$REASON" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
+printf '{"decision": "block", "reason": %s}\n' "$ESCAPED_REASON"
