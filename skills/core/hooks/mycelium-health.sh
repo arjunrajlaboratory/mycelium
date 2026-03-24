@@ -13,6 +13,7 @@ INPUT=$(cat)
 
 # Initialize message accumulator
 MESSAGES=""
+SYSTEM_MESSAGE=""
 NOW_TS=$(date +%s)
 
 # Extract cwd from input
@@ -27,9 +28,11 @@ if [ -z "$REPO_ROOT" ]; then
   exit 0  # Not in a git repo
 fi
 
-# Always record session-start timestamp for the stop hook
+# Record session-start timestamp — only for primary sessions (not subagents)
 mkdir -p "$REPO_ROOT/.claude"
-date +%s > "$REPO_ROOT/.claude/session-start-ts.tmp"
+if [ ! -f "$REPO_ROOT/.claude/active-session-log.tmp" ]; then
+    date +%s > "$REPO_ROOT/.claude/session-start-ts.tmp"
+fi
 
 # Clean up stale sentinels from crashed sessions
 # These are per-repo, so safe to clean on fresh session start
@@ -80,13 +83,35 @@ REGISTRY_EOF
 
   # Check for incomplete log from interrupted previous session
   if [ -f "$ACTIVE_LOG_FILE" ]; then
-    STALE_LOG=$(cat "$ACTIVE_LOG_FILE")
+    STALE_LOG=$(head -1 "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
     if [ -f "$STALE_LOG" ] && ! grep -q "## Session Summary" "$STALE_LOG"; then
       MESSAGES="${MESSAGES}INCOMPLETE SESSION LOG: Previous session log at ${STALE_LOG} was never finalized. Please add a '## Session Summary' section and append a row to the registry before starting new work.\n\n"
     fi
   fi
 
+  # Clean up stale active-session-log from crashed or old sessions
+  if [ -f "$ACTIVE_LOG_FILE" ]; then
+    _STALE_LOG=$(head -1 "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
+    _STALE_OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
+    _SHOULD_CLEAN=false
+    if [ -z "$_STALE_OWNER_TS" ]; then
+      # Old format (no owner TS) — clean up for format upgrade
+      _SHOULD_CLEAN=true
+    elif [ "$(( $(date +%s) - _STALE_OWNER_TS ))" -gt 7200 ]; then
+      # Owner TS > 2 hours old — crashed session
+      _SHOULD_CLEAN=true
+    elif [ -n "$_STALE_LOG" ] && [ -f "$_STALE_LOG" ] && grep -q "^ended: [0-9]" "$_STALE_LOG"; then
+      # Log already finalized but sentinel wasn't cleaned
+      _SHOULD_CLEAN=true
+    elif [ -n "$_STALE_LOG" ] && [ ! -f "$_STALE_LOG" ]; then
+      # Log file deleted but sentinel remains
+      _SHOULD_CLEAN=true
+    fi
+    [ "$_SHOULD_CLEAN" = true ] && rm -f "$ACTIVE_LOG_FILE"
+  fi
+
   # Create new log file only if no active session log exists (fresh process start)
+  # If active-session-log.tmp exists, we're a subagent — skip log creation
   if [ ! -f "$ACTIVE_LOG_FILE" ]; then
     TODAY=$(date +%Y-%m-%d)
     # Determine session counter for today
@@ -137,8 +162,8 @@ files_changed:
 - Resuming from: ${PREV_LINK}
 LOG_EOF
 
-    # Store active log path globally
-    echo "$LOG_PATH" > "$ACTIVE_LOG_FILE"
+    # Store log path + owner timestamp (for subagent detection in stop hook)
+    printf "%s\n%s\n" "$LOG_PATH" "$(cat "$REPO_ROOT/.claude/session-start-ts.tmp" 2>/dev/null || date +%s)" > "$ACTIVE_LOG_FILE"
   fi
 fi
 
@@ -162,11 +187,13 @@ if [ -f "$SESSION_FILE" ]; then
   if [ "$SESSION_AGE_DAYS" -lt 7 ]; then
     SESSION_CONTENT=$(cat "$SESSION_FILE")
     if [ -n "$SESSION_CONTENT" ]; then
-      # Show resume to user immediately via stderr
-      echo "$SESSION_CONTENT" >&2
-      echo "---" >&2
-      # Add to agent context via MESSAGES accumulator
-      MESSAGES="${MESSAGES}${SESSION_CONTENT}\n\n"
+      # Build visible summary for user (systemMessage field)
+      SESSION_DATE=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$SESSION_FILE" 2>/dev/null \
+        || date -r "$SESSION_FILE" '+%Y-%m-%d %H:%M' 2>/dev/null \
+        || echo "recent")
+      SYSTEM_MESSAGE="SESSION RESUME (${SESSION_DATE}):\n${SESSION_CONTENT}"
+      # Add full content to agent context via MESSAGES accumulator
+      MESSAGES="${MESSAGES}${SESSION_CONTENT}\n\nPresent the user with a 1-2 sentence reminder of the above before proceeding.\n\n"
     fi
   fi
 fi
@@ -297,8 +324,13 @@ if [ -d "$LIVING_DIR" ]; then
 fi
 
 # --- Emit combined JSON ---
-if [ -n "$MESSAGES" ]; then
-  ESCAPED=$(printf '%s' "$MESSAGES" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
-  printf '{"additionalContext": %s}\n' "$ESCAPED"
+if [ -n "$MESSAGES" ] || [ -n "$SYSTEM_MESSAGE" ]; then
+  ESCAPED_CTX=$(printf '%s' "$MESSAGES" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
+  if [ -n "$SYSTEM_MESSAGE" ]; then
+    ESCAPED_SYS=$(printf '%s' "$SYSTEM_MESSAGE" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
+    printf '{"additionalContext": %s, "systemMessage": %s}\n' "$ESCAPED_CTX" "$ESCAPED_SYS"
+  else
+    printf '{"additionalContext": %s}\n' "$ESCAPED_CTX"
+  fi
 fi
 exit 0

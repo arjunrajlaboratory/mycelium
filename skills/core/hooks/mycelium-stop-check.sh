@@ -26,7 +26,16 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 # --- Session log finalization ---
 ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
 if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
-  LOG_PATH=$(cat "$ACTIVE_LOG_FILE")
+  LOG_PATH=$(head -1 "$ACTIVE_LOG_FILE")
+  OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
+  OUR_TS=$(cat "$REPO_ROOT/.claude/session-start-ts.tmp" 2>/dev/null || echo "")
+
+  # Subagent detection: if owner timestamp exists and doesn't match ours, we're a subagent
+  if [ -n "$OWNER_TS" ] && [ -n "$OUR_TS" ] && [ "$OWNER_TS" != "$OUR_TS" ]; then
+      # Subagent: skip all finalization and .living/ checks
+      # File activity is tracked in the shared activity file for the primary session
+      exit 0
+  fi
 
   if [ -f "$LOG_PATH" ]; then
     # Compute session duration
@@ -121,6 +130,32 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
         echo "| $(date +%Y-%m-%d) | ${SESSION_ID} | ${PROJECT_SLUG} | ${BRANCH} | ${DURATION_MIN}m | ${FILES_CHANGED} | ${SUMMARY} | | complete | | [log](${SESSION_ID}-${PROJECT_SLUG}.md) |" >> "$LOG_DIR/LOG_REGISTRY.md"
       fi
 
+      # Auto-write last-session.md for next session context
+      _SESSION_FILE="$REPO_ROOT/.claude/last-session.md"
+      _WORK_LINES=""
+      # Try recent commit messages first
+      if [ -n "${START_TS:-}" ]; then
+          _WORK_LINES=$(git -C "$REPO_ROOT" log --since="@${START_TS}" --pretty=format:"- %s" 2>/dev/null | head -10)
+      fi
+      # Fall back to modified file list
+      if [ -z "$_WORK_LINES" ] && [ -f "$ACTIVITY_FILE" ]; then
+          _WORK_LINES=$(sort -u "$ACTIVITY_FILE" | head -10 | while read -r _f; do echo "- Modified \`$(basename "$_f")\`"; done)
+      fi
+      # Last resort: generic summary
+      if [ -z "$_WORK_LINES" ]; then
+          _WORK_LINES="- Session: ${FILES_CHANGED} files changed over ${DURATION_MIN}m"
+      fi
+      _UNCOMMITTED_COUNT=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+      _BRANCH_NOTE="Branch: \`${BRANCH}\`"
+      [ "$_UNCOMMITTED_COUNT" -gt 0 ] && _BRANCH_NOTE="${_BRANCH_NOTE}, ${_UNCOMMITTED_COUNT} uncommitted changes"
+      cat > "$_SESSION_FILE" << LAST_SESSION_EOF
+## What was worked on
+${_WORK_LINES}
+
+## Current state
+- ${_BRANCH_NOTE}
+LAST_SESSION_EOF
+
       # Clean up sentinels
       rm -f "$ACTIVE_LOG_FILE"
       rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
@@ -165,6 +200,7 @@ REMINDER_TS="$WORK_TS"
 
 LEARNINGS_UPDATED=false
 DECISIONS_UPDATED=false
+CONVENTIONS_UPDATED=false
 
 if [ -f "$LIVING_DIR/learnings.md" ]; then
   LEARNINGS_MTIME=$(stat -f "%m" "$LIVING_DIR/learnings.md" 2>/dev/null || stat -c "%Y" "$LIVING_DIR/learnings.md" 2>/dev/null || echo "0")
@@ -180,6 +216,13 @@ if [ -f "$LIVING_DIR/decisions.md" ]; then
   fi
 fi
 
+if [ -f "$LIVING_DIR/conventions.md" ]; then
+  CONVENTIONS_MTIME=$(stat -f "%m" "$LIVING_DIR/conventions.md" 2>/dev/null || stat -c "%Y" "$LIVING_DIR/conventions.md" 2>/dev/null || echo "0")
+  if [ "$CONVENTIONS_MTIME" -gt "$REMINDER_TS" ]; then
+    CONVENTIONS_UPDATED=true
+  fi
+fi
+
 FINDINGS_UPDATED=false
 FINDINGS_DIR="$LIVING_DIR/findings"
 if [ -d "$FINDINGS_DIR" ]; then
@@ -189,32 +232,60 @@ if [ -d "$FINDINGS_DIR" ]; then
   fi
 fi
 
+# Build file context for triage instructions
+FILE_COUNT=0
+FILE_NAMES=""
+if [ -f "$ACTIVITY_FILE" ]; then
+  FILE_COUNT=$(sort -u "$ACTIVITY_FILE" | grep -c . || echo "0")
+  FILE_NAMES=$(sort -u "$ACTIVITY_FILE" | head -15 | xargs -I {} basename {} 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+fi
+
+# --- Session-end triage instructions (used in both pass and block paths) ---
+read -r -d '' TRIAGE_INSTRUCTIONS << 'TRIAGE_EOF' || true
+MYCELIUM SESSION-END PROTOCOL — Dispatch a sonnet subagent (max_turns: 10) to:
+
+**Phase 1 — Triage** (ROUTE CORRECTLY — do NOT dump everything into learnings.md):
+- Empirical observations, measurements, quantitative results? → findings/{topic}.md (NOT learnings.md)
+- Standards/rules/patterns to follow in future work? → conventions.md (NOT learnings.md)
+- Unexpected behaviors, gotchas, one-time fixes? → learnings.md
+- Non-obvious design choices with tradeoffs? → decisions.md
+- Insights beyond this project? → also ~/.claude/knowledge/{domain}.md (status: unreviewed)
+
+  ROUTING RULE: If the entry contains a NUMBER (p-value, percentage, count, threshold)
+  or a BIOLOGICAL CLAIM, it belongs in findings/, not learnings.md.
+  If the entry says "always", "never", "must", or "should", it belongs in conventions.md.
+
+**Phase 2 — Record** (for each YES above, append to the appropriate file):
+- learnings.md: ### YYYY-MM-DD: {title} with Category/What happened/Why it matters/Resolution/Tags
+- decisions.md: ### YYYY-MM-DD: {title} with Context/Decision/Alternatives/Rationale/Consequences/Tags
+- conventions.md: ## {Section} / ### {Title} with Scope/Rule/Why
+- findings/{topic}.md: ## F-NNN: {claim} with Status/Claim/Implications/Tags + Evidence Ledger row
+  - Topic naming: broad scientific questions (not project/method names)
+  - Status: preliminary (1 entry), supported (2+ no contradictions), robust (3+ cross-dataset)
+
+**Phase 3 — Enhance last-session.md** (overwrite .claude/last-session.md with 5 sections):
+1. What was worked on (grounded in git log --since=@session-start)
+2. Key decisions made (with rationale)
+3. Blockers/surprises (resolved and unresolved)
+4. Current state (branch, tests, uncommitted changes)
+5. Next steps (specific actions, not vague)
+TRIAGE_EOF
+
 # If any was updated after the post-action hook fired, protocol was followed
-if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$FINDINGS_UPDATED" = true ]; then
+if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$CONVENTIONS_UPDATED" = true ] || [ "$FINDINGS_UPDATED" = true ]; then
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
 
-  # Check if session summary was written (non-blocking reminder)
-  # Note: session-start-ts.tmp is already deleted by log finalization, so use START_TS variable
-  SESSION_FILE="$REPO_ROOT/.claude/last-session.md"
-  if [ -n "${START_TS:-}" ]; then
-    SESSION_MTIME=$(stat -f "%m" "$SESSION_FILE" 2>/dev/null || stat -c "%Y" "$SESSION_FILE" 2>/dev/null || echo "0")
-    if [ "$SESSION_MTIME" -lt "$START_TS" ] || [ ! -f "$SESSION_FILE" ]; then
-      printf '{"additionalContext": "Write .claude/last-session.md with a brief summary of what was worked on, current state, and next steps — this provides context for your next session."}\n'
-    fi
-  fi
-
+  # Emit non-blocking enhancement prompt (baseline last-session.md already written)
+  ENHANCE_MSG="SESSION COMPLETE (${FILE_COUNT} files: ${FILE_NAMES}). .living/ was updated — good. Now enhance .claude/last-session.md with semantic context:\n\n${TRIAGE_INSTRUCTIONS}"
+  ESCAPED_ENHANCE=$(printf '%s' "$ENHANCE_MSG" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
+  printf '{"additionalContext": %s}\n' "$ESCAPED_ENHANCE"
   exit 0
 fi
 
 # Block: work happened but .living/ was never updated
-FILE_COUNT=0
-if [ -f "$ACTIVITY_FILE" ]; then
-  FILE_COUNT=$(sort -u "$ACTIVITY_FILE" | grep -c . || echo "0")
-fi
-
-REASON="Update .living/ before stopping (${FILE_COUNT} files changed). Append to learnings.md and/or decisions.md."
+REASON="STOP BLOCKED — ${FILE_COUNT} files changed (${FILE_NAMES}) but .living/ not updated.\n\n${TRIAGE_INSTRUCTIONS}"
 
 # Use Python json.dumps to safely escape the reason string (handles newlines, special chars)
 ESCAPED_REASON=$(printf '%s' "$REASON" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
