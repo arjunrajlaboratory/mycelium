@@ -170,6 +170,12 @@ which [interpretation]. This is subject to [caveat/limitation]. Specifically,
 implication]. However, [what would need to be true for this interpretation to hold].
 ```
 
+**CRITICAL — Write order**:
+- Conclusions must be the LAST section written, after Results are complete and verified.
+- Read back what you wrote in Results before writing this section. Base every conclusion on specific findings you already reported — cite the figure or statistic.
+- If results contradict the original hypothesis, say so directly. A null or negative result is a valid conclusion.
+- Never write conclusions as a template to be "filled in later" — by the time you write this section, all the data is available. Use it.
+
 ---
 
 ## Provenance
