@@ -30,8 +30,12 @@ If not installed, guide the user to install the **full** TeX Live distribution:
 
 2. **Copy the template** from `assets/report-template.tex` to `analysis/[name]/reports/[name]-report.tex`
 
-3. **Fill in each section** following the structure below. For detailed writing guidance on each section, consult the reference file.
+3. **Fill in sections in two phases**. For detailed writing guidance on each section, consult the reference file.
    > See [references/section-guide.md](references/section-guide.md) for full section-by-section writing instructions.
+
+   **Phase 1 — Data-driven sections** (Problem Statement, Methods, Results): Write these first by reading actual analysis outputs. For Results, read the actual output files and figures to extract concrete numbers and findings.
+
+   **Phase 2 — Interpretive sections** (Conclusions, Abstract, Next Steps): Write these ONLY after Phase 1 is complete. Derive conclusions from what is written in the Results section, not from the hypothesis. Never pre-write or template conclusions before results are finalized.
 
 4. **Compile to PDF** (two passes for TOC and cross-references):
    ```bash
