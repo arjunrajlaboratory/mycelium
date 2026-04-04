@@ -233,8 +233,10 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template. **Knowledge promotion**: If the learning is transferable (would help in any project), also append to the matching global domain file in `~/.claude/knowledge/{domain}.md` with `status: unreviewed`. Use the structured entry template with a `when_useful` trigger condition.
 5. **Log todos**: If future work is identified during the action, add items to `todo/TODO_REGISTRY.md` (and create detailed `todo/[item].md` files for complex items).
 6. **Validate**: Run `skills/core/scripts/validate_structure.py` to confirm repo still conforms.
-7. **Convention feedback**: If any convention pack practices were relevant, note whether they were helpful or had gaps.
-8. **Write session summary**: Write or update `.claude/last-session.md` with a 5-section summary covering ALL work since session start. Use the session summary template:
+7. **Crystallize conventions**: Review `.living/learnings.md` for recurring patterns (3+ related entries on the same topic). If found, check whether an equivalent convention already exists in `.living/conventions.md` — if so, append new `Source:` citations and refine the text only if materially improved. If no equivalent exists, add a new convention with `Source:` citations linking to the originating learnings. Do not create near-duplicate conventions.
+8. **Update LOG_REGISTRY**: Update the LOG_REGISTRY.md row matching the current session ID. Replace the filename-stub Summary with a 1-sentence past-tense description of what was accomplished (no filenames unless the artifact is the primary output). Fill Key Outputs with semicolon-separated concrete artifacts, metrics, or decisions. Summary and Key Outputs must not duplicate each other.
+9. **Convention feedback**: If any convention pack practices were relevant, note whether they were helpful or had gaps.
+10. **Write session summary**: Write or update `.claude/last-session.md` with a 5-section summary covering ALL work since session start. Use the session summary template:
 
    ```markdown
    SESSION RESUME — Last session (YYYY-MM-DD HH:MM):

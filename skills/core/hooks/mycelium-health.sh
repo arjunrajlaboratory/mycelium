@@ -164,6 +164,12 @@ LOG_EOF
 
     # Store log path + owner timestamp (for subagent detection in stop hook)
     printf "%s\n%s\n" "$LOG_PATH" "$(cat "$REPO_ROOT/.claude/session-start-ts.tmp" 2>/dev/null || date +%s)" > "$ACTIVE_LOG_FILE"
+
+    # Refresh INDEX.md counts at session start (no LLM, <1s)
+    GENERATE_INDEX_SCRIPT="$(dirname "$(dirname "$(realpath "$0")")")/scripts/generate_index.py"
+    if [ -f "$GENERATE_INDEX_SCRIPT" ]; then
+      python3 "$GENERATE_INDEX_SCRIPT" --living-dir "$LIVING_DIR" --counts-only >/dev/null 2>&1 || true
+    fi
   fi
 fi
 
@@ -321,6 +327,19 @@ if [ -d "$LIVING_DIR" ]; then
   fi
 
   MESSAGES="${MESSAGES}${SUMMARY_LINE}\n\n"
+
+  # --- Inject INDEX.md knowledge cluster summaries ---
+  INDEX_FILE="$LIVING_DIR/INDEX.md"
+  if [ -f "$INDEX_FILE" ]; then
+    # Only inject if sentinel markers are present (structured format — not legacy)
+    if grep -q "<!-- BEGIN KNOWLEDGE SUMMARY -->" "$INDEX_FILE" 2>/dev/null; then
+      KNOWLEDGE_SUMMARY=$(awk '/<!-- BEGIN KNOWLEDGE SUMMARY -->/{found=1; next} /<!-- END KNOWLEDGE SUMMARY -->/{exit} found{print}' "$INDEX_FILE" 2>/dev/null)
+      if [ -n "$KNOWLEDGE_SUMMARY" ]; then
+        MESSAGES="${MESSAGES}KNOWLEDGE MAP (read .living/INDEX.md for full details):\n${KNOWLEDGE_SUMMARY}\n\nReview relevant clusters before making decisions in those areas.\n\n"
+      fi
+    fi
+    # If file exists but has no sentinels (legacy format), skip — don't load the whole file
+  fi
 fi
 
 # --- Emit combined JSON ---
