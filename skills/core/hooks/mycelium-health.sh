@@ -164,6 +164,12 @@ LOG_EOF
 
     # Store log path + owner timestamp (for subagent detection in stop hook)
     printf "%s\n%s\n" "$LOG_PATH" "$(cat "$REPO_ROOT/.claude/session-start-ts.tmp" 2>/dev/null || date +%s)" > "$ACTIVE_LOG_FILE"
+
+    # Refresh INDEX.md counts at session start (no LLM, <1s)
+    GENERATE_INDEX_SCRIPT="$(dirname "$(dirname "$(realpath "$0")")")/scripts/generate_index.py"
+    if [ -f "$GENERATE_INDEX_SCRIPT" ]; then
+      python3 "$GENERATE_INDEX_SCRIPT" --living-dir "$LIVING_DIR" --counts-only >/dev/null 2>&1 || true
+    fi
   fi
 fi
 
