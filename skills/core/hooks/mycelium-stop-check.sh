@@ -249,7 +249,7 @@ if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$CON
   rm -f "$ACTIVITY_FILE"
 
   # Emit non-blocking context (baseline last-session.md already written)
-  ENHANCE_MSG=".living/ updated. Enhance .claude/last-session.md (5 sections: work, decisions, blockers, state, next steps)."
+  ENHANCE_MSG=".living/ updated. Enhance .claude/last-session.md (5 sections: work, decisions, blockers, state, next steps). Also update the LOG_REGISTRY.md row for session ${SESSION_ID:-unknown} — replace the filename Summary with a 1-sentence past-tense accomplishment, fill Key Outputs with semicolon-separated artifacts produced."
   ESCAPED_ENHANCE=$(printf '%s' "$ENHANCE_MSG" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
   printf '{"additionalContext": %s}\n' "$ESCAPED_ENHANCE"
   exit 0

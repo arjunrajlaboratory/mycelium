@@ -539,6 +539,49 @@ echo "TEST 14: Activity file only, .living not updated → should BLOCK"
 }
 
 # ─────────────────────────────────────────────────────────────────
+# TEST 15: additionalContext contains LOG_REGISTRY instruction
+# ─────────────────────────────────────────────────────────────────
+echo ""
+echo "TEST 15: additionalContext contains LOG_REGISTRY instruction"
+{
+  REPO=$(make_repo)
+  mkdir -p "$REPO/.living"
+  mkdir -p "$REPO/.claude"
+
+  # Create a fake session log so SESSION_ID is populated
+  LOG_PATH="$REPO/.claude/logs/2026-01-01-session.md"
+  mkdir -p "$(dirname "$LOG_PATH")"
+  cat > "$LOG_PATH" << 'LOG_EOF'
+---
+ended: TBD
+duration_minutes: 0
+files_changed: 0
+project: test
+session_id: test-session-015
+branch: main
+---
+LOG_EOF
+
+  # Simulate work: create reminded.tmp and activity file
+  ts_old > "$REPO/.claude/mycelium-reminded.tmp"
+  echo "src/foo.py" > "$REPO/.claude/mycelium-session-activity.tmp"
+
+  # Update .living/ so the hook passes (not blocked)
+  sleep 1
+  touch_now "$REPO/.living/learnings.md"
+
+  run_hook "$REPO"
+
+  if [ "$HOOK_EXIT" -eq 0 ] && echo "$HOOK_OUTPUT" | grep -q "LOG_REGISTRY"; then
+    pass "additionalContext contains LOG_REGISTRY instruction"
+  else
+    fail "additionalContext missing LOG_REGISTRY instruction" \
+      "exit=$HOOK_EXIT output='$(echo "$HOOK_OUTPUT" | head -c 400)'"
+  fi
+  rm -rf "$REPO"
+}
+
+# ─────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────
 echo ""
