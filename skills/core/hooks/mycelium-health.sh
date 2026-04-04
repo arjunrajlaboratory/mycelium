@@ -327,6 +327,19 @@ if [ -d "$LIVING_DIR" ]; then
   fi
 
   MESSAGES="${MESSAGES}${SUMMARY_LINE}\n\n"
+
+  # --- Inject INDEX.md knowledge cluster summaries ---
+  INDEX_FILE="$LIVING_DIR/INDEX.md"
+  if [ -f "$INDEX_FILE" ]; then
+    # Only inject if sentinel markers are present (structured format — not legacy)
+    if grep -q "<!-- BEGIN KNOWLEDGE SUMMARY -->" "$INDEX_FILE" 2>/dev/null; then
+      KNOWLEDGE_SUMMARY=$(awk '/<!-- BEGIN KNOWLEDGE SUMMARY -->/{found=1; next} /<!-- END KNOWLEDGE SUMMARY -->/{exit} found{print}' "$INDEX_FILE" 2>/dev/null)
+      if [ -n "$KNOWLEDGE_SUMMARY" ]; then
+        MESSAGES="${MESSAGES}KNOWLEDGE MAP (read .living/INDEX.md for full details):\n${KNOWLEDGE_SUMMARY}\n\nReview relevant clusters before making decisions in those areas.\n\n"
+      fi
+    fi
+    # If file exists but has no sentinels (legacy format), skip — don't load the whole file
+  fi
 fi
 
 # --- Emit combined JSON ---
