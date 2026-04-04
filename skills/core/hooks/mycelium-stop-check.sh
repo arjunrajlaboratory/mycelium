@@ -255,6 +255,14 @@ if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$CON
   exit 0
 fi
 
+# Debounce: if work started less than 5 minutes ago, don't block yet — session is likely still active
+NOW_TS_CHECK=$(date +%s)
+WORK_AGE=$(( NOW_TS_CHECK - WORK_TS ))
+if [ "$WORK_AGE" -lt 300 ]; then
+  # Work is < 5 min old — session likely still in progress, don't block
+  exit 0
+fi
+
 # Block: work happened but .living/ was never updated
 REASON="STOP BLOCKED — ${FILE_COUNT} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update last-session.md."
 
