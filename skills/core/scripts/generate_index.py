@@ -8,8 +8,18 @@ table with entry counts, last-modified dates, and key topics.
 import argparse
 import os
 import re
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Sentinel constants for structured INDEX.md blocks
+# ---------------------------------------------------------------------------
+SUMMARY_BEGIN = "<!-- BEGIN KNOWLEDGE SUMMARY -->"
+SUMMARY_END = "<!-- END KNOWLEDGE SUMMARY -->"
+QUICK_REF_BEGIN = "<!-- BEGIN QUICK REFERENCE -->"
+QUICK_REF_END = "<!-- END QUICK REFERENCE -->"
 
 
 def count_headers_and_topics(path: Path, file_type: str) -> tuple[int, list[str]]:
@@ -242,8 +252,6 @@ def generate_index(living_dir: Path) -> str:
         lines.append(skills)
 
     # --- Rebuild cross-project findings INDEX.md if meta-project exists ---
-    import subprocess  # noqa: PLC0415
-    import sys  # noqa: PLC0415
 
     script_dir = Path(__file__).parent
     crystallize_script = script_dir / "crystallize_findings.py"
@@ -261,6 +269,500 @@ def generate_index(living_dir: Path) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# --counts-only helpers
+# ---------------------------------------------------------------------------
+
+
+def _collect_rows(living_dir: Path) -> list[tuple[str, str, str, str]]:
+    """Collect (name, label, updated, topics) rows for all tracked files/dirs."""
+    md_files = sorted(
+        p for p in living_dir.glob("*.md") if p.name.lower() != "index.md"
+    )
+
+    rows: list[tuple[str, str, str, str]] = []
+
+    for md_path in md_files:
+        file_type = classify_file(md_path.name)
+        line_count = sum(1 for _ in md_path.open(encoding="utf-8", errors="replace"))
+        large_note = " (large — read selectively)" if line_count > 500 else ""
+
+        count, keywords = count_headers_and_topics(md_path, file_type)
+        label = entry_label(file_type, count) + large_note
+        updated = last_modified(md_path)
+        topics = ", ".join(keywords) if keywords else "—"
+        rows.append((md_path.name, label, updated, topics))
+
+    # Log directory stats
+    log_dir = living_dir / "log"
+    if log_dir.is_dir():
+        log_files = [
+            f
+            for f in log_dir.glob("*.md")
+            if f.name not in ("REGISTRY.md", "LOG_REGISTRY.md")
+        ]
+        log_count = len(log_files)
+        if log_count > 0:
+            last_log = max(log_files, key=lambda f: f.stat().st_mtime)
+            last_date = datetime.fromtimestamp(last_log.stat().st_mtime).strftime(
+                "%Y-%m-%d"
+            )
+            project_counts: dict[str, int] = {}
+            for f in log_files:
+                parts = f.stem.split("-", 4)
+                if len(parts) >= 5:
+                    slug = parts[4]
+                    project_counts[slug] = project_counts.get(slug, 0) + 1
+            project_summary = ", ".join(
+                f"{slug} ({c})"
+                for slug, c in sorted(project_counts.items(), key=lambda x: -x[1])
+            )
+            rows.append(("log/", f"{log_count} sessions", last_date, project_summary))
+
+    # Findings directory stats
+    findings_dir = living_dir / "findings"
+    if findings_dir.is_dir():
+        topic_files = [
+            f
+            for f in findings_dir.glob("*.md")
+            if f.name not in {"INDEX.md", "FINDINGS_REGISTRY.md"}
+        ]
+        topic_count = len(topic_files)
+        if topic_count > 0:
+            last_topic = max(topic_files, key=lambda f: f.stat().st_mtime)
+            last_date = datetime.fromtimestamp(last_topic.stat().st_mtime).strftime(
+                "%Y-%m-%d"
+            )
+            total_findings = 0
+            topic_names = []
+            for tf in sorted(
+                topic_files, key=lambda f: f.stat().st_mtime, reverse=True
+            ):
+                content = tf.read_text(encoding="utf-8", errors="replace")
+                total_findings += len(
+                    [ln for ln in content.splitlines() if ln.startswith("## F-")]
+                )
+                topic_names.append(tf.stem)
+            topic_summary = ", ".join(topic_names[:5])
+            if len(topic_names) > 5:
+                topic_summary += f", +{len(topic_names) - 5} more"
+            rows.append(
+                (
+                    "findings/",
+                    f"{total_findings} findings across {topic_count} topics",
+                    last_date,
+                    topic_summary,
+                )
+            )
+
+    return rows
+
+
+def build_quick_reference(living_dir: Path) -> str:
+    """Build the Quick Reference table wrapped in sentinel markers.
+
+    Args:
+        living_dir: Path to the .living/ directory.
+
+    Returns:
+        String starting with QUICK_REF_BEGIN and ending with QUICK_REF_END.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = _collect_rows(living_dir)
+
+    lines: list[str] = [
+        QUICK_REF_BEGIN,
+        "# .living/ Index",
+        f"Last audit: {today}",
+        "",
+        "| File | Entries | Last updated | Key topics |",
+        "|------|---------|--------------|------------|",
+    ]
+    for name, label, updated, topics in rows:
+        lines.append(f"| {name} | {label} | {updated} | {topics} |")
+
+    skills = skills_section(living_dir)
+    if skills:
+        lines.append("")
+        lines.append(skills.rstrip("\n"))
+
+    lines.append(QUICK_REF_END)
+    return "\n".join(lines)
+
+
+def update_index_counts_only(living_dir: Path) -> None:
+    """Update INDEX.md with fresh counts, preserving any existing summary block.
+
+    - Fresh directory: creates minimal INDEX.md with QUICK_REFERENCE block only.
+    - Existing with sentinels: replaces QUICK_REFERENCE block, preserves rest.
+    - Legacy (no sentinels): replaces entire file (safe — auto-generated content).
+
+    Args:
+        living_dir: Path to the .living/ directory.
+    """
+    index_path = living_dir / "INDEX.md"
+    quick_ref = build_quick_reference(living_dir)
+
+    if not index_path.exists():
+        index_path.write_text(quick_ref + "\n", encoding="utf-8")
+        print(f"Written: {index_path}")
+        return
+
+    existing = index_path.read_text(encoding="utf-8")
+
+    if QUICK_REF_BEGIN in existing and QUICK_REF_END in existing:
+        # Replace only the QUICK_REFERENCE block
+        before = existing[: existing.index(QUICK_REF_BEGIN)]
+        after = existing[existing.index(QUICK_REF_END) + len(QUICK_REF_END) :]
+        new_content = before + quick_ref + after
+        index_path.write_text(new_content, encoding="utf-8")
+    else:
+        # Legacy migration: no sentinels → replace entire file
+        # Preserve any KNOWLEDGE_SUMMARY block if it somehow exists without sentinels
+        if SUMMARY_BEGIN in existing and SUMMARY_END in existing:
+            summary_start = existing.index(SUMMARY_BEGIN)
+            summary_end = existing.index(SUMMARY_END) + len(SUMMARY_END)
+            summary_block = existing[summary_start:summary_end]
+            new_content = quick_ref + "\n\n" + summary_block + "\n"
+        else:
+            new_content = quick_ref + "\n"
+        index_path.write_text(new_content, encoding="utf-8")
+
+    print(f"Written: {index_path}")
+
+
+# ---------------------------------------------------------------------------
+# --summarize helpers
+# ---------------------------------------------------------------------------
+
+
+def extract_entry_snippets(path: Path, file_type: str) -> list[tuple[str, str]]:
+    """Extract (header, first_content_line) pairs for each entry, newest-first.
+
+    For files with more than 500 entries, samples 250 most recent + 250 evenly
+    spaced from the remainder.
+
+    Args:
+        path: Path to the markdown file.
+        file_type: One of 'learnings', 'decisions', 'conventions', 'other'.
+
+    Returns:
+        List of (header_text, first_content_line) tuples.
+    """
+    if file_type in ("learnings", "decisions"):
+        header_prefix = "### "
+    elif file_type == "conventions":
+        header_prefix = "## "
+    else:
+        header_prefix = "### "
+
+    entries: list[tuple[str, str]] = []  # (header_text, first_content_line)
+    current_header: str | None = None
+    first_content: str | None = None
+
+    def _flush() -> None:
+        if current_header is not None:
+            entries.append((current_header, first_content or ""))
+
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for raw_line in fh:
+            line = raw_line.rstrip()
+            if line.startswith(header_prefix):
+                _flush()
+                current_header = line[len(header_prefix) :].strip()
+                first_content = None
+            elif current_header is not None and first_content is None and line.strip():
+                first_content = line.strip()
+
+    _flush()
+
+    # Entries are in file order (oldest first for append-style files).
+    # Reverse to get newest-first.
+    entries.reverse()
+
+    if len(entries) <= 500:
+        return entries
+
+    # Sample: 250 most recent + 250 evenly spaced from the remainder
+    recent = entries[:250]
+    remainder = entries[250:]
+    step = max(1, len(remainder) // 250)
+    sampled = remainder[::step][:250]
+    return recent + sampled
+
+
+def build_llm_prompt(
+    learnings_snippets: list[tuple[str, str]],
+    decisions_snippets: list[tuple[str, str]],
+    learnings_count: int,
+    decisions_count: int,
+) -> str:
+    """Construct the summarization prompt for the LLM.
+
+    Args:
+        learnings_snippets: List of (header, first_line) from learnings.md.
+        decisions_snippets: List of (header, first_line) from decisions.md.
+        learnings_count: Total entry count in learnings.md.
+        decisions_count: Total entry count in decisions.md.
+
+    Returns:
+        Prompt string ready for passing to claude CLI.
+    """
+
+    def _format_snippets(snippets: list[tuple[str, str]]) -> str:
+        parts = []
+        for header, content in snippets:
+            line = f"- {header}"
+            if content:
+                line += f": {content}"
+            parts.append(line)
+        return "\n".join(parts)
+
+    learnings_text = _format_snippets(learnings_snippets)
+    decisions_text = _format_snippets(decisions_snippets)
+
+    return f"""You are summarizing a .living/ knowledge base for a software/science project.
+
+I'll give you entry snippets (header + first content line) from learnings.md ({learnings_count} total entries) and decisions.md ({decisions_count} total entries).
+
+Your task: identify 3-6 thematic clusters per section. Each cluster groups related entries under a descriptive name.
+
+Output format (STRICT — no other text):
+
+### Key Knowledge Clusters — Learnings
+- **cluster name** (N entries) — one-sentence description of what this cluster covers
+
+### Key Knowledge Clusters — Decisions
+- **cluster name** (N entries) — one-sentence description of what this cluster covers
+
+Rules:
+- Output ONLY the two sections above, nothing else (no preamble, no conclusion)
+- Every cluster line must match exactly: `- **name** (N entries) — description`
+- At least 1 cluster per section
+- N should be a rough estimate based on the snippets
+
+=== LEARNINGS SNIPPETS ({len(learnings_snippets)} shown of {learnings_count} total) ===
+{learnings_text}
+
+=== DECISIONS SNIPPETS ({len(decisions_snippets)} shown of {decisions_count} total) ===
+{decisions_text}
+"""
+
+
+def call_llm(prompt: str) -> str:
+    """Call `claude -p` with --model sonnet and return the output.
+
+    Args:
+        prompt: The prompt string to pass via stdin.
+
+    Returns:
+        The LLM's response string.
+
+    Raises:
+        RuntimeError: If the claude CLI call fails or returns non-zero exit code.
+    """
+    result = subprocess.run(
+        ["claude", "-p", "--model", "claude-sonnet-4-5", prompt],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        raise RuntimeError(
+            f"claude CLI failed (exit {result.returncode}): {stderr or '(no stderr)'}"
+        )
+    return result.stdout
+
+
+def parse_llm_clusters(llm_output: str) -> str | None:
+    """Validate and clean LLM cluster output.
+
+    MUST have both '### Key Knowledge Clusters — Learnings' and
+    '### Key Knowledge Clusters — Decisions' headers. Each section must have
+    at least 1 cluster line matching: `- **name** (N entries) — description`.
+    At least 2 valid cluster lines total. Strips trailing chatter.
+
+    Args:
+        llm_output: Raw LLM output string.
+
+    Returns:
+        Cleaned cluster string, or None if malformed.
+    """
+    cluster_re = re.compile(r"^- \*\*[^*]+\*\* \(\d+ entr(?:y|ies)\) — .+$")
+    learnings_header = "### Key Knowledge Clusters — Learnings"
+    decisions_header = "### Key Knowledge Clusters — Decisions"
+
+    lines = llm_output.splitlines()
+
+    if learnings_header not in llm_output:
+        return None
+    if decisions_header not in llm_output:
+        return None
+
+    # Find the start of the first relevant header
+    start_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == learnings_header or line.strip() == decisions_header:
+            start_idx = i
+            break
+
+    if start_idx is None:
+        return None
+
+    # Work only from first header onward
+    relevant = lines[start_idx:]
+
+    # Strip trailing chatter: keep only headers, cluster lines, and blank lines
+    cleaned: list[str] = []
+    for line in relevant:
+        stripped = line.rstrip()
+        if stripped == "" or stripped.startswith("### ") or cluster_re.match(stripped):
+            cleaned.append(stripped)
+        # Skip any non-matching line (trailing prose, preamble that crept in)
+
+    # Remove trailing blank lines
+    while cleaned and cleaned[-1] == "":
+        cleaned.pop()
+
+    result_text = "\n".join(cleaned)
+
+    # Validate: both headers present
+    if learnings_header not in result_text:
+        return None
+    if decisions_header not in result_text:
+        return None
+
+    # Validate: each section has at least 1 cluster line
+    learnings_idx = result_text.index(learnings_header)
+    decisions_idx = result_text.index(decisions_header)
+
+    if learnings_idx < decisions_idx:
+        learnings_section = result_text[learnings_idx:decisions_idx]
+        decisions_section = result_text[decisions_idx:]
+    else:
+        decisions_section = result_text[decisions_idx:learnings_idx]
+        learnings_section = result_text[learnings_idx:]
+
+    learnings_clusters = [
+        ln for ln in learnings_section.splitlines() if cluster_re.match(ln.rstrip())
+    ]
+    decisions_clusters = [
+        ln for ln in decisions_section.splitlines() if cluster_re.match(ln.rstrip())
+    ]
+
+    if not learnings_clusters or not decisions_clusters:
+        return None
+
+    total_clusters = len(learnings_clusters) + len(decisions_clusters)
+    if total_clusters < 2:
+        return None
+
+    return result_text
+
+
+def update_index_summarize(living_dir: Path) -> None:
+    """Full LLM summarization mode.
+
+    On success: generates both KNOWLEDGE_SUMMARY and QUICK_REFERENCE blocks,
+    updates 'Last summarized' date.
+
+    On LLM failure or malformed output: preserves previous summary block
+    byte-for-byte (preserving old 'Last summarized' date), still updates counts.
+
+    Dual-date semantics:
+    - 'Last audit' (in page header inside QUICK_REFERENCE): always updates.
+    - 'Last summarized' (inside KNOWLEDGE_SUMMARY block): only updates on
+      successful LLM call.
+
+    Args:
+        living_dir: Path to the .living/ directory.
+    """
+    index_path = living_dir / "INDEX.md"
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # --- Collect previous summary block (for fallback) ---
+    old_summary_block: str | None = None
+    if index_path.exists():
+        existing = index_path.read_text(encoding="utf-8")
+        if SUMMARY_BEGIN in existing and SUMMARY_END in existing:
+            s = existing.index(SUMMARY_BEGIN)
+            e = existing.index(SUMMARY_END) + len(SUMMARY_END)
+            old_summary_block = existing[s:e]
+
+    # --- Gather snippets for learnings and decisions ---
+    learnings_path = living_dir / "learnings.md"
+    decisions_path = living_dir / "decisions.md"
+
+    learnings_snippets: list[tuple[str, str]] = []
+    learnings_count = 0
+    if learnings_path.exists():
+        learnings_count, _ = count_headers_and_topics(learnings_path, "learnings")
+        learnings_snippets = extract_entry_snippets(learnings_path, "learnings")
+
+    decisions_snippets: list[tuple[str, str]] = []
+    decisions_count = 0
+    if decisions_path.exists():
+        decisions_count, _ = count_headers_and_topics(decisions_path, "decisions")
+        decisions_snippets = extract_entry_snippets(decisions_path, "decisions")
+
+    # --- Attempt LLM summarization ---
+    new_summary_block: str | None = None
+    if learnings_snippets or decisions_snippets:
+        prompt = build_llm_prompt(
+            learnings_snippets,
+            decisions_snippets,
+            learnings_count,
+            decisions_count,
+        )
+        try:
+            llm_output = call_llm(prompt)
+            clusters = parse_llm_clusters(llm_output)
+            if clusters is not None:
+                new_summary_block = "\n".join(
+                    [
+                        SUMMARY_BEGIN,
+                        f"Last summarized: {today}",
+                        "",
+                        clusters,
+                        SUMMARY_END,
+                    ]
+                )
+            else:
+                print(
+                    "Warning: LLM output was malformed — falling back to previous summary.",
+                    file=sys.stderr,
+                )
+        except (RuntimeError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            print(
+                f"Warning: LLM call failed ({exc}) — falling back to previous summary.",
+                file=sys.stderr,
+            )
+
+    # Use new summary if generated, otherwise fall back to old
+    summary_block = (
+        new_summary_block if new_summary_block is not None else old_summary_block
+    )
+
+    # --- Build quick reference ---
+    quick_ref = build_quick_reference(living_dir)
+
+    # --- Assemble the full INDEX.md ---
+    parts: list[str] = [quick_ref]
+    if summary_block:
+        parts.append("")
+        parts.append(summary_block)
+
+    new_content = "\n".join(parts) + "\n"
+    index_path.write_text(new_content, encoding="utf-8")
+    print(f"Written: {index_path}")
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate .living/INDEX.md for a project."
@@ -276,20 +778,53 @@ def main() -> None:
         action="store_true",
         help="Print the generated INDEX.md to stdout instead of writing it.",
     )
+
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--counts-only",
+        action="store_true",
+        help="Update entry counts and Quick Reference table only (no LLM).",
+    )
+    mode_group.add_argument(
+        "--summarize",
+        action="store_true",
+        help="Full LLM summarization: update counts AND generate knowledge clusters.",
+    )
+
     args = parser.parse_args()
 
     living_dir: Path = args.living_dir.resolve()
     if not living_dir.is_dir():
         parser.error(f"--living-dir '{living_dir}' is not a directory.")
 
-    content = generate_index(living_dir)
+    if args.counts_only:
+        if args.dry_run:
+            print(build_quick_reference(living_dir))
+        else:
+            update_index_counts_only(living_dir)
+    elif args.summarize:
+        if args.dry_run:
+            # For summarize dry-run, show what would be written without saving
+            # We still call the LLM but print instead of write
+            index_path = living_dir / "INDEX.md"
+            _original_write = index_path.write_text
 
-    if args.dry_run:
-        print(content)
+            def _dry_write(text: str, **_kwargs: object) -> None:
+                print(text)
+
+            index_path.write_text = _dry_write  # type: ignore[method-assign]
+            update_index_summarize(living_dir)
+            index_path.write_text = _original_write  # type: ignore[method-assign]
+        else:
+            update_index_summarize(living_dir)
     else:
-        index_path = living_dir / "INDEX.md"
-        index_path.write_text(content, encoding="utf-8")
-        print(f"Written: {index_path}")
+        content = generate_index(living_dir)
+        if args.dry_run:
+            print(content)
+        else:
+            index_path = living_dir / "INDEX.md"
+            index_path.write_text(content, encoding="utf-8")
+            print(f"Written: {index_path}")
 
 
 if __name__ == "__main__":
