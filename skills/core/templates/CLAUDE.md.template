@@ -46,9 +46,11 @@ No domain conventions installed yet. Install with mycelium's `install-convention
     ├── generated-conventions/      — Conventions crystallized from learnings
     ├── log/                        — Append-only event log
     │   └── LOG_REGISTRY.md
-    └── findings/                   — Scientific findings by topic
-        ├── FINDINGS_REGISTRY.md
-        └── {topic-slug}.md
+    ├── findings/                   — Scientific findings by topic
+    │   ├── FINDINGS_REGISTRY.md
+    │   └── {topic-slug}.md
+    └── outputs/                        — Derived reports and transfer logs
+        └── knowledge-transfers/        — Cross-project transfer audit trail
 ```
 
 ## Workflow
@@ -77,11 +79,13 @@ No domain conventions installed yet. Install with mycelium's `install-convention
 1. **Update manifests**: Update the relevant manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, etc.) with new/changed entries
 2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md`
-4. **Log learnings**: If something unexpected happened, append to `.living/learnings.md`
+4. **Log learnings**: If something unexpected happened, append to `.living/learnings.md` (consider promoting to conventions if the pattern recurs 3+ times)
 5. **Log findings**: If the work produced a scientific finding (empirical observation, validated/invalidated hypothesis, quantitative result, or domain discovery), crystallize it to `.living/findings/{topic}.md`. Check existing topics first for consistency. Prefer broad topic names. See `skills/core/templates/findings-entry.md` for format.
 6. **Log todos**: If future work is identified, add items to `todo/TODO_REGISTRY.md` (create a detailed `todo/[item].md` writeup for complex items)
-7. **Validate**: Run `validate_structure.py` to confirm repo structure is correct
-8. **Convention feedback**: Note whether convention pack practices were helpful or had gaps
+7. **Validate structure**: Run `validate_structure.py` to confirm repo structure is correct
+8. **Crystallize conventions**: Review recent learnings — if 3+ entries share a pattern, promote to `.living/conventions.md` or a named convention pack
+9. **Convention feedback**: Note whether convention pack practices were helpful or had gaps
+10. **Session summary**: Write `.claude/last-session.md` with a brief summary of what was done, decisions made, and next steps
 
 ### Automated Enforcement
 
@@ -95,12 +99,16 @@ Mycelium hooks are auto-installed in `.claude/settings.local.json` during `init`
 
 The PostToolUse hook ensures the protocol runs automatically after analysis/data/algorithm work. Read-only and config-only sessions are never interrupted.
 
+### Knowledge Transfer (Cross-Project)
+
+If this project is part of a multi-project portfolio (parent directory has `.living/`), the `mycelium-health.sh` hook checks daily whether cross-project knowledge transfer is due. When triggered, a background subagent scans recent learnings across sibling projects and automatically applies relevant transfers to this project's `.living/learnings.md`. Transfer entries are tagged with `(auto-transferred by mycelium)` for auditability. Audit reports are stored in the parent project's `.living/outputs/knowledge-transfers/`.
+
 ### Subagent-Driven Workflows
 
 When using subagent-driven development (main context coordinates, subagents implement):
-- After all subagent batches complete, dispatch a **crystallization subagent** to log decisions and learnings to `.living/`
+- Subagents receive a tiered post-action directive: Tier 1 (learnings, decisions, findings) fires for all contexts including subagents. Tier 2 (manifests, documentation, crystallization, session summary) is main-context only.
+- After all subagent batches complete, dispatch a **crystallization subagent** to run Tier 2 steps and update `.living/`
 - The Stop hook catches sessions where this step is forgotten
-- Subagents themselves do not need mycelium awareness — only the main context manages the living layer
 
 ## Data Conventions
 

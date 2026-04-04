@@ -5,9 +5,10 @@ description: >
   is registered and discoverable. Use when user says "set up mycelium",
   "initialize living repo", "ingest dataset", "install convention",
   "crystallize learnings", "todo idea", "knowledge init",
-  "set up knowledge", "progressive disclosure", or wants to restructure
-  an existing repository into a self-documenting framework. Also use when
-  user mentions "living dataset", "living repo", or "mycelium".
+  "set up knowledge", "progressive disclosure", "transfer knowledge",
+  "cross-pollinate", or wants to restructure an existing repository into a
+  self-documenting framework. Also use when user mentions "living dataset",
+  "living repo", or "mycelium".
 ---
 
 # Mycelium — Living Repository Skill (Core)
@@ -18,6 +19,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 - `/mycelium:analyze` — start or continue an analysis
 - `/mycelium:report` — generate a structured report
 - `/mycelium:ideas` — brainstorm with disciplinary personas
+- `/mycelium:transfer` — cross-pollinate learnings across sibling projects
 
 ---
 
@@ -36,7 +38,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 6. Generate `CLAUDE.md` for the repo (from `skills/core/templates/CLAUDE.md.template`) that encodes the living repo protocol.
 7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
 8. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
-9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`; create `.living/log/LOG_REGISTRY.md` (session log registry — tracks work across sessions).
+9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`; create `.living/log/LOG_REGISTRY.md` (session log registry — tracks work across sessions). Create `.living/outputs/knowledge-transfers/` for cross-project transfer audit trail.
 10. **Bootstrap knowledge system**: If `~/.claude/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py`. Append the domain routing table to the project's MEMORY.md if not already present (from `skills/core/templates/knowledge/domain-table.md`).
 11. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
 12. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
@@ -124,6 +126,31 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 8. Run `python3 skills/core/scripts/crystallize_findings.py` to rebuild the cross-project INDEX.md and regenerate all per-project FINDINGS_REGISTRY.md files from the topic file source of truth.
 9. **Consolidation pass** (if invoked explicitly): Scan all topics across all projects, flag potential duplicates (overlapping tags or similar descriptions), and suggest merges to the user.
 10. Return single-line summary: "Added N findings to M topics (N new topics created)."
+
+---
+
+## Mode: `transfer`
+
+**Trigger**: "transfer knowledge", "cross-pollinate", "sync learnings", "knowledge transfer"
+
+**Purpose**: Cross-pollinate learnings across sibling projects in a meta-project. Identifies insights from one project that would benefit others and **automatically applies** them to target projects' `.living/learnings.md` files.
+
+**Steps**:
+1. This mode delegates to the dedicated command file. Run the protocol in `commands/transfer.md`.
+2. The transfer command is designed to run as a background subagent — dispatch it with `sonnet` model and do not block on results.
+3. Transfers are auto-applied to target projects' `.living/learnings.md` with `source: {project} (auto-transferred by mycelium)` for auditability.
+4. Audit reports are written to `{meta-project}/.living/outputs/knowledge-transfers/YYYY-MM-DD.md`.
+
+**When this runs**:
+- **Automatic**: `mycelium-health.sh` checks `.living/outputs/knowledge-transfers/.last-run` at session start. If >24h old or missing, it emits a directive to dispatch the transfer as a background subagent.
+- **Manual**: User invokes `/mycelium:transfer` or says "transfer knowledge", "cross-pollinate".
+
+**Lifecycle position**: This phase sits between crystallization (patterns → conventions) and contribution (conventions → network). Crystallize extracts patterns within a project; transfer propagates relevant patterns across projects; contribute shares generalized patterns with the network.
+
+**Notes**:
+- Transfers are context-adapted for the target project, not copy-pasted verbatim
+- Near-duplicate entries in the target are skipped automatically
+- "All clear" reports (no transfers needed) are normal and expected most days
 
 ---
 
