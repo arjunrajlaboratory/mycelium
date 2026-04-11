@@ -79,6 +79,10 @@ desktop.ini
 *.conda
 conda-meta/
 
+# Skill packs (cloned repos, each has its own git history)
+# Only track .gitignore and README.md inside skillpacks/
+skillpacks/*/
+
 # Misc
 *.csv.gz
 *.tsv.gz

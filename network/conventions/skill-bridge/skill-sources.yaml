@@ -1,0 +1,43 @@
+# Skill Bridge: External Repository Locations
+#
+# These repos are cloned into the skillpacks/ directory at the repo root.
+# They are NOT installed as agent skill packs — they sit inert on disk.
+# Conventions read specific files from them on demand.
+#
+# Setup:
+#   cd skillpacks/
+#   git clone https://github.com/K-Dense-AI/scientific-agent-skills.git
+#   git clone https://github.com/bio-skills/bioSkills.git
+#   git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git
+#
+# The skillpacks/ directory is .gitignored — each repo is its own git history.
+
+sources:
+  scientific-agent-skills:
+    path: skillpacks/scientific-agent-skills
+    skills_dir: scientific-skills
+    verify: scientific-skills/scanpy/SKILL.md
+    description: >
+      135 skills across 18 scientific domains. Broad coverage: database access,
+      ML frameworks, scientific communication, lab automation, cheminformatics.
+    url: https://github.com/K-Dense-AI/scientific-agent-skills
+
+  bioSkills:
+    path: skillpacks/bioSkills
+    skills_dir: .
+    verify: single-cell/data-io/SKILL.md
+    description: >
+      439 skills across 63 bioinformatics categories. Deep coverage: genomics,
+      transcriptomics, epigenomics, proteomics, clinical genomics. Version-pinned
+      code patterns with Goal/Approach structure.
+    url: https://github.com/bio-skills/bioSkills
+
+  autonomous-science-personas:
+    path: skillpacks/Autonomous-Science
+    personas_dir: personas/library
+    verify: personas/library/arjun_raj.json
+    description: >
+      50 researcher personas synthesized from publication records. Each contains
+      prompt_fragment, decision_rules, anti_patterns, and key_vocabulary for
+      LLM-operational use as collaborators or reviewers.
+    url: https://github.com/arjunrajlaboratory/Autonomous-Science

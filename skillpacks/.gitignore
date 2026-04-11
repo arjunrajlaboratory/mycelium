@@ -1,0 +1,16 @@
+# Skill pack repos are cloned here but NOT tracked by mycelium's git.
+# They are their own git repos and should be updated independently.
+#
+# To set up:
+#   cd skillpacks/
+#   git clone https://github.com/K-Dense-AI/scientific-agent-skills.git
+#   git clone https://github.com/bio-skills/bioSkills.git
+#   git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git
+#
+# These repos are inert reference libraries. Do NOT install them as
+# agent skill packs. The skill-bridge convention reads specific files
+# from them on demand.
+
+*
+!.gitignore
+!README.md
