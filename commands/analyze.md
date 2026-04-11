@@ -1,9 +1,22 @@
 ---
 description: >
-  Start or continue a data analysis in a mycelium-enabled repository.
-  Routes to installed convention packs (robust-analysis, domain conventions)
-  for methodology guidance. Use when user says "start analysis", "run analysis",
-  "continue analysis", "new analysis", or "analyze".
+  ALWAYS invoke this skill when a user wants to perform computational analysis
+  on data in this repository. This skill loads project-specific analysis
+  conventions, dataset registries, and methodology requirements (validation
+  checks, sensitivity sweeps, null hypothesis testing) that are not available
+  from general knowledge — you cannot do the analysis correctly without
+  consulting it first. Trigger for: running any named analysis technique
+  (clustering, PCA, UMAP, differential expression, survival analysis,
+  dose-response, model fitting, time-series, batch correction, statistical
+  tests), exploring or investigating patterns in data, continuing or extending
+  a previous analysis, debugging or troubleshooting analytical results (wrong
+  clusters, unexpected patterns, parameter tuning). The user's intent must be
+  to computationally process or model data — not just read it, not just look
+  at a file. Do NOT trigger for: reading or previewing data files without
+  analysis, writing reports or documents, brainstorming ideas, setting up or
+  initializing repositories, installing conventions, ingesting or importing
+  data files, fixing code bugs unrelated to analytical results, or updating
+  documentation.
 ---
 
 # Mycelium — Analyze

@@ -85,3 +85,5 @@ conda-meta/
 *.zip
 *.tar.gz
 *.tar.bz2
+localFiles/
+trigger-eval-workspace/
