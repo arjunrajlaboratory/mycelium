@@ -7,7 +7,7 @@ External skill repositories cloned here for use by the `skill-bridge` convention
 ```bash
 cd skillpacks/
 git clone https://github.com/K-Dense-AI/scientific-agent-skills.git
-git clone https://github.com/bio-skills/bioSkills.git
+git clone https://github.com/GPTomics/bioSkills.git
 git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git
 ```
 

@@ -4,7 +4,7 @@
 # To set up:
 #   cd skillpacks/
 #   git clone https://github.com/K-Dense-AI/scientific-agent-skills.git
-#   git clone https://github.com/bio-skills/bioSkills.git
+#   git clone https://github.com/GPTomics/bioSkills.git
 #   git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git
 #
 # These repos are inert reference libraries. Do NOT install them as
