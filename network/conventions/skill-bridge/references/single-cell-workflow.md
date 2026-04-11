@@ -41,7 +41,7 @@ Total context cost for persona panel: ~900 words.
 ## Step 2: Quality Control
 
 **Skill**: Read `skillpacks/bioSkills/single-cell/preprocessing/SKILL.md`
-**Also consult**: Bioinformatics QC checklist (`.living/conventions/bioinformatics/qc-checklist.md`, "Single-Cell QC" section)
+**QC checklist**: Use `skill-bridge/qc-checklist.md` (always available). If the `bioinformatics` convention pack is also installed, consult its `qc-checklist.md` "Single-Cell QC" section for additional domain-specific checks.
 
 **Actions**:
 - Calculate per-cell metrics: n_genes, n_counts, pct_mito, pct_ribo
