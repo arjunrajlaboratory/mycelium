@@ -42,7 +42,7 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
    ```bash
    cd skillpacks/
    git clone https://github.com/K-Dense-AI/scientific-agent-skills.git
-   git clone https://github.com/bio-skills/bioSkills.git
+   git clone https://github.com/GPTomics/bioSkills.git
    git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git
    ```
 6. Ask which **domain** conventions to install from the network (e.g., bioinformatics, image-analysis, skill-bridge). Domain packs are those without `core: true`.
