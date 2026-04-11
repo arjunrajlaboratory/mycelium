@@ -1,0 +1,24 @@
+---
+name: skill-bridge
+version: 0.1.0
+description: >
+  Routes analysis workflows to external skill repositories (bioSkills,
+  scientific-agent-skills) and researcher personas (Autonomous-Science)
+  without installing them as agent skill packs. Skills live as inert git
+  clones on disk; conventions read specific SKILL.md files on demand,
+  wrapping each invocation with defensive methodology and optional
+  persona-guided review. Achieves ~125x context reduction vs. naive
+  skill pack installation.
+author: mycelium
+dependencies:
+  - robust-analysis
+  - bioinformatics
+tags:
+  - skill-routing
+  - progressive-disclosure
+  - personas
+  - bioinformatics
+  - single-cell
+  - genomics
+  - scientific-analysis
+---

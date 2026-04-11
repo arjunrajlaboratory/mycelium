@@ -38,14 +38,21 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 2. **New repo**: Run full scaffold using `skills/core/scripts/init_repo.py`.
 3. **Existing repo**: Run in restructure mode — audit current structure, propose migration plan, ask user to confirm before proceeding.
 4. **Auto-install core convention packs**: Scan `network/conventions/*/CONVENTION_PACK.yaml` for packs with `core: true` and install each one using `skills/core/scripts/install_convention.py`. Currently the core packs are `robust-analysis`, `report-generator`, and `idea-generator`. These provide batteries-included practices every repo should have.
-5. Ask which **domain** conventions to install from the network (e.g., bioinformatics, image-analysis). Domain packs are those without `core: true`.
-6. Generate `CLAUDE.md` for the repo (from `skills/core/templates/CLAUDE.md.template`) that encodes the living repo protocol.
-7. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
-8. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
-9. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`; create `.living/log/LOG_REGISTRY.md` (session log registry — tracks work across sessions). Create `.living/outputs/knowledge-transfers/` for cross-project transfer audit trail.
-10. **Bootstrap knowledge system**: If `~/.claude/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py`. Append the domain routing table to the project's MEMORY.md if not already present (from `skills/core/templates/knowledge/domain-table.md`).
-11. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
-12. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
+5. **Set up skillpacks directory**: Create `skillpacks/` with `.gitignore` and `README.md`. This is where external skill repos (bioSkills, scientific-agent-skills, Autonomous-Science) are cloned for use by the `skill-bridge` convention. The repos are inert reference libraries — never installed as agent skill packs. Prompt the user to clone the repos:
+   ```bash
+   cd skillpacks/
+   git clone https://github.com/K-Dense-AI/scientific-agent-skills.git
+   git clone https://github.com/bio-skills/bioSkills.git
+   git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git
+   ```
+6. Ask which **domain** conventions to install from the network (e.g., bioinformatics, image-analysis, skill-bridge). Domain packs are those without `core: true`.
+7. Generate `CLAUDE.md` for the repo (from `skills/core/templates/CLAUDE.md.template`) that encodes the living repo protocol.
+8. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
+9. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
+10. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`; create `.living/log/LOG_REGISTRY.md` (session log registry — tracks work across sessions). Create `.living/outputs/knowledge-transfers/` for cross-project transfer audit trail.
+11. **Bootstrap knowledge system**: If `~/.claude/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py`. Append the domain routing table to the project's MEMORY.md if not already present (from `skills/core/templates/knowledge/domain-table.md`).
+12. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
+13. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
 
 **References to consult**:
 - `skills/core/references/folder-structure.md` — canonical target structure

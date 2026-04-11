@@ -66,6 +66,7 @@ def create_directory_structure(target_dir: Path):
         "data/processed",
         "data/metadata",
         "reference_material",
+        "skillpacks",
         "todo",
     ]
 
@@ -166,6 +167,65 @@ def create_living_layer(target_dir: Path):
             "# Active Convention Packs\n# Updated by install_convention.py\n\nactive_conventions: []\n"
         )
         print("  Created: .living/conventions/ACTIVE_CONVENTIONS.yaml")
+
+
+def create_skillpacks(target_dir: Path):
+    """Create the skillpacks/ directory with .gitignore and README.
+
+    Skill packs are external git repos cloned into skillpacks/ for use by
+    the skill-bridge convention. They are NOT installed as agent skill packs —
+    they sit inert on disk and are read on demand by convention-routed workflows.
+    """
+    skillpacks_dir = target_dir / "skillpacks"
+    skillpacks_dir.mkdir(exist_ok=True)
+
+    gitignore_path = skillpacks_dir / ".gitignore"
+    if not gitignore_path.exists():
+        gitignore_path.write_text(
+            "# Skill pack repos are cloned here but NOT tracked by this project's git.\n"
+            "# They are their own git repos and should be updated independently.\n"
+            "#\n"
+            "# To set up:\n"
+            "#   cd skillpacks/\n"
+            "#   git clone https://github.com/K-Dense-AI/scientific-agent-skills.git\n"
+            "#   git clone https://github.com/bio-skills/bioSkills.git\n"
+            "#   git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git\n"
+            "#\n"
+            "# These repos are inert reference libraries. Do NOT install them as\n"
+            "# agent skill packs. The skill-bridge convention reads specific files\n"
+            "# from them on demand.\n\n"
+            "*\n"
+            "!.gitignore\n"
+            "!README.md\n"
+        )
+        print("  Created: skillpacks/.gitignore")
+
+    readme_path = skillpacks_dir / "README.md"
+    if not readme_path.exists():
+        readme_path.write_text(
+            "# Skill Packs\n\n"
+            "External skill repositories cloned here for use by the `skill-bridge` convention pack. "
+            "These are **inert reference libraries** — never installed as agent skill packs.\n\n"
+            "## Setup\n\n"
+            "```bash\n"
+            "cd skillpacks/\n"
+            "git clone https://github.com/K-Dense-AI/scientific-agent-skills.git\n"
+            "git clone https://github.com/bio-skills/bioSkills.git\n"
+            "git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git\n"
+            "```\n\n"
+            "## Updating\n\n"
+            "```bash\n"
+            "cd skillpacks/scientific-agent-skills && git pull\n"
+            "cd ../bioSkills && git pull\n"
+            "cd ../Autonomous-Science && git pull\n"
+            "```\n\n"
+            "## How These Are Used\n\n"
+            "The `skill-bridge` convention pack (in `.living/conventions/skill-bridge/` or "
+            "`network/conventions/skill-bridge/`) routes analysis workflows to specific "
+            "SKILL.md files within these repos. The agent reads one file at a time "
+            "(~150-200 lines per analysis step), never loading the full repos into context.\n"
+        )
+        print("  Created: skillpacks/README.md")
 
 
 def find_network_conventions_dir() -> Path | None:
@@ -661,6 +721,9 @@ def main():
 
     print("\nInstalling core convention packs...")
     install_core_convention_packs(target_dir)
+
+    print("\nSetting up skillpacks directory...")
+    create_skillpacks(target_dir)
 
     print("\nInstalling Claude Code hooks...")
     install_claude_hooks(target_dir)
