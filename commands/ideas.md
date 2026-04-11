@@ -1,10 +1,17 @@
 ---
 description: >
-  Generate creative analysis ideas by having diverse disciplinary personas
-  review existing data and findings. Uses parallel subagents for efficient
-  cross-disciplinary brainstorming. Use when user says "generate ideas",
-  "brainstorm", "creative ideas", "persona brainstorm", "idea generation",
-  or "new analysis directions".
+  Invoke this skill for ANY request involving brainstorming, ideation, or
+  generating new research ideas. This is the brainstorming and idea generation
+  skill. Use it when the user wants to brainstorm, generate ideas, get fresh
+  perspectives, hear what experts from different fields would think, find
+  creative angles they're missing, explore new analysis directions, or get
+  unstuck. Trigger phrases include: "brainstorm", "ideas", "fresh perspectives",
+  "what would a [expert] think", "I'm stuck", "creative angles", "wild ideas",
+  "what are we missing", "open to ideas", "before we write it up",
+  "persona brainstorm", "new directions", "where to go next". If the user's
+  request is open-ended and exploratory rather than a specific concrete task,
+  use this skill. Do NOT use for defined tasks like running a specific analysis,
+  fixing code, setting up projects, or ingesting data.
 ---
 
 # Mycelium — Ideas

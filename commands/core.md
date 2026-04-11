@@ -1,14 +1,18 @@
 ---
 description: >
-  Self-documenting, self-improving analytical repository framework.
-  Scaffolds living repositories where every analysis, dataset, and decision
-  is registered and discoverable. Use when user says "set up mycelium",
-  "initialize living repo", "ingest dataset", "install convention",
-  "crystallize learnings", "todo idea", "knowledge init",
-  "set up knowledge", "progressive disclosure", "transfer knowledge",
-  "cross-pollinate", or wants to restructure an existing repository into a
-  self-documenting framework. Also use when user mentions "living dataset",
-  "living repo", or "mycelium".
+  ALWAYS use this skill when the user mentions "mycelium", "living repo",
+  "crystallize", or "todo idea". ALWAYS use for requests about making projects
+  self-documenting, tracking knowledge/decisions/learnings, capturing insights
+  for later, transferring knowledge across projects, or exploring unfamiliar
+  data. This skill manages a .living/ directory framework that registers
+  analyses, datasets, and decisions. It handles: project initialization
+  ("set up mycelium", "initialize living repo"), knowledge capture
+  ("crystallize this learning", "record this finding"), future work tracking
+  ("add a todo idea", "track this for later"), knowledge transfer
+  ("transfer knowledge", "cross-pollinate", "sync learnings"), dataset
+  ingestion, convention installation, and progressive disclosure knowledge
+  systems. NOT for: report writing, code refactoring, brainstorming, git init,
+  or generic folder organization.
 ---
 
 # Mycelium — Living Repository Skill (Core)

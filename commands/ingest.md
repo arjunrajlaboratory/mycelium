@@ -1,9 +1,15 @@
 ---
 description: >
-  Ingest a new dataset into a mycelium-enabled repository. Handles placement,
-  metadata generation, manifest updates, and decision logging. Use when user says
-  "ingest dataset", "add data", "import data", "new dataset", "ingest data",
-  or "add a dataset".
+  Use this skill when the user wants to add, import, or ingest files or data
+  into the project. Trigger whenever someone mentions: adding data/files to
+  the project, ingesting a dataset, importing new data, bringing in files from
+  any source, having received results or files from collaborators or facilities,
+  needing to place files into the data directory, or setting up/initializing
+  mycelium. Covers all file types (CSV, FASTQ, XLSX, TIFF, JSON, FCS, TSV,
+  images, etc.). This skill copies/moves files into the project structure,
+  generates metadata, updates the data manifest, and documents provenance.
+  Do NOT use for: reading or analyzing existing project data, listing datasets,
+  deleting data, downloading from URLs, or editing code files.
 ---
 
 # Mycelium — Ingest
