@@ -63,6 +63,47 @@ else
   echo "$(date +%s) auto-initialized" > "$KNOWLEDGE_DIR/.last-audit"
 fi
 
+# --- Knowledge transfer staleness check ---
+# Only runs if we're inside a meta-project (portfolio with multiple subprojects)
+META_PROJECT=""
+_CHECK_DIR=$(dirname "$REPO_ROOT")
+while [ "$_CHECK_DIR" != "/" ] && [ "$_CHECK_DIR" != "." ]; do
+  if [ -d "$_CHECK_DIR/.living" ]; then
+    META_PROJECT="$_CHECK_DIR"
+    break
+  fi
+  _CHECK_DIR=$(dirname "$_CHECK_DIR")
+done
+
+# Also check if current dir IS the meta-project (has subprojects with .living/)
+if [ -z "$META_PROJECT" ] && [ -d "$REPO_ROOT/.living" ]; then
+  SUBPROJECT_COUNT=0
+  for _sp in "$REPO_ROOT"/*/.living; do
+    [ -d "$_sp" ] && SUBPROJECT_COUNT=$(( SUBPROJECT_COUNT + 1 ))
+  done
+  [ "$SUBPROJECT_COUNT" -ge 2 ] && META_PROJECT="$REPO_ROOT"
+fi
+
+if [ -n "$META_PROJECT" ]; then
+  TRANSFER_LAST_RUN="$META_PROJECT/.living/outputs/knowledge-transfers/.last-run"
+  TRANSFER_STALE=false
+  if [ ! -f "$TRANSFER_LAST_RUN" ]; then
+    TRANSFER_STALE=true
+    TRANSFER_AGE_MSG="never run"
+  else
+    TRANSFER_TS=$(date -jf "%Y-%m-%dT%H:%M:%SZ" "$(cat "$TRANSFER_LAST_RUN")" +%s 2>/dev/null || date -d "$(cat "$TRANSFER_LAST_RUN")" +%s 2>/dev/null || echo "0")
+    TRANSFER_AGE_HOURS=$(( (NOW_TS - TRANSFER_TS) / 3600 ))
+    if [ "$TRANSFER_AGE_HOURS" -ge 24 ]; then
+      TRANSFER_STALE=true
+      TRANSFER_AGE_MSG="${TRANSFER_AGE_HOURS}h since last run"
+    fi
+  fi
+
+  if [ "$TRANSFER_STALE" = true ]; then
+    MESSAGES="${MESSAGES}KNOWLEDGE TRANSFER DUE (${TRANSFER_AGE_MSG}): Dispatch a background sonnet subagent to run the mycelium transfer protocol. The subagent should: read recent learnings from all subprojects under ${META_PROJECT}, identify cross-project transfer opportunities, and write a report to ${META_PROJECT}/.living/outputs/knowledge-transfers/$(date +%Y-%m-%d).md. Do not block on results.\n\n"
+  fi
+fi
+
 # --- Session log setup (runs every invocation, idempotent) ---
 LIVING_DIR="$REPO_ROOT/.living"
 LOG_DIR="$LIVING_DIR/log"

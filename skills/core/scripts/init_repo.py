@@ -22,7 +22,9 @@ except ImportError:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Scaffold a mycelium-enabled living repository.")
+    parser = argparse.ArgumentParser(
+        description="Scaffold a mycelium-enabled living repository."
+    )
     parser.add_argument(
         "--target-dir",
         type=Path,
@@ -54,6 +56,9 @@ def create_directory_structure(target_dir: Path):
         ".living/generated-conventions",
         ".living/log",
         ".living/findings",
+        ".living/outputs",
+        ".living/outputs/knowledge-transfers",
+        ".living/skills",
         "algorithms",
         "analysis",
         "data",
@@ -239,7 +244,9 @@ def install_core_convention_packs(target_dir: Path):
     # Write ACTIVE_CONVENTIONS.yaml with core entries
     yaml_content = (
         "# Active Convention Packs\n"
-        "# Updated by init_repo.py and install_convention.py\n\n" + "\n".join(entries) + "\n"
+        "# Updated by init_repo.py and install_convention.py\n\n"
+        + "\n".join(entries)
+        + "\n"
     )
     yaml_path.write_text(yaml_content)
     print(f"  Updated ACTIVE_CONVENTIONS.yaml with {len(core_packs)} core packs")
@@ -294,7 +301,11 @@ def install_claude_hooks(target_dir: Path):
 
     def _has_hook(hook_list: list, cmd: str) -> bool:
         """Check if a hook command is already registered."""
-        return any(h.get("command") == cmd for entry in hook_list for h in entry.get("hooks", []))
+        return any(
+            h.get("command") == cmd
+            for entry in hook_list
+            for h in entry.get("hooks", [])
+        )
 
     # --- SessionStart: mycelium-health.sh ---
     session_start = hooks.setdefault("SessionStart", [])
@@ -321,7 +332,9 @@ def install_claude_hooks(target_dir: Path):
     # --- PostToolUse: mycelium-activity-tracker.sh (matcher: Edit|Write) ---
     if not _has_hook(post_tool, activity_tracker_hook):
         # Find existing Edit|Write matcher entry or create one
-        edit_write_entry = next((e for e in post_tool if e.get("matcher") == "Edit|Write"), None)
+        edit_write_entry = next(
+            (e for e in post_tool if e.get("matcher") == "Edit|Write"), None
+        )
         if edit_write_entry is None:
             edit_write_entry = {"matcher": "Edit|Write", "hooks": []}
             post_tool.append(edit_write_entry)
@@ -493,7 +506,11 @@ def audit_existing_structure(target_dir: Path) -> dict:
         # Analysis scripts
         if ext in SCRIPT_EXTS:
             # Skip setup.py and similar repo-level Python files at root
-            if len(parts) == 1 and ext == ".py" and path.stem in {"setup", "conftest", "noxfile"}:
+            if (
+                len(parts) == 1
+                and ext == ".py"
+                and path.stem in {"setup", "conftest", "noxfile"}
+            ):
                 plan["unclassified"].append(str(rel))
                 continue
             group = get_analysis_group(rel)
@@ -512,7 +529,9 @@ def audit_existing_structure(target_dir: Path) -> dict:
             }:
                 plan["unclassified"].append(str(rel))
                 continue
-            plan["reference_material"].append((str(rel), f"reference_material/{path.name}"))
+            plan["reference_material"].append(
+                (str(rel), f"reference_material/{path.name}")
+            )
             continue
 
         # Everything else
@@ -533,7 +552,9 @@ def audit_existing_structure(target_dir: Path) -> dict:
     print("\n=== Audit Report ===")
 
     # Data files
-    data_count = len(plan["data_raw"]) + len(plan["data_processed"]) + len(plan["data_metadata"])
+    data_count = (
+        len(plan["data_raw"]) + len(plan["data_processed"]) + len(plan["data_metadata"])
+    )
     print(f"\nDATA FILES ({data_count} files → data/)")
     for bucket, label in [
         ("data_raw", "data/raw/"),
@@ -543,7 +564,11 @@ def audit_existing_structure(target_dir: Path) -> dict:
         if plan[bucket]:
             print(f"  {label}:")
             for current, _ in plan[bucket]:
-                parent = str(Path(current).parent) if str(Path(current).parent) != "." else "root"
+                parent = (
+                    str(Path(current).parent)
+                    if str(Path(current).parent) != "."
+                    else "root"
+                )
                 print(f"    - {current} (currently: {parent})")
 
     # Analysis scripts
@@ -559,7 +584,9 @@ def audit_existing_structure(target_dir: Path) -> dict:
     ref_count = len(plan["reference_material"])
     print(f"\nREFERENCE MATERIAL ({ref_count} files → reference_material/)")
     for current, _ in plan["reference_material"]:
-        parent = str(Path(current).parent) if str(Path(current).parent) != "." else "root"
+        parent = (
+            str(Path(current).parent) if str(Path(current).parent) != "." else "root"
+        )
         print(f"    - {current} (currently: {parent})")
 
     # Algorithms
@@ -612,7 +639,9 @@ def main():
 
     if check_existing_structure(target_dir):
         print("\nThis repo already has a mycelium structure.")
-        print("Use --restructure to audit and update, or remove .living/ to start fresh.")
+        print(
+            "Use --restructure to audit and update, or remove .living/ to start fresh."
+        )
         sys.exit(1)
 
     print("\nCreating directory structure...")
@@ -640,7 +669,9 @@ def main():
     print("Mycelium initialization complete!")
     print("\nNext steps:")
     print("  1. Generate CLAUDE.md from the template")
-    print("  2. Install domain conventions if needed (/mycelium:skill install-convention)")
+    print(
+        "  2. Install domain conventions if needed (/mycelium:skill install-convention)"
+    )
     print("  3. Run validate_structure.py to confirm setup")
     print("  4. Start working — the repo is now alive!")
 
