@@ -111,3 +111,100 @@ def test_matches_domain_multiple_patterns() -> None:
 
 def test_matches_domain_empty_patterns() -> None:
     assert me.matches_domain("anything.py", []) is False
+
+
+def test_parse_entries_splits_by_date_header() -> None:
+    body = (
+        "## [2026-04-15] First entry\n"
+        "**Tags**: palette, colorblind\n"
+        "body text one\n"
+        "## [2026-04-10] Second entry\n"
+        "**Tags**: dpi\n"
+        "body text two\n"
+    )
+    entries = me.parse_entries(body)
+    assert len(entries) == 2
+    assert entries[0]["title"] == "First entry"
+    assert entries[0]["date"] == "2026-04-15"
+    assert entries[0]["tags"] == ["palette", "colorblind"]
+    assert "body text one" in entries[0]["body"]
+
+
+def test_parse_entries_extracts_triggers() -> None:
+    body = '## [2026-04-15] Entry\n**Triggers**: ["palette", "color"]\nbody\n'
+    entries = me.parse_entries(body)
+    assert entries[0]["triggers"] == ["palette", "color"]
+
+
+def test_score_entry_title_match_plus3() -> None:
+    path_tokens = ["panel", "figures"]
+    entry = {
+        "title": "Panel layout best practice",
+        "tags": [],
+        "triggers": [],
+        "body": "unrelated body text",
+        "date": "2026-04-22",
+    }
+    score = me.score_entry(entry, path_tokens, today="2026-04-22")
+    assert score == pytest.approx(3.5)
+
+
+def test_score_entry_tags_plus2() -> None:
+    entry = {
+        "title": "Unrelated",
+        "tags": ["panel"],
+        "triggers": [],
+        "body": "",
+        "date": "2020-01-01",
+    }
+    score = me.score_entry(entry, ["panel"], today="2026-04-22")
+    assert score == pytest.approx(2.0)
+
+
+def test_score_entry_triggers_plus2() -> None:
+    entry = {
+        "title": "X",
+        "tags": [],
+        "triggers": ["panel"],
+        "body": "",
+        "date": "2020-01-01",
+    }
+    score = me.score_entry(entry, ["panel"], today="2026-04-22")
+    assert score == pytest.approx(2.0)
+
+
+def test_score_entry_body_plus1() -> None:
+    entry = {
+        "title": "X",
+        "tags": [],
+        "triggers": [],
+        "body": "first 500 chars mentioning panel somewhere",
+        "date": "2020-01-01",
+    }
+    score = me.score_entry(entry, ["panel"], today="2026-04-22")
+    assert score == pytest.approx(1.0)
+
+
+def test_score_entry_recency_bonus_boundary() -> None:
+    entry = {
+        "title": "unrelated",
+        "tags": [],
+        "triggers": [],
+        "body": "",
+        "date": "2026-02-21",
+    }
+    score = me.score_entry(entry, ["nothing"], today="2026-04-22")
+    assert score == pytest.approx(0.5)
+
+
+def test_score_entry_body_first_500_chars_only() -> None:
+    long_body = "x " * 300 + "panel"
+    entry = {
+        "title": "",
+        "tags": [],
+        "triggers": [],
+        "body": long_body,
+        "date": "2020-01-01",
+    }
+    score = me.score_entry(entry, ["panel"], today="2026-04-22")
+    assert score == 0.0

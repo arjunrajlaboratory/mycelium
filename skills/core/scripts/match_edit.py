@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
-from fnmatch import fnmatch
 import re
 import sys
+from datetime import date
+from fnmatch import fnmatch
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).parent
@@ -22,6 +23,81 @@ import _frontmatter as fm  # noqa: E402
 SCHEMA_VERSION = 1
 
 _SPLIT_RE = re.compile(r"[_\-./\s]+")
+_HEADER_RE = re.compile(r"^## \[(\d{4}-\d{2}-\d{2})\]\s+(.+?)\s*$")
+_TAGS_RE = re.compile(r"^\*\*Tags\*\*\s*:\s*(.+)$", re.IGNORECASE)
+_TRIGGERS_RE = re.compile(r"^\*\*Triggers\*\*\s*:\s*(.+?)\s*$", re.IGNORECASE)
+
+
+def _parse_list_field(raw: str) -> list[str]:
+    raw = raw.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        try:
+            return [str(x).strip() for x in json.loads(raw)]
+        except json.JSONDecodeError:
+            pass
+    return [t.strip().strip('"') for t in raw.split(",") if t.strip()]
+
+
+def parse_entries(body: str) -> list[dict]:
+    lines = body.splitlines()
+    entries: list[dict] = []
+    cur: dict | None = None
+    for line in lines:
+        m = _HEADER_RE.match(line)
+        if m:
+            if cur is not None:
+                entries.append(cur)
+            cur = {
+                "date": m.group(1),
+                "title": m.group(2),
+                "tags": [],
+                "triggers": [],
+                "body": "",
+            }
+            continue
+        if cur is None:
+            continue
+        tag_m = _TAGS_RE.match(line)
+        if tag_m:
+            cur["tags"] = _parse_list_field(tag_m.group(1))
+            continue
+        trig_m = _TRIGGERS_RE.match(line)
+        if trig_m:
+            cur["triggers"] = _parse_list_field(trig_m.group(1))
+            continue
+        cur["body"] += line + "\n"
+    if cur is not None:
+        entries.append(cur)
+    return entries
+
+
+def score_entry(entry: dict, path_tokens: list[str], today: str | None = None) -> float:
+    score = 0.0
+    title_tokens = set(tokenize_text(entry.get("title", "")))
+    tag_tokens = {t.lower() for t in entry.get("tags", [])}
+    trigger_tokens = {t.lower() for t in entry.get("triggers", [])}
+    body_first500 = entry.get("body", "")[:500]
+    body_tokens = set(tokenize_text(body_first500))
+
+    for tok in path_tokens:
+        if tok in title_tokens:
+            score += 3
+        if tok in tag_tokens:
+            score += 2
+        if tok in trigger_tokens:
+            score += 2
+        if tok in body_tokens:
+            score += 1
+
+    today_d = date.fromisoformat(today) if today else date.today()
+    try:
+        entry_d = date.fromisoformat(entry.get("date", ""))
+    except (ValueError, TypeError):
+        return score
+    delta_days = (today_d - entry_d).days
+    if 0 <= delta_days <= 60:
+        score += 0.5
+    return score
 
 
 def _filter_tokens(raw: list[str]) -> list[str]:
