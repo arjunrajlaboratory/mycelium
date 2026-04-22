@@ -80,6 +80,18 @@ def parse(path: Path) -> tuple[dict, str]:
                 i += 1
             meta[key] = items
             continue
-        meta[key] = _coerce_scalar(val)
+        # Inline JSON-style list: matches: ["a", "b"]
+        if val.startswith("["):
+            stripped = val.strip()
+            if stripped.endswith("]"):
+                inner = stripped[1:-1]
+                items_inline: list[str] = []
+                for part in inner.split(","):
+                    items_inline.append(_strip_quotes(part.strip()))
+                meta[key] = items_inline
+            else:
+                meta[key] = _coerce_scalar(val)
+        else:
+            meta[key] = _coerce_scalar(val)
         i += 1
     return meta, body
