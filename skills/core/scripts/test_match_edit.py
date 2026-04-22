@@ -93,3 +93,21 @@ def test_tokenize_text_filters_empty_numeric() -> None:
     tokens = me.tokenize_text("2026 update")
     assert "2026" not in tokens
     assert "update" in tokens
+
+
+def test_matches_domain_recursive_glob() -> None:
+    assert (
+        me.matches_domain("docs/figures/panels/panel_b.py", ["**/figures/**"]) is True
+    )
+    assert me.matches_domain("src/other.py", ["**/figures/**"]) is False
+
+
+def test_matches_domain_multiple_patterns() -> None:
+    pats = ["**/figures/**", "**/panel_*.py", "**/composite*.py"]
+    assert me.matches_domain("src/panel_a.py", pats) is True
+    assert me.matches_domain("src/composite_v2.py", pats) is True
+    assert me.matches_domain("src/unrelated.py", pats) is False
+
+
+def test_matches_domain_empty_patterns() -> None:
+    assert me.matches_domain("anything.py", []) is False

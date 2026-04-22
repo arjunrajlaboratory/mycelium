@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from fnmatch import fnmatch
 import re
 import sys
 from pathlib import Path
@@ -84,6 +85,41 @@ def collect_push_active_domains(living_dir: Path) -> list[dict]:
             }
         )
     return out
+
+
+def matches_domain(path: str, patterns: list[str]) -> bool:
+    """True if path matches any glob pattern. Supports ** via path-walking."""
+    for pat in patterns:
+        if _glob_match(path, pat):
+            return True
+    return False
+
+
+def _glob_match(path: str, pattern: str) -> bool:
+    path = path.replace("\\", "/").lstrip("./")
+    pattern = pattern.replace("\\", "/")
+    if "**" not in pattern:
+        return fnmatch(path, pattern)
+    parts = pattern.split("**")
+    return _seq_match(path, [p.strip("/") for p in parts])
+
+
+def _seq_match(path: str, parts: list[str]) -> bool:
+    """Parts in order; each (non-empty) must fnmatch a segment in sequence."""
+    segments = path.split("/")
+    parts = [p for p in parts if p != ""] or [""]
+    if parts == [""]:
+        return True
+    i = 0
+    for seg in segments:
+        if i >= len(parts):
+            return True
+        if fnmatch(seg, parts[i]):
+            i += 1
+    if i < len(parts):
+        if any(fnmatch(seg, parts[-1]) for seg in segments):
+            return True
+    return i >= len(parts)
 
 
 def main() -> int:
