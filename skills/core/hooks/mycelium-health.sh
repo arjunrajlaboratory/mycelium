@@ -28,8 +28,21 @@ if [ -z "$REPO_ROOT" ]; then
   exit 0  # Not in a git repo
 fi
 
+# --- Error log rotation helper ---
+_mycelium_rotate_error_log() {
+    local errlog="$1"
+    [ -f "${errlog}" ] || return 0
+    local size
+    size=$(wc -c < "${errlog}" 2>/dev/null || echo 0)
+    if [ "${size}" -gt 10485760 ]; then
+        mv "${errlog}" "${errlog}.prev" 2>/dev/null || true
+        : > "${errlog}"
+    fi
+}
+
 # Record session-start timestamp — only for primary sessions (not subagents)
 mkdir -p "$REPO_ROOT/.claude"
+_mycelium_rotate_error_log "${REPO_ROOT}/.claude/mycelium-hook-errors.log"
 if [ ! -f "$REPO_ROOT/.claude/active-session-log.tmp" ]; then
     date +%s > "$REPO_ROOT/.claude/session-start-ts.tmp"
 fi
@@ -394,6 +407,18 @@ if [ -d "$LIVING_DIR" ] && [ -f "$LIVING_DIR/learnings.md" ]; then
     # Build a human-readable list
     RECENT_LIST=$(printf '%s' "$RECENT_TITLES" | tr '|' '\n' | grep -v '^$' | head -3 | tr '\n' ';' | sed 's/;$//' | sed 's/;/ | /g')
     MESSAGES="${MESSAGES}LEARNINGS REMINDER: .living/learnings.md has ${TOTAL_LEARNINGS} entries. 3 most recent: ${RECENT_LIST}. Check learnings before starting any analysis work to avoid repeating past mistakes.\n\n"
+  fi
+fi
+
+# --- L1 menu injection (Phase 1 accessibility architecture) ---
+if [ -f "${LIVING_DIR}/MENU.md" ]; then
+  MENU_CONTENT=$(head -c 8000 "${LIVING_DIR}/MENU.md" 2>/dev/null)
+  if [ -n "${MENU_CONTENT}" ]; then
+    MESSAGES="${MESSAGES}<mycelium-menu>
+${MENU_CONTENT}
+</mycelium-menu>
+
+"
   fi
 fi
 
