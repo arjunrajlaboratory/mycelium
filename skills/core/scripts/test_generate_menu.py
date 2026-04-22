@@ -71,3 +71,23 @@ def test_generate_menu_separates_push_and_pull(living_dir: Path) -> None:
     assert "**extraction** (1) — KG prompts" in push_section
     pull_section = content.split("**Pull-only**")[1]
     assert "**debugging** (1) — runtime failures" in pull_section
+
+
+def test_generate_menu_references_monolith_if_present(living_dir: Path) -> None:
+    (living_dir / "learnings.md").write_text(
+        "## [2026-03-01] old entry 1\nbody\n"
+        "## [2026-03-02] old entry 2\nbody\n"
+        "## [2026-03-03] old entry 3\nbody\n"
+    )
+    out = living_dir / "MENU.md"
+    gm.generate_menu(living_dir, out)
+    content = out.read_text()
+    assert "Unmigrated corpus" in content
+    assert "3 entries" in content
+
+
+def test_generate_menu_omits_monolith_reference_if_absent(living_dir: Path) -> None:
+    out = living_dir / "MENU.md"
+    gm.generate_menu(living_dir, out)
+    content = out.read_text()
+    assert "Unmigrated corpus" not in content
