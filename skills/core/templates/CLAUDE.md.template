@@ -63,6 +63,12 @@ No domain conventions installed yet. Install with mycelium's `install-convention
 4. Check `.living/conventions.md` for any repo-specific overrides
 5. If a domain convention is active, read its conventions in `.living/conventions/[domain]/`
 
+### Mycelium Knowledge Menu (L1)
+
+The SessionStart hook auto-injects `.living/MENU.md` content into every session's opening context as `<mycelium-menu>`. This is your always-visible map of what knowledge exists in this repo — domains, entry counts, one-line descriptors. You do **not** need to Read MENU.md; it is already in context. Use it to decide when to pull a specific domain file (`Read .living/learnings/{domain}.md`) or to recognize what the PreToolUse push injector might surface.
+
+Domain vocabulary: see `.living/learnings/DOMAINS.md`. Push-active domains are auto-injected at edit time when the file path matches their glob patterns.
+
 ### While Working
 
 - Follow analysis conventions: every analysis gets its own folder with UPPER_SNAKE_CASE.md documentation, scripts, outputs, reports
