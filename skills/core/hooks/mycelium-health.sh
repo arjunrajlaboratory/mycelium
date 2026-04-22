@@ -383,6 +383,20 @@ if [ -d "$LIVING_DIR" ]; then
   fi
 fi
 
+# --- Recent learnings surface (session start only) ---
+if [ -d "$LIVING_DIR" ] && [ -f "$LIVING_DIR/learnings.md" ]; then
+  LEARNINGS_FILE="$LIVING_DIR/learnings.md"
+  TOTAL_LEARNINGS=$(grep -c '^### ' "$LEARNINGS_FILE" 2>/dev/null || echo 0)
+
+  if [ "$TOTAL_LEARNINGS" -gt 0 ]; then
+    # Extract titles and dates of the 3 most recent entries (### lines)
+    RECENT_TITLES=$(grep '^### ' "$LEARNINGS_FILE" 2>/dev/null | tail -3 | sed 's/^### /  - /' | tr '\n' '|')
+    # Build a human-readable list
+    RECENT_LIST=$(printf '%s' "$RECENT_TITLES" | tr '|' '\n' | grep -v '^$' | head -3 | tr '\n' ';' | sed 's/;$//' | sed 's/;/ | /g')
+    MESSAGES="${MESSAGES}LEARNINGS REMINDER: .living/learnings.md has ${TOTAL_LEARNINGS} entries. 3 most recent: ${RECENT_LIST}. Check learnings before starting any analysis work to avoid repeating past mistakes.\n\n"
+  fi
+fi
+
 # --- Emit combined JSON ---
 if [ -n "$MESSAGES" ] || [ -n "$SYSTEM_MESSAGE" ]; then
   ESCAPED_CTX=$(printf '%s' "$MESSAGES" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
