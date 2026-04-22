@@ -68,3 +68,65 @@ def test_extract_entry_from_monolith(monolith: Path) -> None:
 def test_extract_entry_missing_returns_none(monolith: Path) -> None:
     entry = sd.extract_entry(monolith, "Nonexistent title")
     assert entry is None
+
+
+def test_seed_creates_domain_file_with_frontmatter(
+    living_dir: Path, monolith: Path, tmp_path: Path
+) -> None:
+    seeds_yaml = living_dir / "learnings" / "_seeds.yaml"
+    seeds_yaml.parent.mkdir(parents=True)
+    seeds_yaml.write_text(
+        "seeds:\n"
+        "  - title: Colorblind palette required\n"
+        "    domain: figures\n"
+        "    tags: [palette, colorblind]\n"
+        "  - title: 300 DPI minimum\n"
+        "    domain: figures\n"
+    )
+    sd.seed_from_yaml(seeds_yaml, living_dir)
+    figures = living_dir / "learnings" / "figures.md"
+    assert figures.exists()
+    content = figures.read_text()
+    assert "domain: figures" in content
+    assert "push_active: true" in content
+    assert "matches:" in content
+    assert "## [2026-04-15] Colorblind palette required" in content
+    assert "Use viridis." in content
+    assert "## [2026-04-10] 300 DPI minimum" in content
+
+
+def test_seed_is_idempotent(living_dir: Path, monolith: Path) -> None:
+    seeds_yaml = living_dir / "learnings" / "_seeds.yaml"
+    seeds_yaml.parent.mkdir(parents=True)
+    seeds_yaml.write_text(
+        "seeds:\n  - title: Colorblind palette required\n    domain: figures\n"
+    )
+    sd.seed_from_yaml(seeds_yaml, living_dir)
+    first = (living_dir / "learnings" / "figures.md").read_text()
+    sd.seed_from_yaml(seeds_yaml, living_dir)
+    second = (living_dir / "learnings" / "figures.md").read_text()
+    assert first == second
+
+
+def test_seed_does_not_modify_monolith(living_dir: Path, monolith: Path) -> None:
+    seeds_yaml = living_dir / "learnings" / "_seeds.yaml"
+    seeds_yaml.parent.mkdir(parents=True)
+    seeds_yaml.write_text(
+        "seeds:\n  - title: Colorblind palette required\n    domain: figures\n"
+    )
+    before = monolith.read_text()
+    sd.seed_from_yaml(seeds_yaml, living_dir)
+    after = monolith.read_text()
+    assert before == after
+
+
+def test_seed_missing_title_in_monolith_raises(
+    living_dir: Path, monolith: Path
+) -> None:
+    seeds_yaml = living_dir / "learnings" / "_seeds.yaml"
+    seeds_yaml.parent.mkdir(parents=True)
+    seeds_yaml.write_text(
+        "seeds:\n  - title: Definitely missing title\n    domain: figures\n"
+    )
+    with pytest.raises(SystemExit):
+        sd.seed_from_yaml(seeds_yaml, living_dir)

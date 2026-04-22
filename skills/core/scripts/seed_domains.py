@@ -102,8 +102,94 @@ def extract_entry(monolith: Path, title: str) -> dict | None:
     }
 
 
+DOMAIN_DEFAULTS = {
+    "figures": {
+        "description": "color, DPI, typography, and layout for publication plots",
+        "matches": ["**/figures/**", "**/panel_*.py", "**/composite*.py"],
+    },
+    "extraction": {
+        "description": "KG claim extraction prompts, schemas, model selection",
+        "matches": ["**/Claim Extraction/**", "**/extraction/**", "**/*_extract*.py"],
+    },
+    "pipelines": {
+        "description": "DAG orchestration, retry, error handling, pipeline outputs",
+        "matches": ["**/orchestrator/**", "**/pipeline*.py", "**/DAG*.py"],
+    },
+    "statistics": {
+        "description": "test selection, assumption checking, effect-size, reporting",
+        "matches": ["**/analysis/**", "**/stats*.py", "**/test_stat*.py"],
+    },
+    "writing": {
+        "description": "IMRAD, citations, prose conventions, figure legends",
+        "matches": [
+            "**/manuscript/**",
+            "**/docs/paper/**",
+            "**/*.tex",
+            "**/*manuscript*.md",
+        ],
+    },
+}
+
+
+def _build_frontmatter(domain: str) -> str:
+    defaults = DOMAIN_DEFAULTS.get(domain)
+    if defaults is None:
+        raise SystemExit(f"Unknown domain: {domain}. Add to DOMAIN_DEFAULTS.")
+    lines = [
+        "---",
+        f"domain: {domain}",
+        f"description: {defaults['description']}",
+        "push_active: true",
+        "matches:",
+    ]
+    for m in defaults["matches"]:
+        lines.append(f'  - "{m}"')
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_seed_entry(entry: dict, seed: dict) -> str:
+    parts = [f"## [{entry['date']}] {entry['title']}"]
+    if seed.get("tags"):
+        parts.append(f"**Tags**: {', '.join(seed['tags'])}")
+    if seed.get("triggers"):
+        parts.append(f"**Triggers**: {seed['triggers']}")
+    parts.append(entry["body"].rstrip())
+    return "\n".join(parts) + "\n"
+
+
+def seed_from_yaml(seeds_yaml: Path, living_dir: Path) -> None:
+    seeds = parse_seeds(seeds_yaml)
+    monolith = living_dir / "learnings.md"
+    if not monolith.exists():
+        raise SystemExit(f"Monolith not found: {monolith}")
+
+    by_domain: dict[str, list[tuple[dict, dict]]] = {}
+    for seed in seeds:
+        domain = seed["domain"]
+        entry = extract_entry(monolith, seed["title"])
+        if entry is None:
+            raise SystemExit(f"Seed title not found in monolith: {seed['title']!r}")
+        by_domain.setdefault(domain, []).append((seed, entry))
+
+    learnings_dir = living_dir / "learnings"
+    learnings_dir.mkdir(exist_ok=True)
+    for domain, pairs in by_domain.items():
+        pairs.sort(key=lambda p: p[1]["date"], reverse=True)
+        body = _build_frontmatter(domain)
+        body += "\n".join(_render_seed_entry(entry, seed) for seed, entry in pairs)
+        domain_file = learnings_dir / f"{domain}.md"
+        domain_file.write_text(body, encoding="utf-8")
+
+
 def main() -> int:
-    return 0  # seeding implementation in Task 13
+    ap = argparse.ArgumentParser()
+    ap.add_argument("seeds_yaml", type=Path)
+    ap.add_argument("--living-dir", type=Path, required=True)
+    args = ap.parse_args()
+    seed_from_yaml(args.seeds_yaml, args.living_dir)
+    return 0
 
 
 if __name__ == "__main__":
