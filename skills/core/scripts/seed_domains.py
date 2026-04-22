@@ -7,6 +7,7 @@ Idempotent — re-running with the same seeds.yaml is a no-op.
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
