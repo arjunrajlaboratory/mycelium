@@ -382,3 +382,72 @@ def test_render_selected_single_over_cap_mid_body_truncation() -> None:
     assert truncated is True
     assert len(rendered.encode("utf-8")) <= CAP_BYTES + 200
     assert "… [truncated; Read .living/learnings/figures.md]" in rendered
+
+
+def test_compute_push_full_happy_path(learnings_dir: Path) -> None:
+    (learnings_dir / "figures.md").write_text(
+        "---\n"
+        "domain: figures\n"
+        "description: color\n"
+        "push_active: true\n"
+        'matches: ["**/figures/**", "**/panel_*.py"]\n'
+        "---\n"
+        "## [2026-04-22] Panel colorblind rule\n"
+        "**Tags**: palette, colorblind\n"
+        "Use viridis or the 7-color palette.\n"
+        "## [2026-04-15] 300 DPI minimum\n"
+        "**Tags**: dpi\n"
+        "Use dpi=300 for raster output.\n"
+    )
+    result = me.compute_push(
+        edit_path="docs/figures/panels/panel_b.py",
+        living_dir=learnings_dir.parent,
+        today="2026-04-22",
+    )
+    assert result["matched_domains"] == ["figures"]
+    assert result["schema_version"] == me.SCHEMA_VERSION
+    assert result["bytes"] > 0
+    assert len(result["entries"]) >= 1
+    first = result["entries"][0]
+    assert set(first.keys()) == {"domain", "title", "date", "score", "content"}
+    assert first["domain"] == "figures"
+
+
+def test_compute_push_no_match_returns_empty(learnings_dir: Path) -> None:
+    (learnings_dir / "figures.md").write_text(
+        "---\n"
+        "domain: figures\n"
+        "description: color\n"
+        "push_active: true\n"
+        'matches: ["**/figures/**"]\n'
+        "---\n"
+        "## [2026-04-22] entry\nbody\n"
+    )
+    result = me.compute_push(
+        edit_path="src/unrelated.py",
+        living_dir=learnings_dir.parent,
+        today="2026-04-22",
+    )
+    assert result["entries"] == []
+    assert result["matched_domains"] == []
+
+
+def test_compute_push_match_but_all_below_threshold(learnings_dir: Path) -> None:
+    (learnings_dir / "figures.md").write_text(
+        "---\n"
+        "domain: figures\n"
+        "description: color\n"
+        "push_active: true\n"
+        'matches: ["**/*.py"]\n'
+        "---\n"
+        "## [2020-01-01] generic entry with no token overlap\n"
+        "body text nothing relevant here\n"
+    )
+    result = me.compute_push(
+        edit_path="src/unrelated.py",
+        living_dir=learnings_dir.parent,
+        today="2026-04-22",
+    )
+    assert result["entries"] == []
+    assert result["matched_domains"] == ["figures"]
+    assert result["dropped_below_threshold"] >= 1

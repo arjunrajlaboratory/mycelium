@@ -290,20 +290,79 @@ def render_selected(
     return head + body_str + "\n" + marker + "\n", True
 
 
+def compute_push(
+    edit_path: str,
+    living_dir: Path,
+    today: str | None = None,
+    k: int = 3,
+    cap_bytes: int = DEFAULT_CAP_BYTES,
+) -> dict:
+    """Full pipeline: collect → match → score → select → render → structured result."""
+    domains_meta = collect_push_active_domains(living_dir)
+    path_tokens = tokenize_path(edit_path)
+
+    matching = []
+    for d in domains_meta:
+        if matches_domain(edit_path, d["matches"]):
+            entries = parse_entries(d["body"])
+            matching.append(
+                {
+                    "domain": d["domain"],
+                    "entries": entries,
+                    "top_k_push": d.get("top_k_push"),
+                    "token_cap": d.get("token_cap"),
+                }
+            )
+
+    if not matching:
+        return {
+            "entries": [],
+            "matched_domains": [],
+            "truncated": False,
+            "dropped_below_threshold": 0,
+            "bytes": 0,
+            "schema_version": SCHEMA_VERSION,
+        }
+
+    effective_k = k
+    effective_cap = cap_bytes
+    if len(matching) == 1:
+        if matching[0].get("top_k_push"):
+            effective_k = matching[0]["top_k_push"]
+        if matching[0].get("token_cap"):
+            effective_cap = matching[0]["token_cap"] * 4
+
+    selected, dropped = select_entries(
+        matching, path_tokens, k=effective_k, today=today
+    )
+    rendered, truncated = render_selected(selected, cap_bytes=effective_cap)
+
+    entry_dicts = [
+        {
+            "domain": s["domain"],
+            "title": s["title"],
+            "date": s["date"],
+            "score": s["score"],
+            "content": _render_entry(s),
+        }
+        for s in selected
+    ]
+    return {
+        "entries": entry_dicts,
+        "matched_domains": [d["domain"] for d in matching],
+        "truncated": truncated,
+        "dropped_below_threshold": dropped,
+        "bytes": len(rendered.encode("utf-8")),
+        "schema_version": SCHEMA_VERSION,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("edit_path", type=str)
     ap.add_argument("--living-dir", type=Path, required=True)
     args = ap.parse_args()
-
-    result = {
-        "entries": [],
-        "matched_domains": [],
-        "truncated": False,
-        "dropped_below_threshold": 0,
-        "bytes": 0,
-        "schema_version": SCHEMA_VERSION,
-    }
+    result = compute_push(args.edit_path, args.living_dir)
     print(json.dumps(result))
     return 0
 
