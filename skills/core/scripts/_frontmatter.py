@@ -37,7 +37,7 @@ def parse(path: Path) -> tuple[dict, str]:
     Returns ({}, body_or_raw) if malformed.
     """
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return {}, ""
     if not text.startswith("---\n"):
