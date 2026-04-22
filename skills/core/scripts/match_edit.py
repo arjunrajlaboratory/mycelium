@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -18,6 +19,45 @@ sys.path.insert(0, str(_SCRIPT_DIR))
 import _frontmatter as fm  # noqa: E402
 
 SCHEMA_VERSION = 1
+
+_SPLIT_RE = re.compile(r"[_\-./\s]+")
+
+
+def _filter_tokens(raw: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in raw:
+        t = t.lower()
+        if not t:
+            continue
+        if len(t) <= 1:
+            continue
+        if t.isdigit():
+            continue
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def tokenize_path(path: str) -> list[str]:
+    """Tokenize edit path: basename stem + parent + grandparent, split on _-./."""
+    p = Path(path)
+    parts = [p.stem]
+    if p.parent.name:
+        parts.append(p.parent.name)
+    if p.parent.parent.name:
+        parts.append(p.parent.parent.name)
+    combined = " ".join(parts)
+    raw = _SPLIT_RE.split(combined)
+    return _filter_tokens(raw)
+
+
+def tokenize_text(text: str) -> list[str]:
+    """Tokenize arbitrary text with the same rules."""
+    raw = _SPLIT_RE.split(text)
+    return _filter_tokens(raw)
 
 
 def collect_push_active_domains(living_dir: Path) -> list[dict]:
