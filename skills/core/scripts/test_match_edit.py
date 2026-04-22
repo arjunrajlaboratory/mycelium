@@ -208,3 +208,93 @@ def test_score_entry_body_first_500_chars_only() -> None:
     }
     score = me.score_entry(entry, ["panel"], today="2026-04-22")
     assert score == 0.0
+
+
+def _mk_entry(title, score_hint, date="2026-04-22"):
+    """Helper: build entry matched by ['panel']. score_hint indicates expected ballpark score."""
+    if score_hint == 0:
+        return {"title": title, "tags": [], "triggers": [], "body": "", "date": date}
+    if score_hint == 2:
+        return {
+            "title": title,
+            "tags": ["panel"],
+            "triggers": [],
+            "body": "",
+            "date": "2020-01-01",
+        }
+    if score_hint == 3:
+        return {
+            "title": f"{title} panel",
+            "tags": [],
+            "triggers": [],
+            "body": "",
+            "date": "2020-01-01",
+        }
+    if score_hint == 5:
+        return {
+            "title": f"{title} panel",
+            "tags": ["panel"],
+            "triggers": [],
+            "body": "",
+            "date": "2020-01-01",
+        }
+    raise ValueError(f"unsupported score_hint {score_hint}")
+
+
+def test_select_entries_drops_below_threshold() -> None:
+    domains = [
+        {
+            "domain": "figures",
+            "entries": [
+                _mk_entry("low", 0),
+                _mk_entry("hit", 3),
+            ],
+        }
+    ]
+    selected, dropped = me.select_entries(domains, ["panel"], k=3, today="2026-04-22")
+    assert len(selected) == 1
+    assert selected[0]["title"].startswith("hit")
+    assert dropped == 1
+
+
+def test_select_entries_respects_top_k() -> None:
+    domains = [
+        {
+            "domain": "figures",
+            "entries": [
+                _mk_entry("a", 5),
+                _mk_entry("b", 5),
+                _mk_entry("c", 3),
+                _mk_entry("d", 3),
+                _mk_entry("e", 2),
+            ],
+        }
+    ]
+    selected, _ = me.select_entries(domains, ["panel"], k=3, today="2026-04-22")
+    assert len(selected) == 3
+    scores = [s["score"] for s in selected]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_select_entries_all_below_threshold_returns_empty() -> None:
+    domains = [
+        {
+            "domain": "figures",
+            "entries": [_mk_entry("low", 0), _mk_entry("also_low", 0)],
+        }
+    ]
+    selected, dropped = me.select_entries(domains, ["panel"], k=3, today="2026-04-22")
+    assert selected == []
+    assert dropped == 2
+
+
+def test_select_entries_cross_domain_merge() -> None:
+    domains = [
+        {"domain": "figures", "entries": [_mk_entry("f1", 3)]},
+        {"domain": "extraction", "entries": [_mk_entry("e1", 5)]},
+    ]
+    selected, _ = me.select_entries(domains, ["panel"], k=3, today="2026-04-22")
+    assert len(selected) == 2
+    assert selected[0]["title"].startswith("e1")
+    assert selected[0]["domain"] == "extraction"
+    assert selected[1]["domain"] == "figures"

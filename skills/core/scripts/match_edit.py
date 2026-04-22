@@ -198,6 +198,38 @@ def _seq_match(path: str, parts: list[str]) -> bool:
     return i >= len(parts)
 
 
+SCORE_THRESHOLD = 2.0
+
+
+def select_entries(
+    domains: list[dict], path_tokens: list[str], k: int = 3, today: str | None = None
+) -> tuple[list[dict], int]:
+    """Score entries across matching domains, filter by threshold, return top K.
+
+    Returns (selected_entries, dropped_below_threshold_count).
+    Selected entries are dicts: {domain, title, date, score, entry}.
+    """
+    scored: list[dict] = []
+    dropped = 0
+    for dom in domains:
+        for entry in dom.get("entries", []):
+            s = score_entry(entry, path_tokens, today=today)
+            if s < SCORE_THRESHOLD:
+                dropped += 1
+                continue
+            scored.append(
+                {
+                    "domain": dom["domain"],
+                    "title": entry.get("title", ""),
+                    "date": entry.get("date", ""),
+                    "score": s,
+                    "entry": entry,
+                }
+            )
+    scored.sort(key=lambda e: e["score"], reverse=True)
+    return scored[:k], dropped
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("edit_path", type=str)
