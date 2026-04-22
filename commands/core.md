@@ -106,12 +106,17 @@ For analysis, report generation, and idea brainstorming, direct the user to the 
 1. Consult `skills/core/references/skill-generation-guide.md`.
 2. Consult `skills/core/templates/learning-entry.md` for the entry format used in learnings.md (entries start with `## [YYYY-MM-DD]` and have **Category**, **Tags** fields — use Tags for pattern clustering).
 3. Read `.living/learnings.md` and `.living/decisions.md`.
-4. Identify recurring patterns using the thresholds defined in `skill-generation-guide.md` — minimum 3 related entries sharing tags or themes. See the worked example in that guide for the complete input→output transformation.
-5. **Promote transferable knowledge**: For patterns that apply beyond the current project, write entries to the matching global domain file in `~/.claude/knowledge/{domain}.md` using the structured entry template (What/Evidence/When useful/Scope/Status/Last validated). Set `status: unreviewed` — the weekly audit will confirm.
-6. Propose new convention documents or checklists for project-specific patterns.
-7. Draft them in `.living/generated-conventions/[name]/` using the template at `skills/core/templates/generated-convention.md`.
-8. Include `ORIGIN.md` linking back to the learnings that spawned it.
-9. Ask user if they want to contribute it back to the network.
+4. **Classify each learning by domain** using `.living/learnings/DOMAINS.md` (closed vocabulary). Then:
+   - If `.living/learnings/{domain}.md` exists: append the entry there.
+   - Else (domain file not yet created): append to the monolithic `.living/learnings.md` with a `migration-todo: <domain>` marker in the body. The next seeding pass will re-home it.
+5. **Trigger menu regeneration**: any write to `.living/learnings/**` is picked up by `mycelium-post-action.sh`, which invokes `generate_menu.py` automatically. No manual step needed.
+6. **Knowledge promotion** (unchanged): for patterns that apply beyond the current project, also append to `~/.claude/knowledge/{domain}.md`.
+7. Identify recurring patterns using the thresholds defined in `skill-generation-guide.md` — minimum 3 related entries sharing tags or themes. See the worked example in that guide for the complete input→output transformation.
+8. **Promote transferable knowledge**: For patterns that apply beyond the current project, write entries to the matching global domain file in `~/.claude/knowledge/{domain}.md` using the structured entry template (What/Evidence/When useful/Scope/Status/Last validated). Set `status: unreviewed` — the weekly audit will confirm.
+9. Propose new convention documents or checklists for project-specific patterns.
+10. Draft them in `.living/generated-conventions/[name]/` using the template at `skills/core/templates/generated-convention.md`.
+11. Include `ORIGIN.md` linking back to the learnings that spawned it.
+12. Ask user if they want to contribute it back to the network.
 
 ---
 
