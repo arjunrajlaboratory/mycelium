@@ -230,6 +230,66 @@ def select_entries(
     return scored[:k], dropped
 
 
+DEFAULT_CAP_BYTES = 8000
+TRUNC_MARKER = "… [truncated; Read .living/learnings/{domain}.md]"
+
+
+def _render_entry(sel: dict) -> str:
+    e = sel["entry"]
+    parts = [f"## [{e['date']}] {e['title']}"]
+    if e.get("tags"):
+        parts.append(f"**Tags**: {', '.join(e['tags'])}")
+    if e.get("triggers"):
+        parts.append(f"**Triggers**: {json.dumps(e['triggers'])}")
+    parts.append(e.get("body", "").rstrip())
+    return "\n".join(parts) + "\n"
+
+
+def render_selected(
+    selected: list[dict], cap_bytes: int = DEFAULT_CAP_BYTES
+) -> tuple[str, bool]:
+    """Render selected entries to a single content string.
+
+    Drops lowest-score entries first if combined exceeds cap.
+    If a single entry alone exceeds cap, truncates body mid-line with marker.
+    Returns (rendered_str, truncated_bool).
+    """
+    if not selected:
+        return "", False
+
+    by_score_desc = sorted(selected, key=lambda s: -s["score"])
+    truncated = False
+    kept = list(by_score_desc)
+    while kept:
+        rendered = "\n\n".join(_render_entry(s) for s in kept)
+        if len(rendered.encode("utf-8")) <= cap_bytes:
+            return rendered, (len(kept) != len(selected))
+        if len(kept) == 1:
+            break
+        kept = kept[:-1]
+        truncated = True
+
+    sel = kept[0]
+    e = sel["entry"]
+    head = f"## [{e['date']}] {e['title']}\n"
+    if e.get("tags"):
+        head += f"**Tags**: {', '.join(e['tags'])}\n"
+    marker = TRUNC_MARKER.replace("{domain}", sel["domain"])
+    budget = cap_bytes - len(head.encode("utf-8")) - len(marker.encode("utf-8")) - 2
+    budget = max(budget, 0)
+    body = e.get("body", "")
+    body_bytes = body.encode("utf-8")[:budget]
+    while body_bytes:
+        try:
+            body_str = body_bytes.decode("utf-8")
+            break
+        except UnicodeDecodeError:
+            body_bytes = body_bytes[:-1]
+    else:
+        body_str = ""
+    return head + body_str + "\n" + marker + "\n", True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("edit_path", type=str)

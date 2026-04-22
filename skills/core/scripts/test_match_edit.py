@@ -298,3 +298,87 @@ def test_select_entries_cross_domain_merge() -> None:
     assert selected[0]["title"].startswith("e1")
     assert selected[0]["domain"] == "extraction"
     assert selected[1]["domain"] == "figures"
+
+
+CAP_BYTES = 8000
+
+
+def test_render_selected_under_cap_emits_all() -> None:
+    selected = [
+        {
+            "domain": "figures",
+            "title": "T1",
+            "date": "2026-04-22",
+            "score": 5,
+            "entry": {
+                "title": "T1",
+                "date": "2026-04-22",
+                "tags": [],
+                "triggers": [],
+                "body": "short body\n",
+            },
+        }
+    ]
+    rendered, truncated = me.render_selected(selected, cap_bytes=CAP_BYTES)
+    assert "T1" in rendered
+    assert "short body" in rendered
+    assert truncated is False
+
+
+def test_render_selected_over_cap_drops_lowest_score_first() -> None:
+    big_body = "x" * 6000
+    selected = [
+        {
+            "domain": "figures",
+            "title": "high",
+            "date": "2026-04-22",
+            "score": 5,
+            "entry": {
+                "title": "high",
+                "date": "2026-04-22",
+                "tags": [],
+                "triggers": [],
+                "body": big_body,
+            },
+        },
+        {
+            "domain": "figures",
+            "title": "low",
+            "date": "2026-04-22",
+            "score": 3,
+            "entry": {
+                "title": "low",
+                "date": "2026-04-22",
+                "tags": [],
+                "triggers": [],
+                "body": big_body,
+            },
+        },
+    ]
+    rendered, truncated = me.render_selected(selected, cap_bytes=CAP_BYTES)
+    assert "high" in rendered
+    assert rendered.count("## [2026-04-22] low") == 0
+    assert truncated is True
+
+
+def test_render_selected_single_over_cap_mid_body_truncation() -> None:
+    huge_body = "x" * 20000
+    selected = [
+        {
+            "domain": "figures",
+            "title": "alone",
+            "date": "2026-04-22",
+            "score": 5,
+            "entry": {
+                "title": "alone",
+                "date": "2026-04-22",
+                "tags": [],
+                "triggers": [],
+                "body": huge_body,
+            },
+        }
+    ]
+    rendered, truncated = me.render_selected(selected, cap_bytes=CAP_BYTES)
+    assert truncated is True
+    assert len(rendered.encode("utf-8")) <= CAP_BYTES + 200
+    assert "… [truncated; Read .living/learnings/figures.md]" in rendered
