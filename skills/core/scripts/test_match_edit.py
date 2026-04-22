@@ -96,9 +96,7 @@ def test_tokenize_text_filters_empty_numeric() -> None:
 
 
 def test_matches_domain_recursive_glob() -> None:
-    assert (
-        me.matches_domain("docs/figures/panels/panel_b.py", ["**/figures/**"]) is True
-    )
+    assert me.matches_domain("docs/figures/panels/panel_b.py", ["**/figures/**"]) is True
     assert me.matches_domain("src/other.py", ["**/figures/**"]) is False
 
 
@@ -430,6 +428,25 @@ def test_compute_push_no_match_returns_empty(learnings_dir: Path) -> None:
     )
     assert result["entries"] == []
     assert result["matched_domains"] == []
+
+
+def test_score_entry_hyphenated_tag_tokenized() -> None:
+    """Tag 'figure-iteration' should tokenize to ['figure', 'iteration'] so path token 'figure' matches."""
+    entry = {
+        "title": "unrelated",
+        "tags": ["figure-iteration", "subagent-dispatch"],
+        "triggers": [],
+        "body": "",
+        "date": "2020-01-01",
+    }
+    score = me.score_entry(entry, ["figure"], today="2026-04-22")
+    assert score == pytest.approx(2.0)  # +2 tag match on 'figure'
+
+
+def test_tokenize_path_adds_singular_forms() -> None:
+    tokens = me.tokenize_path("docs/figures/panel_b.py")
+    assert "figures" in tokens
+    assert "figure" in tokens  # singular form added
 
 
 def test_compute_push_match_but_all_below_threshold(learnings_dir: Path) -> None:

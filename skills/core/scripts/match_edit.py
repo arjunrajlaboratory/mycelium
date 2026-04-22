@@ -74,8 +74,11 @@ def parse_entries(body: str) -> list[dict]:
 def score_entry(entry: dict, path_tokens: list[str], today: str | None = None) -> float:
     score = 0.0
     title_tokens = set(tokenize_text(entry.get("title", "")))
-    tag_tokens = {t.lower() for t in entry.get("tags", [])}
-    trigger_tokens = {t.lower() for t in entry.get("triggers", [])}
+    # Tags and triggers: join into text, then tokenize (splits on _-./ and spaces)
+    tag_text = " ".join(entry.get("tags", []))
+    trigger_text = " ".join(entry.get("triggers", []))
+    tag_tokens = set(tokenize_text(tag_text))
+    trigger_tokens = set(tokenize_text(trigger_text))
     body_first500 = entry.get("body", "")[:500]
     body_tokens = set(tokenize_text(body_first500))
 
@@ -119,7 +122,9 @@ def _filter_tokens(raw: list[str]) -> list[str]:
 
 
 def tokenize_path(path: str) -> list[str]:
-    """Tokenize edit path: basename stem + parent + grandparent, split on _-./."""
+    """Tokenize edit path: basename stem + parent + grandparent, split on _-./.
+    Adds singular forms (stripping trailing 's') for tokens len >= 4.
+    """
     p = Path(path)
     parts = [p.stem]
     if p.parent.name:
@@ -128,7 +133,15 @@ def tokenize_path(path: str) -> list[str]:
         parts.append(p.parent.parent.name)
     combined = " ".join(parts)
     raw = _SPLIT_RE.split(combined)
-    return _filter_tokens(raw)
+    tokens = _filter_tokens(raw)
+    # Add singular forms for plural-looking tokens (len >= 4, ends in 's')
+    out = list(tokens)
+    seen = set(tokens)
+    for t in tokens:
+        if len(t) >= 4 and t.endswith("s") and t[:-1] not in seen:
+            out.append(t[:-1])
+            seen.add(t[:-1])
+    return out
 
 
 def tokenize_text(text: str) -> list[str]:
@@ -245,9 +258,7 @@ def _render_entry(sel: dict) -> str:
     return "\n".join(parts) + "\n"
 
 
-def render_selected(
-    selected: list[dict], cap_bytes: int = DEFAULT_CAP_BYTES
-) -> tuple[str, bool]:
+def render_selected(selected: list[dict], cap_bytes: int = DEFAULT_CAP_BYTES) -> tuple[str, bool]:
     """Render selected entries to a single content string.
 
     Drops lowest-score entries first if combined exceeds cap.
@@ -332,9 +343,7 @@ def compute_push(
         if matching[0].get("token_cap"):
             effective_cap = matching[0]["token_cap"] * 4
 
-    selected, dropped = select_entries(
-        matching, path_tokens, k=effective_k, today=today
-    )
+    selected, dropped = select_entries(matching, path_tokens, k=effective_k, today=today)
     rendered, truncated = render_selected(selected, cap_bytes=effective_cap)
 
     entry_dicts = [
