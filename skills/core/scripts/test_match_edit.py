@@ -96,7 +96,9 @@ def test_tokenize_text_filters_empty_numeric() -> None:
 
 
 def test_matches_domain_recursive_glob() -> None:
-    assert me.matches_domain("docs/figures/panels/panel_b.py", ["**/figures/**"]) is True
+    assert (
+        me.matches_domain("docs/figures/panels/panel_b.py", ["**/figures/**"]) is True
+    )
     assert me.matches_domain("src/other.py", ["**/figures/**"]) is False
 
 
@@ -159,7 +161,7 @@ def test_score_entry_tags_plus2() -> None:
     assert score == pytest.approx(2.0)
 
 
-def test_score_entry_triggers_plus2() -> None:
+def test_score_entry_triggers_plus3() -> None:
     entry = {
         "title": "X",
         "tags": [],
@@ -168,7 +170,43 @@ def test_score_entry_triggers_plus2() -> None:
         "date": "2020-01-01",
     }
     score = me.score_entry(entry, ["panel"], today="2026-04-22")
-    assert score == pytest.approx(2.0)
+    assert score == pytest.approx(3.0)
+
+
+def test_trigger_outranks_tag_same_token() -> None:
+    """A trigger match on 'panel' scores higher than a tag match on 'panel'."""
+    trigger_entry = {
+        "title": "X",
+        "tags": [],
+        "triggers": ["panel"],
+        "body": "",
+        "date": "2020-01-01",
+    }
+    tag_entry = {
+        "title": "Y",
+        "tags": ["panel"],
+        "triggers": [],
+        "body": "",
+        "date": "2020-01-01",
+    }
+    trigger_score = me.score_entry(trigger_entry, ["panel"], today="2026-04-22")
+    tag_score = me.score_entry(tag_entry, ["panel"], today="2026-04-22")
+    assert trigger_score > tag_score
+    assert trigger_score == pytest.approx(3.0)
+    assert tag_score == pytest.approx(2.0)
+
+
+def test_trigger_plus_title_stacks_to_6() -> None:
+    """Both signals compose additively without capping."""
+    entry = {
+        "title": "Panel notes",
+        "tags": [],
+        "triggers": ["panel"],
+        "body": "",
+        "date": "2020-01-01",
+    }
+    score = me.score_entry(entry, ["panel"], today="2026-04-22")
+    assert score == pytest.approx(6.0)  # +3 title + +3 trigger, no recency
 
 
 def test_score_entry_body_plus1() -> None:

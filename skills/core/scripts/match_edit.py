@@ -88,7 +88,7 @@ def score_entry(entry: dict, path_tokens: list[str], today: str | None = None) -
         if tok in tag_tokens:
             score += 2
         if tok in trigger_tokens:
-            score += 2
+            score += 3
         if tok in body_tokens:
             score += 1
 
@@ -258,7 +258,9 @@ def _render_entry(sel: dict) -> str:
     return "\n".join(parts) + "\n"
 
 
-def render_selected(selected: list[dict], cap_bytes: int = DEFAULT_CAP_BYTES) -> tuple[str, bool]:
+def render_selected(
+    selected: list[dict], cap_bytes: int = DEFAULT_CAP_BYTES
+) -> tuple[str, bool]:
     """Render selected entries to a single content string.
 
     Drops lowest-score entries first if combined exceeds cap.
@@ -343,7 +345,9 @@ def compute_push(
         if matching[0].get("token_cap"):
             effective_cap = matching[0]["token_cap"] * 4
 
-    selected, dropped = select_entries(matching, path_tokens, k=effective_k, today=today)
+    selected, dropped = select_entries(
+        matching, path_tokens, k=effective_k, today=today
+    )
     rendered, truncated = render_selected(selected, cap_bytes=effective_cap)
 
     entry_dicts = [
