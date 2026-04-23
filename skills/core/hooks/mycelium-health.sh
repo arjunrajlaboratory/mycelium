@@ -28,17 +28,8 @@ if [ -z "$REPO_ROOT" ]; then
   exit 0  # Not in a git repo
 fi
 
-# --- Error log rotation helper ---
-_mycelium_rotate_error_log() {
-    local errlog="$1"
-    [ -f "${errlog}" ] || return 0
-    local size
-    size=$(wc -c < "${errlog}" 2>/dev/null || echo 0)
-    if [ "${size}" -gt 10485760 ]; then
-        mv "${errlog}" "${errlog}.prev" 2>/dev/null || true
-        : > "${errlog}"
-    fi
-}
+# shellcheck source=_lib/log_rotation.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_lib/log_rotation.sh"
 
 # Record session-start timestamp — only for primary sessions (not subagents)
 mkdir -p "$REPO_ROOT/.claude"
