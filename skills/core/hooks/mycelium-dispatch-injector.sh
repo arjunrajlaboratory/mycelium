@@ -16,7 +16,7 @@ source "${SCRIPT_DIR}/_lib/log_rotation.sh"
 _find_repo_root() {
     # Walk up from $1 looking for .living/MENU.md. Echoes the matching dir or empty.
     local d="$1"
-    while [[ "${d}" != "/" && "${d}" != "." && -n "${d}" ]]; do
+    while [[ -n "${d}" && "${d}" != "/" ]]; do
         if [[ -f "${d}/.living/MENU.md" ]]; then
             printf '%s' "${d}"
             return 0
@@ -47,6 +47,20 @@ _log_error() {
     INPUT="$(cat)"
     SESSION_ID="$(printf '%s' "${INPUT}" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
 
+    # Guard 1: Skip if prompt already contains <mycelium-menu> (idempotency).
+    PROMPT_START="$(printf '%s' "${INPUT}" | jq -r '.tool_input.prompt // "" | .[0:20]' 2>/dev/null || echo "")"
+    if [[ "${PROMPT_START}" == "<mycelium-menu>"* ]]; then
+        exit 0
+    fi
+
+    # Guard 2: Skip if subagent_type is in the exclusion list.
+    SUBAGENT_TYPE="$(printf '%s' "${INPUT}" | jq -r '.tool_input.subagent_type // empty' 2>/dev/null || echo "")"
+    case "${SUBAGENT_TYPE}" in
+        living-scribe|cost-tracker|statusline-setup|figure-qa|data-qa|stats-reviewer|pdf-gen)
+            exit 0
+            ;;
+    esac
+
     # Prefer cwd from stdin, fallback to process pwd. Matches mycelium-health.sh discovery.
     CWD="$(printf '%s' "${INPUT}" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
     [[ -z "${CWD}" ]] && CWD="$(pwd)"
@@ -60,6 +74,14 @@ _log_error() {
     if [[ -z "${MENU_CONTENT}" ]]; then
         _log_error "${REPO_ROOT}" "${SESSION_ID}" "menu-empty" ""
         exit 0
+    fi
+
+    MENU_CAP_BYTES=8192
+    MENU_BYTES="$(printf '%s' "${MENU_CONTENT}" | wc -c | tr -d ' ')"
+    if (( MENU_BYTES > MENU_CAP_BYTES )); then
+        MENU_HEAD="$(printf '%s' "${MENU_CONTENT}" | head -c "${MENU_CAP_BYTES}")"
+        MENU_CONTENT="${MENU_HEAD}"$'\n'"… [truncated; Read .living/MENU.md]"
+        _log_error "${REPO_ROOT}" "${SESSION_ID}" "menu-truncated" "bytes=${MENU_BYTES}"
     fi
 
     # Echo entire tool_input, modify only .prompt. Preserves all sibling keys.
