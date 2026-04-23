@@ -192,10 +192,12 @@ The hook skips injection in two cases:
 
 Silent-on-error, matching Phase 1 conventions. On any failure (no MENU.md found, parse error, output write error), the hook exits 0 with no stdout (meaning: no modification) and logs a structured line to `.claude/mycelium-hook-errors.log` using the Phase 1 `_mycelium_rotate_error_log` helper. The dispatch proceeds with the original prompt. Never block a dispatch.
 
-Log schema (append-only JSONL):
-```json
-{"ts":"2026-04-22T18:30:00Z","hook":"dispatch-injector","session_id":"...","error":"menu_not_found","details":"..."}
+Log schema (append-only TSV):
 ```
+2026-04-22T18:30:00	dispatch-injector	<session_id>	menu-empty	<details>	phase1-5.1
+```
+
+Columns (tab-separated): timestamp, hook_name, session_id, error_class, details, script_version. This matches the format used by mycelium-edit-injector.sh (with hook_name as the discriminator when both hooks write to the same log file).
 
 ### 4.6 Size budget
 
