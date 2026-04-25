@@ -40,7 +40,8 @@ _log_event() {
     [[ -z "${repo_root}" ]] && return 0
     local logfile="${repo_root}/.claude/mycelium-injection-events.log"
 
-    local s_target s_session s_detail
+    local s_tool s_target s_session s_detail
+    s_tool="$(_mycelium_tsv_sanitize "${tool_name}")"
     s_target="$(_mycelium_tsv_sanitize "${target}")"
     s_session="$(_mycelium_tsv_sanitize "${session_id}")"
     s_detail="$(_mycelium_tsv_sanitize "${detail}")"
@@ -49,7 +50,7 @@ _log_event() {
     line="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
         "$(date +%Y-%m-%dT%H:%M:%S)" \
         "edit-injector" \
-        "${tool_name}" \
+        "${s_tool}" \
         "${s_target}" \
         "${s_session}" \
         "${outcome}" \
