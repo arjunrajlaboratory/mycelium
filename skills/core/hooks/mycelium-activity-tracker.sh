@@ -41,6 +41,18 @@ if [[ "$FILE_PATH" == *"/node_modules/"* ]] || \
   exit 0
 fi
 
+# Skip exploratory / iteration scratch paths — these are throwaway iteration work,
+# not deliverables that need .living/ crystallization. Active multi-session repos
+# (where one session iterates on prompts/scripts while another does deliverable work)
+# would otherwise have the iteration session's churn trip the deliverable session's
+# stop hook because the activity tracker is shared across sessions in a repo.
+case "$FILE_PATH" in
+  */scratch_*.py)                              exit 0 ;;
+  */Claim\ Extraction/v[0-9]*_*.py)            exit 0 ;;
+  */Claim\ Extraction/*_v[0-9]*.py)            exit 0 ;;
+  */Graph\ Construction/scripts/ablation/*)    exit 0 ;;
+esac
+
 # --- Repo and .living/ checks ---
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
