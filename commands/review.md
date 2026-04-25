@@ -105,11 +105,19 @@ Each sub-agent (or in-line pass) gets:
 1. The diff (or path to it if large)
 2. The list of context files to read
 3. The path to its checklist reference: `skills/core/references/review/<agent>.md`
-4. A clear instruction to return a structured JSON-like list of findings with
-   fields: `severity`, `file`, `line` (or range), `category`, `summary`,
-   `evidence`, `suggested_fix`, `confidence` (high/medium/low), and a short
-   `not_a_finding_because` block when it considered something and decided to
-   skip it (this helps synthesis dedupe).
+4. A clear instruction to follow the output contract in
+   `skills/core/references/review/README.md` exactly. The required
+   fields per finding are `severity` (`major | minor`), `file`, `line`
+   (or range), `category`, `summary`, `evidence` (a 1–5 line verbatim
+   code snippet — the synthesis pass renders this directly under each
+   finding), `why_it_matters` (one or two sentences specific to this
+   analysis), `suggested_fix`, and `confidence` (`high | medium |
+   low`). Anything the agent considered and decided not to flag goes
+   in a separate `not_flagged` list with `file`, `line`, `considered`,
+   and `reason` — synthesis uses this to dedupe across agents.
+   Sub-agents should also return a `decisions` list of consequential
+   analytical choices in their scope (per the README contract); these
+   roll up into the report's "Key decisions in this analysis" section.
 5. The standing instruction to err on the side of NOT flagging when the
    evidence is weak — false positives are more costly than false negatives at
    this stage because synthesis can ask follow-up questions but cannot
