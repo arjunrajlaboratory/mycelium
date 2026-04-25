@@ -4,7 +4,8 @@
 # Public API:
 #   _mycelium_rotate_log <logfile>            — rotate if >10MB (no lock; best-effort)
 #   _mycelium_append_log_locked <logfile> <line>
-#                                              — flock + rotate-check + append (atomic)
+#                                              — flock + rotate-check + append (best-effort;
+#                                                no-flock fallback path is plain append)
 #   _mycelium_tsv_sanitize <value>            — echo value with \t\r\n → space
 #
 # Back-compat:
@@ -16,6 +17,7 @@ _mycelium_rotate_log() {
     local size
     size=$(wc -c < "${logfile}" 2>/dev/null || echo 0)
     if [ "${size}" -gt 10485760 ]; then
+        # Overwrites any prior .prev archive (best-effort observability; only one rotation kept).
         mv "${logfile}" "${logfile}.prev" 2>/dev/null || true
         : > "${logfile}"
     fi
