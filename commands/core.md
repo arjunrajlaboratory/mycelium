@@ -19,11 +19,12 @@ description: >
 
 When invoked, determine which mode the user needs based on their request, then follow the corresponding protocol.
 
-For analysis, report generation, and idea brainstorming, direct the user to the dedicated skills:
+For analysis, report generation, idea brainstorming, and code review, direct the user to the dedicated skills:
 - `/mycelium:analyze` — start or continue an analysis
 - `/mycelium:report` — generate a structured report
 - `/mycelium:ideas` — brainstorm with disciplinary personas
 - `/mycelium:transfer` — cross-pollinate learnings across sibling projects
+- `/mycelium:review` — review code/analysis changes (PR, commit, or diff) for the kinds of mistakes that matter in scientific work; supports `grill` mode for conversational interrogation of analytical decisions
 
 ---
 
