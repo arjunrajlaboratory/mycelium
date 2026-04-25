@@ -135,6 +135,56 @@ _test_no_modification_outside_repo
 _test_error_logged_on_jq_failure
 _test_other_tool_fields_preserved
 
+_test_event_fired() {
+    echo "test_event_fired"
+    local tmp; tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+    git init -q "${tmp}"
+    mkdir -p "${tmp}/.living" "${tmp}/.claude"
+    echo "test menu" > "${tmp}/.living/MENU.md"
+    local resolved; resolved="$(cd "${tmp}" && pwd -P)"
+    local INPUT
+    INPUT='{"session_id":"sess-evt-1","cwd":"'"${resolved}"'","tool_name":"Agent","tool_input":{"description":"x","prompt":"hello","subagent_type":"general-purpose"}}'
+    echo "${INPUT}" | "${HOOK}" >/dev/null 2>&1
+    # awk -F'\t' for portable literal-tab matching (rev 2 NEW #1).
+    _assert "events log: fired row written for general-purpose dispatch" \
+        'awk -F"\t" '"'"'$2=="dispatch-injector" && $3=="Agent" && $4=="general-purpose" && $5=="sess-evt-1" && $6=="fired"'"'"' "'"${resolved}"'/.claude/mycelium-injection-events.log" | grep -q .'
+}
+
+_test_event_dedup_skip() {
+    echo "test_event_dedup_skip"
+    local tmp; tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+    git init -q "${tmp}"
+    mkdir -p "${tmp}/.living" "${tmp}/.claude"
+    echo "test menu" > "${tmp}/.living/MENU.md"
+    local resolved; resolved="$(cd "${tmp}" && pwd -P)"
+    local INPUT
+    INPUT='{"session_id":"sess-evt-2","cwd":"'"${resolved}"'","tool_name":"Agent","tool_input":{"description":"x","prompt":"<mycelium-menu>old</mycelium-menu>\nbody","subagent_type":"general-purpose"}}'
+    echo "${INPUT}" | "${HOOK}" >/dev/null 2>&1
+    _assert "events log: dedup-skip row written when prompt already injected" \
+        'awk -F"\t" '"'"'$2=="dispatch-injector" && $3=="Agent" && $4=="general-purpose" && $5=="sess-evt-2" && $6=="dedup-skip"'"'"' "'"${resolved}"'/.claude/mycelium-injection-events.log" | grep -q .'
+}
+
+_test_event_excluded_skip() {
+    echo "test_event_excluded_skip"
+    local tmp; tmp="$(mktemp -d)"
+    trap 'rm -rf "${tmp}"' RETURN
+    git init -q "${tmp}"
+    mkdir -p "${tmp}/.living" "${tmp}/.claude"
+    echo "test menu" > "${tmp}/.living/MENU.md"
+    local resolved; resolved="$(cd "${tmp}" && pwd -P)"
+    local INPUT
+    INPUT='{"session_id":"sess-evt-3","cwd":"'"${resolved}"'","tool_name":"Agent","tool_input":{"description":"x","prompt":"hi","subagent_type":"living-scribe"}}'
+    echo "${INPUT}" | "${HOOK}" >/dev/null 2>&1
+    _assert "events log: excluded-skip row written for living-scribe" \
+        'awk -F"\t" '"'"'$2=="dispatch-injector" && $3=="Agent" && $4=="living-scribe" && $5=="sess-evt-3" && $6=="excluded-skip" && $7=="subagent_type=living-scribe"'"'"' "'"${resolved}"'/.claude/mycelium-injection-events.log" | grep -q .'
+}
+
+_test_event_fired
+_test_event_dedup_skip
+_test_event_excluded_skip
+
 echo ""
 echo "Ran ${TESTS_RUN}, failed ${TESTS_FAILED}"
 [[ ${TESTS_FAILED} -eq 0 ]]

@@ -43,32 +43,64 @@ _log_error() {
         "${SCRIPT_VERSION}" >> "${errlog}" 2>/dev/null || true
 }
 
+_log_event() {
+    local repo_root="$1"
+    local target="$2"        # subagent_type value or "unknown"
+    local session_id="$3"
+    local outcome="$4"       # fired | dedup-skip | excluded-skip
+    local detail="$5"        # bytes=N | subagent_type=X | empty
+
+    [[ -z "${repo_root}" ]] && return 0
+    local logfile="${repo_root}/.claude/mycelium-injection-events.log"
+
+    local s_target s_session s_detail
+    s_target="$(_mycelium_tsv_sanitize "${target}")"
+    s_session="$(_mycelium_tsv_sanitize "${session_id}")"
+    s_detail="$(_mycelium_tsv_sanitize "${detail}")"
+
+    local line
+    line="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+        "$(date +%Y-%m-%dT%H:%M:%S)" \
+        "dispatch-injector" \
+        "Agent" \
+        "${s_target}" \
+        "${s_session}" \
+        "${outcome}" \
+        "${s_detail}" \
+        "phase1.5-events-v1")"
+
+    _mycelium_append_log_locked "${logfile}" "${line}"
+}
+
 {
     INPUT="$(cat)"
     SESSION_ID="$(printf '%s' "${INPUT}" | jq -r '.session_id // empty' 2>/dev/null || echo "")"
+    SUBAGENT_TYPE="$(printf '%s' "${INPUT}" | jq -r '.tool_input.subagent_type // empty' 2>/dev/null || echo "")"
+    [[ -z "${SUBAGENT_TYPE}" ]] && SUBAGENT_TYPE="unknown"
 
-    # Guard 1: Skip if prompt already contains <mycelium-menu> (idempotency).
-    PROMPT_START="$(printf '%s' "${INPUT}" | jq -r '.tool_input.prompt // "" | .[0:20]' 2>/dev/null || echo "")"
-    if [[ "${PROMPT_START}" == "<mycelium-menu>"* ]]; then
+    # Discover repo root FIRST so guard outcomes can be logged.
+    CWD="$(printf '%s' "${INPUT}" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
+    [[ -z "${CWD}" ]] && CWD="$(pwd)"
+    REPO_ROOT="$(_find_repo_root "${CWD}")"
+    if [[ -z "${REPO_ROOT}" ]]; then
+        # No log target — silent exit, matches Phase 1.5 spec.
         exit 0
     fi
 
-    # Guard 2: Skip if subagent_type is in the exclusion list.
-    SUBAGENT_TYPE="$(printf '%s' "${INPUT}" | jq -r '.tool_input.subagent_type // empty' 2>/dev/null || echo "")"
+    # Guard 1: Idempotency — skip if prompt already contains <mycelium-menu>.
+    PROMPT_START="$(printf '%s' "${INPUT}" | jq -r '.tool_input.prompt // "" | .[0:20]' 2>/dev/null || echo "")"
+    if [[ "${PROMPT_START}" == "<mycelium-menu>"* ]]; then
+        _log_event "${REPO_ROOT}" "${SUBAGENT_TYPE}" "${SESSION_ID}" "dedup-skip" "" 2>/dev/null || true
+        exit 0
+    fi
+
+    # Guard 2: Excluded subagent types.
     case "${SUBAGENT_TYPE}" in
         living-scribe|cost-tracker|statusline-setup|figure-qa|data-qa|stats-reviewer|pdf-gen)
+            _log_event "${REPO_ROOT}" "${SUBAGENT_TYPE}" "${SESSION_ID}" "excluded-skip" "subagent_type=${SUBAGENT_TYPE}" 2>/dev/null || true
             exit 0
             ;;
     esac
-
-    # Prefer cwd from stdin, fallback to process pwd. Matches mycelium-health.sh discovery.
-    CWD="$(printf '%s' "${INPUT}" | jq -r '.cwd // empty' 2>/dev/null || echo "")"
-    [[ -z "${CWD}" ]] && CWD="$(pwd)"
-
-    REPO_ROOT="$(_find_repo_root "${CWD}")"
-    if [[ -z "${REPO_ROOT}" ]]; then
-        exit 0
-    fi
 
     MENU_CONTENT="$(cat "${REPO_ROOT}/.living/MENU.md" 2>/dev/null || echo "")"
     if [[ -z "${MENU_CONTENT}" ]]; then
@@ -94,6 +126,9 @@ _log_error() {
         _log_error "${REPO_ROOT}" "${SESSION_ID}" "jq-modify-failed" ""
         exit 0
     fi
+
+    MENU_FINAL_BYTES="$(printf '%s' "${MENU_CONTENT}" | wc -c | tr -d ' ')"
+    _log_event "${REPO_ROOT}" "${SUBAGENT_TYPE}" "${SESSION_ID}" "fired" "bytes=${MENU_FINAL_BYTES}" 2>/dev/null || true
 
     jq -nc --argjson inp "${MODIFIED_INPUT}" \
         '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": $inp}}'
