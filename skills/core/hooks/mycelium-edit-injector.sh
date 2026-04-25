@@ -10,6 +10,8 @@ set -euo pipefail
 SCRIPT_VERSION="phase1-1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MATCH_EDIT="${SCRIPT_DIR}/../scripts/match_edit.py"
+# shellcheck source=_lib/log_rotation.sh
+source "${SCRIPT_DIR}/_lib/log_rotation.sh"
 
 _log_error() {
     local repo_root="$1"; shift
@@ -25,6 +27,36 @@ _log_error() {
         "$(date +%Y-%m-%dT%H:%M:%S)" "${tool_name}" "${file_path}" \
         "${repo_root}" "${session_id}" "${error_class}" "${matched_domains}" \
         "${bytes}" "${SCRIPT_VERSION}" >> "${errlog}" 2>/dev/null || true
+}
+
+_log_event() {
+    local repo_root="$1"
+    local tool_name="$2"
+    local target="$3"
+    local session_id="$4"
+    local outcome="$5"   # fired | dedup-skip
+    local detail="$6"    # matched;bytes=N | empty
+
+    [[ -z "${repo_root}" ]] && return 0
+    local logfile="${repo_root}/.claude/mycelium-injection-events.log"
+
+    local s_target s_session s_detail
+    s_target="$(_mycelium_tsv_sanitize "${target}")"
+    s_session="$(_mycelium_tsv_sanitize "${session_id}")"
+    s_detail="$(_mycelium_tsv_sanitize "${detail}")"
+
+    local line
+    line="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+        "$(date +%Y-%m-%dT%H:%M:%S)" \
+        "edit-injector" \
+        "${tool_name}" \
+        "${s_target}" \
+        "${s_session}" \
+        "${outcome}" \
+        "${s_detail}" \
+        "phase1.5-events-v1")"
+
+    _mycelium_append_log_locked "${logfile}" "${line}"
 }
 
 {
@@ -98,6 +130,7 @@ _log_error() {
     rm -f /tmp/mycelium-dedup-result.$$
 
     if [[ "${DEDUP_RESULT}" == *"__DEDUP_SKIP__"* ]]; then
+        _log_event "${REPO_ROOT}" "${TOOL_NAME}" "${REL_PATH}" "${SESSION_ID}" "dedup-skip" ""
         exit 0
     fi
 
@@ -120,6 +153,9 @@ _log_error() {
     WRAPPED="<mycelium-pushed-learnings domains=\"${MATCHED}\">
 ${CONTENT}
 </mycelium-pushed-learnings>"
+
+    PAYLOAD_BYTES="$(printf '%s' "${WRAPPED}" | wc -c | tr -d ' ')"
+    _log_event "${REPO_ROOT}" "${TOOL_NAME}" "${REL_PATH}" "${SESSION_ID}" "fired" "${MATCHED};bytes=${PAYLOAD_BYTES}"
 
     jq -nc --arg ctx "${WRAPPED}" \
         '{"hookSpecificOutput": {"additionalContext": $ctx}}'
