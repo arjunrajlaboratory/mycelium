@@ -130,7 +130,7 @@ _log_event() {
     rm -f /tmp/mycelium-dedup-result.$$
 
     if [[ "${DEDUP_RESULT}" == *"__DEDUP_SKIP__"* ]]; then
-        _log_event "${REPO_ROOT}" "${TOOL_NAME}" "${REL_PATH}" "${SESSION_ID}" "dedup-skip" ""
+        _log_event "${REPO_ROOT}" "${TOOL_NAME}" "${REL_PATH}" "${SESSION_ID}" "dedup-skip" "" 2>/dev/null || true
         exit 0
     fi
 
@@ -155,7 +155,7 @@ ${CONTENT}
 </mycelium-pushed-learnings>"
 
     PAYLOAD_BYTES="$(printf '%s' "${WRAPPED}" | wc -c | tr -d ' ')"
-    _log_event "${REPO_ROOT}" "${TOOL_NAME}" "${REL_PATH}" "${SESSION_ID}" "fired" "${MATCHED};bytes=${PAYLOAD_BYTES}"
+    _log_event "${REPO_ROOT}" "${TOOL_NAME}" "${REL_PATH}" "${SESSION_ID}" "fired" "${MATCHED};bytes=${PAYLOAD_BYTES}" 2>/dev/null || true
 
     jq -nc --arg ctx "${WRAPPED}" \
         '{"hookSpecificOutput": {"additionalContext": $ctx}}'
