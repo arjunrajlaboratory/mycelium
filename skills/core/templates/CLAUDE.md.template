@@ -4,12 +4,10 @@ This repository is a **mycelium-enabled living repository**. It carries its own 
 
 ## Quick Orientation
 
-1. **Read `.living/` first** — This is the repository's accumulated intelligence:
-   - `.living/decisions.md` — Why past choices were made
-   - `.living/learnings.md` — Gotchas, surprises, and insights from previous work
-   - `.living/conventions.md` — Repo-specific convention overrides
-2. **Read `ENVIRONMENTS_INSTALLATIONS.md`** — Environment setup, dependencies, and installation gotchas
-3. **Read the relevant manifest** — Each top-level directory has a descriptive manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`)
+1. **Read `.living/INDEX.md` first** — A one-screen knowledge map: tag clusters, most-recent entries, and a tag → entry-ID inverted index. Drill into the underlying file (`learnings.md`, `decisions.md`, `conventions.md`) only when a row matches your task. The SessionStart hook regenerates this index every fresh session — trust it.
+2. **For targeted lookup:** `python3 skills/core/scripts/recall_lessons.py --living-dir .living/ --tag <tag>` — fetches only the matching entries instead of pulling the whole file. Also accepts `--id L-42`, `--since YYYY-MM-DD`.
+3. **Read `ENVIRONMENTS_INSTALLATIONS.md`** — Environment setup, dependencies, and installation gotchas.
+4. **Read the relevant manifest** — Each top-level directory has a descriptive manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
 
 ## Installed Convention Packs
 
@@ -35,6 +33,7 @@ No domain conventions installed yet. Install with mycelium's `install-convention
 ├── reference_material/ — External references (see REFERENCE_MANIFEST.md)
 ├── todo/               — Future work items and ideas (see todo/TODO_REGISTRY.md)
 └── .living/            — Repository memory layer
+    ├── INDEX.md                    — Auto-regenerated knowledge map (read first)
     ├── decisions.md
     ├── learnings.md
     ├── conventions.md              — Repo-specific overrides
@@ -57,8 +56,10 @@ No domain conventions installed yet. Install with mycelium's `install-convention
 
 ### Before Starting Work
 
-1. Read `.living/learnings.md` for known gotchas relevant to your task
-2. Read `.living/decisions.md` for past reasoning that may inform your approach
+1. **Open `.living/INDEX.md`** — its tag clusters and recent-entries lists tell you which past learnings/decisions are likely relevant. Don't skip this — it's already loaded into context by the SessionStart hook, but the agent should re-read for full detail when starting non-trivial work.
+2. **Drill in selectively** — for entries that look relevant, either:
+   - Fetch just the entries: `python3 skills/core/scripts/recall_lessons.py --living-dir .living/ --tag <tag>` or `--id L-42`
+   - Read the whole file (`learnings.md`/`decisions.md`) only if you need broader context
 3. Read the manifest for the area you'll be working in (e.g., `ANALYSIS_MANIFEST.md`)
 4. Check `.living/conventions.md` for any repo-specific overrides
 5. If a domain convention is active, read its conventions in `.living/conventions/[domain]/`
@@ -122,6 +123,7 @@ When using subagent-driven development (main context coordinates, subagents impl
 | File | Purpose |
 |------|---------|
 | `ENVIRONMENTS_INSTALLATIONS.md` | How to set up the environment |
+| `.living/INDEX.md` | Auto-regenerated knowledge map — entry point for `.living/` |
 | `.living/decisions.md` | Why choices were made |
 | `.living/learnings.md` | Accumulated insights and gotchas |
 | `.living/conventions.md` | Repo-specific convention overrides |
