@@ -28,9 +28,50 @@ if [ -z "$REPO_ROOT" ]; then
   exit 0  # Not in a git repo
 fi
 
-# Record session-start timestamp — only for primary sessions (not subagents)
 mkdir -p "$REPO_ROOT/.claude"
-if [ ! -f "$REPO_ROOT/.claude/active-session-log.tmp" ]; then
+
+# Clean up stale sentinels from a crashed previous session BEFORE the
+# session-start-ts guard below — otherwise the guard mistakes the orphaned
+# active-session-log.tmp for an in-progress session, skips refreshing the
+# start ts, and the next stop hook computes duration_minutes from the
+# crashed session's timestamp (e.g. 10 days = 14794 min). See PR fixing
+# duration_minutes self-healing.
+ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
+if [ -f "$ACTIVE_LOG_FILE" ]; then
+  _STALE_LOG=$(head -1 "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
+  _STALE_OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
+  _SHOULD_CLEAN=false
+  if [ -z "$_STALE_OWNER_TS" ]; then
+    # Old format (no owner TS) — clean up for format upgrade
+    _SHOULD_CLEAN=true
+  elif [ "$(( $(date +%s) - _STALE_OWNER_TS ))" -gt 7200 ]; then
+    # Owner TS > 2 hours old — crashed session
+    _SHOULD_CLEAN=true
+  elif [ -n "$_STALE_LOG" ] && [ -f "$_STALE_LOG" ] && grep -q "^ended: [0-9]" "$_STALE_LOG"; then
+    # Log already finalized but sentinel wasn't cleaned
+    _SHOULD_CLEAN=true
+  elif [ -n "$_STALE_LOG" ] && [ ! -f "$_STALE_LOG" ]; then
+    # Log file deleted but sentinel remains
+    _SHOULD_CLEAN=true
+  fi
+  if [ "$_SHOULD_CLEAN" = true ]; then
+    # If the orphaned log was never finalized, surface a warning so the new
+    # session knows about it. Then drop all session sentinels so this fresh
+    # process starts clean.
+    if [ -n "$_STALE_LOG" ] && [ -f "$_STALE_LOG" ] && ! grep -q "## Session Summary" "$_STALE_LOG"; then
+      MESSAGES="${MESSAGES}INCOMPLETE SESSION LOG: Previous session log at ${_STALE_LOG} was never finalized (likely a crashed session). Add a '## Session Summary' section and append a row to the registry, or delete it.\n\n"
+    fi
+    rm -f "$ACTIVE_LOG_FILE"
+    rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
+    rm -f "$REPO_ROOT/.claude/mycelium-session-activity.tmp"
+    rm -f "$REPO_ROOT/.claude/mycelium-reminded.tmp"
+  fi
+fi
+
+# Record session-start timestamp — only for primary sessions (not subagents).
+# After the cleanup above, a remaining active-session-log.tmp implies a
+# genuine in-progress primary session, so we preserve its start ts.
+if [ ! -f "$ACTIVE_LOG_FILE" ]; then
     date +%s > "$REPO_ROOT/.claude/session-start-ts.tmp"
 fi
 
@@ -109,7 +150,7 @@ LIVING_DIR="$REPO_ROOT/.living"
 LOG_DIR="$LIVING_DIR/log"
 
 if [ -d "$LIVING_DIR" ]; then
-  ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
+  # ACTIVE_LOG_FILE was set above (early stale-cleanup block). Reuse it.
   # Ensure log directory and registry exist
   mkdir -p "$LOG_DIR"
   mkdir -p "$LIVING_DIR/findings"
@@ -120,35 +161,6 @@ if [ -d "$LIVING_DIR" ]; then
 | Date | Session ID | Project | Branch | Duration | Files Changed | Summary | Key Outputs | Status | Tags | Log |
 |------|-----------|---------|--------|----------|---------------|---------|-------------|--------|------|-----|
 REGISTRY_EOF
-  fi
-
-  # Check for incomplete log from interrupted previous session
-  if [ -f "$ACTIVE_LOG_FILE" ]; then
-    STALE_LOG=$(head -1 "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
-    if [ -f "$STALE_LOG" ] && ! grep -q "## Session Summary" "$STALE_LOG"; then
-      MESSAGES="${MESSAGES}INCOMPLETE SESSION LOG: Previous session log at ${STALE_LOG} was never finalized. Please add a '## Session Summary' section and append a row to the registry before starting new work.\n\n"
-    fi
-  fi
-
-  # Clean up stale active-session-log from crashed or old sessions
-  if [ -f "$ACTIVE_LOG_FILE" ]; then
-    _STALE_LOG=$(head -1 "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
-    _STALE_OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
-    _SHOULD_CLEAN=false
-    if [ -z "$_STALE_OWNER_TS" ]; then
-      # Old format (no owner TS) — clean up for format upgrade
-      _SHOULD_CLEAN=true
-    elif [ "$(( $(date +%s) - _STALE_OWNER_TS ))" -gt 7200 ]; then
-      # Owner TS > 2 hours old — crashed session
-      _SHOULD_CLEAN=true
-    elif [ -n "$_STALE_LOG" ] && [ -f "$_STALE_LOG" ] && grep -q "^ended: [0-9]" "$_STALE_LOG"; then
-      # Log already finalized but sentinel wasn't cleaned
-      _SHOULD_CLEAN=true
-    elif [ -n "$_STALE_LOG" ] && [ ! -f "$_STALE_LOG" ]; then
-      # Log file deleted but sentinel remains
-      _SHOULD_CLEAN=true
-    fi
-    [ "$_SHOULD_CLEAN" = true ] && rm -f "$ACTIVE_LOG_FILE"
   fi
 
   # Create new log file only if no active session log exists (fresh process start)

@@ -649,6 +649,80 @@ INDEXEOF
   cleanup_test_env
 }
 
+# ── TEST 23: Stale active-session-log.tmp from crashed session is cleaned and ──
+#           session-start-ts.tmp is refreshed (regression test for the
+#           14794-minute-duration bug).
+echo ""
+echo "TEST 23: Stale active-session-log.tmp → cleanup + fresh session-start-ts"
+{
+  setup_test_env
+  TEN_DAYS_AGO=$(( $(date +%s) - 10*86400 ))
+  echo "$TEN_DAYS_AGO" > "$TEST_DIR/.claude/session-start-ts.tmp"
+
+  # Crashed session left an active-session-log.tmp pointing to an old log
+  OLD_LOG="$TEST_DIR/.living/log/2026-04-15-001-test.md"
+  mkdir -p "$(dirname "$OLD_LOG")"
+  cat > "$OLD_LOG" <<'OLD_LOG_EOF'
+---
+session_id: 2026-04-15-001
+project: test
+branch: main
+started: 2026-04-15T14:50:00-0400
+ended:
+duration_minutes:
+files_changed:
+---
+OLD_LOG_EOF
+  printf '%s\n%s\n' "$OLD_LOG" "$TEN_DAYS_AGO" > "$TEST_DIR/.claude/active-session-log.tmp"
+
+  run_health_hook
+
+  NEW_TS=$(cat "$TEST_DIR/.claude/session-start-ts.tmp" 2>/dev/null || echo 0)
+  AGE=$(( $(date +%s) - NEW_TS ))
+  if [ "$AGE" -lt 60 ]; then
+    pass "Stale sentinel cleaned, session-start-ts refreshed (age=${AGE}s)"
+  else
+    fail "Expected fresh session-start-ts (< 60s old)" "age=${AGE}s ts=$NEW_TS"
+  fi
+  cleanup_test_env
+}
+
+# ── TEST 24: Fresh active-session-log.tmp (subagent) does NOT cause cleanup ──
+#           (preserves primary's session-start-ts so subagent detection still
+#           works when subagents legitimately observe the same sentinel).
+echo ""
+echo "TEST 24: Fresh active-session-log.tmp → session-start-ts preserved"
+{
+  setup_test_env
+  PRIMARY_TS=$(( $(date +%s) - 60 ))  # primary started 60s ago
+  echo "$PRIMARY_TS" > "$TEST_DIR/.claude/session-start-ts.tmp"
+
+  ACTIVE_LOG="$TEST_DIR/.living/log/2026-04-26-001-test.md"
+  mkdir -p "$(dirname "$ACTIVE_LOG")"
+  cat > "$ACTIVE_LOG" <<'ACTIVE_LOG_EOF'
+---
+session_id: 2026-04-26-001
+project: test
+branch: main
+started: 2026-04-26T00:00:00+0000
+ended:
+duration_minutes:
+files_changed:
+---
+ACTIVE_LOG_EOF
+  printf '%s\n%s\n' "$ACTIVE_LOG" "$PRIMARY_TS" > "$TEST_DIR/.claude/active-session-log.tmp"
+
+  run_health_hook
+
+  NEW_TS=$(cat "$TEST_DIR/.claude/session-start-ts.tmp" 2>/dev/null || echo 0)
+  if [ "$NEW_TS" = "$PRIMARY_TS" ]; then
+    pass "Active session-log preserved → session-start-ts unchanged"
+  else
+    fail "Expected session-start-ts unchanged ($PRIMARY_TS), got $NEW_TS"
+  fi
+  cleanup_test_env
+}
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

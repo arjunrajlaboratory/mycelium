@@ -582,6 +582,100 @@ LOG_EOF
 }
 
 # ─────────────────────────────────────────────────────────────────
+# TEST 16: duration_minutes computed from frontmatter `started:`
+# (defends against stale session-start-ts.tmp from a crashed prior session
+# producing 14000+ minute durations).
+# ─────────────────────────────────────────────────────────────────
+echo ""
+echo "TEST 16: duration_minutes uses frontmatter started: when present"
+{
+  REPO=$(make_repo)
+  mkdir -p "$REPO/.living"
+
+  LOG_PATH="$REPO/.living/log/2026-01-01-001-test.md"
+  mkdir -p "$(dirname "$LOG_PATH")"
+  # Frontmatter says session started 30 seconds ago — accurate.
+  RECENT_ISO=$(date -r $(( $(date +%s) - 30 )) '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null \
+               || date -d "@$(( $(date +%s) - 30 ))" '+%Y-%m-%dT%H:%M:%S%z')
+  cat > "$LOG_PATH" <<LOG_EOF
+---
+session_id: 2026-01-01-001
+project: test
+branch: main
+started: ${RECENT_ISO}
+ended:
+duration_minutes:
+files_changed:
+---
+
+## Session Log
+
+### 00:00 — Session started
+LOG_EOF
+
+  # session-start-ts.tmp is BOGUS — 10 days ago. Demonstrates self-healing.
+  TEN_DAYS_AGO=$(( $(date +%s) - 10*86400 ))
+  echo "$TEN_DAYS_AGO" > "$REPO/.claude/session-start-ts.tmp"
+  printf '%s\n%s\n' "$LOG_PATH" "$TEN_DAYS_AGO" > "$REPO/.claude/active-session-log.tmp"
+
+  # Force the non-bypass branch by adding activity — duration won't be < 5 anymore
+  echo "src/foo.py" > "$REPO/.claude/mycelium-session-activity.tmp"
+
+  run_hook "$REPO"
+
+  DUR=$(grep '^duration_minutes:' "$LOG_PATH" 2>/dev/null | awk '{print $2}')
+  if [ "$HOOK_EXIT" -eq 0 ] && [ -n "$DUR" ] && [ "$DUR" -lt 5 ]; then
+    pass "Frontmatter started: → sane duration (${DUR}m), not stale-ts duration"
+  else
+    fail "Stale .tmp ignored, frontmatter used → expected duration < 5m" \
+      "exit=$HOOK_EXIT duration=$DUR"
+  fi
+  rm -rf "$REPO"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# TEST 17: duration_minutes falls back to session-start-ts.tmp when
+# frontmatter `started:` is absent (preserves prior behavior for old logs).
+# ─────────────────────────────────────────────────────────────────
+echo ""
+echo "TEST 17: missing frontmatter started: falls back to session-start-ts.tmp"
+{
+  REPO=$(make_repo)
+  mkdir -p "$REPO/.living"
+
+  LOG_PATH="$REPO/.living/log/2026-01-01-001-test.md"
+  mkdir -p "$(dirname "$LOG_PATH")"
+  # Frontmatter has no `started:` — old-format log.
+  cat > "$LOG_PATH" <<'LOG_EOF'
+---
+session_id: 2026-01-01-001
+project: test
+branch: main
+ended:
+duration_minutes:
+files_changed:
+---
+
+## Session Log
+LOG_EOF
+
+  date +%s > "$REPO/.claude/session-start-ts.tmp"
+  printf '%s\n%s\n' "$LOG_PATH" "$(date +%s)" > "$REPO/.claude/active-session-log.tmp"
+  echo "src/foo.py" > "$REPO/.claude/mycelium-session-activity.tmp"
+
+  run_hook "$REPO"
+
+  DUR=$(grep '^duration_minutes:' "$LOG_PATH" 2>/dev/null | awk '{print $2}')
+  if [ "$HOOK_EXIT" -eq 0 ] && [ -n "$DUR" ] && [ "$DUR" -lt 5 ]; then
+    pass "No frontmatter started: → fell back to .tmp, duration ${DUR}m"
+  else
+    fail "Missing started: → expected fallback to .tmp + sane duration" \
+      "exit=$HOOK_EXIT duration=$DUR"
+  fi
+  rm -rf "$REPO"
+}
+
+# ─────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────
 echo ""
