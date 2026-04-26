@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Migrator no longer creates duplicate hook entries** when the same script is already registered at a different path (e.g. marketplace install vs. dev-repo checkout). `install_claude_hooks` in `init_repo.py` now matches existing hooks by script *basename* (`mycelium-health.sh`, etc.), not full command path. A new pre-pass also consolidates pre-existing duplicates, preferring the marketplace path. The pre-pass also detects entries whose command path no longer exists on disk (stale install dirs) and replaces them with a fresh path — but only when a known-good replacement is available, so transient filesystem hiccups don't make a bad situation worse. Run the migrator on a previously-migrated repo to clean up. New `_consolidate_duplicate_hooks` helper + 10 unit tests.
+
 ### Added
 
 - **Heuristic INDEX.md summary** (`generate_index.py --summary-heuristic`): Tag-aware clustering that produces a `<!-- BEGIN KNOWLEDGE SUMMARY -->` block in <1s without LLM calls. Three subsections — tag clusters (≥2 entries), 10 most-recent entries, and a tag → entry-ID inverted index. Closes the gap that left every existing `INDEX.md` sentinel-less and the SessionStart injection path silently dead.
