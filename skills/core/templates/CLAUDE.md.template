@@ -70,7 +70,7 @@ No domain conventions installed yet. Install with mycelium's `install-convention
 - Follow statistical conventions: report effect sizes, confidence intervals, document assumptions
 - **Follow robust-analysis conventions** (`.living/conventions/robust-analysis/`): fail loudly on unexpected data, assert shapes/types/ranges, log row counts at every step, run sensitivity analyses for every decision, test null hypotheses via permutation/bootstrap
 - **Do not subset data** without explicit user confirmation and justification
-- Use marimo for exploration, Python scripts for reproducible pipelines
+- Use marimo for exploration (start from `skills/core/templates/marimo-notebook-header.py`), Python scripts for reproducible pipelines
 - Every analysis must have a `run.sh` or `run.py` that reproduces final outputs
 
 ### After Every Significant Action (Post-Action Hook Protocol)
