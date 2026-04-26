@@ -92,7 +92,11 @@ def dir_to_manifest_name(dir_name: str) -> str:
 
 
 def create_manifests(target_dir: Path):
-    """Create descriptive manifest files in each top-level directory."""
+    """Create descriptive manifest files in each top-level directory.
+
+    Also drops a `_README_TEMPLATE.md` into algorithms/ and analysis/ so
+    new entries have a concrete starting point.
+    """
     manifest_dirs = ["algorithms", "analysis", "data", "reference_material"]
 
     for dir_name in manifest_dirs:
@@ -104,6 +108,18 @@ def create_manifests(target_dir: Path):
                 "<!-- Add entries below using the appropriate manifest entry template. -->\n"
             )
             print(f"  Created: {dir_name}/{manifest_filename}")
+
+    # Drop README templates so new analyses/algorithms have a concrete start
+    templates_dir = Path(__file__).resolve().parent.parent / "templates"
+    for src_name, target_subdir in (
+        ("algorithm-readme.md", "algorithms"),
+        ("analysis-readme.md", "analysis"),
+    ):
+        src = templates_dir / src_name
+        dst = target_dir / target_subdir / "_README_TEMPLATE.md"
+        if src.exists() and not dst.exists():
+            dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            print(f"  Created: {target_subdir}/_README_TEMPLATE.md")
 
 
 def create_todo_list(target_dir: Path):
@@ -128,12 +144,20 @@ def create_living_layer(target_dir: Path):
         "decisions.md": (
             "# Decision Log\n\n"
             "Append-only log of non-obvious decisions and their rationale.\n\n"
-            "<!-- Use the decision-log-entry template for new entries. -->\n"
+            "**Entry template:** copy from "
+            "`skills/core/templates/decision-log-entry.md` "
+            "(includes Context, Decision, Alternatives considered, Rationale, "
+            "Consequences, Tags fields).\n"
         ),
         "learnings.md": (
             "# Learnings\n\n"
             "Append-only log of gotchas, surprises, and insights.\n\n"
-            "<!-- Use the learning-entry template for new entries. -->\n"
+            "**Entry template:** copy from "
+            "`skills/core/templates/learning-entry.md` "
+            "(includes Category, What happened, Why it matters, Resolution, "
+            "Tags fields). The `**Tags**:` line is consumed by "
+            "`generate_index.py --summary-heuristic` to build the cluster "
+            "summary in INDEX.md — use them.\n"
         ),
         "conventions.md": (
             "# Repo-Specific Conventions\n\n"
@@ -350,11 +374,12 @@ def install_claude_hooks(target_dir: Path):
 
     hooks = settings.setdefault("hooks", {})
 
-    # Define the four mycelium hooks with absolute paths
+    # Define the five mycelium hooks with absolute paths
     health_hook = str(hooks_dir / "mycelium-health.sh")
     post_action_hook = str(hooks_dir / "mycelium-post-action.sh")
     stop_hook = str(hooks_dir / "mycelium-stop-check.sh")
     activity_tracker_hook = str(hooks_dir / "mycelium-activity-tracker.sh")
+    read_tracker_hook = str(hooks_dir / "mycelium-read-tracker.sh")
 
     def _hook_entry(cmd: str) -> dict:
         return {"type": "command", "command": cmd}
@@ -400,6 +425,17 @@ def install_claude_hooks(target_dir: Path):
             post_tool.append(edit_write_entry)
         edit_write_entry["hooks"].append(_hook_entry(activity_tracker_hook))
         print("  Registered: PostToolUse (Edit|Write) → mycelium-activity-tracker.sh")
+
+    # --- PostToolUse: mycelium-read-tracker.sh (matcher: Read) ---
+    # Logs each .living/ file read to .claude/mycelium-read-access.log so we
+    # can measure access rates over time. Silent — no agent-facing context.
+    if not _has_hook(post_tool, read_tracker_hook):
+        read_entry = next((e for e in post_tool if e.get("matcher") == "Read"), None)
+        if read_entry is None:
+            read_entry = {"matcher": "Read", "hooks": []}
+            post_tool.append(read_entry)
+        read_entry["hooks"].append(_hook_entry(read_tracker_hook))
+        print("  Registered: PostToolUse (Read) → mycelium-read-tracker.sh")
 
     # --- Stop: mycelium-stop-check.sh ---
     stop = hooks.setdefault("Stop", [])

@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Heuristic INDEX.md summary** (`generate_index.py --summary-heuristic`): Tag-aware clustering that produces a `<!-- BEGIN KNOWLEDGE SUMMARY -->` block in <1s without LLM calls. Three subsections — tag clusters (≥2 entries), 10 most-recent entries, and a tag → entry-ID inverted index. Closes the gap that left every existing `INDEX.md` sentinel-less and the SessionStart injection path silently dead.
+- **`recall_lessons.py`** — query `.living/learnings.md` and `decisions.md` by tag, ID, or date. Cheap progressive-disclosure tool: fetches matching entries instead of pulling whole files into context. Supports ANY-match within `--tag` and `--id`, AND across filter types.
+- **`migrate_existing_repos.py`** — idempotent backfill for repos started on earlier mycelium versions. Re-anchors CLAUDE.md on `.living/INDEX.md`, tops up missing hooks (especially read-tracker), regenerates the heuristic SUMMARY block, and appends the Global Knowledge Domains routing table to MEMORY.md. Supports `--repo`, `--scan`, `--dry-run`.
+- **CLAUDE.md.template re-anchor**: New repos point at `.living/INDEX.md` as the *first* knowledge entry point and explicitly mention `recall_lessons.py` for targeted lookup. Old "read learnings.md / decisions.md directly" pattern is dropped.
+- **MEMORY.md routing table append in `init_knowledge.py`**: SKILL.md previously claimed this happened, but the script had no MEMORY.md code. Now actually appends the table to `~/.claude/projects/*/memory/MEMORY.md` (idempotent — checks for `## Global Knowledge Domains` header). New `--memory-only` flag for the migrator.
+- **`recall` and `migrate` modes documented in SKILL.md**, plus a "How to verify" section listing the seven commands an agent can run to confirm the system is wired correctly.
+
+### Fixed
+
+- **`mycelium-read-tracker.sh` is now installed by default** in `init_repo.py`'s 5-hook bundle. Previously the hook shipped but had to be installed manually per project — meaning `.living/` access metrics required ad-hoc setup. The bundle now is: SessionStart→health, PostToolUse(Bash)→post-action, PostToolUse(Edit\|Write)→activity-tracker, PostToolUse(Read)→read-tracker (new default), Stop→stop-check.
+- **SessionStart hook calls `--summary-heuristic` by default**, with fallback to `--counts-only` if the local copy of `generate_index.py` predates the new flag. Previously the hook only called `--counts-only`, which never produces a SUMMARY block — leaving the injection path at line ~376 of `mycelium-health.sh` permanently dead for every project on the machine.
+
+### Changed
+
+- **SKILL.md honest about dormant modes**: `transfer` (requires meta-project layout), `contribute` (requires prior `crystallize`), and `file-issue` (manual workflow only) now carry "Dormant by design" callouts explaining what triggers them and what does not. Prevents agents from inferring they fire automatically.
+
+### Wired (previously orphan templates)
+
+- `algorithm-readme.md` and `analysis-readme.md` are now copied as `_README_TEMPLATE.md` into `algorithms/` and `analysis/` at init.
+- `decision-log-entry.md` and `learning-entry.md` are now cited by name in the `.living/decisions.md` and `.living/learnings.md` stub content. The learnings stub also notes that `**Tags**:` annotations feed `--summary-heuristic`.
+- `marimo-notebook-header.py` is now referenced in the CLAUDE.md.template Workflow section.
+
 ## [0.5.0] - 2026-04-11
 
 ### Added

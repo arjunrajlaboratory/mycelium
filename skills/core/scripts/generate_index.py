@@ -434,6 +434,254 @@ def update_index_counts_only(living_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# --summary-heuristic helpers (no LLM)
+# ---------------------------------------------------------------------------
+
+# Matches lines like "**Tags**: foo, bar", "Tags: [foo, bar]", "Tags: foo".
+# The [\s>]* prefix allows blockquoted entries.
+_TAG_LINE_RE = re.compile(
+    r"^[\s>]*\*?\*?Tags\*?\*?\s*:\s*(.+?)\s*$", re.IGNORECASE
+)
+_DATE_RE = re.compile(r"\[(\d{4}-\d{2}-\d{2})\]")
+
+# Sentinel-wrapped advisory lines below the cluster table. Used to keep the
+# heuristic block self-explanatory without the agent needing to read SKILL.md.
+_HEURISTIC_FOOTER = (
+    "_Heuristic clustering: tags with ≥2 entries, top 6 by count. "
+    "To fetch matching entries: "
+    "`python3 skills/core/scripts/recall_lessons.py --living-dir <path> --tag <tag>` "
+    "or `--id L-N`._"
+)
+
+
+def parse_tag_line(text: str) -> list[str]:
+    """Extract tag names from a 'Tags:' line.
+
+    Handles all observed formats:
+    - **Tags**: [tag1, tag2]
+    - **Tags**: tag1, tag2
+    - Tags: tag1
+    - **Tags**:  (empty — returns [])
+
+    Returns a list of stripped tag strings; empty list if the line is not a
+    Tags line or contains no tags.
+    """
+    m = _TAG_LINE_RE.match(text)
+    if not m:
+        return []
+    raw = m.group(1).strip()
+    # Strip surrounding brackets if present
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1].strip()
+    if not raw:
+        return []
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def collect_entries(path: Path, file_type: str, prefix: str) -> list[dict]:
+    """Walk a learnings/decisions/conventions file and emit one record per entry.
+
+    Each record is `{id, title, date, tags, line_no}`:
+    - `id`: f"{prefix}-{N}" where N is 1-indexed file order (e.g. L-1, D-7)
+    - `title`: header text with the `[YYYY-MM-DD]` date stripped
+    - `date`: extracted date string or "" if absent
+    - `tags`: list[str], from the first `**Tags**:` line within the entry body
+    - `line_no`: 1-indexed line number of the header (for downstream slicing)
+
+    Entries are returned in file order (oldest first) — match the on-disk shape
+    so callers can derive recency by reversing or sorting on `date`.
+    """
+    if file_type in ("learnings", "decisions"):
+        header_prefix = "### "
+    elif file_type == "conventions":
+        header_prefix = "## "
+    else:
+        header_prefix = "### "
+
+    entries: list[dict] = []
+    current: dict | None = None
+
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line_no, raw in enumerate(fh, start=1):
+            line = raw.rstrip()
+            if line.startswith(header_prefix):
+                if current is not None:
+                    entries.append(current)
+                title = line[len(header_prefix) :].strip()
+                m = _DATE_RE.search(title)
+                date = m.group(1) if m else ""
+                clean_title = _DATE_RE.sub("", title).strip(" :-–—")
+                current = {
+                    "id": f"{prefix}-{len(entries) + 1}",
+                    "title": clean_title or title,
+                    "date": date,
+                    "tags": [],
+                    "line_no": line_no,
+                }
+            elif current is not None and not current["tags"]:
+                tags = parse_tag_line(line)
+                if tags:
+                    current["tags"] = tags
+
+    if current is not None:
+        entries.append(current)
+    return entries
+
+
+def _cluster_by_tag(entries: list[dict], min_count: int = 2) -> list[tuple[str, list[dict]]]:
+    """Group entries by tag, keep tags with ≥min_count, sort by count desc."""
+    by_tag: dict[str, list[dict]] = {}
+    for e in entries:
+        for tag in e["tags"]:
+            by_tag.setdefault(tag, []).append(e)
+    clusters = [(tag, ents) for tag, ents in by_tag.items() if len(ents) >= min_count]
+    clusters.sort(key=lambda x: (-len(x[1]), x[0]))
+    return clusters
+
+
+def build_heuristic_summary(living_dir: Path, top_n: int = 6, recent_n: int = 10) -> str:
+    """Build a self-contained KNOWLEDGE SUMMARY block from tag clusters.
+
+    No LLM — purely heuristic. Three subsections:
+    1. **Tag clusters** — top N tags by entry count (threshold ≥2)
+    2. **Most recent** — N most recent entries by date
+    3. **By tag** — full inverted index `tag → L-1, L-3, ...`
+
+    Always emits a valid sentinel-wrapped block (even when empty) so the
+    SessionStart hook injection isn't gated forever on missing content.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    learnings = (
+        collect_entries(living_dir / "learnings.md", "learnings", "L")
+        if (living_dir / "learnings.md").exists()
+        else []
+    )
+    decisions = (
+        collect_entries(living_dir / "decisions.md", "decisions", "D")
+        if (living_dir / "decisions.md").exists()
+        else []
+    )
+    all_entries = learnings + decisions
+
+    lines: list[str] = [
+        SUMMARY_BEGIN,
+        f"Last summarized: {today} (heuristic)",
+        "",
+    ]
+
+    if not all_entries:
+        lines.extend(
+            [
+                "_No `### [YYYY-MM-DD]` entries yet — this block populates as "
+                "`.living/learnings.md` and `.living/decisions.md` accumulate "
+                "tagged entries._",
+                SUMMARY_END,
+            ]
+        )
+        return "\n".join(lines)
+
+    # Two views of the same data:
+    # - clusters (≥2 entries) feed the headline summary at the top
+    # - all_tags (no min_count) feeds the full inverted index — singletons
+    #   are valid recall targets too, so excluding them defeats the purpose
+    clusters = _cluster_by_tag(all_entries, min_count=2)
+    top_clusters = clusters[:top_n]
+    all_tags = _cluster_by_tag(all_entries, min_count=1)
+
+    lines.append("## Tag clusters")
+    lines.append("")
+    if top_clusters:
+        for tag, ents in top_clusters:
+            ids = ", ".join(e["id"] for e in ents[-5:])
+            lines.append(f"- **{tag}** ({len(ents)} entries) — {ids}")
+    else:
+        lines.append("_No tag clusters yet (need ≥2 entries sharing a tag)._")
+
+    lines.append("")
+    lines.append(f"## Most recent ({recent_n})")
+    lines.append("")
+    sorted_entries = sorted(
+        all_entries, key=lambda e: (e["date"] or "0000-00-00"), reverse=True
+    )
+    recent = sorted_entries[:recent_n]
+    for e in recent:
+        date_label = e["date"] if e["date"] else "—"
+        lines.append(f"- [{date_label}] {e['id']}: {e['title']}")
+
+    lines.append("")
+    lines.append("## By tag")
+    lines.append("")
+    if all_tags:
+        for tag, ents in all_tags:
+            ids = ", ".join(e["id"] for e in ents)
+            lines.append(f"- `{tag}`: {ids}")
+    else:
+        lines.append("_(empty — no tagged entries)_")
+
+    lines.append("")
+    lines.append(_HEURISTIC_FOOTER)
+    lines.append(SUMMARY_END)
+    return "\n".join(lines)
+
+
+def update_index_summary_heuristic(living_dir: Path) -> None:
+    """Write the heuristic SUMMARY block into INDEX.md, preserving QUICK_REFERENCE.
+
+    - Fresh INDEX.md: writes both QUICK_REFERENCE and SUMMARY blocks.
+    - Existing with both sentinels: replaces SUMMARY in-place.
+    - Existing with QUICK_REFERENCE only: inserts SUMMARY after it.
+    - Legacy (no sentinels): rebuilds from scratch.
+    """
+    index_path = living_dir / "INDEX.md"
+    summary_block = build_heuristic_summary(living_dir)
+    quick_ref = build_quick_reference(living_dir)
+
+    if not index_path.exists():
+        index_path.write_text(quick_ref + "\n\n" + summary_block + "\n", encoding="utf-8")
+        print(f"Written: {index_path}")
+        return
+
+    existing = index_path.read_text(encoding="utf-8")
+
+    # Legacy migration: any INDEX.md without QUICK_REF sentinels is
+    # auto-generated content (the schema has always been managed by this
+    # script). Rebuild from scratch — matches update_index_counts_only's
+    # legacy behavior and avoids stranding a stale pre-sentinel table at
+    # the bottom of the file. Migrator targets this case specifically.
+    if QUICK_REF_BEGIN not in existing or QUICK_REF_END not in existing:
+        index_path.write_text(
+            quick_ref + "\n\n" + summary_block + "\n", encoding="utf-8"
+        )
+        print(f"Written: {index_path}")
+        return
+
+    before = existing[: existing.index(QUICK_REF_BEGIN)]
+    after = existing[existing.index(QUICK_REF_END) + len(QUICK_REF_END) :]
+    existing = before + quick_ref + after
+
+    if SUMMARY_BEGIN in existing and SUMMARY_END in existing:
+        before = existing[: existing.index(SUMMARY_BEGIN)]
+        after = existing[existing.index(SUMMARY_END) + len(SUMMARY_END) :]
+        existing = before + summary_block + after
+    else:
+        # Insert SUMMARY after QUICK_REFERENCE block
+        anchor = existing.find(QUICK_REF_END)
+        if anchor >= 0:
+            insert_at = anchor + len(QUICK_REF_END)
+            existing = (
+                existing[:insert_at] + "\n\n" + summary_block + existing[insert_at:]
+            )
+        else:
+            existing = existing.rstrip() + "\n\n" + summary_block
+
+    if not existing.endswith("\n"):
+        existing += "\n"
+    index_path.write_text(existing, encoding="utf-8")
+    print(f"Written: {index_path}")
+
+
+# ---------------------------------------------------------------------------
 # --summarize helpers
 # ---------------------------------------------------------------------------
 
@@ -785,6 +1033,12 @@ def main() -> None:
         help="Update entry counts and Quick Reference table only (no LLM).",
     )
     mode_group.add_argument(
+        "--summary-heuristic",
+        action="store_true",
+        help="No-LLM tag-based clustering. Updates counts AND emits a "
+        "knowledge summary block from `**Tags**:` annotations.",
+    )
+    mode_group.add_argument(
         "--summarize",
         action="store_true",
         help="Full LLM summarization: update counts AND generate knowledge clusters.",
@@ -801,6 +1055,13 @@ def main() -> None:
             print(build_quick_reference(living_dir))
         else:
             update_index_counts_only(living_dir)
+    elif args.summary_heuristic:
+        if args.dry_run:
+            print(build_quick_reference(living_dir))
+            print()
+            print(build_heuristic_summary(living_dir))
+        else:
+            update_index_summary_heuristic(living_dir)
     elif args.summarize:
         if args.dry_run:
             # For summarize dry-run, show what would be written without saving
