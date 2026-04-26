@@ -38,25 +38,41 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
   fi
 
   if [ -f "$LOG_PATH" ]; then
-    # Compute session duration
+    # Compute session duration. Prefer the frontmatter `started:` field
+    # (set when the SessionStart hook created this log) over
+    # session-start-ts.tmp, which can be stale across crashed sessions and
+    # produce nonsense durations like 14794 minutes for a 55-second session.
     LOG_REPO="$REPO_ROOT"
     START_FILE="$LOG_REPO/.claude/session-start-ts.tmp"
     NOW_TS=$(date +%s)
     DURATION_MIN=0
-    if [ -f "$START_FILE" ]; then
-      START_TS=$(cat "$START_FILE")
+    START_TS=""
+
+    FM_STARTED=$({ grep -m1 '^started:' "$LOG_PATH" 2>/dev/null || true; } | sed 's/^started:[[:space:]]*//; s/[[:space:]]*$//')
+    if [ -n "$FM_STARTED" ]; then
+      # Try BSD date (macOS) first, then GNU date (Linux). Frontmatter format
+      # is e.g. 2026-04-26T06:43:53-0400.
+      START_TS=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$FM_STARTED" +%s 2>/dev/null \
+                 || date -d "$FM_STARTED" +%s 2>/dev/null \
+                 || echo "")
+    fi
+    if [ -z "$START_TS" ] && [ -f "$START_FILE" ]; then
+      START_TS=$(cat "$START_FILE" 2>/dev/null || echo "")
+    fi
+    if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
       DURATION_MIN=$(( (NOW_TS - START_TS) / 60 ))
+      [ "$DURATION_MIN" -lt 0 ] && DURATION_MIN=0
     fi
 
     # Compute files changed since session start (committed + uncommitted + staged + activity tracker)
     FILES_CHANGED=0
-    if [ -f "$START_FILE" ]; then
-      FILES_CHANGED_UNCOMMITTED=$({ git -C "$LOG_REPO" diff --name-only 2>/dev/null || true; } | wc -l | tr -d ' ')
-      FILES_CHANGED_STAGED=$({ git -C "$LOG_REPO" diff --cached --name-only 2>/dev/null || true; } | wc -l | tr -d ' ')
-      START_TS=$(cat "$START_FILE")
+    FILES_CHANGED_UNCOMMITTED=$({ git -C "$LOG_REPO" diff --name-only 2>/dev/null || true; } | wc -l | tr -d ' ')
+    FILES_CHANGED_STAGED=$({ git -C "$LOG_REPO" diff --cached --name-only 2>/dev/null || true; } | wc -l | tr -d ' ')
+    FILES_CHANGED_COMMITTED=0
+    if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
       FILES_CHANGED_COMMITTED=$({ git -C "$LOG_REPO" log --since="@${START_TS}" --name-only --pretty=format: 2>/dev/null || true; } | sort -u | { grep -v '^$' || true; } | wc -l | tr -d ' ')
-      FILES_CHANGED=$((FILES_CHANGED_UNCOMMITTED + FILES_CHANGED_STAGED + FILES_CHANGED_COMMITTED))
     fi
+    FILES_CHANGED=$((FILES_CHANGED_UNCOMMITTED + FILES_CHANGED_STAGED + FILES_CHANGED_COMMITTED))
     # Also count activity-tracked files (Edit/Write operations not yet in git)
     ACTIVITY_FILE_CHECK="$LOG_REPO/.claude/mycelium-session-activity.tmp"
     if [ -f "$ACTIVITY_FILE_CHECK" ] && [ "$FILES_CHANGED" -eq 0 ]; then
