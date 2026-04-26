@@ -578,10 +578,25 @@ class TestHeuristicSummary:
         assert "**debugging** (3 entries)" in block
         assert "**pytest** (2 entries)" in block
         assert "**asyncio** (2 entries)" in block
-        # solo has 1 — must NOT appear in the cluster section
-        # (but may appear in "Most recent" — guard the cluster line specifically)
+        # `solo` (1 entry) must NOT appear in the headline "Tag clusters" block
         cluster_section = block.split("## Most recent")[0]
-        assert "solo" not in cluster_section
+        assert "**solo**" not in cluster_section
+
+    def test_singleton_tags_appear_in_inverted_index(self, living_dir: Path) -> None:
+        """The full inverted index must include singleton tags — they're valid
+        recall targets. Only the headline 'Tag clusters' filters by ≥2."""
+        _write_tagged_learnings(
+            living_dir,
+            [
+                ("2026-04-01", "A", ["popular", "popular-too"]),
+                ("2026-04-02", "B", ["popular", "popular-too"]),
+                ("2026-04-03", "C", ["singleton-tag"]),
+            ],
+        )
+        block = gi.build_heuristic_summary(living_dir)
+        by_tag_section = block.split("## By tag")[1]
+        assert "`singleton-tag`" in by_tag_section
+        assert "L-3" in by_tag_section
 
     def test_recent_section_sorted_by_date(self, living_dir: Path) -> None:
         _write_tagged_learnings(
@@ -690,6 +705,27 @@ class TestUpdateIndexSummaryHeuristic:
         content = (living_dir / "INDEX.md").read_text(encoding="utf-8")
         assert "STALE_CONTENT_MARKER" not in content
         assert content.count(gi.SUMMARY_BEGIN) == 1
+
+    def test_legacy_index_rebuilt_from_scratch(self, living_dir: Path) -> None:
+        """A pre-sentinel legacy INDEX.md must be replaced wholesale, not
+        prepended. Otherwise stale tables linger after migration."""
+        _write_tagged_learnings(living_dir, [("2026-04-01", "A", ["x", "y"])])
+        legacy = (
+            "# .living/ Index\n"
+            "Last audit: 2025-08-01\n\n"
+            "| File | Entries | Last updated | Key topics |\n"
+            "|------|---------|--------------|------------|\n"
+            "| learnings.md | STALE_LEGACY_TABLE | 2025-01-01 | old topics |\n"
+        )
+        (living_dir / "INDEX.md").write_text(legacy, encoding="utf-8")
+
+        gi.update_index_summary_heuristic(living_dir)
+        content = (living_dir / "INDEX.md").read_text(encoding="utf-8")
+        # Stale content must be GONE — not coexisting with new content
+        assert "STALE_LEGACY_TABLE" not in content
+        # Both sentinel blocks must be present in the rebuilt file
+        assert gi.QUICK_REF_BEGIN in content
+        assert gi.SUMMARY_BEGIN in content
 
     def test_inserts_after_quick_ref_when_summary_missing(
         self, living_dir: Path

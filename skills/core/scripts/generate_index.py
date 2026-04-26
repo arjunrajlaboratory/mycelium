@@ -581,8 +581,13 @@ def build_heuristic_summary(living_dir: Path, top_n: int = 6, recent_n: int = 10
         )
         return "\n".join(lines)
 
-    clusters = _cluster_by_tag(all_entries)
+    # Two views of the same data:
+    # - clusters (≥2 entries) feed the headline summary at the top
+    # - all_tags (no min_count) feeds the full inverted index — singletons
+    #   are valid recall targets too, so excluding them defeats the purpose
+    clusters = _cluster_by_tag(all_entries, min_count=2)
     top_clusters = clusters[:top_n]
+    all_tags = _cluster_by_tag(all_entries, min_count=1)
 
     lines.append("## Tag clusters")
     lines.append("")
@@ -607,12 +612,12 @@ def build_heuristic_summary(living_dir: Path, top_n: int = 6, recent_n: int = 10
     lines.append("")
     lines.append("## By tag")
     lines.append("")
-    if clusters:
-        for tag, ents in clusters:
+    if all_tags:
+        for tag, ents in all_tags:
             ids = ", ".join(e["id"] for e in ents)
             lines.append(f"- `{tag}`: {ids}")
     else:
-        lines.append("_(empty — no tags with ≥2 entries)_")
+        lines.append("_(empty — no tagged entries)_")
 
     lines.append("")
     lines.append(_HEURISTIC_FOOTER)
@@ -639,12 +644,21 @@ def update_index_summary_heuristic(living_dir: Path) -> None:
 
     existing = index_path.read_text(encoding="utf-8")
 
-    if QUICK_REF_BEGIN in existing and QUICK_REF_END in existing:
-        before = existing[: existing.index(QUICK_REF_BEGIN)]
-        after = existing[existing.index(QUICK_REF_END) + len(QUICK_REF_END) :]
-        existing = before + quick_ref + after
-    else:
-        existing = quick_ref + "\n" + existing
+    # Legacy migration: any INDEX.md without QUICK_REF sentinels is
+    # auto-generated content (the schema has always been managed by this
+    # script). Rebuild from scratch — matches update_index_counts_only's
+    # legacy behavior and avoids stranding a stale pre-sentinel table at
+    # the bottom of the file. Migrator targets this case specifically.
+    if QUICK_REF_BEGIN not in existing or QUICK_REF_END not in existing:
+        index_path.write_text(
+            quick_ref + "\n\n" + summary_block + "\n", encoding="utf-8"
+        )
+        print(f"Written: {index_path}")
+        return
+
+    before = existing[: existing.index(QUICK_REF_BEGIN)]
+    after = existing[existing.index(QUICK_REF_END) + len(QUICK_REF_END) :]
+    existing = before + quick_ref + after
 
     if SUMMARY_BEGIN in existing and SUMMARY_END in existing:
         before = existing[: existing.index(SUMMARY_BEGIN)]
