@@ -348,8 +348,76 @@ def find_mycelium_hooks_dir() -> Path | None:
     return None
 
 
+MYCELIUM_HOOK_BASENAMES = {
+    "mycelium-health.sh",
+    "mycelium-post-action.sh",
+    "mycelium-stop-check.sh",
+    "mycelium-activity-tracker.sh",
+    "mycelium-read-tracker.sh",
+}
+
+
+def _consolidate_duplicate_hooks(hooks: dict) -> tuple[int, dict[str, str]]:
+    """Remove duplicate hook entries that point at the same script via different paths.
+
+    For each mycelium hook basename, if multiple entries exist (e.g. one
+    pointing at the marketplace install and one at a dev-repo checkout),
+    keep one and drop the others. Preference order:
+
+    1. Any path containing `/marketplaces/` (the production install)
+    2. The longest existing path (heuristic: most specific)
+
+    Mutates `hooks` in place. Returns `(removed_count, kept_by_basename)`
+    so the caller can report what happened and reuse the kept paths when
+    deciding whether to install missing hooks.
+    """
+    removed = 0
+    kept_by_basename: dict[str, str] = {}
+
+    for event_kind, entries in hooks.items():
+        for entry in entries:
+            basename_to_cmds: dict[str, list[str]] = {}
+            for h in entry.get("hooks", []):
+                cmd = h.get("command", "")
+                bn = Path(cmd).name
+                if bn in MYCELIUM_HOOK_BASENAMES:
+                    basename_to_cmds.setdefault(bn, []).append(cmd)
+
+            # Pick canonical for each duplicated basename
+            canonical: dict[str, str] = {}
+            for bn, cmds in basename_to_cmds.items():
+                # Prefer marketplace path; otherwise longest path; ties broken
+                # by sort order for determinism
+                marketplace = [c for c in cmds if "/marketplaces/" in c]
+                if marketplace:
+                    canonical[bn] = sorted(marketplace)[0]
+                else:
+                    canonical[bn] = sorted(cmds, key=lambda c: (-len(c), c))[0]
+                kept_by_basename[bn] = canonical[bn]
+
+            # Drop non-canonical entries
+            new_hook_list = []
+            for h in entry.get("hooks", []):
+                cmd = h.get("command", "")
+                bn = Path(cmd).name
+                if bn in canonical and cmd != canonical[bn]:
+                    removed += 1
+                    continue
+                new_hook_list.append(h)
+            entry["hooks"] = new_hook_list
+
+    return removed, kept_by_basename
+
+
 def install_claude_hooks(target_dir: Path):
     """Create or update .claude/settings.local.json with mycelium hooks.
+
+    Two-pass:
+    1. Consolidate any pre-existing duplicate entries (same script, different
+       paths — e.g. marketplace + dev-repo). Prefers marketplace path.
+    2. Install any of the 5 mycelium hooks that are missing entirely. Match
+       by script *basename* not full path so a re-run with a different
+       hooks-dir does not double-install.
 
     Handles the innermost-wins rule: subproject settings must include
     the complete hook set or parent hooks won't fire.
@@ -374,7 +442,15 @@ def install_claude_hooks(target_dir: Path):
 
     hooks = settings.setdefault("hooks", {})
 
-    # Define the five mycelium hooks with absolute paths
+    # --- Pass 1: consolidate duplicates ---
+    removed, kept = _consolidate_duplicate_hooks(hooks)
+    if removed > 0:
+        print(f"  Consolidated: removed {removed} duplicate hook entr"
+              f"{'y' if removed == 1 else 'ies'}")
+
+    # --- Pass 2: install missing hooks ---
+    # Use the path resolved from this script's location for any hook NOT
+    # already present (the consolidation pass picked existing paths).
     health_hook = str(hooks_dir / "mycelium-health.sh")
     post_action_hook = str(hooks_dir / "mycelium-post-action.sh")
     stop_hook = str(hooks_dir / "mycelium-stop-check.sh")
@@ -384,18 +460,17 @@ def install_claude_hooks(target_dir: Path):
     def _hook_entry(cmd: str) -> dict:
         return {"type": "command", "command": cmd}
 
-    def _has_hook(hook_list: list, cmd: str) -> bool:
-        """Check if a hook command is already registered."""
+    def _has_hook(hook_list: list, basename: str) -> bool:
+        """Check if any entry registers the named script (path-agnostic)."""
         return any(
-            h.get("command") == cmd
+            Path(h.get("command", "")).name == basename
             for entry in hook_list
             for h in entry.get("hooks", [])
         )
 
     # --- SessionStart: mycelium-health.sh ---
     session_start = hooks.setdefault("SessionStart", [])
-    if not _has_hook(session_start, health_hook):
-        # Find existing catch-all matcher entry or create one
+    if not _has_hook(session_start, "mycelium-health.sh"):
         catch_all = next((e for e in session_start if e.get("matcher", "") == ""), None)
         if catch_all is None:
             catch_all = {"matcher": "", "hooks": []}
@@ -405,8 +480,7 @@ def install_claude_hooks(target_dir: Path):
 
     # --- PostToolUse: mycelium-post-action.sh (matcher: Bash) ---
     post_tool = hooks.setdefault("PostToolUse", [])
-    if not _has_hook(post_tool, post_action_hook):
-        # Find existing Bash matcher entry or create one
+    if not _has_hook(post_tool, "mycelium-post-action.sh"):
         bash_entry = next((e for e in post_tool if e.get("matcher") == "Bash"), None)
         if bash_entry is None:
             bash_entry = {"matcher": "Bash", "hooks": []}
@@ -415,8 +489,7 @@ def install_claude_hooks(target_dir: Path):
         print("  Registered: PostToolUse (Bash) → mycelium-post-action.sh")
 
     # --- PostToolUse: mycelium-activity-tracker.sh (matcher: Edit|Write) ---
-    if not _has_hook(post_tool, activity_tracker_hook):
-        # Find existing Edit|Write matcher entry or create one
+    if not _has_hook(post_tool, "mycelium-activity-tracker.sh"):
         edit_write_entry = next(
             (e for e in post_tool if e.get("matcher") == "Edit|Write"), None
         )
@@ -429,7 +502,7 @@ def install_claude_hooks(target_dir: Path):
     # --- PostToolUse: mycelium-read-tracker.sh (matcher: Read) ---
     # Logs each .living/ file read to .claude/mycelium-read-access.log so we
     # can measure access rates over time. Silent — no agent-facing context.
-    if not _has_hook(post_tool, read_tracker_hook):
+    if not _has_hook(post_tool, "mycelium-read-tracker.sh"):
         read_entry = next((e for e in post_tool if e.get("matcher") == "Read"), None)
         if read_entry is None:
             read_entry = {"matcher": "Read", "hooks": []}
@@ -439,7 +512,7 @@ def install_claude_hooks(target_dir: Path):
 
     # --- Stop: mycelium-stop-check.sh ---
     stop = hooks.setdefault("Stop", [])
-    if not _has_hook(stop, stop_hook):
+    if not _has_hook(stop, "mycelium-stop-check.sh"):
         catch_all = next((e for e in stop if e.get("matcher", "") == ""), None)
         if catch_all is None:
             catch_all = {"matcher": "", "hooks": []}
