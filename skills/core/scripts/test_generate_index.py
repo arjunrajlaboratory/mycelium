@@ -434,3 +434,328 @@ class TestSummarizeMode:
         assert "Last summarized: 2025-06-01" in content
         assert "old learning cluster" in content
         assert "old decision cluster" in content
+
+
+# ---------------------------------------------------------------------------
+# TestParseTagLine
+# ---------------------------------------------------------------------------
+
+
+class TestParseTagLine:
+    def test_bracketed_bold_format(self) -> None:
+        assert gi.parse_tag_line("**Tags**: [foo, bar, baz]") == ["foo", "bar", "baz"]
+
+    def test_bare_bold_format(self) -> None:
+        assert gi.parse_tag_line("**Tags**: foo, bar") == ["foo", "bar"]
+
+    def test_unbolded_format(self) -> None:
+        assert gi.parse_tag_line("Tags: foo, bar") == ["foo", "bar"]
+
+    def test_single_tag(self) -> None:
+        assert gi.parse_tag_line("**Tags**: [solo]") == ["solo"]
+
+    def test_empty_brackets(self) -> None:
+        assert gi.parse_tag_line("**Tags**: []") == []
+
+    def test_empty_value(self) -> None:
+        assert gi.parse_tag_line("**Tags**: ") == []
+
+    def test_non_tag_line(self) -> None:
+        assert gi.parse_tag_line("**Category**: gotcha") == []
+        assert gi.parse_tag_line("Some other content") == []
+        assert gi.parse_tag_line("") == []
+
+    def test_blockquoted_tag_line(self) -> None:
+        assert gi.parse_tag_line("> **Tags**: [a, b]") == ["a", "b"]
+
+    def test_extra_whitespace(self) -> None:
+        assert gi.parse_tag_line("**Tags**:   foo,  bar  ,baz") == ["foo", "bar", "baz"]
+
+
+# ---------------------------------------------------------------------------
+# TestCollectEntries
+# ---------------------------------------------------------------------------
+
+
+class TestCollectEntries:
+    def test_extracts_id_title_date_tags(self, living_dir: Path) -> None:
+        """Entry with date and tags produces a complete record."""
+        path = living_dir / "learnings.md"
+        path.write_text(
+            "# Learnings\n\n"
+            "### [2026-04-01] First lesson\n"
+            "**Tags**: [debugging, pydantic]\n\n"
+            "Body content.\n\n"
+            "### [2026-04-02] Second lesson\n"
+            "**Tags**: testing\n\n"
+            "More body.\n",
+            encoding="utf-8",
+        )
+        entries = gi.collect_entries(path, "learnings", "L")
+
+        assert len(entries) == 2
+        assert entries[0]["id"] == "L-1"
+        assert entries[0]["title"] == "First lesson"
+        assert entries[0]["date"] == "2026-04-01"
+        assert entries[0]["tags"] == ["debugging", "pydantic"]
+        assert entries[1]["id"] == "L-2"
+        assert entries[1]["tags"] == ["testing"]
+
+    def test_handles_missing_tags(self, living_dir: Path) -> None:
+        path = living_dir / "learnings.md"
+        path.write_text(
+            "### [2026-04-01] Untagged\n\nBody.\n",
+            encoding="utf-8",
+        )
+        entries = gi.collect_entries(path, "learnings", "L")
+        assert entries[0]["tags"] == []
+
+    def test_handles_missing_date(self, living_dir: Path) -> None:
+        path = living_dir / "learnings.md"
+        path.write_text(
+            "### Untitled lesson\n**Tags**: [misc]\n\nBody.\n",
+            encoding="utf-8",
+        )
+        entries = gi.collect_entries(path, "learnings", "L")
+        assert entries[0]["date"] == ""
+        assert entries[0]["title"] == "Untitled lesson"
+
+    def test_only_first_tags_line_per_entry(self, living_dir: Path) -> None:
+        """If an entry has multiple Tags lines (rare), only the first counts."""
+        path = living_dir / "learnings.md"
+        path.write_text(
+            "### [2026-04-01] Test\n"
+            "**Tags**: [first]\n"
+            "Some body.\n"
+            "**Tags**: [second]\n",
+            encoding="utf-8",
+        )
+        entries = gi.collect_entries(path, "learnings", "L")
+        assert entries[0]["tags"] == ["first"]
+
+
+# ---------------------------------------------------------------------------
+# TestHeuristicSummary
+# ---------------------------------------------------------------------------
+
+
+def _write_tagged_learnings(living_dir: Path, entries: list[tuple[str, str, list[str]]]) -> Path:
+    """Write a learnings.md from (date, title, tags) tuples."""
+    path = living_dir / "learnings.md"
+    lines = ["# Learnings\n\n"]
+    for date, title, tags in entries:
+        date_part = f"[{date}] " if date else ""
+        lines.append(f"### {date_part}{title}\n")
+        if tags:
+            lines.append(f"**Tags**: [{', '.join(tags)}]\n")
+        lines.append("\nBody content.\n\n")
+    path.write_text("".join(lines), encoding="utf-8")
+    return path
+
+
+class TestHeuristicSummary:
+    def test_emits_sentinels_when_empty(self, living_dir: Path) -> None:
+        """No entries → still a valid sentinel-wrapped block."""
+        block = gi.build_heuristic_summary(living_dir)
+        assert block.startswith(gi.SUMMARY_BEGIN)
+        assert block.endswith(gi.SUMMARY_END)
+        assert "(heuristic)" in block
+
+    def test_clusters_top_tags(self, living_dir: Path) -> None:
+        _write_tagged_learnings(
+            living_dir,
+            [
+                ("2026-04-01", "A", ["debugging", "pytest"]),
+                ("2026-04-02", "B", ["debugging"]),
+                ("2026-04-03", "C", ["debugging", "asyncio"]),
+                ("2026-04-04", "D", ["pytest"]),
+                ("2026-04-05", "E", ["asyncio"]),
+                ("2026-04-06", "F", ["solo"]),
+            ],
+        )
+        block = gi.build_heuristic_summary(living_dir)
+        # debugging has 3, pytest has 2, asyncio has 2 — all included
+        assert "**debugging** (3 entries)" in block
+        assert "**pytest** (2 entries)" in block
+        assert "**asyncio** (2 entries)" in block
+        # solo has 1 — must NOT appear in the cluster section
+        # (but may appear in "Most recent" — guard the cluster line specifically)
+        cluster_section = block.split("## Most recent")[0]
+        assert "solo" not in cluster_section
+
+    def test_recent_section_sorted_by_date(self, living_dir: Path) -> None:
+        _write_tagged_learnings(
+            living_dir,
+            [
+                ("2026-01-01", "Old entry", ["x", "y"]),
+                ("2026-04-01", "New entry", ["x", "y"]),
+                ("2026-03-01", "Middle entry", ["x", "y"]),
+            ],
+        )
+        block = gi.build_heuristic_summary(living_dir)
+        recent_section = block.split("## Most recent")[1].split("## By tag")[0]
+        # New entry should appear before Middle, before Old
+        assert recent_section.index("New entry") < recent_section.index("Middle entry")
+        assert recent_section.index("Middle entry") < recent_section.index("Old entry")
+
+    def test_inverted_index_lists_all_ids(self, living_dir: Path) -> None:
+        """The 'By tag' section maps tag → all matching IDs (T2)."""
+        _write_tagged_learnings(
+            living_dir,
+            [
+                ("2026-04-01", "A", ["debugging"]),
+                ("2026-04-02", "B", ["debugging"]),
+                ("2026-04-03", "C", ["debugging"]),
+            ],
+        )
+        block = gi.build_heuristic_summary(living_dir)
+        by_tag_section = block.split("## By tag")[1]
+        # All three IDs present in the inverted index
+        assert "L-1" in by_tag_section
+        assert "L-2" in by_tag_section
+        assert "L-3" in by_tag_section
+        assert "`debugging`" in by_tag_section
+
+    def test_inverted_index_combines_learnings_and_decisions(self, living_dir: Path) -> None:
+        _write_tagged_learnings(living_dir, [("2026-04-01", "L1", ["shared"])])
+        decisions_path = living_dir / "decisions.md"
+        decisions_path.write_text(
+            "# Decisions\n\n"
+            "### [2026-04-02] D1\n"
+            "**Tags**: [shared]\n\n"
+            "Body.\n",
+            encoding="utf-8",
+        )
+        block = gi.build_heuristic_summary(living_dir)
+        # Both L-1 and D-1 should appear under the shared tag
+        by_tag_section = block.split("## By tag")[1]
+        assert "L-1" in by_tag_section
+        assert "D-1" in by_tag_section
+
+
+# ---------------------------------------------------------------------------
+# TestUpdateIndexSummaryHeuristic
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateIndexSummaryHeuristic:
+    def test_creates_both_blocks_on_fresh_index(self, living_dir: Path) -> None:
+        _write_tagged_learnings(
+            living_dir,
+            [
+                ("2026-04-01", "A", ["x", "y"]),
+                ("2026-04-02", "B", ["x"]),
+            ],
+        )
+        gi.update_index_summary_heuristic(living_dir)
+        content = (living_dir / "INDEX.md").read_text(encoding="utf-8")
+        assert gi.QUICK_REF_BEGIN in content
+        assert gi.QUICK_REF_END in content
+        assert gi.SUMMARY_BEGIN in content
+        assert gi.SUMMARY_END in content
+        # Quick ref appears before summary
+        assert content.index(gi.QUICK_REF_BEGIN) < content.index(gi.SUMMARY_BEGIN)
+
+    def test_idempotent_rerun(self, living_dir: Path) -> None:
+        """Running twice yields stable structure (modulo today's date)."""
+        _write_tagged_learnings(living_dir, [("2026-04-01", "A", ["x", "y"])])
+        gi.update_index_summary_heuristic(living_dir)
+        first = (living_dir / "INDEX.md").read_text(encoding="utf-8")
+        gi.update_index_summary_heuristic(living_dir)
+        second = (living_dir / "INDEX.md").read_text(encoding="utf-8")
+        # Second run should not duplicate sentinels
+        assert first.count(gi.SUMMARY_BEGIN) == 1
+        assert second.count(gi.SUMMARY_BEGIN) == 1
+        assert first.count(gi.QUICK_REF_BEGIN) == 1
+        assert second.count(gi.QUICK_REF_BEGIN) == 1
+
+    def test_replaces_existing_summary_block(self, living_dir: Path) -> None:
+        """A stale summary block is replaced, not appended."""
+        _write_tagged_learnings(living_dir, [("2026-04-01", "A", ["x", "y"])])
+        seed = "\n".join(
+            [
+                gi.QUICK_REF_BEGIN,
+                "# .living/ Index",
+                gi.QUICK_REF_END,
+                "",
+                gi.SUMMARY_BEGIN,
+                "STALE_CONTENT_MARKER",
+                gi.SUMMARY_END,
+                "",
+            ]
+        )
+        (living_dir / "INDEX.md").write_text(seed, encoding="utf-8")
+
+        gi.update_index_summary_heuristic(living_dir)
+        content = (living_dir / "INDEX.md").read_text(encoding="utf-8")
+        assert "STALE_CONTENT_MARKER" not in content
+        assert content.count(gi.SUMMARY_BEGIN) == 1
+
+    def test_inserts_after_quick_ref_when_summary_missing(
+        self, living_dir: Path
+    ) -> None:
+        _write_tagged_learnings(living_dir, [("2026-04-01", "A", ["x", "y"])])
+        seed = "\n".join(
+            [
+                gi.QUICK_REF_BEGIN,
+                "# .living/ Index",
+                gi.QUICK_REF_END,
+                "",
+            ]
+        )
+        (living_dir / "INDEX.md").write_text(seed, encoding="utf-8")
+
+        gi.update_index_summary_heuristic(living_dir)
+        content = (living_dir / "INDEX.md").read_text(encoding="utf-8")
+        assert gi.SUMMARY_BEGIN in content
+        assert content.index(gi.QUICK_REF_END) < content.index(gi.SUMMARY_BEGIN)
+
+
+# ---------------------------------------------------------------------------
+# TestSummaryHeuristicCli
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryHeuristicCli:
+    def test_subprocess_writes_summary_block(self, living_dir: Path) -> None:
+        _write_tagged_learnings(
+            living_dir,
+            [
+                ("2026-04-01", "A", ["debugging"]),
+                ("2026-04-02", "B", ["debugging"]),
+            ],
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(_SCRIPT_DIR / "generate_index.py"),
+                "--living-dir",
+                str(living_dir),
+                "--summary-heuristic",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        content = (living_dir / "INDEX.md").read_text(encoding="utf-8")
+        assert gi.SUMMARY_BEGIN in content
+        assert "**debugging** (2 entries)" in content
+
+    def test_dry_run_prints_without_writing(self, living_dir: Path) -> None:
+        _write_tagged_learnings(living_dir, [("2026-04-01", "A", ["x", "y"])])
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(_SCRIPT_DIR / "generate_index.py"),
+                "--living-dir",
+                str(living_dir),
+                "--summary-heuristic",
+                "--dry-run",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert gi.SUMMARY_BEGIN in result.stdout
+        # Dry run must not write the INDEX
+        assert not (living_dir / "INDEX.md").exists()
