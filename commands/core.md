@@ -51,7 +51,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 8. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
 9. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
 10. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`; create `.living/log/LOG_REGISTRY.md` (session log registry — tracks work across sessions). Create `.living/outputs/knowledge-transfers/` for cross-project transfer audit trail.
-11. **Bootstrap knowledge system**: If `~/.claude/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py`. Append the domain routing table to the project's MEMORY.md if not already present (from `skills/core/templates/knowledge/domain-table.md`).
+11. **Bootstrap knowledge system**: If `~/.claude/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. The script also appends the Global Knowledge Domains routing table to every `~/.claude/projects/*/memory/MEMORY.md` (idempotent — skips files where the header is already present). Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py --summary-heuristic`.
 12. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
 13. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
 
@@ -145,6 +145,8 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 
 **Trigger**: "transfer knowledge", "cross-pollinate", "sync learnings", "knowledge transfer"
 
+> **Dormant by design — requires meta-project layout.** This mode only fires when the current repo sits inside a parent directory that itself has `.living/` (the "meta-project"), or when the current repo *is* the meta-project with ≥2 sibling projects each having `.living/`. Sibling repos at the same parent level (e.g. `~/code/projA/`, `~/code/projB/`) do NOT qualify. If your repos are siblings, either (a) nest them under a common meta-project directory and `init` the parent, or (b) skip this mode entirely.
+
 **Purpose**: Cross-pollinate learnings across sibling projects in a meta-project. Identifies insights from one project that would benefit others and **automatically applies** them to target projects' `.living/learnings.md` files.
 
 **Steps**:
@@ -169,6 +171,8 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 ## Mode: `contribute`
 
 **Trigger**: "contribute convention", "share back", "submit to network"
+
+> **Dormant by design — manual workflow.** This mode does not fire automatically. It runs only when a user explicitly asks to contribute a convention back to the network, and requires that `crystallize` mode has previously produced a `.living/generated-conventions/[name]/` to package. Most projects never reach this stage; that is normal.
 
 **Purpose**: Package a repo-local generated convention for PR to the mycelium network.
 
@@ -203,6 +207,8 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 
 **Trigger**: "file issue", "report convention gap", "report bug in convention"
 
+> **Dormant by design — manual workflow.** Fires only when a user explicitly asks to file a network-side issue. No automation routes to this mode.
+
 **Purpose**: Report a convention gap or error to the mycelium network.
 
 **Steps**:
@@ -210,6 +216,38 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 2. Draft a structured GitHub issue using the appropriate template.
 3. Categorize as `convention-gap`, `convention-improvement`, or `new-domain-request`.
 4. Present to user for review before filing.
+
+---
+
+## Mode: `recall`
+
+**Trigger**: "what do we know about X", "find learnings tagged Y", "fetch entry L-42", "/recall"
+
+**Purpose**: Targeted lookup of `.living/learnings.md` and `.living/decisions.md` entries by tag, ID, or date — without pulling whole files into context.
+
+**Steps**:
+1. Identify the filter the user wants:
+   - **Tag-based**: `--tag <tag>` (repeatable for ANY-match)
+   - **ID-based**: `--id L-42` or `--id D-7` (repeatable)
+   - **Date-based**: `--since YYYY-MM-DD`
+2. Run `python3 skills/core/scripts/recall_lessons.py --living-dir .living/ [filters]`.
+3. The script prints only the matching entry blocks, sorted most-recent-first, capped at `--max 20` by default.
+4. Use the printed entries directly — the script substitutes for whole-file reads of `learnings.md`/`decisions.md`.
+
+**Discovery**: Tag → ID maps live in `.living/INDEX.md` under the **By tag** subsection (regenerated by the SessionStart hook). Use it to find candidate IDs before recall.
+
+---
+
+## Mode: `migrate`
+
+**Trigger**: "migrate this repo", "upgrade mycelium", "this is an old repo"
+
+**Purpose**: Bring a repo started on an earlier mycelium version up to current spec — adds the `.living/INDEX.md` knowledge-index callout to CLAUDE.md, tops up missing hooks (e.g. read-tracker), regenerates the heuristic SUMMARY block, and appends the Global Knowledge Domains routing table to MEMORY.md.
+
+**Steps**:
+1. Run `python3 skills/core/scripts/migrate_existing_repos.py --repo .` (or `--scan <parent-dir>` to migrate every child).
+2. Each action is idempotent — re-running on an already-migrated repo is a no-op.
+3. Use `--dry-run` first to preview changes.
 
 ---
 
@@ -368,6 +406,23 @@ When work is dispatched to subagents (main context = coordination only):
    - Writes `.claude/last-session.md` using the 5-section session summary template (covering ALL work since session start, not just the latest batch — run `git log --since=<session-start-ts>` and `git diff --stat` to ground the summary in facts)
    - Checks cross-project relevance (if applicable)
 3. **The Stop hook enforces this** — it blocks session end if `.living/` wasn't updated after significant work, catching sessions where the crystallization step was forgotten.
+
+---
+
+## How to verify the system is working
+
+Quick checks an agent or human can run to confirm mycelium is wired correctly:
+
+| Check | Command / location | Expected |
+|-------|--------------------|----------|
+| Hooks installed | `cat .claude/settings.local.json` | Five hooks: SessionStart→health, PostToolUse(Bash)→post-action, PostToolUse(Edit\|Write)→activity-tracker, PostToolUse(Read)→read-tracker, Stop→stop-check |
+| INDEX.md has knowledge summary | `grep "BEGIN KNOWLEDGE SUMMARY" .living/INDEX.md` | Match present |
+| Read-access being logged | `tail .claude/mycelium-read-access.log` | Entries appearing whenever Claude reads `.living/` files |
+| MEMORY.md routing table present | `grep "Global Knowledge Domains" ~/.claude/projects/*/memory/MEMORY.md` | At least one match |
+| Heuristic clusters populating | `python3 skills/core/scripts/generate_index.py --living-dir .living/ --summary-heuristic --dry-run` | Tag clusters with ≥2 entries shown |
+| recall_lessons.py works | `python3 skills/core/scripts/recall_lessons.py --living-dir .living/ --tag <known-tag>` | Matching entries printed |
+
+If any check fails, run `python3 skills/core/scripts/migrate_existing_repos.py --repo .` to bring the repo up to spec.
 
 ---
 
