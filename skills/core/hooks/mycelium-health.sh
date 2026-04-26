@@ -34,18 +34,23 @@ mkdir -p "$REPO_ROOT/.claude"
 # session-start-ts guard below — otherwise the guard mistakes the orphaned
 # active-session-log.tmp for an in-progress session, skips refreshing the
 # start ts, and the next stop hook computes duration_minutes from the
-# crashed session's timestamp (e.g. 10 days = 14794 min). See PR fixing
-# duration_minutes self-healing.
+# crashed session's timestamp (e.g. 10 days = 14794 min).
+#
+# Sessions can legitimately run for many hours or days (long analyses,
+# overnight jobs), so we cannot rely on owner_ts age alone to declare a
+# session dead. The activity tracker touches mycelium-session-activity.tmp
+# on every Edit/Write and the post-action hook touches
+# mycelium-reminded.tmp on every Bash invocation, so a fresh mtime on
+# either is a strong liveness signal. We only clean when owner_ts is old
+# AND those signals are also quiet.
 ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
 if [ -f "$ACTIVE_LOG_FILE" ]; then
   _STALE_LOG=$(head -1 "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
   _STALE_OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
   _SHOULD_CLEAN=false
+  # Definitive signals — clean regardless of activity:
   if [ -z "$_STALE_OWNER_TS" ]; then
     # Old format (no owner TS) — clean up for format upgrade
-    _SHOULD_CLEAN=true
-  elif [ "$(( $(date +%s) - _STALE_OWNER_TS ))" -gt 7200 ]; then
-    # Owner TS > 2 hours old — crashed session
     _SHOULD_CLEAN=true
   elif [ -n "$_STALE_LOG" ] && [ -f "$_STALE_LOG" ] && grep -q "^ended: [0-9]" "$_STALE_LOG"; then
     # Log already finalized but sentinel wasn't cleaned
@@ -53,18 +58,44 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
   elif [ -n "$_STALE_LOG" ] && [ ! -f "$_STALE_LOG" ]; then
     # Log file deleted but sentinel remains
     _SHOULD_CLEAN=true
+  elif [ "$(( $(date +%s) - _STALE_OWNER_TS ))" -gt 7200 ]; then
+    # owner_ts > 2h: only conclude "crashed" if activity signals are also
+    # quiet. If either is fresh, the session is alive — don't touch.
+    _NOW=$(date +%s)
+    _ACTIVITY_FILE="$REPO_ROOT/.claude/mycelium-session-activity.tmp"
+    _REMINDED_FILE="$REPO_ROOT/.claude/mycelium-reminded.tmp"
+    _ACT_AGE=999999999
+    _REM_AGE=999999999
+    if [ -f "$_ACTIVITY_FILE" ]; then
+      _ACT_MTIME=$(stat -f "%m" "$_ACTIVITY_FILE" 2>/dev/null \
+                   || stat -c "%Y" "$_ACTIVITY_FILE" 2>/dev/null \
+                   || echo 0)
+      _ACT_AGE=$(( _NOW - _ACT_MTIME ))
+    fi
+    if [ -f "$_REMINDED_FILE" ]; then
+      _REM_MTIME=$(stat -f "%m" "$_REMINDED_FILE" 2>/dev/null \
+                   || stat -c "%Y" "$_REMINDED_FILE" 2>/dev/null \
+                   || echo 0)
+      _REM_AGE=$(( _NOW - _REM_MTIME ))
+    fi
+    # Clean only if BOTH activity signals are also old (> 2h). If either is
+    # fresh, assume the session is still alive.
+    if [ "$_ACT_AGE" -gt 7200 ] && [ "$_REM_AGE" -gt 7200 ]; then
+      _SHOULD_CLEAN=true
+    fi
   fi
   if [ "$_SHOULD_CLEAN" = true ]; then
     # If the orphaned log was never finalized, surface a warning so the new
-    # session knows about it. Then drop all session sentinels so this fresh
-    # process starts clean.
+    # session knows about it. Drop the active-session-log + session-start-ts
+    # sentinels so this process starts clean. Deliberately do NOT touch
+    # mycelium-session-activity.tmp / mycelium-reminded.tmp here — those
+    # have their own dedicated staleness cleanup further down, and wiping
+    # them would erase legitimate work signal in any rare misclassification.
     if [ -n "$_STALE_LOG" ] && [ -f "$_STALE_LOG" ] && ! grep -q "## Session Summary" "$_STALE_LOG"; then
       MESSAGES="${MESSAGES}INCOMPLETE SESSION LOG: Previous session log at ${_STALE_LOG} was never finalized (likely a crashed session). Add a '## Session Summary' section and append a row to the registry, or delete it.\n\n"
     fi
     rm -f "$ACTIVE_LOG_FILE"
     rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
-    rm -f "$REPO_ROOT/.claude/mycelium-session-activity.tmp"
-    rm -f "$REPO_ROOT/.claude/mycelium-reminded.tmp"
   fi
 fi
 

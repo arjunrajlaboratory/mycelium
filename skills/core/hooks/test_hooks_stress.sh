@@ -649,17 +649,16 @@ INDEXEOF
   cleanup_test_env
 }
 
-# ── TEST 23: Stale active-session-log.tmp from crashed session is cleaned and ──
-#           session-start-ts.tmp is refreshed (regression test for the
-#           14794-minute-duration bug).
+# ── TEST 23: Stale active-session-log.tmp from crashed session (no recent ──
+#           activity) is cleaned and session-start-ts.tmp is refreshed.
+#           Regression test for the 14794-minute-duration bug.
 echo ""
-echo "TEST 23: Stale active-session-log.tmp → cleanup + fresh session-start-ts"
+echo "TEST 23: Crashed session, no activity → cleanup + fresh session-start-ts"
 {
   setup_test_env
   TEN_DAYS_AGO=$(( $(date +%s) - 10*86400 ))
   echo "$TEN_DAYS_AGO" > "$TEST_DIR/.claude/session-start-ts.tmp"
 
-  # Crashed session left an active-session-log.tmp pointing to an old log
   OLD_LOG="$TEST_DIR/.living/log/2026-04-15-001-test.md"
   mkdir -p "$(dirname "$OLD_LOG")"
   cat > "$OLD_LOG" <<'OLD_LOG_EOF'
@@ -675,6 +674,15 @@ files_changed:
 OLD_LOG_EOF
   printf '%s\n%s\n' "$OLD_LOG" "$TEN_DAYS_AGO" > "$TEST_DIR/.claude/active-session-log.tmp"
 
+  # Aged activity files match the crash time
+  echo "src/old.py" > "$TEST_DIR/.claude/mycelium-session-activity.tmp"
+  echo "$TEN_DAYS_AGO" > "$TEST_DIR/.claude/mycelium-reminded.tmp"
+  OLD_FMT=$(date -r "$TEN_DAYS_AGO" "+%Y%m%d%H%M.%S" 2>/dev/null || true)
+  if [ -n "$OLD_FMT" ]; then
+    touch -t "$OLD_FMT" "$TEST_DIR/.claude/mycelium-session-activity.tmp"
+    touch -t "$OLD_FMT" "$TEST_DIR/.claude/mycelium-reminded.tmp"
+  fi
+
   run_health_hook
 
   NEW_TS=$(cat "$TEST_DIR/.claude/session-start-ts.tmp" 2>/dev/null || echo 0)
@@ -688,13 +696,12 @@ OLD_LOG_EOF
 }
 
 # ── TEST 24: Fresh active-session-log.tmp (subagent) does NOT cause cleanup ──
-#           (preserves primary's session-start-ts so subagent detection still
-#           works when subagents legitimately observe the same sentinel).
+#           (preserves primary's session-start-ts).
 echo ""
 echo "TEST 24: Fresh active-session-log.tmp → session-start-ts preserved"
 {
   setup_test_env
-  PRIMARY_TS=$(( $(date +%s) - 60 ))  # primary started 60s ago
+  PRIMARY_TS=$(( $(date +%s) - 60 ))
   echo "$PRIMARY_TS" > "$TEST_DIR/.claude/session-start-ts.tmp"
 
   ACTIVE_LOG="$TEST_DIR/.living/log/2026-04-26-001-test.md"
@@ -719,6 +726,94 @@ ACTIVE_LOG_EOF
     pass "Active session-log preserved → session-start-ts unchanged"
   else
     fail "Expected session-start-ts unchanged ($PRIMARY_TS), got $NEW_TS"
+  fi
+  cleanup_test_env
+}
+
+# ── TEST 25: Long-running active session (5h+ owner_ts but FRESH activity) ──
+#           must NOT trigger cleanup. Codex P2 / multi-day-session concern.
+echo ""
+echo "TEST 25: 5h old owner_ts + fresh activity → preserve everything"
+{
+  setup_test_env
+  FIVE_H_AGO=$(( $(date +%s) - 5*3600 ))
+  echo "$FIVE_H_AGO" > "$TEST_DIR/.claude/session-start-ts.tmp"
+
+  ACTIVE_LOG="$TEST_DIR/.living/log/2026-04-26-001-test.md"
+  mkdir -p "$(dirname "$ACTIVE_LOG")"
+  cat > "$ACTIVE_LOG" <<'ACTIVE_LOG_EOF'
+---
+session_id: 2026-04-26-001
+project: test
+branch: main
+started: 2026-04-26T01:00:00-0400
+ended:
+duration_minutes:
+files_changed:
+---
+ACTIVE_LOG_EOF
+  printf '%s\n%s\n' "$ACTIVE_LOG" "$FIVE_H_AGO" > "$TEST_DIR/.claude/active-session-log.tmp"
+  # Activity is FRESH — session is alive
+  echo "src/active.py" > "$TEST_DIR/.claude/mycelium-session-activity.tmp"
+  date +%s > "$TEST_DIR/.claude/mycelium-reminded.tmp"
+
+  run_health_hook
+
+  PRESERVED_TS=$(cat "$TEST_DIR/.claude/session-start-ts.tmp" 2>/dev/null || echo 0)
+  ALL_OK=true
+  [ "$PRESERVED_TS" = "$FIVE_H_AGO" ] || { ALL_OK=false; FAIL_MSG="ts disrupted ($FIVE_H_AGO → $PRESERVED_TS)"; }
+  [ -f "$TEST_DIR/.claude/active-session-log.tmp" ] || { ALL_OK=false; FAIL_MSG="active-session-log wiped"; }
+  [ -f "$TEST_DIR/.claude/mycelium-session-activity.tmp" ] || { ALL_OK=false; FAIL_MSG="activity wiped"; }
+  [ -f "$TEST_DIR/.claude/mycelium-reminded.tmp" ] || { ALL_OK=false; FAIL_MSG="reminded wiped"; }
+  if [ "$ALL_OK" = true ]; then
+    pass "Long-running active session preserved (5h owner_ts + fresh activity)"
+  else
+    fail "Long-running session disrupted" "${FAIL_MSG:-}"
+  fi
+  cleanup_test_env
+}
+
+# ── TEST 26: Stale crashed session (sentinels old) is still cleaned even when ──
+#           activity files are present but quiet (long-since-crashed scenario).
+echo ""
+echo "TEST 26: Stale owner_ts + stale activity → cleanup proceeds"
+{
+  setup_test_env
+  TWO_DAYS=$(( $(date +%s) - 2*86400 ))
+  echo "$TWO_DAYS" > "$TEST_DIR/.claude/session-start-ts.tmp"
+
+  OLD_LOG="$TEST_DIR/.living/log/2026-04-24-001-test.md"
+  mkdir -p "$(dirname "$OLD_LOG")"
+  cat > "$OLD_LOG" <<'OLD_LOG_EOF'
+---
+session_id: 2026-04-24-001
+project: test
+branch: main
+started: 2026-04-24T00:00:00-0400
+ended:
+duration_minutes:
+files_changed:
+---
+OLD_LOG_EOF
+  printf '%s\n%s\n' "$OLD_LOG" "$TWO_DAYS" > "$TEST_DIR/.claude/active-session-log.tmp"
+  echo "src/old.py" > "$TEST_DIR/.claude/mycelium-session-activity.tmp"
+  echo "$TWO_DAYS" > "$TEST_DIR/.claude/mycelium-reminded.tmp"
+  STALE_FMT=$(date -r "$TWO_DAYS" "+%Y%m%d%H%M.%S" 2>/dev/null || true)
+  if [ -n "$STALE_FMT" ]; then
+    touch -t "$STALE_FMT" "$TEST_DIR/.claude/mycelium-session-activity.tmp"
+    touch -t "$STALE_FMT" "$TEST_DIR/.claude/mycelium-reminded.tmp"
+  fi
+
+  run_health_hook
+
+  NEW_TS=$(cat "$TEST_DIR/.claude/session-start-ts.tmp" 2>/dev/null || echo 0)
+  AGE=$(( $(date +%s) - NEW_TS ))
+  # Note: activity / reminded should be PRESERVED on disk by our cleanup
+  # (they get cleaned by the dedicated >1h staleness cleanup further down).
+  if [ "$AGE" -lt 60 ]; then
+    pass "Stale activity present → cleanup still proceeds (ts age=${AGE}s)"
+  else
+    fail "Cleanup should fire when all signals are stale" "ts age=${AGE}s"
   fi
   cleanup_test_env
 }
