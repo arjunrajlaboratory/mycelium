@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Migrator no longer creates duplicate hook entries** when the same script is already registered at a different path (e.g. marketplace install vs. dev-repo checkout). `install_claude_hooks` in `init_repo.py` now matches existing hooks by script *basename* (`mycelium-health.sh`, etc.), not full command path. A new pre-pass also consolidates pre-existing duplicates, preferring the marketplace path. Run the migrator on a previously-migrated repo to clean up. New `_consolidate_duplicate_hooks` helper + 6 unit tests covering both prevention and cleanup.
+- **Migrator no longer creates duplicate hook entries** when the same script is already registered at a different path (e.g. marketplace install vs. dev-repo checkout). `install_claude_hooks` in `init_repo.py` now matches existing hooks by script *basename* (`mycelium-health.sh`, etc.), not full command path. A new pre-pass also consolidates pre-existing duplicates, preferring the marketplace path. The pre-pass also detects entries whose command path no longer exists on disk (stale install dirs) and replaces them with a fresh path — but only when a known-good replacement is available, so transient filesystem hiccups don't make a bad situation worse. Run the migrator on a previously-migrated repo to clean up. New `_consolidate_duplicate_hooks` helper + 10 unit tests.
 
 ### Added
 

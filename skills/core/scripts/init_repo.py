@@ -357,24 +357,36 @@ MYCELIUM_HOOK_BASENAMES = {
 }
 
 
-def _consolidate_duplicate_hooks(hooks: dict) -> tuple[int, dict[str, str]]:
-    """Remove duplicate hook entries that point at the same script via different paths.
+def _consolidate_duplicate_hooks(
+    hooks: dict,
+    valid_replacement_for: dict[str, str] | None = None,
+) -> tuple[int, dict[str, str]]:
+    """Remove duplicate or stale mycelium-hook entries.
 
-    For each mycelium hook basename, if multiple entries exist (e.g. one
-    pointing at the marketplace install and one at a dev-repo checkout),
-    keep one and drop the others. Preference order:
+    For each mycelium hook basename, group existing entries:
+    - Entries whose command path no longer exists on disk are "stale"
+    - Entries whose path exists are "live"
 
-    1. Any path containing `/marketplaces/` (the production install)
-    2. The longest existing path (heuristic: most specific)
+    If a valid replacement path is supplied (in `valid_replacement_for`)
+    for a basename, stale entries for that basename are dropped — the
+    install pass will then register the fresh path. This handles repos
+    whose old install directory was moved or deleted.
 
-    Mutates `hooks` in place. Returns `(removed_count, kept_by_basename)`
-    so the caller can report what happened and reuse the kept paths when
-    deciding whether to install missing hooks.
+    Without a valid replacement (e.g. the script can't locate a hooks
+    dir at all, or the hook isn't shipped), stale entries are preserved
+    rather than risk making a bad situation worse during transient
+    filesystem hiccups (network drives, etc.).
+
+    Among live entries, pick canonical: prefer `/marketplaces/`, otherwise
+    longest path. Drop the rest.
+
+    Mutates `hooks` in place. Returns `(removed_count, kept_by_basename)`.
     """
+    valid_replacement_for = valid_replacement_for or {}
     removed = 0
     kept_by_basename: dict[str, str] = {}
 
-    for event_kind, entries in hooks.items():
+    for entries in hooks.values():
         for entry in entries:
             basename_to_cmds: dict[str, list[str]] = {}
             for h in entry.get("hooks", []):
@@ -383,24 +395,42 @@ def _consolidate_duplicate_hooks(hooks: dict) -> tuple[int, dict[str, str]]:
                 if bn in MYCELIUM_HOOK_BASENAMES:
                     basename_to_cmds.setdefault(bn, []).append(cmd)
 
-            # Pick canonical for each duplicated basename
+            # Pick canonical for each basename
             canonical: dict[str, str] = {}
+            droppable_stale: set[str] = set()
             for bn, cmds in basename_to_cmds.items():
-                # Prefer marketplace path; otherwise longest path; ties broken
-                # by sort order for determinism
-                marketplace = [c for c in cmds if "/marketplaces/" in c]
-                if marketplace:
-                    canonical[bn] = sorted(marketplace)[0]
-                else:
-                    canonical[bn] = sorted(cmds, key=lambda c: (-len(c), c))[0]
-                kept_by_basename[bn] = canonical[bn]
+                live = [c for c in cmds if Path(c).exists()]
+                stale = [c for c in cmds if not Path(c).exists()]
 
-            # Drop non-canonical entries
+                if live:
+                    marketplace = [c for c in live if "/marketplaces/" in c]
+                    if marketplace:
+                        canonical[bn] = sorted(marketplace)[0]
+                    else:
+                        canonical[bn] = sorted(live, key=lambda c: (-len(c), c))[0]
+                    kept_by_basename[bn] = canonical[bn]
+                    # All stale paths for this basename are droppable when at
+                    # least one live entry exists
+                    droppable_stale.update(stale)
+                elif bn in valid_replacement_for:
+                    # No live entries, but we have a known-good replacement.
+                    # Drop ALL stale entries; install pass will add the fresh one.
+                    droppable_stale.update(stale)
+                else:
+                    # No live entries and no replacement available — keep
+                    # everything to avoid making things worse on transient
+                    # filesystem issues. canonical stays unset, no drops.
+                    pass
+
+            # Apply: drop non-canonical entries (duplicates) and droppable stale
             new_hook_list = []
             for h in entry.get("hooks", []):
                 cmd = h.get("command", "")
                 bn = Path(cmd).name
                 if bn in canonical and cmd != canonical[bn]:
+                    removed += 1
+                    continue
+                if cmd in droppable_stale and bn not in canonical:
                     removed += 1
                     continue
                 new_hook_list.append(h)
@@ -442,10 +472,20 @@ def install_claude_hooks(target_dir: Path):
 
     hooks = settings.setdefault("hooks", {})
 
-    # --- Pass 1: consolidate duplicates ---
-    removed, kept = _consolidate_duplicate_hooks(hooks)
+    # --- Pass 1: consolidate duplicates and drop stale entries ---
+    # Build the replacement map: basename → known-good path on disk.
+    # The consolidation pass uses this to determine when it's safe to drop
+    # entries whose path no longer exists.
+    valid_replacement_for = {
+        bn: str(hooks_dir / bn)
+        for bn in MYCELIUM_HOOK_BASENAMES
+        if (hooks_dir / bn).exists()
+    }
+    removed, kept = _consolidate_duplicate_hooks(
+        hooks, valid_replacement_for=valid_replacement_for
+    )
     if removed > 0:
-        print(f"  Consolidated: removed {removed} duplicate hook entr"
+        print(f"  Consolidated: removed {removed} duplicate or stale hook entr"
               f"{'y' if removed == 1 else 'ies'}")
 
     # --- Pass 2: install missing hooks ---
