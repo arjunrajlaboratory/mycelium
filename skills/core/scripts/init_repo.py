@@ -350,11 +350,12 @@ def install_claude_hooks(target_dir: Path):
 
     hooks = settings.setdefault("hooks", {})
 
-    # Define the four mycelium hooks with absolute paths
+    # Define the five mycelium hooks with absolute paths
     health_hook = str(hooks_dir / "mycelium-health.sh")
     post_action_hook = str(hooks_dir / "mycelium-post-action.sh")
     stop_hook = str(hooks_dir / "mycelium-stop-check.sh")
     activity_tracker_hook = str(hooks_dir / "mycelium-activity-tracker.sh")
+    read_tracker_hook = str(hooks_dir / "mycelium-read-tracker.sh")
 
     def _hook_entry(cmd: str) -> dict:
         return {"type": "command", "command": cmd}
@@ -400,6 +401,17 @@ def install_claude_hooks(target_dir: Path):
             post_tool.append(edit_write_entry)
         edit_write_entry["hooks"].append(_hook_entry(activity_tracker_hook))
         print("  Registered: PostToolUse (Edit|Write) → mycelium-activity-tracker.sh")
+
+    # --- PostToolUse: mycelium-read-tracker.sh (matcher: Read) ---
+    # Logs each .living/ file read to .claude/mycelium-read-access.log so we
+    # can measure access rates over time. Silent — no agent-facing context.
+    if not _has_hook(post_tool, read_tracker_hook):
+        read_entry = next((e for e in post_tool if e.get("matcher") == "Read"), None)
+        if read_entry is None:
+            read_entry = {"matcher": "Read", "hooks": []}
+            post_tool.append(read_entry)
+        read_entry["hooks"].append(_hook_entry(read_tracker_hook))
+        print("  Registered: PostToolUse (Read) → mycelium-read-tracker.sh")
 
     # --- Stop: mycelium-stop-check.sh ---
     stop = hooks.setdefault("Stop", [])
