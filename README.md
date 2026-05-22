@@ -25,10 +25,10 @@ Mycelium is named after the underground fungal networks that connect trees in a 
 ## Mycelium in practice
 
 <p align="center">
-  <img src="docs/figures/mycelium-summary-figure.png" alt="Mycelium summary figure" width="900"/>
+  <img src="docs/figures/panel-a-workflow.png" alt="Mycelium workflow" width="900"/>
 </p>
 
-<em>Panel A: workflow — research output is ingested, crystallized into structured learnings/decisions/findings, and re-surfaced to inform downstream work via the mycelial network. Panel B: real measurement from a 14-day deployment showing cumulative pull-better deliveries accumulating; the render-gate fix on 2026-05-07 shipped a meaningful coverage improvement. Panel C: a 12-learning observational audit found that 4 of 4 ambient-awareness learnings recurred when opportunities arose, while 0 of 2 shipped as structural mitigations did. The mitigation_type field (PR #35) forces this distinction at crystallize time.</em>
+<em>Mycelium ingests research output, crystallizes it into structured learnings, decisions, and findings, and re-surfaces it to inform downstream work via the mycelial network. Knowledge that would otherwise evaporate between sessions compounds across them.</em>
 
 ## Quickstart
 
