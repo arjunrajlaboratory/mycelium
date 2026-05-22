@@ -49,6 +49,7 @@ These checks verify the prose matches the artefacts. Phase 6 (blind numerical re
 
 - [ ] **Git commit** is recorded
 - [ ] **Script paths** for the analysis are listed with one-line descriptions
+- [ ] **Every script** that writes into `outputs/` (per the manifest's `computed_at` pointers and the analysis-script directory) appears in the Provenance list. *Failure mode: post-redesign drafts dropped diagnostic scripts (`run_em_tree_pairwise_autopsy.R`, etc.) because they were demoted into supplement narrative, leaving Provenance incomplete.*
 - [ ] **Analyst name** and **analysis date range** present
 - [ ] **Software environment** reference (`ENVIRONMENTS_INSTALLATIONS.md`) cited
 - [ ] **Manifest path** and **compile-log path** are recorded so a future reader can audit how the report was built
@@ -66,14 +67,15 @@ These checks verify the prose works for a skim reader and a careful reader simul
 - [ ] **Abstract** has no undefined acronyms and no citations and no figure references
 - [ ] **Problem statement** is understandable by a non-specialist
 - [ ] **Definitions** section covers every symbol and technical term used in the report
+- [ ] **Every subsection title under Results** states a finding, not a topic. *"Evidence-first cell calling" is a topic; "Evidence-first calling trades recall for precision in a transparent way" is a finding.* Methods, Provenance, and References subsection titles may be topics.
 
 ### Acronym discipline
 
-- [ ] **No acronym** in the abstract without spelling out the underlying concept
-- [ ] **No acronym** in any section title
-- [ ] **No acronym** in any figure caption
-- [ ] **Acronym budget per page** ≤ 4 (heuristic — judgment is allowed when a methods section legitimately uses a defined acronym dozens of times)
-- [ ] **First use per section** gives the plain-English gloss even when the acronym is defined elsewhere
+- [ ] **No acronym** in the abstract without spelling out the underlying concept (regardless of audience tier)
+- [ ] **No acronym** in any section title (regardless of audience tier)
+- [ ] **No acronym** in any figure caption (regardless of audience tier)
+- [ ] **Acronym budget per page** matches the Phase-0 audience tier: Tier A = 2; Tier B (default) = 4; Tier C = 6
+- [ ] **First use per section** gives the plain-English gloss at the strictness level the audience tier requires (Tier A: every term; Tier B: non-trivial terms; Tier C: coined / overloaded terms only)
 
 ### Plain-English with intuitive-before-technical
 
@@ -86,6 +88,12 @@ These checks verify the prose works for a skim reader and a careful reader simul
 - [ ] **Every new aggregation analysis type** in the draft has one worked example with raw inputs traced to the aggregate. The example is a small inline figure or sparkline-style mini-table where possible (Tufte sparklines are a strong reference shape).
 - [ ] **Failure-mode worked examples** (cases where the analysis breaks) live in the supplement / appendix.
 - [ ] **No aggregate claim** rests on a single example without hedging.
+
+### Worked-example provenance
+
+- [ ] **Every worked-example table** in the draft has a matching `manifest.worked_examples[*]` entry with a `subject_id` (concrete cell / row / capsule) and row-level `provenance`. *Failure mode: a table that looks plausible but whose values were invented during drafting because the model wanted a concrete example.*
+- [ ] **Every row** in each worked-example table matches the manifest's `rows[*]` for the same `subject_id` — same `snp_id` / `role`, same `N`, same `Y`, same `alt_fraction`, same `covered` / `supports_target` flags.
+- [ ] **The aggregate** rendered below the rows (typically a fraction and a call) matches `manifest.worked_examples[*].aggregate`.
 
 ### Denominator discipline
 
@@ -110,6 +118,13 @@ These checks verify the prose works for a skim reader and a careful reader simul
 
 - [ ] **Report shape** matches the Phase-0 choice. An "overview" draft with a 12-page methods section is not an overview.
 - [ ] **Main vs. supplement** designation from Phase 0.75 is honoured.
+- [ ] **Main-text page count** (pages before `\appendix`) is within the shape budget: overview ≤ 6 pages; overview+supplement ≤ 14 pages; comprehensive ≥ 5 pages. Overruns get explicit acknowledgement in `.compile-log.md` under `shape_budget`.
+
+### Results structure
+
+- [ ] **Results section style** matches the Phase-0 choice (`policies.results_structure` in the manifest):
+   - **Narrative** (DEFAULT): each result is prose with a self-explanatory subsection title that states the finding (caught by the Subsection title quality item above).
+   - **Structured**: each result carries explicit `\paragraph{Question}` / `\paragraph{Findings}` / `\paragraph{Interpretation}` headers consistently across the section.
 
 ### Conclusions discipline
 

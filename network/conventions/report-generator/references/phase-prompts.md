@@ -34,7 +34,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 **Inputs to load:**
 
 - `analysis/[name]/reports/[name]-report.tex` (the draft itself)
-- `analysis/[name]/reports/.manifest.json` (terms section only — `manifest.terms[*]`)
+- `analysis/[name]/reports/.manifest.json` (`terms[*]` and `policies` — nothing else)
 
 **Do NOT load:**
 
@@ -45,23 +45,24 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 
 **Prompt:**
 
-> You are reading a scientific report draft with **zero project context**. You do not know what the analysis is about, who the collaborators are, or what was decided in prior sessions. You will be given the draft `.tex` file and a list of coined terms from `.manifest.json`. Your job is to flag every place a non-specialist reader would stumble.
+> You are reading a scientific report draft with **zero project context**. You do not know what the analysis is about, who the collaborators are, or what was decided in prior sessions. You will be given the draft `.tex` file, a list of coined terms from `.manifest.json:terms[*]`, and the manifest's `policies` block (acronym budget, strictness, intuition lead-in form). The `policies` block is the only configuration you act on; it is the manifest's compact summary of the Phase-0 audience tier.
 >
 > For each check below, return a finding with file, line, the quoted sentence, the issue, and a one-line fix.
 >
-> **Acronyms.**
-> - Find every acronym in the draft. For each one, locate its first use *per section* (not per document) and verify a plain-English gloss is present in the same paragraph. The Abstract, Section titles, and Figure captions count as their own sections — an acronym defined in §2 does not count as defined in the abstract.
-> - Count acronyms per page. If any page exceeds 4 distinct unexpanded acronyms, flag the page (heuristic — judgment is allowed when a methods section legitimately uses a defined acronym many times).
-> - Any acronym in a section title or figure caption is a finding regardless of other definitions in the document.
+> **Acronyms.** Use `policies.acronym_budget_per_page` and `policies.acronym_strictness`:
+> - Find every acronym in the draft. For each one, locate its first use *per section* and verify a plain-English gloss is present in the same paragraph. The Abstract, Section titles, and Figure captions count as their own sections — an acronym defined in §2 does not count as defined in the abstract.
+> - At `acronym_strictness: strict`: gloss every acronym on first use in every section, including standard terms (ARI, PC1, BIC). At `moderate` (default): gloss non-trivial acronyms per section; well-known field-standard terms (RNA-seq, PCA) may rely on the audience to know them. At `loose`: gloss only coined / overloaded acronyms; standard terms need no per-section regloss.
+> - Count acronyms per page. If any page exceeds `policies.acronym_budget_per_page` distinct unexpanded acronyms, flag the page (judgment is allowed when a methods section legitimately uses a defined acronym many times).
+> - Regardless of strictness: any acronym in a section title, the abstract, or a figure caption is a finding. These three surfaces always require spelled-out form.
 >
 > **Jargon-dense sentences.**
 > - Scan each sentence for "noun-phrase stacks" — sequences of ≥ 3 unexplained technical noun-phrases. Examples to recognise: "consensus-floor depth-2 predictive-closure with lambda=0.10 sticky top-25", "empirical-bg vs fixed-bg permutation".
 > - For each such sentence, check whether a plain-English description of the operation appears in the same paragraph. If not, flag it.
 >
-> **Intuitive-before-technical.**
+> **Intuitive-before-technical.** Use `policies.intuition_leadin_default_form`:
 > - For each term in `manifest.terms[*]` that has a `plain_english` field (i.e., the manifest declared it load-bearing), locate its first use in the draft. Check whether the plain-English explanation appears *before* the technical statement.
-> - The intuitive lead-in may be a sentence or a paragraph — judgment is allowed based on the complexity of the concept. Flag only when no intuitive lead-in exists at all (the draft jumps straight to the technical form for a load-bearing concept).
-> - Routine technical details (standard tests, well-known transforms) need no intuitive lead-in — do not flag those.
+> - At `intuition_leadin_default_form: paragraph` (Tier A audience): expect a full paragraph of intuition before the formal definition. At `sentence` (Tier B / default): a single intuitive sentence suffices. At `sentence-or-none` (Tier C): only novel or coined concepts need a lead-in.
+> - Routine technical details (standard tests, well-known transforms) need no intuitive lead-in regardless of tier — do not flag those.
 >
 > **Overloaded-name guard.**
 > - For each term in `manifest.terms[*]` that has an `overloaded_warning` field, locate its first use. Verify the warning is present and that it specifically names how this term differs from the standard literature term (missing factor of 2, not a p-value, etc.).
@@ -96,6 +97,12 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 > - Read only the title, the abstract, every section header, and every figure caption. Set the body aside.
 > - From those surfaces alone, write the one-paragraph summary you would take home. Then read the body. Does the body force you to retract or qualify any sentence in your summary?
 > - The most common failure mode: the abstract states a finding without the body's qualifications. A reader who reads only the abstract — common — takes home the unqualified claim. Flag any such case.
+>
+> **Subsection title quality.**
+> - For every subsection title under Results, decide whether the title states a *finding* (verb + outcome, e.g., "The root split cleanly separates dysplastic and non-dysplastic cells", "Recursive application stops rather than finds additional clone splits") or a *topic* (bare noun phrase, e.g., "Evidence-first cell calling", "Within-dysplasia branch selection").
+> - Topic-only titles are findings. They waste the skim surface. Suggest a finding-form replacement that the body already supports.
+> - Methods, Provenance, References, and supplement subsection titles are allowed to be topics.
+> - A title that *contains* a finding plus a colon and a topic ("Within-dysplasia branch selection: SNP concentration improves, but cell calling stays hard") is fine — the colon clause carries the finding.
 >
 > **Baseline present.**
 > - Does the body state what the headline finding is being compared against? Is the headline framing in terms of that baseline?
@@ -161,6 +168,20 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 >
 > *Figure freshness.*
 > - For every `\includegraphics{...}` in the draft, locate the file. Hash it. Compare against `manifest.figures[*].sha256`. If mismatch, flag as **stale figure** — the figure was regenerated mid-draft and the prose may reference the wrong version.
+>
+> *Worked-example value verification.*
+> - Identify every `\begin{table}` / `tabular` block in the draft that is a worked example. Heuristics: the surrounding caption or text uses the phrase "worked example", "trace", "single cell", or names a concrete identifier (`c_017`, `module_42`, etc.); the table columns include raw inputs (`N`, `Y`, `coverage`, `alt fraction`); the table is short (≤ ~10 rows) and is followed by an aggregate value derived from the rows.
+> - For each candidate worked-example table, extract the named `subject_id` from the caption or surrounding text. Look up `manifest.worked_examples[*]` for an entry with that `subject_id`.
+>   - **No matching entry**: flag as **unsourced worked example** (severity: major). The table values are not registered with provenance, which means they may be confabulated.
+>   - **Matching entry exists**: verify every row in the rendered table equals the corresponding row in `manifest.worked_examples[*].rows[*]` — same `snp_id` / `role`, same `N`, same `Y`, same `alt_fraction`, same `covered` and `supports_target` flags. Any mismatch is a **fabricated worked-example value** (severity: major).
+>   - Verify the rendered aggregate (typically a fraction-of-supported-SNPs and a call) equals `manifest.worked_examples[*].aggregate`. Mismatch is major.
+> - This check exists because worked-example tables pass the visual sniff test and the Phase-3 presence gate even when the row values are invented. The manifest is the only thing that distinguishes a real trace from a plausible-looking confabulation.
+>
+> *Provenance-section completeness.*
+> - Read the draft's Provenance section. Extract the list of cited script paths.
+> - Infer the analysis script directory from `manifest.numbers[*].computed_at` and `manifest.worked_examples[*].computed_at` (e.g., `scripts/`, `analysis/[name]/`, or wherever the manifest's `computed_at` pointers live). List the actual script files in that directory matching the patterns `run_*.{R,py}`, `evaluate_*.{R,py}`, `make_*.{R,py}`.
+> - Every script that writes into `outputs/` (heuristic: any script the manifest's `computed_at` fields cite, plus any sibling scripts in the same directory) should appear in the Provenance section with a one-line description. Pure diagnostic / development scripts (`*_test.R`, `*_dev.R`, `scratch_*.R`) can be omitted.
+> - Flag missing scripts as **provenance-incomplete** (severity: minor) with a suggested one-line description drawn from the script's first comment block or filename.
 >
 > *Cross-document drift.*
 > - For each unique number in the draft, `grep` for it in:

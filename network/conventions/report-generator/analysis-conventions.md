@@ -40,14 +40,18 @@ Required questions:
 1. **Headline question.** What is the report answering, in one sentence? ("Does our method beat the baseline at recovering known clones?")
 2. **Baseline of comparison.** What are the reported numbers being compared against? ("vs. Laura's production pipeline", "vs. random assignment", "vs. published reference X").
 3. **Primary metric.** Which single metric should the abstract lead with? ("exact accuracy", not "weighted F1 because it was in the CSV"). If there's tension between what's plentiful in outputs and what's decision-relevant, ask explicitly.
-4. **Audience.** Who reads this? ("Lab PI plus one external collaborator", "co-authors only", "wet-lab partner with no statistics background"). Audience drives terminology load.
+4. **Audience.** Pick one tier. The choice drives the acronym budget per page, the depth of intuitive lead-ins, and how often plain-English glosses recur across sections.
+   - **Tier A — Lay or out-of-field reader.** Acronym budget 2 / page; full intuition paragraphs before every load-bearing term; gloss every term on first use *per section* (not just per document).
+   - **Tier B — Adjacent-field collaborator** (e.g., wet-lab partner for a stats-heavy report; PI for a methods-heavy report). Acronym budget 4 / page; sentence-length intuition lead-ins for load-bearing methodological choices; gloss most non-trivial terms on first use per section. **Default if the user names a collaborator type without a tier letter.**
+   - **Tier C — In-field PI / close collaborator.** Acronym budget 6 / page; intuition lead-ins only for novel or coined concepts; standard terms (ARI, PC1, BIC, RNA-seq) need no per-section regloss.
 5. **Standalone vs. addendum.** Default **standalone**: the draft must be readable without prior reports as a dependency. If the user opts in to **addendum**, ask which documents are the referenced base, and name them upfront in the introduction. Standalone is the default because every report that depended on "see §6.6.E" trips a future reader who didn't read §6.6.E.
 6. **Report shape.** Default **overview + supplement**. Options:
    - **Overview** — main text only, 2–5 pages, no supplement. Use when the audience needs the headline and methods sketch but not the exhaustive table.
    - **Comprehensive** — single document with full methods, tables, and appendices inline. Use when the report *is* the artifact and no separate supplement is expected.
    - **Overview + supplement / appendix** (DEFAULT) — main text is the overview a collaborator could read in 10 minutes; supplement carries methods detail, worked examples for failure modes, and exhaustive tables.
+7. **Results section style.** Default **narrative**: each result is prose, with a self-explanatory subsection title that states the finding. The alternative is **structured**: each result carries explicit `\paragraph{Question}` / `\paragraph{Findings}` / `\paragraph{Interpretation}` headers, paying for predictable skimmability with visual heaviness. Narrative is the default because it reads more like the final paper; structured pays off for long results sections (≥ 5 sub-results) or when readers want to land on a specific question quickly.
 
-The shape choice drives the template selection in Phase 1 and the main-vs-supplement designation in Phase 0.75. It is not retrofitted after drafting.
+The shape and style choices drive the template selection in Phase 1 and the main-vs-supplement designation in Phase 0.75. They are not retrofitted after drafting.
 
 Persist the answers as a small YAML artifact at `analysis/[name]/reports/.planning-brief.yaml`. All later phases read from it. The file is not shown to the user during normal flow; it is reproducible scaffolding.
 
@@ -124,6 +128,14 @@ Manifest schema (write to `analysis/[name]/reports/.manifest.json`):
 
 ```json
 {
+  "policies": {
+    "audience_tier": "B",
+    "acronym_budget_per_page": 4,
+    "acronym_strictness": "moderate",
+    "results_structure": "narrative",
+    "intuition_leadin_default_form": "sentence",
+    "shape": "overview-supplement"
+  },
   "numbers": [
     {
       "id": "exact_accuracy_test",
@@ -151,19 +163,48 @@ Manifest schema (write to `analysis/[name]/reports/.manifest.json`):
       "sha256": "...",
       "caption_seed": "Volcano plot of differential expression between treatment and control."
     }
+  ],
+  "worked_examples": [
+    {
+      "id": "snp_score_c017",
+      "analysis_type": "sparse_axis_module_call",
+      "subject_id": "c_017",
+      "subject_kind": "cell",
+      "provenance": "outputs/tables/module_call_per_cell.csv:row=c_017",
+      "computed_at": "scripts/06_module_call.R:L88",
+      "rows": [
+        {"snp_id": "X17.76565019G>A", "role": "seed", "N": 5, "Y": 3, "alt_fraction": 0.60, "covered": true, "supports_target": true},
+        {"snp_id": "X2.197498780A>G",  "role": "partner", "N": 2, "Y": 1, "alt_fraction": 0.50, "covered": true, "supports_target": true},
+        {"snp_id": "X1.109675067C>T",  "role": "partner", "N": 0, "Y": 0, "alt_fraction": null, "covered": false, "supports_target": null}
+      ],
+      "aggregate": {"target_support_fraction": 0.75, "call": "high-support"},
+      "appears_in_sections": ["results.headline"],
+      "_note": "Every value in the row-level table must trace to scripts/06_module_call.R when executed against the row of the provenance CSV."
+    }
   ]
 }
 ```
 
-Every number that will appear in prose has an entry. Every coined term has a plain-English rendering. Every figure has a hash so Phase 7 can detect stale assets.
+Every number that will appear in prose has an entry. Every coined term has a plain-English rendering. Every figure has a hash so Phase 6 can detect stale assets. Every worked example carries row-level provenance so Phase 6 can verify the example wasn't confabulated.
+
+The `policies` block is derived from the Phase-0 planning brief and is the only project-context field the sub-agent reviewers (Phases 4–6) are allowed to read — they read the manifest, not the brief itself. The mapping is:
+
+| Phase-0 audience tier | acronym_budget_per_page | acronym_strictness | intuition_leadin_default_form |
+|---|---:|---|---|
+| A (lay / out-of-field) | 2 | strict — gloss every term per section | paragraph |
+| B (adjacent-field collaborator) — DEFAULT | 4 | moderate — gloss non-trivial terms per section | sentence |
+| C (in-field PI / close collaborator) | 6 | loose — gloss only coined terms, no per-section regloss for standard ones | sentence-or-none |
+
+`results_structure` is one of `narrative` (default) or `structured` (with explicit Question / Findings / Interpretation paragraph headers in each result). `shape` mirrors Phase 0's report-shape choice.
 
 Constraints the manifest must satisfy before Phase 2 may proceed:
 
 - Every `value` has a `provenance` pointing to a file path with row/col or line number that a reader could check.
 - Every `label_canonical` matches the metric definition in the source file. If `support-weighted F1` and `exact accuracy` are both in the CSV, both have separate entries with distinct labels.
-- Every coined term has either a plain-English rendering or an explicit note that no rendering is needed (e.g., for standard terms like "ARI"). If a term shadows an established literature term, the `overloaded_warning` field is mandatory.
+- Every coined term has either a plain-English rendering or an explicit note that no rendering is needed. If a term shadows an established literature term, the `overloaded_warning` field is mandatory.
+- Every worked example has a `subject_id` (the concrete row, cell, or capsule the example traces) and `provenance` (the file/row that holds the raw inputs). The `rows` table values must match the provenance file when executed; Phase 6 verifies this.
 
-The draft step is not allowed to introduce a number or term that is not in the manifest. If a draft pass discovers a new number it needs, the flow returns to Phase 1, adds the entry, and re-enters Phase 2.
+The draft step is not allowed to introduce a number, term, or worked-example value that is not in the manifest. If a draft pass discovers a new artefact it needs, the flow returns to Phase 1, adds the entry, and re-enters Phase 2.
 
 ---
 
@@ -179,14 +220,17 @@ Drafting order:
 While drafting:
 
 - Every cross-document reference must either inline the relevant fact (≤ 1 sentence) or be deleted. The Phase-0 standalone default forbids "as discussed in the previous report" leaning. If Phase 0 picked **addendum**, the named base documents are introduced upfront and "see §X" references to them are acceptable in body text, but the abstract still stands alone.
-- Every concept that the planning brief's audience would not immediately recognise gets a plain-English rendering on first use *per section* — even when defined earlier. The acronym budget is 4 per page (any section, not just abstract) and 0 in section titles, abstract, and figure captions.
-- Lead with the intuitive explanation *before* the technical statement for any load-bearing methodological choice, non-obvious metric, or surprising result. Length is judged by complexity: a complex analytic method may warrant a full intuition paragraph before the formal definition; a simpler concept needs a single sentence; routine technical details (standard tests, well-known transforms) need no intuition lead-in.
+- Apply the manifest's `policies` block. `acronym_budget_per_page` and `acronym_strictness` set how aggressively to spell-out and re-gloss. `intuition_leadin_default_form` sets whether load-bearing concepts get a paragraph or a sentence of intuition before the formal definition. `results_structure` decides whether Results sections use prose subsection titles (narrative) or `\paragraph{Question}` / `\paragraph{Findings}` / `\paragraph{Interpretation}` headers (structured). These are configuration, not exhortation — the policy is what gets enforced by the sub-agent reviewers, so the draft should follow it on first pass rather than wait for findings.
+- In every shape, 0 acronyms in section titles, the abstract, and figure captions, regardless of audience tier. Tier C only loosens what happens *inside* sections.
+- Every subsection title under Results states a finding, not a topic. "Evidence-first cell calling" is a topic; "Evidence-first calling trades recall for precision in a transparent way" is a finding. Phase 5 enforces this and it's cheap to get right the first time.
 
 ---
 
 ## Phase 3 — Worked-example gate (INTERNAL)
 
 For each *new aggregation analysis type* introduced in the draft, the draft must contain one fully-traced concrete example: pick a single SNP / cell / capsule / row and show its raw inputs, the per-row metric calculation, and how it contributes to the aggregate. The example does the explanatory work once — subsequent claims using the same analysis type don't need their own example.
+
+**Crucial:** the values inside the worked-example table are sourced from `manifest.worked_examples[*].rows[*]`, not invented to look plausible. Phase 1 already required a `subject_id` and a row-level `provenance` pointer for every worked example; Phase 3 is the gate that confirms the table in the draft cites the same `subject_id` and reproduces the same `rows` values. If the analysis hasn't produced the per-row tracer file yet, run the relevant script (or extend it) to write one before Phase 2 — confabulated worked examples pass the visual sniff test but fail the Phase-6 cross-check, and they teach the reader the wrong calculation if no one ever notices.
 
 Format preference: small inline figures and sparkline-style mini-tables over big monolithic figures. A 5-row inline table with raw N, Y, score, rank, contribution is often clearer than a full plot. Tufte sparklines are a strong reference shape.
 
@@ -222,6 +266,7 @@ Dispatch a sub-agent that reads only the `.tex` files and the `references/sectio
 The sub-agent answers:
 
 - **Standalone test.** Reading only the title + abstract + section headers + figure captions, does the story require body-prose recovery? If the abstract says "held-aside validation markers" but the body explains they are not held-aside, the skim-reader takes home the unqualified claim.
+- **Subsection title quality.** For every subsection title under Results, does the title state a *finding* (verb + outcome) or a *topic* (bare noun phrase)? Topics get flagged. *"Evidence-first cell calling"* is a topic; *"Evidence-first calling trades recall for precision in a transparent way"* is a finding. Methods, Provenance, and References subsection titles are allowed to be topics.
 - **Baseline present.** Does the draft state, in the body, what it is being compared against? Is the headline finding framed in terms of that baseline?
 - **Changelog framing.** Does any prose read as "what we fixed" rather than "what we found"? Drafts that recap the path the author walked tend to read as changelogs. Fix: rewrite as though the analysis was done the right way from the start.
 - **Cross-document references.** Does the draft lean on "as discussed in the previous report" / "we previously showed X" without inlining? If standalone, every such reference is a finding. If addendum, the referenced documents must be named upfront.
@@ -246,6 +291,8 @@ Output is structured as **provenance** vs **style** (mirroring the synthesis spl
 - For each numeric token in the prose: is it in the manifest? Does its surrounding label match `label_canonical` (and not any `label_aliases_forbidden`)? If `0.482` appears in prose adjacent to the word "accuracy", but the manifest says it is `support-weighted F1`, that is a label-vs-value mismatch.
 - Are there numbers in the prose that have no manifest entry (unsourced numbers)? These often turn out to be from a one-off check during the conversation, not a stored test.
 - For every figure: does the file at `figures[*].path` still have the manifest's `sha256`? If a figure was regenerated mid-draft, the file may be newer than the prose claims.
+- **Worked-example value verification.** For each table in the draft that the Phase-3 gate marked as a worked example, locate the matching `manifest.worked_examples[*]` entry by `subject_id` (mentioned in the caption or surrounding text). Verify that every row in the table matches the manifest's `rows[*]` — same `snp_id`/`role`, same `N` and `Y`, same `alt_fraction`, same `covered`/`supports_target`. Worked examples with no manifest entry are *unsourced worked examples* and get flagged as major; mismatching rows are *fabricated worked-example values* and get flagged as major. This catches confabulated plausible-looking values that pass the visual sniff test.
+- **Provenance section completeness.** Read the Provenance section's script list. Run `ls scripts/` (or whichever directory the analysis uses, inferable from manifest provenance pointers). Every `run_*.R` / `run_*.py` / `evaluate_*.R` / `make_figures.R` etc. in the analysis directory should appear in the Provenance list with a one-line description. Scripts that are clearly diagnostic-only (`*_test.R`, `*_dev.R`) can be omitted; the heuristic is that anything which writes into `outputs/` belongs in Provenance. Flag missing scripts as minor provenance findings.
 
 **Cross-document drift findings** (also provenance):
 
@@ -270,9 +317,15 @@ After the sub-agents pass:
 
 1. Recompile the report with two `pdflatex` passes (plus `bibtex` if citations are used).
 2. If any Phase-6 finding triggered a code rerun (e.g., a figure had to be regenerated, a number was wrong because the script was outdated), re-run the relevant script and re-verify the manifest before recompiling.
-3. Record in `analysis/[name]/reports/.compile-log.md`:
+3. Measure the **main-text page count** (pages before `\appendix`) from the compiled PDF and compare to the shape budget:
+   - **Overview**: target 2–5 pages. Flag if main text > 6 pages.
+   - **Overview + supplement** (DEFAULT): target main text ≤ a 10-minute read ≈ ≤ 12 pages. Flag if main text > 14 pages.
+   - **Comprehensive**: no upper bound. Flag if main text < 5 pages (the shape was probably wrong; comprehensive reports rarely fit in fewer pages).
+   A flag does not block compilation, but it appears in the compile log as `shape_budget: flagged` with a one-line reason. The drafter is expected to either prune to fit or, with explicit acknowledgement in the log, accept the overrun.
+4. Record in `analysis/[name]/reports/.compile-log.md`:
    - PDF SHA256
    - Compile timestamp
+   - Main-text page count and shape-budget status (`within` / `flagged` with reason)
    - Sub-agent reviewer verdicts (each: PASS / loop count to convergence)
    - Whether code was re-run since the last manifest snapshot
 
@@ -387,9 +440,9 @@ These come up frequently in computational analysis reports:
 
 ## Cross-references inside this convention pack
 
-- `references/section-guide.md` — per-section craft (the writing guidance the draft step consumes).
+- `references/section-guide.md` — per-section craft (the writing guidance the draft step consumes); includes the results-structure (narrative vs structured) decision and the audience-tier acronym ladder.
 - `references/phase-prompts.md` — sub-agent prompts for Phases 4, 5, 6.
-- `references/manifest-example.json` — fully-populated Phase-1 manifest example, to crib from when starting a new report.
+- `references/manifest-example.json` — fully-populated Phase-1 manifest example with `policies`, `worked_examples`, `numbers`, `terms`, and `figures` sections, to crib from when starting a new report.
 - `qc-checklist.md` — provenance / style checklist used in Phase 7 and surfaced to the user via `.compile-log.md`.
 - `assets/report-template-overview.tex` — overview shape.
 - `assets/report-template-comprehensive.tex` — comprehensive shape.

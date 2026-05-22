@@ -1,6 +1,16 @@
 {
-  "_description": "Worked example of a Phase-1 source-of-truth manifest. Drawn from a small SNP-tree-flavoured differential-expression-with-clone-recovery analysis. Every numeric token that appears in the corresponding report draft has an entry here; every coined term that the report uses has a plain-English rendering. Phase 6 (blind numerical re-verify) cross-checks the draft against this file.",
-  "_schema_version": "0.2.0",
+  "_description": "Worked example of a Phase-1 source-of-truth manifest. Drawn from a small SNP-tree-flavoured differential-expression-with-clone-recovery analysis. Every numeric token that appears in the corresponding report draft has an entry here; every coined term that the report uses has a plain-English rendering; every worked-example table cell has row-level provenance. Phase 6 (blind numerical re-verify) cross-checks the draft against this file.",
+  "_schema_version": "0.3.0",
+
+  "policies": {
+    "audience_tier": "B",
+    "audience_description": "Lab PI plus one external wet-lab collaborator with no statistical-genetics background",
+    "acronym_budget_per_page": 4,
+    "acronym_strictness": "moderate",
+    "intuition_leadin_default_form": "sentence",
+    "results_structure": "narrative",
+    "shape": "overview-supplement"
+  },
 
   "report_metadata": {
     "title": "Clone-aware differential expression in A191 Barrett's esophagus scRNA-seq",
@@ -205,6 +215,54 @@
       "sha256": "e7f6a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1",
       "caption_seed": "Number of significant genes vs. adjusted p-value threshold across the range 0.01-0.10. Dashed red line indicates the chosen threshold (0.05); the result is stable across 0.03-0.07.",
       "appears_in_sections": ["supplement.S4"]
+    }
+  ],
+
+  "worked_examples": [
+    {
+      "id": "snp_score_c017",
+      "analysis_type": "sparse_axis_module_call",
+      "subject_id": "c_017",
+      "subject_kind": "cell",
+      "provenance": "outputs/tables/module_call_per_cell.csv:row=c_017",
+      "computed_at": "scripts/06_module_call.R:L88",
+      "appears_in_sections": ["results.headline"],
+      "rows": [
+        {"snp_id": "X17.76565019G>A",  "role": "seed",    "N": 5, "Y": 3, "alt_fraction": 0.60, "covered": true,  "supports_target": true},
+        {"snp_id": "X2.197498780A>G",  "role": "partner", "N": 2, "Y": 1, "alt_fraction": 0.50, "covered": true,  "supports_target": true},
+        {"snp_id": "X3.69105192C>G",   "role": "partner", "N": 3, "Y": 2, "alt_fraction": 0.67, "covered": true,  "supports_target": true},
+        {"snp_id": "X2.113713484T>C",  "role": "partner", "N": 1, "Y": 0, "alt_fraction": 0.00, "covered": true,  "supports_target": false},
+        {"snp_id": "X1.109675067C>T",  "role": "partner", "N": 0, "Y": 0, "alt_fraction": null, "covered": false, "supports_target": null}
+      ],
+      "aggregate": {
+        "target_support_fraction": 0.75,
+        "denominator": "4 covered SNPs of 5 module members",
+        "call": "high-support",
+        "threshold_rule": "target-support fraction >= 0.60 -> high-support"
+      },
+      "_note": "Cell c_017 is the canonical worked example for the sparse-axis module call. Every row above corresponds to one row of outputs/tables/module_call_per_cell.csv when filtered to snp_id IN (the five module members). If the report's worked-example table uses different N/Y values, that is a fabricated worked example and Phase 6 must flag it."
+    },
+    {
+      "id": "failure_example_snp_bic_incoherent",
+      "analysis_type": "snp_tree_pairwise_coherence",
+      "subject_id": "X2.218386G>A",
+      "subject_kind": "snp",
+      "provenance": "outputs/tables/em_tree_pairwise_bic_summary.csv:row=X2.218386G>A",
+      "computed_at": "scripts/07_em_tree_pairwise_autopsy.R:L142",
+      "appears_in_sections": ["supplement.S3"],
+      "rows": [
+        {"partner_snp_id": "X17.76565019G>A", "best_coherent_model": "M2", "best_coherent_loglik": -184.2, "incoherent_M0_loglik": -113.6, "delta_loglik": 70.6, "incoherent": true},
+        {"partner_snp_id": "X2.197498780A>G", "best_coherent_model": "M3", "best_coherent_loglik": -201.4, "incoherent_M0_loglik": -159.8, "delta_loglik": 41.6, "incoherent": true},
+        {"partner_snp_id": "X3.69105192C>G",  "best_coherent_model": "M1", "best_coherent_loglik": -178.9, "incoherent_M0_loglik": -169.4, "delta_loglik": 9.5,  "incoherent": true}
+      ],
+      "aggregate": {
+        "incoherent_partner_count": 14,
+        "total_partners": 14,
+        "delta_loglik_min": 9.5,
+        "delta_loglik_max": 70.6,
+        "bic_threshold": 7.6
+      },
+      "_note": "Failure-mode worked example shown in the supplement (S3). The SNP at chromosome two position 218386 is BIC-incoherent against all 14 other panel SNPs, with delta-loglik values from 9.5 to 70.6 nats. This is the structural reason the SNP-tree caller reduces to a one-SNP classifier on this panel."
     }
   ]
 }

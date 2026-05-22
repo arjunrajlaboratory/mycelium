@@ -135,19 +135,36 @@ If parameters were chosen via sensitivity analysis, reference the appendix figur
 
 ## Results
 
-Each result should be a self-contained unit that a reader can understand independently.
+Each result should be a self-contained unit that a reader can understand independently. The skill supports two styles for Results sections; the Phase-0 planning brief picks one and `manifest.policies.results_structure` carries the choice forward.
 
-**The structure for each result**:
+### Narrative (DEFAULT)
 
-1. **Question**: What specific question is this result addressing? ("Does treatment X change the expression of inflammatory genes?")
+Each result is prose. The subsection title states the finding (it is checked by Phase 5 — see "Subsection title quality" below). The body covers the question, the competing-hypothesis discrimination, the findings, and the interpretation as a single readable flow rather than four bolded subheadings.
 
-2. **Discrimination**: What would you expect to see under competing hypotheses? This is the most underused and most valuable part. ("If treatment activates the inflammatory response, we'd expect to see upregulation of known inflammatory markers like IL6 and TNF, and enrichment of the NF-kB pathway. If treatment has no specific inflammatory effect, any differential expression should be distributed across pathways without enrichment.")
+A narrative result still owes the reader the same four things — question, discrimination, findings, interpretation — but in prose. The advantage is that the section reads more like a final paper or polished writeup; the disadvantage is that a skim reader can't land on "what was the question?" by visual search alone.
 
-3. **Findings**: The actual data — figures, tables, statistics. State the result plainly. ("247 genes were significantly upregulated (padj < 0.05, |log2FC| > 1), with the strongest enrichment in the NF-kB signaling pathway (padj = 2.3e-8, 23/87 pathway genes present).")
+Example shape (one paragraph or two, depending on density):
 
-4. **Interpretation**: What does this mean for the question? ("This is consistent with treatment activating an inflammatory response via NF-kB signaling.")
+> *"We asked whether [Q]. Under the alternative we'd expect [A]; under the null we'd expect [N]. The headline panel showed [finding with sourced numbers]. This is consistent with [interpretation]."*
 
-This structure is a guideline — some results are simple enough to collapse steps 2 and 4, and complex results might need sub-results. But the question-discrimination-finding-interpretation flow should be the default.
+### Structured (opt-in)
+
+Each result carries explicit paragraph headers in the LaTeX:
+
+```latex
+\paragraph{Question.} What specific question is this result addressing?
+\paragraph{Discrimination.} What would you expect under competing hypotheses?
+\paragraph{Findings.} The actual data — figures, tables, statistics.
+\paragraph{Interpretation.} What does this mean for the question?
+```
+
+Use the structured style when results pile up (≥ 5 sub-results in a long Results section), when readers want to skim to a specific question, or when the analysis is methodologically complex enough that the discrimination step is genuinely the load-bearing one.
+
+The structured style pays a visual-heaviness tax — every result is four paragraph breaks — that the narrative style does not. The skill defaults to narrative because most reports benefit more from readability than from skim-grid-ability; structured is a deliberate choice, not a fallback.
+
+### Subsection title quality (both styles)
+
+Regardless of which style is chosen, every Results subsection title should state a finding. "Evidence-first cell calling" is a topic; "Evidence-first calling trades recall for precision in a transparent way" is a finding. The Phase 5 sub-agent flags topic-only titles in Results (Methods, Provenance, and References titles are allowed to be topics).
 
 **Figures and tables**:
 - Every figure and table must be referenced in the text — if it's not discussed, it shouldn't be there
@@ -263,16 +280,23 @@ The rules below apply across sections. They are checked automatically by the Pha
 
 ### Acronym discipline
 
-The abstract, section titles, and figure captions never carry an undefined acronym. A "BCLRT" in the abstract is a finding — even when the term is defined in Methods later.
+The abstract, section titles, and figure captions never carry an undefined acronym, regardless of audience. A "BCLRT" in the abstract is a finding — even when the term is defined in Methods later.
 
-Rules:
+The per-page budget and per-section regloss strictness scale with the **Phase-0 audience tier**, which Phase 1 records in `manifest.policies.acronym_budget_per_page` and `manifest.policies.acronym_strictness`:
 
-- **Cap at 4 acronyms per page** (heuristic). A methods section that defines `BCLRT` once and uses it 40 times is fine; what triggers the flag is a sentence stacking three or four undefined acronyms.
-- **Spell out the underlying concept on first use *per section*** (not per document). Even when an acronym has been defined earlier, the next section that uses it gets a brief plain-English gloss. Sections are independent surfaces; a reader landing on §3 should not have to walk back to §2.1.
-- **No acronyms in section titles or figure captions.** Both of these are skim surfaces and a reader scanning the TOC or flipping through figures should not have to look terms up to decide whether to read further.
-- **No acronyms in the abstract** without spelling out the underlying concept on first mention. "We compared a per-cell logistic regression (the branch-coherency log-likelihood ratio test, BCLRT) to ..." is acceptable; "We compared BCLRT to ..." is not.
+| Tier | Acronym budget / page | First-use-per-section gloss | Example audiences |
+|---|---:|---|---|
+| **A** (lay / out-of-field) | 2 | every term, every section | grant reviewers, lay collaborators, journalists |
+| **B** (adjacent-field collaborator) — DEFAULT | 4 | non-trivial terms per section; field-standard terms (RNA-seq, PCA) may rely on the audience | wet-lab partner for a stats-heavy report; PI reading a methods-heavy report |
+| **C** (in-field PI / close collaborator) | 6 | only coined / overloaded terms; standard terms need no per-section regloss | direct co-authors, the analyst's PI, immediate lab group |
 
-The per-page budget is a flag for human review, not a hard constraint — it works better as a probe ("does this page feel heavy?") than as a count to enforce mechanically.
+Rules that hold at every tier:
+
+- **No acronyms in section titles, the abstract, or figure captions** — these are skim surfaces.
+- **Coined or overloaded terms** (anything carrying an `overloaded_warning` in the manifest) get the spelled-out form plus the "this is NOT the standard X" disclaimer on first use, regardless of tier.
+- **First-use-per-section** stays the rule for whichever terms the tier requires; sections are independent surfaces and a reader landing on §3 should not have to walk back to §2.1.
+
+The per-page budget is a flag for human review, not a hard constraint — it works better as a probe ("does this page feel heavy?") than as a count to enforce mechanically. A methods section that defines `BCLRT` once and uses it 40 times legitimately is fine at any tier.
 
 ### Intuitive-before-technical
 
