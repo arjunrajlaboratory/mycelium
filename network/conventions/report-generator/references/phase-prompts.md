@@ -204,5 +204,5 @@ In practice, two iterations is typical. Three or more iterations on the same sub
 
 - **Sub-agents must not know the planning brief, the memory cheatsheet, or the analysis directory.** The point of phase-4/5/6 is the blind read. Honour the input list above strictly.
 - **One sub-agent per phase, not one sub-agent per checklist item.** Combining the checks in one prompt keeps the context small and lets the sub-agent share work (e.g., the regex pass for numeric tokens in Phase 6 is one pass, not one per check).
-- **Output is YAML, not Markdown.** This matters because the parent flow programmatically applies the findings — Markdown free-text is error-prone to parse.
+- **Output is YAML, not Markdown.** This matters because the parent flow programmatically applies the findings — Markdown free-text is error-prone to parse. The orchestrator persists each phase's output to `analysis/[name]/reports/.review-plain-english.yaml`, `.review-framing.yaml`, and `.review-numerical.yaml` respectively. The sub-agent returns the YAML body; the orchestrator owns the file.
 - **Sub-agents err on the side of NOT flagging.** Each prompt says so; treat that line as load-bearing. False positives waste the drafter's time. A finding with `confidence: low` is fine; an invented finding is not.

@@ -118,6 +118,8 @@ For **overview + supplement** (DEFAULT): main text holds the headline plus one h
 
 Build a JSON manifest of every concrete artefact the draft will contain. The Phase-2 draft step is constrained to source numbers and terms from this manifest — that is what makes blind numerical re-verification (Phase 6) catch label-vs-value bugs.
 
+A fully-populated example lives at `references/manifest-example.json` — read it once before generating the manifest for a new analysis. The example is drawn from a small clone-recovery / differential-expression report and covers the common shapes: a primary metric with bootstrap CIs, an adjacent metric that exists in the same CSV but is *not* the primary (so the manifest carries both with distinct `label_aliases_forbidden` lists), a coined statistic with an `overloaded_warning`, a term whose role-name ("validation panel") could mislead a skim reader, and a figure entry with `sha256` for the Phase-6 freshness check.
+
 Manifest schema (write to `analysis/[name]/reports/.manifest.json`):
 
 ```json
@@ -280,9 +282,9 @@ The compile log is the answer to "okay, so all of this is fixed now? and was cod
 
 ## Phase 8 — Headline-summary preview (USER-FACING, optional)
 
-Before the user opens the PDF, surface a one-paragraph summary that contains the headline question (from Phase 0), the baseline of comparison, the primary metric value, and the single biggest caveat. This pre-empts the most common B2 / B5 failure mode (changelog framing, wrong metric featured) by giving the user a chance to reject the framing before they invest in reading the PDF.
+Before the user opens the PDF, surface a one-paragraph summary that contains the headline question (from Phase 0), the baseline of comparison, the primary metric value, and the single biggest caveat. This pre-empts the most common framing failures (changelog framing, wrong metric featured) by giving the user a chance to reject the framing before they invest in reading the PDF.
 
-The preview is optional. Skip if the user explicitly says "just show me the PDF" or if the report shape is **comprehensive** and a tight summary would mislead.
+The preview is optional. Skip if the Phase-0 planning brief recorded a "skip-preview" preference, or if the report shape is **comprehensive** — in the comprehensive shape a tight one-paragraph summary tends to mislead by omission, and the user is expected to read the document end-to-end anyway.
 
 ---
 
@@ -296,9 +298,9 @@ The preview is optional. Skip if the user explicitly says "just show me the PDF"
 | 1 — Manifest | no | `analysis/[name]/reports/.manifest.json` |
 | 2 — Draft | no | `analysis/[name]/reports/[name]-report.tex` |
 | 3 — Worked-example gate | no | (in-place patches to draft) |
-| 4 — Plain-English lint | no | `analysis/[name]/reports/.review-plain-english.md` |
-| 5 — Framing critique | no | `analysis/[name]/reports/.review-framing.md` |
-| 6 — Blind numerical re-verify | no | `analysis/[name]/reports/.review-numerical.md` |
+| 4 — Plain-English lint | no | `analysis/[name]/reports/.review-plain-english.yaml` |
+| 5 — Framing critique | no | `analysis/[name]/reports/.review-framing.yaml` |
+| 6 — Blind numerical re-verify | no | `analysis/[name]/reports/.review-numerical.yaml` |
 | 7 — Recompile log | no | `analysis/[name]/reports/.compile-log.md` |
 | 8 — Headline preview | optional | (in chat, not a file) |
 
@@ -387,6 +389,7 @@ These come up frequently in computational analysis reports:
 
 - `references/section-guide.md` — per-section craft (the writing guidance the draft step consumes).
 - `references/phase-prompts.md` — sub-agent prompts for Phases 4, 5, 6.
+- `references/manifest-example.json` — fully-populated Phase-1 manifest example, to crib from when starting a new report.
 - `qc-checklist.md` — provenance / style checklist used in Phase 7 and surfaced to the user via `.compile-log.md`.
 - `assets/report-template-overview.tex` — overview shape.
 - `assets/report-template-comprehensive.tex` — comprehensive shape.
