@@ -157,18 +157,73 @@ def _extract_mitigation_type(text: str) -> str:
     return "unknown"
 
 
+def _collect_with_fallback(path: Path) -> list[dict]:
+    """Collect learning entries from both ### (canonical) and ## (legacy) headers.
+
+    The canonical template uses ``### [YYYY-MM-DD]``.  Pre-feature entries
+    written before the mitigation_type PR used ``## [YYYY-MM-DD]``.
+    ``generate_index.collect_entries`` only matches one prefix per call, so
+    we call it twice and merge, deduplicating by ``line_no``.
+
+    Legacy ``##`` headers that are NOT date-bearing (e.g. ``## Knowledge Summary``,
+    ``## Stand-alone entries``) are filtered out by requiring the title to start
+    with a ``[YYYY-`` date bracket after stripping the prefix.
+    """
+    _DATE_BRACKET_RE = re.compile(r"^\[?\d{4}-\d{2}-\d{2}\]?")
+
+    canonical = gi.collect_entries(path, "learnings", "L")
+
+    # Legacy scan: re-open file and collect ## [YYYY-MM-DD] headers manually
+    legacy: list[dict] = []
+    canonical_lines = {e["line_no"] for e in canonical}
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line_no, raw in enumerate(fh, start=1):
+            line = raw.rstrip()
+            if not line.startswith("## "):
+                continue
+            title_part = line[3:].strip()
+            if not _DATE_BRACKET_RE.match(title_part):
+                continue  # Skip non-date ## headers (section titles, etc.)
+            if line_no in canonical_lines:
+                continue  # Already captured by canonical scan
+            import generate_index as _gi_local
+
+            m = _gi_local._DATE_RE.search(title_part)  # type: ignore[attr-defined]
+            date = m.group(1) if m else ""
+            clean_title = _gi_local._DATE_RE.sub("", title_part).strip(" :-–—")  # type: ignore[attr-defined]
+            entry: dict = {
+                "id": f"L-legacy-{line_no}",
+                "title": clean_title or title_part,
+                "date": date,
+                "tags": [],
+                "line_no": line_no,
+            }
+            legacy.append(entry)
+
+    # Re-number IDs to avoid collisions: canonical keeps L-1…L-N,
+    # legacy keeps L-legacy-<lineno> (clearly marked)
+    merged = canonical + legacy
+    # Sort by line_no so downstream slicing works correctly
+    merged.sort(key=lambda e: e["line_no"])
+    return merged
+
+
 def collect_learning_records(path: Path) -> list[dict]:
     """Parse learnings.md into enriched records including mitigation_type and body text.
 
     Extends generate_index.collect_entries by also capturing:
     - ``mitigation_type``: value from **mitigation_type**: field, or "unknown"
     - ``body``: full raw entry text (for TF-IDF)
+
+    Handles both ``### [YYYY-MM-DD]`` (canonical) and ``## [YYYY-MM-DD]``
+    (legacy pre-feature format) via ``_collect_with_fallback``.
     """
-    base = gi.collect_entries(path, "learnings", "L")
+    base = _collect_with_fallback(path)
     # Now fetch body text + mitigation_type for each entry
-    header_prefix = "### "
     records = []
     for e in base:
+        # Determine header prefix based on which scan found this entry
+        header_prefix = "## " if str(e["id"]).startswith("L-legacy-") else "### "
         body = _slice_entry_text(path, header_prefix, e["line_no"])
         mitigation_type = _extract_mitigation_type(body)
         records.append(
@@ -280,15 +335,19 @@ def _combined_sim(
 
 
 def _union_find_cluster(
-    records: list[dict], threshold: float
-) -> list[list[tuple[dict, float, float, float]]]:
+    records: list[dict],
+    threshold: float,
+    cohesion_threshold: float = 0.4,
+) -> list[tuple[list[tuple[dict, float, float, float]], float]]:
     """Group records into near-duplicate clusters using union-find.
 
-    Returns a list of clusters; each cluster is a list of
-    (record, combined_sim, tag_sim, term_sim) tuples relative to the
-    cluster representative (entry with lowest index).
+    Returns a list of ``(cluster, avg_pairwise_sim)`` tuples where each
+    cluster is a list of ``(record, combined_sim, tag_sim, term_sim)`` tuples
+    relative to the cluster representative (entry with lowest index).
 
-    Only clusters with 2+ members are returned.
+    Only clusters with 2+ members AND avg pairwise similarity >=
+    ``cohesion_threshold`` are returned.  Chained weak-link clusters (A–B
+    and B–C similar but A–C unrelated) are dropped to avoid misleading output.
     """
     n = len(records)
     parent = list(range(n))
@@ -322,7 +381,7 @@ def _union_find_cluster(
             continue
         # Build cluster with similarity to representative (first member)
         rep = members[0]
-        cluster = []
+        cluster: list[tuple[dict, float, float, float]] = []
         for idx in members:
             if idx == rep:
                 cluster.append((records[idx], 1.0, 1.0, 1.0))
@@ -333,9 +392,59 @@ def _union_find_cluster(
                     # Compute on-demand if union merged via intermediary
                     sims = _combined_sim(records[rep], records[idx])
                 cluster.append((records[idx], sims[0], sims[1], sims[2]))
-        clusters.append(cluster)
+        # Cohesion check: discard chain-linked clusters
+        validated, avg_cohesion = _validate_cohesion(
+            cluster, records, cohesion_threshold
+        )
+        if validated:
+            clusters.append((validated, avg_cohesion))
 
     return clusters
+
+
+# ---------------------------------------------------------------------------
+# Cluster cohesion validation
+# ---------------------------------------------------------------------------
+
+
+def _avg_pairwise_sim(members: list[int], records: list[dict]) -> float:
+    """Compute average pairwise combined similarity for a set of member indices."""
+    if len(members) < 2:
+        return 1.0
+    total = 0.0
+    count = 0
+    for i in range(len(members)):
+        for j in range(i + 1, len(members)):
+            combined, _, _ = _combined_sim(records[members[i]], records[members[j]])
+            total += combined
+            count += 1
+    return total / count if count else 0.0
+
+
+def _validate_cohesion(
+    cluster: list[tuple[dict, float, float, float]],
+    records: list[dict],
+    cohesion_threshold: float,
+) -> tuple[list[tuple[dict, float, float, float]], float]:
+    """Validate that a cluster is internally cohesive (not just chain-linked).
+
+    Returns ``(cluster, avg_pairwise_sim)``.  If avg pairwise similarity is
+    below ``cohesion_threshold``, returns an empty list (cluster is discarded)
+    together with the computed avg so callers can log it.
+
+    Rationale: union-find can chain A–B (sim=0.6) and B–C (sim=0.55) into
+    {A,B,C} even when A–C similarity is 0.0.  Requiring minimum average
+    pairwise cohesion eliminates these misleading transitive clusters.
+    """
+    # Reconstruct member indices by matching record IDs back to ``records``
+    id_to_idx = {r["id"]: i for i, r in enumerate(records)}
+    member_indices = [
+        id_to_idx[rec["id"]] for rec, *_ in cluster if rec["id"] in id_to_idx
+    ]
+    avg = _avg_pairwise_sim(member_indices, records)
+    if avg < cohesion_threshold:
+        return [], avg
+    return cluster, avg
 
 
 # ---------------------------------------------------------------------------
@@ -439,23 +548,81 @@ def _suggest_action(cluster: list[tuple[dict, float, float, float]]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _format_cluster_block(
+    cluster: list[tuple[dict, float, float, float]],
+    avg_cohesion: float,
+    cluster_idx: int,
+    include_git: bool,
+    repo_dir: Path | None,
+) -> list[str]:
+    """Render a single cluster block into markdown lines."""
+    lines: list[str] = []
+    theme = _cluster_theme(cluster)
+    sims = [s for _, s, _, _ in cluster if s < 1.0]
+    max_sim = max(sims) if sims else 0.0
+    tag_sims = [ts for _, _, ts, _ in cluster if ts < 1.0]
+    term_sims = [ks for _, _, _, ks in cluster if ks < 1.0]
+    avg_tag = sum(tag_sims) / len(tag_sims) if tag_sims else 0.0
+    avg_term = sum(term_sims) / len(term_sims) if term_sims else 0.0
+
+    lines.append(f"### Cluster {cluster_idx}: {theme}")
+    lines.append(
+        f"**Similarity**: {max_sim:.2f} (tags={avg_tag:.2f}, terms={avg_term:.2f}, "
+        f"cohesion={avg_cohesion:.2f})"
+    )
+    lines.append("**Entries**:")
+    for rec, _sim, _tag_sim, _term_sim in cluster:
+        entry_id = rec["id"]
+        date = rec["date"] or "undated"
+        title = rec["title"]
+        mit = rec["mitigation_type"]
+        lines.append(f'- {entry_id} ({date}): "{title}" [mitigation_type: {mit}]')
+
+    if include_git and repo_dir:
+        dates = sorted(r["date"] for r, *_ in cluster if r.get("date"))
+        since = dates[0] if dates else None
+        until = dates[-1] if dates else None
+        git_hits = _git_signals(repo_dir, since, until)
+        if git_hits:
+            lines.append(
+                "**Git signals** (fix/revert/regress commits near these dates):"
+            )
+            for g in git_hits[:5]:
+                lines.append(f"  - `{g}`")
+
+    lines.append(f"**Suggested action**: {_suggest_action(cluster)}")
+    lines.append("")
+    return lines
+
+
 def _format_report(
     records: list[dict],
-    clusters: list[list[tuple[dict, float, float, float]]],
+    clusters: list[tuple[list[tuple[dict, float, float, float]], float]],
     standalone: list[dict],
     living_dir: Path,
     include_git: bool,
     repo_dir: Path | None,
+    strong_threshold: float = 0.65,
+    review_threshold: float = 0.45,
 ) -> str:
+    """Format the recurrence report with tiered bands.
+
+    Clusters are split into:
+    - **Strong** (max_sim >= strong_threshold): high-confidence recurrences,
+      promotion suggested.
+    - **Review** (max_sim >= review_threshold and < strong_threshold): possible
+      recurrences requiring human judgment.
+    """
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     n_entries = len(records)
-    n_flagged = sum(len(c) for c in clusters)
+    n_flagged = sum(len(c) for c, _ in clusters)
     n_clusters = len(clusters)
 
     lines: list[str] = [
         "# Recurrence Detection Report",
         f"Generated: {now_iso}",
         f"Living dir: {living_dir}",
+        f"Thresholds: strong>={strong_threshold:.2f}, review>={review_threshold:.2f}",
         "",
         "## Summary",
         (
@@ -465,52 +632,65 @@ def _format_report(
         "",
     ]
 
-    if clusters:
-        lines.append("## Potential recurrence clusters")
-        lines.append("")
-        for cluster_idx, cluster in enumerate(clusters, start=1):
-            theme = _cluster_theme(cluster)
-            # Highest pairwise similarity (excluding rep↔rep)
-            sims = [s for _, s, _, _ in cluster if s < 1.0]
-            max_sim = max(sims) if sims else 0.0
-            tag_sims = [ts for _, _, ts, _ in cluster if ts < 1.0]
-            term_sims = [ks for _, _, _, ks in cluster if ks < 1.0]
-            avg_tag = sum(tag_sims) / len(tag_sims) if tag_sims else 0.0
-            avg_term = sum(term_sims) / len(term_sims) if term_sims else 0.0
+    # Split clusters into bands based on their max pairwise similarity
+    strong_clusters: list[tuple[list[tuple[dict, float, float, float]], float]] = []
+    review_clusters: list[tuple[list[tuple[dict, float, float, float]], float]] = []
+    for cluster, avg_cohesion in clusters:
+        sims = [s for _, s, _, _ in cluster if s < 1.0]
+        max_sim = max(sims) if sims else 0.0
+        if max_sim >= strong_threshold:
+            strong_clusters.append((cluster, avg_cohesion))
+        elif max_sim >= review_threshold:
+            review_clusters.append((cluster, avg_cohesion))
+        # Below review_threshold: cohesion-validated but low signal — skip
 
-            lines.append(f"### Cluster {cluster_idx}: {theme}")
-            lines.append(
-                f"**Similarity**: {max_sim:.2f} (tags={avg_tag:.2f}, terms={avg_term:.2f})"
-            )
-            lines.append("**Entries**:")
-            for rec, sim, tag_sim, term_sim in cluster:
-                entry_id = rec["id"]
-                date = rec["date"] or "undated"
-                title = rec["title"]
-                mit = rec["mitigation_type"]
-                lines.append(
-                    f'- {entry_id} ({date}): "{title}" [mitigation_type: {mit}]'
+    global_idx = 1
+
+    if strong_clusters:
+        lines.append("## Strong recurrence clusters")
+        lines.append(
+            f"*{len(strong_clusters)} cluster{'s' if len(strong_clusters) != 1 else ''} "
+            f"with similarity >= {strong_threshold:.2f}. "
+            "Suggested action: Convert to convention or structural mitigation.*"
+        )
+        lines.append("")
+        for cluster, avg_cohesion in strong_clusters:
+            lines.extend(
+                _format_cluster_block(
+                    cluster, avg_cohesion, global_idx, include_git, repo_dir
                 )
-
-            # Git signals
-            if include_git and repo_dir:
-                dates = sorted(r["date"] for r, *_ in cluster if r.get("date"))
-                since = dates[0] if dates else None
-                until = dates[-1] if dates else None
-                git_hits = _git_signals(repo_dir, since, until)
-                if git_hits:
-                    lines.append(
-                        "**Git signals** (fix/revert/regress commits near these dates):"
-                    )
-                    for g in git_hits[:5]:
-                        lines.append(f"  - `{g}`")
-
-            lines.append(f"**Suggested action**: {_suggest_action(cluster)}")
-            lines.append("")
+            )
+            global_idx += 1
     else:
-        lines.append("## Potential recurrence clusters")
+        lines.append("## Strong recurrence clusters")
         lines.append("")
-        lines.append("No near-duplicate clusters detected above threshold.")
+        lines.append(
+            f"No strong-band clusters detected (threshold >= {strong_threshold:.2f})."
+        )
+        lines.append("")
+
+    if review_clusters:
+        lines.append("## Review-band clusters")
+        lines.append(
+            f"*{len(review_clusters)} cluster{'s' if len(review_clusters) != 1 else ''} "
+            f"with similarity >= {review_threshold:.2f} and < {strong_threshold:.2f}. "
+            "Suggested action: Human review recommended — possible recurrence on weak signal.*"
+        )
+        lines.append("")
+        for cluster, avg_cohesion in review_clusters:
+            lines.extend(
+                _format_cluster_block(
+                    cluster, avg_cohesion, global_idx, include_git, repo_dir
+                )
+            )
+            global_idx += 1
+    else:
+        lines.append("## Review-band clusters")
+        lines.append("")
+        lines.append(
+            f"No review-band clusters detected "
+            f"(threshold >= {review_threshold:.2f} and < {strong_threshold:.2f})."
+        )
         lines.append("")
 
     lines.append("## Stand-alone entries (no recurrence)")
@@ -552,11 +732,43 @@ def main() -> None:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.5,
+        default=None,
         metavar="FLOAT",
         help=(
-            "Combined similarity threshold to flag a pair as near-duplicate "
-            "(0.0–1.0, default: 0.5). Combined = 0.5×Jaccard(tags) + 0.5×cosine(terms)."
+            "Backward-compatible alias: sets both --strong-threshold and "
+            "--review-threshold to the same value (0.0–1.0). "
+            "If specified, overrides the individual band thresholds."
+        ),
+    )
+    parser.add_argument(
+        "--strong-threshold",
+        type=float,
+        default=0.65,
+        metavar="FLOAT",
+        help=(
+            "Minimum combined similarity for a high-confidence 'strong' recurrence "
+            "cluster (default: 0.65). Suggested action: promote to convention or "
+            "structural mitigation."
+        ),
+    )
+    parser.add_argument(
+        "--review-threshold",
+        type=float,
+        default=0.45,
+        metavar="FLOAT",
+        help=(
+            "Minimum combined similarity for a 'review-band' cluster requiring human "
+            "judgment (default: 0.45). Clusters below this value are suppressed."
+        ),
+    )
+    parser.add_argument(
+        "--cohesion-threshold",
+        type=float,
+        default=0.4,
+        metavar="FLOAT",
+        help=(
+            "Minimum average pairwise similarity within a cluster (default: 0.4). "
+            "Clusters that fail this check are discarded as chain-linked artifacts."
         ),
     )
     parser.add_argument(
@@ -589,8 +801,21 @@ def main() -> None:
         )
         sys.exit(3)
 
-    # Clamp threshold
-    threshold = max(0.0, min(1.0, args.threshold))
+    # Resolve thresholds: --threshold is a backward-compatible alias
+    def _clamp(v: float) -> float:
+        return max(0.0, min(1.0, v))
+
+    if args.threshold is not None:
+        strong_threshold = _clamp(args.threshold)
+        review_threshold = _clamp(args.threshold)
+    else:
+        strong_threshold = _clamp(args.strong_threshold)
+        review_threshold = _clamp(args.review_threshold)
+
+    cohesion_threshold = _clamp(args.cohesion_threshold)
+
+    # union-find scan threshold = review_threshold (lowest band to consider)
+    scan_threshold = min(strong_threshold, review_threshold)
 
     # Parse entries
     records = collect_learning_records(learnings_path)
@@ -611,13 +836,13 @@ def main() -> None:
     # Build TF-IDF vectors
     records = _build_tfidf(records)
 
-    # Detect clusters
-    clusters = _union_find_cluster(records, threshold)
+    # Detect clusters (returns list of (cluster, avg_cohesion) tuples)
+    clusters = _union_find_cluster(records, scan_threshold, cohesion_threshold)
     # Sort clusters largest-first
-    clusters.sort(key=lambda c: -len(c))
+    clusters.sort(key=lambda c: -len(c[0]))
 
-    # Identify stand-alone entries
-    clustered_ids = {r["id"] for cluster in clusters for r, *_ in cluster}
+    # Identify stand-alone entries (not in any cohesion-validated cluster)
+    clustered_ids = {r["id"] for cluster, _ in clusters for r, *_ in cluster}
     standalone = [r for r in records if r["id"] not in clustered_ids]
 
     # Derive repo_dir for git signals (walk up from living_dir)
@@ -631,7 +856,14 @@ def main() -> None:
             candidate = candidate.parent
 
     report = _format_report(
-        records, clusters, standalone, living_dir, args.include_git_signals, repo_dir
+        records,
+        clusters,
+        standalone,
+        living_dir,
+        args.include_git_signals,
+        repo_dir,
+        strong_threshold=strong_threshold,
+        review_threshold=review_threshold,
     )
 
     if args.report_out:
