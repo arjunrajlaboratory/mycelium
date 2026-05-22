@@ -1,13 +1,15 @@
 ---
 name: report-generator
-version: 0.1.0
+version: 0.2.0
 core: true
 description: >
-  Structured LaTeX PDF report generation for computational analyses. Provides
-  section-by-section writing guidance, a LaTeX template with placeholders, and
-  a compilation workflow. Reports follow a problem-statement-first structure
-  with definitions, layered methods, hypothesis-driven results, and auto-populated
-  provenance. Not for presentations or notebook exports.
+  Structured LaTeX PDF report generation for computational analyses. Provides a
+  phase-based agentic flow (planning brief, memory consultation, source-of-truth
+  manifest, draft, worked-example gate, three blind sub-agent reviewers for
+  plain-English, framing, and numerical re-verification, then recompile),
+  three template variants (overview, comprehensive, overview+supplement default),
+  section-by-section writing guidance, and a provenance/style QC checklist. Not
+  for presentations or notebook exports.
 author: mycelium
 dependencies: []
 tags: [report, latex, pdf, writing, core]

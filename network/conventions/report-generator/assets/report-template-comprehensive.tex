@@ -1,0 +1,221 @@
+% Mycelium Report Template — COMPREHENSIVE shape
+% =============================================================================
+% Use when: the report IS the artifact and no separate supplement is expected.
+% Full methods, tables, and appendices inline. Long-form draft suitable for a
+% paper section, a thesis chapter, or a complete handoff to a collaborator.
+%
+% Copy to analysis/[name]/reports/[name]-report.tex and replace %%PLACEHOLDER%%
+% markers. Numbers and terms must be sourced from .manifest.json; do not
+% introduce values that have not been registered there.
+
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}              % Professional tables
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{natbib}                % Citations
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}            % Sub-figures
+\usepackage{float}                 % [H] placement
+\usepackage{longtable}             % Multi-page tables
+\usepackage{listings}              % Code listings
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+% --- Metadata ---
+\title{%%TITLE%%}
+\author{%%AUTHOR%%}
+\date{%%DATE%%}
+
+\begin{document}
+
+% =============================================================================
+% TITLE PAGE
+% =============================================================================
+\maketitle
+
+% =============================================================================
+% ABSTRACT
+% =============================================================================
+\begin{abstract}
+%%ABSTRACT%%
+% Lead with the scientific question, then the approach in one sentence, then
+% the key finding (sourced from the manifest). State the single biggest
+% caveat. No undefined acronyms, no citations, no figure references.
+% 150–250 words, 1–2 paragraphs.
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+% =============================================================================
+% PROBLEM STATEMENT
+% =============================================================================
+\section{Problem Statement}
+
+%%PROBLEM_STATEMENT%%
+% Frame the question in plain English. Define every concept a non-specialist
+% would need. Explain why the answer matters, what a good answer would look
+% like, and what the comparison baseline is. The comprehensive shape can
+% afford 3–5 paragraphs here.
+
+% =============================================================================
+% METHODS
+% =============================================================================
+\section{Methods}
+
+% --- Definitions ---
+\subsection{Definitions}
+
+%%DEFINITIONS%%
+% Define every mathematical symbol, technical term, and domain-specific
+% concept that appears anywhere in the report. Group related definitions
+% together. For coined terms that shadow established literature terms, add
+% an explicit "this is NOT the standard X" disclaimer at first use, naming
+% the specific way it differs (missing factor of 2, not a p-value, etc.).
+% Example:
+% \textbf{Log2 fold change} ($\log_2 \text{FC}$): The base-2 logarithm of
+% the ratio of expression between two conditions. Range: $(-\infty, +\infty)$.
+
+% --- Overview ---
+\subsection{Overview}
+
+%%METHODS_OVERVIEW%%
+% 2–3 sentences a non-specialist could follow. No tool names, no parameters,
+% no version numbers. Even in the comprehensive shape, the Overview stays
+% short — its job is to orient the reader before the Technical Detail.
+
+% --- Technical Detail ---
+\subsection{Technical Detail}
+
+%%METHODS_DETAIL%%
+% Datasets: name, source, size (n samples, n features), preprocessing.
+% Software: tool, version, citation for every tool.
+% Parameters: value AND rationale for non-default choices. State defaults too
+%   (defaults change between versions).
+% Statistical methods: test, assumptions checked, correction method, threshold.
+% For load-bearing methodological choices, lead with the intuitive
+% explanation before the formal definition.
+
+% =============================================================================
+% RESULTS
+% =============================================================================
+\section{Results}
+
+%%RESULTS%%
+% Each result follows the pattern:
+% 1. State the question being tested.
+% 2. Describe what you'd expect under competing hypotheses.
+% 3. Report findings with figures and tables — values sourced from the
+%    manifest, labels matching label_canonical.
+% 4. Conclude in relation to the question.
+%
+% For each new aggregation analysis type, include one worked example with
+% raw inputs traced to the aggregate (prefer inline sparkline-style
+% mini-tables over big monolithic figures).
+%
+% Figure template:
+% \begin{figure}[H]
+%     \centering
+%     \includegraphics[width=0.8\textwidth]{../outputs/figures/FIGURE_NAME.pdf}
+%     \caption{[What it shows]. [How to read it]. [Key takeaway].}
+%     \label{fig:LABEL}
+% \end{figure}
+
+% =============================================================================
+% CONCLUSIONS
+% =============================================================================
+\section{Conclusions}
+
+%%CONCLUSIONS%%
+% Map each conclusion back to the problem statement. State caveats explicitly
+% — and at a heading level at least as prominent as the claim. Distinguish
+% what the data shows from what it suggests. Do not introduce new results.
+
+% =============================================================================
+% NEXT STEPS (optional — delete if not applicable)
+% =============================================================================
+\section{Next Steps}
+
+%%NEXT_STEPS%%
+% Only include if there are clear, actionable follow-up analyses. Delete this
+% entire section if there is nothing concrete to say.
+
+% =============================================================================
+% PROVENANCE
+% =============================================================================
+\section{Provenance}
+
+\begin{description}
+\item[Analysis directory] \texttt{%%ANALYSIS_DIR%%}
+\item[Key scripts] ~
+  \begin{itemize}
+%%SCRIPT_LIST%%
+  \end{itemize}
+\item[Git commit] \texttt{%%GIT_COMMIT%%}
+\item[Analysis period] %%ANALYSIS_PERIOD%%
+\item[Analyst] %%ANALYST%%
+\item[Report generated] \today
+\item[Manifest] \texttt{.manifest.json}
+\item[Compile log] \texttt{.compile-log.md}
+\item[Software environment] See \texttt{ENVIRONMENTS\_INSTALLATIONS.md}
+\end{description}
+
+% =============================================================================
+% APPENDIX — INLINE (comprehensive shape)
+% =============================================================================
+% In the comprehensive shape, the appendix is part of the same document. It
+% carries: failure-mode worked examples, parameter sensitivity sweeps, method
+% comparisons, subsample stability, extended tables. Reference these from the
+% main text Methods or Results.
+\appendix
+
+\section{Failure-mode Worked Examples}
+
+%%APPENDIX_FAILURE_MODES%%
+% For each new aggregation analysis type whose main-text worked example
+% showed a healthy case, include a contrasting failure-mode example here.
+% Same format as the main-text example, but the failure mode is the point.
+
+\section{Parameter Sensitivity}
+
+%%APPENDIX_SENSITIVITY%%
+% Threshold sweeps, method comparisons, subsample stability.
+% Example:
+% \subsection{P-value Threshold Sensitivity}
+% Figure~\ref{fig:pvalue_sensitivity} shows the number of significant genes
+% across adjusted p-value thresholds.
+%
+% \begin{figure}[H]
+%     \centering
+%     \includegraphics[width=0.8\textwidth]{../outputs/figures/supplementary/threshold_sensitivity_pvalue.png}
+%     \caption{Significant gene count vs. adjusted p-value threshold.
+%     Dashed red line: chosen threshold (0.05).}
+%     \label{fig:pvalue_sensitivity}
+% \end{figure}
+
+\section{Extended Tables}
+
+%%APPENDIX_TABLES%%
+% Long tables that would interrupt the main narrative. Use longtable for
+% multi-page tables.
+
+% =============================================================================
+% REFERENCES
+% =============================================================================
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
