@@ -195,6 +195,25 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
         fi
       fi
 
+      # Deterministic fallback Summary: commit subjects since session start.
+      # Runs in milliseconds, no LLM, no dependency. The haiku call (if available)
+      # will upgrade this to a semantic Summary; if not, this is what stays.
+      if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
+        DETERMINISTIC_SUMMARY=$(git -C "$LOG_REPO" log --since="@${START_TS}" --pretty=format:'%s' 2>/dev/null \
+          | head -3 | tr '\n' ';' | sed 's/;$//; s/;/; /g')
+        # Cap at 200 chars
+        if [ ${#DETERMINISTIC_SUMMARY} -gt 200 ]; then
+          DETERMINISTIC_SUMMARY="${DETERMINISTIC_SUMMARY:0:197}..."
+        fi
+        if [ -n "$DETERMINISTIC_SUMMARY" ]; then
+          # Re-upsert the row with the deterministic Summary. Same row, better Summary.
+          NEW_ROW_DET="| $(date +%Y-%m-%d) | ${SESSION_ID} | ${PROJECT_SLUG} | ${BRANCH} | ${DURATION_MIN}m | ${FILES_CHANGED} | ${DETERMINISTIC_SUMMARY} | | complete | | [log](${SESSION_ID}-${PROJECT_SLUG}.md) |"
+          if [ -f "$UPSERT_SCRIPT" ]; then
+            python3 "$UPSERT_SCRIPT" "$LOG_DIR/LOG_REGISTRY.md" "$SESSION_ID" "$NEW_ROW_DET" >/dev/null 2>&1 || true
+          fi
+        fi
+      fi
+
       # Auto-write last-session.md for next session context
       _SESSION_FILE="$REPO_ROOT/.claude/last-session.md"
       _WORK_LINES=""
@@ -309,34 +328,42 @@ fi
 
 # If any was updated after the post-action hook fired, protocol was followed
 if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$CONVENTIONS_UPDATED" = true ] || [ "$FINDINGS_UPDATED" = true ]; then
-  # Clean up reminder file — cycle complete
-  rm -f "$REMINDER_FILE"
-  rm -f "$ACTIVITY_FILE"
-
-  # Emit non-blocking context. Dispatch a haiku log-scribe subagent to mechanically
-  # populate the LOG_REGISTRY row (Summary + Key Outputs) instead of asking the
-  # main agent to do it by hand (which it routinely skips).
-  # $TEMPLATE_FILE and $UPSERT_SCRIPT were resolved at the top of this hook.
+  # Try to spawn a background haiku log-scribe to upgrade the deterministic Summary
+  # to a semantic one. Completely silent — the main agent never sees a prompt,
+  # the Stop hook returns in 0s, the haiku writes the row when it finishes.
+  # Falls through gracefully if `claude` is not on PATH.
+  SCRIBE_DISPATCHED=false
   if [ -f "$TEMPLATE_FILE" ] && [ -n "${SESSION_ID:-}" ]; then
-    START_TS_ISO=$(date -r "${START_TS:-0}" -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -d "@${START_TS:-0}" -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-    TODAY=$(date +%Y-%m-%d)
-    # Render the template via Python — values may legally contain '|', '&', or '\',
-    # all of which break sed's substitute command. Python's str.replace handles them
-    # verbatim. The values are passed through the environment to avoid any shell
-    # quoting/escaping concerns.
-    SCRIBE_PROMPT=$(SESSION_ID="$SESSION_ID" \
-                    PROJECT_SLUG="$PROJECT_SLUG" \
-                    LOG_PATH="$LOG_PATH" \
-                    REGISTRY_PATH="$LOG_DIR/LOG_REGISTRY.md" \
-                    REPO_ROOT="$REPO_ROOT" \
-                    START_TS_ISO="$START_TS_ISO" \
-                    DURATION_MIN="$DURATION_MIN" \
-                    FILES_CHANGED="$FILES_CHANGED" \
-                    BRANCH="$BRANCH" \
-                    DATE="$TODAY" \
-                    UPSERT_SCRIPT="$UPSERT_SCRIPT" \
-                    TEMPLATE_FILE="$TEMPLATE_FILE" \
-                    python3 - <<'PY'
+    # Probe for the claude CLI. Try PATH first, then common install locations.
+    CLAUDE_BIN=""
+    for candidate in \
+      "$(command -v claude 2>/dev/null)" \
+      "/Applications/cmux.app/Contents/Resources/bin/claude" \
+      "/opt/homebrew/bin/claude" \
+      "/usr/local/bin/claude" \
+      "$HOME/.local/bin/claude"; do
+      if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        CLAUDE_BIN="$candidate"
+        break
+      fi
+    done
+
+    if [ -n "$CLAUDE_BIN" ]; then
+      START_TS_ISO=$(date -r "${START_TS:-0}" -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -d "@${START_TS:-0}" -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+      TODAY=$(date +%Y-%m-%d)
+      SCRIBE_PROMPT=$(SESSION_ID="$SESSION_ID" \
+                      PROJECT_SLUG="$PROJECT_SLUG" \
+                      LOG_PATH="$LOG_PATH" \
+                      REGISTRY_PATH="$LOG_DIR/LOG_REGISTRY.md" \
+                      REPO_ROOT="$REPO_ROOT" \
+                      START_TS_ISO="$START_TS_ISO" \
+                      DURATION_MIN="$DURATION_MIN" \
+                      FILES_CHANGED="$FILES_CHANGED" \
+                      BRANCH="$BRANCH" \
+                      DATE="$TODAY" \
+                      UPSERT_SCRIPT="$UPSERT_SCRIPT" \
+                      TEMPLATE_FILE="$TEMPLATE_FILE" \
+                      python3 - <<'PY'
 import os, sys
 text = open(os.environ["TEMPLATE_FILE"], encoding="utf-8").read()
 keys = ["SESSION_ID","PROJECT_SLUG","LOG_PATH","REGISTRY_PATH","REPO_ROOT",
@@ -346,16 +373,32 @@ for k in keys:
 sys.stdout.write(text)
 PY
 )
-    ENHANCE_MSG=".living/ updated. Dispatch a haiku subagent (max_turns: 5) with the following prompt to mechanically populate the LOG_REGISTRY row for session ${SESSION_ID}. The subagent is a stateless log-scribe: it reads the session log, runs git log, composes Summary + Key Outputs, and calls upsert_registry_row.py. Do not run this in the main context.
+      SCRIBE_RUN_LOG="$LOG_DIR/.log-scribe-${SESSION_ID}.log"
+      # Spawn detached. Use --max-budget-usd as a cost ceiling (no --max-turns in
+      # this CLI version). The deterministic Summary is already in place; this
+      # call only overwrites the row if it succeeds.
+      nohup "$CLAUDE_BIN" -p "$SCRIBE_PROMPT" \
+        --model claude-haiku-4-5 \
+        --output-format text \
+        --max-budget-usd 0.05 \
+        --dangerously-skip-permissions \
+        >"$SCRIBE_RUN_LOG" 2>&1 </dev/null &
+      disown 2>/dev/null || true
+      SCRIBE_DISPATCHED=true
+    fi
+  fi
 
----log-scribe prompt begin---
-${SCRIBE_PROMPT}
----log-scribe prompt end---
+  # Clean up reminder file — cycle complete
+  rm -f "$REMINDER_FILE"
+  rm -f "$ACTIVITY_FILE"
 
-Also enhance .claude/last-session.md (5 sections: work, decisions, blockers, state, next steps)."
+  # Emit a small additionalContext: enhance .claude/last-session.md. If the
+  # scribe couldn't be dispatched (claude not on PATH), include a fallback
+  # instruction to update the registry row by hand.
+  if [ "$SCRIBE_DISPATCHED" = true ]; then
+    ENHANCE_MSG=".living/ updated. Enhance .claude/last-session.md (5 sections: work, decisions, blockers, state, next steps). Log-scribe is running in the background — the LOG_REGISTRY row will be upgraded automatically."
   else
-    # Fallback if template missing
-    ENHANCE_MSG=".living/ updated. Enhance .claude/last-session.md (5 sections: work, decisions, blockers, state, next steps). Also update LOG_REGISTRY.md row for session ${SESSION_ID:-unknown} — replace filename Summary with 1-sentence past-tense accomplishment, fill Key Outputs."
+    ENHANCE_MSG=".living/ updated. Enhance .claude/last-session.md (5 sections: work, decisions, blockers, state, next steps). Note: claude CLI not on PATH so log-scribe could not auto-dispatch; the deterministic Summary from commit subjects is in place. If you want a richer Summary, dispatch a haiku log-scribe subagent by hand or set PATH so the Stop hook can find claude."
   fi
   ESCAPED_ENHANCE=$(printf '%s' "$ENHANCE_MSG" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
   printf '{"additionalContext": %s}\n' "$ESCAPED_ENHANCE"
