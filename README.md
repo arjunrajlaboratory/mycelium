@@ -1,4 +1,6 @@
-# Mycelium
+<p align="center">
+  <img src="docs/figures/mycelium-logo.png" alt="Mycelium" width="600"/>
+</p>
 
 <!-- Badges -->
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -19,6 +21,14 @@ Mycelium is named after the underground fungal networks that connect trees in a 
 - **Each project carries its own memory.** Decisions, learnings, and conventions are recorded as structured traces in the `.living/` directory, so every session starts with the accumulated intelligence of all previous sessions.
 - **Projects grow smarter over time.** Gotchas encountered once are never forgotten. Patterns detected in learnings crystallize into conventions. The project evolves.
 - **The network shares nutrients.** Domain-specific best practices (bioinformatics, image analysis, and more) are packaged as convention packs that any project can install. When one project discovers something generally useful, it can contribute back.
+
+## Mycelium in practice
+
+<p align="center">
+  <img src="docs/figures/mycelium-summary-figure.png" alt="Mycelium summary figure" width="900"/>
+</p>
+
+<em>Panel A: workflow — research output is ingested, crystallized into structured learnings/decisions/findings, and re-surfaced to inform downstream work via the mycelial network. Panel B: real measurement from a 14-day deployment showing cumulative pull-better deliveries accumulating; the render-gate fix on 2026-05-07 shipped a meaningful coverage improvement. Panel C: a 12-learning observational audit found that 4 of 4 ambient-awareness learnings recurred when opportunities arose, while 0 of 2 shipped as structural mitigations did. The mitigation_type field (PR #35) forces this distinction at crystallize time.</em>
 
 ## Quickstart
 
