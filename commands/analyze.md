@@ -45,7 +45,14 @@ Start a new analysis or continue an existing one, routing to the appropriate con
    - Use marimo for exploratory work, plain Python scripts for reproducible pipelines.
    - Every analysis must have a `run.sh` or `run.py` that reproduces final outputs.
 
-6. **Run the post-action hook protocol** after significant steps (see `/mycelium:core` for the full protocol):
+6. **Lint with `scilintr` after writing or modifying analysis code** (non-negotiable). This is a fast static analyzer that flags silent scientific commitments — things that look like ordinary software (broad `except`, positional indexing, unchecked joins, unannotated filters, label leakage, magic thresholds, unseeded RNGs, etc.). The core principle is: *scientifically meaningful choices must not be anonymous.* Read `skills/core/references/scilintr-guide.md` before invoking it the first time in a session — it explains the philosophy, the rule catalogue, and (critically) the `ANALYSIS_OK[category]: explanation` waiver mechanism. Workflow:
+   - **Install if missing.** Python: `pip install "scilintr @ git+https://github.com/arjunrajlaboratory/scilintr.git#subdirectory=py/scilintr"`. R: `remotes::install_github("arjunrajlaboratory/scilintr", subdir = "r/scilintr")`. Not yet on PyPI/CRAN.
+   - **After every code write or edit**, run `scilintr <file_or_dir>` on the touched files. The CLI is fast (sub-second on most files), so there is no reason to defer.
+   - **Drive findings to zero**, either by fixing the pattern (preferred — most findings have a cleaner code path) or by adding a structured waiver (`# ANALYSIS_OK[category]: explanation; where the check/assertion lives`). A waiver must answer *what / why scientifically valid / where it is recorded*. Vacuous waivers (`# ANALYSIS_OK: fine`) are not acceptable.
+   - **Before declaring the analysis complete**, run `scilintr` on the full analysis directory (e.g., `scilintr analysis/<name>/`) to catch cross-file rules (duplicate-parameter-source, shadow-overwrite, definition drift).
+   - This is complementary to `/mycelium:review`, not a substitute. Lint catches structural patterns cheaply; review catches semantic and statistical issues.
+
+7. **Run the post-action hook protocol** after significant steps (see `/mycelium:core` for the full protocol):
    - Update `analysis/ANALYSIS_MANIFEST.md`
    - Update the analysis documentation file
    - Log decisions to `.living/decisions.md`
