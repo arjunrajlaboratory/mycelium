@@ -13,7 +13,13 @@ Detailed guidance for writing each section of a computational analysis report. T
 7. [Conclusions](#conclusions)
 8. [Provenance](#provenance)
 9. [Appendix](#appendix)
-10. [General Writing Principles](#general-writing-principles)
+10. [Cross-cutting craft](#cross-cutting-craft)
+    - [Acronym discipline](#acronym-discipline)
+    - [Intuitive-before-technical](#intuitive-before-technical)
+    - [Worked examples per analysis type](#worked-examples-per-analysis-type)
+    - [Denominator discipline](#denominator-discipline)
+    - [Overloaded-name guard](#overloaded-name-guard)
+11. [General Writing Principles](#general-writing-principles)
 
 ---
 
@@ -129,19 +135,36 @@ If parameters were chosen via sensitivity analysis, reference the appendix figur
 
 ## Results
 
-Each result should be a self-contained unit that a reader can understand independently.
+Each result should be a self-contained unit that a reader can understand independently. The skill supports two styles for Results sections; the Phase-0 planning brief picks one and `manifest.policies.results_structure` carries the choice forward.
 
-**The structure for each result**:
+### Narrative (DEFAULT)
 
-1. **Question**: What specific question is this result addressing? ("Does treatment X change the expression of inflammatory genes?")
+Each result is prose. The subsection title states the finding (it is checked by Phase 5 — see "Subsection title quality" below). The body covers the question, the competing-hypothesis discrimination, the findings, and the interpretation as a single readable flow rather than four bolded subheadings.
 
-2. **Discrimination**: What would you expect to see under competing hypotheses? This is the most underused and most valuable part. ("If treatment activates the inflammatory response, we'd expect to see upregulation of known inflammatory markers like IL6 and TNF, and enrichment of the NF-kB pathway. If treatment has no specific inflammatory effect, any differential expression should be distributed across pathways without enrichment.")
+A narrative result still owes the reader the same four things — question, discrimination, findings, interpretation — but in prose. The advantage is that the section reads more like a final paper or polished writeup; the disadvantage is that a skim reader can't land on "what was the question?" by visual search alone.
 
-3. **Findings**: The actual data — figures, tables, statistics. State the result plainly. ("247 genes were significantly upregulated (padj < 0.05, |log2FC| > 1), with the strongest enrichment in the NF-kB signaling pathway (padj = 2.3e-8, 23/87 pathway genes present).")
+Example shape (one paragraph or two, depending on density):
 
-4. **Interpretation**: What does this mean for the question? ("This is consistent with treatment activating an inflammatory response via NF-kB signaling.")
+> *"We asked whether [Q]. Under the alternative we'd expect [A]; under the null we'd expect [N]. The headline panel showed [finding with sourced numbers]. This is consistent with [interpretation]."*
 
-This structure is a guideline — some results are simple enough to collapse steps 2 and 4, and complex results might need sub-results. But the question-discrimination-finding-interpretation flow should be the default.
+### Structured (opt-in)
+
+Each result carries explicit paragraph headers in the LaTeX:
+
+```latex
+\paragraph{Question.} What specific question is this result addressing?
+\paragraph{Discrimination.} What would you expect under competing hypotheses?
+\paragraph{Findings.} The actual data — figures, tables, statistics.
+\paragraph{Interpretation.} What does this mean for the question?
+```
+
+Use the structured style when results pile up (≥ 5 sub-results in a long Results section), when readers want to skim to a specific question, or when the analysis is methodologically complex enough that the discrimination step is genuinely the load-bearing one.
+
+The structured style pays a visual-heaviness tax — every result is four paragraph breaks — that the narrative style does not. The skill defaults to narrative because most reports benefit more from readability than from skim-grid-ability; structured is a deliberate choice, not a fallback.
+
+### Subsection title quality (both styles)
+
+Regardless of which style is chosen, every Results subsection title should state a finding. "Evidence-first cell calling" is a topic; "Evidence-first calling trades recall for precision in a transparent way" is a finding. The Phase 5 sub-agent flags topic-only titles in Results (Methods, Provenance, and References titles are allowed to be topics).
 
 **Figures and tables**:
 - Every figure and table must be referenced in the text — if it's not discussed, it shouldn't be there
@@ -248,6 +271,109 @@ Each appendix figure should have:
 - A clear title indicating what was varied
 - A caption explaining what the figure shows and what conclusion to draw
 - A reference from the main text methods section ("Parameter sensitivity is shown in Appendix A")
+
+---
+
+## Cross-cutting craft
+
+The rules below apply across sections. They are checked automatically by the Phase 4 (plain-English lint), Phase 5 (framing critique), and Phase 6 (blind numerical re-verify) sub-agents in the report-generator flow.
+
+### Acronym discipline
+
+The abstract, section titles, and figure captions never carry an undefined acronym, regardless of audience. A "BCLRT" in the abstract is a finding — even when the term is defined in Methods later.
+
+The per-page budget and per-section regloss strictness scale with the **Phase-0 audience tier**, which Phase 1 records in `manifest.policies.acronym_budget_per_page` and `manifest.policies.acronym_strictness`:
+
+| Tier | Acronym budget / page | First-use-per-section gloss | Example audiences |
+|---|---:|---|---|
+| **A** (lay / out-of-field) | 2 | every term, every section | grant reviewers, lay collaborators, journalists |
+| **B** (adjacent-field collaborator) — DEFAULT | 4 | non-trivial terms per section; field-standard terms (RNA-seq, PCA) may rely on the audience | wet-lab partner for a stats-heavy report; PI reading a methods-heavy report |
+| **C** (in-field PI / close collaborator) | 6 | only coined / overloaded terms; standard terms need no per-section regloss | direct co-authors, the analyst's PI, immediate lab group |
+
+Rules that hold at every tier:
+
+- **No acronyms in section titles, the abstract, or figure captions** — these are skim surfaces.
+- **Coined or overloaded terms** (anything carrying an `overloaded_warning` in the manifest) get the spelled-out form plus the "this is NOT the standard X" disclaimer on first use, regardless of tier.
+- **First-use-per-section** stays the rule for whichever terms the tier requires; sections are independent surfaces and a reader landing on §3 should not have to walk back to §2.1.
+
+The per-page budget is a flag for human review, not a hard constraint — it works better as a probe ("does this page feel heavy?") than as a count to enforce mechanically. A methods section that defines `BCLRT` once and uses it 40 times legitimately is fine at any tier.
+
+### Intuitive-before-technical
+
+For load-bearing methodological choices, non-obvious metrics, and surprising results, **lead with the intuitive explanation before the technical statement**. The length is judged by complexity, not by a fixed rule:
+
+| Concept type | Lead-in form |
+|---|---|
+| Complex analytic method (new framework, multi-step procedure) | Full intuition paragraph before the formal definition |
+| Non-obvious metric or transform | Single intuitive sentence before the formula |
+| Routine technical detail (standard test, well-known transform) | No lead-in needed |
+| Surprising result | Plain-English summary of what the reader should walk away with, before the table or figure |
+
+Example:
+
+> **Without intuitive lead-in (bad).** *We define BCLRT as `dLL = LL_branch - LL_null` for a per-cell logistic regression with two covariates: `log(1 + total panel coverage)` and an artifact-load covariate `u_i`.*
+>
+> **With intuitive lead-in (good).** *We score each cell by asking: does this cell's pattern of alternative-allele reads look more like the proposed clone-of-origin or like a uniform background? We use a per-cell logistic regression — with controls for coverage and an artifact-load covariate — and report the log-likelihood difference between the branch model and the null. Formally, BCLRT = LL_branch − LL_null (note: this is not the Wilks chi-square statistic; threshold 10 here corresponds to Wilks 20).*
+
+The plain-English lint sub-agent (Phase 4) flags load-bearing concepts that are introduced technical-first. It does not enforce a sentence count.
+
+### Worked examples per analysis type
+
+For every *new aggregation analysis type* introduced in the report, the main body contains one fully-traced concrete example: pick a single SNP / cell / capsule / row, show its raw inputs, the per-row metric calculation, and how it contributes to the aggregate. The example does the explanatory work once — subsequent claims using the same analysis type don't need their own example.
+
+Format preference: small inline figures or sparkline-style mini-tables over big monolithic figures. Tufte sparklines are a strong reference shape. A five-row inline table with raw N, Y, score, rank, contribution is often clearer than a full plot.
+
+Example pattern:
+
+```latex
+\begin{table}[H]
+    \centering
+    \caption{Worked example: how a single SNP's per-clone score contributes
+    to its aggregate rank. Cell \texttt{c\_017} is shown; the full ranking
+    aggregates over all 1{,}231 SNPs.}
+    \label{tab:worked_example_snp_score}
+    \begin{tabular}{lrrrrr}
+        \toprule
+        Clone & N & Y & VAF & score & rank \\
+        \midrule
+        c1 & 12 & 6 & 0.50 & 4.81 & 1 \\
+        c2 & 9 & 1 & 0.11 & 0.42 & 7 \\
+        c3 & 11 & 0 & 0.00 & 0.00 & 9 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+```
+
+**Failure modes** (cases where the analysis breaks) get worked examples too, but those live in the supplement / appendix. The main text shows one healthy example per analysis type; the supplement shows the contrasting failure case.
+
+The Phase-3 worked-example gate also catches the inverse failure (single-example-as-proof): "confirmed" / "verified" / "established" claims that rest on one example without hedging. Both failures share a root cause — sloppy handling of the relationship between concrete instances and general claims — so the same phase checks for both.
+
+### Denominator discipline
+
+Every count or rate in the prose has its denominator within one sentence.
+
+- *Bad.* "Consensus floor of 5."
+- *Better.* "Consensus floor of 5 (out of 25 operating-point sweep conditions)."
+
+For cross-universe comparisons, also report the universe-eligible-restricted denominator:
+
+- *Bad.* "baseline_band sticky=1, current_iter sticky=3."
+- *Better.* "baseline_band sticky=1 of 1 eligible (X21 and X19 are structurally excluded from baseline_band); current_iter sticky=3 of 3 eligible."
+
+Bare percentages are stated alongside the count (or vice versa) so the reader does not have to back out the denominator from rounding.
+
+### Overloaded-name guard
+
+Any coined term that overlaps an established statistics / genomics / ML term needs an explicit "this is NOT the standard X" disclaimer at first use, naming the specific way it differs.
+
+Common overloads:
+
+- **"Log-likelihood ratio test"** when the statistic is `dLL = LL_branch - LL_null` without the factor of 2 (so a threshold of 10 corresponds to Wilks 20, not Wilks 10).
+- **"Penalised log-likelihood ratio"** that a reader trained on Wilks chi-square statistics will mis-extrapolate.
+- **`cond_p`** for an ordinal score that looks like a per-SNP p-value but is not.
+- **"Validation"** when the validation cohort is downstream of the same upstream labelling decisions (so agreement is a self-consistency check, not external validation).
+
+When an overloaded name is used, the manifest's `terms[*].overloaded_warning` field is mandatory.
 
 ---
 
