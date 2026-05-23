@@ -282,7 +282,9 @@ The full sub-agent prompt is in `references/phase-prompts.md`.
 
 ## Phase 6 — Blind numerical re-verify (SUB-AGENT)
 
-Dispatch a sub-agent that reads the draft `.tex` files and the Phase-1 manifest. It extracts every numeric token in the prose plus its surrounding label, and cross-checks the manifest.
+Dispatch a sub-agent that reads the draft `.tex` files, the Phase-1 manifest, the compiled PDF, and the narrowly-scoped on-disk artefacts the checks below depend on. The "blind" in this phase's name refers to the planning brief, the memory cheatsheet, and `.living/` — *not* to the analysis directory at large. Phase 6 is fundamentally a verification phase: it must be able to read the on-disk CSV that a manifest entry claims to come from, the figure file that a `\includegraphics` references, and the cross-document drift target files. The blind read is preserved at the framing level (the sub-agent doesn't know the analyst's intent) while the verification has enough access to actually verify. The full input list and the explicit prohibition list live in `references/phase-prompts.md`.
+
+It extracts every numeric token in the prose plus its surrounding label, and cross-checks the manifest.
 
 Output is structured as **provenance** vs **style** (mirroring the synthesis split of `mycelium:review`):
 

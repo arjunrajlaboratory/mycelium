@@ -78,7 +78,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 **Inputs to load:**
 
 - `analysis/[name]/reports/[name]-report.tex` (the draft itself)
-- `network/conventions/report-generator/references/section-guide.md` (the craft notes — read once, do not re-read per check)
+- `references/section-guide.md`, resolved relative to the convention pack root. When the pack is installed, this resolves to `.living/conventions/report-generator/references/section-guide.md`; when running from the mycelium source tree it resolves to `network/conventions/report-generator/references/section-guide.md`. The orchestrator passes the absolute path to the sub-agent; the sub-agent does not need to know where it lives. (The craft notes — read once, do not re-read per check.)
 
 **Do NOT load:**
 
@@ -138,18 +138,27 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 
 **Inputs to load:**
 
-- `analysis/[name]/reports/[name]-report.tex` (the draft itself)
-- `analysis/[name]/reports/.manifest.json` (full)
-- `analysis/[name]/reports/[name]-report.pdf` if it has been compiled — read with `pdftotext` to extract the prose-as-rendered (catches LaTeX-rendering edge cases that read differently than the source)
-- Other documents to grep for cross-document drift (named below in the prompt)
+- `analysis/[name]/reports/[name]-report.tex` (the draft itself).
+- `analysis/[name]/reports/.manifest.json` (full).
+- `analysis/[name]/reports/[name]-report.pdf` if it has been compiled — read with `pdftotext` to extract the prose-as-rendered (catches LaTeX-rendering edge cases that read differently than the source).
+- **On-disk CSVs / outputs the manifest's `provenance` / `computed_at` fields point to.** Phase 6 is fundamentally a verification phase; it must be able to read the artefact a manifest entry claims to come from. Stay within `analysis/[name]/output/`, `analysis/[name]/outputs/`, and `analysis/[name]/figures/` (or whichever output directory the manifest's pointers establish — infer it once at the start).
+- **The analysis script directory** for the Provenance-completeness check — `ls analysis/[name]/*.R` / `*.py` and read the first comment block of each script for the one-line description. Do not read deeper into scripts unless a specific finding (lying caption pointing to a specific figure generator) requires it.
+- **The figure files themselves** (for `sha256` comparison against `manifest.figures[*].sha256`) and the figure-generation code referenced by `manifest.figures[*]` (typically `make_figures.R` or a similarly-named entry point) **only** when chasing a lying-caption finding. Open the specific function that draws the figure under suspicion; do not skim the whole file.
+- **Cross-document drift target files** (for the cross-document drift check) — the analysis's `UPPER_SNAKE_CASE.md`, `STATUS.md`, `specification.md`, `conclusions.md`, `decisions_pre_run.md`, any plan documents, and other `.tex` files under `analysis/[name]/reports/`. Grep is preferred over full reads; named files only — do not crawl.
 
 **Do NOT load:**
 
-- The planning brief, the memory cheatsheet, the analysis directory, `.living/`
+- The planning brief (`.planning-brief.yaml`) — that would tell you the verification target's framing intent and bias the blind read.
+- The memory cheatsheet (`.memory-cheatsheet.md`) — same reason.
+- `.living/` in any directory — project-context that biases the blind read.
+- Any analysis directory other than `analysis/[name]/`.
+- Other reports under `analysis/[name]/reports/` that have been excluded from verification (e.g., a human-revised baseline kept for comparison). The orchestrator names these explicitly when present; in their absence assume the report under verification is the only one.
+
+The list above is permissive in scope but narrow in *kind*: you read the artefacts that the draft already cites or that the project's headline surfaces (STATUS, MANIFEST, etc.) carry, never the scaffolding the draft was written from. The blind read is preserved at the framing level — you still don't know the analyst's intent — while the verification has enough access to actually verify.
 
 **Prompt:**
 
-> You are verifying that every numeric token in a scientific report draft is consistent with the manifest of values that were computed, and that the same numbers are not contradicted elsewhere in the project. You have **zero project context** beyond the draft and the manifest.
+> You are verifying that every numeric token in a scientific report draft is consistent with the manifest of values that were computed, and that the same numbers are not contradicted elsewhere in the project. You are *blind to framing context* — you don't know the analyst's intent, you haven't seen the planning brief, you haven't read `.living/`. You may, however, read the on-disk artefacts the verification checks below need (CSVs the manifest points to, the figures themselves, the analysis script directory, and the named cross-doc drift files). The full input list and the explicit prohibition list are given above.
 >
 > Return findings in two top-level sections: **provenance** (label–value alignment, unsourced numbers, cross-document drift) and **style** (denominators, lying captions). The Phase-7 recompile log surfaces both sections; neither is more important than the other.
 >
