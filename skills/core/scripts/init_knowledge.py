@@ -135,6 +135,66 @@ AUDIT_LOG_TEMPLATE = """\
 # ---------------------------------------------------------------------------
 
 
+MEMORY_ROUTING_HEADER = "## Global Knowledge Domains"
+
+
+def _glob_memory_files(claude_projects_dir: Path) -> list[Path]:
+    """Find all `~/.claude/projects/*/memory/MEMORY.md` files."""
+    if not claude_projects_dir.is_dir():
+        return []
+    return sorted(claude_projects_dir.glob("*/memory/MEMORY.md"))
+
+
+def _append_routing_table(memory_path: Path, table_text: str) -> bool:
+    """Append the routing table to MEMORY.md if not already present.
+
+    Returns True if appended, False if header already present (no-op).
+    Always idempotent — re-running on a populated MEMORY.md is a no-op.
+    """
+    if not memory_path.exists():
+        return False
+    existing = memory_path.read_text(encoding="utf-8")
+    if MEMORY_ROUTING_HEADER in existing:
+        return False
+
+    # Ensure exactly one blank line between existing content and the table
+    sep = "\n\n" if existing and not existing.endswith("\n\n") else ""
+    if existing and not existing.endswith("\n"):
+        sep = "\n\n"
+    memory_path.write_text(existing + sep + table_text.lstrip("\n"), encoding="utf-8")
+    return True
+
+
+def append_routing_to_memory_files(
+    mycelium_root: Path,
+    claude_projects_dir: Path | None = None,
+) -> tuple[int, int]:
+    """Append the Global Knowledge Domains routing table to all MEMORY.md files.
+
+    Skips files that already contain the routing header.
+
+    Returns (appended_count, skipped_count).
+    """
+    if claude_projects_dir is None:
+        claude_projects_dir = Path.home() / ".claude" / "projects"
+
+    table_path = (
+        mycelium_root / "skills" / "core" / "templates" / "knowledge" / "domain-table.md"
+    )
+    if not table_path.exists():
+        raise FileNotFoundError(f"domain-table.md not found at {table_path}")
+    table_text = table_path.read_text(encoding="utf-8")
+
+    appended = 0
+    skipped = 0
+    for memory_path in _glob_memory_files(claude_projects_dir):
+        if _append_routing_table(memory_path, table_text):
+            appended += 1
+        else:
+            skipped += 1
+    return appended, skipped
+
+
 def init_knowledge(knowledge_dir: Path, mycelium_root: Path) -> None:
     templates_dir = mycelium_root / "skills" / "core" / "templates" / "knowledge"
     domains_yaml_path = templates_dir / "domains.yaml"
@@ -195,6 +255,17 @@ def init_knowledge(knowledge_dir: Path, mycelium_root: Path) -> None:
     total = created + skipped
     print(f"{created} created, {skipped} skipped (already exist), {total} total")
 
+    # --- Append routing table to MEMORY.md files --------------------------
+    try:
+        appended, mem_skipped = append_routing_to_memory_files(mycelium_root)
+        mem_total = appended + mem_skipped
+        print(
+            f"MEMORY.md: appended {appended}, skipped {mem_skipped} (already present), "
+            f"{mem_total} files scanned"
+        )
+    except FileNotFoundError as exc:
+        print(f"Warning: skipping MEMORY.md routing append ({exc})")
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -225,6 +296,23 @@ def main() -> None:
             "relative to this script)"
         ),
     )
+    parser.add_argument(
+        "--memory-only",
+        action="store_true",
+        help=(
+            "Only append the routing table to existing MEMORY.md files. "
+            "Skip the domain file creation step. Used by the migrator."
+        ),
+    )
+    parser.add_argument(
+        "--projects-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Override the Claude Code projects directory "
+            "(default: ~/.claude/projects/). Mostly for testing."
+        ),
+    )
     args = parser.parse_args()
 
     knowledge_dir: Path = args.knowledge_dir.expanduser().resolve()
@@ -235,7 +323,21 @@ def main() -> None:
     else:
         mycelium_root = args.mycelium_root.expanduser().resolve()
 
-    init_knowledge(knowledge_dir, mycelium_root)
+    projects_dir = (
+        args.projects_dir.expanduser().resolve() if args.projects_dir else None
+    )
+
+    if args.memory_only:
+        appended, skipped = append_routing_to_memory_files(
+            mycelium_root, claude_projects_dir=projects_dir
+        )
+        total = appended + skipped
+        print(
+            f"MEMORY.md: appended {appended}, skipped {skipped} (already present), "
+            f"{total} files scanned"
+        )
+    else:
+        init_knowledge(knowledge_dir, mycelium_root)
 
 
 if __name__ == "__main__":

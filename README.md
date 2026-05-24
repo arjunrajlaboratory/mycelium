@@ -34,7 +34,7 @@ claude plugin marketplace add arjunrajlaboratory/mycelium
 claude plugin install mycelium@mycelium
 ```
 
-This permanently registers the mycelium plugin with your Claude Code installation. The slash commands (`/mycelium:core`, `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`, `/mycelium:ingest`, `/mycelium:transfer`) become available in all sessions.
+This permanently registers the mycelium plugin with your Claude Code installation. The slash commands (`/mycelium:core`, `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`, `/mycelium:ingest`, `/mycelium:review`, `/mycelium:transfer`) become available in all sessions.
 
 **Option B — Local / development install:**
 
@@ -69,6 +69,7 @@ Work normally — analyze data, write code, build algorithms. Use the dedicated 
 - `/mycelium:report` — generate a structured report
 - `/mycelium:ideas` — brainstorm with disciplinary personas
 - `/mycelium:ingest` — import new data with metadata and provenance
+- `/mycelium:review` — analysis-aware code review for PRs, commits, or working-tree changes
 - `/mycelium:transfer` — cross-pollinate learnings across sibling projects
 
 Mycelium's hooks enforce the post-action protocol automatically after every significant action:
@@ -139,7 +140,7 @@ Hooks are auto-registered by `init_repo.py` during project initialization. No ma
 Mycelium includes a three-tier knowledge system that routes agents to the right information at the right time:
 
 1. **MEMORY.md routing table** (always in context) — lightweight domain pointers that tell the agent where to look.
-2. **INDEX.md summaries** (injected at session start) — LLM-generated knowledge clusters per project, refreshed automatically.
+2. **INDEX.md summaries** (injected at session start) — knowledge clusters per project, refreshed automatically. The default is a fast heuristic regenerated at every SessionStart in <1s; an opt-in LLM mode produces richer cluster narratives when desired.
 3. **Global domain files** (`~/.claude/knowledge/`) — cross-project knowledge organized by domain (Python, statistics, data engineering, etc.). Transferable learnings are promoted here automatically.
 
 This replaces the naive approach of loading all `.living/` files at session start, which doesn't scale past the first few sessions.
@@ -148,7 +149,7 @@ This replaces the naive approach of loading all `.living/` files at session star
 
 Mycelium separates **skills** (actions) from **conventions** (reference material):
 
-- **Skills** are Claude Code slash commands that execute workflows: `/mycelium:core` (core orchestrator), `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`, `/mycelium:ingest`, `/mycelium:transfer`
+- **Skills** are Claude Code slash commands that execute workflows: `/mycelium:core` (core orchestrator), `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`, `/mycelium:ingest`, `/mycelium:review`, `/mycelium:transfer`
 - **Convention packs** are collections of markdown files that skills consult for methodology guidance. They're swappable — different report conventions, different analysis approaches.
 - **Hooks** enforce the framework automatically — detecting code execution, tracking file edits, and ensuring `.living/` stays current without manual intervention.
 
@@ -209,7 +210,7 @@ This is how the ecosystem improves: individual projects learn, patterns are extr
 
 ## Repository Structure
 
-- **[`commands/`](commands/)** — Claude Code slash commands: `core.md` (orchestrator), `analyze.md`, `report.md`, `ideas.md`, `ingest.md`, `transfer.md`.
+- **[`commands/`](commands/)** — Claude Code slash commands: `core.md` (orchestrator), `analyze.md`, `report.md`, `ideas.md`, `ingest.md`, `review.md`, `transfer.md`.
 - **[`skills/core/`](skills/core/)** — Bundled resources used by the commands:
   - `hooks/` — 5 automation hooks (health, post-action, activity-tracker, read-tracker, stop-check)
   - `scripts/` — Python scripts for initialization, validation, index generation, findings crystallization, knowledge bootstrap

@@ -92,7 +92,11 @@ def dir_to_manifest_name(dir_name: str) -> str:
 
 
 def create_manifests(target_dir: Path):
-    """Create descriptive manifest files in each top-level directory."""
+    """Create descriptive manifest files in each top-level directory.
+
+    Also drops a `_README_TEMPLATE.md` into algorithms/ and analysis/ so
+    new entries have a concrete starting point.
+    """
     manifest_dirs = ["algorithms", "analysis", "data", "reference_material"]
 
     for dir_name in manifest_dirs:
@@ -104,6 +108,18 @@ def create_manifests(target_dir: Path):
                 "<!-- Add entries below using the appropriate manifest entry template. -->\n"
             )
             print(f"  Created: {dir_name}/{manifest_filename}")
+
+    # Drop README templates so new analyses/algorithms have a concrete start
+    templates_dir = Path(__file__).resolve().parent.parent / "templates"
+    for src_name, target_subdir in (
+        ("algorithm-readme.md", "algorithms"),
+        ("analysis-readme.md", "analysis"),
+    ):
+        src = templates_dir / src_name
+        dst = target_dir / target_subdir / "_README_TEMPLATE.md"
+        if src.exists() and not dst.exists():
+            dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            print(f"  Created: {target_subdir}/_README_TEMPLATE.md")
 
 
 def create_todo_list(target_dir: Path):
@@ -128,12 +144,20 @@ def create_living_layer(target_dir: Path):
         "decisions.md": (
             "# Decision Log\n\n"
             "Append-only log of non-obvious decisions and their rationale.\n\n"
-            "<!-- Use the decision-log-entry template for new entries. -->\n"
+            "**Entry template:** copy from "
+            "`skills/core/templates/decision-log-entry.md` "
+            "(includes Context, Decision, Alternatives considered, Rationale, "
+            "Consequences, Tags fields).\n"
         ),
         "learnings.md": (
             "# Learnings\n\n"
             "Append-only log of gotchas, surprises, and insights.\n\n"
-            "<!-- Use the learning-entry template for new entries. -->\n"
+            "**Entry template:** copy from "
+            "`skills/core/templates/learning-entry.md` "
+            "(includes Category, What happened, Why it matters, Resolution, "
+            "Tags fields). The `**Tags**:` line is consumed by "
+            "`generate_index.py --summary-heuristic` to build the cluster "
+            "summary in INDEX.md — use them.\n"
         ),
         "conventions.md": (
             "# Repo-Specific Conventions\n\n"
@@ -324,8 +348,106 @@ def find_mycelium_hooks_dir() -> Path | None:
     return None
 
 
+MYCELIUM_HOOK_BASENAMES = {
+    "mycelium-health.sh",
+    "mycelium-post-action.sh",
+    "mycelium-stop-check.sh",
+    "mycelium-activity-tracker.sh",
+    "mycelium-read-tracker.sh",
+}
+
+
+def _consolidate_duplicate_hooks(
+    hooks: dict,
+    valid_replacement_for: dict[str, str] | None = None,
+) -> tuple[int, dict[str, str]]:
+    """Remove duplicate or stale mycelium-hook entries.
+
+    For each mycelium hook basename, group existing entries:
+    - Entries whose command path no longer exists on disk are "stale"
+    - Entries whose path exists are "live"
+
+    If a valid replacement path is supplied (in `valid_replacement_for`)
+    for a basename, stale entries for that basename are dropped — the
+    install pass will then register the fresh path. This handles repos
+    whose old install directory was moved or deleted.
+
+    Without a valid replacement (e.g. the script can't locate a hooks
+    dir at all, or the hook isn't shipped), stale entries are preserved
+    rather than risk making a bad situation worse during transient
+    filesystem hiccups (network drives, etc.).
+
+    Among live entries, pick canonical: prefer `/marketplaces/`, otherwise
+    longest path. Drop the rest.
+
+    Mutates `hooks` in place. Returns `(removed_count, kept_by_basename)`.
+    """
+    valid_replacement_for = valid_replacement_for or {}
+    removed = 0
+    kept_by_basename: dict[str, str] = {}
+
+    for entries in hooks.values():
+        for entry in entries:
+            basename_to_cmds: dict[str, list[str]] = {}
+            for h in entry.get("hooks", []):
+                cmd = h.get("command", "")
+                bn = Path(cmd).name
+                if bn in MYCELIUM_HOOK_BASENAMES:
+                    basename_to_cmds.setdefault(bn, []).append(cmd)
+
+            # Pick canonical for each basename
+            canonical: dict[str, str] = {}
+            droppable_stale: set[str] = set()
+            for bn, cmds in basename_to_cmds.items():
+                live = [c for c in cmds if Path(c).exists()]
+                stale = [c for c in cmds if not Path(c).exists()]
+
+                if live:
+                    marketplace = [c for c in live if "/marketplaces/" in c]
+                    if marketplace:
+                        canonical[bn] = sorted(marketplace)[0]
+                    else:
+                        canonical[bn] = sorted(live, key=lambda c: (-len(c), c))[0]
+                    kept_by_basename[bn] = canonical[bn]
+                    # All stale paths for this basename are droppable when at
+                    # least one live entry exists
+                    droppable_stale.update(stale)
+                elif bn in valid_replacement_for:
+                    # No live entries, but we have a known-good replacement.
+                    # Drop ALL stale entries; install pass will add the fresh one.
+                    droppable_stale.update(stale)
+                else:
+                    # No live entries and no replacement available — keep
+                    # everything to avoid making things worse on transient
+                    # filesystem issues. canonical stays unset, no drops.
+                    pass
+
+            # Apply: drop non-canonical entries (duplicates) and droppable stale
+            new_hook_list = []
+            for h in entry.get("hooks", []):
+                cmd = h.get("command", "")
+                bn = Path(cmd).name
+                if bn in canonical and cmd != canonical[bn]:
+                    removed += 1
+                    continue
+                if cmd in droppable_stale and bn not in canonical:
+                    removed += 1
+                    continue
+                new_hook_list.append(h)
+            entry["hooks"] = new_hook_list
+
+    return removed, kept_by_basename
+
+
 def install_claude_hooks(target_dir: Path):
     """Create or update .claude/settings.local.json with mycelium hooks.
+
+    Two-pass:
+    1. Consolidate any pre-existing duplicate entries (same script, different
+       paths — e.g. marketplace + dev-repo). Prefers marketplace path.
+    2. Install any of the 5 mycelium hooks that are missing entirely. Match
+       by script *basename* not full path so a re-run with a different
+       hooks-dir does not double-install.
 
     Handles the innermost-wins rule: subproject settings must include
     the complete hook set or parent hooks won't fire.
@@ -350,27 +472,45 @@ def install_claude_hooks(target_dir: Path):
 
     hooks = settings.setdefault("hooks", {})
 
-    # Define the four mycelium hooks with absolute paths
+    # --- Pass 1: consolidate duplicates and drop stale entries ---
+    # Build the replacement map: basename → known-good path on disk.
+    # The consolidation pass uses this to determine when it's safe to drop
+    # entries whose path no longer exists.
+    valid_replacement_for = {
+        bn: str(hooks_dir / bn)
+        for bn in MYCELIUM_HOOK_BASENAMES
+        if (hooks_dir / bn).exists()
+    }
+    removed, kept = _consolidate_duplicate_hooks(
+        hooks, valid_replacement_for=valid_replacement_for
+    )
+    if removed > 0:
+        print(f"  Consolidated: removed {removed} duplicate or stale hook entr"
+              f"{'y' if removed == 1 else 'ies'}")
+
+    # --- Pass 2: install missing hooks ---
+    # Use the path resolved from this script's location for any hook NOT
+    # already present (the consolidation pass picked existing paths).
     health_hook = str(hooks_dir / "mycelium-health.sh")
     post_action_hook = str(hooks_dir / "mycelium-post-action.sh")
     stop_hook = str(hooks_dir / "mycelium-stop-check.sh")
     activity_tracker_hook = str(hooks_dir / "mycelium-activity-tracker.sh")
+    read_tracker_hook = str(hooks_dir / "mycelium-read-tracker.sh")
 
     def _hook_entry(cmd: str) -> dict:
         return {"type": "command", "command": cmd}
 
-    def _has_hook(hook_list: list, cmd: str) -> bool:
-        """Check if a hook command is already registered."""
+    def _has_hook(hook_list: list, basename: str) -> bool:
+        """Check if any entry registers the named script (path-agnostic)."""
         return any(
-            h.get("command") == cmd
+            Path(h.get("command", "")).name == basename
             for entry in hook_list
             for h in entry.get("hooks", [])
         )
 
     # --- SessionStart: mycelium-health.sh ---
     session_start = hooks.setdefault("SessionStart", [])
-    if not _has_hook(session_start, health_hook):
-        # Find existing catch-all matcher entry or create one
+    if not _has_hook(session_start, "mycelium-health.sh"):
         catch_all = next((e for e in session_start if e.get("matcher", "") == ""), None)
         if catch_all is None:
             catch_all = {"matcher": "", "hooks": []}
@@ -380,8 +520,7 @@ def install_claude_hooks(target_dir: Path):
 
     # --- PostToolUse: mycelium-post-action.sh (matcher: Bash) ---
     post_tool = hooks.setdefault("PostToolUse", [])
-    if not _has_hook(post_tool, post_action_hook):
-        # Find existing Bash matcher entry or create one
+    if not _has_hook(post_tool, "mycelium-post-action.sh"):
         bash_entry = next((e for e in post_tool if e.get("matcher") == "Bash"), None)
         if bash_entry is None:
             bash_entry = {"matcher": "Bash", "hooks": []}
@@ -390,8 +529,7 @@ def install_claude_hooks(target_dir: Path):
         print("  Registered: PostToolUse (Bash) → mycelium-post-action.sh")
 
     # --- PostToolUse: mycelium-activity-tracker.sh (matcher: Edit|Write) ---
-    if not _has_hook(post_tool, activity_tracker_hook):
-        # Find existing Edit|Write matcher entry or create one
+    if not _has_hook(post_tool, "mycelium-activity-tracker.sh"):
         edit_write_entry = next(
             (e for e in post_tool if e.get("matcher") == "Edit|Write"), None
         )
@@ -401,9 +539,20 @@ def install_claude_hooks(target_dir: Path):
         edit_write_entry["hooks"].append(_hook_entry(activity_tracker_hook))
         print("  Registered: PostToolUse (Edit|Write) → mycelium-activity-tracker.sh")
 
+    # --- PostToolUse: mycelium-read-tracker.sh (matcher: Read) ---
+    # Logs each .living/ file read to .claude/mycelium-read-access.log so we
+    # can measure access rates over time. Silent — no agent-facing context.
+    if not _has_hook(post_tool, "mycelium-read-tracker.sh"):
+        read_entry = next((e for e in post_tool if e.get("matcher") == "Read"), None)
+        if read_entry is None:
+            read_entry = {"matcher": "Read", "hooks": []}
+            post_tool.append(read_entry)
+        read_entry["hooks"].append(_hook_entry(read_tracker_hook))
+        print("  Registered: PostToolUse (Read) → mycelium-read-tracker.sh")
+
     # --- Stop: mycelium-stop-check.sh ---
     stop = hooks.setdefault("Stop", [])
-    if not _has_hook(stop, stop_hook):
+    if not _has_hook(stop, "mycelium-stop-check.sh"):
         catch_all = next((e for e in stop if e.get("matcher", "") == ""), None)
         if catch_all is None:
             catch_all = {"matcher": "", "hooks": []}

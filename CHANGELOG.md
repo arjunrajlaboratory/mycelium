@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`report-generator` convention pack (0.2.0 → 0.3.0): worked-example provenance, audience tiers, narrative-vs-structured Results, and shape-budget check.** Surfaced from comparing the v0.2.0 baseline output against the legacy report on a real A191 analysis. Six follow-ups: (1) Phase 1 manifest gains a `worked_examples[]` section with row-level provenance so Phase 6 can catch confabulated worked-example values (the failure mode the v0.2.0 worked-example gate could not detect — presence was enforced, contents were not); (2) Phase 0 gains an audience-tier ladder (A lay / B adjacent-field default / C in-field PI), recorded in `manifest.policies.acronym_*` and `intuition_leadin_default_form`, which the Phase 4 plain-English lint reads to modulate strictness; (3) Phase 0 gains a Results-structure question (narrative default vs structured Q/F/I headers), recorded in `manifest.policies.results_structure`; (4) Phase 5 framing critique gains an explicit subsection-title-states-finding test (topic-only Results titles get flagged); (5) Phase 6 numerical re-verify gains a Provenance-section completeness check that lists analysis scripts and flags any missing from the report's Provenance; (6) Phase 7 records main-text page count and flags shape-budget overruns (overview > 6 pages; overview+supplement > 14 pages; comprehensive < 5 pages) in `.compile-log.md`. Manifest example extended with `policies`, `worked_examples`, and a failure-mode worked example for the supplement.
+
+- **`report-generator` convention pack (0.1.0 → 0.2.0): phase-based agentic redesign.** The old 5-step procedural flow (gather context → copy template → fill sections → compile → verify) is replaced by a 9-phase flow that orchestrates the work and pushes most of the review burden onto three blind sub-agents. The user is in the loop only at Phase 0 (planning brief — headline question, baseline of comparison, primary metric, audience, standalone-vs-addendum, report shape) and optionally Phase 8 (headline preview). Internal phases: 0.5 memory consultation (reads `.living/` and emits a names+concepts cheatsheet); 0.75 section outline + main/supplement designation; 1 source-of-truth manifest (every number and coined term registered with provenance); 2 draft (sources values from the manifest, terms from the glossary); 3 worked-example gate (one healthy example per new aggregation analysis type in main text; failure-mode examples in supplement); 4–6 blind sub-agent reviewers for plain-English/glossary lint, framing critique, and numerical re-verify with provenance/style split (mirroring `mycelium:review`'s synthesis structure); 7 recompile with PDF sha + reviewer verdicts in `.compile-log.md`. Three template variants: `report-template-overview.tex`, `report-template-comprehensive.tex`, `report-template-overview-supplement.tex` (default). Sub-agent prompts live in `references/phase-prompts.md`; cross-cutting craft (acronym discipline, intuitive-before-technical, worked-examples, denominator discipline, overloaded-name guard) lives in `references/section-guide.md`; QC checklist restructured into provenance/style sections.
+
+### Fixed
+
+- **Migrator no longer creates duplicate hook entries** when the same script is already registered at a different path (e.g. marketplace install vs. dev-repo checkout). `install_claude_hooks` in `init_repo.py` now matches existing hooks by script *basename* (`mycelium-health.sh`, etc.), not full command path. A new pre-pass also consolidates pre-existing duplicates, preferring the marketplace path. The pre-pass also detects entries whose command path no longer exists on disk (stale install dirs) and replaces them with a fresh path — but only when a known-good replacement is available, so transient filesystem hiccups don't make a bad situation worse. Run the migrator on a previously-migrated repo to clean up. New `_consolidate_duplicate_hooks` helper + 10 unit tests.
+
+### Added
+
+- **Heuristic INDEX.md summary** (`generate_index.py --summary-heuristic`): Tag-aware clustering that produces a `<!-- BEGIN KNOWLEDGE SUMMARY -->` block in <1s without LLM calls. Three subsections — tag clusters (≥2 entries), 10 most-recent entries, and a tag → entry-ID inverted index. Closes the gap that left every existing `INDEX.md` sentinel-less and the SessionStart injection path silently dead.
+- **`recall_lessons.py`** — query `.living/learnings.md` and `decisions.md` by tag, ID, or date. Cheap progressive-disclosure tool: fetches matching entries instead of pulling whole files into context. Supports ANY-match within `--tag` and `--id`, AND across filter types.
+- **`migrate_existing_repos.py`** — idempotent backfill for repos started on earlier mycelium versions. Re-anchors CLAUDE.md on `.living/INDEX.md`, tops up missing hooks (especially read-tracker), regenerates the heuristic SUMMARY block, and appends the Global Knowledge Domains routing table to MEMORY.md. Supports `--repo`, `--scan`, `--dry-run`.
+- **CLAUDE.md.template re-anchor**: New repos point at `.living/INDEX.md` as the *first* knowledge entry point and explicitly mention `recall_lessons.py` for targeted lookup. Old "read learnings.md / decisions.md directly" pattern is dropped.
+- **MEMORY.md routing table append in `init_knowledge.py`**: SKILL.md previously claimed this happened, but the script had no MEMORY.md code. Now actually appends the table to `~/.claude/projects/*/memory/MEMORY.md` (idempotent — checks for `## Global Knowledge Domains` header). New `--memory-only` flag for the migrator.
+- **`recall` and `migrate` modes documented in SKILL.md**, plus a "How to verify" section listing the seven commands an agent can run to confirm the system is wired correctly.
+
+### Fixed
+
+- **`mycelium-read-tracker.sh` is now installed by default** in `init_repo.py`'s 5-hook bundle. Previously the hook shipped but had to be installed manually per project — meaning `.living/` access metrics required ad-hoc setup. The bundle now is: SessionStart→health, PostToolUse(Bash)→post-action, PostToolUse(Edit\|Write)→activity-tracker, PostToolUse(Read)→read-tracker (new default), Stop→stop-check.
+- **SessionStart hook calls `--summary-heuristic` by default**, with fallback to `--counts-only` if the local copy of `generate_index.py` predates the new flag. Previously the hook only called `--counts-only`, which never produces a SUMMARY block — leaving the injection path at line ~376 of `mycelium-health.sh` permanently dead for every project on the machine.
+
+### Changed
+
+- **SKILL.md honest about dormant modes**: `transfer` (requires meta-project layout), `contribute` (requires prior `crystallize`), and `file-issue` (manual workflow only) now carry "Dormant by design" callouts explaining what triggers them and what does not. Prevents agents from inferring they fire automatically.
+
+### Wired (previously orphan templates)
+
+- `algorithm-readme.md` and `analysis-readme.md` are now copied as `_README_TEMPLATE.md` into `algorithms/` and `analysis/` at init.
+- `decision-log-entry.md` and `learning-entry.md` are now cited by name in the `.living/decisions.md` and `.living/learnings.md` stub content. The learnings stub also notes that `**Tags**:` annotations feed `--summary-heuristic`.
+- `marimo-notebook-header.py` is now referenced in the CLAUDE.md.template Workflow section.
+
 ## [0.5.0] - 2026-04-11
 
 ### Added
