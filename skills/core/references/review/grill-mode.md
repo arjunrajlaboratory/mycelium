@@ -222,3 +222,14 @@ asked for that with the default invocation. Grill is intentionally
 narrower: depth-first on judgment calls, not breadth-first on the
 checklist. If you're tempted to "also run the default agents," ask
 the user — it's their time budget.
+
+## Grill ≠ tripwires
+
+Grill and tripwires are complementary but distinct. Grill asks the
+*analyst* what should happen at each decision point ("what would
+happen if a sample were missing from metadata?"). Tripwires
+(`deep-tripwires.md`, offered after the default review) ask the
+*pipeline* what actually happens ("here's what the pipeline does
+when I delete a metadata row"). When a grill answer is "I think it
+would fail loudly" and you're not sure, that's a natural moment to
+suggest the matching fault-injection tripwire as a follow-up.

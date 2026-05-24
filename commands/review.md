@@ -22,10 +22,16 @@ description: >
   forking-paths, sycophancy-driven parameter drift, hallucinated APIs,
   definition drift, smuggled default parameters, undocumented implicit
   behavior, pseudoreplication, reference-genome mismatch) that general code
-  review will not catch. The skill also has a `grill` mode that interviews
-  the user conversationally about every consequential analytical decision
-  (estimand, sample-filtering thresholds, multiple-comparison correction,
-  train/test split, normalization, reference choice) one question at a time.
+  review will not catch. After the static report is rendered the skill
+  offers an optional `tripwires` follow-up — behavioral checks
+  (fault-injection, metamorphic, and known-answer tests) that perturb
+  inputs and verify named scientific boundaries (missing data, sample
+  misalignment, label leakage, contrast direction) actually break the
+  pipeline rather than being silently absorbed. The skill also has a
+  `grill` mode that interviews the user conversationally about every
+  consequential analytical decision (estimand, sample-filtering thresholds,
+  multiple-comparison correction, train/test split, normalization,
+  reference choice) one question at a time.
   Do NOT trigger for: writing NEW analysis code (/mycelium:analyze),
   generating reports or paper sections (/mycelium:report), open-ended
   brainstorming (/mycelium:ideas), repo initialization (/mycelium:core init),
@@ -35,12 +41,21 @@ description: >
 # Mycelium — Review
 
 Review code, analysis, or documentation changes for the kinds of mistakes that
-matter in scientific data work. Two modes:
+matter in scientific data work. Two modes plus one opt-in follow-up:
 
 - **Default**: dispatch six specialized sub-agents in parallel, then synthesize
   a single prioritized report.
 - **`grill`**: walk the user through every consequential analytical decision
   conversationally, one question at a time.
+- **Tripwires (opt-in, offered after default)**: perturb inputs and verify
+  the pipeline actually fails at named scientific boundaries. Three
+  categories — fault-injection, metamorphic, and known-answer tests.
+  Three modes — **audit** (default: write a behavioral spec describing
+  which tripwires would apply, no code runs), **scaffold** (propose
+  project-specific patches that add the instrumentation hooks),
+  **run** (execute against existing instrumentation). Scaffold and
+  run are agent-improvised per analysis rather than template-stamped.
+  See `skills/core/references/review/deep-tripwires.md`.
 
 The point of progressive disclosure is that the main skill stays under your
 context budget and only loads the per-domain checklists into the sub-agents
@@ -244,7 +259,71 @@ Print the path of the written file at the end. The chat reply should
 surface the count of Major findings per category and the "Key decisions"
 list so the user sees the shape of the report without opening the file.
 
-### Step 5 — Post-action hook
+### Step 5 — Offer tripwires (opt-in behavioral follow-up)
+
+Read `skills/core/references/review/deep-tripwires.md` and follow it.
+The short form (two terms before the steps: an **audit** is the
+*default artifact* — a written document that walks the analysis, names
+each tripwire that would apply, names the perturbation and expected
+outcome, links each to a static finding, and surfaces what's missing
+if you wanted to execute. No code runs. **Instrumentation** is the
+four observability hooks the pipeline needs for tripwires to actually
+execute: checkpoint emission, `--stop-after`, `analysis_labels.yml`,
+and a drop ledger. Definitions and the full mode table are in
+`deep-tripwires.md` "Three operating modes"):
+
+1. Scan the static findings for `suggested_tripwire` tags emitted by
+   the sub-agents (see the output contract in `review/README.md`).
+2. Detect whether the repo has any of the four instrumentation hooks
+   (checkpoint logging anywhere in the analysis scripts, a
+   `--stop-after` / `STOP_AFTER_CHECKPOINT` mechanism, an
+   `analysis_labels.yml` or equivalent at the analysis root, a drop
+   ledger of any name/shape, an existing tripwire runner under
+   `tools/`). Names and formats are illustrative — accept what the
+   project uses. This picks the default mode: `audit` if zero or
+   only some hooks are present, `scaffold` if the user asks to add
+   them, `run` if all four are present.
+3. Use `AskUserQuestion` to offer a menu. **Lead every user-facing
+   surface with plain English; keep internal IDs in parentheses or
+   in artifacts.** See `deep-tripwires.md` "Talking to the user" for
+   the gloss table. Examples of well-phrased options: "Describe what
+   we'd test (no code runs)" rather than "audit mode"; "Propose
+   project-specific patches that would let us actually run the
+   tests" rather than "scaffold mode". Always include "skip" and the
+   audit option. Include "scaffold" if the hooks are partial or
+   absent. Include "run selected tripwires" if all four hooks are
+   present. The list of named tripwires on the menu is shaped by
+   which `suggested_tripwire` tags appeared in the static findings,
+   plus the starter four (missing counts, missing metadata sample,
+   label permutation, toy contrast direction) which are always
+   available. When naming individual tripwires in the menu, use the
+   plain-English glosses ("the report-numbers-still-match check")
+   not the internal IDs.
+4. Execute the chosen mode per `deep-tripwires.md`. Scaffold-mode
+   and run-mode are **agent-improvised per analysis** — the skill
+   ships principles + examples, and the agent reads the project's
+   language / layout / existing helpers and adapts. Do not stamp
+   templates blindly; if the project already has a logging or
+   filter helper, build on it. Output paths:
+   - audit → `.living/outputs/reviews/YYYY-MM-DD-<scope-slug>-tripwires.md`
+   - scaffold → `…-tripwires-scaffold.md` (proposal, not auto-applied)
+   - run → `…-tripwires-run.md` (pass/fail per tripwire)
+
+Print the written path(s) at the end.
+
+**Reporting rule (applies to every mode).** When summarizing the
+result back to the user in chat, lead with one English sentence
+("Three places in your docs cite p-values that don't match the
+source CSV"), then show the table / artifact as evidence. Don't
+open with `Instrumentation detected: 0/4` or raw checkmark/X
+output. The user wants to know what failed and why before they
+need the test IDs.
+
+Skip Step 5 entirely if the diff is a pure refactor with no data-flow
+change, documentation-only, or if the user invoked the skill with a
+flag asking to suppress tripwires (e.g., `/mycelium:review --no-tripwires`).
+
+### Step 6 — Post-action hook
 
 Treat a review as a significant action: log a short entry to
 `.living/learnings.md` if the review surfaced a recurring pattern (e.g., "the
@@ -298,6 +377,8 @@ believe about each choice without exhausting them. If at any point they say
 - `skills/core/references/review/synthesis.md` — synthesis & severity
   calibration
 - `skills/core/references/review/grill-mode.md` — grill protocol detail
+- `skills/core/references/review/deep-tripwires.md` — behavioral
+  follow-up (Step 5)
 - Per-agent checklists under `skills/core/references/review/` (six files;
   loaded by sub-agents, not by you)
 - The mycelium core `Post-Action Hook Protocol` from `commands/core.md`
