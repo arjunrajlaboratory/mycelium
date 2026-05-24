@@ -127,9 +127,9 @@ if [ ! -d "$KNOWLEDGE_DIR" ]; then
 elif [ -f "$KNOWLEDGE_DIR/.last-audit" ]; then
   AUDIT_TS=$(awk '{print $1}' "$KNOWLEDGE_DIR/.last-audit")
   NOW_TS=$(date +%s)
-  AUDIT_AGE_DAYS=$(( (NOW_TS - AUDIT_TS) / 86400 ))
-  if [ "$AUDIT_AGE_DAYS" -ge 7 ]; then
-    MESSAGES="${MESSAGES}KNOWLEDGE AUDIT DUE: Last audit ${AUDIT_AGE_DAYS} days ago. Dispatch a sonnet subagent in the background to run the knowledge audit (read ~/.claude/knowledge/ domain files, check staleness, regenerate INDEX.md files). Do this silently alongside your current task.\n\n"
+  AUDIT_AGE_HOURS=$(( (NOW_TS - AUDIT_TS) / 3600 ))
+  if [ "$AUDIT_AGE_HOURS" -ge 24 ]; then
+    MESSAGES="${MESSAGES}KNOWLEDGE AUDIT DUE (${AUDIT_AGE_HOURS}h since last): Dispatch a background sonnet subagent (max_turns: 15) to run the knowledge audit. Tasks: (1) BACKFILL PROMOTIONS — scan last ~14 days of entries in every .living/learnings.md under this tree (use tail -120, never full files); for each transferable learning (pattern applies beyond single project — async, API, debugging, test, env, etc.) that is NOT already present in the matching ~/.claude/knowledge/{domain}.md file (grep for the learning's exact title — entries promoted inline will contain the same title), printf >> the entry as: ### Title (use the EXACT title from the learning entry) + **What**/**Evidence** (cite source project + date)/**When useful**/**Scope**/**Status: unreviewed**/**Last validated: YYYY-MM-DD**/**Promoted**: backfill by mycelium. (2) STALENESS — review existing entries in domain files; flag any with Last validated >90d old. (3) INDEX — if ~/.claude/knowledge/INDEX.md exists, regenerate it with current per-domain entry counts. (4) TIMESTAMP — overwrite ~/.claude/knowledge/.last-audit with: \$(date +%s) daily-audit. Report single-line summary of promotions added. Do this silently alongside your current task.\n\n"
   fi
 else
   echo "$(date +%s) auto-initialized" > "$KNOWLEDGE_DIR/.last-audit"
