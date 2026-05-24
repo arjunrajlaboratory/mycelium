@@ -176,26 +176,38 @@ def _caller_frame() -> inspect.FrameInfo:
 
 
 def _infer_namespace(call_site_filename: str) -> str | None:
-    """Return the directory segment that follows the first ``analysis`` part."""
+    """Return the directory segment that follows the *nearest* ``analysis`` part.
+
+    "Nearest" = closest to the caller's file along the path. Walking
+    right-to-left handles nested layouts like
+    ``/repo/analysis/outer/.../analysis/inner/scripts/run.py`` correctly:
+    the caller belongs to ``inner``, not ``outer``.
+    """
     try:
         parts = Path(call_site_filename).resolve().parts
     except (OSError, ValueError):
         return None
-    for i, part in enumerate(parts):
-        if part == "analysis" and i + 1 < len(parts):
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i] == "analysis":
             return parts[i + 1]
     return None
 
 
 def _find_analysis_root(call_site_filename: str, ns: str) -> Path | None:
-    """Locate the ``analysis/<ns>/`` directory for the given namespace."""
+    """Locate the ``analysis/<ns>/`` directory for the given namespace.
+
+    Prefers the *nearest* match along the caller's resolved path (right-to-
+    left) so nested ``analysis/.../analysis/`` layouts resolve to the deeper
+    namespace. Falls back to ancestor search only if no in-path match exists
+    (typical when ``namespace=`` is overridden to a sibling analysis).
+    """
     try:
         resolved = Path(call_site_filename).resolve()
     except (OSError, ValueError):
         return None
     parts = resolved.parts
-    for i, part in enumerate(parts):
-        if part == "analysis" and i + 1 < len(parts) and parts[i + 1] == ns:
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i] == "analysis" and parts[i + 1] == ns:
             return Path(*parts[: i + 2])
     here = resolved.parent
     for ancestor in [here, *here.parents]:

@@ -217,6 +217,35 @@ def test_rejects_unsupported_type(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_nested_analysis_segments_uses_nearest(tmp_path: Path) -> None:
+    """Regression: a project laid out as
+    ``analysis/outer/.../analysis/inner/scripts/probe.py`` must resolve to
+    ``inner``, not ``outer``. The earlier left-to-right walk silently
+    mis-routed the fragment to the wrong namespace."""
+    script_dir = tmp_path / "analysis" / "outer" / "subdir" / "analysis" / "inner" / "scripts"
+    script_dir.mkdir(parents=True)
+    script = script_dir / "probe.py"
+    prefix = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(HELPER_PATH.parent)!r})\n"
+        "from register_value import register_value\n"
+        "\n"
+    )
+    script.write_text(prefix + 'register_value("n_samples", 48)\n', encoding="utf-8")
+    assert _run(script).returncode == 0
+    inner_fragment = (
+        tmp_path
+        / "analysis" / "outer" / "subdir" / "analysis" / "inner"
+        / "outputs" / "numbers.json"
+    )
+    assert inner_fragment.exists(), "fragment should land under the inner analysis"
+    data = json.loads(inner_fragment.read_text())
+    assert data["namespace"] == "inner"
+    assert data["values"][0]["value"] == 48
+    outer_fragment = tmp_path / "analysis" / "outer" / "outputs" / "numbers.json"
+    assert not outer_fragment.exists(), "fragment must not land under the outer namespace"
+
+
 def test_mixed_namespace_in_file_rejected(tmp_path: Path) -> None:
     """If outputs/numbers.json exists with a different namespace, refuse."""
     outputs = tmp_path / "analysis" / "diff-expr" / "outputs"

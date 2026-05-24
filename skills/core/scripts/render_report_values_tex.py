@@ -68,26 +68,26 @@ def id_to_macro_name(manifest_id: str) -> str:
 # LaTeX escaping for text values
 # ---------------------------------------------------------------------------
 
-# Order matters: backslash first, then the others.
-_TEX_ESCAPES = [
-    ("\\", "\\textbackslash{}"),
-    ("&", "\\&"),
-    ("%", "\\%"),
-    ("$", "\\$"),
-    ("#", "\\#"),
-    ("_", "\\_"),
-    ("{", "\\{"),
-    ("}", "\\}"),
-    ("~", "\\textasciitilde{}"),
-    ("^", "\\textasciicircum{}"),
-]
+# Single-pass character table — avoids the classic re-escape bug where
+# ``\\`` → ``\\textbackslash{}`` would then have its inserted ``{``/``}``
+# re-processed by later rules. Each character is mapped once.
+_TEX_ESCAPE_TABLE = {
+    "\\": "\\textbackslash{}",
+    "&": "\\&",
+    "%": "\\%",
+    "$": "\\$",
+    "#": "\\#",
+    "_": "\\_",
+    "{": "\\{",
+    "}": "\\}",
+    "~": "\\textasciitilde{}",
+    "^": "\\textasciicircum{}",
+}
 
 
 def tex_escape(s: str) -> str:
     """Escape a plain-text string for safe inclusion as a LaTeX macro body."""
-    for raw, replacement in _TEX_ESCAPES:
-        s = s.replace(raw, replacement)
-    return s
+    return "".join(_TEX_ESCAPE_TABLE.get(c, c) for c in s)
 
 
 # ---------------------------------------------------------------------------

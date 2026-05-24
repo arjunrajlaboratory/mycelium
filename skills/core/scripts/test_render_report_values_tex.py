@@ -59,6 +59,31 @@ def test_render_escapes_text() -> None:
     assert "\\newcommand{\\LabelWithUnderscore}{foo\\_bar}" in out
 
 
+def test_render_escapes_backslash_without_re_escaping_braces() -> None:
+    """Regression: the earlier sequential replace loop produced
+    ``\\textbackslash\\{\\}`` for an input ``\\`` because the ``{`` /
+    ``}`` rules later re-processed the just-inserted braces."""
+    out = rrv.render({"numbers": [{"id": "regex_pattern", "value": r"a\b"}]})
+    assert "\\newcommand{\\RegexPattern}{a\\textbackslash{}b}" in out
+    # The bad output we are guarding against.
+    assert "\\textbackslash\\{\\}" not in out
+
+
+def test_render_escapes_all_specials_in_one_pass() -> None:
+    """Every special character appears exactly once-escaped, no double-escapes."""
+    out = rrv.render(
+        {"numbers": [{"id": "cohort_name", "value": r"A&B \% 100 ^ ~ _ # $ { }"}]}
+    )
+    # Locate the rendered macro line.
+    macro_line = [ln for ln in out.splitlines() if "CohortName" in ln][0]
+    # Backslash escape leaves the brace group intact.
+    assert "\\textbackslash{}" in macro_line
+    assert "\\textasciitilde{}" in macro_line
+    assert "\\textasciicircum{}" in macro_line
+    # No double-escaping artefact.
+    assert "\\textbackslash\\{\\}" not in macro_line
+
+
 def test_render_collision_raises() -> None:
     manifest = {
         "numbers": [
