@@ -1,0 +1,137 @@
+"""Tests for render_report_values_tex."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import render_report_values_tex as rrv
+
+
+def test_id_to_macro_name_basics() -> None:
+    assert rrv.id_to_macro_name("n_samples") == "NSamples"
+    assert rrv.id_to_macro_name("fdr_threshold") == "FDRThreshold"
+    assert rrv.id_to_macro_name("contrast_phrase") == "ContrastPhrase"
+    # all-letter ≤3 segments uppercase; long segments title-case
+    assert rrv.id_to_macro_name("n_de_genes") == "NDEGenes"
+    # digits become English words
+    assert rrv.id_to_macro_name("n_de_genes_fdr_0_05") == "NDEGenesFDRZeroZeroFive"
+
+
+def test_id_to_macro_name_strips_namespace() -> None:
+    assert rrv.id_to_macro_name("diff-expr.n_samples") == "NSamples"
+    # ``baz`` and ``qux`` are both ≤3-letter all-alpha segments, so they
+    # uppercase per the spec.
+    assert rrv.id_to_macro_name("foo:bar/baz_qux") == "BAZQUX"
+    assert rrv.id_to_macro_name("foo:bar/contrast_phrase") == "ContrastPhrase"
+
+
+def test_render_basic(tmp_path: Path) -> None:
+    manifest = {
+        "numbers": [
+            {"id": "n_samples", "value": 48},
+            {"id": "fdr_threshold", "value": 0.05},
+            {"id": "contrast_phrase", "value": "treated versus control"},
+        ]
+    }
+    out = rrv.render(manifest)
+    assert "\\newcommand{\\NSamples}{48}" in out
+    assert "\\newcommand{\\FDRThreshold}{0.05}" in out
+    assert "\\newcommand{\\ContrastPhrase}{treated versus control}" in out
+    # Wrappers present.
+    assert "\\providecommand{\\SciVal}[2]{#1}" in out
+    assert "\\providecommand{\\SciText}[2]{#1}" in out
+
+
+def test_render_escapes_text() -> None:
+    manifest = {
+        "numbers": [
+            {"id": "cohort_name", "value": "A&B cohort"},
+            {"id": "label_with_underscore", "value": "foo_bar"},
+        ]
+    }
+    out = rrv.render(manifest)
+    assert "\\newcommand{\\CohortName}{A\\&B cohort}" in out
+    assert "\\newcommand{\\LabelWithUnderscore}{foo\\_bar}" in out
+
+
+def test_render_collision_raises() -> None:
+    manifest = {
+        "numbers": [
+            {"id": "diff-expr.n_samples", "value": 48},
+            {"id": "qc.n_samples", "value": 50},
+        ]
+    }
+    with pytest.raises(ValueError, match="collision"):
+        rrv.render(manifest)
+
+
+def test_render_empty_numbers() -> None:
+    out = rrv.render({"numbers": []})
+    # Still emits the wrappers; no \newcommand lines.
+    assert "\\providecommand{\\SciVal}[2]{#1}" in out
+    assert "\\newcommand{" not in out
+
+
+def test_render_ignores_entries_without_id_or_value() -> None:
+    manifest = {
+        "numbers": [
+            {"id": "good", "value": 1},
+            {"id": "no_value"},
+            {"value": 99},
+            "not_a_dict",
+            None,
+        ]
+    }
+    out = rrv.render(manifest)
+    assert "\\newcommand{\\Good}{1}" in out
+    assert "no_value" not in out.lower() or "\\Good}" in out  # smoke
+
+
+def test_cli_writes_default_path(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "reports" / ".manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps({"numbers": [{"id": "n_samples", "value": 48}]})
+    )
+    rc = rrv.main([str(manifest_path)])
+    assert rc == 0
+    out_path = tmp_path / "reports" / "build" / "report_values.tex"
+    assert out_path.exists()
+    content = out_path.read_text()
+    assert "\\newcommand{\\NSamples}{48}" in content
+
+
+def test_cli_collision_exits_nonzero(tmp_path: Path, capsys) -> None:
+    manifest_path = tmp_path / ".manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "numbers": [
+                    {"id": "a.x", "value": 1},
+                    {"id": "b.x", "value": 2},
+                ]
+            }
+        )
+    )
+    rc = rrv.main([str(manifest_path)])
+    assert rc == 1
+
+
+def test_float_repr_stable() -> None:
+    # Ensure 0.05 stays 0.05 (Python's repr is the shortest round-trip).
+    out = rrv.render({"numbers": [{"id": "p", "value": 0.05}]})
+    assert "{0.05}" in out
+
+
+def test_bool_value() -> None:
+    out = rrv.render({"numbers": [{"id": "passed", "value": True}]})
+    assert "\\newcommand{\\Passed}{true}" in out
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

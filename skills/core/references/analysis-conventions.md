@@ -62,8 +62,17 @@ Place all outputs in the `outputs/` subdirectory:
 - **Figures**: Use descriptive names, e.g., `volcano_plot_treatment_vs_control.pdf`
 - **Tables**: CSV or TSV format with headers, e.g., `significant_genes_fdr05.csv`
 - **Intermediate results**: Prefix with step number, e.g., `01_filtered_counts.parquet`
+- **Reportable values**: `outputs/numbers.json` is written automatically by `register_value` (see `report-values-guide.md`). Do not edit by hand.
 
 Prefer vector formats (PDF, SVG) for figures. Use PNG only when vector is impractical (e.g., heatmaps with many elements).
+
+## Reportable Values
+
+Any number or short phrase a future report would quote — sample counts, applied thresholds, contrast phrases, headline metrics — should be captured at the site that computes it using the `register_value` helper at `skills/core/scripts/register_value.py`. The helper writes `outputs/numbers.json`; the `report-generator` convention's Phase 1 merges that fragment into the report manifest, and `scitexlintr` catches drift between the manifest and the `.tex` source.
+
+Full guide: `report-values-guide.md`.
+
+Short rule: if a number would force you to edit the report when the data changes, `register_value` it.
 
 ## Analysis Lifecycle
 

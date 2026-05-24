@@ -33,6 +33,12 @@
     urlcolor=blue
 }
 
+% --- Generated reportable values (see report-values-guide.md / scitexlintr) ---
+\IfFileExists{build/report_values.tex}{\input{build/report_values.tex}}{%
+  \providecommand{\SciVal}[2]{#1}%
+  \providecommand{\SciText}[2]{#1}%
+}
+
 % --- Metadata ---
 \title{%%TITLE%%}
 \author{%%AUTHOR%%}
