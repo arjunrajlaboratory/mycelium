@@ -284,6 +284,12 @@ the analysis process itself, sub-agents that struggled.>
 5. **Fix** is one sentence. If the fix is multi-step, name the
    approach in one sentence and link to a per-agent reference for
    detail.
+6. **Behavioral check** (optional): if the sub-agent attached a
+   `suggested_tripwire` tag to the finding, render a one-line
+   `**Behavioral check:**` pointer naming the tripwire, e.g.
+   `**Behavioral check:** `missing-counts-file` fault-injection
+   tripwire (see Step 5)`. Step 5 of the parent skill collects these
+   tags to compose the tripwire offer menu.
 
 If a finding *cannot* point to specific source lines (e.g., "no random
 seed anywhere"), still pick the most representative location and show
