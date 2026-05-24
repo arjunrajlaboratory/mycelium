@@ -725,6 +725,20 @@ What we learned the first time this ran end-to-end on a real project:
   review couldn't have known about, precisely because behavioral
   checks evaluate state-as-of-now rather than state-as-of-commit.
 
+- **Fingerprint-algorithm consistency in registries is load-bearing.**
+  When a scaffold-mode patch proposes a freshness registry that
+  stores algorithm-prefixed hashes (e.g., `sha256:abc...`), the
+  algorithm used to *recompute* the hash at check time must match
+  the algorithm used to *write* it. A helper that falls back from
+  `sha256` to `md5` when the primary library is missing produces
+  `md5:*` strings that will never equal the stored `sha256:*`
+  strings — every provenance check then reports STALE even when
+  the files haven't changed. Either (a) make the primary algorithm
+  a hard dependency and refuse to run without it, or (b) persist
+  the algorithm name alongside the hash so the checker can compare
+  apples to apples. Worth spelling out in any scaffold-mode patch
+  that proposes a freshness registry.
+
 - **Token tightening matters in user-prose checkers.** First version
   of a freshness checker on one project matched a short tag as a
   substring of a longer tag that contained it, and cross-attributed
