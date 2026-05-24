@@ -1,0 +1,268 @@
+{
+  "_description": "Worked example of a Phase-1 source-of-truth manifest. Drawn from a small SNP-tree-flavoured differential-expression-with-clone-recovery analysis. Every numeric token that appears in the corresponding report draft has an entry here; every coined term that the report uses has a plain-English rendering; every worked-example table cell has row-level provenance. Phase 6 (blind numerical re-verify) cross-checks the draft against this file.",
+  "_schema_version": "0.3.0",
+
+  "policies": {
+    "audience_tier": "B",
+    "audience_description": "Lab PI plus one external wet-lab collaborator with no statistical-genetics background",
+    "acronym_budget_per_page": 4,
+    "acronym_strictness": "moderate",
+    "intuition_leadin_default_form": "sentence",
+    "results_structure": "narrative",
+    "shape": "overview-supplement"
+  },
+
+  "report_metadata": {
+    "title": "Clone-aware differential expression in A191 Barrett's esophagus scRNA-seq",
+    "analyst": "A. Raj",
+    "analysis_period": "2026-04-12 to 2026-05-18",
+    "git_commit": "e61cb3501fd13d4f3b3a9c6c1e4ba7c8e0a4d3b2",
+    "report_shape": "overview-supplement",
+    "baseline_of_comparison": "Laura Bagamery's production pipeline (v3.2), as reported in 2026-Q1 internal handoff",
+    "primary_metric": "exact accuracy on the held-out 27-SNP validation panel",
+    "audience": "Lab PI plus one external wet-lab collaborator with no statistical-genetics background",
+    "standalone_or_addendum": "standalone"
+  },
+
+  "numbers": [
+    {
+      "id": "exact_accuracy_test",
+      "value": 0.280,
+      "label_canonical": "exact accuracy",
+      "label_aliases_forbidden": ["accuracy", "support-weighted F1", "weighted F1", "F1w2"],
+      "provenance": "outputs/tables/test_metrics.csv:row=overall,col=exact_accuracy",
+      "computed_at": "scripts/03_evaluate.R:L142",
+      "uncertainty": {"ci_low": 0.241, "ci_high": 0.322, "method": "bootstrap n=1000, seed=42"},
+      "appears_in_sections": ["abstract", "results.headline", "conclusions"]
+    },
+    {
+      "id": "weighted_f1_test",
+      "value": 0.482,
+      "label_canonical": "support-weighted F1",
+      "label_aliases_forbidden": ["accuracy", "exact accuracy"],
+      "provenance": "outputs/tables/test_metrics.csv:row=overall,col=f1w2",
+      "computed_at": "scripts/03_evaluate.R:L148",
+      "uncertainty": {"ci_low": 0.451, "ci_high": 0.513, "method": "bootstrap n=1000, seed=42"},
+      "appears_in_sections": ["supplement.S5"],
+      "_note": "Reported in the supplement only — primary metric is exact accuracy per the planning brief. This entry exists because the value is in the table the supplement references; if the abstract or results drift to citing 0.482, the Phase-6 re-verify will catch the label-vs-value swap."
+    },
+    {
+      "id": "ari_legacy_vs_inferred",
+      "value": 0.282,
+      "label_canonical": "adjusted Rand index between inferred clones and legacy 27-SNP panel labels",
+      "label_aliases_forbidden": ["Rand index", "RI", "agreement"],
+      "provenance": "outputs/tables/clone_recovery.csv:row=top5,col=ari",
+      "computed_at": "scripts/04_clone_recovery.R:L87",
+      "uncertainty": null,
+      "appears_in_sections": ["results.clone_recovery"]
+    },
+    {
+      "id": "ari_legacy_vs_inferred_baseline",
+      "value": 0.142,
+      "label_canonical": "adjusted Rand index for Laura's production pipeline against the same legacy panel",
+      "label_aliases_forbidden": ["ARI", "Rand index"],
+      "provenance": "outputs/tables/clone_recovery.csv:row=baseline_production,col=ari",
+      "computed_at": "scripts/04_clone_recovery.R:L92",
+      "uncertainty": null,
+      "appears_in_sections": ["results.clone_recovery", "abstract"]
+    },
+    {
+      "id": "n_cells_total",
+      "value": 12453,
+      "label_canonical": "number of cells passing QC",
+      "label_aliases_forbidden": ["total cells", "total barcodes"],
+      "provenance": "outputs/tables/cell_qc.csv:row=passing,col=count",
+      "computed_at": "scripts/01_preprocess.R:L203",
+      "uncertainty": null,
+      "appears_in_sections": ["methods.technical_detail", "supplement.S2"]
+    },
+    {
+      "id": "n_snps_panel",
+      "value": 1231,
+      "label_canonical": "number of SNPs in the inference panel",
+      "label_aliases_forbidden": ["number of SNPs", "panel size"],
+      "provenance": "outputs/tables/snp_panel.csv:row=total,col=count",
+      "computed_at": "scripts/01_preprocess.R:L267",
+      "uncertainty": null,
+      "appears_in_sections": ["methods.technical_detail"]
+    },
+    {
+      "id": "n_snps_legacy_validation",
+      "value": 27,
+      "label_canonical": "number of SNPs in the legacy validation panel used as a self-consistency check",
+      "label_aliases_forbidden": ["validation set", "held-out SNPs", "external validation"],
+      "provenance": "data/a191Run/legacy_snp_panel.csv (chr-posREF>ALT format) — see DATASET_INFO.md for provenance",
+      "computed_at": "n/a — input file",
+      "uncertainty": null,
+      "appears_in_sections": ["methods.technical_detail", "supplement.S1"],
+      "_note": "Per Phase 5 framing critique: do not describe this panel as 'held-aside' or 'external validation' — it is the panel that produced the labels the inference is being measured against. Self-consistency check, not external."
+    },
+    {
+      "id": "p_value_top_pathway",
+      "value": 2.3e-8,
+      "label_canonical": "Benjamini-Hochberg-adjusted p-value for NF-kB pathway enrichment",
+      "label_aliases_forbidden": ["raw p-value", "uncorrected p-value", "p-value"],
+      "provenance": "outputs/tables/pathway_enrichment.csv:row=NF-kB_signaling,col=padj_bh",
+      "computed_at": "scripts/05_enrichment.R:L73",
+      "uncertainty": null,
+      "appears_in_sections": ["results.pathway"]
+    },
+    {
+      "id": "n_genes_de",
+      "value": 247,
+      "label_canonical": "number of genes significantly differentially expressed (padj < 0.05, |log2FC| > 1)",
+      "label_aliases_forbidden": ["differentially expressed", "DE genes", "significant genes"],
+      "provenance": "outputs/tables/de_results.csv: count where padj < 0.05 and abs(log2FC) > 1",
+      "computed_at": "scripts/02_de.R:L156",
+      "uncertainty": null,
+      "appears_in_sections": ["abstract", "results.de"]
+    }
+  ],
+
+  "terms": [
+    {
+      "id": "ARI",
+      "expansion": "adjusted Rand index",
+      "plain_english": "a measure of how well two clusterings of the same set of cells agree, corrected for the agreement you would expect by chance. 0 means chance-level; 1 means identical; negative values are worse than chance.",
+      "first_use_section": "abstract",
+      "load_bearing": true,
+      "overloaded_warning": null,
+      "_note": "User explicitly asked to avoid acronyms in the abstract — the abstract should say 'cluster agreement (adjusted Rand index, ARI)' on first use, then can use ARI alone in body sections."
+    },
+    {
+      "id": "BCLRT",
+      "expansion": "branch-coherency log-likelihood ratio test",
+      "plain_english": "a per-cell logistic regression with two covariates (log total panel coverage and a flat-false-positive artifact-load term). The score is the log-likelihood difference between the proposed-clone-of-origin model and a null model.",
+      "first_use_section": "methods.technical_detail",
+      "load_bearing": true,
+      "overloaded_warning": "This is NOT the standard log-likelihood-ratio test in the Wilks sense — the statistic is dLL = LL_branch - LL_null without the factor of 2. A threshold of 10 on dLL corresponds to a Wilks statistic of 20, not 10. Readers trained on chi-square nulls for LRTs will mis-extrapolate the threshold."
+    },
+    {
+      "id": "exact_accuracy",
+      "expansion": "exact accuracy",
+      "plain_english": "the fraction of cells whose inferred clone label exactly matches the legacy-panel label. Unlike weighted F1, exact accuracy does not give partial credit for getting some clones right and others wrong on the same cell.",
+      "first_use_section": "abstract",
+      "load_bearing": true,
+      "overloaded_warning": "Often confused with 'accuracy' in multi-class contexts. In this report, accuracy = exact accuracy = exact match rate; 'support-weighted F1' is a different metric reported only in the supplement."
+    },
+    {
+      "id": "log2FC",
+      "expansion": "log2 fold change",
+      "plain_english": "the base-2 logarithm of the ratio of expression between two conditions. log2FC = 1 means the gene is twice as expressed in treatment; -1 means half as expressed.",
+      "first_use_section": "methods.definitions",
+      "load_bearing": false,
+      "overloaded_warning": null
+    },
+    {
+      "id": "LOH",
+      "expansion": "loss of heterozygosity",
+      "plain_english": "a locus where one of the two parental alleles has been lost in the cells under study, so reads at that position now come from only one of the two original chromosomes.",
+      "first_use_section": "supplement.S1",
+      "load_bearing": false,
+      "overloaded_warning": null
+    },
+    {
+      "id": "validation_panel",
+      "expansion": "legacy validation panel",
+      "plain_english": "the 27-SNP panel from prior work on this sample used here as a comparison target. We use 'validation' as a description of the role, not as a claim of statistical independence.",
+      "first_use_section": "methods.technical_detail",
+      "load_bearing": true,
+      "overloaded_warning": "This is NOT external validation. The legacy panel produced the labels the inference is being scored against, so agreement is a self-consistency check, not a generalization measure. The Abstract must not use phrases like 'held-aside' or 'external' for this panel."
+    },
+    {
+      "id": "clone",
+      "expansion": "clone",
+      "plain_english": "a group of cells inferred to share a common ancestor more recent than the last common ancestor of the whole sample. In this report, clones are leaf nodes of the inferred lineage tree.",
+      "first_use_section": "problem_statement",
+      "load_bearing": true,
+      "overloaded_warning": "Adjacent fields (cancer genomics, immunology) use 'clone' with subtly different operational definitions. This report's definition is structural (tree-leaf membership), not phenotypic."
+    }
+  ],
+
+  "figures": [
+    {
+      "id": "clone_recovery_overview",
+      "path": "outputs/figures/clone_recovery_overview.pdf",
+      "sha256": "a3f2d8e91b4c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e",
+      "caption_seed": "Adjusted Rand index between inferred clones and the 27-SNP legacy panel, for our pipeline (top-5 modules) and the production baseline.",
+      "appears_in_sections": ["results.clone_recovery"]
+    },
+    {
+      "id": "volcano_de",
+      "path": "outputs/figures/volcano_de.pdf",
+      "sha256": "b4e3c9d2a5f7d8e9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
+      "caption_seed": "Volcano plot of differential expression between c1 (proliferative) and c4 (quiescent) clones. Each point is a gene; x-axis log2 fold change, y-axis -log10 adjusted p-value. Red points cross both thresholds (padj < 0.05, |log2FC| > 1).",
+      "appears_in_sections": ["results.de"]
+    },
+    {
+      "id": "nfkb_pathway_heatmap",
+      "path": "outputs/figures/nfkb_pathway_heatmap.pdf",
+      "sha256": "c5d4e0a1b6c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4",
+      "caption_seed": "Expression of NF-kB pathway genes (23 of 87 pathway members differentially expressed) across the five inferred clones. Hierarchical clustering of cells groups c1 and c2 by shared upregulation.",
+      "appears_in_sections": ["results.pathway"]
+    },
+    {
+      "id": "worked_example_snp_score",
+      "path": "outputs/tables/worked_example_c017.csv",
+      "sha256": "d6e5f1b2a3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0",
+      "caption_seed": "Worked example: cell c_017's per-clone BCLRT score, showing how raw N and Y counts at three SNPs feed into the aggregate rank. The full ranking aggregates over all 1,231 SNPs.",
+      "appears_in_sections": ["results.headline"],
+      "_note": "Inline mini-table per Phase 3 worked-example gate — Tufte sparkline shape preferred over a full figure."
+    },
+    {
+      "id": "supplement_threshold_sensitivity",
+      "path": "outputs/figures/supplementary/threshold_sensitivity_pvalue.pdf",
+      "sha256": "e7f6a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1",
+      "caption_seed": "Number of significant genes vs. adjusted p-value threshold across the range 0.01-0.10. Dashed red line indicates the chosen threshold (0.05); the result is stable across 0.03-0.07.",
+      "appears_in_sections": ["supplement.S4"]
+    }
+  ],
+
+  "worked_examples": [
+    {
+      "id": "snp_score_c017",
+      "analysis_type": "sparse_axis_module_call",
+      "subject_id": "c_017",
+      "subject_kind": "cell",
+      "provenance": "outputs/tables/module_call_per_cell.csv:row=c_017",
+      "computed_at": "scripts/06_module_call.R:L88",
+      "appears_in_sections": ["results.headline"],
+      "rows": [
+        {"snp_id": "X17.76565019G>A",  "role": "seed",    "N": 5, "Y": 3, "alt_fraction": 0.60, "covered": true,  "supports_target": true},
+        {"snp_id": "X2.197498780A>G",  "role": "partner", "N": 2, "Y": 1, "alt_fraction": 0.50, "covered": true,  "supports_target": true},
+        {"snp_id": "X3.69105192C>G",   "role": "partner", "N": 3, "Y": 2, "alt_fraction": 0.67, "covered": true,  "supports_target": true},
+        {"snp_id": "X2.113713484T>C",  "role": "partner", "N": 1, "Y": 0, "alt_fraction": 0.00, "covered": true,  "supports_target": false},
+        {"snp_id": "X1.109675067C>T",  "role": "partner", "N": 0, "Y": 0, "alt_fraction": null, "covered": false, "supports_target": null}
+      ],
+      "aggregate": {
+        "target_support_fraction": 0.75,
+        "denominator": "4 covered SNPs of 5 module members",
+        "call": "high-support",
+        "threshold_rule": "target-support fraction >= 0.60 -> high-support"
+      },
+      "_note": "Cell c_017 is the canonical worked example for the sparse-axis module call. Every row above corresponds to one row of outputs/tables/module_call_per_cell.csv when filtered to snp_id IN (the five module members). If the report's worked-example table uses different N/Y values, that is a fabricated worked example and Phase 6 must flag it."
+    },
+    {
+      "id": "failure_example_snp_bic_incoherent",
+      "analysis_type": "snp_tree_pairwise_coherence",
+      "subject_id": "X2.218386G>A",
+      "subject_kind": "snp",
+      "provenance": "outputs/tables/em_tree_pairwise_bic_summary.csv:row=X2.218386G>A",
+      "computed_at": "scripts/07_em_tree_pairwise_autopsy.R:L142",
+      "appears_in_sections": ["supplement.S3"],
+      "rows": [
+        {"partner_snp_id": "X17.76565019G>A", "best_coherent_model": "M2", "best_coherent_loglik": -184.2, "incoherent_M0_loglik": -113.6, "delta_loglik": 70.6, "incoherent": true},
+        {"partner_snp_id": "X2.197498780A>G", "best_coherent_model": "M3", "best_coherent_loglik": -201.4, "incoherent_M0_loglik": -159.8, "delta_loglik": 41.6, "incoherent": true},
+        {"partner_snp_id": "X3.69105192C>G",  "best_coherent_model": "M1", "best_coherent_loglik": -178.9, "incoherent_M0_loglik": -169.4, "delta_loglik": 9.5,  "incoherent": true}
+      ],
+      "aggregate": {
+        "incoherent_partner_count": 14,
+        "total_partners": 14,
+        "delta_loglik_min": 9.5,
+        "delta_loglik_max": 70.6,
+        "bic_threshold": 7.6
+      },
+      "_note": "Failure-mode worked example shown in the supplement (S3). The SNP at chromosome two position 218386 is BIC-incoherent against all 14 other panel SNPs, with delta-loglik values from 9.5 to 70.6 nats. This is the structural reason the SNP-tree caller reduces to a one-SNP classifier on this panel."
+    }
+  ]
+}
