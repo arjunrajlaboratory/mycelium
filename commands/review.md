@@ -320,8 +320,18 @@ output. The user wants to know what failed and why before they
 need the test IDs.
 
 Skip Step 5 entirely if the diff is a pure refactor with no data-flow
-change, documentation-only, or if the user invoked the skill with a
-flag asking to suppress tripwires (e.g., `/mycelium:review --no-tripwires`).
+change AND no documentation change, or if the user invoked the skill
+with a flag asking to suppress tripwires (e.g., `/mycelium:review
+--no-tripwires`).
+
+**Documentation-only diffs are NOT a skip case.** When report text or
+analysis docs change without the pipeline changing, that's exactly
+when the report-values-freshness tripwire is most useful — it catches
+"someone edited the report number without regenerating the source
+CSV" silently. For doc-only diffs, restrict the offered menu to the
+freshness and known-answer categories (the fault-injection and
+metamorphic tripwires don't apply when the pipeline wasn't touched)
+rather than skipping Step 5.
 
 ### Step 6 — Post-action hook
 

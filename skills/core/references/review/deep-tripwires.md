@@ -641,11 +641,19 @@ the specific checkpoint the tripwire watches), record it as
 ## When NOT to offer tripwires
 
 - Pure refactor with no change to data flow or analytical behavior
-- Documentation-only changes
+  AND no documentation change
 - Code that doesn't load any data (utility scripts, plotting helpers)
 - The user has already run tripwires in this session for the same scope
 - The static review found nothing and the analysis is a one-shot
   exploratory script (offer only the starter four with a quiet note)
+
+**Documentation-only diffs are NOT a skip case.** When report text or
+analysis docs change without the pipeline changing, that's exactly when
+the freshness-category tripwires are most useful — they catch "someone
+edited the doc value without regenerating the source CSV" silently. For
+doc-only diffs, restrict the offered menu to freshness and known-answer
+tripwires (fault-injection and metamorphic don't apply when the pipeline
+wasn't touched) rather than skipping the whole step.
 
 ## What tripwires are NOT for
 
