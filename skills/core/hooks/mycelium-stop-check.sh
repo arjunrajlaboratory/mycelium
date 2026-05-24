@@ -23,6 +23,15 @@ fi
 # Determine repo root early (used by both log finalization and .living/ checks)
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 
+# Resolve this hook's mycelium-core dir once, in absolute form. Used to locate
+# the upsert script and the log-scribe template. BASH_SOURCE may be unset in
+# weird invocations (e.g. `sh -c "$(...)"`), so fall back to $0; if even that
+# fails, leave SCRIPT_DIR empty and downstream existence checks will skip.
+HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR=$(cd "$(dirname "$(dirname "$HOOK_SOURCE")")" 2>/dev/null && pwd || echo "")
+UPSERT_SCRIPT="$SCRIPT_DIR/scripts/upsert_registry_row.py"
+TEMPLATE_FILE="$SCRIPT_DIR/templates/log-scribe-prompt.md"
+
 # --- Session log finalization ---
 ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
 if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
@@ -79,12 +88,39 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       FILES_CHANGED=$(sort -u "$ACTIVITY_FILE_CHECK" | grep -c . || echo "0")
     fi
 
-    # Short session check: skip finalization if < 5min and 0 files changed
-    if [ "$DURATION_MIN" -lt 5 ] && [ "$FILES_CHANGED" -eq 0 ]; then
+    # Compute session-local activity: Edit/Write (activity tracker), commits, OR Bash-mutated files
+    # (files in `git status` whose mtime is newer than session start). The mtime signal catches
+    # `sed -i`, `perl -pi`, formatters, and any other Bash mutation that bypasses the Edit/Write
+    # activity tracker. Without it we incorrectly discard sessions that did real work via Bash.
+    ACTIVITY_COUNT=0
+    if [ -f "$ACTIVITY_FILE_CHECK" ]; then
+      ACTIVITY_COUNT=$(sort -u "$ACTIVITY_FILE_CHECK" | grep -c . 2>/dev/null || echo "0")
+    fi
+    COMMITS_THIS_SESSION=0
+    UNCOMMITTED_RECENT=0
+    if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
+      COMMITS_THIS_SESSION=$({ git -C "$LOG_REPO" log --since="@${START_TS}" --oneline 2>/dev/null || true; } | grep -c . || echo "0")
+      # Files in `git status` whose mtime is > session start. `awk 'NF{print $NF}'` extracts
+      # the filename (last whitespace-separated token), handling `M  filename` and `?? filename`.
+      # Renames (`R  oldname -> newname`) collapse to `newname`, which is the right behavior.
+      while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        if [ -e "$LOG_REPO/$f" ]; then
+          FILE_MTIME=$(stat -f "%m" "$LOG_REPO/$f" 2>/dev/null || stat -c "%Y" "$LOG_REPO/$f" 2>/dev/null || echo "0")
+          if [ "$FILE_MTIME" -gt "$START_TS" ] 2>/dev/null; then
+            UNCOMMITTED_RECENT=$((UNCOMMITTED_RECENT + 1))
+          fi
+        fi
+      done < <(git -C "$LOG_REPO" status --porcelain 2>/dev/null | awk 'NF{print $NF}')
+    fi
+
+    # Short session check: skip finalization only if NO evidence of work in any signal.
+    # Duration is irrelevant — a long session that only read files is still noise.
+    if [ "$ACTIVITY_COUNT" -eq 0 ] && [ "$COMMITS_THIS_SESSION" -eq 0 ] && [ "$UNCOMMITTED_RECENT" -eq 0 ]; then
       rm -f "$LOG_PATH"
       rm -f "$ACTIVE_LOG_FILE"
       rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
-      # No registry row, no finalization — clean exit
+      # No registry row, no finalization — clean exit (noise session)
     else
       # Auto-finalize the session log (factual record — no Claude needed)
       LOG_DIR=$(dirname "$LOG_PATH")
@@ -142,8 +178,21 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
           SUMMARY="${SUMMARY} (+$((UNIQUE_COUNT - 3)) more)"
         fi
       fi
+      # Atomic upsert via the script resolved at the top of this hook ($UPSERT_SCRIPT).
+      NEW_ROW="| $(date +%Y-%m-%d) | ${SESSION_ID} | ${PROJECT_SLUG} | ${BRANCH} | ${DURATION_MIN}m | ${FILES_CHANGED} | ${SUMMARY} | | complete | | [log](${SESSION_ID}-${PROJECT_SLUG}.md) |"
       if [ -f "$LOG_DIR/LOG_REGISTRY.md" ]; then
-        echo "| $(date +%Y-%m-%d) | ${SESSION_ID} | ${PROJECT_SLUG} | ${BRANCH} | ${DURATION_MIN}m | ${FILES_CHANGED} | ${SUMMARY} | | complete | | [log](${SESSION_ID}-${PROJECT_SLUG}.md) |" >> "$LOG_DIR/LOG_REGISTRY.md"
+        if [ -f "$UPSERT_SCRIPT" ]; then
+          # If the script rejects (e.g. wrong pipe count), the error stays in
+          # .upsert_registry_row.err for operator debugging. Do NOT echo the
+          # row on rejection — that would defeat the validation the script
+          # exists to perform.
+          python3 "$UPSERT_SCRIPT" "$LOG_DIR/LOG_REGISTRY.md" "$SESSION_ID" "$NEW_ROW" \
+            >/dev/null 2>"$LOG_DIR/.upsert_registry_row.err" \
+            && rm -f "$LOG_DIR/.upsert_registry_row.err"
+        else
+          # Script missing entirely — fall back to plain append so we don't lose the row.
+          echo "$NEW_ROW" >> "$LOG_DIR/LOG_REGISTRY.md"
+        fi
       fi
 
       # Auto-write last-session.md for next session context
@@ -264,8 +313,50 @@ if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$CON
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
 
-  # Emit non-blocking context (baseline last-session.md already written)
-  ENHANCE_MSG=".living/ updated. Enhance .claude/last-session.md (5 sections: work, decisions, blockers, state, next steps). Also update the LOG_REGISTRY.md row for session ${SESSION_ID:-unknown} — replace the filename Summary with a 1-sentence past-tense accomplishment, fill Key Outputs with semicolon-separated artifacts produced."
+  # Emit non-blocking context. Dispatch a haiku log-scribe subagent to mechanically
+  # populate the LOG_REGISTRY row (Summary + Key Outputs) instead of asking the
+  # main agent to do it by hand (which it routinely skips).
+  # $TEMPLATE_FILE and $UPSERT_SCRIPT were resolved at the top of this hook.
+  if [ -f "$TEMPLATE_FILE" ] && [ -n "${SESSION_ID:-}" ]; then
+    START_TS_ISO=$(date -r "${START_TS:-0}" -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -d "@${START_TS:-0}" -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+    TODAY=$(date +%Y-%m-%d)
+    # Render the template via Python — values may legally contain '|', '&', or '\',
+    # all of which break sed's substitute command. Python's str.replace handles them
+    # verbatim. The values are passed through the environment to avoid any shell
+    # quoting/escaping concerns.
+    SCRIBE_PROMPT=$(SESSION_ID="$SESSION_ID" \
+                    PROJECT_SLUG="$PROJECT_SLUG" \
+                    LOG_PATH="$LOG_PATH" \
+                    REGISTRY_PATH="$LOG_DIR/LOG_REGISTRY.md" \
+                    REPO_ROOT="$REPO_ROOT" \
+                    START_TS_ISO="$START_TS_ISO" \
+                    DURATION_MIN="$DURATION_MIN" \
+                    FILES_CHANGED="$FILES_CHANGED" \
+                    BRANCH="$BRANCH" \
+                    DATE="$TODAY" \
+                    UPSERT_SCRIPT="$UPSERT_SCRIPT" \
+                    TEMPLATE_FILE="$TEMPLATE_FILE" \
+                    python3 - <<'PY'
+import os, sys
+text = open(os.environ["TEMPLATE_FILE"], encoding="utf-8").read()
+keys = ["SESSION_ID","PROJECT_SLUG","LOG_PATH","REGISTRY_PATH","REPO_ROOT",
+        "START_TS_ISO","DURATION_MIN","FILES_CHANGED","BRANCH","DATE","UPSERT_SCRIPT"]
+for k in keys:
+    text = text.replace("{{" + k + "}}", os.environ.get(k, ""))
+sys.stdout.write(text)
+PY
+)
+    ENHANCE_MSG=".living/ updated. Dispatch a haiku subagent (max_turns: 5) with the following prompt to mechanically populate the LOG_REGISTRY row for session ${SESSION_ID}. The subagent is a stateless log-scribe: it reads the session log, runs git log, composes Summary + Key Outputs, and calls upsert_registry_row.py. Do not run this in the main context.
+
+---log-scribe prompt begin---
+${SCRIBE_PROMPT}
+---log-scribe prompt end---
+
+Also enhance .claude/last-session.md (5 sections: work, decisions, blockers, state, next steps)."
+  else
+    # Fallback if template missing
+    ENHANCE_MSG=".living/ updated. Enhance .claude/last-session.md (5 sections: work, decisions, blockers, state, next steps). Also update LOG_REGISTRY.md row for session ${SESSION_ID:-unknown} — replace filename Summary with 1-sentence past-tense accomplishment, fill Key Outputs."
+  fi
   ESCAPED_ENHANCE=$(printf '%s' "$ENHANCE_MSG" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
   printf '{"additionalContext": %s}\n' "$ESCAPED_ENHANCE"
   exit 0
