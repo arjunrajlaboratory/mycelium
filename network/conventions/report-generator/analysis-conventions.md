@@ -120,7 +120,20 @@ For **overview + supplement** (DEFAULT): main text holds the headline plus one h
 
 ## Phase 1 — Source-of-truth manifest (INTERNAL)
 
-Build a JSON manifest of every concrete artefact the draft will contain. The Phase-2 draft step is constrained to source numbers and terms from this manifest — that is what makes blind numerical re-verification (Phase 6) catch label-vs-value bugs.
+Build a JSON manifest of every concrete artefact the draft will contain. The Phase-2 draft step is constrained to source numbers and terms from this manifest — that is what makes blind numerical re-verification (Phase 6) catch label-vs-value bugs and what makes `scitexlintr` (Phase 7) catch drift at lint time.
+
+**Read analysis-side fragments first.** Each contributing analysis registers reportable values with the `register_value` helper (`skills/core/scripts/register_value.py`), which writes mechanical fields (`value`, `provenance`, `computed_at`) into `analysis/<name>/outputs/numbers.json`. Phase 1 collects every fragment the report sources from and merges them into `numbers[*]`. The agent then *enriches* each entry with the framing-aware fields the analysis cannot know:
+
+- `label_canonical` — the canonical phrasing the prose must use
+- `label_aliases_forbidden` — phrasings that would mislead in this report's framing
+- `appears_in_sections` — where this value will be cited
+- `overloaded_warning` (rare) — when a value's name shadows an established literature term
+
+The mechanical fields (`value`, `provenance`, `computed_at`) come from the fragment and must not be edited; the framing fields are this phase's contribution.
+
+If a value the draft needs has no fragment entry, do not type it into the manifest — return to the analysis, add a `register_value` call, re-run the relevant script, and re-enter Phase 1 with the updated fragment. The exception is *legacy* analyses that pre-date `register_value`: the agent may hand-author an entry by reading the CSV the value comes from, and the entry is flagged in the manifest's `_provenance: legacy` field so Phase 6 still verifies it against the on-disk file.
+
+`terms[*]`, `figures[*]`, and `worked_examples[*]` are still hand-authored from the analysis outputs at this phase — those carry framing information (canonical phrasings, sha256 fingerprints, row-level traces) that the analysis does not produce.
 
 A fully-populated example lives at `references/manifest-example.json` — read it once before generating the manifest for a new analysis. The example is drawn from a small clone-recovery / differential-expression report and covers the common shapes: a primary metric with bootstrap CIs, an adjacent metric that exists in the same CSV but is *not* the primary (so the manifest carries both with distinct `label_aliases_forbidden` lists), a coined statistic with an `overloaded_warning`, a term whose role-name ("validation panel") could mislead a skim reader, and a figure entry with `sha256` for the Phase-6 freshness check.
 
@@ -211,6 +224,20 @@ The draft step is not allowed to introduce a number, term, or worked-example val
 ## Phase 2 — Draft (INTERNAL)
 
 Fill the template chosen in Phase 0 (overview / comprehensive / overview+supplement). Source every numeric token from `numbers[*].value` and every coined term from `terms[*]`. Read `references/section-guide.md` for the per-section craft.
+
+**Use `\SciVal` and `\SciText` wrappers for every reportable value.** Every quoted number from `numbers[*]` goes in prose as `\SciVal{\Macro}{snapshot}` (numeric values) or `\SciText{\Macro}{snapshot}` (text values like contrast phrases). The macro name follows the id→macro transform documented in scitexlintr: `n_samples` → `\NSamples`, `fdr_threshold` → `\FDRThreshold`. The snapshot is the current value, shown in the source for review. The LaTeX renderer prints only the macro (so the PDF is always fresh); `scitexlintr` (Phase 7) verifies the snapshot equals the manifest value.
+
+Add `\input{build/report_values.tex}` to the preamble — Phase 7 generates that file from `.manifest.json`. The generated file provides the wrapper definitions and one `\newcommand` per manifest entry.
+
+Examples:
+
+```latex
+We analyzed \SciVal{\NSamples}{48} cells passing QC.
+At \SciVal{\FDRThreshold}{0.05}, \SciVal{\NDEGenesFDRZeroZeroFive}{317} genes were differentially expressed.
+For the contrast \SciText{\ContrastPhrase}{treated versus control}, ...
+```
+
+Do not type raw values into prose without a wrapper — `scitexlintr`'s `raw-generated-value` rule will flag any literal that matches a manifest entry. Do not use bare `\Macro{}` without a `\SciVal`/`\SciText` wrapper — `scitexlintr`'s `bare-generated-macro` rule will flag it (the macro is fresh, but the source is unreviewable).
 
 Drafting order:
 
@@ -317,19 +344,27 @@ The full sub-agent prompt is in `references/phase-prompts.md`.
 
 After the sub-agents pass:
 
-1. Recompile the report with two `pdflatex` passes (plus `bibtex` if citations are used).
-2. If any Phase-6 finding triggered a code rerun (e.g., a figure had to be regenerated, a number was wrong because the script was outdated), re-run the relevant script and re-verify the manifest before recompiling.
-3. Measure the **main-text page count** (pages before `\appendix`) from the compiled PDF and compare to the shape budget:
+1. **Regenerate the LaTeX macros from the manifest.** Run `python skills/core/scripts/render_report_values_tex.py analysis/[name]/reports/.manifest.json`. This writes `build/report_values.tex` with one `\newcommand` per `numbers[*]` entry plus the `\SciVal` / `\SciText` wrappers. Re-run this step every time `.manifest.json` changes.
+2. **Run scitexlintr on the draft.** `scitexlintr analysis/[name]/reports/[name]-report.tex --manifest=analysis/[name]/reports/.manifest.json`. The recompile gate **must not proceed** if findings remain after waivers. Auto-fix snapshot drift with `--write` (typically interactively, not in the gate):
+   - `snapshot-mismatch` is the load-bearing check — the snapshot in `\SciVal{\Macro}{...}` must equal the manifest value. Use `--write` to rewrite stale snapshots; the diff is small and reviewable.
+   - `raw-generated-value`, `unwrapped-threshold`, `forbidden-alias`, `bare-generated-macro` are also enforced; fix the prose to use the appropriate wrapper.
+   - `unfingerprinted-figure` errors when `\includegraphics{...}` points at a path not in `manifest.figures[*]` or whose `sha256` has changed — re-fingerprint the manifest entry after regenerating the figure.
+   - `unsourced-numeric-token` and `handwritten-numeric-claim` are warnings; promote to errors before merging if the team has stabilised the pattern.
+   - Waiver any genuinely intentional case with `% ANALYSIS_OK[rule-code]: explanation` on or up to four lines above the offending line.
+3. Recompile the report with two `pdflatex` passes (plus `bibtex` if citations are used).
+4. If any Phase-6 finding triggered a code rerun (e.g., a figure had to be regenerated, a number was wrong because the script was outdated), re-run the relevant script, re-collect the analysis-side fragment, and re-run Phase 1's merge before recompiling.
+5. Measure the **main-text page count** (pages before `\appendix`) from the compiled PDF and compare to the shape budget:
    - **Overview**: target 2–5 pages. Flag if main text > 6 pages.
    - **Overview + supplement** (DEFAULT): target main text ≤ a 10-minute read ≈ ≤ 12 pages. Flag if main text > 14 pages.
    - **Comprehensive**: no upper bound. Flag if main text < 5 pages (the shape was probably wrong; comprehensive reports rarely fit in fewer pages).
    A flag does not block compilation, but it appears in the compile log as `shape_budget: flagged` with a one-line reason. The drafter is expected to either prune to fit or, with explicit acknowledgement in the log, accept the overrun.
-4. Record in `analysis/[name]/reports/.compile-log.md`:
+6. Record in `analysis/[name]/reports/.compile-log.md`:
    - PDF SHA256
    - Compile timestamp
    - Main-text page count and shape-budget status (`within` / `flagged` with reason)
    - Sub-agent reviewer verdicts (each: PASS / loop count to convergence)
    - Whether code was re-run since the last manifest snapshot
+   - `scitexlintr` exit code and finding count after waivers (must be 0 for the gate to pass)
 
 The compile log is the answer to "okay, so all of this is fixed now? and was code rerun in case things changed?" — that question lands on every report draft and the log makes the answer mechanical.
 
@@ -449,3 +484,10 @@ These come up frequently in computational analysis reports:
 - `assets/report-template-overview.tex` — overview shape.
 - `assets/report-template-comprehensive.tex` — comprehensive shape.
 - `assets/report-template-overview-supplement.tex` — default shape.
+
+## Cross-references outside this convention pack
+
+- `skills/core/references/report-values-guide.md` — analysis-side `register_value` helper that produces the `numbers[*]` fragments Phase 1 merges.
+- `skills/core/scripts/register_value.py` — the helper itself.
+- `skills/core/scripts/render_report_values_tex.py` — Phase 7 step 1; emits `build/report_values.tex` from `.manifest.json`.
+- scitexlintr — Phase 7 step 2; verifies the draft's `\SciVal`/`\SciText` snapshots against the manifest. Source: https://github.com/arjunrajlaboratory/scilintr/tree/main/tex/scitexlintr.

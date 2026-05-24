@@ -14,6 +14,8 @@ Phase 4–6 sub-agents in the report-generator flow check most of these automati
 - [ ] **All figures** render (no missing file errors)
 - [ ] **BibTeX** pass run if citations are used
 - [ ] `.compile-log.md` exists and records PDF SHA256, compile timestamp, and sub-agent reviewer verdicts
+- [ ] **`build/report_values.tex` is fresh** — regenerated from `.manifest.json` in this compile cycle (Phase 7 step 1)
+- [ ] **`scitexlintr` exit code is 0** after waivers (Phase 7 step 2) — no `snapshot-mismatch`, `raw-generated-value`, `unwrapped-threshold`, `forbidden-alias`, or `unfingerprinted-figure` findings remain
 
 ---
 

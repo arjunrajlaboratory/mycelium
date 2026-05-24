@@ -166,6 +166,7 @@ The list above is permissive in scope but narrow in *kind*: you read the artefac
 >
 > *Label–value alignment.*
 > - Extract every numeric token in the prose (regex over `[-+]?\d*\.?\d+([eE][-+]?\d+)?`, with sensible filters for things like `figure 3` or `2024`).
+> - **`\SciVal{\Macro}{snapshot}` and `\SciText{\Macro}{snapshot}` wrappers are pre-verified by scitexlintr in Phase 7.** When the numeric token sits inside the second argument of one of these wrappers, treat the value-to-manifest binding as already checked at lint time and focus this phase on the *label adjacent to the wrapper* (does it match `label_canonical`? is it in `label_aliases_forbidden`?). Numbers that appear bare in prose (no wrapper) are the unsourced-number candidates.
 > - For each numeric token, locate its surrounding context — the noun phrase or label adjacent to it. ("0.482 ... weighted F1", "247 ... significantly upregulated genes", "p = 1.2e-8 ... NF-kB pathway enrichment").
 > - Look up the numeric token in `manifest.numbers[*]`. If present:
 >   - Verify the surrounding label matches `label_canonical`.
