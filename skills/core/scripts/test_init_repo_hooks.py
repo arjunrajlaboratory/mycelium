@@ -9,12 +9,12 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
 
 _SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 import init_repo as ir  # noqa: E402
+
 
 def _make_hook_dir(parent: Path, label: str) -> Path:
     """Create a directory containing all 5 mycelium hook scripts as real files.
@@ -31,9 +31,7 @@ def _make_hook_dir(parent: Path, label: str) -> Path:
     return d
 
 
-def _build_settings_with_dup_hooks(
-    marketplace: Path, dev: Path, third: Path
-) -> dict:
+def _build_settings_with_dup_hooks(marketplace: Path, dev: Path, third: Path) -> dict:
     """Settings with mycelium-health.sh registered twice (marketplace + dev)
     and mycelium-post-action.sh registered three times across different paths.
     """
@@ -43,7 +41,10 @@ def _build_settings_with_dup_hooks(
                 {
                     "matcher": "",
                     "hooks": [
-                        {"type": "command", "command": str(marketplace / "mycelium-health.sh")},
+                        {
+                            "type": "command",
+                            "command": str(marketplace / "mycelium-health.sh"),
+                        },
                         {"type": "command", "command": str(dev / "mycelium-health.sh")},
                     ],
                 }
@@ -52,9 +53,18 @@ def _build_settings_with_dup_hooks(
                 {
                     "matcher": "Bash",
                     "hooks": [
-                        {"type": "command", "command": str(marketplace / "mycelium-post-action.sh")},
-                        {"type": "command", "command": str(dev / "mycelium-post-action.sh")},
-                        {"type": "command", "command": str(third / "mycelium-post-action.sh")},
+                        {
+                            "type": "command",
+                            "command": str(marketplace / "mycelium-post-action.sh"),
+                        },
+                        {
+                            "type": "command",
+                            "command": str(dev / "mycelium-post-action.sh"),
+                        },
+                        {
+                            "type": "command",
+                            "command": str(third / "mycelium-post-action.sh"),
+                        },
                     ],
                 }
             ],
@@ -62,8 +72,14 @@ def _build_settings_with_dup_hooks(
                 {
                     "matcher": "",
                     "hooks": [
-                        {"type": "command", "command": str(marketplace / "mycelium-stop-check.sh")},
-                        {"type": "command", "command": str(dev / "mycelium-stop-check.sh")},
+                        {
+                            "type": "command",
+                            "command": str(marketplace / "mycelium-stop-check.sh"),
+                        },
+                        {
+                            "type": "command",
+                            "command": str(dev / "mycelium-stop-check.sh"),
+                        },
                     ],
                 }
             ],
@@ -111,7 +127,10 @@ class TestConsolidateDuplicateHooks:
                     {
                         "matcher": "",
                         "hooks": [
-                            {"type": "command", "command": str(marketplace / "mycelium-health.sh")},
+                            {
+                                "type": "command",
+                                "command": str(marketplace / "mycelium-health.sh"),
+                            },
                         ],
                     }
                 ],
@@ -131,8 +150,14 @@ class TestConsolidateDuplicateHooks:
                     {
                         "matcher": "",
                         "hooks": [
-                            {"type": "command", "command": str(dev / "mycelium-health.sh")},
-                            {"type": "command", "command": str(third / "mycelium-health.sh")},
+                            {
+                                "type": "command",
+                                "command": str(dev / "mycelium-health.sh"),
+                            },
+                            {
+                                "type": "command",
+                                "command": str(third / "mycelium-health.sh"),
+                            },
                         ],
                     }
                 ],
@@ -152,8 +177,14 @@ class TestConsolidateDuplicateHooks:
                     {
                         "matcher": "",
                         "hooks": [
-                            {"type": "command", "command": "/path/a/some-other-hook.sh"},
-                            {"type": "command", "command": "/path/b/some-other-hook.sh"},
+                            {
+                                "type": "command",
+                                "command": "/path/a/some-other-hook.sh",
+                            },
+                            {
+                                "type": "command",
+                                "command": "/path/b/some-other-hook.sh",
+                            },
                         ],
                     }
                 ],
@@ -165,9 +196,7 @@ class TestConsolidateDuplicateHooks:
         cmds = _flatten_hook_commands(settings["hooks"])
         assert len(cmds) == 2
 
-    def test_drops_stale_entry_when_replacement_available(
-        self, tmp_path: Path
-    ) -> None:
+    def test_drops_stale_entry_when_replacement_available(self, tmp_path: Path) -> None:
         """A hook whose path no longer exists is removed if the caller
         supplied a known-good replacement for that basename."""
         # Create a real on-disk replacement so the test's replacement map
@@ -271,12 +300,27 @@ class TestInstallClaudeHooksIdempotent:
                     {"matcher": "", "hooks": [_entry("mycelium-health.sh")]}
                 ],
                 "PostToolUse": [
-                    {"matcher": "Bash", "hooks": [_entry("mycelium-post-action.sh")]},
-                    {"matcher": "Edit|Write", "hooks": [_entry("mycelium-activity-tracker.sh")]},
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            _entry("mycelium-post-action.sh"),
+                            _entry("mycelium-data-tracker.sh"),
+                        ],
+                    },
+                    {
+                        "matcher": "Edit|Write",
+                        "hooks": [_entry("mycelium-activity-tracker.sh")],
+                    },
                     {"matcher": "Read", "hooks": [_entry("mycelium-read-tracker.sh")]},
                 ],
                 "Stop": [
-                    {"matcher": "", "hooks": [_entry("mycelium-stop-check.sh")]}
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            _entry("mycelium-stop-check.sh"),
+                            _entry("mycelium-data-lineage-stop.sh"),
+                        ],
+                    }
                 ],
             }
         }
@@ -284,16 +328,14 @@ class TestInstallClaudeHooksIdempotent:
             json.dumps(settings, indent=2), encoding="utf-8"
         )
 
-        # Run install — should be a complete no-op (all 5 hooks already
+        # Run install — should be a complete no-op (all 7 hooks already
         # live at marketplace paths)
         ir.install_claude_hooks(repo)
 
-        result = json.loads(
-            (repo / ".claude" / "settings.local.json").read_text()
-        )
+        result = json.loads((repo / ".claude" / "settings.local.json").read_text())
         cmds = _flatten_hook_commands(result["hooks"])
-        # Still exactly 5 entries, all marketplace paths
-        assert len(cmds) == 5
+        # Still exactly 7 entries, all marketplace paths
+        assert len(cmds) == len(ir.MYCELIUM_HOOK_BASENAMES)
         for cmd in cmds:
             assert "/marketplaces/" in cmd
 
@@ -315,8 +357,14 @@ class TestInstallClaudeHooksIdempotent:
                     {
                         "matcher": "",
                         "hooks": [
-                            {"type": "command", "command": str(marketplace / "mycelium-health.sh")},
-                            {"type": "command", "command": str(dev_dir / "mycelium-health.sh")},
+                            {
+                                "type": "command",
+                                "command": str(marketplace / "mycelium-health.sh"),
+                            },
+                            {
+                                "type": "command",
+                                "command": str(dev_dir / "mycelium-health.sh"),
+                            },
                         ],
                     }
                 ],
@@ -324,8 +372,14 @@ class TestInstallClaudeHooksIdempotent:
                     {
                         "matcher": "Bash",
                         "hooks": [
-                            {"type": "command", "command": str(marketplace / "mycelium-post-action.sh")},
-                            {"type": "command", "command": str(dev_dir / "mycelium-post-action.sh")},
+                            {
+                                "type": "command",
+                                "command": str(marketplace / "mycelium-post-action.sh"),
+                            },
+                            {
+                                "type": "command",
+                                "command": str(dev_dir / "mycelium-post-action.sh"),
+                            },
                         ],
                     }
                 ],
@@ -333,8 +387,14 @@ class TestInstallClaudeHooksIdempotent:
                     {
                         "matcher": "",
                         "hooks": [
-                            {"type": "command", "command": str(marketplace / "mycelium-stop-check.sh")},
-                            {"type": "command", "command": str(dev_dir / "mycelium-stop-check.sh")},
+                            {
+                                "type": "command",
+                                "command": str(marketplace / "mycelium-stop-check.sh"),
+                            },
+                            {
+                                "type": "command",
+                                "command": str(dev_dir / "mycelium-stop-check.sh"),
+                            },
                         ],
                     }
                 ],
@@ -346,14 +406,12 @@ class TestInstallClaudeHooksIdempotent:
 
         ir.install_claude_hooks(repo)
 
-        result = json.loads(
-            (repo / ".claude" / "settings.local.json").read_text()
-        )
+        result = json.loads((repo / ".claude" / "settings.local.json").read_text())
         cmds = _flatten_hook_commands(result["hooks"])
         basenames = {Path(c).name for c in cmds}
-        # All 5 mycelium hooks present, exactly once each
+        # All mycelium hooks present, exactly once each
         assert basenames == ir.MYCELIUM_HOOK_BASENAMES
-        assert len(cmds) == 5
+        assert len(cmds) == len(ir.MYCELIUM_HOOK_BASENAMES)
 
         # Pre-existing 3 hooks consolidated to marketplace path
         for bn in (
@@ -393,9 +451,7 @@ class TestInstallClaudeHooksIdempotent:
 
         ir.install_claude_hooks(repo)
 
-        result = json.loads(
-            (repo / ".claude" / "settings.local.json").read_text()
-        )
+        result = json.loads((repo / ".claude" / "settings.local.json").read_text())
         cmds = _flatten_hook_commands(result["hooks"])
         # Stale path must be gone
         assert stale not in cmds
