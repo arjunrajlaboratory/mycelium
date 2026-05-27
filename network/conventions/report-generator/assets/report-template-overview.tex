@@ -1,0 +1,153 @@
+% Mycelium Report Template — OVERVIEW shape
+% =============================================================================
+% Use when: the audience needs the headline and a sketch of the methods, but
+% not the exhaustive table. Target length: 2–5 pages of main text. No
+% supplement, no appendix.
+%
+% Copy to analysis/[name]/reports/[name]-report.tex and replace %%PLACEHOLDER%%
+% markers. Numbers and terms must be sourced from .manifest.json; do not
+% introduce values that have not been registered there.
+
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}              % Professional tables
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{natbib}                % Citations
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}            % Sub-figures
+\usepackage{float}                 % [H] placement
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+% --- Generated reportable values (see report-values-guide.md / scitexlintr) ---
+\IfFileExists{build/report_values.tex}{\input{build/report_values.tex}}{%
+  \providecommand{\SciVal}[2]{#1}%
+  \providecommand{\SciText}[2]{#1}%
+}
+
+% --- Metadata ---
+\title{%%TITLE%%}
+\author{%%AUTHOR%%}
+\date{%%DATE%%}
+
+\begin{document}
+
+% =============================================================================
+% TITLE PAGE
+% =============================================================================
+\maketitle
+
+% =============================================================================
+% ABSTRACT
+% =============================================================================
+\begin{abstract}
+%%ABSTRACT%%
+% Lead with the question (from the planning brief), the comparison baseline,
+% and the primary metric value. State the single biggest caveat. No undefined
+% acronyms, no citations, no figure references. 150–250 words.
+\end{abstract}
+
+% =============================================================================
+% PROBLEM STATEMENT
+% =============================================================================
+\section{Problem Statement}
+
+%%PROBLEM_STATEMENT%%
+% Frame the question in plain English. Name the baseline of comparison.
+% State what a good answer would look like. Two short paragraphs is typical
+% for the overview shape.
+
+% =============================================================================
+% METHODS
+% =============================================================================
+\section{Methods}
+
+%%METHODS_OVERVIEW%%
+% In the overview shape, Methods is a single paragraph: 4–6 sentences that a
+% non-specialist could follow. Name the inputs, the analytical operation, the
+% comparison baseline, and the primary metric. For load-bearing methodological
+% choices, lead with the intuitive explanation before the technical term —
+% even in the overview, a sentence of intuition before the formal name pays
+% off. No software version numbers, no parameter rationale — those live in
+% the analysis directory documentation.
+
+% =============================================================================
+% RESULTS
+% =============================================================================
+\section{Results}
+
+%%RESULTS%%
+% Each result is one to two paragraphs: state the question, the finding (with
+% the numeric value sourced from the manifest), and the interpretation.
+%
+% Include exactly one worked example for the first new aggregation analysis
+% type the report introduces. Prefer an inline sparkline-style mini-table
+% over a full figure. Subsequent claims using the same analysis type reuse
+% that example by reference.
+%
+% Figure template (use sparingly in the overview shape — 1 or 2 figures total):
+% \begin{figure}[H]
+%     \centering
+%     \includegraphics[width=0.75\textwidth]{../outputs/figures/FIGURE_NAME.pdf}
+%     \caption{[What it shows]. [How to read it]. [Key takeaway].}
+%     \label{fig:LABEL}
+% \end{figure}
+
+% =============================================================================
+% CONCLUSIONS
+% =============================================================================
+\section{Conclusions}
+
+%%CONCLUSIONS%%
+% Map each conclusion back to the problem statement. State caveats explicitly.
+% Distinguish what the data shows from what it suggests. For the overview
+% shape, three to five sentences is typical.
+
+% =============================================================================
+% NEXT STEPS (optional — delete if not applicable)
+% =============================================================================
+\section{Next Steps}
+
+%%NEXT_STEPS%%
+% Only include if there are clear, actionable follow-up analyses. Delete this
+% entire section if there is nothing concrete to say.
+
+% =============================================================================
+% PROVENANCE
+% =============================================================================
+\section{Provenance}
+
+\begin{description}
+\item[Analysis directory] \texttt{%%ANALYSIS_DIR%%}
+\item[Key scripts] ~
+  \begin{itemize}
+%%SCRIPT_LIST%%
+  \end{itemize}
+\item[Git commit] \texttt{%%GIT_COMMIT%%}
+\item[Analysis period] %%ANALYSIS_PERIOD%%
+\item[Analyst] %%ANALYST%%
+\item[Report generated] \today
+\item[Manifest] \texttt{.manifest.json}
+\item[Compile log] \texttt{.compile-log.md}
+\item[Software environment] See \texttt{ENVIRONMENTS\_INSTALLATIONS.md}
+\end{description}
+
+% =============================================================================
+% REFERENCES (optional — delete if no citations)
+% =============================================================================
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

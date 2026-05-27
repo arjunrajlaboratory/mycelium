@@ -16,6 +16,7 @@ the path to the appropriate sub-agent.
 | `code-quality.md` | API design, secrets, BC, organization | code-quality sub-agent |
 | `synthesis.md` | How to synthesize, dedupe, calibrate severity | main skill |
 | `grill-mode.md` | Conversational grilling protocol | main skill |
+| `deep-tripwires.md` | Opt-in behavioral follow-up: perturb inputs, observe checkpoints (fault-injection / metamorphic / known-answer tests) | main skill (Step 5) |
 
 ## Output contract for sub-agents
 
@@ -35,7 +36,17 @@ Each sub-agent must return findings in this shape (one block per finding):
   why_it_matters: one or two sentences specific to this analysis context
   suggested_fix: what to do about it (one sentence is plenty)
   confidence: high | medium | low
+  suggested_tripwire: missing-counts-file  # optional; see deep-tripwires.md
 ```
+
+**Optional `suggested_tripwire` field.** If the finding is the kind of
+silent failure that a behavioral tripwire could confirm — silent
+fallback, missing-data handling, sample alignment, label leakage,
+contrast direction, report-value freshness — tag it with the name of
+the matching tripwire from `deep-tripwires.md`. Synthesis aggregates
+these tags so the main skill can compose the Step 5 tripwire menu
+without re-reasoning. If no tripwire fits, omit the field — do not
+invent names.
 
 **Severity is two levels only:**
 - **`major`** — result is invalid, misleading, or insecure if not

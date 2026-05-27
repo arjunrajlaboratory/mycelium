@@ -1,4 +1,6 @@
-# Mycelium
+<p align="center">
+  <img src="docs/figures/mycelium-logo.png" alt="Mycelium" width="600"/>
+</p>
 
 <!-- Badges -->
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -19,6 +21,14 @@ Mycelium is named after the underground fungal networks that connect trees in a 
 - **Each project carries its own memory.** Decisions, learnings, and conventions are recorded as structured traces in the `.living/` directory, so every session starts with the accumulated intelligence of all previous sessions.
 - **Projects grow smarter over time.** Gotchas encountered once are never forgotten. Patterns detected in learnings crystallize into conventions. The project evolves.
 - **The network shares nutrients.** Domain-specific best practices (bioinformatics, image analysis, and more) are packaged as convention packs that any project can install. When one project discovers something generally useful, it can contribute back.
+
+## Mycelium in practice
+
+<p align="center">
+  <img src="docs/figures/panel-a-workflow.png" alt="Mycelium workflow" width="900"/>
+</p>
+
+<em>Mycelium ingests research output, crystallizes it into structured learnings, decisions, and findings, and re-surfaces it to inform downstream work via the mycelial network. Knowledge that would otherwise evaporate between sessions compounds across them.</em>
 
 ## Quickstart
 
