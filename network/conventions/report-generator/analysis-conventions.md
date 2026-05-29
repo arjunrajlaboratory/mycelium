@@ -2,7 +2,7 @@
 
 Guides the generation of structured LaTeX PDF reports from analysis project outputs. This skill is for formal writeups — not PowerPoint, not HTML notebook exports, not quick Markdown summaries (those go in the analysis README).
 
-The skill is organised as a **phase-based agentic flow**. Most phases are internal to the skill; the user is only consulted at Phase 0 (planning brief) and, optionally, Phase 8 (headline preview). Every phase produces a verifiable artifact, and the sub-agent review phases (4–6) get a fresh context so they read the draft blind — that is the missing ingredient in self-declared consistency checks.
+The skill is organized as a **phase-based agentic flow**. Most phases are internal to the skill; the user is only consulted at Phase 0 (planning brief) and, optionally, Phase 8 (headline preview). Every phase produces a verifiable artifact, and the sub-agent review phases (4–6) get a fresh context so they read the draft blind — that is the missing ingredient in self-declared consistency checks.
 
 ---
 
@@ -38,7 +38,7 @@ Ask the user a single round of questions before drafting begins. This is the onl
 Required questions:
 
 1. **Headline question.** What is the report answering, in one sentence? ("Does our method beat the baseline at recovering known clones?")
-2. **Baseline of comparison.** What are the reported numbers being compared against? ("vs. Laura's production pipeline", "vs. random assignment", "vs. published reference X").
+2. **Baseline of comparison.** What are the reported numbers being compared against? ("vs. the production pipeline", "vs. random assignment", "vs. published reference X").
 3. **Primary metric.** Which single metric should the abstract lead with? ("exact accuracy", not "weighted F1 because it was in the CSV"). If there's tension between what's plentiful in outputs and what's decision-relevant, ask explicitly.
 4. **Audience.** Pick one tier. The choice drives the acronym budget per page, the depth of intuitive lead-ins, and how often plain-English glosses recur across sections.
    - **Tier A — Lay or out-of-field reader.** Acronym budget 2 / page; full intuition paragraphs before every load-bearing term; gloss every term on first use *per section* (not just per document).
@@ -92,7 +92,7 @@ The cheatsheet has these sections:
 
 If any section is empty, write `(none recorded)` so the absence is legible.
 
-Catches: collaborator name spellings (e.g., "Bagamery, not Brettner"); domain term canonicalisation ("ontogeny, not ontology"); decisions documented and now liable to be re-explained; prior-flagged failure modes that should be checked again before the sub-agent reviewers see the draft.
+Catches: collaborator name spellings (e.g., "Devereux, not Devereaux"); domain term canonicalization ("ontogeny, not ontology"); decisions documented and now liable to be re-explained; prior-flagged failure modes that should be checked again before the sub-agent reviewers see the draft.
 
 ---
 
@@ -120,7 +120,7 @@ For **overview + supplement** (DEFAULT): main text holds the headline plus one h
 
 ## Phase 1 — Source-of-truth manifest (INTERNAL)
 
-Build a JSON manifest of every concrete artefact the draft will contain. The Phase-2 draft step is constrained to source numbers and terms from this manifest — that is what makes blind numerical re-verification (Phase 6) catch label-vs-value bugs and what makes `scitexlintr` (Phase 7) catch drift at lint time.
+Build a JSON manifest of every concrete artifact the draft will contain. The Phase-2 draft step is constrained to source numbers and terms from this manifest — that is what makes blind numerical re-verification (Phase 6) catch label-vs-value bugs and what makes `scitexlintr` (Phase 7) catch drift at lint time.
 
 **Read analysis-side fragments first.** Each contributing analysis registers reportable values with the `register_value` helper (`skills/core/scripts/register_value.py`), which writes mechanical fields (`value`, `provenance`, `computed_at`) into `analysis/<name>/outputs/numbers.json`. Phase 1 collects every fragment the report sources from and merges them into `numbers[*]`. The agent then *enriches* each entry with the framing-aware fields the analysis cannot know:
 
@@ -131,9 +131,11 @@ Build a JSON manifest of every concrete artefact the draft will contain. The Pha
 
 The mechanical fields (`value`, `provenance`, `computed_at`) come from the fragment and must not be edited; the framing fields are this phase's contribution.
 
-If a value the draft needs has no fragment entry, do not type it into the manifest — return to the analysis, add a `register_value` call, re-run the relevant script, and re-enter Phase 1 with the updated fragment. The exception is *legacy* analyses that pre-date `register_value`: the agent may hand-author an entry by reading the CSV the value comes from, and the entry is flagged in the manifest's `_provenance: legacy` field so Phase 6 still verifies it against the on-disk file.
+If a value the draft needs has no fragment entry, do not type it into the manifest — return to the analysis, add a `register_value` call, re-run the relevant script, and re-enter Phase 1 with the updated fragment. (The framing fields in this paragraph and the next read "the analysis cannot know," but everything mechanical the report quotes still has to come from the code that produced it — see the code-grounding instruction below.) The exception is *legacy* analyses that pre-date `register_value`: the agent may hand-author an entry by reading the CSV the value comes from, and the entry is flagged in the manifest's `_provenance: legacy` field so Phase 6 still verifies it against the on-disk file.
 
 `terms[*]`, `figures[*]`, and `worked_examples[*]` are still hand-authored from the analysis outputs at this phase — those carry framing information (canonical phrasings, sha256 fingerprints, row-level traces) that the analysis does not produce.
+
+**Ground load-bearing claims in the code, not the documentation.** The most expensive failure this skill does *not* yet catch is the stale-doc bug: a `README`, `CLAUDE.md`, `specification.md`, or a docstring describes the pipeline one way, the code has since drifted, and the draft inherits the doc's wrong claim. When that happens the manifest becomes a faithful recorder of the wrong consensus — every later phase cross-checks the prose against the manifest, but nothing checks the manifest against what the code actually does. So for every **load-bearing definitional, structural, or enumeration claim** the report will make — the set of categories in an enum, the number of stages in a pipeline, the columns a function emits, the order of a precedence chain, the definition of a coined metric (for instance, a status field documented as having three allowed values that the code actually emits with five) — trace the claim to the code that implements it and source the manifest entry from the code, treating any prose documentation as a lead to verify rather than a source of truth. Read the function that produces the value, not the doc that describes it. Where the implementing file and line are known, record them in the entry's `computed_at` (for `numbers[*]`) or in a `grounded_in` note (for `terms[*]`) so Phase 6 can re-check against the same code. If a doc and the code disagree, the code wins and the doc is flagged for a fix (Phase 6 emits the cross-document patch). This is the Phase-1 half of code-grounding; Phase 6 re-verifies a sample of these claims against the code with fresh eyes.
 
 A fully-populated example lives at `references/manifest-example.json` — read it once before generating the manifest for a new analysis. The example is drawn from a small clone-recovery / differential-expression report and covers the common shapes: a primary metric with bootstrap CIs, an adjacent metric that exists in the same CSV but is *not* the primary (so the manifest carries both with distinct `label_aliases_forbidden` lists), a coined statistic with an `overloaded_warning`, a term whose role-name ("validation panel") could mislead a skim reader, and a figure entry with `sha256` for the Phase-6 freshness check.
 
@@ -217,7 +219,7 @@ Constraints the manifest must satisfy before Phase 2 may proceed:
 - Every coined term has either a plain-English rendering or an explicit note that no rendering is needed. If a term shadows an established literature term, the `overloaded_warning` field is mandatory.
 - Every worked example has a `subject_id` (the concrete row, cell, or capsule the example traces) and `provenance` (the file/row that holds the raw inputs). The `rows` table values must match the provenance file when executed; Phase 6 verifies this.
 
-The draft step is not allowed to introduce a number, term, or worked-example value that is not in the manifest. If a draft pass discovers a new artefact it needs, the flow returns to Phase 1, adds the entry, and re-enters Phase 2.
+The draft step is not allowed to introduce a number, term, or worked-example value that is not in the manifest. If a draft pass discovers a new artifact it needs, the flow returns to Phase 1, adds the entry, and re-enters Phase 2.
 
 ---
 
@@ -244,7 +246,13 @@ Drafting order:
 1. Data-driven sections first (Problem Statement, Methods, Results). These are bound by the manifest.
 2. Interpretive sections last (Conclusions, Abstract, Next Steps). Derive these from what was written in Results — never pre-write them, never template-fill from the planning brief alone.
 
+**Voice and readability.** All the rigor below (manifest-sourced numbers, finding-form titles, acronym discipline, denominators) is about *correctness*, not *register*. Do not let it flatten the prose into a methods section. The Abstract, Problem Statement, and the opening of each Results unit should read like the introduction of a good paper a person wrote — lead with the scientific story and why it matters before the machinery, motivate the question, and carry the reader. Reserve the dense, methods-paper register for the Methods technical detail and the supplement, where it belongs. A report that is exhaustively verified but reads as an archive of facts has failed the reader who needed to understand *why* before *how*. See `references/section-guide.md` (Abstract, Problem Statement, and the readability note) for the craft.
+
+**Write in US English.** Default to US spelling and conventions throughout the report (`analyze`, `normalization`, `behavior`, `signaling`, `center`, `artifact`) unless the planning brief explicitly asks otherwise. The convention prose you are reading is itself US English; match it. Do not drift into British forms (`analyse`, `normalisation`, `behaviour`, `signalling`, `centre`, `artefact`) — that drift is a recurring failure mode of this skill.
+
 While drafting:
+
+- **Integrate the figures the analysis already produced.** Look in `outputs/figures/` (and any figure directory the analysis uses) and pull the load-bearing plots into the report with `\includegraphics`, a self-contained caption, and a `\ref{}` from the prose — do not default to a figure-free methods-archive. A report that describes a result the analysis has a figure for, but omits the figure, is harder to read than it needs to be; figures are the in-house strength this skill should match. Register each figure you include in `manifest.figures[*]` with its `sha256` so Phase 6 can check freshness and `scitexlintr`'s `unfingerprinted-figure` rule is satisfied. Only the supplement-heavy or genuinely figure-free analysis should ship zero figures, and that should be a deliberate choice, not a default.
 
 - Every cross-document reference must either inline the relevant fact (≤ 1 sentence) or be deleted. The Phase-0 standalone default forbids "as discussed in the previous report" leaning. If Phase 0 picked **addendum**, the named base documents are introduced upfront and "see §X" references to them are acceptable in body text, but the abstract still stands alone.
 - Apply the manifest's `policies` block. `acronym_budget_per_page` and `acronym_strictness` set how aggressively to spell-out and re-gloss. `intuition_leadin_default_form` sets whether load-bearing concepts get a paragraph or a sentence of intuition before the formal definition. `results_structure` decides whether Results sections use prose subsection titles (narrative) or `\paragraph{Question}` / `\paragraph{Findings}` / `\paragraph{Interpretation}` headers (structured). These are configuration, not exhortation — the policy is what gets enforced by the sub-agent reviewers, so the draft should follow it on first pass rather than wait for findings.
@@ -309,7 +317,7 @@ The full sub-agent prompt is in `references/phase-prompts.md`.
 
 ## Phase 6 — Blind numerical re-verify (SUB-AGENT)
 
-Dispatch a sub-agent that reads the draft `.tex` files, the Phase-1 manifest, the compiled PDF, and the narrowly-scoped on-disk artefacts the checks below depend on. The "blind" in this phase's name refers to the planning brief, the memory cheatsheet, and `.living/` — *not* to the analysis directory at large. Phase 6 is fundamentally a verification phase: it must be able to read the on-disk CSV that a manifest entry claims to come from, the figure file that a `\includegraphics` references, and the cross-document drift target files. The blind read is preserved at the framing level (the sub-agent doesn't know the analyst's intent) while the verification has enough access to actually verify. The full input list and the explicit prohibition list live in `references/phase-prompts.md`.
+Dispatch a sub-agent that reads the draft `.tex` files, the Phase-1 manifest, the compiled PDF, and the narrowly-scoped on-disk artifacts the checks below depend on. The "blind" in this phase's name refers to the planning brief, the memory cheatsheet, and `.living/` — *not* to the analysis directory at large. Phase 6 is fundamentally a verification phase: it must be able to read the on-disk CSV that a manifest entry claims to come from, the figure file that a `\includegraphics` references, and the cross-document drift target files. The blind read is preserved at the framing level (the sub-agent doesn't know the analyst's intent) while the verification has enough access to actually verify. The full input list and the explicit prohibition list live in `references/phase-prompts.md`.
 
 It extracts every numeric token in the prose plus its surrounding label, and cross-checks the manifest.
 
@@ -322,6 +330,7 @@ Output is structured as **provenance** vs **style** (mirroring the synthesis spl
 - For every figure: does the file at `figures[*].path` still have the manifest's `sha256`? If a figure was regenerated mid-draft, the file may be newer than the prose claims.
 - **Worked-example value verification.** For each table in the draft that the Phase-3 gate marked as a worked example, locate the matching `manifest.worked_examples[*]` entry by `subject_id` (mentioned in the caption or surrounding text). Verify that every row in the table matches the manifest's `rows[*]` — same `snp_id`/`role`, same `N` and `Y`, same `alt_fraction`, same `covered`/`supports_target`. Worked examples with no manifest entry are *unsourced worked examples* and get flagged as major; mismatching rows are *fabricated worked-example values* and get flagged as major. This catches confabulated plausible-looking values that pass the visual sniff test.
 - **Provenance section completeness.** Read the Provenance section's script list. Run `ls scripts/` (or whichever directory the analysis uses, inferable from manifest provenance pointers). Every `run_*.R` / `run_*.py` / `evaluate_*.R` / `make_figures.R` etc. in the analysis directory should appear in the Provenance list with a one-line description. Scripts that are clearly diagnostic-only (`*_test.R`, `*_dev.R`) can be omitted; the heuristic is that anything which writes into `outputs/` belongs in Provenance. Flag missing scripts as minor provenance findings.
+- **Code-grounding of load-bearing claims (doc-vs-code drift).** For a sample of the report's load-bearing *definitional, structural, and enumeration* claims — the set of categories in an enum, the number of stages/streams/tiers/grades, the columns a function emits, the order of a precedence chain, the definition of a coined metric — open the code that implements the claim and verify the claim against the code's actual behavior, not against any doc that describes it. This is the one check in Phase 6 that reads the code as source of truth rather than the manifest: the manifest can faithfully record a claim that every doc agrees on but the code contradicts (the "wrong consensus" failure), and only reading the implementing function catches it. Where the manifest entry carries a `computed_at` or `grounded_in` pointer, start there; otherwise locate the producing function. A claim that the code refutes is a **code-grounding finding** (severity: major when it changes a reported value or a definition; minor when it is a stale label) — emit both the draft fix and, via the cross-document drift mechanism, a patch for the doc that drifted.
 
 **Cross-document drift findings** (also provenance):
 
@@ -378,7 +387,7 @@ The preview is optional. Skip if the Phase-0 planning brief recorded a "skip-pre
 
 ---
 
-## Quick reference — phase artefacts
+## Quick reference — phase artifacts
 
 | Phase | User-in-loop? | Artifact path |
 |---|---|---|

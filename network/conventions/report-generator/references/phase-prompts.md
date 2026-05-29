@@ -56,7 +56,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 > - Regardless of strictness: any acronym in a section title, the abstract, or a figure caption is a finding. These three surfaces always require spelled-out form.
 >
 > **Jargon-dense sentences.**
-> - Scan each sentence for "noun-phrase stacks" — sequences of ≥ 3 unexplained technical noun-phrases. Examples to recognise: "consensus-floor depth-2 predictive-closure with lambda=0.10 sticky top-25", "empirical-bg vs fixed-bg permutation".
+> - Scan each sentence for "noun-phrase stacks" — sequences of ≥ 3 unexplained technical noun-phrases. Examples to recognize: "consensus-floor depth-2 predictive-closure with lambda=0.10 sticky top-25", "empirical-bg vs fixed-bg permutation".
 > - For each such sentence, check whether a plain-English description of the operation appears in the same paragraph. If not, flag it.
 >
 > **Intuitive-before-technical.** Use `policies.intuition_leadin_default_form`:
@@ -121,7 +121,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 >
 > **Report-shape consistency.**
 > - The report claims a shape implicitly through structure: a short main text + supplement vs. a single comprehensive document. Does the actual shape match the claim? An "overview" that runs 18 pages is not an overview.
-> - Section length skew: if the Methods section is more than ~50% of the main text by length, flag as shape inconsistency (likely a comprehensive draft labelled as overview, or a methods-heavy section that should have been split into main + supplement).
+> - Section length skew: if the Methods section is more than ~50% of the main text by length, flag as shape inconsistency (likely a comprehensive draft labeled as overview, or a methods-heavy section that should have been split into main + supplement).
 >
 > **Caveat prominence.**
 > - For every headline number (any number that appears in the abstract or in a section conclusion), locate the strongest caveat for it. Verify the caveat lives at a heading level at least as prominent as the claim. A caveat buried in §1.3 footnote when the number is in the abstract is hiding.
@@ -141,8 +141,9 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 - `analysis/[name]/reports/[name]-report.tex` (the draft itself).
 - `analysis/[name]/reports/.manifest.json` (full).
 - `analysis/[name]/reports/[name]-report.pdf` if it has been compiled — read with `pdftotext` to extract the prose-as-rendered (catches LaTeX-rendering edge cases that read differently than the source).
-- **On-disk CSVs / outputs the manifest's `provenance` / `computed_at` fields point to.** Phase 6 is fundamentally a verification phase; it must be able to read the artefact a manifest entry claims to come from. Stay within `analysis/[name]/output/`, `analysis/[name]/outputs/`, and `analysis/[name]/figures/` (or whichever output directory the manifest's pointers establish — infer it once at the start).
+- **On-disk CSVs / outputs the manifest's `provenance` / `computed_at` fields point to.** Phase 6 is fundamentally a verification phase; it must be able to read the artifact a manifest entry claims to come from. Stay within `analysis/[name]/output/`, `analysis/[name]/outputs/`, and `analysis/[name]/figures/` (or whichever output directory the manifest's pointers establish — infer it once at the start).
 - **The analysis script directory** for the Provenance-completeness check — `ls analysis/[name]/*.R` / `*.py` and read the first comment block of each script for the one-line description. Do not read deeper into scripts unless a specific finding (lying caption pointing to a specific figure generator) requires it.
+- **The specific functions that implement load-bearing definitional / structural / enumeration claims**, for the code-grounding check below. This is the one check that reads the code as source of truth, so it is allowed to read deeper than the first comment block — but only into the named function that produces the claim under inspection (the enum builder, the pipeline driver, the schema definition, the precedence-ranking constant). Start from the manifest entry's `computed_at` / `grounded_in` pointer when present; otherwise grep for the value or the term. Do not crawl the whole codebase — open the implementing function, verify, move on.
 - **The figure files themselves** (for `sha256` comparison against `manifest.figures[*].sha256`) and the figure-generation code referenced by `manifest.figures[*]` (typically `make_figures.R` or a similarly-named entry point) **only** when chasing a lying-caption finding. Open the specific function that draws the figure under suspicion; do not skim the whole file.
 - **Cross-document drift target files** (for the cross-document drift check) — the analysis's `UPPER_SNAKE_CASE.md`, `STATUS.md`, `specification.md`, `conclusions.md`, `decisions_pre_run.md`, any plan documents, and other `.tex` files under `analysis/[name]/reports/`. Grep is preferred over full reads; named files only — do not crawl.
 
@@ -154,11 +155,11 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 - Any analysis directory other than `analysis/[name]/`.
 - Other reports under `analysis/[name]/reports/` that have been excluded from verification (e.g., a human-revised baseline kept for comparison). The orchestrator names these explicitly when present; in their absence assume the report under verification is the only one.
 
-The list above is permissive in scope but narrow in *kind*: you read the artefacts that the draft already cites or that the project's headline surfaces (STATUS, MANIFEST, etc.) carry, never the scaffolding the draft was written from. The blind read is preserved at the framing level — you still don't know the analyst's intent — while the verification has enough access to actually verify.
+The list above is permissive in scope but narrow in *kind*: you read the artifacts that the draft already cites or that the project's headline surfaces (STATUS, MANIFEST, etc.) carry, never the scaffolding the draft was written from. The blind read is preserved at the framing level — you still don't know the analyst's intent — while the verification has enough access to actually verify.
 
 **Prompt:**
 
-> You are verifying that every numeric token in a scientific report draft is consistent with the manifest of values that were computed, and that the same numbers are not contradicted elsewhere in the project. You are *blind to framing context* — you don't know the analyst's intent, you haven't seen the planning brief, you haven't read `.living/`. You may, however, read the on-disk artefacts the verification checks below need (CSVs the manifest points to, the figures themselves, the analysis script directory, and the named cross-doc drift files). The full input list and the explicit prohibition list are given above.
+> You are verifying that every numeric token in a scientific report draft is consistent with the manifest of values that were computed, and that the same numbers are not contradicted elsewhere in the project. You are *blind to framing context* — you don't know the analyst's intent, you haven't seen the planning brief, you haven't read `.living/`. You may, however, read the on-disk artifacts the verification checks below need (CSVs the manifest points to, the figures themselves, the analysis script directory, and the named cross-doc drift files). The full input list and the explicit prohibition list are given above.
 >
 > Return findings in two top-level sections: **provenance** (label–value alignment, unsourced numbers, cross-document drift) and **style** (denominators, lying captions). The Phase-7 recompile log surfaces both sections; neither is more important than the other.
 >
@@ -174,7 +175,8 @@ The list above is permissive in scope but narrow in *kind*: you read the artefac
 > - If absent from the manifest: flag as **unsourced number**. These are often from a one-off check during the drafting conversation, not a stored test.
 >
 > *Adjacent-paragraph swaps.*
-> - For each pair of numerically-similar values appearing in adjacent paragraphs, check whether the labels are consistent across the paragraphs. The lamanno / 10x swap pattern is: -0.014 in one paragraph, -0.023 in the next, when the labels indicate the values should be the other way around. Flag any candidate.
+> - For each pair of numerically-similar values appearing in adjacent paragraphs, check whether the labels are consistent across the paragraphs. The lamanno / 10x swap pattern is: -0.014 in one paragraph, -0.023 in the next, when the labels indicate the values should be the other way around.
+ Flag any candidate.
 >
 > *Figure freshness.*
 > - For every `\includegraphics{...}` in the draft, locate the file. Hash it. Compare against `manifest.figures[*].sha256`. If mismatch, flag as **stale figure** — the figure was regenerated mid-draft and the prose may reference the wrong version.
@@ -192,6 +194,13 @@ The list above is permissive in scope but narrow in *kind*: you read the artefac
 > - Infer the analysis script directory from `manifest.numbers[*].computed_at` and `manifest.worked_examples[*].computed_at` (e.g., `scripts/`, `analysis/[name]/`, or wherever the manifest's `computed_at` pointers live). List the actual script files in that directory matching the patterns `run_*.{R,py}`, `evaluate_*.{R,py}`, `make_*.{R,py}`.
 > - Every script that writes into `outputs/` (heuristic: any script the manifest's `computed_at` fields cite, plus any sibling scripts in the same directory) should appear in the Provenance section with a one-line description. Pure diagnostic / development scripts (`*_test.R`, `*_dev.R`, `scratch_*.R`) can be omitted.
 > - Flag missing scripts as **provenance-incomplete** (severity: minor) with a suggested one-line description drawn from the script's first comment block or filename.
+>
+> *Code-grounding (doc-vs-code drift).*
+> - This is the only check in this phase that treats the **code as source of truth** rather than the manifest. The reason it exists: the manifest, and every prose number checked against it, can be internally consistent and still wrong, because the manifest was built from documentation (a `README`, `CLAUDE.md`, a docstring) that drifted away from the code. When the whole documentation surface agrees on a wrong claim, the manifest faithfully records the wrong consensus and every other check in this phase passes. Only reading the implementing code catches it.
+> - Identify the report's **load-bearing definitional, structural, and enumeration claims**: the set of categories in an enum (e.g. a status field documented as `{pending, active, done}` that the code actually emits with more values), the count of stages or steps in a pipeline, the columns or fields a function emits, the order of a precedence / ranking chain, the closed vocabulary a classifier uses, the definition of a coined metric. These are claims about *what the code does*, not measured numbers.
+> - For each such claim, open the function that implements it (use the manifest's `computed_at` / `grounded_in` pointer; else grep for the value, the term, or the enum members) and verify the claim against the code's actual behavior. Does the enum really have four members, or eight? Does the pipeline really have six steps, or eight? Does the precedence chain in the code match the order quoted in the prose?
+> - A claim the code refutes is a **code-grounding finding**. Severity: `major` when it changes a reported value or a definition the reader would act on (wrong enum, wrong count, wrong precedence order); `minor` when it is a stale label that does not change the meaning. In the finding's `evidence`, quote both the draft's claim and the contradicting code (`file:line`). In `suggested_fix`, give the draft correction *and* note the documentation file that drifted, so the cross-document drift pass can patch it at the source.
+> - Be conservative about scope: check the claims a reader would build on, not every incidental number. And be honest about the limit — if the code itself is wrong and every doc agrees with it, this check cannot catch that; it catches doc-vs-code disagreement, not code-vs-reality. Flag a claim only when you have read the implementing code and it disagrees with the draft.
 >
 > *Cross-document drift.*
 > - For each unique number in the draft, `grep` for it in:
@@ -233,7 +242,7 @@ In practice, two iterations is typical. Three or more iterations on the same sub
 
 ## Cross-cutting notes
 
-- **Sub-agents must not know the planning brief, the memory cheatsheet, or the analysis directory.** The point of phase-4/5/6 is the blind read. Honour the input list above strictly.
+- **Sub-agents must not know the planning brief, the memory cheatsheet, or the analysis directory.** The point of phase-4/5/6 is the blind read. Honor the input list above strictly.
 - **One sub-agent per phase, not one sub-agent per checklist item.** Combining the checks in one prompt keeps the context small and lets the sub-agent share work (e.g., the regex pass for numeric tokens in Phase 6 is one pass, not one per check).
 - **Output is YAML, not Markdown.** This matters because the parent flow programmatically applies the findings — Markdown free-text is error-prone to parse. The orchestrator persists each phase's output to `analysis/[name]/reports/.review-plain-english.yaml`, `.review-framing.yaml`, and `.review-numerical.yaml` respectively. The sub-agent returns the YAML body; the orchestrator owns the file.
 - **Sub-agents err on the side of NOT flagging.** Each prompt says so; treat that line as load-bearing. False positives waste the drafter's time. A finding with `confidence: low` is fine; an invented finding is not.

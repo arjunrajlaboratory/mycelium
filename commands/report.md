@@ -19,7 +19,7 @@ description: >
 
 Generate a structured report from an analysis, routing to the appropriate report convention pack installed in this repository.
 
-This command is a thin router. The substantive workflow — the planning brief, the memory cheatsheet, the manifest, the draft, the three blind sub-agent reviewers, and the recompile gate — lives in the convention pack's own `analysis-conventions.md`. The router's job is to pick the right convention pack and hand off; do not duplicate or summarise the convention's phases here.
+This command is a thin router. The substantive workflow — the planning brief, the memory cheatsheet, the manifest, the draft, the three blind sub-agent reviewers, and the recompile gate — lives in the convention pack's own `analysis-conventions.md`. The router's job is to pick the right convention pack and hand off; do not duplicate or summarize the convention's phases here.
 
 ## Routing
 
@@ -33,7 +33,7 @@ This command is a thin router. The substantive workflow — the planning brief, 
 
 ## Post-action
 
-After the chosen convention pack's flow completes (or after a fallback draft is finalised), update the analysis manifest entry with the report status and the path to the PDF. Log any decisions or learnings from the writing process to `.living/decisions.md` and `.living/learnings.md` per the core post-action protocol — particularly any new failure modes the sub-agent reviewers surfaced, so the next report can probe for them upfront.
+After the chosen convention pack's flow completes (or after a fallback draft is finalized), update the analysis manifest entry with the report status and the path to the PDF. Log any decisions or learnings from the writing process to `.living/decisions.md` and `.living/learnings.md` per the core post-action protocol — particularly any new failure modes the sub-agent reviewers surfaced, so the next report can probe for them upfront.
 
 ## What this skill is NOT for
 
