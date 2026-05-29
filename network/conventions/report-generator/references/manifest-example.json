@@ -18,7 +18,7 @@
     "analysis_period": "2026-04-12 to 2026-05-18",
     "git_commit": "e61cb3501fd13d4f3b3a9c6c1e4ba7c8e0a4d3b2",
     "report_shape": "overview-supplement",
-    "baseline_of_comparison": "Laura Bagamery's production pipeline (v3.2), as reported in 2026-Q1 internal handoff",
+    "baseline_of_comparison": "the lab's production pipeline (v3.2), as reported in a prior internal handoff",
     "primary_metric": "exact accuracy on the held-out 27-SNP validation panel",
     "audience": "Lab PI plus one external wet-lab collaborator with no statistical-genetics background",
     "standalone_or_addendum": "standalone"
@@ -59,7 +59,7 @@
     {
       "id": "ari_legacy_vs_inferred_baseline",
       "value": 0.142,
-      "label_canonical": "adjusted Rand index for Laura's production pipeline against the same legacy panel",
+      "label_canonical": "adjusted Rand index for the production pipeline against the same legacy panel",
       "label_aliases_forbidden": ["ARI", "Rand index"],
       "provenance": "outputs/tables/clone_recovery.csv:row=baseline_production,col=ari",
       "computed_at": "scripts/04_clone_recovery.R:L92",

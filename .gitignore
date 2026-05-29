@@ -91,3 +91,6 @@ skillpacks/*/
 *.tar.bz2
 localFiles/
 trigger-eval-workspace/
+
+# Local calibration/example material — proprietary, never commit
+comparison_files/
