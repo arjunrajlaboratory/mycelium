@@ -60,7 +60,20 @@ def id_to_macro_name(manifest_id: str) -> str:
         elif segment.isalpha() and len(segment) <= 3:
             out.append(segment.upper())
         else:
-            out.append(segment[0].upper() + segment[1:].lower())
+            # Mixed or long letter segment. Title-case the letters and spell
+            # out any embedded digits: a TeX control word is letters only, so
+            # a bare digit would silently terminate the macro name (``\C`` plus
+            # literal ``1`` rather than ``\COne``) and break both the emitted
+            # \newcommand and scitexlintr's macro lookup.
+            chars: list[str] = []
+            for j, ch in enumerate(segment):
+                if ch.isdigit():
+                    chars.append(_DIGIT_WORDS[ch])
+                elif j == 0:
+                    chars.append(ch.upper())
+                else:
+                    chars.append(ch.lower())
+            out.append("".join(chars))
     return "".join(out)
 
 

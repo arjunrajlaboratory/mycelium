@@ -354,6 +354,8 @@ MYCELIUM_HOOK_BASENAMES = {
     "mycelium-stop-check.sh",
     "mycelium-activity-tracker.sh",
     "mycelium-read-tracker.sh",
+    "mycelium-data-tracker.sh",
+    "mycelium-data-lineage-stop.sh",
 }
 
 
@@ -485,8 +487,10 @@ def install_claude_hooks(target_dir: Path):
         hooks, valid_replacement_for=valid_replacement_for
     )
     if removed > 0:
-        print(f"  Consolidated: removed {removed} duplicate or stale hook entr"
-              f"{'y' if removed == 1 else 'ies'}")
+        print(
+            f"  Consolidated: removed {removed} duplicate or stale hook entr"
+            f"{'y' if removed == 1 else 'ies'}"
+        )
 
     # --- Pass 2: install missing hooks ---
     # Use the path resolved from this script's location for any hook NOT
@@ -496,6 +500,8 @@ def install_claude_hooks(target_dir: Path):
     stop_hook = str(hooks_dir / "mycelium-stop-check.sh")
     activity_tracker_hook = str(hooks_dir / "mycelium-activity-tracker.sh")
     read_tracker_hook = str(hooks_dir / "mycelium-read-tracker.sh")
+    data_tracker_hook = str(hooks_dir / "mycelium-data-tracker.sh")
+    data_lineage_stop_hook = str(hooks_dir / "mycelium-data-lineage-stop.sh")
 
     def _hook_entry(cmd: str) -> dict:
         return {"type": "command", "command": cmd}
@@ -550,6 +556,18 @@ def install_claude_hooks(target_dir: Path):
         read_entry["hooks"].append(_hook_entry(read_tracker_hook))
         print("  Registered: PostToolUse (Read) → mycelium-read-tracker.sh")
 
+    # --- PostToolUse: mycelium-data-tracker.sh (matcher: Bash) ---
+    # Detects analysis invocations and appends one NDJSON event per detected
+    # script to .claude/mycelium-data-events.tmp under fcntl.flock. Consumed
+    # at Stop by mycelium-data-lineage-stop.sh.
+    if not _has_hook(post_tool, "mycelium-data-tracker.sh"):
+        bash_entry = next((e for e in post_tool if e.get("matcher") == "Bash"), None)
+        if bash_entry is None:
+            bash_entry = {"matcher": "Bash", "hooks": []}
+            post_tool.append(bash_entry)
+        bash_entry["hooks"].append(_hook_entry(data_tracker_hook))
+        print("  Registered: PostToolUse (Bash) → mycelium-data-tracker.sh")
+
     # --- Stop: mycelium-stop-check.sh ---
     stop = hooks.setdefault("Stop", [])
     if not _has_hook(stop, "mycelium-stop-check.sh"):
@@ -559,6 +577,16 @@ def install_claude_hooks(target_dir: Path):
             stop.append(catch_all)
         catch_all["hooks"].append(_hook_entry(stop_hook))
         print("  Registered: Stop → mycelium-stop-check.sh")
+
+    # --- Stop: mycelium-data-lineage-stop.sh ---
+    # Consolidates per-session data lineage events into a manifest.
+    if not _has_hook(stop, "mycelium-data-lineage-stop.sh"):
+        catch_all = next((e for e in stop if e.get("matcher", "") == ""), None)
+        if catch_all is None:
+            catch_all = {"matcher": "", "hooks": []}
+            stop.append(catch_all)
+        catch_all["hooks"].append(_hook_entry(data_lineage_stop_hook))
+        print("  Registered: Stop → mycelium-data-lineage-stop.sh")
 
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
     print("  Wrote: .claude/settings.local.json")

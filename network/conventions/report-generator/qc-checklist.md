@@ -1,6 +1,6 @@
 # Report QC Checklist
 
-Run before finalising any report PDF. The list is split into **provenance** (does the result match what was actually run?) and **style** (is the prose clear and standalone?). Neither is more important than the other — calling them out separately helps the reader see at a glance whether an issue is factual or about clarity.
+Run before finalizing any report PDF. The list is split into **provenance** (does the result match what was actually run?) and **style** (is the prose clear and standalone?). Neither is more important than the other — calling them out separately helps the reader see at a glance whether an issue is factual or about clarity.
 
 Phase 4–6 sub-agents in the report-generator flow check most of these automatically. This file is the user-facing surface so a reader who only sees the QC list can still audit a finished report.
 
@@ -21,7 +21,7 @@ Phase 4–6 sub-agents in the report-generator flow check most of these automati
 
 ## Provenance (factual correctness)
 
-These checks verify the prose matches the artefacts. Phase 6 (blind numerical re-verify) is responsible for most of these.
+These checks verify the prose matches the artifacts. Phase 6 (blind numerical re-verify) is responsible for most of these.
 
 ### Label–value alignment
 
@@ -56,11 +56,22 @@ These checks verify the prose matches the artefacts. Phase 6 (blind numerical re
 - [ ] **Software environment** reference (`ENVIRONMENTS_INSTALLATIONS.md`) cited
 - [ ] **Manifest path** and **compile-log path** are recorded so a future reader can audit how the report was built
 
+### Code-grounding (claims vs. code, not docs)
+
+- [ ] **Every load-bearing definitional / structural / enumeration claim** (enum membership, stage / step / category counts, emitted columns, precedence-chain order, coined-metric definitions) has been verified against the **code that implements it**, not against a README, `CLAUDE.md`, `specification.md`, or docstring. *Failure mode: the docs all agree a status field has three categories, the code actually emits five, and the manifest faithfully records the wrong consensus — every prose-vs-manifest check passes while the report is wrong.* Phase 1 sources these claims from code; Phase 6 re-verifies a sample.
+- [ ] **Where a doc and the code disagreed**, the code won and the drifting doc was flagged for a fix (cross-document drift patch).
+
 ---
 
 ## Style (clarity and standalone-readability)
 
 These checks verify the prose works for a skim reader and a careful reader simultaneously. Phase 4 (plain-English lint) and Phase 5 (framing critique) catch most of these.
+
+### Language and readability
+
+- [ ] **US English throughout** — `analyze` / `normalization` / `behavior` / `signaling` / `center` / `artifact` / `modeling`, not the British forms. *Failure mode: the draft drifts into `analyse` / `behaviour` / `signalling` / `centre`, mirroring stale British prose; this skill's reports are US English by default.*
+- [ ] **Abstract and Problem Statement read as a readable introduction**, not a methods setup — they lead with the scientific story and why it matters before the apparatus. *Failure mode: a correct report that reads as an archive of verified facts, with no higher-level framing to carry the reader.*
+- [ ] **Available figures are integrated.** Load-bearing plots in `outputs/figures/` are pulled into the report with self-contained captions and `\ref{}`, not omitted in favor of a figure-free archive. Zero figures is a deliberate choice for a figure-free analysis, not a default.
 
 ### Skim-reader robustness
 
@@ -119,7 +130,7 @@ These checks verify the prose works for a skim reader and a careful reader simul
 ### Report-shape consistency
 
 - [ ] **Report shape** matches the Phase-0 choice. An "overview" draft with a 12-page methods section is not an overview.
-- [ ] **Main vs. supplement** designation from Phase 0.75 is honoured.
+- [ ] **Main vs. supplement** designation from Phase 0.75 is honored.
 - [ ] **Main-text page count** (pages before `\appendix`) is within the shape budget: overview ≤ 6 pages; overview+supplement ≤ 14 pages; comprehensive ≥ 5 pages. Overruns get explicit acknowledgement in `.compile-log.md` under `shape_budget`.
 
 ### Results structure

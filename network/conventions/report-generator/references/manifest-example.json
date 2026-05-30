@@ -1,6 +1,6 @@
 {
-  "_description": "Worked example of a Phase-1 source-of-truth manifest. Drawn from a small SNP-tree-flavoured differential-expression-with-clone-recovery analysis. Every numeric token that appears in the corresponding report draft has an entry here; every coined term that the report uses has a plain-English rendering; every worked-example table cell has row-level provenance. Phase 6 (blind numerical re-verify) cross-checks the draft against this file.",
-  "_schema_version": "0.3.0",
+  "_description": "Worked example of a Phase-1 source-of-truth manifest. Drawn from a small SNP-tree-flavoured differential-expression-with-clone-recovery analysis. Every numeric token that appears in the corresponding report draft has an entry here; every coined term that the report uses has a plain-English rendering; every worked-example table cell has row-level provenance. Phase 6 (blind numerical re-verify) cross-checks the draft against this file. NOTE on field names: each numbers[*] entry uses 'id' (not 'key'). The register_value helper writes 'key' into the analysis-side outputs/numbers.json fragment; Phase 1 renames 'key' -> 'id' when merging fragments into this manifest, because render_report_values_tex.py keys macros off 'id'. NOTE on confidence intervals: CI bounds are modelled as their own scalar numbers[*] entries (e.g. exact_accuracy_test_ci_low / _ci_high), not as a nested 'uncertainty' object — register_value emits scalars only, and a bound bundled in a nested object would get no \\SciVal macro and so escape scitexlintr drift detection.",
+  "_schema_version": "0.4.0",
 
   "policies": {
     "audience_tier": "B",
@@ -18,7 +18,7 @@
     "analysis_period": "2026-04-12 to 2026-05-18",
     "git_commit": "e61cb3501fd13d4f3b3a9c6c1e4ba7c8e0a4d3b2",
     "report_shape": "overview-supplement",
-    "baseline_of_comparison": "Laura Bagamery's production pipeline (v3.2), as reported in 2026-Q1 internal handoff",
+    "baseline_of_comparison": "the lab's production pipeline (v3.2), as reported in a prior internal handoff",
     "primary_metric": "exact accuracy on the held-out 27-SNP validation panel",
     "audience": "Lab PI plus one external wet-lab collaborator with no statistical-genetics background",
     "standalone_or_addendum": "standalone"
@@ -32,8 +32,26 @@
       "label_aliases_forbidden": ["accuracy", "support-weighted F1", "weighted F1", "F1w2"],
       "provenance": "outputs/tables/test_metrics.csv:row=overall,col=exact_accuracy",
       "computed_at": "scripts/03_evaluate.R:L142",
-      "uncertainty": {"ci_low": 0.241, "ci_high": 0.322, "method": "bootstrap n=1000, seed=42"},
       "appears_in_sections": ["abstract", "results.headline", "conclusions"]
+    },
+    {
+      "id": "exact_accuracy_test_ci_low",
+      "value": 0.241,
+      "label_canonical": "lower bound of the 95% bootstrap CI on exact accuracy",
+      "label_aliases_forbidden": ["standard error", "margin of error"],
+      "provenance": "outputs/tables/test_metrics.csv:row=overall,col=exact_accuracy_ci_low",
+      "computed_at": "scripts/03_evaluate.R:L142",
+      "appears_in_sections": ["abstract", "results.headline"],
+      "_note": "Bootstrap n=1000, seed=42. Registered as its own scalar (paired with exact_accuracy_test_ci_high) rather than bundled into the metric entry: when the CI is quoted in prose — 'exact accuracy 0.28 (95% CI 0.24-0.32)' — both bounds need their own \\SciVal macro, which only a numbers[*] entry produces. register_value emits scalars only; there is no 'uncertainty' object."
+    },
+    {
+      "id": "exact_accuracy_test_ci_high",
+      "value": 0.322,
+      "label_canonical": "upper bound of the 95% bootstrap CI on exact accuracy",
+      "label_aliases_forbidden": ["standard error", "margin of error"],
+      "provenance": "outputs/tables/test_metrics.csv:row=overall,col=exact_accuracy_ci_high",
+      "computed_at": "scripts/03_evaluate.R:L142",
+      "appears_in_sections": ["abstract", "results.headline"]
     },
     {
       "id": "weighted_f1_test",
@@ -42,9 +60,27 @@
       "label_aliases_forbidden": ["accuracy", "exact accuracy"],
       "provenance": "outputs/tables/test_metrics.csv:row=overall,col=f1w2",
       "computed_at": "scripts/03_evaluate.R:L148",
-      "uncertainty": {"ci_low": 0.451, "ci_high": 0.513, "method": "bootstrap n=1000, seed=42"},
       "appears_in_sections": ["supplement.S5"],
       "_note": "Reported in the supplement only — primary metric is exact accuracy per the planning brief. This entry exists because the value is in the table the supplement references; if the abstract or results drift to citing 0.482, the Phase-6 re-verify will catch the label-vs-value swap."
+    },
+    {
+      "id": "weighted_f1_test_ci_low",
+      "value": 0.451,
+      "label_canonical": "lower bound of the 95% bootstrap CI on support-weighted F1",
+      "label_aliases_forbidden": ["standard error", "margin of error"],
+      "provenance": "outputs/tables/test_metrics.csv:row=overall,col=f1w2_ci_low",
+      "computed_at": "scripts/03_evaluate.R:L148",
+      "appears_in_sections": ["supplement.S5"],
+      "_note": "Bootstrap n=1000, seed=42. Paired with weighted_f1_test_ci_high; same separate-scalar rationale as exact_accuracy_test_ci_low."
+    },
+    {
+      "id": "weighted_f1_test_ci_high",
+      "value": 0.513,
+      "label_canonical": "upper bound of the 95% bootstrap CI on support-weighted F1",
+      "label_aliases_forbidden": ["standard error", "margin of error"],
+      "provenance": "outputs/tables/test_metrics.csv:row=overall,col=f1w2_ci_high",
+      "computed_at": "scripts/03_evaluate.R:L148",
+      "appears_in_sections": ["supplement.S5"]
     },
     {
       "id": "ari_legacy_vs_inferred",
@@ -52,19 +88,15 @@
       "label_canonical": "adjusted Rand index between inferred clones and legacy 27-SNP panel labels",
       "label_aliases_forbidden": ["Rand index", "RI", "agreement"],
       "provenance": "outputs/tables/clone_recovery.csv:row=top5,col=ari",
-      "computed_at": "scripts/04_clone_recovery.R:L87",
-      "uncertainty": null,
-      "appears_in_sections": ["results.clone_recovery"]
+      "computed_at": "scripts/04_clone_recovery.R:L87",      "appears_in_sections": ["results.clone_recovery"]
     },
     {
       "id": "ari_legacy_vs_inferred_baseline",
       "value": 0.142,
-      "label_canonical": "adjusted Rand index for Laura's production pipeline against the same legacy panel",
+      "label_canonical": "adjusted Rand index for the production pipeline against the same legacy panel",
       "label_aliases_forbidden": ["ARI", "Rand index"],
       "provenance": "outputs/tables/clone_recovery.csv:row=baseline_production,col=ari",
-      "computed_at": "scripts/04_clone_recovery.R:L92",
-      "uncertainty": null,
-      "appears_in_sections": ["results.clone_recovery", "abstract"]
+      "computed_at": "scripts/04_clone_recovery.R:L92",      "appears_in_sections": ["results.clone_recovery", "abstract"]
     },
     {
       "id": "n_cells_total",
@@ -72,9 +104,7 @@
       "label_canonical": "number of cells passing QC",
       "label_aliases_forbidden": ["total cells", "total barcodes"],
       "provenance": "outputs/tables/cell_qc.csv:row=passing,col=count",
-      "computed_at": "scripts/01_preprocess.R:L203",
-      "uncertainty": null,
-      "appears_in_sections": ["methods.technical_detail", "supplement.S2"]
+      "computed_at": "scripts/01_preprocess.R:L203",      "appears_in_sections": ["methods.technical_detail", "supplement.S2"]
     },
     {
       "id": "n_snps_panel",
@@ -82,9 +112,7 @@
       "label_canonical": "number of SNPs in the inference panel",
       "label_aliases_forbidden": ["number of SNPs", "panel size"],
       "provenance": "outputs/tables/snp_panel.csv:row=total,col=count",
-      "computed_at": "scripts/01_preprocess.R:L267",
-      "uncertainty": null,
-      "appears_in_sections": ["methods.technical_detail"]
+      "computed_at": "scripts/01_preprocess.R:L267",      "appears_in_sections": ["methods.technical_detail"]
     },
     {
       "id": "n_snps_legacy_validation",
@@ -92,9 +120,7 @@
       "label_canonical": "number of SNPs in the legacy validation panel used as a self-consistency check",
       "label_aliases_forbidden": ["validation set", "held-out SNPs", "external validation"],
       "provenance": "data/a191Run/legacy_snp_panel.csv (chr-posREF>ALT format) — see DATASET_INFO.md for provenance",
-      "computed_at": "n/a — input file",
-      "uncertainty": null,
-      "appears_in_sections": ["methods.technical_detail", "supplement.S1"],
+      "computed_at": "n/a — input file",      "appears_in_sections": ["methods.technical_detail", "supplement.S1"],
       "_note": "Per Phase 5 framing critique: do not describe this panel as 'held-aside' or 'external validation' — it is the panel that produced the labels the inference is being measured against. Self-consistency check, not external."
     },
     {
@@ -103,9 +129,7 @@
       "label_canonical": "Benjamini-Hochberg-adjusted p-value for NF-kB pathway enrichment",
       "label_aliases_forbidden": ["raw p-value", "uncorrected p-value", "p-value"],
       "provenance": "outputs/tables/pathway_enrichment.csv:row=NF-kB_signaling,col=padj_bh",
-      "computed_at": "scripts/05_enrichment.R:L73",
-      "uncertainty": null,
-      "appears_in_sections": ["results.pathway"]
+      "computed_at": "scripts/05_enrichment.R:L73",      "appears_in_sections": ["results.pathway"]
     },
     {
       "id": "n_genes_de",
@@ -113,9 +137,7 @@
       "label_canonical": "number of genes significantly differentially expressed (padj < 0.05, |log2FC| > 1)",
       "label_aliases_forbidden": ["differentially expressed", "DE genes", "significant genes"],
       "provenance": "outputs/tables/de_results.csv: count where padj < 0.05 and abs(log2FC) > 1",
-      "computed_at": "scripts/02_de.R:L156",
-      "uncertainty": null,
-      "appears_in_sections": ["abstract", "results.de"]
+      "computed_at": "scripts/02_de.R:L156",      "appears_in_sections": ["abstract", "results.de"]
     }
   ],
 

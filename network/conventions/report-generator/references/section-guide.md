@@ -31,6 +31,8 @@ The abstract is the most-read part of any report. Many readers will read only th
 
 **Audience**: A general technical person who is not in your field. They should understand what you did and why it matters without needing domain expertise.
 
+**Lead with the story, not the apparatus.** The abstract is a place to be readable, not a place to enumerate. Open with the scientific question and why it matters in plain language; make a non-specialist *want* to read on. The rules below (numbers, acronyms, citations) are guardrails against overload — they are not an instruction to write tersely or mechanically. A correct abstract that reads like a CSV summary has missed the point.
+
 **Rules**:
 - No undefined acronyms — define on first use or avoid entirely
 - No figure or table references
@@ -54,7 +56,7 @@ These results [implication — what does this mean for the field/project/next st
 
 ## Problem Statement
 
-This section exists so that someone outside the immediate project can understand what you're doing and why. It replaces the traditional "Introduction" with something more focused and accessible.
+This section exists so that someone outside the immediate project can understand what you're doing and why. It replaces the traditional "Introduction" with something more focused and accessible — but it is still an *introduction*, and it is where the report earns a reader's attention. Default to a genuine, readable, higher-level framing: motivate the problem, sketch the scientific context, and tell the reader why this question is worth their time before you descend into specifics. This is the section where the in-house style consistently reads better than a bare methods setup; match that warmth here. Readability is the default, not a reward for finishing the rigor.
 
 **What to include**:
 - The question, in plain English
@@ -167,6 +169,7 @@ The structured style pays a visual-heaviness tax — every result is four paragr
 Regardless of which style is chosen, every Results subsection title should state a finding. "Evidence-first cell calling" is a topic; "Evidence-first calling trades recall for precision in a transparent way" is a finding. The Phase 5 sub-agent flags topic-only titles in Results (Methods, Provenance, and References titles are allowed to be topics).
 
 **Figures and tables**:
+- **Use the figures the analysis produced.** Before writing a result, check `outputs/figures/` (and any figure directory the analysis uses) for a plot that shows it, and integrate that figure with `\includegraphics`, a self-contained caption, and a `\ref{}`. A well-chosen figure communicates a result faster than a paragraph; integrating figures well is the in-house style's clearest advantage, and this skill should match it rather than defaulting to a figure-free archive. Register every figure you include in `manifest.figures[*]` with its `sha256` (Phase 1) so Phase 6 can verify freshness. Shipping zero figures should be a deliberate choice for a genuinely figure-free analysis, not the default outcome.
 - Every figure and table must be referenced in the text — if it's not discussed, it shouldn't be there
 - Captions must be self-contained: a reader should understand the figure from the caption alone without reading the surrounding text
 - Caption pattern: "[What the figure shows]. [How to read it]. [Key takeaway]."
@@ -369,9 +372,9 @@ Any coined term that overlaps an established statistics / genomics / ML term nee
 Common overloads:
 
 - **"Log-likelihood ratio test"** when the statistic is `dLL = LL_branch - LL_null` without the factor of 2 (so a threshold of 10 corresponds to Wilks 20, not Wilks 10).
-- **"Penalised log-likelihood ratio"** that a reader trained on Wilks chi-square statistics will mis-extrapolate.
+- **"Penalized log-likelihood ratio"** that a reader trained on Wilks chi-square statistics will mis-extrapolate.
 - **`cond_p`** for an ordinal score that looks like a per-SNP p-value but is not.
-- **"Validation"** when the validation cohort is downstream of the same upstream labelling decisions (so agreement is a self-consistency check, not external validation).
+- **"Validation"** when the validation cohort is downstream of the same upstream labeling decisions (so agreement is a self-consistency check, not external validation).
 
 When an overloaded name is used, the manifest's `terms[*].overloaded_warning` field is mandatory.
 
@@ -381,6 +384,8 @@ When an overloaded name is used, the manifest's `terms[*].overloaded_warning` fi
 
 These apply throughout the report:
 
+- **US English.** Default to US spelling and conventions (`analyze`, `normalization`, `behavior`, `signaling`, `center`, `artifact`, `modeling`) unless the planning brief asks otherwise. Do not drift into British forms (`analyse`, `normalisation`, `behaviour`, `signalling`, `centre`, `artefact`, `modelling`) — that drift is a recurring failure mode of this skill, and it is jarring in a US-based lab's reports.
+- **Readable over formulaic.** The rigor machinery (manifest sourcing, finding-form titles, acronym budgets, denominators) governs *correctness*; it does not require a flat, methods-section register everywhere. The Abstract, Problem Statement, and the opening of each Results unit should read like a paper a thoughtful person wrote — narrative, motivated, carrying the reader. Save the dense methods-paper voice for the technical detail and the supplement. If a section reads like an archive of verified facts rather than an explanation, it is too formulaic; rewrite the framing without weakening the rigor.
 - **Past tense** for methods and results ("We computed...", "The analysis showed..."). Present tense for statements that are currently true ("Figure 3 shows...", "These results suggest...").
 - **Active voice** when possible ("We filtered cells with fewer than 500 genes" not "Cells with fewer than 500 genes were filtered").
 - **Precision over hedging**: "23% of genes were upregulated" not "a significant proportion of genes were upregulated." Use numbers.
