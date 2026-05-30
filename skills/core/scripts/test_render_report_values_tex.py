@@ -22,6 +22,19 @@ def test_id_to_macro_name_basics() -> None:
     assert rrv.id_to_macro_name("n_de_genes_fdr_0_05") == "NDEGenesFDRZeroZeroFive"
 
 
+def test_id_to_macro_name_spells_out_embedded_digits() -> None:
+    # Mixed letter+digit segments must spell out the digit, because a LaTeX
+    # control word is letters-only — ``\COne`` not ``\C`` + literal ``1``.
+    assert rrv.id_to_macro_name("c1_precision") == "COnePrecision"
+    assert rrv.id_to_macro_name("x17_module") == "XOneSevenModule"
+    assert rrv.id_to_macro_name("pc1_c1_ari") == "PcOneCOneARI"
+    assert rrv.id_to_macro_name("weighted_f1_test") == "WeightedFOneTest"
+    assert (
+        rrv.id_to_macro_name("x17_module_c1_balanced_accuracy_ci_high")
+        == "XOneSevenModuleCOneBalancedAccuracyCIHigh"
+    )
+
+
 def test_id_to_macro_name_strips_namespace() -> None:
     assert rrv.id_to_macro_name("diff-expr.n_samples") == "NSamples"
     # ``baz`` and ``qux`` are both ≤3-letter all-alpha segments, so they

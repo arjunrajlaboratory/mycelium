@@ -14,10 +14,10 @@ For scitexlintr to do its job, the report needs a manifest of every reportable v
 your analysis script
   └── register_value("n_samples", 48)
         ↓
-analysis/<name>/outputs/numbers.json        (fragment — mechanical fields only)
-        ↓  [report-generator Phase 1 merges + enriches]
+analysis/<name>/outputs/numbers.json        (fragment — mechanical fields only; field name "key")
+        ↓  [report-generator Phase 1 merges + enriches; renames "key" → "id"]
         ↓
-analysis/<name>/reports/.manifest.json      (canonical source of truth)
+analysis/<name>/reports/.manifest.json      (canonical source of truth; field name "id")
         ↓  [render_report_values_tex emits LaTeX macros]
         ↓
 analysis/<name>/reports/build/report_values.tex
@@ -144,7 +144,7 @@ Two calls **across processes / re-runs** with different values silently upsert �
 
 This is implemented by the `report-generator` convention, but quickly:
 
-1. **Phase 1** of `/mycelium:report` reads every `analysis/<name>/outputs/numbers.json` fragment the report sources from. It merges them into a single `numbers[*]` list in `.manifest.json`, then enriches each entry with framing fields the report-writing agent decides on (canonical label, forbidden aliases, which sections each value appears in).
+1. **Phase 1** of `/mycelium:report` reads every `analysis/<name>/outputs/numbers.json` fragment the report sources from. It merges them into a single `numbers[*]` list in `.manifest.json`, then enriches each entry with framing fields the report-writing agent decides on (canonical label, forbidden aliases, which sections each value appears in). During the merge it **renames the fragment's `key` field to `id`** — the manifest entry is `{"id": "n_samples", ...}`, not `{"key": ...}` — because `render_report_values_tex` keys its macros off `id`. (A fragment entry merged verbatim with its `key` intact emits no macro and silently breaks drift detection.)
 2. **`render_report_values_tex`** (`skills/core/scripts/render_report_values_tex.py`) reads `.manifest.json` and writes `build/report_values.tex` — a `\newcommand` per id plus the `\SciVal` / `\SciText` wrappers.
 3. **The draft** sources every quoted number via `\SciVal{\Macro}{snapshot}` (numbers) or `\SciText{\Macro}{snapshot}` (text values). The snapshot is what the source file shows for review; LaTeX prints only the macro.
 4. **scitexlintr** runs as part of Phase 7's recompile gate. It re-resolves every macro against `.manifest.json` and fails the build if any snapshot disagrees with the manifest value.
@@ -163,9 +163,9 @@ The PDF was never wrong (LaTeX always printed the macro's current expansion); th
 - `key` is snake_case: `n_samples`, `fdr_threshold`, `contrast_phrase`. The id→macro transform (documented in scitexlintr's `_manifest.py`) is deterministic:
   - all-letter segments of ≤3 characters uppercase (`fdr` → `FDR`)
   - all-digit segments map each digit to its English word (`05` → `ZeroFive`)
-  - everything else title-cases
-- `n_samples` → `\NSamples`, `fdr_threshold` → `\FDRThreshold`, `n_de_genes_fdr_0_05` → `\NDEGenesFDRZeroZeroFive`.
-- Stay snake_case in the key; the macro name is generated.
+  - everything else (mixed letters+digits, or a longer letter run) title-cases the letters **and spells out any embedded digit** (`c1` → `COne`, `x17` → `XOneSeven`). Digits are always spelled out, never left as digits, because a LaTeX control word is letters-only — a bare digit would terminate the macro name (`\C` followed by a literal `1` rather than `\COne`).
+- `n_samples` → `\NSamples`, `fdr_threshold` → `\FDRThreshold`, `n_de_genes_fdr_0_05` → `\NDEGenesFDRZeroZeroFive`, `x17_module_c1_precision` → `\XOneSevenModuleCOnePrecision`.
+- Stay snake_case in the key; the macro name is generated. Keys with digit-bearing segments are fine — they produce longer but valid macro names.
 
 ## Migrating an existing analysis
 
@@ -179,6 +179,7 @@ The PDF was never wrong (LaTeX always printed the macro's current expansion); th
 
 - **Don't register transformed-for-display values.** Register the raw number (`15122`); let the report decide whether to show `15,122` or `15122`. scitexlintr's snapshot comparison handles comma grouping at the linter side.
 - **Don't register lists or dicts.** v1 supports `int` / `float` / `bool` / `str` only. For richer structures (tables, worked examples) use the existing `worked_examples[*]` section of `.manifest.json` — that's the report-writing agent's job, not `register_value`'s.
+- **Register confidence intervals as separate scalars, never as a nested `uncertainty` object.** A bound you intend to quote in prose needs its own `register_value` call — `register_value("acc_ci_low", 0.241)` and `register_value("acc_ci_high", 0.322)` — so each gets a `\SciVal` macro and scitexlintr can catch drift. A bound bundled into a `{"ci_low": ..., "ci_high": ...}` dict gets no macro and would be flagged `unsourced-numeric-token` if it appeared in the text. (Older `.manifest.json` examples carried an `uncertainty` object; that shape is retired — `numbers[*]` entries are flat scalars on both the fragment and manifest sides.)
 - **Don't quote derived numbers without a register.** If the analysis prints "There were 317 DE genes" but no `register_value("n_de_genes_fdr_0_05", 317)` happened, that number will be flagged as `unsourced-numeric-token` once the linter sees it. Register it at the site that computed it.
 
 ## Cross-references

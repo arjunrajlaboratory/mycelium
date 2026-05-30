@@ -122,7 +122,11 @@ For **overview + supplement** (DEFAULT): main text holds the headline plus one h
 
 Build a JSON manifest of every concrete artifact the draft will contain. The Phase-2 draft step is constrained to source numbers and terms from this manifest — that is what makes blind numerical re-verification (Phase 6) catch label-vs-value bugs and what makes `scitexlintr` (Phase 7) catch drift at lint time.
 
-**Read analysis-side fragments first.** Each contributing analysis registers reportable values with the `register_value` helper (`skills/core/scripts/register_value.py`), which writes mechanical fields (`value`, `provenance`, `computed_at`) into `analysis/<name>/outputs/numbers.json`. Phase 1 collects every fragment the report sources from and merges them into `numbers[*]`. The agent then *enriches* each entry with the framing-aware fields the analysis cannot know:
+**Read analysis-side fragments first.** Each contributing analysis registers reportable values with the `register_value` helper (`skills/core/scripts/register_value.py`), which writes mechanical fields (`value`, `provenance`, `computed_at`) into `analysis/<name>/outputs/numbers.json`. Phase 1 collects every fragment the report sources from and merges them into `numbers[*]`.
+
+**Rename `key` → `id` during the merge.** Each fragment entry carries a `key` field (`{"key": "exact_accuracy_test", "value": ...}`), but the merged manifest entry must name that field `id` (`{"id": "exact_accuracy_test", "value": ...}`). This is not cosmetic: `render_report_values_tex.py` reads `entry.get("id")` to mint each macro, so a fragment entry copied verbatim with its `key` field intact emits **no** `\SciVal` macro for that value and silently breaks drift detection. The value string is unchanged — only the field name changes (`key` → `id`). The `value`, `provenance`, and `computed_at` fields carry over untouched.
+
+The agent then *enriches* each entry with the framing-aware fields the analysis cannot know:
 
 - `label_canonical` — the canonical phrasing the prose must use
 - `label_aliases_forbidden` — phrasings that would mislead in this report's framing
@@ -137,7 +141,7 @@ If a value the draft needs has no fragment entry, do not type it into the manife
 
 **Ground load-bearing claims in the code, not the documentation.** The most expensive failure this skill does *not* yet catch is the stale-doc bug: a `README`, `CLAUDE.md`, `specification.md`, or a docstring describes the pipeline one way, the code has since drifted, and the draft inherits the doc's wrong claim. When that happens the manifest becomes a faithful recorder of the wrong consensus — every later phase cross-checks the prose against the manifest, but nothing checks the manifest against what the code actually does. So for every **load-bearing definitional, structural, or enumeration claim** the report will make — the set of categories in an enum, the number of stages in a pipeline, the columns a function emits, the order of a precedence chain, the definition of a coined metric (for instance, a status field documented as having three allowed values that the code actually emits with five) — trace the claim to the code that implements it and source the manifest entry from the code, treating any prose documentation as a lead to verify rather than a source of truth. Read the function that produces the value, not the doc that describes it. Where the implementing file and line are known, record them in the entry's `computed_at` (for `numbers[*]`) or in a `grounded_in` note (for `terms[*]`) so Phase 6 can re-check against the same code. If a doc and the code disagree, the code wins and the doc is flagged for a fix (Phase 6 emits the cross-document patch). This is the Phase-1 half of code-grounding; Phase 6 re-verifies a sample of these claims against the code with fresh eyes.
 
-A fully-populated example lives at `references/manifest-example.json` — read it once before generating the manifest for a new analysis. The example is drawn from a small clone-recovery / differential-expression report and covers the common shapes: a primary metric with bootstrap CIs, an adjacent metric that exists in the same CSV but is *not* the primary (so the manifest carries both with distinct `label_aliases_forbidden` lists), a coined statistic with an `overloaded_warning`, a term whose role-name ("validation panel") could mislead a skim reader, and a figure entry with `sha256` for the Phase-6 freshness check.
+A fully-populated example lives at `references/manifest-example.json` — read it once before generating the manifest for a new analysis. The example is drawn from a small clone-recovery / differential-expression report and covers the common shapes: a primary metric with bootstrap CIs modelled as separate `*_ci_low` / `*_ci_high` scalar entries (so each bound gets its own macro), an adjacent metric that exists in the same CSV but is *not* the primary (so the manifest carries both with distinct `label_aliases_forbidden` lists), a coined statistic with an `overloaded_warning`, a term whose role-name ("validation panel") could mislead a skim reader, and a figure entry with `sha256` for the Phase-6 freshness check.
 
 Manifest schema (write to `analysis/[name]/reports/.manifest.json`):
 
@@ -158,8 +162,24 @@ Manifest schema (write to `analysis/[name]/reports/.manifest.json`):
       "label_canonical": "exact accuracy",
       "label_aliases_forbidden": ["accuracy", "support-weighted F1", "weighted F1"],
       "provenance": "outputs/tables/test_metrics.csv:row=overall,col=exact_accuracy",
+      "computed_at": "scripts/03_evaluate.R:L142"
+    },
+    {
+      "id": "exact_accuracy_test_ci_low",
+      "value": 0.241,
+      "label_canonical": "lower bound of the 95% bootstrap CI on exact accuracy",
+      "label_aliases_forbidden": ["standard error", "margin of error"],
+      "provenance": "outputs/tables/test_metrics.csv:row=overall,col=exact_accuracy_ci_low",
       "computed_at": "scripts/03_evaluate.R:L142",
-      "uncertainty": {"ci_low": 0.241, "ci_high": 0.322, "method": "bootstrap n=1000"}
+      "_note": "Bootstrap n=1000, seed=42. CI bounds are their own scalar entries (paired _ci_low / _ci_high), not a nested 'uncertainty' object: register_value emits scalars only, and a bound bundled in a nested object gets no \\SciVal macro and so escapes scitexlintr."
+    },
+    {
+      "id": "exact_accuracy_test_ci_high",
+      "value": 0.322,
+      "label_canonical": "upper bound of the 95% bootstrap CI on exact accuracy",
+      "label_aliases_forbidden": ["standard error", "margin of error"],
+      "provenance": "outputs/tables/test_metrics.csv:row=overall,col=exact_accuracy_ci_high",
+      "computed_at": "scripts/03_evaluate.R:L142"
     }
   ],
   "terms": [
