@@ -163,9 +163,9 @@ The PDF was never wrong (LaTeX always printed the macro's current expansion); th
 - `key` is snake_case: `n_samples`, `fdr_threshold`, `contrast_phrase`. The id→macro transform (documented in scitexlintr's `_manifest.py`) is deterministic:
   - all-letter segments of ≤3 characters uppercase (`fdr` → `FDR`)
   - all-digit segments map each digit to its English word (`05` → `ZeroFive`)
-  - everything else title-cases
-- `n_samples` → `\NSamples`, `fdr_threshold` → `\FDRThreshold`, `n_de_genes_fdr_0_05` → `\NDEGenesFDRZeroZeroFive`.
-- Stay snake_case in the key; the macro name is generated.
+  - everything else (mixed letters+digits, or a longer letter run) title-cases the letters **and spells out any embedded digit** (`c1` → `COne`, `x17` → `XOneSeven`). Digits are always spelled out, never left as digits, because a LaTeX control word is letters-only — a bare digit would terminate the macro name (`\C` followed by a literal `1` rather than `\COne`).
+- `n_samples` → `\NSamples`, `fdr_threshold` → `\FDRThreshold`, `n_de_genes_fdr_0_05` → `\NDEGenesFDRZeroZeroFive`, `x17_module_c1_precision` → `\XOneSevenModuleCOnePrecision`.
+- Stay snake_case in the key; the macro name is generated. Keys with digit-bearing segments are fine — they produce longer but valid macro names.
 
 ## Migrating an existing analysis
 
