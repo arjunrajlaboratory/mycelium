@@ -171,5 +171,60 @@ def test_bool_value() -> None:
     assert "\\newcommand{\\Passed}{true}" in out
 
 
+# ---------------------------------------------------------------------------
+# Renderer-derived display: unit / precision / display (Path X)
+# ---------------------------------------------------------------------------
+
+
+def test_render_percent_default_precision() -> None:
+    out = rrv.render(
+        {"numbers": [{"id": "frac_positive", "value": 0.978, "unit": "percent"}]}
+    )
+    assert "\\newcommand{\\FracPositive}{97.8\\%}" in out
+
+
+def test_render_percent_explicit_precision() -> None:
+    out0 = rrv.render(
+        {"numbers": [{"id": "frac_positive", "value": 0.978, "unit": "percent", "precision": 0}]}
+    )
+    assert "\\newcommand{\\FracPositive}{98\\%}" in out0
+    out2 = rrv.render(
+        {"numbers": [{"id": "frac_positive", "value": 0.978, "unit": "percent", "precision": 2}]}
+    )
+    assert "\\newcommand{\\FracPositive}{97.80\\%}" in out2
+
+
+def test_render_display_override_verbatim() -> None:
+    # display is the author's LaTeX-ready escape hatch: emitted as-is.
+    out = rrv.render(
+        {"numbers": [{"id": "fold", "value": 3.2, "display": "3.2$\\times$"}]}
+    )
+    assert "\\newcommand{\\Fold}{3.2$\\times$}" in out
+
+
+def test_render_no_display_fields_unchanged() -> None:
+    # No unit/display → historical behavior (raw value).
+    out = rrv.render({"numbers": [{"id": "frac_positive", "value": 0.978}]})
+    assert "\\newcommand{\\FracPositive}{0.978}" in out
+
+
+def test_render_does_not_mutate_value() -> None:
+    manifest = {"numbers": [{"id": "frac_positive", "value": 0.978, "unit": "percent"}]}
+    rrv.render(manifest)
+    # The canonical value is the Phase-6 / scitexlintr anchor — rendering must
+    # not touch it even though the *displayed* macro is derived from it.
+    assert manifest["numbers"][0]["value"] == 0.978
+
+
+def test_render_percent_unit_unsupported_raises() -> None:
+    with pytest.raises(ValueError, match="unit"):
+        rrv.render({"numbers": [{"id": "x", "value": 0.5, "unit": "fold-change"}]})
+
+
+def test_format_value_percent_direct() -> None:
+    assert rrv.format_value(0.0111, unit="percent") == "1.1\\%"
+    assert rrv.format_value(0.8193, unit="percent") == "81.9\\%"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
