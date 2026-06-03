@@ -393,3 +393,24 @@ These apply throughout the report:
 - **Define before use**. Every abbreviation, every technical term, every symbol — define it before or at first use.
 - **Concrete over abstract**. "Expression of TP53 increased 3.2-fold" not "There was a notable change in expression levels."
 - **Figures do the heavy lifting**. The text should guide the reader through the figures, not duplicate them. "As shown in Figure 2, treatment increased IL6 expression 4.1-fold..." not "Treatment increased IL6 expression 4.1-fold (Figure 2 shows a bar plot of expression levels...)."
+
+### Read it aloud
+
+The fastest test for stiff prose is to read a sentence aloud. If it sounds like something you would never say to a colleague, rewrite it. Three patterns recur in this skill's output — the fix is shown, not lectured:
+
+- **Stored value, not spoken value.**
+  - *Before:* "consensus is positive for a fraction 0.978 of evidenced claims."
+  - *After:* "consensus is positive for 97.8% of evidenced claims."
+  - The fix is the `unit:"percent"` manifest field (Phase 1): it renders the canonical fraction `0.978` as `97.8\%`, so you write the readable form while the stored `value` stays the verification anchor. Reach for it whenever a fraction-of-a-whole would be spoken as a percentage.
+
+- **Jargon in a skim surface.** A subsection title or the first sentence of a result is read out of context; a bare coined term there reads as noise.
+  - *Before:* "Centrality is not a volume proxy."
+  - *After:* "Centrality is not just a popularity measure."
+  - If the precise term is genuinely load-bearing, gloss it in the same breath rather than dropping it cold.
+
+- **Archive register vs. explanation.** Enumerating verified facts is not the same as explaining them.
+  - *Before:* "The consensus score is positive for 97.8% of evidenced claims; the median is 0.75; the negative fraction is 1.1%."
+  - *After:* "Among claims that carry any evidence at all, the literature is overwhelmingly consensual — 97.8% lean positive, the median agreement is 0.75, and only 1.1% lean negative."
+  - Same numbers, but the second version tells the reader what they *mean* before listing them.
+
+This complements "Readable over formulaic" above: that principle says *why*; these pairs show *how*.

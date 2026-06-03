@@ -1,5 +1,5 @@
 {
-  "_description": "Worked example of a Phase-1 source-of-truth manifest. Drawn from a small SNP-tree-flavoured differential-expression-with-clone-recovery analysis. Every numeric token that appears in the corresponding report draft has an entry here; every coined term that the report uses has a plain-English rendering; every worked-example table cell has row-level provenance. Phase 6 (blind numerical re-verify) cross-checks the draft against this file. NOTE on field names: each numbers[*] entry uses 'id' (not 'key'). The register_value helper writes 'key' into the analysis-side outputs/numbers.json fragment; Phase 1 renames 'key' -> 'id' when merging fragments into this manifest, because render_report_values_tex.py keys macros off 'id'. NOTE on confidence intervals: CI bounds are modelled as their own scalar numbers[*] entries (e.g. exact_accuracy_test_ci_low / _ci_high), not as a nested 'uncertainty' object — register_value emits scalars only, and a bound bundled in a nested object would get no \\SciVal macro and so escape scitexlintr drift detection.",
+  "_description": "Worked example of a Phase-1 source-of-truth manifest. Drawn from a small SNP-tree-flavoured differential-expression-with-clone-recovery analysis. Every numeric token that appears in the corresponding report draft has an entry here; every coined term that the report uses has a plain-English rendering; every worked-example table cell has row-level provenance. Phase 6 (blind numerical re-verify) cross-checks the draft against this file. NOTE on field names: each numbers[*] entry uses 'id' (not 'key'). The register_value helper writes 'key' into the analysis-side outputs/numbers.json fragment; Phase 1 renames 'key' -> 'id' when merging fragments into this manifest, because render_report_values_tex.py keys macros off 'id'. NOTE on confidence intervals: CI bounds are modelled as their own scalar numbers[*] entries (e.g. exact_accuracy_test_ci_low / _ci_high), not as a nested 'uncertainty' object — register_value emits scalars only, and a bound bundled in a nested object would get no \\SciVal macro and so escape scitexlintr drift detection. NOTE on display fields: a numbers[*] entry may carry optional unit/precision/display fields that control only how value is rendered in prose (unit:'percent' renders the stored fraction 0.978 as 97.8\\%); value itself is never edited and stays the verification anchor — see frac_de_genes_upregulated.",
   "_schema_version": "0.4.0",
 
   "policies": {
@@ -138,6 +138,17 @@
       "label_aliases_forbidden": ["differentially expressed", "DE genes", "significant genes"],
       "provenance": "outputs/tables/de_results.csv: count where padj < 0.05 and abs(log2FC) > 1",
       "computed_at": "scripts/02_de.R:L156",      "appears_in_sections": ["abstract", "results.de"]
+    },
+    {
+      "id": "frac_de_genes_upregulated",
+      "value": 0.806,
+      "unit": "percent",
+      "label_canonical": "fraction of differentially expressed genes that are upregulated",
+      "label_aliases_forbidden": ["fraction of all genes upregulated", "upregulation rate"],
+      "provenance": "outputs/tables/de_results.csv: count(log2FC > 0 & padj < 0.05) / n_genes_de",
+      "computed_at": "scripts/02_de.R:L172",
+      "appears_in_sections": ["abstract", "results.de"],
+      "_note": "unit:'percent' renders this as 80.6% in prose ('80.6% of the 247 DE genes are upregulated') while value stays the canonical fraction 0.806 — the scitexlintr / Phase-6 anchor. precision defaults to 1; the displayed string is DERIVED from value, so it cannot silently drift from it. Reserve the free-text 'display' field for a value no unit can derive (e.g. a fold-change rendered '3.2$\\times$')."
     }
   ],
 
