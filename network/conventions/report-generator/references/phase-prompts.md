@@ -79,11 +79,12 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 
 - `analysis/[name]/reports/[name]-report.tex` (the draft itself)
 - `references/section-guide.md`, resolved relative to the convention pack root. When the pack is installed, this resolves to `.living/conventions/report-generator/references/section-guide.md`; when running from the mycelium source tree it resolves to `network/conventions/report-generator/references/section-guide.md`. The orchestrator passes the absolute path to the sub-agent; the sub-agent does not need to know where it lives. (The craft notes — read once, do not re-read per check.)
+- The report's **audience tier** — the orchestrator passes `policies.audience_tier` (the single letter A / B / C) so the read-aloud jargon check can calibrate to the intended reader. This is the *only* manifest-derived value Phase 5 receives; it does not get the numbers, the framing fields, or the brief, so the standalone test stays honest. Default to Tier B (an adjacent-field colleague) if it is not supplied.
 
 **Do NOT load:**
 
 - The planning brief (this is the test — see if the standalone read recovers the framing the brief asked for, or if the brief is doing work the prose isn't)
-- The manifest
+- The manifest (beyond the single `policies.audience_tier` letter the orchestrator hands in)
 - The analysis directory
 - `.living/`
 
@@ -113,6 +114,12 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 > - Rewrite test: imagine the analysis was done the right way from the start. Would the prose change substantively? If yes, flag.
 > - Particularly check the abstract and conclusions — body sections sometimes get away with light changelog framing, but the abstract anti-pattern is a finding regardless.
 >
+> **Read-aloud / voice.**
+> - Read the load-bearing prose aloud in your head — the abstract, the problem statement, and the opening sentences of each Results unit. You are listening for prose a person would not actually say to a colleague.
+> - Flag sentences that read as a *verified-facts archive* — a list of numbers and defined terms — rather than an explanation. The test: does the passage tell the reader what the numbers *mean* before (or instead of) enumerating them? A correct paragraph that reads like a CSV summary is a finding.
+> - Flag any term that, read aloud, a reader at the report's audience tier (`policies.audience_tier`, passed to you; default Tier B = an adjacent-field colleague) could not parse without the page in front of them. This catches bare coined jargon in *running prose* — e.g. "centrality is not a volume proxy" — that the acronym and title checks miss because it is neither an acronym nor a title. Suggest a glossed or plain rewrite the body already supports.
+> - Flag clunky number phrasings that the manifest's `unit` / `display` field should fix: "a fraction 0.978" should read "97.8%". You do not have the manifest, so flag the phrasing and let Phase 2 wire up the field.
+>
 > **Cross-document references.**
 > - Count every "as discussed in the previous report," "we previously showed X," "see §X" (for non-self references), or "this builds on Y."
 > - For each one, decide: was the relevant fact inlined in ≤ 1 sentence? If not, flag.
@@ -130,7 +137,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 > - Search for "confirmed", "verified", "established", "showed" used in a strong sense.
 > - For each, check whether the supporting evidence is a tested invariant across all relevant inputs, or one example. If one example, the prose must hedge ("for this one case"). Flag absent hedging.
 >
-> Return findings as a YAML list following the output contract above. Use `section: framing` on every finding. Use `severity: major` for standalone-test failures and missing-baseline findings; `severity: minor` for cross-document reference style and caveat-prominence questions of degree.
+> Return findings as a YAML list following the output contract above. Use `section: framing` on every finding. Use `severity: major` for standalone-test failures and missing-baseline findings; `severity: minor` for cross-document reference style, caveat-prominence questions of degree, and voice findings — except an archive-register or unparseable-jargon passage that reaches the abstract, which is `major` (the abstract is the most-read surface).
 
 ---
 
@@ -173,6 +180,10 @@ The list above is permissive in scope but narrow in *kind*: you read the artifac
 >   - Verify the surrounding label matches `label_canonical`.
 >   - Verify the surrounding label is not in `label_aliases_forbidden`.
 > - If absent from the manifest: flag as **unsourced number**. These are often from a one-off check during the drafting conversation, not a stored test.
+>
+> *Display faithfulness (derived-number check).*
+> - Some `numbers[*]` entries carry a `unit` or `display` field that controls how the number renders in prose: `unit:"percent"` makes the stored fraction `0.978` render as `97.8\%`, and `display` is a verbatim free-text override. The canonical `value` is unchanged; only the displayed string differs.
+> - For each such entry, confirm the rendered string is a faithful function of `value`: a `unit:"percent"` display must equal `value*100` rounded to the entry's `precision` (default 1) — `0.978 → 97.8\%`, `0.0111 → 1.1\%`; a free-text `display` must not state a number that contradicts `value`. Flag a display that does not derive from `value` as a provenance finding (severity: `major` when it changes the number a reader takes home, `minor` for a rounding-only quibble). This is the one way the readable number can drift from the verified one, so it closes the hole that `unit`/`display` would otherwise open.
 >
 > *Adjacent-paragraph swaps.*
 > - For each pair of numerically-similar values appearing in adjacent paragraphs, check whether the labels are consistent across the paragraphs. The lamanno / 10x swap pattern is: -0.014 in one paragraph, -0.023 in the next, when the labels indicate the values should be the other way around.

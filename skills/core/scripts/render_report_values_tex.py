@@ -108,13 +108,56 @@ def tex_escape(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def format_value(value: Any) -> str:
+def format_value(
+    value: Any,
+    *,
+    unit: str | None = None,
+    precision: int = 1,
+    display: str | None = None,
+) -> str:
     """Render a manifest value as it should appear in the generated .tex.
 
-    Numeric values are rendered as their natural Python repr (no comma
-    grouping; comma grouping is tolerated by scitexlintr at lint time but
-    not produced by default). Strings are LaTeX-escaped.
+    Display selection, in order:
+
+    1. ``unit`` set    — DERIVE the displayed string from ``value``.
+       ``unit="percent"`` turns the stored fraction ``0.978`` into ``97.8\\%``
+       at ``precision`` decimal places (default 1; integer precision drops the
+       trailing ``.0``). Because the string is a pure function of the canonical
+       ``value``, it can never silently disagree with the number the
+       verification layer (Phase 6 / scitexlintr) anchors on.
+    2. ``display`` set — emit the author-supplied string VERBATIM (no escaping).
+       This is the escape hatch for a rare non-derivable one-off (e.g. a
+       fold-change with a math-mode ``$\\times$``); the author owns its LaTeX.
+    3. neither         — historical behavior: numbers render as their natural
+       Python repr (no comma grouping; scitexlintr tolerates grouping at lint
+       time but it is not produced by default), strings are LaTeX-escaped.
     """
+    if unit is not None:
+        if unit != "percent":
+            raise ValueError(
+                f"render_report_values_tex: unsupported unit {unit!r}. "
+                "v1 supports only unit='percent'."
+            )
+        # bool is an int subclass — exclude it so True/False can't masquerade
+        # as a fraction.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                "render_report_values_tex: unit='percent' requires a numeric "
+                f"fraction value, got {type(value).__name__!r} (value={value!r})."
+            )
+        if isinstance(precision, bool) or not isinstance(precision, int) or precision < 0:
+            raise ValueError(
+                "render_report_values_tex: precision must be a non-negative int, "
+                f"got {precision!r}."
+            )
+        return f"{value * 100:.{precision}f}" + r"\%"
+    if display is not None:
+        if not isinstance(display, str):
+            raise ValueError(
+                "render_report_values_tex: display override must be a string, "
+                f"got {type(display).__name__!r} (display={display!r})."
+            )
+        return display
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
@@ -157,7 +200,12 @@ def render(manifest: dict, *, source_label: str | None = None) -> str:
         if not macro:
             continue
         value = entry["value"]
-        formatted = format_value(value)
+        formatted = format_value(
+            value,
+            unit=entry.get("unit"),
+            precision=entry.get("precision", 1),
+            display=entry.get("display"),
+        )
         if macro in macros:
             collisions.setdefault(macro, [macros[macro][0]]).append(manifest_id)
         else:
