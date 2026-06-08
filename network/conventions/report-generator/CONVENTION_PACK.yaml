@@ -20,6 +20,6 @@ dependencies:
   # Phase 7 invokes the `scitexlintr` CLI; see analysis-conventions.md.
   - name: scitexlintr
     type: python-package
-    install: 'pip install "scitexlintr @ git+https://github.com/arjunrajlaboratory/scilintr.git#subdirectory=tex/scitexlintr"'
+    install: 'pip install scitexlintr'
 tags: [report, latex, pdf, writing, core]
 ---

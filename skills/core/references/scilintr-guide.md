@@ -36,17 +36,17 @@ The linter is fast (sub-second on most files), so there is no reason to defer it
 
 ## Install
 
-If `scilintr` is not already importable on the PATH, install it from GitHub. It is not yet on PyPI or CRAN.
+If `scilintr` is not already importable on the PATH, install it.
 
-**Python (Python analysis code):**
+**Python (Python analysis code)** — published on PyPI (no runtime dependencies):
 
 ```bash
-pip install "scilintr @ git+https://github.com/arjunrajlaboratory/scilintr.git#subdirectory=py/scilintr"
+pip install scilintr
 ```
 
 After install, the `scilintr` CLI is on `$PATH`. Verify with `scilintr --help`.
 
-**R (R analysis code):**
+**R (R analysis code)** — not on CRAN; install from GitHub:
 
 ```r
 remotes::install_github("arjunrajlaboratory/scilintr", subdir = "r/scilintr")
