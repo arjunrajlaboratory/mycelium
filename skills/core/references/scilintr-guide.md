@@ -46,10 +46,10 @@ pip install scilintr
 
 After install, the `scilintr` CLI is on `$PATH`. Verify with `scilintr --help`.
 
-**R (R analysis code)** — not on CRAN; install from GitHub:
+**R (R analysis code)** — published on CRAN:
 
 ```r
-remotes::install_github("arjunrajlaboratory/scilintr", subdir = "r/scilintr")
+install.packages("scilintr")
 ```
 
 CLI:
