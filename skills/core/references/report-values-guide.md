@@ -149,6 +149,8 @@ This is implemented by the `report-generator` convention, but quickly:
 3. **The draft** sources every quoted number via `\SciVal{\Macro}{snapshot}` (numbers) or `\SciText{\Macro}{snapshot}` (text values). The snapshot is what the source file shows for review; LaTeX prints only the macro.
 4. **scitexlintr** runs as part of Phase 7's recompile gate. It re-resolves every macro against `.manifest.json` and fails the build if any snapshot disagrees with the manifest value.
 
+For `unit:"percent"` entries, the snapshot is still the stored value. If the manifest stores `0.9653` and renders it as `96.5\%`, the source should read `\SciVal{\FracDated}{0.9653}`, not `\SciVal{\FracDated}{96.5\%}`.
+
 If a value changes between runs, the linter detects drift and `scitexlintr --write` rewrites the snapshots in place. Diff:
 
 ```diff
@@ -178,6 +180,7 @@ The PDF was never wrong (LaTeX always printed the macro's current expansion); th
 ## Pitfalls
 
 - **Don't register transformed-for-display values.** Register the raw number (`15122`); let the report decide whether to show `15,122` or `15122`. scitexlintr's snapshot comparison handles comma grouping at the linter side.
+- **Don't register collision-prone narrative constants.** Bare round values (`0`, `1`, `1.0`) and common years (`2020`, `2021`) will match every incidental occurrence in prose and trigger `raw-generated-value`. Leave non-computed labels and narrative years unregistered unless they are load-bearing results; phrase them in words where practical.
 - **Don't register lists or dicts.** v1 supports `int` / `float` / `bool` / `str` only. For richer structures (tables, worked examples) use the existing `worked_examples[*]` section of `.manifest.json` — that's the report-writing agent's job, not `register_value`'s.
 - **Register confidence intervals as separate scalars, never as a nested `uncertainty` object.** A bound you intend to quote in prose needs its own `register_value` call — `register_value("acc_ci_low", 0.241)` and `register_value("acc_ci_high", 0.322)` — so each gets a `\SciVal` macro and scitexlintr can catch drift. A bound bundled into a `{"ci_low": ..., "ci_high": ...}` dict gets no macro and would be flagged `unsourced-numeric-token` if it appeared in the text. (Older `.manifest.json` examples carried an `uncertainty` object; that shape is retired — `numbers[*]` entries are flat scalars on both the fragment and manifest sides.)
 - **Don't quote derived numbers without a register.** If the analysis prints "There were 317 DE genes" but no `register_value("n_de_genes_fdr_0_05", 317)` happened, that number will be flagged as `unsourced-numeric-token` once the linter sees it. Register it at the site that computed it.

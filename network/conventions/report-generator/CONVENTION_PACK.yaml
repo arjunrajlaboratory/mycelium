@@ -18,8 +18,10 @@ author: mycelium
 dependencies:
   # External runtime dependency — install when this convention is active.
   # Phase 7 invokes the `scitexlintr` CLI; see analysis-conventions.md.
+  # This is the LaTeX-report package from scilintr/tex/scitexlintr, distinct
+  # from the analysis-code `scilintr` CLI.
   - name: scitexlintr
     type: python-package
-    install: 'pip install scitexlintr'
+    install: 'pip install "scitexlintr @ git+https://github.com/arjunrajlaboratory/scilintr.git#subdirectory=tex/scitexlintr"'
 tags: [report, latex, pdf, writing, core]
 ---

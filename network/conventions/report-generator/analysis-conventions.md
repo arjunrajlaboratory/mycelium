@@ -29,6 +29,25 @@ If not installed, guide the user to install the **full** TeX Live distribution:
 - **Linux**: `sudo apt-get install texlive-full` or equivalent
 - **Do not** install BasicTeX or minimal distributions — missing packages cause frustrating compilation failures
 
+Also verify that the LaTeX report linter is available:
+
+```bash
+which scitexlintr
+scitexlintr --help
+```
+
+`scitexlintr` is a separate Python package from the analysis-code `scilintr` CLI, even though both live in the `scilintr` repository. Installing `scilintr` does not imply that `scitexlintr` is on the path. If it is missing, install the report linter into the environment that will run Phase 7:
+
+```bash
+python -m pip install "scitexlintr @ git+https://github.com/arjunrajlaboratory/scilintr.git#subdirectory=tex/scitexlintr"
+```
+
+When working from a local `scilintr` checkout, an editable install is also fine:
+
+```bash
+python -m pip install -e /path/to/scilintr/tex/scitexlintr
+```
+
 ---
 
 ## Phase 0 — Planning brief (USER-FACING)
@@ -133,7 +152,7 @@ The agent then *enriches* each entry with the framing-aware fields the analysis 
 - `appears_in_sections` — where this value will be cited
 - `overloaded_warning` (rare) — when a value's name shadows an established literature term
 
-The mechanical fields (`value`, `provenance`, `computed_at`) come from the fragment and must not be edited; the framing fields are this phase's contribution.
+For the ordinary fragment-merge path, the mechanical fields (`value`, `provenance`, `computed_at`) come from the fragment and must not be edited; the framing fields are this phase's contribution. Legacy exceptions are called out below and must be marked explicitly.
 
 **Optional display fields (number formatting).** A `numbers[*]` entry may also carry three optional fields that control only how the value is *rendered* in prose — never what it *is*:
 
@@ -141,9 +160,15 @@ The mechanical fields (`value`, `provenance`, `computed_at`) come from the fragm
 - `precision` — decimal places for the derived display (default 1; `precision: 0` gives `98\%`, `precision: 2` gives `97.80\%`).
 - `display` — a free-text, LaTeX-ready override emitted verbatim, for the rare value no `unit` can derive (e.g. a fold-change `3.2$\times$`). Reserve it for genuine one-offs: a hand-typed `display` *can* drift from `value`, whereas a `unit`-derived display cannot.
 
-The `value` stays the canonical number and is never edited — it remains the Phase-6 / scitexlintr anchor. For `unit`, the displayed string is *derived* from `value`, so the readable number cannot silently disagree with the verified one. Phase 6 re-checks this faithfulness for any entry carrying `unit`/`display`.
+In the ordinary path, the `value` stays the canonical number and is never edited — it remains the Phase-6 / scitexlintr anchor. For `unit`, the displayed string is *derived* from `value`, so the readable number cannot silently disagree with the verified one. Phase 6 re-checks this faithfulness for any entry carrying `unit`/`display`.
 
-If a value the draft needs has no fragment entry, do not type it into the manifest — return to the analysis, add a `register_value` call, re-run the relevant script, and re-enter Phase 1 with the updated fragment. (The framing fields in this paragraph and the next read "the analysis cannot know," but everything mechanical the report quotes still has to come from the code that produced it — see the code-grounding instruction below.) The exception is *legacy* analyses that pre-date `register_value`: the agent may hand-author an entry by reading the CSV the value comes from, and the entry is flagged in the manifest's `_provenance: legacy` field so Phase 6 still verifies it against the on-disk file.
+For `unit: "percent"`, the `\SciVal` snapshot in the `.tex` source is still the stored fraction, not the rendered percent. A manifest entry with `"value": 0.9653`, `"unit": "percent"`, and `"precision": 1` renders as `96.5\%`, but the draft uses `\SciVal{\FracDated}{0.9653}`. Writing `\SciVal{\FracDated}{96.5\%}` trips `snapshot-mismatch` because the snapshot no longer matches the manifest value.
+
+If a value the draft needs has no fragment entry, do not type it into the manifest — return to the analysis, add a `register_value` call, re-run the relevant script, and re-enter Phase 1 with the updated fragment. (The framing fields in this paragraph and the next read "the analysis cannot know," but everything mechanical the report quotes still has to come from the code that produced it — see the code-grounding instruction below.) The default exception is *legacy* analyses that pre-date `register_value`: the agent may hand-author an entry by reading the CSV the value comes from, and the entry is flagged in the manifest's `_provenance: legacy` field so Phase 6 still verifies it against the on-disk file.
+
+A second legacy exception covers analyses that have on-disk values or `numbers.json` fragments, but those values were stored at full computational precision before the report-value convention stabilized. If the report only claims a rounded display-precision value, the agent may hand-author a rounded manifest entry, point `provenance` at the exact on-disk file/key that contains the full-precision value, and set `_provenance: "legacy_on_disk"` on that entry. Phase 6 must then verify the rounded manifest value against the cited on-disk source and the stated precision. Do not use this path to override a fresh `register_value` fragment in an active analysis; fix the analysis-side registration instead.
+
+Do not register collision-prone constants just because they are number-like. Bare `0`, `1`, `1.0`, common publication years (`2020`, `2021`), and structural labels (`top-100`, `top-25`) cause `raw-generated-value` to fire on every incidental occurrence in prose. Register load-bearing results and thresholds; leave narrative constants unregistered when they are not computed outputs, and phrase them in words where practical ("a lift of one", "zero hub papers", "claims reaching degree 100").
 
 `terms[*]`, `figures[*]`, and `worked_examples[*]` are still hand-authored from the analysis outputs at this phase — those carry framing information (canonical phrasings, sha256 fingerprints, row-level traces) that the analysis does not produce.
 
@@ -265,9 +290,15 @@ Examples:
 We analyzed \SciVal{\NSamples}{48} cells passing QC.
 At \SciVal{\FDRThreshold}{0.05}, \SciVal{\NDEGenesFDRZeroZeroFive}{317} genes were differentially expressed.
 For the contrast \SciText{\ContrastPhrase}{treated versus control}, ...
+
+% Manifest value is 0.9653 with unit:"percent", precision:1.
+% The PDF renders 96.5\%, but the checked snapshot remains the stored fraction.
+\SciVal{\FracDated}{0.9653} of dated claims supported the later-year conclusion.
 ```
 
 Do not type raw values into prose without a wrapper — `scitexlintr`'s `raw-generated-value` rule will flag any literal that matches a manifest entry. Do not use bare `\Macro{}` without a `\SciVal`/`\SciText` wrapper — `scitexlintr`'s `bare-generated-macro` rule will flag it (the macro is fresh, but the source is unreviewable).
+
+Not every numeric-looking token belongs in `numbers[*]`. Publication years, numbered structural labels, table row labels, and prose-only constants should be registered only when they are load-bearing computed results. Otherwise, prefer words where this improves lintability and readability ("first/second/third" rather than `(1)(2)(3)`, "claims reaching degree 100" rather than a bare `top-100` label when the exact token is not important).
 
 Drafting order:
 
@@ -386,12 +417,14 @@ The full sub-agent prompt is in `references/phase-prompts.md`.
 After the sub-agents pass:
 
 1. **Regenerate the LaTeX macros from the manifest.** Run `python skills/core/scripts/render_report_values_tex.py analysis/[name]/reports/.manifest.json`. This writes `build/report_values.tex` with one `\newcommand` per `numbers[*]` entry plus the `\SciVal` / `\SciText` wrappers. Re-run this step every time `.manifest.json` changes.
-2. **Run scitexlintr on the draft.** `scitexlintr analysis/[name]/reports/[name]-report.tex --manifest=analysis/[name]/reports/.manifest.json`. The recompile gate **must not proceed** if findings remain after waivers. Auto-fix snapshot drift with `--write` (typically interactively, not in the gate):
+2. **Run scitexlintr on the draft.** `scitexlintr analysis/[name]/reports/[name]-report.tex --manifest=analysis/[name]/reports/.manifest.json`. The recompile gate **must not proceed** if error findings remain after waivers. Warnings are advisory by default: fix the ones that point to real drift risk, document intentional leftovers in the compile log, and promote them to blocking errors only when the team has stabilized that rule for the report type. Auto-fix snapshot drift with `--write` (typically interactively, not in the gate):
    - `snapshot-mismatch` is the load-bearing check — the snapshot in `\SciVal{\Macro}{...}` must equal the manifest value. Use `--write` to rewrite stale snapshots; the diff is small and reviewable.
-   - `raw-generated-value`, `unwrapped-threshold`, `forbidden-alias`, `bare-generated-macro` are also enforced; fix the prose to use the appropriate wrapper.
+   - `raw-generated-value`, `unwrapped-threshold`, and `forbidden-alias` are error checks; fix the prose to use the appropriate wrapper and label.
    - `unfingerprinted-figure` errors when `\includegraphics{...}` points at a path not in `manifest.figures[*]` or whose `sha256` has changed — re-fingerprint the manifest entry after regenerating the figure.
-   - `unsourced-numeric-token` and `handwritten-numeric-claim` are warnings; promote to errors before merging if the team has stabilised the pattern.
-   - Waiver any genuinely intentional case with `% ANALYSIS_OK[rule-code]: explanation` on or up to four lines above the offending line.
+   - `bare-generated-macro` is a warning by default: the PDF is fresh, but the source is not reviewable. Prefer fixing it to `\SciVal` / `\SciText`; waive only with a specific reason.
+   - `unsourced-numeric-token` and `handwritten-numeric-claim` are warnings in the default gate. They are useful prompts, not a requirement to waive every narrative year in a number-dense report.
+   - For pervasive narrative numbers, register load-bearing results; phrase constants and labels in words where possible; and use clustered waiver comments for genuinely narrative years or supplement-table cells that are sourced from a named file or caption. `tabular` cells count as prose for the linter.
+   - Waive any genuinely intentional case with `% ANALYSIS_OK[rule-code]: explanation` on or up to four lines above the offending line. The waiver window is four lines forward, and each waiver comment names exactly one rule code; if two rules apply, write two comments.
 3. Recompile the report with two `pdflatex` passes (plus `bibtex` if citations are used).
 4. If any Phase-6 finding triggered a code rerun (e.g., a figure had to be regenerated, a number was wrong because the script was outdated), re-run the relevant script, re-collect the analysis-side fragment, and re-run Phase 1's merge before recompiling.
 5. Measure the **main-text page count** (pages before `\appendix`) from the compiled PDF and compare to the shape budget:
@@ -405,7 +438,7 @@ After the sub-agents pass:
    - Main-text page count and shape-budget status (`within` / `flagged` with reason)
    - Sub-agent reviewer verdicts (each: PASS / loop count to convergence)
    - Whether code was re-run since the last manifest snapshot
-   - `scitexlintr` exit code and finding count after waivers (must be 0 for the gate to pass)
+   - `scitexlintr` exit code, error count after waivers (must be 0 for the gate to pass), and warning count/disposition
 
 The compile log is the answer to "okay, so all of this is fixed now? and was code rerun in case things changed?" — that question lands on every report draft and the log makes the answer mechanical.
 
@@ -531,4 +564,4 @@ These come up frequently in computational analysis reports:
 - `skills/core/references/report-values-guide.md` — analysis-side `register_value` helper that produces the `numbers[*]` fragments Phase 1 merges.
 - `skills/core/scripts/register_value.py` — the helper itself.
 - `skills/core/scripts/render_report_values_tex.py` — Phase 7 step 1; emits `build/report_values.tex` from `.manifest.json`.
-- scitexlintr — Phase 7 step 2; verifies the draft's `\SciVal`/`\SciText` snapshots against the manifest. Source: https://github.com/arjunrajlaboratory/scilintr/tree/main/tex/scitexlintr.
+- scitexlintr — Phase 7 step 2; verifies the draft's `\SciVal`/`\SciText` snapshots against the manifest. It is the separate report-lint package under `tex/scitexlintr`, not the analysis-code `scilintr` CLI. Source: https://github.com/arjunrajlaboratory/scilintr/tree/main/tex/scitexlintr.
