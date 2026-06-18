@@ -19,13 +19,16 @@ from graph_model import (
     EntryKind,
     EntryStatus,
     Facet,
+    Graph,
     MatchMode,
     ProjectMeta,
     Provenance,
+    SCHEMA_VERSION,
     SourceShape,
+    SupportingKind,
+    SupportingNode,
     confidence_for,
     sha256_hash,
-    SCHEMA_VERSION,
 )
 from build_graph import build_graph, validate_graph
 
@@ -308,7 +311,6 @@ def test_validate_dangling_from_id():
 
     # Inject a dangling edge directly into the graph (simulate corruption)
     bad_edge = make_about_edge("e-NONEXISTENT", "target-concept")
-    from graph_model import Graph
 
     bad_graph = Graph(
         entries=graph.entries,
@@ -337,7 +339,6 @@ def test_validate_dangling_to_id():
     graph = build_graph([e1], EMPTY_FACETS, good_edges, registry)
 
     bad_edge = make_about_edge("e-013", "ghost-concept")
-    from graph_model import Graph
 
     bad_graph = Graph(
         entries=graph.entries,
@@ -419,7 +420,6 @@ def test_unmatched_concept_appears_as_candidate():
 
 
 def test_duplicate_entry_ids_flagged():
-    from graph_model import Graph
 
     e1 = make_entry("e-017", "proj-a", "family-alpha")
     e2 = make_entry("e-017", "proj-b", "family-beta")  # duplicate id
@@ -472,6 +472,213 @@ def test_canonical_json_serialization():
     print(f"\nSmoke: canonical JSON length = {len(json_output)} chars")
 
 
+# ---------------------------------------------------------------------------
+# Helpers for supporting-node tests
+# ---------------------------------------------------------------------------
+
+
+def make_supporting_node(
+    sid: str,
+    kind: SupportingKind,
+    project_id: str | None = None,
+    parent_id: str | None = None,
+    project_ids: list[str] | None = None,
+) -> SupportingNode:
+    return SupportingNode(
+        id=sid,
+        kind=kind,
+        title=f"Supporting node {sid}",
+        project_id=project_id,
+        family=project_id,
+        parent_id=parent_id,
+        project_ids=project_ids or [],
+        date="2026-01-01",
+        severity=None,
+        body_excerpt="Excerpt.",
+        source_path=f"some/path/{sid}.md",
+    )
+
+
+def make_edge(from_id: str, to_id: str, etype: EdgeType) -> Edge:
+    return Edge(
+        from_id=from_id,
+        to_id=to_id,
+        type=etype,
+        provenance=Provenance.auto,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 9: review SupportingNode (documents→hub) + finding (detail_of→review) → clean
+# ---------------------------------------------------------------------------
+
+
+def test_supporting_nodes_review_finding_clean():
+    e1 = make_entry("e-020", "proj-a", "family-alpha")
+    concept = make_concept("some-concept")
+    about_edges = [make_about_edge("e-020", "some-concept")]
+    registry = StubRegistry(
+        concepts=[concept],
+        projects=[make_project("proj-a", "family-alpha")],
+    )
+
+    review_sn = make_supporting_node(
+        "rv-proj-a-review1", SupportingKind.review, project_id="proj-a"
+    )
+    finding_sn = make_supporting_node(
+        "rv-proj-a-review1-f01",
+        SupportingKind.finding,
+        parent_id="rv-proj-a-review1",
+    )
+
+    supporting_edges = [
+        make_edge("rv-proj-a-review1", "proj-a", EdgeType.documents),
+        make_edge("rv-proj-a-review1-f01", "rv-proj-a-review1", EdgeType.detail_of),
+    ]
+
+    graph = build_graph(
+        [e1],
+        EMPTY_FACETS,
+        about_edges + supporting_edges,
+        registry,
+        supporting_nodes=[review_sn, finding_sn],
+    )
+
+    # Supporting nodes present and sorted
+    assert len(graph.supporting_nodes) == 2
+    ids = [sn.id for sn in graph.supporting_nodes]
+    assert ids == sorted(ids), "supporting_nodes must be sorted by id"
+    assert "rv-proj-a-review1" in ids
+    assert "rv-proj-a-review1-f01" in ids
+
+    # documents and detail_of edges retained
+    edge_types = {e.type for e in graph.edges}
+    assert EdgeType.documents in edge_types
+    assert EdgeType.detail_of in edge_types
+
+    violations = validate_graph(graph)
+    assert violations == [], f"Expected no violations; got: {violations}"
+
+
+# ---------------------------------------------------------------------------
+# Test 10: documents edge to a nonexistent hub is flagged
+# ---------------------------------------------------------------------------
+
+
+def test_documents_edge_to_missing_hub():
+    e1 = make_entry("e-021", "proj-a", "family-alpha")
+    concept = make_concept("any-concept")
+    registry = StubRegistry(
+        concepts=[concept],
+        projects=[make_project("proj-a", "family-alpha")],
+    )
+
+    review_sn = make_supporting_node(
+        "rv-proj-a-review2", SupportingKind.review, project_id="proj-a"
+    )
+    # documents edge points to a hub that doesn't exist
+    bad_supporting_edge = make_edge(
+        "rv-proj-a-review2", "nonexistent-hub", EdgeType.documents
+    )
+
+    graph = build_graph(
+        [e1],
+        EMPTY_FACETS,
+        [make_about_edge("e-021", "any-concept"), bad_supporting_edge],
+        registry,
+        supporting_nodes=[review_sn],
+    )
+
+    violations = validate_graph(graph)
+    assert any("nonexistent-hub" in v for v in violations), (
+        f"Expected violation for missing hub; got: {violations}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 11: detail_of edge to a missing parent SupportingNode is flagged
+# ---------------------------------------------------------------------------
+
+
+def test_detail_of_edge_to_missing_parent():
+    e1 = make_entry("e-022", "proj-a", "family-alpha")
+    concept = make_concept("another-concept")
+    registry = StubRegistry(
+        concepts=[concept],
+        projects=[make_project("proj-a", "family-alpha")],
+    )
+
+    finding_sn = make_supporting_node(
+        "rv-proj-a-review3-f01",
+        SupportingKind.finding,
+        parent_id="rv-proj-a-review3",  # parent does NOT exist in supporting_nodes
+    )
+    bad_detail_edge = make_edge(
+        "rv-proj-a-review3-f01", "rv-proj-a-review3", EdgeType.detail_of
+    )
+
+    graph = build_graph(
+        [e1],
+        EMPTY_FACETS,
+        [make_about_edge("e-022", "another-concept"), bad_detail_edge],
+        registry,
+        supporting_nodes=[finding_sn],
+    )
+
+    violations = validate_graph(graph)
+    assert any("rv-proj-a-review3" in v for v in violations), (
+        f"Expected violation for missing parent supporting node; got: {violations}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 12: supporting node ids appear in graph.supporting_nodes + serialize correctly
+# ---------------------------------------------------------------------------
+
+
+def test_supporting_nodes_serialization():
+    e1 = make_entry("e-023", "proj-a", "family-alpha")
+    concept = make_concept("serial-concept")
+    registry = StubRegistry(
+        concepts=[concept],
+        projects=[make_project("proj-a", "family-alpha")],
+    )
+
+    review_sn = make_supporting_node(
+        "rv-proj-a-serial", SupportingKind.review, project_id="proj-a"
+    )
+    finding_sn = make_supporting_node(
+        "rv-proj-a-serial-f01",
+        SupportingKind.finding,
+        parent_id="rv-proj-a-serial",
+    )
+
+    graph = build_graph(
+        [e1],
+        EMPTY_FACETS,
+        [
+            make_about_edge("e-023", "serial-concept"),
+            make_edge("rv-proj-a-serial", "proj-a", EdgeType.documents),
+            make_edge("rv-proj-a-serial-f01", "rv-proj-a-serial", EdgeType.detail_of),
+        ],
+        registry,
+        supporting_nodes=[review_sn, finding_sn],
+    )
+
+    # IDs present
+    ids = [sn.id for sn in graph.supporting_nodes]
+    assert "rv-proj-a-serial" in ids
+    assert "rv-proj-a-serial-f01" in ids
+
+    # Serialize and confirm supporting_nodes key present
+    json_output = graph.to_canonical_json()
+    assert '"supporting_nodes"' in json_output
+    assert '"rv-proj-a-serial"' in json_output
+    assert '"rv-proj-a-serial-f01"' in json_output
+    assert '"review"' in json_output
+    assert '"finding"' in json_output
+
+
 if __name__ == "__main__":
     # Quick smoke without pytest
     import sys
@@ -488,5 +695,9 @@ if __name__ == "__main__":
     test_unmatched_concept_appears_as_candidate()
     test_duplicate_entry_ids_flagged()
     test_canonical_json_serialization()
+    test_supporting_nodes_review_finding_clean()
+    test_documents_edge_to_missing_hub()
+    test_detail_of_edge_to_missing_parent()
+    test_supporting_nodes_serialization()
     print("All smoke tests passed.")
     sys.exit(0)

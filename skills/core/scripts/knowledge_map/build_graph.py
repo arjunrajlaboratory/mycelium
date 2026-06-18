@@ -25,6 +25,8 @@ from graph_model import (
     Graph,
     LogNode,
     ProjectHub,
+    SupportingKind,
+    SupportingNode,
 )
 
 if TYPE_CHECKING:
@@ -47,6 +49,7 @@ def build_graph(
     registry: "Registry",
     logs: list | None = None,
     log_edges: list | None = None,
+    supporting_nodes: list[SupportingNode] | None = None,
 ) -> Graph:
     """
     Assemble the full node+edge graph (§11/§12).
@@ -74,6 +77,12 @@ def build_graph(
     # Normalise optional params
     _logs: list = logs if logs is not None else []
     _log_edges: list = log_edges if log_edges is not None else []
+    _supporting_nodes: list[SupportingNode] = (
+        supporting_nodes if supporting_nodes is not None else []
+    )
+
+    # Build supporting node id set (for known-id checks and edge validation)
+    supporting_node_id_set: set[str] = {sn.id for sn in _supporting_nodes}
 
     # Build log id set for validation and mentions population
     log_id_set: set[str] = {lg.id for lg in _logs}
@@ -116,6 +125,20 @@ def build_graph(
     #   • about-edges from log ids are validation errors (R1 invariant)
     # ------------------------------------------------------------------
     concept_slugs: set[str] = {c.slug for c in registry.concepts}
+
+    # Build hub id set for use in edge partitioning (documents edges target hubs)
+    # Note: project_hubs is built above; collect ids here for the partitioning loop.
+    hub_ids_for_partition: set[str] = {h.project_id for h in project_hubs}
+
+    # Known-id set: entries + logs + concept slugs + hubs + supporting nodes
+    # Used to avoid false-positive dangling-edge warnings for supporting edges.
+    known_ids_all: set[str] = (
+        active_entry_ids
+        | {lg.id for lg in _logs}
+        | concept_slugs
+        | hub_ids_for_partition
+        | supporting_node_id_set
+    )
 
     live_about_edges: list[Edge] = []
     output_edges: list[Edge] = []  # all edges that appear in the graph
@@ -188,6 +211,9 @@ def build_graph(
                         f"INVALID created_in edge: {e.from_id!r} (project {from_log.project_id!r}) "
                         f"→ {e.to_id!r} (project {to_entry.project_id!r}) — must be same project"
                     )
+            output_edges.append(e)
+        elif e.type in (EdgeType.documents, EdgeType.detail_of):
+            # supporting edges — retain as-is (validated later in validate_graph)
             output_edges.append(e)
         else:
             # unknown edge type — pass through
@@ -273,6 +299,7 @@ def build_graph(
     )
     hubs_sorted = sorted(project_hubs, key=lambda h: h.project_id)
     logs_sorted = sorted(logs_with_mentions, key=lambda l: l.id)
+    supporting_sorted = sorted(_supporting_nodes, key=lambda sn: sn.id)
 
     return Graph(
         entries=active_entries_sorted,
@@ -282,6 +309,7 @@ def build_graph(
         logs=logs_sorted,
         conventions=[],  # TODO: elevation nodes — deferred (§7)
         global_knowledge=[],  # TODO: elevation nodes — deferred (§7)
+        supporting_nodes=supporting_sorted,
     )
 
 
@@ -323,6 +351,32 @@ def validate_graph(graph: Graph) -> list[str]:
 
     # Valid "from" ids: active entry ids
     valid_from_ids: set[str] = entry_id_set
+
+    # Supporting node sets
+    supporting_node_id_set_v: set[str] = {sn.id for sn in graph.supporting_nodes}
+    supporting_node_by_id: dict[str, "SupportingNode"] = {
+        sn.id: sn for sn in graph.supporting_nodes
+    }
+
+    # Supporting node ids must be unique and must not collide with entry/log/concept/hub ids
+    seen_supporting_ids: set[str] = set()
+    for sn in graph.supporting_nodes:
+        if sn.id in seen_supporting_ids:
+            violations.append(f"DUPLICATE supporting node id: {sn.id!r}")
+        seen_supporting_ids.add(sn.id)
+        # Check collision with entry/concept/hub id spaces
+        if sn.id in entry_id_set:
+            violations.append(
+                f"COLLISION: supporting node id {sn.id!r} collides with an entry id"
+            )
+        if sn.id in concept_slug_set:
+            violations.append(
+                f"COLLISION: supporting node id {sn.id!r} collides with a concept slug"
+            )
+        if sn.id in hub_id_set:
+            violations.append(
+                f"COLLISION: supporting node id {sn.id!r} collides with a hub id"
+            )
 
     # Log id set for edge validation
     log_id_set_v: set[str] = {lg.id for lg in graph.logs}
@@ -395,6 +449,48 @@ def validate_graph(graph: Graph) -> list[str]:
                         f"INVALID created_in edge: {edge.from_id!r} (project {log_proj!r}) "
                         f"→ {edge.to_id!r} (project {entry_proj!r}) — must be same project"
                     )
+        elif edge.type == EdgeType.documents:
+            # documents: from_id must be a SupportingNode of kind review or transfer;
+            # to_id must be an existing ProjectHub id.
+            from_sn = supporting_node_by_id.get(edge.from_id)
+            if from_sn is None:
+                violations.append(
+                    f"INVALID documents edge: from_id {edge.from_id!r} is not a supporting node "
+                    f"(to {edge.to_id!r})"
+                )
+            elif from_sn.kind not in (SupportingKind.review, SupportingKind.transfer):
+                violations.append(
+                    f"INVALID documents edge: from_id {edge.from_id!r} has kind "
+                    f"{from_sn.kind.value!r} — must be review or transfer (to {edge.to_id!r})"
+                )
+            if edge.to_id not in hub_id_set:
+                violations.append(
+                    f"INVALID documents edge: to_id {edge.to_id!r} is not an existing "
+                    f"ProjectHub id (from {edge.from_id!r})"
+                )
+        elif edge.type == EdgeType.detail_of:
+            # detail_of: from_id must be a SupportingNode of kind finding or transfer_item;
+            # to_id must be an existing SupportingNode (finding→review, transfer_item→transfer).
+            from_sn = supporting_node_by_id.get(edge.from_id)
+            if from_sn is None:
+                violations.append(
+                    f"INVALID detail_of edge: from_id {edge.from_id!r} is not a supporting node "
+                    f"(to {edge.to_id!r})"
+                )
+            elif from_sn.kind not in (
+                SupportingKind.finding,
+                SupportingKind.transfer_item,
+            ):
+                violations.append(
+                    f"INVALID detail_of edge: from_id {edge.from_id!r} has kind "
+                    f"{from_sn.kind.value!r} — must be finding or transfer_item "
+                    f"(to {edge.to_id!r})"
+                )
+            if edge.to_id not in supporting_node_id_set_v:
+                violations.append(
+                    f"INVALID detail_of edge: to_id {edge.to_id!r} is not an existing "
+                    f"supporting node (from {edge.from_id!r})"
+                )
 
     # ------------------------------------------------------------------
     # effective_status confirmed ↔ threshold consistency check

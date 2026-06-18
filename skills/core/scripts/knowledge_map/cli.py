@@ -78,6 +78,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     build_vault_mod, build_vault_err = _try_import("build_vault")
     extract_logs_mod, extract_logs_err = _try_import("extract_logs")
     link_logs_mod, link_logs_err = _try_import("link_logs")
+    extract_reviews_mod, extract_reviews_err = _try_import("extract_reviews")
 
     if render_views_err:
         _warn(f"render_views not importable (skipping): {render_views_err}")
@@ -89,6 +90,10 @@ def cmd_build(args: argparse.Namespace) -> int:
         )
     if link_logs_err:
         _warn(f"link_logs not importable (log pipeline disabled): {link_logs_err}")
+    if extract_reviews_err and not args.no_reviews:
+        _warn(
+            f"extract_reviews not importable (review ingestion disabled): {extract_reviews_err}"
+        )
 
     # ------------------------------------------------------------------
     # Step 1: Load registry
@@ -195,11 +200,43 @@ def cmd_build(args: argparse.Namespace) -> int:
         _warn("Log pipeline skipped (extract_logs or link_logs not available).")
 
     # ------------------------------------------------------------------
+    # Step 5c: Extract reviews / knowledge-transfers as supporting nodes
+    # ------------------------------------------------------------------
+    supporting_nodes: list = []
+    supporting_edges: list = []
+    if not args.no_reviews:
+        if extract_reviews_mod is not None:
+            print("Extracting reviews and knowledge-transfers …")
+            rv_result = extract_reviews_mod.extract_reviews(
+                portfolio, selected_projects
+            )
+            for msg in rv_result.report:
+                print(f"  [extract_reviews] {msg}")
+            supporting_nodes = rv_result.supporting_nodes
+            supporting_edges = rv_result.edges
+            if supporting_nodes:
+                print(
+                    f"  Supporting nodes: {len(supporting_nodes)} "
+                    f"({len(supporting_edges)} edges)"
+                )
+        else:
+            _warn("extract_reviews not available — review ingestion skipped.")
+
+    # Merge supporting edges into the main edge list for build_graph
+    all_edges = list(lr.edges) + supporting_edges
+
+    # ------------------------------------------------------------------
     # Step 6: Build graph
     # ------------------------------------------------------------------
     print("Building graph …")
     graph = _bg.build_graph(
-        ext.entries, ext.facets, lr.edges, registry, logs=logs, log_edges=log_edges
+        ext.entries,
+        ext.facets,
+        all_edges,
+        registry,
+        logs=logs,
+        log_edges=log_edges,
+        supporting_nodes=supporting_nodes if supporting_nodes else None,
     )
 
     # ------------------------------------------------------------------
@@ -307,7 +344,12 @@ def cmd_build(args: argparse.Namespace) -> int:
     if build_vault_mod is not None:
         print("Building vault …")
         try:
-            build_vault_mod.build_vault(graph, ext.facets, vault_dir)
+            build_vault_mod.build_vault(
+                graph,
+                ext.facets,
+                vault_dir,
+                keep_graph_config=args.keep_graph_config,
+            )
         except Exception as exc:
             _warn(f"build_vault raised an exception (continuing): {exc}")
     else:
@@ -335,6 +377,8 @@ def cmd_build(args: argparse.Namespace) -> int:
         build_meta_path=build_meta_path,
         views_dir=views_dir,
         vault_dir=vault_dir,
+        supporting_nodes=supporting_nodes,
+        supporting_edges=supporting_edges,
     )
 
     # Fail-closed: exit 2 if violations were found, unless --allow-violations
@@ -413,6 +457,8 @@ def _print_summary(
     build_meta_path: Path,
     views_dir: Path,
     vault_dir: Path,
+    supporting_nodes: list | None = None,
+    supporting_edges: list | None = None,
 ) -> None:
     from graph_model import ConceptStatus
 
@@ -466,6 +512,12 @@ def _print_summary(
     print(f"  Concepts confirmed:         {confirmed_count}")
     print(f"  Concepts candidate:         {candidate_count}")
     print(f"  Cross-family (confirmed):   {cross_family_confirmed}")
+    if supporting_nodes is not None and len(supporting_nodes) > 0:
+        _sup_edges = supporting_edges if supporting_edges is not None else []
+        print(
+            f"  Supporting nodes:           {len(supporting_nodes)} "
+            f"({len(_sup_edges)} documents/detail_of edges)"
+        )
     print(f"  Validation warnings:        {len(violations)}")
     print()
     print("  Output paths:")
@@ -565,6 +617,28 @@ def _build_parser() -> argparse.ArgumentParser:
             "validate_graph reports any violations, even though artifacts are "
             "still written. Pass this flag to suppress the non-zero exit and "
             "treat violations as warnings only."
+        ),
+    )
+    build_p.add_argument(
+        "--no-reviews",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip ingestion of review and knowledge-transfer reports as supporting "
+            "nodes. By default, .living/outputs/reviews/ and "
+            ".living/outputs/knowledge-transfers/ are extracted and included in the "
+            "graph. Pass this flag to omit them entirely."
+        ),
+    )
+    build_p.add_argument(
+        "--keep-graph-config",
+        action="store_true",
+        default=False,
+        help=(
+            "Preserve an existing .obsidian/graph.json instead of rewriting it on "
+            "each build. By default the graph config is rewritten every build so "
+            "visual settings stay in sync with the tiering spec. Use this flag when "
+            "you have hand-tuned the Obsidian graph and want to keep your changes."
         ),
     )
     build_p.set_defaults(func=cmd_build)

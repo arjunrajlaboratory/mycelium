@@ -12,10 +12,14 @@ Generates four directory trees under out_dir:
   entries/finding/<entry_id>.md          — finding entries
   entries/other/<entry_id>.md            — convention/feedback/other entries
   logs/<project_id>/<log_id>.md          — one note per LogNode (episodic tier)
+  supporting/reviews/<slug>.md           — review reports
+  supporting/findings/<review-slug>/F<NN>.md  — individual findings
+  supporting/transfers/<slug>.md         — knowledge-transfer reports
+  supporting/transfer-items/<transfer-slug>/I<NN>.md  — transfer items
 
-Stale content directories (concepts/, entries/, logs/, projects/) are removed at
-the start of each build to avoid duplicate graph nodes.  vault/.obsidian/ is
-never touched.
+Stale content directories (concepts/, entries/, logs/, projects/, supporting/) are
+removed at the start of each build to avoid duplicate graph nodes.
+vault/.obsidian/ graph.json is written on first build (or when keep_graph_config=False).
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ from graph_model import (
     Graph,
     LogNode,
     Stage,
+    SupportingKind,
+    SupportingNode,
 )
 
 # ---------------------------------------------------------------------------
@@ -100,6 +106,11 @@ def _yaml_tags(tags: list[str]) -> str:
     return f"tags: [{inner}]"
 
 
+def _make_slug(s: str) -> str:
+    """Lowercase and replace non-alphanumeric runs with hyphens."""
+    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -109,52 +120,123 @@ def build_vault(
     graph: Graph,
     facets: dict[str, Facet],
     out_dir: Path,
+    keep_graph_config: bool = False,
 ) -> None:
-    """Write project, concept, entry, and log markdown notes to out_dir."""
+    """Write project, concept, entry, log, and supporting markdown notes to out_dir."""
 
     # ------------------------------------------------------------------
     # Clean stale content directories (flat notes from previous builds).
-    # MUST preserve vault/.obsidian/ (graph.json, colorgroups-by-project.json).
+    # MUST preserve vault/.obsidian/ (graph.json).
     # ------------------------------------------------------------------
     import shutil
 
-    for stale_dir in ("concepts", "entries", "logs", "projects"):
+    for stale_dir in ("concepts", "entries", "logs", "projects", "supporting"):
         stale_path = out_dir / stale_dir
         if stale_path.exists():
             shutil.rmtree(stale_path)
 
     # ------------------------------------------------------------------
-    # Change 1: Write vault/.obsidian/graph.json ONLY IF it does not exist.
+    # Write vault/.obsidian/graph.json (skipped when keep_graph_config=True
+    # and the file already exists).
     # ------------------------------------------------------------------
     obsidian_dir = out_dir / ".obsidian"
     obsidian_dir.mkdir(parents=True, exist_ok=True)
+
+    # Delete stale colorgroups file if present
+    stale_cg = obsidian_dir / "colorgroups-by-project.json"
+    if stale_cg.exists():
+        stale_cg.unlink()
+
     graph_json_path = obsidian_dir / "graph.json"
-    if not graph_json_path.exists():
-        _obsidian_graph = {
-            "colorGroups": [
-                {"query": "path:concepts/bridge", "color": {"a": 1, "rgb": 16746496}},
-                {"query": "path:concepts/confirmed", "color": {"a": 1, "rgb": 5614848}},
-                {
-                    "query": "path:concepts/candidate",
-                    "color": {"a": 1, "rgb": 16737792},
-                },
-                {"query": "path:concepts/curated", "color": {"a": 1, "rgb": 9699328}},
-                {"query": "path:projects", "color": {"a": 1, "rgb": 3166464}},
-                {"query": "path:entries/decision", "color": {"a": 1, "rgb": 10027264}},
-                {"query": "path:entries/learning", "color": {"a": 1, "rgb": 5592832}},
-                {"query": "path:entries/finding", "color": {"a": 1, "rgb": 16711780}},
-                {"query": "path:logs", "color": {"a": 1, "rgb": 8421504}},
-            ],
+    if not keep_graph_config or not graph_json_path.exists():
+
+        def _make_rgb(r: int, g: int, b: int) -> int:
+            return r * 65536 + g * 256 + b
+
+        COLOR_GROUPS = [
+            {
+                "query": "path:projects/",
+                "color": {"a": 1.0, "rgb": _make_rgb(70, 130, 180)},
+            },
+            {
+                "query": "path:concepts/bridge/",
+                "color": {"a": 1.0, "rgb": _make_rgb(148, 103, 189)},
+            },
+            {
+                "query": "path:concepts/confirmed/",
+                "color": {"a": 1.0, "rgb": _make_rgb(44, 160, 44)},
+            },
+            {
+                "query": "path:concepts/curated/",
+                "color": {"a": 1.0, "rgb": _make_rgb(23, 190, 207)},
+            },
+            {
+                "query": "path:concepts/candidate/",
+                "color": {"a": 0.9, "rgb": _make_rgb(152, 223, 138)},
+            },
+            {
+                "query": "path:supporting/reviews/",
+                "color": {"a": 1.0, "rgb": _make_rgb(214, 39, 40)},
+            },
+            {
+                "query": "path:supporting/transfers/",
+                "color": {"a": 1.0, "rgb": _make_rgb(255, 187, 120)},
+            },
+            {
+                "query": "path:entries/finding/",
+                "color": {"a": 0.30, "rgb": _make_rgb(188, 189, 34)},
+            },
+            {
+                "query": "path:entries/decision/",
+                "color": {"a": 0.28, "rgb": _make_rgb(140, 86, 75)},
+            },
+            {
+                "query": "path:entries/learning/",
+                "color": {"a": 0.25, "rgb": _make_rgb(31, 119, 180)},
+            },
+            {
+                "query": "path:entries/other/",
+                "color": {"a": 0.25, "rgb": _make_rgb(174, 199, 232)},
+            },
+            {
+                "query": "path:logs/",
+                "color": {"a": 0.16, "rgb": _make_rgb(127, 127, 127)},
+            },
+            {
+                "query": "tag:severity/critical",
+                "color": {"a": 1.0, "rgb": _make_rgb(220, 38, 38)},
+            },
+            {
+                "query": "tag:severity/major",
+                "color": {"a": 0.95, "rgb": _make_rgb(234, 88, 12)},
+            },
+            {
+                "query": "tag:severity/minor",
+                "color": {"a": 0.8, "rgb": _make_rgb(107, 114, 128)},
+            },
+            {
+                "query": "tag:severity/unknown",
+                "color": {"a": 0.7, "rgb": _make_rgb(100, 116, 139)},
+            },
+        ]
+
+        GRAPH_SETTINGS = {
+            "colorGroups": COLOR_GROUPS,
+            "nodeSizeMultiplier": 2.2,
+            "lineSizeMultiplier": 0.35,
+            "textFadeMultiplier": -1.5,
+            "showArrow": False,
             "showOrphans": False,
-            "showTags": False,
             "hideUnresolved": False,
-            "nodeSizeMultiplier": 1.2,
-            "nodeSize": 10,
-            "linkDistance": 150,
-            "scale": 1.0,
+            "showTags": False,
+            "search": "",
+            "repelStrength": 13,
+            "linkDistance": 120,
+            "linkStrength": 0.6,
+            "centerStrength": 0.3,
         }
         graph_json_path.write_text(
-            json.dumps(_obsidian_graph, indent=2), encoding="utf-8"
+            json.dumps(GRAPH_SETTINGS, indent=2), encoding="utf-8"
         )
 
     # Create output subdirectories (top-level; subfolders created on demand)
@@ -465,6 +547,16 @@ def build_vault(
     )
 
     # ------------------------------------------------------------------
+    # Write supporting nodes (reviews, findings, transfers, transfer-items)
+    # ------------------------------------------------------------------
+    if graph.supporting_nodes:
+        _write_supporting_notes(
+            nodes=graph.supporting_nodes,
+            out_dir=out_dir,
+            known_project_ids=known_project_ids,
+        )
+
+    # ------------------------------------------------------------------
     # Change 2: Generate 000-MAP-OF-CONTENT.md (always regenerated).
     # ------------------------------------------------------------------
     moc_lines: list[str] = []
@@ -596,3 +688,166 @@ def _write_log_notes(
 
         content = "\n".join(lines)
         (project_log_dir / f"{log.id}.md").write_text(content, encoding="utf-8")
+
+
+def _write_supporting_notes(
+    nodes: list[SupportingNode],
+    out_dir: Path,
+    known_project_ids: set[str],
+) -> None:
+    """
+    Write supporting knowledge nodes (reviews, findings, transfers, transfer-items).
+
+    Folder routing:
+      supporting/reviews/<review-slug>.md
+      supporting/findings/<review-slug>/F<NN>.md
+      supporting/transfers/<transfer-slug>.md
+      supporting/transfer-items/<transfer-slug>/I<NN>.md
+    """
+    # Group findings and transfer-items by parent for ordinal fallback
+    findings_by_parent: dict[str, list[SupportingNode]] = {}
+    items_by_parent: dict[str, list[SupportingNode]] = {}
+    for n in sorted(nodes, key=lambda x: x.id):
+        if n.kind == SupportingKind.finding and n.parent_id:
+            findings_by_parent.setdefault(n.parent_id, []).append(n)
+        elif n.kind == SupportingKind.transfer_item and n.parent_id:
+            items_by_parent.setdefault(n.parent_id, []).append(n)
+
+    for node in sorted(nodes, key=lambda x: x.id):
+        slug = _make_slug(node.id)
+        date_val = node.date or ""
+        sev = node.severity or "unknown"
+
+        if node.kind == SupportingKind.review:
+            # Determine project wikilinks
+            pids = (
+                node.project_ids
+                if node.project_ids
+                else ([node.project_id] if node.project_id else [])
+            )
+            lines: list[str] = ["---", "type: review"]
+            if len(pids) > 1:
+                lines.append(f"projects: [{', '.join(pids)}]")
+            elif pids:
+                lines.append(f'project: "{pids[0]}"')
+            lines.append(f'date: "{date_val}"')
+            lines.append(f'aliases: ["{_yaml_escape(node.title)}"]')
+            lines.append("tags: [support/review]")
+            lines.append("---")
+            lines.append("")
+            lines.append(f"# {node.title}")
+            lines.append("")
+            # Project wikilinks
+            for pid in pids:
+                if pid in known_project_ids:
+                    lines.append(f"[[{pid}]]")
+                else:
+                    lines.append(pid)
+            lines.append("")
+            if node.body_excerpt:
+                lines.append(node.body_excerpt)
+                lines.append("")
+
+            dest = out_dir / "supporting" / "reviews"
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / f"{slug}.md").write_text("\n".join(lines), encoding="utf-8")
+
+        elif node.kind == SupportingKind.finding:
+            parent_id = node.parent_id or ""
+            parent_slug = _make_slug(parent_id) if parent_id else ""
+            # Extract NN from id: look for -f(\d+) at end
+            m = re.search(r"-f(\d+)$", node.id)
+            if m:
+                nn = m.group(1).zfill(2)
+            else:
+                # Ordinal fallback
+                siblings = findings_by_parent.get(parent_id, [])
+                idx = next(
+                    (i + 1 for i, s in enumerate(siblings) if s.id == node.id), 1
+                )
+                nn = str(idx).zfill(2)
+
+            lines = ["---", "type: finding"]
+            lines.append(f'severity: "{sev}"')
+            if parent_slug:
+                lines.append(f'parent: "{parent_slug}"')
+            lines.append(f'date: "{date_val}"')
+            lines.append(f'aliases: ["{_yaml_escape(node.title)}"]')
+            lines.append(f"tags: [support/finding, severity/{sev}]")
+            lines.append("---")
+            lines.append("")
+            lines.append(f"# {node.title}")
+            lines.append("")
+            if parent_slug:
+                lines.append(f"[[{parent_slug}]]")
+                lines.append("")
+            if node.body_excerpt:
+                lines.append(node.body_excerpt)
+                lines.append("")
+
+            dest = out_dir / "supporting" / "findings" / parent_slug
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / f"F{nn}.md").write_text("\n".join(lines), encoding="utf-8")
+
+        elif node.kind == SupportingKind.transfer:
+            pids = (
+                node.project_ids
+                if node.project_ids
+                else ([node.project_id] if node.project_id else [])
+            )
+            lines = ["---", "type: transfer"]
+            lines.append(f"projects: [{', '.join(pids)}]")
+            lines.append(f'date: "{date_val}"')
+            lines.append(f'aliases: ["{_yaml_escape(node.title)}"]')
+            lines.append("tags: [support/transfer]")
+            lines.append("---")
+            lines.append("")
+            lines.append(f"# {node.title}")
+            lines.append("")
+            for pid in pids:
+                if pid in known_project_ids:
+                    lines.append(f"[[{pid}]]")
+                else:
+                    lines.append(pid)
+            lines.append("")
+            if node.body_excerpt:
+                lines.append(node.body_excerpt)
+                lines.append("")
+
+            dest = out_dir / "supporting" / "transfers"
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / f"{slug}.md").write_text("\n".join(lines), encoding="utf-8")
+
+        elif node.kind == SupportingKind.transfer_item:
+            parent_id = node.parent_id or ""
+            parent_slug = _make_slug(parent_id) if parent_id else ""
+            m = re.search(r"-i(\d+)$", node.id)
+            if m:
+                nn = m.group(1).zfill(2)
+            else:
+                siblings = items_by_parent.get(parent_id, [])
+                idx = next(
+                    (i + 1 for i, s in enumerate(siblings) if s.id == node.id), 1
+                )
+                nn = str(idx).zfill(2)
+
+            lines = ["---", "type: transfer-item"]
+            if parent_slug:
+                lines.append(f'parent: "{parent_slug}"')
+            lines.append(f'date: "{date_val}"')
+            lines.append(f'aliases: ["{_yaml_escape(node.title)}"]')
+            lines.append("tags: [support/transfer-item]")
+            lines.append("---")
+            lines.append("")
+            lines.append(f"# {node.title}")
+            lines.append("")
+            if parent_slug:
+                lines.append(f"[[{parent_slug}]]")
+                lines.append("")
+            if node.body_excerpt:
+                lines.append(node.body_excerpt)
+                lines.append("")
+
+            dest = out_dir / "supporting" / "transfer-items" / parent_slug
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / f"I{nn}.md").write_text("\n".join(lines), encoding="utf-8")

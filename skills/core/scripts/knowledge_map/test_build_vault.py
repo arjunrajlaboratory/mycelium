@@ -2,6 +2,7 @@
 test_build_vault.py — Unit tests for build_vault.py
 """
 
+import dataclasses
 import json
 import tempfile
 import unittest
@@ -23,6 +24,8 @@ from graph_model import (
     SourceShape,
     Stage,
     StageSource,
+    SupportingKind,
+    SupportingNode,
 )
 from build_vault import build_vault
 
@@ -117,6 +120,81 @@ def _make_graph() -> Graph:
     )
 
 
+def _make_graph_with_supporting() -> Graph:
+    """Same as _make_graph() but with supporting_nodes populated."""
+    g = _make_graph()
+    return dataclasses.replace(
+        g,
+        supporting_nodes=[
+            SupportingNode(
+                id="rv-proj-alpha-myreview",
+                kind=SupportingKind.review,
+                title="My Review",
+                project_id="proj-alpha",
+                family="alpha-family",
+                parent_id=None,
+                project_ids=["proj-alpha"],
+                date="2026-06-10",
+                severity=None,
+                body_excerpt="Review body.",
+                source_path="alpha/.living/outputs/reviews/myreview.md",
+            ),
+            SupportingNode(
+                id="rv-proj-alpha-myreview-f01",
+                kind=SupportingKind.finding,
+                title="Finding One",
+                project_id=None,
+                family=None,
+                parent_id="rv-proj-alpha-myreview",
+                project_ids=[],
+                date="2026-06-10",
+                severity="major",
+                body_excerpt="F1 body.",
+                source_path="",
+            ),
+            SupportingNode(
+                id="rv-proj-alpha-myreview-f02",
+                kind=SupportingKind.finding,
+                title="Finding Two",
+                project_id=None,
+                family=None,
+                parent_id="rv-proj-alpha-myreview",
+                project_ids=[],
+                date="2026-06-10",
+                severity="minor",
+                body_excerpt="F2 body.",
+                source_path="",
+            ),
+            SupportingNode(
+                id="tx-proj-beta-mytransfer",
+                kind=SupportingKind.transfer,
+                title="My Transfer",
+                project_id="proj-beta",
+                family="beta-family",
+                parent_id=None,
+                project_ids=["proj-beta"],
+                date="2026-06-11",
+                severity=None,
+                body_excerpt="Transfer body.",
+                source_path="beta/.living/outputs/knowledge-transfers/mytransfer.md",
+            ),
+            SupportingNode(
+                id="tx-proj-beta-mytransfer-i01",
+                kind=SupportingKind.transfer_item,
+                title="Transfer Item One",
+                project_id=None,
+                family=None,
+                parent_id="tx-proj-beta-mytransfer",
+                project_ids=[],
+                date="2026-06-11",
+                severity=None,
+                body_excerpt="Item body.",
+                source_path="",
+            ),
+        ],
+    )
+
+
 _FACETS: dict[str, Facet] = {
     "e-00001": Facet(stage=Stage.analysis, stage_source=StageSource.path),
     "e-00002": Facet(stage=Stage.planning, stage_source=StageSource.keyword),
@@ -200,6 +278,152 @@ class TestBuildVault(unittest.TestCase):
         self.assertTrue(p.exists(), "entries/learning/e-00001.md should exist")
         text = p.read_text(encoding="utf-8")
         self.assertIn("aliases:", text)
+
+
+class TestBuildVaultWithSupporting(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp_dir = tempfile.TemporaryDirectory()
+        cls.out_dir = Path(cls.tmp_dir.name)
+        graph = _make_graph_with_supporting()
+        build_vault(graph, _FACETS, cls.out_dir)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.tmp_dir.cleanup()
+
+    def test_supporting_review_exists(self) -> None:
+        p = self.out_dir / "supporting" / "reviews" / "rv-proj-alpha-myreview.md"
+        self.assertTrue(p.exists(), f"Expected {p} to exist")
+
+    def test_supporting_finding_f01_exists(self) -> None:
+        p = (
+            self.out_dir
+            / "supporting"
+            / "findings"
+            / "rv-proj-alpha-myreview"
+            / "F01.md"
+        )
+        self.assertTrue(p.exists(), f"Expected {p} to exist")
+
+    def test_supporting_finding_f02_exists(self) -> None:
+        p = (
+            self.out_dir
+            / "supporting"
+            / "findings"
+            / "rv-proj-alpha-myreview"
+            / "F02.md"
+        )
+        self.assertTrue(p.exists(), f"Expected {p} to exist")
+
+    def test_supporting_transfer_exists(self) -> None:
+        p = self.out_dir / "supporting" / "transfers" / "tx-proj-beta-mytransfer.md"
+        self.assertTrue(p.exists(), f"Expected {p} to exist")
+
+    def test_supporting_transfer_item_exists(self) -> None:
+        p = (
+            self.out_dir
+            / "supporting"
+            / "transfer-items"
+            / "tx-proj-beta-mytransfer"
+            / "I01.md"
+        )
+        self.assertTrue(p.exists(), f"Expected {p} to exist")
+
+    def test_finding_f01_severity_tag(self) -> None:
+        p = (
+            self.out_dir
+            / "supporting"
+            / "findings"
+            / "rv-proj-alpha-myreview"
+            / "F01.md"
+        )
+        text = p.read_text(encoding="utf-8")
+        self.assertIn("severity/major", text)
+
+    def test_finding_f01_parent_wikilink(self) -> None:
+        p = (
+            self.out_dir
+            / "supporting"
+            / "findings"
+            / "rv-proj-alpha-myreview"
+            / "F01.md"
+        )
+        text = p.read_text(encoding="utf-8")
+        self.assertIn("[[rv-proj-alpha-myreview]]", text)
+
+    def test_review_project_wikilink(self) -> None:
+        p = self.out_dir / "supporting" / "reviews" / "rv-proj-alpha-myreview.md"
+        text = p.read_text(encoding="utf-8")
+        self.assertIn("[[proj-alpha]]", text)
+
+    def test_graph_json_color_groups(self) -> None:
+        p = self.out_dir / ".obsidian" / "graph.json"
+        data = json.loads(p.read_text(encoding="utf-8"))
+        groups = data["colorGroups"]
+        queries = [g["query"] for g in groups]
+        # Must have both path groups and severity tag groups
+        self.assertTrue(any("path:" in q for q in queries), "Expected path: groups")
+        self.assertTrue(
+            any("tag:severity" in q for q in queries), "Expected severity tag groups"
+        )
+        # All tag:severity groups must come AFTER all path: groups
+        last_path_idx = max(i for i, q in enumerate(queries) if q.startswith("path:"))
+        first_tag_idx = min(i for i, q in enumerate(queries) if q.startswith("tag:"))
+        self.assertGreater(
+            first_tag_idx,
+            last_path_idx,
+            "Severity tag groups must come after path groups",
+        )
+
+    def test_graph_json_settings(self) -> None:
+        p = self.out_dir / ".obsidian" / "graph.json"
+        data = json.loads(p.read_text(encoding="utf-8"))
+        self.assertAlmostEqual(data["nodeSizeMultiplier"], 2.2)
+        self.assertAlmostEqual(data["lineSizeMultiplier"], 0.35)
+        self.assertFalse(data["showOrphans"])
+
+    def test_stale_colorgroups_file_removed(self) -> None:
+        p = self.out_dir / ".obsidian" / "colorgroups-by-project.json"
+        self.assertFalse(
+            p.exists(), "Stale colorgroups-by-project.json should not exist"
+        )
+
+    def test_keep_graph_config_true(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / ".obsidian").mkdir()
+            custom = {"custom": True, "nodeSizeMultiplier": 99}
+            (out / ".obsidian" / "graph.json").write_text(
+                json.dumps(custom), encoding="utf-8"
+            )
+            graph = _make_graph_with_supporting()
+            build_vault(graph, _FACETS, out, keep_graph_config=True)
+            data = json.loads(
+                (out / ".obsidian" / "graph.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                data["nodeSizeMultiplier"], 99, "Custom graph.json should be preserved"
+            )
+
+    def test_keep_graph_config_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / ".obsidian").mkdir()
+            custom = {"custom": True, "nodeSizeMultiplier": 99}
+            (out / ".obsidian" / "graph.json").write_text(
+                json.dumps(custom), encoding="utf-8"
+            )
+            graph = _make_graph_with_supporting()
+            build_vault(graph, _FACETS, out, keep_graph_config=False)
+            data = json.loads(
+                (out / ".obsidian" / "graph.json").read_text(encoding="utf-8")
+            )
+            self.assertAlmostEqual(
+                data["nodeSizeMultiplier"],
+                2.2,
+                msg="graph.json should be overwritten",
+            )
 
 
 if __name__ == "__main__":

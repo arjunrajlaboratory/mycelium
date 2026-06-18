@@ -53,6 +53,8 @@ class EdgeType(str, Enum):
     mentions = "mentions"
     follows = "follows"
     created_in = "created_in"
+    documents = "documents"
+    detail_of = "detail_of"
 
 
 class Stage(str, Enum):
@@ -296,6 +298,54 @@ class LogNode:
         }
 
 
+class SupportingKind(str, Enum):
+    review = "review"
+    finding = "finding"
+    transfer = "transfer"
+    transfer_item = "transfer_item"
+
+
+@dataclass
+class SupportingNode:
+    """
+    A supporting knowledge node representing a review report, individual finding,
+    knowledge-transfer report, or transfer item (Part 2 of the viz+reviews spec).
+
+    IDs are deterministic slug-based (no ledger):
+      review:         ``rv-<project_id>-<file-stem-slug>``
+      finding:        ``<review_id>-f<NN>``
+      transfer:       ``tx-<project_id>-<file-stem-slug>``
+      transfer_item:  ``<transfer_id>-i<NN>``
+    """
+
+    id: str
+    kind: SupportingKind
+    title: str
+    project_id: str | None
+    family: str | None
+    parent_id: str | None
+    project_ids: list[str] = field(default_factory=list)
+    date: str | None = None
+    severity: str | None = None
+    body_excerpt: str = ""
+    source_path: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "body_excerpt": self.body_excerpt,
+            "date": self.date,
+            "family": self.family,
+            "id": self.id,
+            "kind": self.kind.value,
+            "parent_id": self.parent_id,
+            "project_id": self.project_id,
+            "project_ids": list(self.project_ids),  # insertion order preserved
+            "severity": self.severity,
+            "source_path": self.source_path,
+            "title": self.title,
+        }
+
+
 @dataclass
 class Graph:
     """
@@ -313,6 +363,7 @@ class Graph:
     conventions: list[dict[str, Any]] = field(default_factory=list)
     global_knowledge: list[dict[str, Any]] = field(default_factory=list)
     logs: list[LogNode] = field(default_factory=list)
+    supporting_nodes: list[SupportingNode] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -334,6 +385,9 @@ class Graph:
                 for h in sorted(self.project_hubs, key=lambda h: h.project_id)
             ],
             "schema_version": SCHEMA_VERSION,
+            "supporting_nodes": [
+                s.to_dict() for s in sorted(self.supporting_nodes, key=lambda s: s.id)
+            ],
         }
 
     def to_canonical_json(self) -> str:
