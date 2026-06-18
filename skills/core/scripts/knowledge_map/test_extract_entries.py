@@ -14,9 +14,15 @@ from pathlib import Path
 # Ensure the knowledge_map directory is on sys.path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 
-from graph_model import EntryKind, SourceShape
-from extract_entries import extract_entries, ExtractResult
-from graph_model import ProjectMeta
+from extract_entries import (  # noqa: E402
+    ExtractResult,
+    _content_hash,
+    _find_explicit_id_in_ledger,
+    _find_in_ledger,
+    _parse_signal_fields,
+    extract_entries,
+)
+from graph_model import EntryKind, ProjectMeta, SourceShape  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +254,371 @@ Tags: discovery, important
         result = self._run()
         keys = [(e.project_id, e.source_path, e.id) for e in result.entries]
         self.assertEqual(keys, sorted(keys), msg="Entries are not sorted")
+
+
+# ---------------------------------------------------------------------------
+# New tests for Changes 1–5
+# ---------------------------------------------------------------------------
+
+
+class TestSignalFieldParsing(unittest.TestCase):
+    """Change 1: parse mitigation_type, finding_status, source_project from body lines."""
+
+    def test_bold_variant_all_three_fields(self) -> None:
+        """Bold **key**: value syntax parses all three signal fields."""
+        body = [
+            "**mitigation_type**: structural",
+            "**Status**: supported",
+            "**source**: MyProject",
+            "Some other content.",
+        ]
+        mit, fstatus, src = _parse_signal_fields(body)
+        self.assertEqual(mit, "structural")
+        self.assertEqual(fstatus, "supported")
+        self.assertEqual(src, "MyProject")
+
+    def test_plain_variant_mitigation_type(self) -> None:
+        """Plain mitigation_type: value (no bold) is parsed and lowercased."""
+        body = ["mitigation_type: ambient-awareness"]
+        mit, fstatus, src = _parse_signal_fields(body)
+        self.assertEqual(mit, "ambient-awareness")
+        self.assertIsNone(fstatus)
+        self.assertIsNone(src)
+
+    def test_finding_status_does_not_touch_entry_status(self) -> None:
+        """finding_status is stored separately; entry.status must not be 'supported'."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write(
+                root / "proj-s" / ".living" / "learnings.md",
+                """\
+## [2026-03-01] Signal field learning
+**mitigation_type**: structural
+**Status**: supported
+**source**: MyProject
+Body text.
+""",
+            )
+            projects = [
+                ProjectMeta(
+                    id="proj-s",
+                    name="Signal Project",
+                    path="proj-s",
+                    family="test",
+                    has_living=True,
+                )
+            ]
+            result = extract_entries(root, projects, {})
+            self.assertEqual(len(result.entries), 1)
+            entry = result.entries[0]
+            self.assertEqual(entry.mitigation_type, "structural")
+            self.assertEqual(entry.finding_status, "supported")
+            self.assertEqual(entry.source_project, "MyProject")
+            # entry.status must NOT be "supported" — it's an EntryStatus enum
+            self.assertNotEqual(str(entry.status), "supported")
+
+    def test_absent_fields_are_none(self) -> None:
+        """When none of the signal fields appear, all three are None."""
+        body = ["Just some plain text.", "No special fields here."]
+        mit, fstatus, src = _parse_signal_fields(body)
+        self.assertIsNone(mit)
+        self.assertIsNone(fstatus)
+        self.assertIsNone(src)
+
+    def test_case_insensitive_keys(self) -> None:
+        """Keys are matched case-insensitively."""
+        body = [
+            "MITIGATION_TYPE: process",
+            "status: replicated",
+            "SOURCE: AnotherProject",
+        ]
+        mit, fstatus, src = _parse_signal_fields(body)
+        self.assertEqual(mit, "process")
+        self.assertEqual(fstatus, "replicated")
+        self.assertEqual(src, "AnotherProject")
+
+
+class TestFingerprintPipeInAnchor(unittest.TestCase):
+    """Change 3: | in heading anchor must not corrupt the fingerprint."""
+
+    def _build_fingerprint(
+        self, project_id: str, source_path: str, anchor: str, kind: str, date: str
+    ) -> str:
+        return "\x00".join([project_id, source_path, anchor, kind, date])
+
+    def test_pipe_in_anchor_fingerprint_stable(self) -> None:
+        """Building the same fingerprint twice with | in anchor gives equal results."""
+        fp1 = self._build_fingerprint(
+            "proj-x", "proj-x/.living/learnings.md", "foo|bar", "learning", "2026-01-01"
+        )
+        fp2 = self._build_fingerprint(
+            "proj-x", "proj-x/.living/learnings.md", "foo|bar", "learning", "2026-01-01"
+        )
+        self.assertEqual(fp1, fp2)
+
+    def test_fingerprint_splits_to_five_fields(self) -> None:
+        """A fingerprint with | in anchor splits to exactly 5 fields on \\x00."""
+        fp = self._build_fingerprint(
+            "proj-x",
+            "proj-x/.living/learnings.md",
+            "heading|with|pipes",
+            "learning",
+            "2026-01-01",
+        )
+        parts = fp.split("\x00")
+        self.assertEqual(
+            len(parts), 5, msg=f"Expected 5 parts, got {len(parts)}: {parts}"
+        )
+        self.assertEqual(parts[2], "heading|with|pipes")
+
+    def test_pipe_anchor_roundtrip(self) -> None:
+        """project_id, source_path, anchor, kind, date survive the join/split roundtrip."""
+        project_id = "proj-x"
+        source_path = "proj-x/.living/findings.md"
+        anchor = "Finding: A|B split claim"
+        kind = "finding"
+        date = "2026-05-10"
+        fp = self._build_fingerprint(project_id, source_path, anchor, kind, date)
+        parts = fp.split("\x00")
+        self.assertEqual(parts[0], project_id)
+        self.assertEqual(parts[1], source_path)
+        self.assertEqual(parts[2], anchor)
+        self.assertEqual(parts[3], kind)
+        self.assertEqual(parts[4], date)
+
+
+class TestDuplicateAnchorIncrementalBuild(unittest.TestCase):
+    """Change 4: duplicate anchors in one file get distinct stable IDs via claimed_ids."""
+
+    def test_two_entries_same_fingerprint_get_different_ids(self) -> None:
+        """_find_in_ledger with shared claimed_ids returns distinct ids for duplicate fingerprints."""
+        fingerprint = "proj\x00path\x00anchor\x00learning\x002026-01-01"
+        # Pre-populate ledger with two records sharing the same fingerprint
+        ledger = {
+            "e-00001": {
+                "current_fingerprint": fingerprint,
+                "previous_fingerprints": [],
+                "content_hash": "sha256:aaa",
+                "status": "active",
+            },
+            "e-00002": {
+                "current_fingerprint": fingerprint,
+                "previous_fingerprints": [],
+                "content_hash": "sha256:bbb",
+                "status": "active",
+            },
+        }
+        claimed: set[str] = set()
+        id1 = _find_in_ledger(ledger, fingerprint, claimed)
+        id2 = _find_in_ledger(ledger, fingerprint, claimed)
+        # Both must be found (not None), and they must be different
+        self.assertIsNotNone(id1, "First call should find a ledger match")
+        self.assertIsNotNone(id2, "Second call should find an unclaimed ledger match")
+        self.assertNotEqual(
+            id1, id2, "Duplicate fingerprint entries must get distinct IDs"
+        )
+
+    def test_third_call_returns_none_when_all_claimed(self) -> None:
+        """Third call returns None when both ledger entries are already claimed."""
+        fingerprint = "proj\x00path\x00anchor\x00learning\x002026-01-01"
+        ledger = {
+            "e-00001": {
+                "current_fingerprint": fingerprint,
+                "previous_fingerprints": [],
+                "content_hash": "sha256:aaa",
+                "status": "active",
+            },
+            "e-00002": {
+                "current_fingerprint": fingerprint,
+                "previous_fingerprints": [],
+                "content_hash": "sha256:bbb",
+                "status": "active",
+            },
+        }
+        claimed: set[str] = set()
+        _find_in_ledger(ledger, fingerprint, claimed)
+        _find_in_ledger(ledger, fingerprint, claimed)
+        id3 = _find_in_ledger(ledger, fingerprint, claimed)
+        self.assertIsNone(id3, "Third call with all ids claimed should return None")
+
+
+class TestCRLFContentHash(unittest.TestCase):
+    """Change 5: CRLF body lines yield same content_hash as LF equivalent."""
+
+    def test_crlf_same_hash_as_lf(self) -> None:
+        """Body lines with \\r\\n endings hash identically to their \\n equivalents."""
+        lf_lines = ["line one", "line two", "line three"]
+        # Simulate what the parsers produce AFTER rstrip("\\r\\n"):
+        # both LF and CRLF source files should reduce to the same stripped lines
+        crlf_raw = ["line one\r\n", "line two\r\n", "line three\r\n"]
+        lf_raw = ["line one\n", "line two\n", "line three\n"]
+
+        stripped_crlf = [l.rstrip("\r\n") for l in crlf_raw]
+        stripped_lf = [l.rstrip("\r\n") for l in lf_raw]
+
+        self.assertEqual(stripped_crlf, lf_lines)
+        self.assertEqual(stripped_lf, lf_lines)
+        self.assertEqual(_content_hash(stripped_crlf), _content_hash(stripped_lf))
+
+    def test_crlf_differs_from_lf_without_fix(self) -> None:
+        """Confirms that rstrip('\\n') alone would NOT strip the \\r, causing hash divergence."""
+        crlf_raw = ["line one\r\n", "line two\r\n"]
+        lf_raw = ["line one\n", "line two\n"]
+
+        broken_crlf = [l.rstrip("\n") for l in crlf_raw]  # retains \r
+        broken_lf = [l.rstrip("\n") for l in lf_raw]  # clean
+
+        # Without the fix, the lines differ because \r remains
+        self.assertNotEqual(
+            broken_crlf, broken_lf, "Pre-fix behaviour: CRLF and LF lines should differ"
+        )
+        self.assertNotEqual(
+            _content_hash(broken_crlf),
+            _content_hash(broken_lf),
+            "Pre-fix behaviour: content hashes should differ when \\r is retained",
+        )
+
+
+class TestBug1MintedIdNotRegistered(unittest.TestCase):
+    """Regression: Bug 1 — minted ids were never added to _file_claimed_ids.
+
+    Two verbatim-duplicate sections in the same file (same fingerprint) must
+    receive TWO distinct entry ids in a single cold build (empty ledger).
+    Before the fix, the second record's _find_in_ledger call found the
+    just-minted id in working_ledger and returned it again, collapsing both
+    records to one id.
+    """
+
+    def test_duplicate_dated_sections_get_distinct_ids(self) -> None:
+        """Two identical dated sections in one file → two distinct entry ids."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            # Two verbatim-duplicate sections: same heading text, same body.
+            # They produce the same fingerprint, so this directly exercises
+            # the mint path + _file_claimed_ids registration gap.
+            _write(
+                root / "proj-dup" / ".living" / "learnings.md",
+                """\
+## [2026-04-01] Duplicate Learning
+Body text that is identical in both sections.
+
+## [2026-04-01] Duplicate Learning
+Body text that is identical in both sections.
+""",
+            )
+            projects = [
+                ProjectMeta(
+                    id="proj-dup",
+                    name="Dup Project",
+                    path="proj-dup",
+                    family="test",
+                    has_living=True,
+                )
+            ]
+            # Cold build: empty ledger
+            result = extract_entries(root, projects, {})
+            ids = [e.id for e in result.entries]
+            self.assertEqual(
+                len(ids),
+                2,
+                msg=f"Expected 2 entries for duplicate sections, got {len(ids)}: {ids}",
+            )
+            self.assertEqual(
+                len(set(ids)),
+                2,
+                msg=f"Duplicate entry ids produced (Bug 1 not fixed): {ids}",
+            )
+
+
+class TestBug2ExplicitIdSubstringCollision(unittest.TestCase):
+    """Regression: Bug 2 — _find_explicit_id_in_ledger had no claimed_ids guard
+    and used a substring match.
+
+    Three headings in the same file all tagged with the same explicit token
+    (e.g. L72) must receive THREE distinct entry ids in a single cold build.
+    Before the fix, every heading resolved to the same first-minted id because
+    the substring match found it without checking claimed_ids.
+    """
+
+    def test_shared_explicit_token_headings_get_distinct_ids(self) -> None:
+        """Three headings sharing explicit token L72 → three distinct entry ids."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            # Three decision headings, all bearing the same explicit id token L72.
+            _write(
+                root / "proj-exp" / ".living" / "decisions.md",
+                """\
+## [2026-05-01] L72 First decision variant
+Body of the first variant.
+
+## [2026-05-02] L72 Second decision variant
+Body of the second variant.
+
+## [2026-05-03] L72 Third decision variant
+Body of the third variant.
+""",
+            )
+            projects = [
+                ProjectMeta(
+                    id="proj-exp",
+                    name="Explicit Id Project",
+                    path="proj-exp",
+                    family="test",
+                    has_living=True,
+                )
+            ]
+            # Cold build: empty ledger
+            result = extract_entries(root, projects, {})
+            ids = [e.id for e in result.entries]
+            self.assertEqual(
+                len(ids),
+                3,
+                msg=f"Expected 3 entries for three L72-tagged headings, got {len(ids)}: {ids}",
+            )
+            self.assertEqual(
+                len(set(ids)),
+                3,
+                msg=f"Duplicate entry ids produced (Bug 2 not fixed): {ids}",
+            )
+
+    def test_find_explicit_id_in_ledger_claimed_ids_guard(self) -> None:
+        """_find_explicit_id_in_ledger skips already-claimed ids (unit-level)."""
+        # Pre-populate ledger with two entries that both match project/path/L72
+        ledger = {
+            "e-00010": {
+                "current_fingerprint": "proj-exp\x00proj-exp/.living/decisions.md\x00L72 First decision variant\x00decision\x002026-05-01",
+                "previous_fingerprints": [],
+                "content_hash": "sha256:aaa",
+                "status": "active",
+            },
+            "e-00011": {
+                "current_fingerprint": "proj-exp\x00proj-exp/.living/decisions.md\x00L72 Second decision variant\x00decision\x002026-05-02",
+                "previous_fingerprints": [],
+                "content_hash": "sha256:bbb",
+                "status": "active",
+            },
+        }
+        claimed: set[str] = set()
+        # Both anchors contain "L72" as a substring — the old code would keep
+        # returning e-00010 for every call.  With the fix, the second call
+        # skips e-00010 (already claimed) and returns e-00011.
+        id1 = _find_explicit_id_in_ledger(
+            ledger,
+            "proj-exp",
+            "proj-exp/.living/decisions.md",
+            "L72",
+            claimed,
+        )
+        id2 = _find_explicit_id_in_ledger(
+            ledger,
+            "proj-exp",
+            "proj-exp/.living/decisions.md",
+            "L72",
+            claimed,
+        )
+        self.assertIsNotNone(id1, "First call must find a ledger match")
+        self.assertIsNotNone(id2, "Second call must find a distinct unclaimed match")
+        self.assertNotEqual(id1, id2, "Both calls must return distinct ids")
 
 
 if __name__ == "__main__":

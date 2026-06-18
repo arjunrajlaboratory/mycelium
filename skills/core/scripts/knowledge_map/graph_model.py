@@ -52,6 +52,7 @@ class EdgeType(str, Enum):
     relates = "relates"
     mentions = "mentions"
     follows = "follows"
+    created_in = "created_in"
 
 
 class Stage(str, Enum):
@@ -141,6 +142,9 @@ class Entry:
     content_hash: str
     status: EntryStatus = EntryStatus.active
     schema_version: int = SCHEMA_VERSION
+    finding_status: str | None = None
+    mitigation_type: str | None = None
+    source_project: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -149,13 +153,16 @@ class Entry:
             "content_hash": self.content_hash,
             "date": self.date,
             "family": self.family,
+            "finding_status": self.finding_status,
             "id": self.id,
             "kind": self.kind.value,
             "line_end": self.line_end,
             "line_start": self.line_start,
+            "mitigation_type": self.mitigation_type,
             "project_id": self.project_id,
             "schema_version": self.schema_version,
             "source_path": self.source_path,
+            "source_project": self.source_project,
             "source_shape": self.source_shape.value,
             "status": self.status.value,
             "tags": sorted(self.tags),

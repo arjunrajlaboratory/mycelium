@@ -55,6 +55,15 @@ _DATE_RE = re.compile(r"\[?\d{4}-\d{2}-\d{2}\]?")
 _EXPLICIT_ID_RE = re.compile(r"\b[DLF]-?\d+\b")
 _FINDING_MARKER_RE = re.compile(r"Finding:", re.IGNORECASE)
 _TAGS_LINE_RE = re.compile(r"^\*{0,2}Tags\*{0,2}:\s*(.+)", re.IGNORECASE)
+_MITIGATION_TYPE_RE = re.compile(
+    r"^\s*(?:\*{2})?mitigation_type(?:\*{2})?\s*:\s*(.+)$", re.IGNORECASE
+)
+_FINDING_STATUS_RE = re.compile(
+    r"^\s*(?:\*{2})?Status(?:\*{2})?\s*:\s*(.+)$", re.IGNORECASE
+)
+_SOURCE_PROJECT_RE = re.compile(
+    r"^\s*(?:\*{2})?source(?:\*{2})?\s*:\s*(.+)$", re.IGNORECASE
+)
 _DATE_EXTRACT_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 _YAML_DATE_RE = re.compile(r"^date:\s*(\d{4}-\d{2}-\d{2})", re.IGNORECASE)
 
@@ -149,10 +158,48 @@ def _parse_tags(body_lines: list[str]) -> list[str]:
     return []
 
 
+_EXCERPT_LEN = 2000
+
+
+def _parse_signal_fields(
+    body_lines: list[str],
+) -> tuple[str | None, str | None, str | None]:
+    """Extract (mitigation_type, finding_status, source_project) from body lines.
+
+    Returns lowercased/stripped values, or None when absent.
+    """
+    mitigation_type: str | None = None
+    finding_status: str | None = None
+    source_project: str | None = None
+
+    for line in body_lines:
+        stripped = line.strip()
+        if mitigation_type is None:
+            m = _MITIGATION_TYPE_RE.match(stripped)
+            if m:
+                mitigation_type = m.group(1).strip().lower()
+                continue
+        if finding_status is None:
+            m = _FINDING_STATUS_RE.match(stripped)
+            if m:
+                finding_status = m.group(1).strip().lower()
+                continue
+        if source_project is None:
+            m = _SOURCE_PROJECT_RE.match(stripped)
+            if m:
+                source_project = m.group(1).strip()
+                continue
+        # Early-exit once all three found
+        if mitigation_type and finding_status and source_project:
+            break
+
+    return mitigation_type, finding_status, source_project
+
+
 def _body_excerpt(body_lines: list[str]) -> str:
-    """Return first 500 chars of normalized body."""
+    """Return first 2000 chars of normalized body."""
     full = "\n".join(body_lines).strip()
-    return full[:500]
+    return full[:_EXCERPT_LEN]
 
 
 def _content_hash(body_lines: list[str]) -> str:
@@ -197,36 +244,89 @@ def _mint_id(counter: list[int]) -> str:
     return f"e-{counter[0]:05d}"
 
 
-def _find_in_ledger(ledger: dict, fingerprint: str) -> str | None:
-    """Return ledger id if fingerprint matches current or previous fingerprints."""
+def _find_in_ledger(
+    ledger: dict,
+    fingerprint: str,
+    claimed_ids: set[str] | None = None,
+) -> str | None:
+    """Return ledger id if fingerprint matches current or previous fingerprints.
+
+    claimed_ids: set of ids already claimed in this build pass. When two records
+    share the same fingerprint, the second call (with the same id already in
+    claimed_ids) will skip that id and continue searching, returning None so a
+    fresh id gets minted. The caller must pass the same set across all calls for
+    a given file/build to get correct deduplication.
+    """
     for entry_id, meta in ledger.items():
+        if claimed_ids is not None and entry_id in claimed_ids:
+            continue
         if meta.get("current_fingerprint") == fingerprint:
+            if claimed_ids is not None:
+                claimed_ids.add(entry_id)
             return entry_id
         if fingerprint in meta.get("previous_fingerprints", []):
+            if claimed_ids is not None:
+                claimed_ids.add(entry_id)
             return entry_id
     return None
 
 
 def _find_explicit_id_in_ledger(
-    ledger: dict, project_id: str, source_path: str, row_id: str
+    ledger: dict,
+    project_id: str,
+    source_path: str,
+    row_id: str,
+    claimed_ids: set[str] | None = None,
 ) -> str | None:
-    """Match on project_id|source_path|row_id for explicit-id rows."""
-    key = f"{project_id}|{source_path}|{row_id}"
+    """Match on project_id\x00source_path\x00row_id for explicit-id rows.
+
+    claimed_ids: set of ids already claimed in this build pass for the current
+    file.  When two headings in the same file share the same explicit token (e.g.
+    four headings all tagged ``L72``), each successive call skips ids already in
+    claimed_ids so they receive distinct ids rather than collapsing to one.
+    """
+    key = "\x00".join([project_id, source_path, row_id])
     for entry_id, meta in ledger.items():
+        if claimed_ids is not None and entry_id in claimed_ids:
+            continue
         fp = meta.get("current_fingerprint", "")
-        parts = fp.split("|")
-        # fingerprint format: project_id|source_path|anchor|kind|date
-        if (
-            len(parts) >= 3
-            and f"{parts[0]}|{parts[1]}" == f"{project_id}|{source_path}"
+        parts = fp.split("\x00")
+        # fingerprint format: project_id\x00source_path\x00anchor\x00kind\x00date
+        if len(parts) >= 3 and "\x00".join([parts[0], parts[1]]) == "\x00".join(
+            [project_id, source_path]
+        ):
+            # Use exact match on the anchor field (parts[2]) to avoid the
+            # substring-collision bug where multiple headings sharing a token
+            # (e.g. three headings each containing "L72") all resolve to the
+            # first minted id.  We check both row_id == anchor and the legacy
+            # substring path so that existing behaviour is preserved when
+            # anchors are unique.
+            if row_id == (parts[2] if len(parts) > 2 else ""):
+                if claimed_ids is not None:
+                    claimed_ids.add(entry_id)
+                return entry_id
+    # Fallback: substring match (legacy) — also guarded by claimed_ids
+    for entry_id, meta in ledger.items():
+        if claimed_ids is not None and entry_id in claimed_ids:
+            continue
+        fp = meta.get("current_fingerprint", "")
+        parts = fp.split("\x00")
+        if len(parts) >= 3 and "\x00".join([parts[0], parts[1]]) == "\x00".join(
+            [project_id, source_path]
         ):
             if row_id in (parts[2] if len(parts) > 2 else ""):
+                if claimed_ids is not None:
+                    claimed_ids.add(entry_id)
                 return entry_id
     # Fallback: check previous_fingerprints too
     for entry_id, meta in ledger.items():
+        if claimed_ids is not None and entry_id in claimed_ids:
+            continue
         for pfp in meta.get("previous_fingerprints", []):
-            parts = pfp.split("|")
-            if len(parts) >= 3 and f"{parts[0]}|{parts[1]}|{parts[2]}" == key:
+            parts = pfp.split("\x00")
+            if len(parts) >= 3 and "\x00".join(parts[:3]) == key:
+                if claimed_ids is not None:
+                    claimed_ids.add(entry_id)
                 return entry_id
     return None
 
@@ -374,7 +474,7 @@ def _parse_aggregate_sections(
         }
 
     for lineno, raw in enumerate(lines, start=1):
-        line = raw.rstrip("\n")
+        line = raw.rstrip("\r\n")
         m = _HEADING_RE.match(line)
         if m:
             heading_text = m.group(2).strip()
@@ -421,7 +521,7 @@ def _parse_whole_file(
         }
 
     total = len(lines)
-    stripped = [l.rstrip("\n") for l in lines]
+    stripped = [l.rstrip("\r\n") for l in lines]
 
     # Detect YAML frontmatter
     frontmatter_date: str | None = None
@@ -483,7 +583,7 @@ def _parse_conventions(
         }
         return
 
-    stripped = [l.rstrip("\n") for l in lines]
+    stripped = [l.rstrip("\r\n") for l in lines]
     total = len(stripped)
 
     def _sections_at_level(level: int) -> list[dict]:
@@ -622,9 +722,10 @@ def extract_entries(
                     excerpt = _body_excerpt(body_lines)
                     chash = _content_hash(body_lines)
                     anchor = heading_text
+                    mit, fstatus, src_proj = _parse_signal_fields(body_lines)
 
-                    fingerprint = (
-                        f"{project.id}|{abs_source_path}|{anchor}|{kind.value}|None"
+                    fingerprint = "\x00".join(
+                        [project.id, abs_source_path, anchor, kind.value, "None"]
                     )
 
                     pending_records.append(
@@ -644,6 +745,9 @@ def extract_entries(
                             "body_excerpt": excerpt,
                             "content_hash": chash,
                             "heading_text": heading_text,
+                            "mitigation_type": mit,
+                            "finding_status": fstatus,
+                            "source_project": src_proj,
                         }
                     )
 
@@ -664,9 +768,10 @@ def extract_entries(
                     excerpt = _body_excerpt(body_lines)
                     chash = _content_hash(body_lines)
                     anchor = heading_text
+                    mit, fstatus, src_proj = _parse_signal_fields(body_lines)
 
-                    fingerprint = (
-                        f"{project.id}|{abs_source_path}|{anchor}|{kind.value}|{date}"
+                    fingerprint = "\x00".join(
+                        [project.id, abs_source_path, anchor, kind.value, str(date)]
                     )
 
                     pending_records.append(
@@ -686,6 +791,9 @@ def extract_entries(
                             "body_excerpt": excerpt,
                             "content_hash": chash,
                             "heading_text": heading_text,
+                            "mitigation_type": mit,
+                            "finding_status": fstatus,
+                            "source_project": src_proj,
                         }
                     )
 
@@ -705,9 +813,10 @@ def extract_entries(
                 excerpt = _body_excerpt(body_lines)
                 chash = _content_hash(body_lines)
                 anchor = fpath.stem
+                mit, fstatus, src_proj = _parse_signal_fields(body_lines)
 
-                fingerprint = (
-                    f"{project.id}|{abs_source_path}|{anchor}|{kind.value}|{date}"
+                fingerprint = "\x00".join(
+                    [project.id, abs_source_path, anchor, kind.value, str(date)]
                 )
 
                 pending_records.append(
@@ -727,6 +836,9 @@ def extract_entries(
                         "body_excerpt": excerpt,
                         "content_hash": chash,
                         "heading_text": heading_text,
+                        "mitigation_type": mit,
+                        "finding_status": fstatus,
+                        "source_project": src_proj,
                     }
                 )
 
@@ -738,6 +850,10 @@ def extract_entries(
     # Track duplicate fingerprints within this run for ordinal suffixing
     fp_seen_count: dict[str, int] = {}
 
+    # Per-file claimed_ids set for duplicate-anchor deduplication (Change 4)
+    _current_file_key: tuple[str, str] | None = None
+    _file_claimed_ids: set[str] = set()
+
     for rec in pending_records:
         fingerprint = rec["fingerprint"]
         heading_text = rec["heading_text"]
@@ -745,19 +861,37 @@ def extract_entries(
         project_id = rec["project_id"]
         source_path = rec["source_path"]
 
+        # Reset claimed_ids when we move to a new file
+        file_key = (project_id, source_path)
+        if file_key != _current_file_key:
+            _current_file_key = file_key
+            _file_claimed_ids = set()
+
         # Resolve or mint id
+        # NOTE: _file_claimed_ids is reset at each (project_id, source_path)
+        # boundary (see reset logic above).  pending_records is sorted by
+        # (project_id, source_path, fingerprint), which guarantees all records
+        # for a given file are contiguous, so the per-file reset is correct.
+        #
+        # ALL three paths below MUST call _file_claimed_ids.add(entry_id) so
+        # that no id can be issued twice within the same file.
+
         # 1. Check for explicit id in heading
         explicit_match = _EXPLICIT_ID_RE.search(heading_text)
         entry_id: str | None = None
         if explicit_match:
             row_id = explicit_match.group(0)
+            # Pass _file_claimed_ids so duplicate explicit tokens (e.g. four
+            # headings tagged L72) each receive a distinct id (Bug 2 fix).
+            # _find_explicit_id_in_ledger adds the returned id to claimed_ids.
             entry_id = _find_explicit_id_in_ledger(
-                working_ledger, project_id, source_path, row_id
+                working_ledger, project_id, source_path, row_id, _file_claimed_ids
             )
 
         # 2. Check fingerprint match
         if entry_id is None:
-            entry_id = _find_in_ledger(working_ledger, fingerprint)
+            # _find_in_ledger already adds the returned id to _file_claimed_ids.
+            entry_id = _find_in_ledger(working_ledger, fingerprint, _file_claimed_ids)
 
         # 3. Mint new id
         if entry_id is None:
@@ -772,6 +906,10 @@ def extract_entries(
                 entry_id = f"{base_id}-{fp_count + 1}"
             else:
                 entry_id = base_id
+            # Bug 1 fix: register the newly-minted id so that a second record
+            # in the same file with the same fingerprint cannot claim it again
+            # via _find_in_ledger (which would see it in working_ledger below).
+            _file_claimed_ids.add(entry_id)
         else:
             # Track duplication for existing ids too
             fp_count = fp_seen_count.get(fingerprint, 0)
@@ -809,6 +947,9 @@ def extract_entries(
             body_excerpt=rec["body_excerpt"],
             content_hash=rec["content_hash"],
             status=EntryStatus.active,
+            mitigation_type=rec.get("mitigation_type"),
+            finding_status=rec.get("finding_status"),
+            source_project=rec.get("source_project"),
         )
 
         raw_entries.append((project_id, source_path, entry))

@@ -145,6 +145,9 @@ def _parse_log_file(fpath: Path) -> tuple[str, str, list[str]]:
     except OSError:
         return fpath.stem, "", []
 
+    # Normalize line endings up-front so all downstream logic is CRLF-independent.
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+
     lines = raw.splitlines()
 
     # --- title: first heading ---
@@ -175,17 +178,22 @@ def _parse_log_file(fpath: Path) -> tuple[str, str, list[str]]:
         tags = _HASHTAG_RE.findall(head)
 
     # --- body_excerpt: full log body, frontmatter stripped, newlines preserved ---
-    # Strip leading YAML frontmatter block (--- ... ---) if present
+    # Strip leading YAML frontmatter block (--- ... ---) if present.
+    # At this point raw is already LF-only (CRLF normalised above).
     stripped = raw
     if raw.startswith("---"):
         # Find the closing --- line (must be on its own line, after the opener)
         fm_end = raw.find("\n---", 3)
         if fm_end != -1:
-            # Skip past the closing --- line and any immediately following newline
+            # Skip past the "\n---" marker (4 chars) and any immediately following "\n"
             after_fm = fm_end + 4  # len("\n---") == 4
             if after_fm < len(raw) and raw[after_fm] == "\n":
                 after_fm += 1
             stripped = raw[after_fm:]
+        else:
+            # Unterminated frontmatter: no closing ---.
+            # Do not keep the orphan "---\n" opener as body content; strip it.
+            stripped = raw[4:] if raw.startswith("---\n") else raw[3:]
     body_excerpt = stripped  # full body, no character cap, newlines preserved
 
     return title, body_excerpt, tags

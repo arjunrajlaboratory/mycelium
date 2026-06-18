@@ -183,7 +183,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         updated_log_ledger = log_result.ledger
 
         print("Linking logs …")
-        link_result = link_logs_mod.link_logs(logs, registry)
+        link_result = link_logs_mod.link_logs(logs, registry, entries=ext.entries)
         for msg in link_result.report:
             print(f"  [link_logs] {msg}")
         log_edges = link_result.edges
@@ -336,6 +336,15 @@ def cmd_build(args: argparse.Namespace) -> int:
         views_dir=views_dir,
         vault_dir=vault_dir,
     )
+
+    # Fail-closed: exit 2 if violations were found, unless --allow-violations
+    if violations and not args.allow_violations:
+        _err(
+            f"Build produced {len(violations)} validation violation(s). "
+            "Artifacts were written (inspect them). "
+            "Re-run with --allow-violations to suppress this exit code."
+        )
+        return 2
 
     return 0
 
@@ -545,6 +554,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="<path>",
         help="Path to a prior knowledge-graph.json for link-diff computation.",
+    )
+    build_p.add_argument(
+        "--allow-violations",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow validation violations without failing the build. "
+            "By default (without this flag) the build exits with code 2 when "
+            "validate_graph reports any violations, even though artifacts are "
+            "still written. Pass this flag to suppress the non-zero exit and "
+            "treat violations as warnings only."
+        ),
     )
     build_p.set_defaults(func=cmd_build)
 

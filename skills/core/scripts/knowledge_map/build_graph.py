@@ -167,6 +167,28 @@ def build_graph(
                         f"→ {e.to_id!r} (project {to_log.project_id!r}) — must be same project"
                     )
             output_edges.append(e)
+        elif e.type == EdgeType.created_in:
+            # created_in: from_id must be a live log id; to_id must be an active entry id;
+            # both must belong to the same project
+            from_log = next((lg for lg in _logs if lg.id == e.from_id), None)
+            to_entry = next((en for en in active_entries if en.id == e.to_id), None)
+            if from_log is None:
+                validation_warnings.append(
+                    f"INVALID created_in edge: from_id {e.from_id!r} is not a live log id "
+                    f"(to {e.to_id!r})"
+                )
+            if to_entry is None:
+                validation_warnings.append(
+                    f"INVALID created_in edge: to_id {e.to_id!r} is not an active entry id "
+                    f"(from {e.from_id!r})"
+                )
+            if from_log is not None and to_entry is not None:
+                if from_log.project_id != to_entry.project_id:
+                    validation_warnings.append(
+                        f"INVALID created_in edge: {e.from_id!r} (project {from_log.project_id!r}) "
+                        f"→ {e.to_id!r} (project {to_entry.project_id!r}) — must be same project"
+                    )
+            output_edges.append(e)
         else:
             # unknown edge type — pass through
             output_edges.append(e)
@@ -351,6 +373,27 @@ def validate_graph(graph: Graph) -> list[str]:
                     violations.append(
                         f"INVALID follows edge: {edge.from_id!r} and {edge.to_id!r} "
                         f"are in different projects"
+                    )
+        elif edge.type == EdgeType.created_in:
+            # created_in: from_id must be a live log id, to_id must be an active entry id,
+            # both must belong to the same project
+            if edge.from_id not in log_id_set_v:
+                violations.append(
+                    f"INVALID created_in edge: from_id {edge.from_id!r} is not a live log id "
+                    f"(to {edge.to_id!r})"
+                )
+            if edge.to_id not in entry_id_set:
+                violations.append(
+                    f"INVALID created_in edge: to_id {edge.to_id!r} is not an active entry id "
+                    f"(from {edge.from_id!r})"
+                )
+            if edge.from_id in log_id_set_v and edge.to_id in entry_id_set:
+                log_proj = log_project.get(edge.from_id)
+                entry_proj = {e.id: e.project_id for e in graph.entries}.get(edge.to_id)
+                if log_proj != entry_proj:
+                    violations.append(
+                        f"INVALID created_in edge: {edge.from_id!r} (project {log_proj!r}) "
+                        f"→ {edge.to_id!r} (project {entry_proj!r}) — must be same project"
                     )
 
     # ------------------------------------------------------------------
