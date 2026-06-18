@@ -1,14 +1,16 @@
 """
 build_vault.py — Write Obsidian-style markdown vault notes from a Graph + Facet map.
 
-Generates three directories under out_dir:
-  projects/<project_id>.md  — one note per ProjectHub
-  concepts/<slug>.md        — one note per Concept (all, including unlinked)
-  entries/<entry_id>.md     — one note per active Entry
+Generates four directories under out_dir:
+  projects/<project_id>.md        — one note per ProjectHub
+  concepts/<slug>.md              — one note per Concept (all, including unlinked)
+  entries/<entry_id>.md           — one note per active Entry
+  logs/<project_id>/<log_id>.md   — one note per LogNode (episodic tier)
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from graph_model import (
@@ -16,6 +18,7 @@ from graph_model import (
     EntryStatus,
     Facet,
     Graph,
+    LogNode,
     Stage,
 )
 
@@ -62,6 +65,28 @@ def _yaml_str(value: str | None) -> str:
     return f'"{_yaml_escape(value)}"'
 
 
+def _tag_slug(s: str) -> str:
+    """
+    Sanitize a family/kind string to a nested-tag slug.
+
+    Lowercases, replaces spaces and underscores with hyphens, strips any
+    characters that are not alphanumeric, hyphens, or forward-slashes.
+    """
+    s = s.lower()
+    s = re.sub(r"[ _]+", "-", s)
+    s = re.sub(r"[^a-z0-9\-/]", "", s)
+    return s
+
+
+def _yaml_tags(tags: list[str]) -> str:
+    """
+    Render a list of tag strings as a YAML flow sequence, e.g.:
+      tags: [concept, bridge, confirmed]
+    """
+    inner = ", ".join(tags)
+    return f"tags: [{inner}]"
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -72,15 +97,17 @@ def build_vault(
     facets: dict[str, Facet],
     out_dir: Path,
 ) -> None:
-    """Write project, concept, and entry markdown notes to out_dir."""
+    """Write project, concept, entry, and log markdown notes to out_dir."""
 
     # Create output subdirectories
     projects_dir = out_dir / "projects"
     concepts_dir = out_dir / "concepts"
     entries_dir = out_dir / "entries"
+    logs_dir = out_dir / "logs"
     projects_dir.mkdir(parents=True, exist_ok=True)
     concepts_dir.mkdir(parents=True, exist_ok=True)
     entries_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Pre-compute: about-edge lookup tables
@@ -113,6 +140,30 @@ def build_vault(
     entry_by_id = {e.id: e for e in graph.entries}
 
     # ------------------------------------------------------------------
+    # Pre-compute: log edge lookup tables
+    # ------------------------------------------------------------------
+
+    # log_id → sorted list of concept slugs (mentions edges)
+    log_to_concepts: dict[str, list[str]] = {}
+    # log_id → previous log_id (follows edge, at most one per log)
+    log_follows: dict[str, str] = {}
+
+    for edge in sorted(graph.edges, key=lambda e: (e.from_id, e.to_id)):
+        if edge.type == EdgeType.mentions:
+            log_id = edge.from_id
+            concept_slug = edge.to_id
+            log_to_concepts.setdefault(log_id, [])
+            if concept_slug not in log_to_concepts[log_id]:
+                log_to_concepts[log_id].append(concept_slug)
+        elif edge.type == EdgeType.follows:
+            log_id = edge.from_id
+            prev_log_id = edge.to_id
+            log_follows[log_id] = prev_log_id
+
+    for k in log_to_concepts:
+        log_to_concepts[k].sort()
+
+    # ------------------------------------------------------------------
     # Write project notes
     # ------------------------------------------------------------------
 
@@ -139,11 +190,15 @@ def build_vault(
             for slug in entry_to_concepts.get(entry.id, []):
                 touched_concepts.add(slug)
 
+        # Task 2: project tags
+        project_tags = ["project", f"fam/{_tag_slug(hub.family)}"]
+
         lines: list[str] = []
         # Frontmatter
         lines.append("---")
         lines.append("type: project")
         lines.append(f"family: {_yaml_str(hub.family)}")
+        lines.append(_yaml_tags(project_tags))
         lines.append("---")
         lines.append("")
         lines.append(f"# {hub.name}")
@@ -194,6 +249,18 @@ def build_vault(
             project_to_concept_entries.setdefault(entry.project_id, [])
             project_to_concept_entries[entry.project_id].append(entry)
 
+        # Task 2: concept tags
+        # Use effective_status if present, else status
+        status_for_tag = (
+            concept.effective_status.value
+            if concept.effective_status is not None
+            else concept.status.value
+        )
+        concept_tags = ["concept"]
+        if n_families >= 2:
+            concept_tags.append("bridge")
+        concept_tags.append(status_for_tag)
+
         lines: list[str] = []
         # Frontmatter
         effective_val = (
@@ -206,6 +273,7 @@ def build_vault(
         lines.append(f"status: {_yaml_str(concept.status.value)}")
         lines.append(f"effective_status: {_yaml_str(effective_val)}")
         lines.append(f"families: {n_families}")
+        lines.append(_yaml_tags(concept_tags))
         lines.append("---")
         lines.append("")
         lines.append(f"# {concept.label}")
@@ -244,6 +312,13 @@ def build_vault(
         # Linked concepts
         linked_slugs = entry_to_concepts.get(entry.id, [])
 
+        # Task 2: entry tags
+        entry_tags = [
+            "entry",
+            f"kind/{_tag_slug(entry.kind.value)}",
+            f"fam/{_tag_slug(entry.family)}",
+        ]
+
         lines: list[str] = []
         # Frontmatter
         lines.append("---")
@@ -254,6 +329,7 @@ def build_vault(
         lines.append(f"kind: {_yaml_str(entry.kind.value)}")
         lines.append(f"date: {_yaml_str(entry.date or '')}")
         lines.append(f"source: {_yaml_str(entry.source_path)}")
+        lines.append(_yaml_tags(entry_tags))
         lines.append("---")
         lines.append("")
         lines.append(f"# {entry.title}")
@@ -270,3 +346,76 @@ def build_vault(
 
         content = "\n".join(lines)
         (entries_dir / f"{entry.id}.md").write_text(content, encoding="utf-8")
+
+    # ------------------------------------------------------------------
+    # Write log notes (episodic tier)
+    # ------------------------------------------------------------------
+
+    _write_log_notes(
+        logs=graph.logs,
+        logs_dir=logs_dir,
+        log_to_concepts=log_to_concepts,
+        log_follows=log_follows,
+    )
+
+
+def _write_log_notes(
+    logs: list[LogNode],
+    logs_dir: Path,
+    log_to_concepts: dict[str, list[str]],
+    log_follows: dict[str, str],
+) -> None:
+    """
+    Write one markdown note per LogNode into logs/<project_id>/<log_id>.md.
+
+    Frontmatter keys: type, project, family, date, title, tags.
+    Body contains the log's title/excerpt and Obsidian wikilinks for:
+      - mentions edges  → [[<concept_slug>]]
+      - follows edge    → [[<prev_log_id>]]
+    """
+    for log in sorted(logs, key=lambda l: l.id):
+        # Create per-project subdirectory
+        project_log_dir = logs_dir / log.project_id
+        project_log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Tags: [log, fam/<family>]
+        log_tags = ["log", f"fam/{_tag_slug(log.family)}"]
+
+        # Date field: use session_date if available
+        date_val = log.session_date or ""
+
+        lines: list[str] = []
+        # Frontmatter
+        lines.append("---")
+        lines.append("type: log")
+        lines.append(f"project: {_yaml_str(log.project_id)}")
+        lines.append(f"family: {_yaml_str(log.family)}")
+        lines.append(f"date: {_yaml_str(date_val)}")
+        lines.append(f"title: {_yaml_str(log.title)}")
+        lines.append(_yaml_tags(log_tags))
+        lines.append("---")
+        lines.append("")
+        lines.append(f"# {log.title}")
+        lines.append("")
+
+        # Body excerpt
+        if log.body_excerpt:
+            lines.append(log.body_excerpt)
+            lines.append("")
+
+        # Follows wikilink (chronological predecessor in same project)
+        prev_log_id = log_follows.get(log.id)
+        if prev_log_id:
+            lines.append(f"Previous session: [[{prev_log_id}]]")
+            lines.append("")
+
+        # Mentions wikilinks (concept references)
+        mentioned_slugs = log_to_concepts.get(log.id, [])
+        if mentioned_slugs:
+            lines.append("Concepts mentioned:")
+            for slug in mentioned_slugs:
+                lines.append(f"- [[{slug}]]")
+            lines.append("")
+
+        content = "\n".join(lines)
+        (project_log_dir / f"{log.id}.md").write_text(content, encoding="utf-8")
