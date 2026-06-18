@@ -374,13 +374,13 @@ sys.stdout.write(text)
 PY
 )
       SCRIBE_RUN_LOG="$LOG_DIR/.log-scribe-${SESSION_ID}.log"
-      # Spawn detached. Use --max-budget-usd as a cost ceiling (no --max-turns in
-      # this CLI version). The deterministic Summary is already in place; this
-      # call only overwrites the row if it succeeds.
+      # Spawn detached. No budget cap — the scribe must run to completion to
+      # write the ## Session Summary section into the log file (consumed by the
+      # knowledge graph) AND upsert the registry row. Cap removed 2026-06-18
+      # after run-logs showed "Error: Exceeded USD budget (0.05)" on every dispatch.
       nohup "$CLAUDE_BIN" -p "$SCRIBE_PROMPT" \
         --model claude-haiku-4-5 \
         --output-format text \
-        --max-budget-usd 0.05 \
         --dangerously-skip-permissions \
         >"$SCRIBE_RUN_LOG" 2>&1 </dev/null &
       disown 2>/dev/null || true
