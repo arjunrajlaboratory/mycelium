@@ -1,5 +1,11 @@
 """
-link_logs.py — Auto-link episodic LogNodes to concept nodes and chain follows edges.
+link_logs.py — Chain episodic LogNodes into follows edges only.
+
+Log notes connect to their project hub (via a wikilink written by build_vault)
+and to the previous session in the same project (follows chain).  The old
+mentions (log→concept) edges have been removed: logs were flooding the concept
+graph with low-signal connections, and build_vault no longer writes concept
+wikilinks in log notes anyway.
 
 Implements the log edge-linking step of the knowledge-map pipeline.
 Pure function: no I/O, no mutation of input objects.
@@ -12,19 +18,12 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from graph_model import (
-    MASS_LINK_THRESHOLD,
     Edge,
     EdgeType,
     LogNode,
-    MatchMode,
     Provenance,
-    confidence_for,
-    normalize_text,
 )
 from concept_registry import Registry
-
-# Reuse whole-word matcher and _find_matches from link_entries (single source of truth).
-from link_entries import _find_matches
 
 
 # ---------------------------------------------------------------------------
@@ -67,102 +66,23 @@ def _null_safe_log_sort_key(log: LogNode) -> tuple:
 
 def link_logs(logs: list[LogNode], registry: Registry) -> LinkLogsResult:
     """
-    Auto-link LogNodes to concept nodes (mentions edges) and chain follows edges.
+    Chain LogNodes into follows edges (chronological predecessor within project).
+
+    Mentions edges (log→concept) are intentionally not generated.  Log notes
+    link to concepts only through the project hub, keeping the episodic tier
+    structurally clean.
 
     Args:
         logs: List of LogNode objects to link.
-        registry: Loaded concept Registry.
+        registry: Loaded concept Registry (accepted for API compatibility; unused).
 
     Returns:
-        LinkLogsResult with sorted edges (mentions block then follows block) and
-        a report list of strings (mass-link warnings + summary counts).
+        LinkLogsResult with follows edges sorted by from_id and a report list.
     """
     report: list[str] = []
 
     # ------------------------------------------------------------------
-    # Step 1: mentions edges (log → concept)
-    # ------------------------------------------------------------------
-
-    # Pre-normalize log text once per log
-    log_text: dict[str, str] = {}
-    for log in logs:
-        combined = log.title + "\n" + log.body_excerpt
-        log_text[log.id] = normalize_text(combined)
-
-    # Track trigger → edge count for mass-link guard
-    trigger_counts: dict[str, int] = defaultdict(int)
-
-    # (log_id, concept_slug) → Edge  — deduplication map
-    mentions_map: dict[tuple[str, str], Edge] = {}
-
-    for log in logs:
-        text = log_text[log.id]
-
-        for concept in registry.concepts:
-            # --- Negative-keyword veto ---
-            if concept.negative_keywords:
-                neg_matches = _find_matches(concept.negative_keywords, text)
-                if neg_matches:
-                    continue
-
-            # NOTE: No required_any gate for logs (loosely associated per spec).
-
-            mode = concept.match_mode
-
-            # --- Active terms by match_mode ---
-            matched_aliases: list[str] = []
-            matched_positives: list[str] = []
-
-            if mode in (MatchMode.alias, MatchMode.hybrid):
-                matched_aliases = _find_matches(concept.aliases, text)
-
-            if mode in (MatchMode.keyword, MatchMode.hybrid):
-                matched_positives = _find_matches(concept.positive_keywords, text)
-
-            # --- Trigger + confidence (alias > keyword, lexicographic tie) ---
-            trigger: str | None = None
-            confidence: str | None = None
-
-            if matched_aliases:
-                trigger = matched_aliases[0]  # lex smallest alias
-                confidence = confidence_for("alias")
-            elif matched_positives:
-                trigger = matched_positives[0]  # lex smallest keyword
-                confidence = confidence_for("positive")
-            else:
-                continue  # nothing matched
-
-            pair = (log.id, concept.slug)
-            if pair in mentions_map:
-                continue  # dedup: keep first (highest-precedence) edge
-
-            edge = Edge(
-                from_id=log.id,
-                to_id=concept.slug,
-                type=EdgeType.mentions,
-                provenance=Provenance.auto,
-                trigger=trigger,
-                confidence=confidence,
-            )
-            mentions_map[pair] = edge
-            trigger_counts[trigger] += 1
-
-    # --- Mass-link guard ---
-    for term, count in trigger_counts.items():
-        if count > MASS_LINK_THRESHOLD:
-            report.append(
-                f"MASS-LINK WARNING: trigger {term!r} produced {count} mentions edges "
-                f"(> {MASS_LINK_THRESHOLD} threshold)"
-            )
-
-    # Sort mentions edges by (from_id, to_id, trigger)
-    mentions_edges: list[Edge] = sorted(
-        mentions_map.values(),
-        key=lambda e: (e.from_id, e.to_id, e.trigger or ""),
-    )
-
-    # ------------------------------------------------------------------
-    # Step 2: follows edges (log → previous log in same project)
+    # follows edges (log → previous log in same project)
     # ------------------------------------------------------------------
 
     # Group logs by project_id
@@ -194,17 +114,13 @@ def link_logs(logs: list[LogNode], registry: Registry) -> LinkLogsResult:
     follows_edges.sort(key=lambda e: e.from_id)
 
     # ------------------------------------------------------------------
-    # Step 3: Assemble result
+    # Assemble result
     # ------------------------------------------------------------------
 
-    all_edges = mentions_edges + follows_edges
-
-    n_mentions = len(mentions_edges)
     n_follows = len(follows_edges)
-    n_concepts = len({e.to_id for e in mentions_edges})
     report.append(
-        f"link_logs: {n_mentions} mentions edges ({n_concepts} distinct concepts), "
-        f"{n_follows} follows edges, {len(all_edges)} total"
+        f"link_logs: 0 mentions edges (removed), "
+        f"{n_follows} follows edges, {n_follows} total"
     )
 
-    return LinkLogsResult(edges=all_edges, report=report)
+    return LinkLogsResult(edges=follows_edges, report=report)

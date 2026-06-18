@@ -1,11 +1,20 @@
 """
 build_vault.py — Write Obsidian-style markdown vault notes from a Graph + Facet map.
 
-Generates four directories under out_dir:
-  projects/<project_id>.md        — one note per ProjectHub
-  concepts/<slug>.md              — one note per Concept (all, including unlinked)
-  entries/<entry_id>.md           — one note per active Entry
-  logs/<project_id>/<log_id>.md   — one note per LogNode (episodic tier)
+Generates four directory trees under out_dir:
+  projects/<project_id>.md               — one note per ProjectHub
+  concepts/bridge/<slug>.md              — cross-project concepts (families >= 2)
+  concepts/candidate/<slug>.md           — candidate concepts
+  concepts/confirmed/<slug>.md           — confirmed non-bridge concepts
+  entries/decision/<entry_id>.md         — decision entries
+  entries/learning/<entry_id>.md         — learning entries
+  entries/finding/<entry_id>.md          — finding entries
+  entries/other/<entry_id>.md            — convention/feedback/other entries
+  logs/<project_id>/<log_id>.md          — one note per LogNode (episodic tier)
+
+Stale content directories (concepts/, entries/, logs/, projects/) are removed at
+the start of each build to avoid duplicate graph nodes.  vault/.obsidian/ is
+never touched.
 """
 
 from __future__ import annotations
@@ -14,7 +23,9 @@ import re
 from pathlib import Path
 
 from graph_model import (
+    ConceptStatus,
     EdgeType,
+    EntryKind,
     EntryStatus,
     Facet,
     Graph,
@@ -99,7 +110,18 @@ def build_vault(
 ) -> None:
     """Write project, concept, entry, and log markdown notes to out_dir."""
 
-    # Create output subdirectories
+    # ------------------------------------------------------------------
+    # Clean stale content directories (flat notes from previous builds).
+    # MUST preserve vault/.obsidian/ (graph.json, colorgroups-by-project.json).
+    # ------------------------------------------------------------------
+    import shutil
+
+    for stale_dir in ("concepts", "entries", "logs", "projects"):
+        stale_path = out_dir / stale_dir
+        if stale_path.exists():
+            shutil.rmtree(stale_path)
+
+    # Create output subdirectories (top-level; subfolders created on demand)
     projects_dir = out_dir / "projects"
     concepts_dir = out_dir / "concepts"
     entries_dir = out_dir / "entries"
@@ -296,7 +318,16 @@ def build_vault(
             lines.append("")
 
         content = "\n".join(lines)
-        (concepts_dir / f"{concept.slug}.md").write_text(content, encoding="utf-8")
+
+        # Route concept into subfolder: bridge / candidate / confirmed
+        if n_families >= 2:
+            concept_subfolder = concepts_dir / "bridge"
+        elif status_for_tag == ConceptStatus.candidate.value:
+            concept_subfolder = concepts_dir / "candidate"
+        else:
+            concept_subfolder = concepts_dir / "confirmed"
+        concept_subfolder.mkdir(parents=True, exist_ok=True)
+        (concept_subfolder / f"{concept.slug}.md").write_text(content, encoding="utf-8")
 
     # ------------------------------------------------------------------
     # Write entry notes (active only)
@@ -345,7 +376,17 @@ def build_vault(
         lines.append("")
 
         content = "\n".join(lines)
-        (entries_dir / f"{entry.id}.md").write_text(content, encoding="utf-8")
+
+        # Route entry into subfolder: decision / learning / finding / other
+        _kind_folder_map = {
+            EntryKind.decision.value: "decision",
+            EntryKind.learning.value: "learning",
+            EntryKind.finding.value: "finding",
+        }
+        entry_subfolder_name = _kind_folder_map.get(entry.kind.value, "other")
+        entry_subfolder = entries_dir / entry_subfolder_name
+        entry_subfolder.mkdir(parents=True, exist_ok=True)
+        (entry_subfolder / f"{entry.id}.md").write_text(content, encoding="utf-8")
 
     # ------------------------------------------------------------------
     # Write log notes (episodic tier)
@@ -370,8 +411,9 @@ def _write_log_notes(
 
     Frontmatter keys: type, project, family, date, title, tags.
     Body contains the log's title/excerpt and Obsidian wikilinks for:
-      - mentions edges  → [[<concept_slug>]]
-      - follows edge    → [[<prev_log_id>]]
+      - project link    → [[<project_id>]]  (connects log to its project hub)
+      - follows edge    → [[<prev_log_id>]] (chronological chain only)
+    No concept wikilinks are written from log notes.
     """
     for log in sorted(logs, key=lambda l: l.id):
         # Create per-project subdirectory
@@ -398,6 +440,10 @@ def _write_log_notes(
         lines.append(f"# {log.title}")
         lines.append("")
 
+        # Project wikilink — mirrors entry-note convention (entry notes use same project_id)
+        lines.append(f"Project: [[{log.project_id}]]")
+        lines.append("")
+
         # Body excerpt
         if log.body_excerpt:
             lines.append(log.body_excerpt)
@@ -409,13 +455,8 @@ def _write_log_notes(
             lines.append(f"Previous session: [[{prev_log_id}]]")
             lines.append("")
 
-        # Mentions wikilinks (concept references)
-        mentioned_slugs = log_to_concepts.get(log.id, [])
-        if mentioned_slugs:
-            lines.append("Concepts mentioned:")
-            for slug in mentioned_slugs:
-                lines.append(f"- [[{slug}]]")
-            lines.append("")
+        # NOTE: "Concepts mentioned" section intentionally removed.
+        # Log nodes connect only to their project hub and the chronological chain.
 
         content = "\n".join(lines)
         (project_log_dir / f"{log.id}.md").write_text(content, encoding="utf-8")

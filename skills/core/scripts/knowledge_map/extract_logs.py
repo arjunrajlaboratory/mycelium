@@ -21,7 +21,6 @@ from pathlib import Path
 from graph_model import (
     LogNode,
     ProjectMeta,
-    normalize_text,
     sha256_hash,
 )
 
@@ -42,6 +41,11 @@ _EXCLUDED_SUFFIX = "_MANIFEST.md"
 
 # Excerpt target length (chars)
 _EXCERPT_LEN = 500
+
+# Minimum body length (stripped) to keep a log node.
+# Logs shorter than this are auto-generated session-boundary stubs
+# ("## Session Log / ### HH:MM Session started / Branch: main / ...") with no narrative.
+_MIN_BODY_LEN = 150
 
 # ---------------------------------------------------------------------------
 # Result dataclass
@@ -170,8 +174,19 @@ def _parse_log_file(fpath: Path) -> tuple[str, str, list[str]]:
         head = "\n".join(lines[:30])
         tags = _HASHTAG_RE.findall(head)
 
-    # --- body_excerpt: normalize_text of first EXCERPT_LEN raw chars ---
-    body_excerpt = normalize_text(raw[:_EXCERPT_LEN])
+    # --- body_excerpt: full log body, frontmatter stripped, newlines preserved ---
+    # Strip leading YAML frontmatter block (--- ... ---) if present
+    stripped = raw
+    if raw.startswith("---"):
+        # Find the closing --- line (must be on its own line, after the opener)
+        fm_end = raw.find("\n---", 3)
+        if fm_end != -1:
+            # Skip past the closing --- line and any immediately following newline
+            after_fm = fm_end + 4  # len("\n---") == 4
+            if after_fm < len(raw) and raw[after_fm] == "\n":
+                after_fm += 1
+            stripped = raw[after_fm:]
+    body_excerpt = stripped  # full body, no character cap, newlines preserved
 
     return title, body_excerpt, tags
 
@@ -258,6 +273,16 @@ def extract_logs(
                 session_seq = None
 
             title, body_excerpt, tags = _parse_log_file(fpath)
+
+            # Drop near-empty session-boundary stubs — no narrative value.
+            # The follows-chain is built downstream over only the logs that reach
+            # link_logs; dropping here automatically re-links around these stubs.
+            if len(body_excerpt.strip()) < _MIN_BODY_LEN:
+                report.append(
+                    f"STUB DROPPED ({source_path}): body length "
+                    f"{len(body_excerpt.strip())} < {_MIN_BODY_LEN}"
+                )
+                continue
 
             pending_records.append(
                 {
