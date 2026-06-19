@@ -18,6 +18,7 @@ Detailed guidance for writing each section of a computational analysis report. T
     - [Intuitive-before-technical](#intuitive-before-technical)
     - [Worked examples per analysis type](#worked-examples-per-analysis-type)
     - [Denominator discipline](#denominator-discipline)
+    - [Narrative numbers and linter warnings](#narrative-numbers-and-linter-warnings)
     - [Overloaded-name guard](#overloaded-name-guard)
 11. [General Writing Principles](#general-writing-principles)
 
@@ -365,6 +366,16 @@ For cross-universe comparisons, also report the universe-eligible-restricted den
 
 Bare percentages are stated alongside the count (or vice versa) so the reader does not have to back out the denominator from rounding.
 
+### Narrative numbers and linter warnings
+
+`scitexlintr` is intentionally suspicious of numeric prose, but reports still need years, structural labels, and supplemental table cells. Use this policy before reaching for waivers:
+
+- Register the load-bearing computed results and thresholds. If the number would change when the analysis reruns, it belongs in `numbers[*]` and should be cited with `\SciVal`.
+- Phrase prose-only constants and labels in words when the exact token is not important: "first/second/third" instead of `(1)(2)(3)`, "a lift of one", "zero hub papers", "claims reaching degree 100".
+- Do not register common round values or years solely to silence warnings. Registering `0`, `1`, `1.0`, `2020`, or `2021` makes `raw-generated-value` fire anywhere that literal appears.
+- For genuine narrative years or supplement-table cells, use waiver comments that explain the source ("publication year from Crossref metadata", "supplement table values copied from `outputs/tables/topic_counts.csv`; caption cites the file"). A table cell is prose to the linter.
+- A waiver covers only the current line or the next four lines, and each `% ANALYSIS_OK[...]` comment names one rule code. For dense paragraphs or tables, cluster/repeat precise waivers close to the affected lines rather than relying on one distant comment.
+
 ### Overloaded-name guard
 
 Any coined term that overlaps an established statistics / genomics / ML term needs an explicit "this is NOT the standard X" disclaimer at first use, naming the specific way it differs.
@@ -401,7 +412,7 @@ The fastest test for stiff prose is to read a sentence aloud. If it sounds like 
 - **Stored value, not spoken value.**
   - *Before:* "consensus is positive for a fraction 0.978 of evidenced claims."
   - *After:* "consensus is positive for 97.8% of evidenced claims."
-  - The fix is the `unit:"percent"` manifest field (Phase 1): it renders the canonical fraction `0.978` as `97.8\%`, so you write the readable form while the stored `value` stays the verification anchor. Reach for it whenever a fraction-of-a-whole would be spoken as a percentage.
+  - The fix is the `unit:"percent"` manifest field (Phase 1): it renders the canonical fraction `0.978` as `97.8\%`, so you write the readable form while the stored `value` stays the verification anchor. In the `.tex` source, the checked snapshot remains the stored fraction (`\SciVal{\FracPositive}{0.978}`), not the rendered percent. Reach for it whenever a fraction-of-a-whole would be spoken as a percentage.
 
 - **Jargon in a skim surface.** A subsection title or the first sentence of a result is read out of context; a bare coined term there reads as noise.
   - *Before:* "Centrality is not a volume proxy."
