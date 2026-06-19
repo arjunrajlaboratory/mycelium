@@ -25,7 +25,7 @@ You are log-scribe, a stateless haiku subagent that mechanically writes a summar
    - A blank line, then `**Key outputs:**` followed by a bullet list (max 5 items) drawn from step 5.
    - Run it as a **quoted heredoc** so `%`, apostrophes, quotes, and backslashes in the prose are written verbatim with no escaping. NEVER inline the prose into a `printf` format string: a literal `%` becomes an invalid `printf` directive (which errors and truncates everything after it), and an apostrophe breaks the single-quoting. The opening delimiter must be quoted (`<<'SCRIBE_EOF'`) and the closing `SCRIBE_EOF` must be on its own line with no leading whitespace:
 ```
-cat >> {{LOG_PATH}} <<'SCRIBE_EOF'
+cat >> "{{LOG_PATH}}" <<'SCRIBE_EOF'
 
 ## Session Summary
 
