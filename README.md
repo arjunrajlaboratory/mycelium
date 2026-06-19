@@ -44,7 +44,7 @@ claude plugin marketplace add arjunrajlaboratory/mycelium
 claude plugin install mycelium@mycelium
 ```
 
-This permanently registers the mycelium plugin with your Claude Code installation. The slash commands (`/mycelium:core`, `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`, `/mycelium:ingest`, `/mycelium:review`, `/mycelium:transfer`) become available in all sessions.
+This permanently registers the mycelium plugin with your Claude Code installation. The slash commands (`/mycelium:core`, `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`, `/mycelium:ingest`, `/mycelium:review`, `/mycelium:codex-review`, `/mycelium:transfer`) become available in all sessions.
 
 **Option B — Local / development install:**
 
@@ -80,6 +80,7 @@ Work normally — analyze data, write code, build algorithms. Use the dedicated 
 - `/mycelium:ideas` — brainstorm with disciplinary personas
 - `/mycelium:ingest` — import new data with metadata and provenance
 - `/mycelium:review` — analysis-aware code review for PRs, commits, or working-tree changes
+- `/mycelium:codex-review` — address Codex review comments and audit the whole branch for the same error pattern in one pass
 - `/mycelium:transfer` — cross-pollinate learnings across sibling projects
 
 Mycelium's hooks enforce the post-action protocol automatically after every significant action:
@@ -159,7 +160,7 @@ This replaces the naive approach of loading all `.living/` files at session star
 
 Mycelium separates **skills** (actions) from **conventions** (reference material):
 
-- **Skills** are Claude Code slash commands that execute workflows: `/mycelium:core` (core orchestrator), `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`, `/mycelium:ingest`, `/mycelium:review`, `/mycelium:transfer`
+- **Skills** are Claude Code slash commands that execute workflows: `/mycelium:core` (core orchestrator), `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`, `/mycelium:ingest`, `/mycelium:review`, `/mycelium:codex-review`, `/mycelium:transfer`
 - **Convention packs** are collections of markdown files that skills consult for methodology guidance. They're swappable — different report conventions, different analysis approaches.
 - **Hooks** enforce the framework automatically — detecting code execution, tracking file edits, and ensuring `.living/` stays current without manual intervention.
 

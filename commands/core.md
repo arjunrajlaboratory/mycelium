@@ -25,6 +25,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 - `/mycelium:ideas` — brainstorm with disciplinary personas
 - `/mycelium:transfer` — cross-pollinate learnings across sibling projects
 - `/mycelium:review` — review code/analysis changes (PR, commit, or diff) for the kinds of mistakes that matter in scientific work; supports `grill` mode for conversational interrogation of analytical decisions
+- `/mycelium:codex-review` — respond to Codex review comments on a PR: fix the flagged instance and audit the whole branch for other instances of the same error pattern, with an access-gated `@codex review` re-trigger
 
 ---
 
