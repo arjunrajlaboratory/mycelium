@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyyaml
+          pip install pyyaml pytest
 
       - name: Validate command frontmatter
         run: |
@@ -78,24 +78,37 @@ jobs:
       - name: Run knowledge_map unit tests
         run: |
           km_dir="skills/core/scripts/knowledge_map"
-          # Core test files that require only stdlib + pyyaml.
-          # propose_concepts depends on sentence-transformers which is not installed;
-          # we skip its test by running an explicit list rather than blind discovery.
+          # Self-running tests (unittest / __main__ smoke harnesses) that need
+          # only stdlib + pyyaml. propose_concepts depends on
+          # sentence-transformers which is not installed; we skip its test by
+          # running an explicit list rather than blind discovery.
           core_tests=(
             test_build_graph
             test_build_vault
-            test_concept_registry
             test_extract_entries
             test_extract_logs
             test_link_entries
             test_link_logs
             test_render_views
           )
+          # pytest-style tests (fixture-based, no __main__ entry point) must be
+          # run via `python -m pytest`, not invoked as a plain script.
+          pytest_tests=(
+            test_concept_registry
+          )
           failed=0
           for t in "${core_tests[@]}"; do
             if [ -f "$km_dir/$t.py" ]; then
               echo "--- running $t ---"
               python "$km_dir/$t.py" -v || failed=1
+            else
+              echo "--- $t.py not present, skipping ---"
+            fi
+          done
+          for t in "${pytest_tests[@]}"; do
+            if [ -f "$km_dir/$t.py" ]; then
+              echo "--- running $t (pytest) ---"
+              python -m pytest "$km_dir/$t.py" -v || failed=1
             else
               echo "--- $t.py not present, skipping ---"
             fi
