@@ -7,8 +7,9 @@ Python 3.13+, stdlib unittest only.
 
 import sys
 import unittest
+from pathlib import Path
 
-sys.path.insert(0, "/Users/mst36/tools/mycelium-main/skills/core/scripts/knowledge_map")
+sys.path.insert(0, str(Path(__file__).parent.resolve()))
 
 from graph_model import (
     ConceptStatus,

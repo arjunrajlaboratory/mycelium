@@ -2,6 +2,7 @@
 test_build_vault.py — Unit tests for build_vault.py
 """
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -144,11 +145,11 @@ class TestBuildVault(unittest.TestCase):
         self.assertIn("[[e-00001]]", text)
 
     def test_concept_shared_concept(self) -> None:
-        """concepts/shared-concept.md has definition, cross-project badge, and both entries."""
-        p = self.out_dir / "concepts" / "shared-concept.md"
-        self.assertTrue(p.exists(), "concepts/shared-concept.md should exist")
+        """concepts/bridge/shared-concept.md has definition, cross-project badge, and both entries."""
+        p = self.out_dir / "concepts" / "bridge" / "shared-concept.md"
+        self.assertTrue(p.exists(), "concepts/bridge/shared-concept.md should exist")
         text = p.read_text(encoding="utf-8")
-        print("\n--- concepts/shared-concept.md ---")
+        print("\n--- concepts/bridge/shared-concept.md ---")
         print(text)
         print("--- end ---")
         self.assertIn("A concept shared across both families.", text)
@@ -157,18 +158,18 @@ class TestBuildVault(unittest.TestCase):
         self.assertIn("[[e-00002]]", text)
 
     def test_entry_e00001_frontmatter_and_links(self) -> None:
-        """entries/e-00001.md has valid frontmatter, project link, and concept link."""
-        p = self.out_dir / "entries" / "e-00001.md"
-        self.assertTrue(p.exists(), "entries/e-00001.md should exist")
+        """entries/learning/e-00001.md has valid frontmatter, project link, and concept link."""
+        p = self.out_dir / "entries" / "learning" / "e-00001.md"
+        self.assertTrue(p.exists(), "entries/learning/e-00001.md should exist")
         text = p.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---"), "Entry note should start with '---'")
         self.assertIn("Project: [[proj-alpha]]", text)
         self.assertIn("[[shared-concept]]", text)
 
     def test_entry_e00002_project_link(self) -> None:
-        """entries/e-00002.md has project link to proj-beta."""
-        p = self.out_dir / "entries" / "e-00002.md"
-        self.assertTrue(p.exists(), "entries/e-00002.md should exist")
+        """entries/decision/e-00002.md has project link to proj-beta."""
+        p = self.out_dir / "entries" / "decision" / "e-00002.md"
+        self.assertTrue(p.exists(), "entries/decision/e-00002.md should exist")
         text = p.read_text(encoding="utf-8")
         self.assertIn("Project: [[proj-beta]]", text)
 
@@ -179,6 +180,26 @@ class TestBuildVault(unittest.TestCase):
         text = p.read_text(encoding="utf-8")
         self.assertIn("## Concepts touched", text)
         self.assertIn("[[shared-concept]]", text)
+
+    def test_obsidian_graph_json_exists_and_valid(self) -> None:
+        """.obsidian/graph.json exists and is valid JSON."""
+        p = self.out_dir / ".obsidian" / "graph.json"
+        self.assertTrue(p.exists(), ".obsidian/graph.json should exist")
+        data = json.loads(p.read_text(encoding="utf-8"))
+        self.assertIn("colorGroups", data)
+        self.assertIsInstance(data["colorGroups"], list)
+
+    def test_moc_exists(self) -> None:
+        """000-MAP-OF-CONTENT.md exists."""
+        p = self.out_dir / "000-MAP-OF-CONTENT.md"
+        self.assertTrue(p.exists(), "000-MAP-OF-CONTENT.md should exist")
+
+    def test_entry_has_aliases(self) -> None:
+        """An entry note contains an aliases: line."""
+        p = self.out_dir / "entries" / "learning" / "e-00001.md"
+        self.assertTrue(p.exists(), "entries/learning/e-00001.md should exist")
+        text = p.read_text(encoding="utf-8")
+        self.assertIn("aliases:", text)
 
 
 if __name__ == "__main__":

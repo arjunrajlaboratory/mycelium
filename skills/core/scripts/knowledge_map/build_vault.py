@@ -6,6 +6,7 @@ Generates four directory trees under out_dir:
   concepts/bridge/<slug>.md              — cross-project concepts (families >= 2)
   concepts/candidate/<slug>.md           — candidate concepts
   concepts/confirmed/<slug>.md           — confirmed non-bridge concepts
+  concepts/curated/<slug>.md             — curated singleton concepts
   entries/decision/<entry_id>.md         — decision entries
   entries/learning/<entry_id>.md         — learning entries
   entries/finding/<entry_id>.md          — finding entries
@@ -19,6 +20,7 @@ never touched.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -121,6 +123,40 @@ def build_vault(
         if stale_path.exists():
             shutil.rmtree(stale_path)
 
+    # ------------------------------------------------------------------
+    # Change 1: Write vault/.obsidian/graph.json ONLY IF it does not exist.
+    # ------------------------------------------------------------------
+    obsidian_dir = out_dir / ".obsidian"
+    obsidian_dir.mkdir(parents=True, exist_ok=True)
+    graph_json_path = obsidian_dir / "graph.json"
+    if not graph_json_path.exists():
+        _obsidian_graph = {
+            "colorGroups": [
+                {"query": "path:concepts/bridge", "color": {"a": 1, "rgb": 16746496}},
+                {"query": "path:concepts/confirmed", "color": {"a": 1, "rgb": 5614848}},
+                {
+                    "query": "path:concepts/candidate",
+                    "color": {"a": 1, "rgb": 16737792},
+                },
+                {"query": "path:concepts/curated", "color": {"a": 1, "rgb": 9699328}},
+                {"query": "path:projects", "color": {"a": 1, "rgb": 3166464}},
+                {"query": "path:entries/decision", "color": {"a": 1, "rgb": 10027264}},
+                {"query": "path:entries/learning", "color": {"a": 1, "rgb": 5592832}},
+                {"query": "path:entries/finding", "color": {"a": 1, "rgb": 16711780}},
+                {"query": "path:logs", "color": {"a": 1, "rgb": 8421504}},
+            ],
+            "showOrphans": False,
+            "showTags": False,
+            "hideUnresolved": False,
+            "nodeSizeMultiplier": 1.2,
+            "nodeSize": 10,
+            "linkDistance": 150,
+            "scale": 1.0,
+        }
+        graph_json_path.write_text(
+            json.dumps(_obsidian_graph, indent=2), encoding="utf-8"
+        )
+
     # Create output subdirectories (top-level; subfolders created on demand)
     projects_dir = out_dir / "projects"
     concepts_dir = out_dir / "concepts"
@@ -161,29 +197,29 @@ def build_vault(
     # Build entry lookup by id
     entry_by_id = {e.id: e for e in graph.entries}
 
-    # ------------------------------------------------------------------
-    # Pre-compute: log edge lookup tables
-    # ------------------------------------------------------------------
+    # Change 4: Build known_project_ids set to guard dangling wikilinks.
+    known_project_ids: set[str] = {h.project_id for h in graph.project_hubs}
 
-    # log_id → sorted list of concept slugs (mentions edges)
-    log_to_concepts: dict[str, list[str]] = {}
-    # log_id → previous log_id (follows edge, at most one per log)
+    # ------------------------------------------------------------------
+    # Change 5: Standalone log_follows loop (log_to_concepts removed).
+    # ------------------------------------------------------------------
     log_follows: dict[str, str] = {}
-
     for edge in sorted(graph.edges, key=lambda e: (e.from_id, e.to_id)):
-        if edge.type == EdgeType.mentions:
-            log_id = edge.from_id
-            concept_slug = edge.to_id
-            log_to_concepts.setdefault(log_id, [])
-            if concept_slug not in log_to_concepts[log_id]:
-                log_to_concepts[log_id].append(concept_slug)
-        elif edge.type == EdgeType.follows:
-            log_id = edge.from_id
-            prev_log_id = edge.to_id
-            log_follows[log_id] = prev_log_id
+        if edge.type == EdgeType.follows:
+            log_follows[edge.from_id] = edge.to_id
 
-    for k in log_to_concepts:
-        log_to_concepts[k].sort()
+    # ------------------------------------------------------------------
+    # Build log_to_entries: log_id → sorted list[entry_id] from created_in edges.
+    # ------------------------------------------------------------------
+    log_to_entries: dict[str, list[str]] = {}
+    for edge in sorted(graph.edges, key=lambda e: (e.from_id, e.to_id)):
+        if edge.type == EdgeType.created_in:
+            log_to_entries.setdefault(edge.from_id, [])
+            if edge.to_id not in log_to_entries[edge.from_id]:
+                log_to_entries[edge.from_id].append(edge.to_id)
+    # Ensure deterministic ordering within each list
+    for k in log_to_entries:
+        log_to_entries[k].sort()
 
     # ------------------------------------------------------------------
     # Write project notes
@@ -221,6 +257,8 @@ def build_vault(
         lines.append("type: project")
         lines.append(f"family: {_yaml_str(hub.family)}")
         lines.append(_yaml_tags(project_tags))
+        # Change 3: aliases for project hub
+        lines.append(f'aliases: ["{_yaml_escape(hub.name)}"]')
         lines.append("---")
         lines.append("")
         lines.append(f"# {hub.name}")
@@ -249,6 +287,10 @@ def build_vault(
     # ------------------------------------------------------------------
     # Write concept notes
     # ------------------------------------------------------------------
+
+    # Change 2: Track bridge/confirmed concepts for MOC generation.
+    bridge_concepts: list = []
+    confirmed_concepts: list = []
 
     for concept in sorted(graph.concepts, key=lambda c: c.slug):
         # Find all entries linked to this concept
@@ -319,13 +361,18 @@ def build_vault(
 
         content = "\n".join(lines)
 
-        # Route concept into subfolder: bridge / candidate / confirmed
+        # Change 7: Route concept into subfolder: bridge / candidate / curated / confirmed.
         if n_families >= 2:
             concept_subfolder = concepts_dir / "bridge"
+            bridge_concepts.append(concept)
         elif status_for_tag == ConceptStatus.candidate.value:
             concept_subfolder = concepts_dir / "candidate"
+        elif status_for_tag == "curated_singleton":
+            # Curated concepts that span only one family route to concepts/curated/
+            concept_subfolder = concepts_dir / "curated"
         else:
             concept_subfolder = concepts_dir / "confirmed"
+            confirmed_concepts.append(concept)
         concept_subfolder.mkdir(parents=True, exist_ok=True)
         (concept_subfolder / f"{concept.slug}.md").write_text(content, encoding="utf-8")
 
@@ -343,15 +390,20 @@ def build_vault(
         # Linked concepts
         linked_slugs = entry_to_concepts.get(entry.id, [])
 
-        # Task 2: entry tags
+        # Change 6: Build entry_tags first (including optional extra tags), then frontmatter.
         entry_tags = [
             "entry",
             f"kind/{_tag_slug(entry.kind.value)}",
             f"fam/{_tag_slug(entry.family)}",
         ]
+        # Append optional extra tags before emitting frontmatter
+        if getattr(entry, "finding_status", None) is not None:
+            entry_tags.append(f"status/{_tag_slug(entry.finding_status)}")
+        if getattr(entry, "mitigation_type", None) is not None:
+            entry_tags.append(f"mitigation/{_tag_slug(entry.mitigation_type)}")
 
         lines: list[str] = []
-        # Frontmatter
+        # Frontmatter — Change 6: optional fields after source, then tags, then aliases.
         lines.append("---")
         lines.append("type: entry")
         lines.append(f"project: {_yaml_str(entry.project_id)}")
@@ -360,12 +412,24 @@ def build_vault(
         lines.append(f"kind: {_yaml_str(entry.kind.value)}")
         lines.append(f"date: {_yaml_str(entry.date or '')}")
         lines.append(f"source: {_yaml_str(entry.source_path)}")
+        if getattr(entry, "finding_status", None) is not None:
+            lines.append(f"finding_status: {_yaml_str(entry.finding_status)}")
+        if getattr(entry, "mitigation_type", None) is not None:
+            lines.append(f"mitigation_type: {_yaml_str(entry.mitigation_type)}")
+        if getattr(entry, "source_project", None) is not None:
+            lines.append(f"source_project: {_yaml_str(entry.source_project)}")
         lines.append(_yaml_tags(entry_tags))
+        # Change 3: aliases for entry notes
+        lines.append(f'aliases: ["{_yaml_escape(entry.title)}"]')
         lines.append("---")
         lines.append("")
         lines.append(f"# {entry.title}")
         lines.append("")
-        lines.append(f"Project: [[{entry.project_id}]]")
+        # Change 4: guard project wikilink
+        if entry.project_id in known_project_ids:
+            lines.append(f"Project: [[{entry.project_id}]]")
+        else:
+            lines.append(f"Project: {entry.project_id}")
         lines.append("")
         concepts_str = " ".join(f"[[{slug}]]" for slug in linked_slugs)
         lines.append(f"Concepts: {concepts_str}")
@@ -395,16 +459,75 @@ def build_vault(
     _write_log_notes(
         logs=graph.logs,
         logs_dir=logs_dir,
-        log_to_concepts=log_to_concepts,
         log_follows=log_follows,
+        known_project_ids=known_project_ids,
+        log_to_entries=log_to_entries,
     )
+
+    # ------------------------------------------------------------------
+    # Change 2: Generate 000-MAP-OF-CONTENT.md (always regenerated).
+    # ------------------------------------------------------------------
+    moc_lines: list[str] = []
+    moc_lines.append("# Map of Content")
+    moc_lines.append("")
+    moc_lines.append(
+        "This vault contains notes generated from the mycelium knowledge graph. "
+        "Notes are organized as follows:"
+    )
+    moc_lines.append("")
+    moc_lines.append(
+        "- **concepts/bridge/** — concepts that appear in 2+ project families (cross-project)"
+    )
+    moc_lines.append("- **concepts/confirmed/** — confirmed non-bridge concepts")
+    moc_lines.append("- **concepts/candidate/** — candidate concepts awaiting review")
+    moc_lines.append("- **concepts/curated/** — manually curated singleton concepts")
+    moc_lines.append("- **entries/decision/** — decision entries")
+    moc_lines.append("- **entries/learning/** — learning entries")
+    moc_lines.append("- **entries/finding/** — finding entries")
+    moc_lines.append("- **logs/** — episodic session logs, grouped by project")
+    moc_lines.append("")
+
+    moc_lines.append("## Projects")
+    moc_lines.append("")
+    for hub in sorted(graph.project_hubs, key=lambda h: h.project_id):
+        moc_lines.append(f"- [[{hub.project_id}]]")
+    moc_lines.append("")
+
+    if bridge_concepts:
+        moc_lines.append("## Concepts (bridge)")
+        moc_lines.append("")
+        for concept in sorted(bridge_concepts, key=lambda c: c.slug):
+            moc_lines.append(f"- [[{concept.slug}]]")
+        moc_lines.append("")
+
+    if confirmed_concepts:
+        moc_lines.append("## Concepts (confirmed)")
+        moc_lines.append("")
+        for concept in sorted(confirmed_concepts, key=lambda c: c.slug):
+            moc_lines.append(f"- [[{concept.slug}]]")
+        moc_lines.append("")
+
+    # Link to views/ if it exists under out_dir
+    views_dir = out_dir / "views"
+    if views_dir.exists() and views_dir.is_dir():
+        view_files = sorted(views_dir.glob("*.md"))
+        if view_files:
+            moc_lines.append("## Views")
+            moc_lines.append("")
+            for vf in view_files:
+                moc_lines.append(f"- [[../views/{vf.name}]]")
+            moc_lines.append("")
+
+    moc_content = "\n".join(moc_lines)
+    (out_dir / "000-MAP-OF-CONTENT.md").write_text(moc_content, encoding="utf-8")
 
 
 def _write_log_notes(
     logs: list[LogNode],
     logs_dir: Path,
-    log_to_concepts: dict[str, list[str]],
     log_follows: dict[str, str],
+    known_project_ids: set[str],
+    log_to_entries: dict[str, list[str]] | None = None,
 ) -> None:
     """
     Write one markdown note per LogNode into logs/<project_id>/<log_id>.md.
@@ -413,8 +536,10 @@ def _write_log_notes(
     Body contains the log's title/excerpt and Obsidian wikilinks for:
       - project link    → [[<project_id>]]  (connects log to its project hub)
       - follows edge    → [[<prev_log_id>]] (chronological chain only)
+      - produced entries → ## Produced in this session section with [[entry_id]] wikilinks
     No concept wikilinks are written from log notes.
     """
+    _log_to_entries = log_to_entries or {}
     for log in sorted(logs, key=lambda l: l.id):
         # Create per-project subdirectory
         project_log_dir = logs_dir / log.project_id
@@ -440,8 +565,11 @@ def _write_log_notes(
         lines.append(f"# {log.title}")
         lines.append("")
 
-        # Project wikilink — mirrors entry-note convention (entry notes use same project_id)
-        lines.append(f"Project: [[{log.project_id}]]")
+        # Change 4: guard project wikilink in log notes
+        if log.project_id in known_project_ids:
+            lines.append(f"Project: [[{log.project_id}]]")
+        else:
+            lines.append(f"Project: {log.project_id}")
         lines.append("")
 
         # Body excerpt
@@ -453,6 +581,14 @@ def _write_log_notes(
         prev_log_id = log_follows.get(log.id)
         if prev_log_id:
             lines.append(f"Previous session: [[{prev_log_id}]]")
+            lines.append("")
+
+        # Produced in this session — created_in entries (non-empty only)
+        produced_entry_ids = _log_to_entries.get(log.id, [])
+        if produced_entry_ids:
+            lines.append("## Produced in this session")
+            for eid in produced_entry_ids:
+                lines.append(f"- [[{eid}]]")
             lines.append("")
 
         # NOTE: "Concepts mentioned" section intentionally removed.
