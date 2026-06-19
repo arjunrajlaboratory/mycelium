@@ -177,6 +177,11 @@ def link_entries(entries: list[Entry], registry: Registry) -> LinkResult:
         e for e in auto_edges if (e.from_id, e.to_id) not in block_pairs
     ]
 
+    # Pairs already covered by a surviving auto edge. A force_about override
+    # naming one of these would otherwise append a second `about` edge for the
+    # same (entry, concept) pair, inflating edge counts and link-diff output.
+    auto_kept_pairs: set[tuple[str, str]] = {(e.from_id, e.to_id) for e in kept_edges}
+
     # Collect existing manual pairs to avoid duplicates
     manual_pairs: set[tuple[str, str]] = set()
     manual_edges: list[Edge] = []
@@ -190,8 +195,8 @@ def link_entries(entries: list[Entry], registry: Registry) -> LinkResult:
             )
             continue
         pair = (eid, cslug)
-        if pair in manual_pairs:
-            continue  # dedup
+        if pair in manual_pairs or pair in auto_kept_pairs:
+            continue  # dedup against other overrides and auto matches
         manual_pairs.add(pair)
         manual_edges.append(
             Edge(

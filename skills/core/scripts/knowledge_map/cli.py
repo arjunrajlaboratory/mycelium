@@ -155,6 +155,48 @@ def cmd_build(args: argparse.Namespace) -> int:
         )
 
     # ------------------------------------------------------------------
+    # Step 4b: Preserve human-curated stage overrides
+    # ------------------------------------------------------------------
+    # `_infer_stage` only ever emits path/keyword/default sources, so any facet
+    # carrying `stage_source: curated` was hand-edited into entry-facets.yaml.
+    # Merge those overrides back into ext.facets before they flow to the graph,
+    # the rewritten YAML, and the views/vault — otherwise a normal build
+    # silently overwrites manual curation with freshly inferred values.
+    _existing_facets_path = graph_dir / "entry-facets.yaml"
+    if _existing_facets_path.exists():
+        import yaml as _yaml
+        from graph_model import Facet, Stage, StageSource
+
+        try:
+            _existing_facets_doc = (
+                _yaml.safe_load(_existing_facets_path.read_text(encoding="utf-8")) or {}
+            )
+        except (OSError, _yaml.YAMLError) as exc:
+            _warn(
+                f"Could not read {_existing_facets_path} "
+                f"(curated overrides not preserved): {exc}"
+            )
+            _existing_facets_doc = {}
+
+        n_preserved = 0
+        for eid, fdict in (_existing_facets_doc.get("facets") or {}).items():
+            if (
+                isinstance(fdict, dict)
+                and fdict.get("stage_source") == StageSource.curated.value
+                and eid in ext.facets
+            ):
+                try:
+                    ext.facets[eid] = Facet(
+                        stage=Stage(fdict["stage"]),
+                        stage_source=StageSource.curated,
+                    )
+                    n_preserved += 1
+                except (KeyError, ValueError) as exc:
+                    _warn(f"Skipping malformed curated facet for {eid!r}: {exc}")
+        if n_preserved:
+            print(f"  Preserved {n_preserved} curated stage override(s).")
+
+    # ------------------------------------------------------------------
     # Step 5: Link entries
     # ------------------------------------------------------------------
     print("Linking entries …")
