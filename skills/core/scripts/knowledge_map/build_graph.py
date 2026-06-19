@@ -119,6 +119,45 @@ def build_graph(
             )
 
     # ------------------------------------------------------------------
+    # Step 2b: hubs for projects documented by reviews/transfers
+    # ------------------------------------------------------------------
+    # A `documents` edge must resolve to an existing ProjectHub, but a project
+    # can have reviews/transfers without any active extracted entries — e.g.
+    # portfolio-level reports parsed under a synthetic "portfolio" project that
+    # is not in the registry and has no entries. Without a hub, validate_graph
+    # rejects the edge and the default CLI build exits non-zero. Create hubs for
+    # the projects a supporting node legitimately documents (its owning project
+    # plus any projects it spans), using registry metadata when the project is
+    # real and falling back to the supporting node's family otherwise. Targets
+    # that no supporting node documents stay validation errors (a bogus edge).
+    existing_hub_ids: set[str] = {h.project_id for h in project_hubs}
+    documented_families: dict[str, str] = {}
+    for sn in _supporting_nodes:
+        pids = list(sn.project_ids or [])
+        if sn.project_id:
+            pids.append(sn.project_id)
+        for pid in pids:
+            if pid:
+                documented_families.setdefault(pid, sn.family or "unknown")
+    for pid in sorted(documented_families):
+        if pid in existing_hub_ids:
+            continue
+        existing_hub_ids.add(pid)
+        meta = project_meta_by_id.get(pid)
+        if meta is not None:
+            project_hubs.append(
+                ProjectHub(project_id=meta.id, name=meta.name, family=meta.family)
+            )
+        else:
+            project_hubs.append(
+                ProjectHub(
+                    project_id=pid,
+                    name=pid,
+                    family=documented_families[pid],
+                )
+            )
+
+    # ------------------------------------------------------------------
     # Step 3: partition edges
     #   • about-edges from live ENTRIES feed status computation
     #   • mentions/follows edges from logs are preserved for output
