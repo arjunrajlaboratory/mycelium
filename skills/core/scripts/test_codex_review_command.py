@@ -51,7 +51,22 @@ def test_body_requires_branch_wide_audit(command_text):
     assert "audit" in low, "body must describe auditing the branch"
     assert "branch" in low, "body must scope the audit to the whole branch"
     assert "pattern" in low, "body must generalize the instance into an error pattern"
-    assert "git diff main" in low, "body should search the branch diff against main"
+    assert "git diff" in low, "body must diff the branch to scope the audit"
+    assert "base ref" in low, (
+        "body must diff against the PR base ref (baseRefName), not a hardcoded "
+        "branch like main (Codex PR #63 finding 1)"
+    )
+
+
+def test_body_identifies_codex_by_login_not_bot_type_alone(command_text):
+    """Codex PR #63 finding 2: bot-type alone over-matches Dependabot etc."""
+    _, body = _split_frontmatter(command_text)
+    low = body.lower()
+    assert "login" in low, "body must identify Codex by author login"
+    assert any(k in low for k in ("dependabot", "github-actions", "release bot")), (
+        "body must warn that matching on bot type alone over-matches unrelated "
+        "bots (Dependabot, github-actions, release bots)"
+    )
 
 
 def test_body_auto_detects_comment_scope(command_text):

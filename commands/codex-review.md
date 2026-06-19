@@ -67,14 +67,19 @@ Then **auto-detect comment scope**:
   - PR-level review summaries: `gh api repos/{owner}/{repo}/pulls/{number}/reviews`
   - conversation comments: `gh api repos/{owner}/{repo}/issues/{number}/comments`
 
-  Keep the ones authored by the Codex bot. Match on the author login
-  case-insensitively containing `codex` (the connector usually appears as
-  something like `chatgpt-codex-connector[bot]`) and/or `.user.type == "Bot"`;
-  if you are unsure, show the candidate authors to the user and confirm which is
-  Codex. "Open" means not already resolved or already addressed: if the
-  repo exposes review-thread resolution (GraphQL `reviewThreads { isResolved }`),
-  skip resolved threads; otherwise skip any comment that already has a reply from
-  you fixing it, and note which you skipped.
+  Keep only the comments authored by Codex, and identify Codex by its **author
+  login** — case-insensitively containing `codex` (the connector usually appears
+  as `chatgpt-codex-connector[bot]`). Do **not** accept `.user.type == "Bot"`
+  alone: other automation (Dependabot, github-actions, release bots) is also type
+  `Bot`, so matching on type would pull unrelated bot comments in as "Codex
+  findings" — fixing the wrong thing and, worse, becoming false evidence for the
+  `@codex review` access gate in Step 5. Treat Bot type only as a secondary hint;
+  if no login clearly matches Codex but there are bot comments, show the candidate
+  authors to the user and confirm which (if any) is Codex rather than assuming.
+  "Open" means not already resolved or already addressed: if the repo exposes
+  review-thread resolution (GraphQL `reviewThreads { isResolved }`), skip resolved
+  threads; otherwise skip any comment that already has a reply from you fixing it,
+  and note which you skipped.
 
 Record the PR's `{owner}/{repo}` and `{number}` — you will reuse them when
 posting.
@@ -106,10 +111,16 @@ surrounding code's style and conventions. Don't gold-plate; fix the cited issue.
 For **each** error pattern from Step 1, search the entire branch — not just the
 flagged file — for other instances, and fix them all now.
 
-1. Scope the branch's own changes first: `git diff main...HEAD --name-only` for
-   the touched files, and `git diff main...HEAD` for the changes themselves. The
-   patterns Codex flags are usually concentrated in the code this branch added or
-   changed.
+1. Scope the branch's own changes first against the PR's **base ref** — the
+   `baseRefName` you captured in Step 0, not a hardcoded branch. A PR may target
+   `develop`, `release`, or `master`, and a fresh checkout may only have the
+   remote ref, so prefer the remote-tracking form: set `BASE=origin/<baseRefName>`
+   (fall back to `<baseRefName>` if there is no remote), then run
+   `git diff "$BASE...HEAD" --name-only` for the touched files and
+   `git diff "$BASE...HEAD"` for the changes themselves. (On a local-only branch
+   with no PR, diff against the repository's default branch — resolve it from
+   `git remote show origin`, don't assume `main`.) The patterns Codex flags are
+   usually concentrated in the code this branch added or changed.
 2. Search for the pattern with `grep`/`rg`/`Glob` using a signature that matches
    the *generalized* mistake (e.g. for swallowed exceptions, search
    `except.*:\s*pass` and bare `except:`; for hardcoded paths, search for
