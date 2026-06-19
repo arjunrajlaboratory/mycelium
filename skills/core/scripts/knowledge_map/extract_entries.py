@@ -256,15 +256,34 @@ def _find_in_ledger(
     claimed_ids) will skip that id and continue searching, returning None so a
     fresh id gets minted. The caller must pass the same set across all calls for
     a given file/build to get correct deduplication.
+
+    Legacy ledgers (written before the "|"→"\\x00" delimiter switch) store
+    fingerprints joined by "|".  Converting the current "\\x00"-joined candidate
+    back to the old "|" form reproduces byte-for-byte what the previous extractor
+    would have written for the same fields, so unchanged entries still resolve to
+    their existing ids on the first build after the upgrade instead of being
+    re-minted and tombstoned.  We only ever *store* the "\\x00" form, so this
+    cannot reintroduce the delimiter-collision bug the switch fixed.
     """
+    legacy_fingerprint = fingerprint.replace("\x00", "|")
+
+    def _is_legacy_match(stored: str | None) -> bool:
+        return (
+            stored is not None
+            and "\x00" not in stored
+            and stored == legacy_fingerprint
+        )
+
     for entry_id, meta in ledger.items():
         if claimed_ids is not None and entry_id in claimed_ids:
             continue
-        if meta.get("current_fingerprint") == fingerprint:
+        current_fp = meta.get("current_fingerprint")
+        if current_fp == fingerprint or _is_legacy_match(current_fp):
             if claimed_ids is not None:
                 claimed_ids.add(entry_id)
             return entry_id
-        if fingerprint in meta.get("previous_fingerprints", []):
+        previous = meta.get("previous_fingerprints", [])
+        if fingerprint in previous or any(_is_legacy_match(p) for p in previous):
             if claimed_ids is not None:
                 claimed_ids.add(entry_id)
             return entry_id
