@@ -45,7 +45,7 @@ Need a convention pack for your domain? [Request it](.github/ISSUE_TEMPLATE/new-
 
 ### 5. Improve Core Infrastructure
 
-The core skills (`commands/`), hooks (`skills/core/hooks/`), scripts, templates, and documentation are all open for improvement. For significant changes, open an issue to discuss the approach before submitting a PR.
+The shared skills (`skills/*/SKILL.md`), hooks (`skills/core/hooks/`), scripts, templates, and documentation are all open for improvement. For significant changes, open an issue to discuss the approach before submitting a PR.
 
 ## Development Guidelines
 
@@ -81,12 +81,12 @@ The core skills (`commands/`), hooks (`skills/core/hooks/`), scripts, templates,
 3. At least one domain expert should review
 4. After approval, moved to `network/conventions/`
 
-### Core Skills & Hooks (commands/, skills/core/hooks/)
+### Core Skills & Hooks (skills/, skills/core/hooks/)
 
 1. Open an issue discussing the change
 2. PR with the change
 3. Maintainer review
-4. Changes to command files and hooks require extra scrutiny — they affect all users
+4. Changes to shared skill files and hooks require extra scrutiny — they affect all users
 5. Hook changes should include `bash -n` syntax validation and test scenarios
 
 ## Code of Conduct

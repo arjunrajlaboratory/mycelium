@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Ideas"
+  short_description: "Generate research ideas from expert perspectives"
+  default_prompt: "Use $mycelium:ideas to brainstorm new research directions with disciplinary personas."

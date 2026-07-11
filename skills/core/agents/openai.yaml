@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Core"
+  short_description: "Initialize and maintain living repositories"
+  default_prompt: "Use $mycelium:core to initialize or maintain this repository with Mycelium."

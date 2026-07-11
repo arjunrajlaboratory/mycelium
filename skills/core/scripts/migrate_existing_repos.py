@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -156,6 +157,71 @@ def topup_hooks(repo_path: Path, dry_run: bool = False) -> bool:
     return before_signature != after_signature
 
 
+def ensure_cross_agent_guidance(repo_path: Path, dry_run: bool = False) -> bool:
+    """Create MYCELIUM.md and ensure Claude/Codex routing adapters exist."""
+    paths = [repo_path / name for name in ("MYCELIUM.md", "CLAUDE.md", "AGENTS.md")]
+    before = {path.name: path.read_text() if path.exists() else None for path in paths}
+    if dry_run:
+        return any(value is None for value in before.values()) or any(
+            value is not None and "<!-- MYCELIUM:BEGIN -->" not in value
+            for name, value in before.items()
+            if name != "MYCELIUM.md"
+        )
+    ir.create_agent_guidance(repo_path)
+    after = {path.name: path.read_text() if path.exists() else None for path in paths}
+    return before != after
+
+
+def migrate_runtime_state(repo_path: Path, dry_run: bool = False) -> bool:
+    """Move durable session context from .claude/ to provider-neutral state."""
+    legacy = repo_path / ".claude" / "last-session.md"
+    state_dir = repo_path / ".mycelium"
+    destination = state_dir / "last-session.md"
+    needs_copy = legacy.exists() and not destination.exists()
+    needs_gitignore = not (state_dir / ".gitignore").exists()
+    pointer = state_dir / "plugin-root"
+    expected_pointer = f"{ir.mycelium_plugin_root()}\n"
+    needs_pointer = (
+        not pointer.exists()
+        or pointer.read_text(encoding="utf-8") != expected_pointer
+    )
+    if dry_run:
+        return needs_copy or needs_gitignore or needs_pointer
+    state_dir.mkdir(exist_ok=True)
+    gitignore = state_dir / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text("*\n!.gitignore\n")
+    if needs_copy:
+        shutil.copy2(legacy, destination)
+    ir.write_plugin_root_pointer(repo_path)
+    return needs_copy or needs_gitignore or needs_pointer
+
+
+def topup_codex_hooks(repo_path: Path, dry_run: bool = False) -> bool:
+    """Install the Codex hook bundle and report whether it changed."""
+    hooks_path = repo_path / ".codex" / "hooks.json"
+    before = hooks_path.read_text() if hooks_path.exists() else None
+    if dry_run:
+        return before is None or "MYCELIUM_HOOK_HOST=codex" not in before
+    ir.install_codex_hooks(repo_path)
+    after = hooks_path.read_text() if hooks_path.exists() else None
+    return before != after
+
+
+def ensure_todo_contract(repo_path: Path, dry_run: bool = False) -> bool:
+    """Ensure the registry and item template used by the core skill exist."""
+    required = [
+        repo_path / "todo" / "TODO_REGISTRY.md",
+        repo_path / "todo" / "TODO_ITEM_TEMPLATE.md",
+    ]
+    missing = any(not path.exists() for path in required)
+    if dry_run:
+        return missing
+    if missing:
+        ir.create_todo_list(repo_path)
+    return missing
+
+
 def regen_index(repo_path: Path, dry_run: bool = False) -> bool:
     """Run generate_index.py --summary-heuristic on .living/.
 
@@ -211,12 +277,20 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
         return {"_skip": f"no .living/ at {repo_path}"}
 
     claude_md_applied = reanchor_claude_md(repo_path, dry_run=dry_run)
+    guidance_applied = ensure_cross_agent_guidance(repo_path, dry_run=dry_run)
+    runtime_applied = migrate_runtime_state(repo_path, dry_run=dry_run)
     hooks_applied = topup_hooks(repo_path, dry_run=dry_run)
+    codex_hooks_applied = topup_codex_hooks(repo_path, dry_run=dry_run)
+    todo_applied = ensure_todo_contract(repo_path, dry_run=dry_run)
     index_applied = regen_index(repo_path, dry_run=dry_run)
 
     return {
         "CLAUDE.md re-anchor": _action_status(claude_md_applied),
-        "Hooks top-up": _action_status(hooks_applied),
+        "Cross-agent guidance": _action_status(guidance_applied),
+        "Runtime state migration": _action_status(runtime_applied),
+        "Claude hooks top-up": _action_status(hooks_applied),
+        "Codex hooks top-up": _action_status(codex_hooks_applied),
+        "Todo contract": _action_status(todo_applied),
         "INDEX.md regen": _action_status(index_applied),
     }
 

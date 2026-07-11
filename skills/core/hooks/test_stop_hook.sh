@@ -4,7 +4,8 @@
 
 set -uo pipefail
 
-HOOK_PATH="/Users/mst36/tools/mycelium/skills/core/hooks/mycelium-stop-check.sh"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOOK_PATH="$HERE/mycelium-stop-check.sh"
 
 # Colors
 GREEN='\033[0;32m'
@@ -37,7 +38,7 @@ make_repo() {
   touch "$dir/README.md"
   git -C "$dir" add README.md
   git -C "$dir" commit -q -m "init"
-  mkdir -p "$dir/.claude"
+  mkdir -p "$dir/.mycelium"
   echo "$dir"
 }
 
@@ -78,6 +79,16 @@ touch_old() {
   fi
 }
 
+touch_very_old() {
+  local file="$1"
+  touch "$file"
+  python3 - "$file" <<'PY'
+import os, sys, time
+stamp = time.time() - 7200
+os.utime(sys.argv[1], (stamp, stamp))
+PY
+}
+
 # Set file mtime to now (guaranteed newer than a "60s ago" reminder)
 touch_now() {
   touch "$1"
@@ -116,15 +127,15 @@ echo "TEST 2: Work done, nothing updated → should BLOCK"
 
   # Create .living files FIRST, then wait 2 seconds, then write the reminder timestamp.
   # This guarantees file mtimes < WORK_TS (reminder is written after the files exist).
-  touch_old "$REPO/.living/learnings.md"
-  touch_old "$REPO/.living/decisions.md"
-  touch_old "$REPO/.living/conventions.md"
-  touch_old "$REPO/.living/findings"
+  touch_very_old "$REPO/.living/learnings.md"
+  touch_very_old "$REPO/.living/decisions.md"
+  touch_very_old "$REPO/.living/conventions.md"
+  touch_very_old "$REPO/.living/findings"
   # Ensure the directory itself is also old
   sleep 2
 
-  # Write reminder timestamp NOW (current time), which is newer than all .living files
-  date +%s > "$REPO/.claude/mycelium-reminded.tmp"
+  # Use an old work timestamp so the five-minute debounce has elapsed.
+  ts_ancient > "$REPO/.mycelium/mycelium-reminded.tmp"
 
   run_hook "$REPO"
 
@@ -150,7 +161,7 @@ echo "TEST 3: Work done, only learnings.md updated → should PASS"
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
 
-  ts_old > "$REPO/.claude/mycelium-reminded.tmp"
+  ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
 
   touch_old "$REPO/.living/decisions.md"
   touch_old "$REPO/.living/conventions.md"
@@ -181,7 +192,7 @@ echo "TEST 4: Work done, only decisions.md updated → should PASS"
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
 
-  ts_old > "$REPO/.claude/mycelium-reminded.tmp"
+  ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
 
   touch_old "$REPO/.living/learnings.md"
   touch_old "$REPO/.living/conventions.md"
@@ -211,7 +222,7 @@ echo "TEST 5: Work done, only conventions.md updated → should PASS"
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
 
-  ts_old > "$REPO/.claude/mycelium-reminded.tmp"
+  ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
 
   touch_old "$REPO/.living/learnings.md"
   touch_old "$REPO/.living/decisions.md"
@@ -242,12 +253,12 @@ echo "TEST 6: Work done, only findings/ dir updated → should PASS"
   mkdir -p "$REPO/.living"
   mkdir -p "$REPO/.living/findings"
 
-  ts_old > "$REPO/.claude/mycelium-reminded.tmp"
+  ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
 
-  touch_old "$REPO/.living/learnings.md"
-  touch_old "$REPO/.living/decisions.md"
-  touch_old "$REPO/.living/conventions.md"
-  touch_old "$REPO/.living/findings"
+  touch_very_old "$REPO/.living/learnings.md"
+  touch_very_old "$REPO/.living/decisions.md"
+  touch_very_old "$REPO/.living/conventions.md"
+  touch_very_old "$REPO/.living/findings"
 
   sleep 1
   # Adding a new file into findings/ updates the directory mtime
@@ -274,15 +285,15 @@ echo "TEST 7: Subagent detection → should skip, exit 0"
   mkdir -p "$REPO/.living"
 
   # Create active-session-log.tmp: line 1 = log path, line 2 = owner_ts
-  LOG_FILE="$REPO/.claude/fake-session.log"
+  LOG_FILE="$REPO/.mycelium/fake-session.log"
   touch "$LOG_FILE"
-  printf '%s\n%s\n' "$LOG_FILE" "111" > "$REPO/.claude/active-session-log.tmp"
+  printf '%s\n%s\n' "$LOG_FILE" "111" > "$REPO/.mycelium/active-session-log.tmp"
 
   # session-start-ts.tmp holds OUR timestamp — different from owner
-  echo "222" > "$REPO/.claude/session-start-ts.tmp"
+  echo "222" > "$REPO/.mycelium/session-start-ts.tmp"
 
   # Also set up reminder so the .living/ check would normally trigger
-  ts_old > "$REPO/.claude/mycelium-reminded.tmp"
+  ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
   touch_old "$REPO/.living/learnings.md"
 
   run_hook "$REPO"
@@ -307,7 +318,7 @@ echo "TEST 8: No .living/ directory → should PASS silently"
   # Deliberately do NOT create .living/
 
   # Create sentinel files so the check would fire if .living/ existed
-  ts_old > "$REPO/.claude/mycelium-reminded.tmp"
+  ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
 
   run_hook "$REPO"
 
@@ -330,12 +341,12 @@ echo "TEST 9: Block JSON contains correct routing rule text"
   mkdir -p "$REPO/.living"
   mkdir -p "$REPO/.living/findings"
 
-  touch_old "$REPO/.living/learnings.md"
-  touch_old "$REPO/.living/decisions.md"
-  touch_old "$REPO/.living/conventions.md"
-  touch_old "$REPO/.living/findings"
+  touch_very_old "$REPO/.living/learnings.md"
+  touch_very_old "$REPO/.living/decisions.md"
+  touch_very_old "$REPO/.living/conventions.md"
+  touch_very_old "$REPO/.living/findings"
   sleep 2
-  date +%s > "$REPO/.claude/mycelium-reminded.tmp"
+  ts_ancient > "$REPO/.mycelium/mycelium-reminded.tmp"
 
   run_hook "$REPO"
 
@@ -344,11 +355,9 @@ echo "TEST 9: Block JSON contains correct routing rule text"
   MISSING=""
 
   for needle in \
-    "findings/{topic}.md" \
-    "NOT learnings.md" \
-    "ROUTING RULE" \
-    "conventions.md" \
-    "decisions.md"
+    ".living/ not updated" \
+    "learnings/decisions/conventions/findings" \
+    "last-session.md"
   do
     if ! echo "$HOOK_OUTPUT" | grep -qF "$needle"; then
       ROUTING_OK=false
@@ -375,7 +384,7 @@ echo "TEST 10: learnings.md + findings/ both updated → should PASS"
   mkdir -p "$REPO/.living"
   mkdir -p "$REPO/.living/findings"
 
-  ts_old > "$REPO/.claude/mycelium-reminded.tmp"
+  ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
 
   touch_old "$REPO/.living/decisions.md"
   touch_old "$REPO/.living/conventions.md"
@@ -406,8 +415,8 @@ echo "TEST 11: Activity file only (no reminded.tmp) → work detected"
   mkdir -p "$REPO/.living"
 
   # Only the activity file exists, no reminded.tmp
-  echo "src/foo.py" > "$REPO/.claude/mycelium-session-activity.tmp"
-  echo "src/bar.py" >> "$REPO/.claude/mycelium-session-activity.tmp"
+  echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
+  echo "src/bar.py" >> "$REPO/.mycelium/mycelium-session-activity.tmp"
 
   # No session-start-ts either → WORK_TS = 0, so any file touched now is "newer"
   # .living files touched now → should PASS
@@ -437,10 +446,10 @@ echo "TEST 12: Short session (< 5 min, 0 files) → log deleted, clean exit"
 {
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
-  mkdir -p "$REPO/.claude"
+  mkdir -p "$REPO/.mycelium"
 
   # Create a fake active session log
-  LOG_PATH="$REPO/.claude/logs/2026-01-01-session.md"
+  LOG_PATH="$REPO/.mycelium/logs/2026-01-01-session.md"
   mkdir -p "$(dirname "$LOG_PATH")"
   cat > "$LOG_PATH" << 'LOG_EOF'
 ---
@@ -454,10 +463,10 @@ branch: main
 LOG_EOF
 
   # active-session-log.tmp: line 1 = log path, line 2 = owner_ts
-  printf '%s\n%s\n' "$LOG_PATH" "$(date +%s)" > "$REPO/.claude/active-session-log.tmp"
+  printf '%s\n%s\n' "$LOG_PATH" "$(date +%s)" > "$REPO/.mycelium/active-session-log.tmp"
 
   # session-start-ts.tmp = now (< 5 min ago)
-  date +%s > "$REPO/.claude/session-start-ts.tmp"
+  date +%s > "$REPO/.mycelium/session-start-ts.tmp"
 
   # No activity file, no git changes → FILES_CHANGED = 0
   # Duration = 0 min (start_ts = now)
@@ -486,7 +495,7 @@ echo "TEST 13: stop_hook_active=true in stdin → immediate exit 0"
 {
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
-  ts_old > "$REPO/.claude/mycelium-reminded.tmp"
+  ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
   touch_old "$REPO/.living/learnings.md"
 
   # Pass stop_hook_active: true in stdin
@@ -513,19 +522,19 @@ echo "TEST 14: Activity file only, .living not updated → should BLOCK"
   mkdir -p "$REPO/.living/findings"
 
   # Create living files and the findings directory with OLD timestamps first
-  touch_old "$REPO/.living/learnings.md"
-  touch_old "$REPO/.living/decisions.md"
-  touch_old "$REPO/.living/conventions.md"
-  touch_old "$REPO/.living/findings"
+  touch_very_old "$REPO/.living/learnings.md"
+  touch_very_old "$REPO/.living/decisions.md"
+  touch_very_old "$REPO/.living/conventions.md"
+  touch_very_old "$REPO/.living/findings"
 
   # Sleep so that session-start-ts written AFTER is newer than all .living files
   sleep 2
 
   # Activity file exists, no reminded.tmp → hook uses session-start-ts as WORK_TS
-  echo "src/foo.py" > "$REPO/.claude/mycelium-session-activity.tmp"
-  date +%s > "$REPO/.claude/session-start-ts.tmp"  # now = newer than all .living files
+  echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
+  ts_ancient > "$REPO/.mycelium/session-start-ts.tmp"
 
-  # WORK_TS = session_start_ts (now), .living files are ≥2s old → none updated → BLOCK
+  # WORK_TS is older than five minutes but newer than the .living files.
 
   run_hook "$REPO"
 
@@ -546,10 +555,10 @@ echo "TEST 15: additionalContext contains LOG_REGISTRY instruction"
 {
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
-  mkdir -p "$REPO/.claude"
+  mkdir -p "$REPO/.mycelium"
 
   # Create a fake session log so SESSION_ID is populated
-  LOG_PATH="$REPO/.claude/logs/2026-01-01-session.md"
+  LOG_PATH="$REPO/.mycelium/logs/2026-01-01-session.md"
   mkdir -p "$(dirname "$LOG_PATH")"
   cat > "$LOG_PATH" << 'LOG_EOF'
 ---
@@ -563,8 +572,8 @@ branch: main
 LOG_EOF
 
   # Simulate work: create reminded.tmp and activity file
-  ts_old > "$REPO/.claude/mycelium-reminded.tmp"
-  echo "src/foo.py" > "$REPO/.claude/mycelium-session-activity.tmp"
+  ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
+  echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
 
   # Update .living/ so the hook passes (not blocked)
   sleep 1
@@ -615,11 +624,11 @@ LOG_EOF
 
   # session-start-ts.tmp is BOGUS — 10 days ago. Demonstrates self-healing.
   TEN_DAYS_AGO=$(( $(date +%s) - 10*86400 ))
-  echo "$TEN_DAYS_AGO" > "$REPO/.claude/session-start-ts.tmp"
-  printf '%s\n%s\n' "$LOG_PATH" "$TEN_DAYS_AGO" > "$REPO/.claude/active-session-log.tmp"
+  echo "$TEN_DAYS_AGO" > "$REPO/.mycelium/session-start-ts.tmp"
+  printf '%s\n%s\n' "$LOG_PATH" "$TEN_DAYS_AGO" > "$REPO/.mycelium/active-session-log.tmp"
 
   # Force the non-bypass branch by adding activity — duration won't be < 5 anymore
-  echo "src/foo.py" > "$REPO/.claude/mycelium-session-activity.tmp"
+  echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
 
   run_hook "$REPO"
 
@@ -659,9 +668,9 @@ files_changed:
 ## Session Log
 LOG_EOF
 
-  date +%s > "$REPO/.claude/session-start-ts.tmp"
-  printf '%s\n%s\n' "$LOG_PATH" "$(date +%s)" > "$REPO/.claude/active-session-log.tmp"
-  echo "src/foo.py" > "$REPO/.claude/mycelium-session-activity.tmp"
+  date +%s > "$REPO/.mycelium/session-start-ts.tmp"
+  printf '%s\n%s\n' "$LOG_PATH" "$(date +%s)" > "$REPO/.mycelium/active-session-log.tmp"
+  echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
 
   run_hook "$REPO"
 

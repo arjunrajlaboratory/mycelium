@@ -1,5 +1,5 @@
 # Domain Registry — Progressive Disclosure Knowledge System
-# Each domain becomes a file at ~/.claude/knowledge/{name}.md
+# Each domain becomes a file at ~/.mycelium/knowledge/{name}.md
 # The init_knowledge.py script reads this to generate domain files.
 
 domains:

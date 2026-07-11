@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Report"
+  short_description: "Create reports from registered analysis results"
+  default_prompt: "Use $mycelium:report to turn the completed analysis into a structured report."

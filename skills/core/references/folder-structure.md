@@ -6,8 +6,14 @@ This document defines the structure that `init_repo.py` creates when scaffolding
 
 ```
 project-root/
-├── CLAUDE.md                              # AI agent instructions (generated from template)
+├── MYCELIUM.md                            # Canonical living-repository protocol
+├── CLAUDE.md                              # Claude Code routing adapter
+├── AGENTS.md                              # Codex routing adapter
 ├── ENVIRONMENTS_INSTALLATIONS.md          # All env setup, dependencies, gotchas
+├── .mycelium/                             # Gitignored provider-neutral session state
+│   └── plugin-root                        # Machine-local bundled-resource pointer
+├── .claude/settings.local.json            # Claude hook registrations
+├── .codex/hooks.json                      # Codex hook registrations
 ├── .living/                               # The memory layer
 │   ├── decisions.md                       # Append-only log: why choices were made
 │   ├── learnings.md                       # Append-only log: gotchas, surprises, insights

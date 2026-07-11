@@ -36,7 +36,7 @@ from propose_concepts import (
     summarize_clusters,
     write_proposals,
 )
-from concept_labeler import label_cluster
+from concept_labeler import label_cluster, llm_label
 
 
 # ── tiny fixtures ──────────────────────────────────────────────────────────
@@ -530,6 +530,33 @@ class TestLabelCluster:
         assert result.source == "llm"
         assert result.slug == "prompt-caching"
         assert result.label == "Prompt Caching"
+
+    def test_codex_cli_success_path(self):
+        """Codex receives a non-interactive, read-only command."""
+        summary = _make_summary(tfidf_terms=["cache", "ttl"])
+        response = {
+            "slug": "prompt-caching",
+            "label": "Prompt Caching",
+            "definition": "Caching prompt prefixes to reduce latency.",
+            "keywords": ["cache", "ttl"],
+            "aliases": [],
+        }
+        seen = {}
+
+        def fake_run(command, **kwargs):
+            seen["command"] = command
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(response),
+                stderr="",
+            )
+
+        result = llm_label(summary, claude_bin="/usr/local/bin/codex", run=fake_run)
+        assert result is not None
+        assert result.slug == "prompt-caching"
+        assert seen["command"][:2] == ["/usr/local/bin/codex", "exec"]
+        assert "--ephemeral" in seen["command"]
+        assert "read-only" in seen["command"]
 
     def test_llm_failure_falls_back_to_offline(self):
         """If fake_run raises, label_cluster must return offline-tfidf."""

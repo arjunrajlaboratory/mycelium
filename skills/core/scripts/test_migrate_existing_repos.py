@@ -144,17 +144,23 @@ class TestRegenIndex:
 
 class TestMigrateOne:
     def test_runs_all_actions_idempotently(self, fake_repo: Path) -> None:
-        # First run: 3 actions (CLAUDE.md, hooks, INDEX.md) all applied
+        # First run applies guidance, state, both hook hosts, and INDEX refresh.
         result1 = mig.migrate_one(fake_repo)
         applied_count1 = sum(1 for v in result1.values() if v == "applied")
-        assert applied_count1 == 3
+        assert applied_count1 == 7
+        assert "# Fake Project" in (fake_repo / "MYCELIUM.md").read_text()
+        assert (fake_repo / ".mycelium" / "plugin-root").is_file()
 
         # Second run: structural changes (CLAUDE.md, hooks) skipped.
         # INDEX.md regen always runs (data refresh), but the structural
         # changes are the ones that signal "still needs migration".
         result2 = mig.migrate_one(fake_repo)
         assert result2["CLAUDE.md re-anchor"] == "skipped (already up-to-date)"
-        assert result2["Hooks top-up"] == "skipped (already up-to-date)"
+        assert result2["Cross-agent guidance"] == "skipped (already up-to-date)"
+        assert result2["Runtime state migration"] == "skipped (already up-to-date)"
+        assert result2["Claude hooks top-up"] == "skipped (already up-to-date)"
+        assert result2["Codex hooks top-up"] == "skipped (already up-to-date)"
+        assert result2["Todo contract"] == "skipped (already up-to-date)"
 
     def test_skips_when_no_living_dir(self, tmp_path: Path) -> None:
         no_living = tmp_path / "not-mycelium"

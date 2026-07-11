@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Transfer"
+  short_description: "Transfer learnings across related projects"
+  default_prompt: "Use $mycelium:transfer to cross-pollinate relevant learnings across sibling projects."

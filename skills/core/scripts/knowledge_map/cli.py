@@ -619,7 +619,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--llm",
         action="store_true",
         default=False,
-        help="Use local claude CLI to label clusters (falls back to TF-IDF on failure).",
+        help=(
+            "Use a local Claude or Codex CLI to label clusters "
+            "(falls back to TF-IDF on failure)."
+        ),
     )
     propose_p.add_argument(
         "--embed-model",

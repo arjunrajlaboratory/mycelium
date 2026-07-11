@@ -1,25 +1,19 @@
 ---
+name: analyze
 description: >
-  ALWAYS invoke this skill when a user wants to perform computational analysis
-  on data in this repository. This skill loads project-specific analysis
-  conventions, dataset registries, and methodology requirements (validation
-  checks, sensitivity sweeps, null hypothesis testing) that are not available
-  from general knowledge — you cannot do the analysis correctly without
-  consulting it first. Trigger for: running any named analysis technique
-  (clustering, PCA, UMAP, differential expression, survival analysis,
-  dose-response, model fitting, time-series, batch correction, statistical
-  tests), exploring or investigating patterns in data, continuing or extending
-  a previous analysis, debugging or troubleshooting analytical results (wrong
-  clusters, unexpected patterns, parameter tuning). The user's intent must be
-  to computationally process or model data — not just read it, not just look
-  at a file. Do NOT trigger for: reading or previewing data files without
-  analysis, writing reports or documents, brainstorming ideas, setting up or
-  initializing repositories, installing conventions, ingesting or importing
-  data files, fixing code bugs unrelated to analytical results, or updating
-  documentation.
+  Run computational analysis using the repository's registered datasets,
+  conventions, and validation requirements. Use for clustering, PCA/UMAP,
+  differential expression, survival or time-series models, statistical tests,
+  sensitivity analysis, continuing prior analyses, or debugging unexpected
+  analytical results. Do not use for merely previewing data, ingesting files,
+  writing reports, brainstorming, repository setup, or unrelated code fixes.
 ---
 
 # Mycelium — Analyze
+
+Resolve bundled `skills/` and `network/` paths relative to the Mycelium plugin
+root—the ancestor containing `.codex-plugin/` and `.claude-plugin/`. Resolve
+analysis and `.living/` paths relative to the user's repository.
 
 Start a new analysis or continue an existing one, routing to the appropriate convention packs installed in this repository.
 

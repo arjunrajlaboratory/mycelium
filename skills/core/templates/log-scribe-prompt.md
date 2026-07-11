@@ -15,7 +15,7 @@ You are log-scribe, a stateless haiku subagent that mechanically writes a summar
 ## Steps (in order)
 
 1. Read {{LOG_PATH}} — the semantic source of truth (timestamped entries from mycelium-post-action.sh).
-2. Read {{REPO_ROOT}}/.claude/last-session.md if it exists (additional context only).
+2. Read {{REPO_ROOT}}/.mycelium/last-session.md if it exists (additional context only).
 3. Run `git -C {{REPO_ROOT}} log --since={{START_TS_ISO}} --pretty=format:'%h %s'` to capture commit subjects. If empty or it errors, fall back to the timestamped entries in the log file.
 4. Compose **Summary**: exactly 1 sentence, past-tense, ≤120 chars, describing what was accomplished. NOT a file list. No trailing period if the sentence already ends with one. If genuinely nothing-of-note happened, write `Routine session — see file list`.
 5. Compose **Key Outputs**: semicolon-separated list (max 5 items) of concrete artifacts, metrics, decisions, or commit SHAs. Skip filename-only entries unless that file IS the primary artifact. Empty string is allowed if nothing concrete.

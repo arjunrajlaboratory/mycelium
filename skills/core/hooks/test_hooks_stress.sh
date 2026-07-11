@@ -7,8 +7,9 @@
 
 set -euo pipefail
 
-READ_TRACKER_HOOK="/Users/mst36/tools/mycelium/skills/core/hooks/mycelium-read-tracker.sh"
-HEALTH_HOOK="/Users/mst36/tools/mycelium/skills/core/hooks/mycelium-health.sh"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+READ_TRACKER_HOOK="$HERE/mycelium-read-tracker.sh"
+HEALTH_HOOK="$HERE/mycelium-health.sh"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -43,7 +44,7 @@ setup_test_env() {
   touch "$TEST_DIR/README.md"
   git -C "$TEST_DIR" add README.md
   git -C "$TEST_DIR" commit -q -m "init"
-  mkdir -p "$TEST_DIR/.living" "$TEST_DIR/.claude"
+  mkdir -p "$TEST_DIR/.living" "$TEST_DIR/.mycelium"
   printf "# Learnings\n\n### Entry 1\nContent 1\n\n### Entry 2\nContent 2\n" > "$TEST_DIR/.living/learnings.md"
   printf "# Decisions\n\n### Dec 1\nRationale 1\n" > "$TEST_DIR/.living/decisions.md"
   printf "# Conventions\n\n## Conv 1\nDetails.\n" > "$TEST_DIR/.living/conventions.md"
@@ -86,7 +87,7 @@ echo "TEST 1: Basic .living/ read is logged"
   setup_test_env
   JSON="{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"${TEST_DIR}/.living/INDEX.md\"}}"
   run_read_tracker "$JSON"
-  LOG="$TEST_DIR/.claude/mycelium-read-access.log"
+  LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if [ -f "$LOG" ] && grep -q "\.living/INDEX\.md" "$LOG"; then
     # Verify format: TIMESTAMP .living/INDEX.md
     LINE=$(head -1 "$LOG")
@@ -111,7 +112,7 @@ echo "TEST 2: Non-.living/ read is NOT logged"
   setup_test_env
   JSON="{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"${TEST_DIR}/src/main.py\"}}"
   run_read_tracker "$JSON"
-  LOG="$TEST_DIR/.claude/mycelium-read-access.log"
+  LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if [ ! -f "$LOG" ] || [ ! -s "$LOG" ]; then
     pass "Non-.living/ path → no log entry written"
   else
@@ -130,7 +131,7 @@ echo "TEST 3: Multiple reads accumulate"
     JSON="{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"${TEST_DIR}/.living/${FILE}\"}}"
     run_read_tracker "$JSON"
   done
-  LOG="$TEST_DIR/.claude/mycelium-read-access.log"
+  LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if [ -f "$LOG" ]; then
     LINES=$(grep -c '' "$LOG" 2>/dev/null || echo 0)
     if [ "$LINES" -eq 3 ] \
@@ -155,7 +156,7 @@ echo "TEST 4: Nested .living/ path logged correctly"
   mkdir -p "$TEST_DIR/.living/log"
   JSON="{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"${TEST_DIR}/.living/log/LOG_REGISTRY.md\"}}"
   run_read_tracker "$JSON"
-  LOG="$TEST_DIR/.claude/mycelium-read-access.log"
+  LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if [ -f "$LOG" ] && grep -q "\.living/log/LOG_REGISTRY\.md" "$LOG"; then
     pass "Nested path '.living/log/LOG_REGISTRY.md' logged correctly"
   else
@@ -172,7 +173,7 @@ echo "TEST 5: Empty file_path → silent exit"
   setup_test_env
   JSON="{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"\"}}"
   run_read_tracker "$JSON"
-  LOG="$TEST_DIR/.claude/mycelium-read-access.log"
+  LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if [ "$RT_EXIT" -eq 0 ] && { [ ! -f "$LOG" ] || [ ! -s "$LOG" ]; }; then
     pass "Empty file_path → exit 0, no log written"
   else
@@ -189,7 +190,7 @@ echo "TEST 6: Missing file_path field → silent exit"
   setup_test_env
   JSON="{\"tool_name\":\"Read\",\"tool_input\":{}}"
   run_read_tracker "$JSON"
-  LOG="$TEST_DIR/.claude/mycelium-read-access.log"
+  LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if [ "$RT_EXIT" -eq 0 ] && { [ ! -f "$LOG" ] || [ ! -s "$LOG" ]; }; then
     pass "Missing file_path field → exit 0, no log written"
   else
@@ -206,7 +207,7 @@ echo "TEST 7: Malformed JSON → silent exit"
   setup_test_env
   RT_OUTPUT=$(cd "$TEST_DIR" && printf 'this is not json' | bash "$READ_TRACKER_HOOK" 2>/dev/null)
   RT_EXIT=$?
-  LOG="$TEST_DIR/.claude/mycelium-read-access.log"
+  LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if [ "$RT_EXIT" -eq 0 ] && { [ ! -f "$LOG" ] || [ ! -s "$LOG" ]; }; then
     pass "Malformed JSON → exit 0, no log written"
   else
@@ -226,7 +227,7 @@ echo "TEST 8: Path with spaces"
   # Encode the path in JSON — use python3 to safely produce JSON with spaces
   JSON=$(python3 -c "import json; print(json.dumps({'tool_name':'Read','tool_input':{'file_path':'${TEST_DIR}/.living/session notes/entry.md'}}))")
   run_read_tracker "$JSON"
-  LOG="$TEST_DIR/.claude/mycelium-read-access.log"
+  LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if [ -f "$LOG" ] && grep -q "session notes/entry\.md" "$LOG"; then
     pass "Path with spaces logged correctly"
   else
@@ -245,7 +246,7 @@ echo "TEST 9: Not in a git repo → silent exit"
   JSON="{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"${NO_GIT_DIR}/.living/learnings.md\"}}"
   RT_OUTPUT=$(cd "$NO_GIT_DIR" && printf '%s' "$JSON" | bash "$READ_TRACKER_HOOK" 2>/dev/null)
   RT_EXIT=$?
-  LOG="$NO_GIT_DIR/.claude/mycelium-read-access.log"
+  LOG="$NO_GIT_DIR/.mycelium/mycelium-read-access.log"
   if [ "$RT_EXIT" -eq 0 ] && { [ ! -f "$LOG" ] || [ ! -s "$LOG" ]; }; then
     pass "No git repo → exit 0, no log written"
   else
@@ -263,7 +264,7 @@ echo "TEST 10: '.living' as substring (not a directory component) → NOT logged
   # Note: path uses /.living_docs/ — not /.living/
   JSON="{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"${TEST_DIR}/src/.living_docs/README.md\"}}"
   run_read_tracker "$JSON"
-  LOG="$TEST_DIR/.claude/mycelium-read-access.log"
+  LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if { [ ! -f "$LOG" ] || [ ! -s "$LOG" ]; }; then
     pass "'.living_docs/' substring → NOT logged (hook checks for /.living/ specifically)"
   else
@@ -294,7 +295,7 @@ echo "TEST 11: Concurrent writes (10 parallel reads)"
   for PID in "${PIDS[@]}"; do
     wait "$PID" 2>/dev/null || true
   done
-  LOG="$TEST_DIR/.claude/mycelium-read-access.log"
+  LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if [ -f "$LOG" ]; then
     LINES=$(grep -c '' "$LOG" 2>/dev/null || echo 0)
     if [ "$LINES" -eq 10 ]; then
@@ -322,7 +323,7 @@ echo "TEST 12: Timestamp format validation (ISO 8601 YYYY-MM-DDTHH:MM:SS)"
   setup_test_env
   JSON="{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"${TEST_DIR}/.living/learnings.md\"}}"
   run_read_tracker "$JSON"
-  LOG="$TEST_DIR/.claude/mycelium-read-access.log"
+  LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if [ -f "$LOG" ]; then
     LINE=$(head -1 "$LOG")
     TS="${LINE%% *}"
@@ -386,9 +387,8 @@ INDEXEOF
   HH_OUTPUT=$(cd "$TEST_DIR" && printf '%s' "$(health_json)" | bash "$HEALTH_HOOK" 2>/dev/null)
   HH_EXIT=$?
 
-  if echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP" \
-    && echo "$HH_OUTPUT" | grep -q "Data Pipelines"; then
-    pass "Sentinel markers present → KNOWLEDGE MAP section injected with cluster content"
+  if echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
+    pass "SessionStart regenerated and injected the KNOWLEDGE MAP section"
   else
     fail "KNOWLEDGE MAP not injected despite sentinel markers" \
       "output=$(echo "$HH_OUTPUT" | head -c 300)"
@@ -396,9 +396,9 @@ INDEXEOF
   cleanup_test_env
 }
 
-# ── TEST 14: INDEX.md without sentinels (legacy) → NO injection ───────────────
+# ── TEST 14: Legacy INDEX.md is upgraded and injected ────────────────────────
 echo ""
-echo "TEST 14: INDEX.md without sentinels (legacy format) → NO injection"
+echo "TEST 14: INDEX.md without sentinels is regenerated and injected"
 {
   setup_test_env
   # A legacy file with no sentinels.  generate_index.py will replace it entirely
@@ -412,8 +412,8 @@ INDEXEOF
 
   HH_OUTPUT=$(cd "$TEST_DIR" && printf '%s' "$(health_json)" | bash "$HEALTH_HOOK" 2>/dev/null)
 
-  if ! echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
-    pass "Legacy INDEX.md (no sentinels) → no KNOWLEDGE MAP injection"
+  if echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
+    pass "Legacy INDEX.md was upgraded before KNOWLEDGE MAP injection"
   else
     fail "Legacy INDEX.md injected KNOWLEDGE MAP unexpectedly" \
       "output=$(echo "$HH_OUTPUT" | head -c 300)"
@@ -421,9 +421,9 @@ INDEXEOF
   cleanup_test_env
 }
 
-# ── TEST 15: No INDEX.md file → NO injection, no error ───────────────────────
+# ── TEST 15: Missing INDEX.md is generated and injected ──────────────────────
 echo ""
-echo "TEST 15: No INDEX.md file → NO injection, no error"
+echo "TEST 15: No INDEX.md file → generated and injected"
 {
   setup_test_env
   # Ensure INDEX.md does not exist
@@ -432,8 +432,8 @@ echo "TEST 15: No INDEX.md file → NO injection, no error"
   HH_OUTPUT=$(cd "$TEST_DIR" && printf '%s' "$(health_json)" | bash "$HEALTH_HOOK" 2>/dev/null)
   HH_EXIT=$?
 
-  if [ "$HH_EXIT" -eq 0 ] && ! echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
-    pass "No INDEX.md → exit 0, no KNOWLEDGE MAP injection"
+  if [ "$HH_EXIT" -eq 0 ] && echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
+    pass "No INDEX.md → generated and injected without error"
   else
     fail "No INDEX.md produced unexpected output" \
       "exit=$HH_EXIT output=$(echo "$HH_OUTPUT" | head -c 200)"
@@ -441,9 +441,9 @@ echo "TEST 15: No INDEX.md file → NO injection, no error"
   cleanup_test_env
 }
 
-# ── TEST 16: Empty KNOWLEDGE SUMMARY block → NO injection ────────────────────
+# ── TEST 16: Empty summary is regenerated before injection ───────────────────
 echo ""
-echo "TEST 16: Empty KNOWLEDGE SUMMARY block → NO injection"
+echo "TEST 16: Empty KNOWLEDGE SUMMARY block → regenerated and injected"
 {
   setup_test_env
   # Must include QUICK REFERENCE sentinels so generate_index.py does in-place
@@ -464,8 +464,8 @@ INDEXEOF
 
   HH_OUTPUT=$(cd "$TEST_DIR" && printf '%s' "$(health_json)" | bash "$HEALTH_HOOK" 2>/dev/null)
 
-  if ! echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
-    pass "Empty sentinel block → no KNOWLEDGE MAP injection (awk returns empty string)"
+  if echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
+    pass "Empty sentinel block → regenerated before KNOWLEDGE MAP injection"
   else
     fail "Empty sentinel block unexpectedly injected KNOWLEDGE MAP" \
       "output=$(echo "$HH_OUTPUT" | head -c 300)"
@@ -617,9 +617,9 @@ echo "TEST 21: Entry counts correct in MYCELIUM SUMMARY (3 learnings, 2 decision
   cleanup_test_env
 }
 
-# ── TEST 22: Only QUICK REFERENCE sentinels, no SUMMARY sentinels → no injection
+# ── TEST 22: QUICK REFERENCE-only INDEX is upgraded and injected
 echo ""
-echo "TEST 22: Only QUICK REFERENCE sentinels (no SUMMARY sentinels) → no KNOWLEDGE MAP"
+echo "TEST 22: QUICK REFERENCE-only INDEX is upgraded with a KNOWLEDGE MAP"
 {
   setup_test_env
   # Use the real sentinel text that generate_index.py recognises:
@@ -640,8 +640,8 @@ INDEXEOF
 
   HH_OUTPUT=$(cd "$TEST_DIR" && printf '%s' "$(health_json)" | bash "$HEALTH_HOOK" 2>/dev/null)
 
-  if ! echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
-    pass "QUICK REFERENCE sentinels only → no KNOWLEDGE MAP injection (requires BEGIN KNOWLEDGE SUMMARY)"
+  if echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
+    pass "QUICK REFERENCE-only INDEX.md → regenerated KNOWLEDGE MAP injected"
   else
     fail "QUICK REFERENCE sentinels triggered KNOWLEDGE MAP injection unexpectedly" \
       "output=$(echo "$HH_OUTPUT" | head -c 300)"
@@ -657,7 +657,7 @@ echo "TEST 23: Crashed session, no activity → cleanup + fresh session-start-ts
 {
   setup_test_env
   TEN_DAYS_AGO=$(( $(date +%s) - 10*86400 ))
-  echo "$TEN_DAYS_AGO" > "$TEST_DIR/.claude/session-start-ts.tmp"
+  echo "$TEN_DAYS_AGO" > "$TEST_DIR/.mycelium/session-start-ts.tmp"
 
   OLD_LOG="$TEST_DIR/.living/log/2026-04-15-001-test.md"
   mkdir -p "$(dirname "$OLD_LOG")"
@@ -672,20 +672,20 @@ duration_minutes:
 files_changed:
 ---
 OLD_LOG_EOF
-  printf '%s\n%s\n' "$OLD_LOG" "$TEN_DAYS_AGO" > "$TEST_DIR/.claude/active-session-log.tmp"
+  printf '%s\n%s\n' "$OLD_LOG" "$TEN_DAYS_AGO" > "$TEST_DIR/.mycelium/active-session-log.tmp"
 
   # Aged activity files match the crash time
-  echo "src/old.py" > "$TEST_DIR/.claude/mycelium-session-activity.tmp"
-  echo "$TEN_DAYS_AGO" > "$TEST_DIR/.claude/mycelium-reminded.tmp"
+  echo "src/old.py" > "$TEST_DIR/.mycelium/mycelium-session-activity.tmp"
+  echo "$TEN_DAYS_AGO" > "$TEST_DIR/.mycelium/mycelium-reminded.tmp"
   OLD_FMT=$(date -r "$TEN_DAYS_AGO" "+%Y%m%d%H%M.%S" 2>/dev/null || true)
   if [ -n "$OLD_FMT" ]; then
-    touch -t "$OLD_FMT" "$TEST_DIR/.claude/mycelium-session-activity.tmp"
-    touch -t "$OLD_FMT" "$TEST_DIR/.claude/mycelium-reminded.tmp"
+    touch -t "$OLD_FMT" "$TEST_DIR/.mycelium/mycelium-session-activity.tmp"
+    touch -t "$OLD_FMT" "$TEST_DIR/.mycelium/mycelium-reminded.tmp"
   fi
 
   run_health_hook
 
-  NEW_TS=$(cat "$TEST_DIR/.claude/session-start-ts.tmp" 2>/dev/null || echo 0)
+  NEW_TS=$(cat "$TEST_DIR/.mycelium/session-start-ts.tmp" 2>/dev/null || echo 0)
   AGE=$(( $(date +%s) - NEW_TS ))
   if [ "$AGE" -lt 60 ]; then
     pass "Stale sentinel cleaned, session-start-ts refreshed (age=${AGE}s)"
@@ -702,7 +702,7 @@ echo "TEST 24: Fresh active-session-log.tmp → session-start-ts preserved"
 {
   setup_test_env
   PRIMARY_TS=$(( $(date +%s) - 60 ))
-  echo "$PRIMARY_TS" > "$TEST_DIR/.claude/session-start-ts.tmp"
+  echo "$PRIMARY_TS" > "$TEST_DIR/.mycelium/session-start-ts.tmp"
 
   ACTIVE_LOG="$TEST_DIR/.living/log/2026-04-26-001-test.md"
   mkdir -p "$(dirname "$ACTIVE_LOG")"
@@ -717,11 +717,11 @@ duration_minutes:
 files_changed:
 ---
 ACTIVE_LOG_EOF
-  printf '%s\n%s\n' "$ACTIVE_LOG" "$PRIMARY_TS" > "$TEST_DIR/.claude/active-session-log.tmp"
+  printf '%s\n%s\n' "$ACTIVE_LOG" "$PRIMARY_TS" > "$TEST_DIR/.mycelium/active-session-log.tmp"
 
   run_health_hook
 
-  NEW_TS=$(cat "$TEST_DIR/.claude/session-start-ts.tmp" 2>/dev/null || echo 0)
+  NEW_TS=$(cat "$TEST_DIR/.mycelium/session-start-ts.tmp" 2>/dev/null || echo 0)
   if [ "$NEW_TS" = "$PRIMARY_TS" ]; then
     pass "Active session-log preserved → session-start-ts unchanged"
   else
@@ -737,7 +737,7 @@ echo "TEST 25: 5h old owner_ts + fresh activity → preserve everything"
 {
   setup_test_env
   FIVE_H_AGO=$(( $(date +%s) - 5*3600 ))
-  echo "$FIVE_H_AGO" > "$TEST_DIR/.claude/session-start-ts.tmp"
+  echo "$FIVE_H_AGO" > "$TEST_DIR/.mycelium/session-start-ts.tmp"
 
   ACTIVE_LOG="$TEST_DIR/.living/log/2026-04-26-001-test.md"
   mkdir -p "$(dirname "$ACTIVE_LOG")"
@@ -752,19 +752,19 @@ duration_minutes:
 files_changed:
 ---
 ACTIVE_LOG_EOF
-  printf '%s\n%s\n' "$ACTIVE_LOG" "$FIVE_H_AGO" > "$TEST_DIR/.claude/active-session-log.tmp"
+  printf '%s\n%s\n' "$ACTIVE_LOG" "$FIVE_H_AGO" > "$TEST_DIR/.mycelium/active-session-log.tmp"
   # Activity is FRESH — session is alive
-  echo "src/active.py" > "$TEST_DIR/.claude/mycelium-session-activity.tmp"
-  date +%s > "$TEST_DIR/.claude/mycelium-reminded.tmp"
+  echo "src/active.py" > "$TEST_DIR/.mycelium/mycelium-session-activity.tmp"
+  date +%s > "$TEST_DIR/.mycelium/mycelium-reminded.tmp"
 
   run_health_hook
 
-  PRESERVED_TS=$(cat "$TEST_DIR/.claude/session-start-ts.tmp" 2>/dev/null || echo 0)
+  PRESERVED_TS=$(cat "$TEST_DIR/.mycelium/session-start-ts.tmp" 2>/dev/null || echo 0)
   ALL_OK=true
   [ "$PRESERVED_TS" = "$FIVE_H_AGO" ] || { ALL_OK=false; FAIL_MSG="ts disrupted ($FIVE_H_AGO → $PRESERVED_TS)"; }
-  [ -f "$TEST_DIR/.claude/active-session-log.tmp" ] || { ALL_OK=false; FAIL_MSG="active-session-log wiped"; }
-  [ -f "$TEST_DIR/.claude/mycelium-session-activity.tmp" ] || { ALL_OK=false; FAIL_MSG="activity wiped"; }
-  [ -f "$TEST_DIR/.claude/mycelium-reminded.tmp" ] || { ALL_OK=false; FAIL_MSG="reminded wiped"; }
+  [ -f "$TEST_DIR/.mycelium/active-session-log.tmp" ] || { ALL_OK=false; FAIL_MSG="active-session-log wiped"; }
+  [ -f "$TEST_DIR/.mycelium/mycelium-session-activity.tmp" ] || { ALL_OK=false; FAIL_MSG="activity wiped"; }
+  [ -f "$TEST_DIR/.mycelium/mycelium-reminded.tmp" ] || { ALL_OK=false; FAIL_MSG="reminded wiped"; }
   if [ "$ALL_OK" = true ]; then
     pass "Long-running active session preserved (5h owner_ts + fresh activity)"
   else
@@ -780,7 +780,7 @@ echo "TEST 26: Stale owner_ts + stale activity → cleanup proceeds"
 {
   setup_test_env
   TWO_DAYS=$(( $(date +%s) - 2*86400 ))
-  echo "$TWO_DAYS" > "$TEST_DIR/.claude/session-start-ts.tmp"
+  echo "$TWO_DAYS" > "$TEST_DIR/.mycelium/session-start-ts.tmp"
 
   OLD_LOG="$TEST_DIR/.living/log/2026-04-24-001-test.md"
   mkdir -p "$(dirname "$OLD_LOG")"
@@ -795,18 +795,18 @@ duration_minutes:
 files_changed:
 ---
 OLD_LOG_EOF
-  printf '%s\n%s\n' "$OLD_LOG" "$TWO_DAYS" > "$TEST_DIR/.claude/active-session-log.tmp"
-  echo "src/old.py" > "$TEST_DIR/.claude/mycelium-session-activity.tmp"
-  echo "$TWO_DAYS" > "$TEST_DIR/.claude/mycelium-reminded.tmp"
+  printf '%s\n%s\n' "$OLD_LOG" "$TWO_DAYS" > "$TEST_DIR/.mycelium/active-session-log.tmp"
+  echo "src/old.py" > "$TEST_DIR/.mycelium/mycelium-session-activity.tmp"
+  echo "$TWO_DAYS" > "$TEST_DIR/.mycelium/mycelium-reminded.tmp"
   STALE_FMT=$(date -r "$TWO_DAYS" "+%Y%m%d%H%M.%S" 2>/dev/null || true)
   if [ -n "$STALE_FMT" ]; then
-    touch -t "$STALE_FMT" "$TEST_DIR/.claude/mycelium-session-activity.tmp"
-    touch -t "$STALE_FMT" "$TEST_DIR/.claude/mycelium-reminded.tmp"
+    touch -t "$STALE_FMT" "$TEST_DIR/.mycelium/mycelium-session-activity.tmp"
+    touch -t "$STALE_FMT" "$TEST_DIR/.mycelium/mycelium-reminded.tmp"
   fi
 
   run_health_hook
 
-  NEW_TS=$(cat "$TEST_DIR/.claude/session-start-ts.tmp" 2>/dev/null || echo 0)
+  NEW_TS=$(cat "$TEST_DIR/.mycelium/session-start-ts.tmp" 2>/dev/null || echo 0)
   AGE=$(( $(date +%s) - NEW_TS ))
   # Note: activity / reminded should be PRESERVED on disk by our cleanup
   # (they get cleaned by the dedicated >1h staleness cleanup further down).

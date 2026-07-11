@@ -1,31 +1,33 @@
 ---
+name: core
 description: >
-  ALWAYS use this skill when the user mentions "mycelium", "living repo",
-  "crystallize", or "todo idea". ALWAYS use for requests about making projects
-  self-documenting, tracking knowledge/decisions/learnings, capturing insights
-  for later, transferring knowledge across projects, or exploring unfamiliar
-  data. This skill manages a .living/ directory framework that registers
-  analyses, datasets, and decisions. It handles: project initialization
-  ("set up mycelium", "initialize living repo"), knowledge capture
-  ("crystallize this learning", "record this finding"), future work tracking
-  ("add a todo idea", "track this for later"), knowledge transfer
-  ("transfer knowledge", "cross-pollinate", "sync learnings"), dataset
-  ingestion, convention installation, and progressive disclosure knowledge
-  systems. NOT for: report writing, code refactoring, brainstorming, git init,
-  or generic folder organization.
+  Initialize and maintain Mycelium living repositories. Use when the user
+  mentions Mycelium, living repos, crystallizing learnings or findings,
+  recording decisions, installing conventions, tracking todo ideas, migrating
+  an older Mycelium project, or managing the .living knowledge layer. Do not use
+  for report writing, generic refactoring, brainstorming, git initialization,
+  or ordinary folder organization.
 ---
 
 # Mycelium — Living Repository Skill (Core)
 
+## Bundled paths
+
+Resolve paths beginning with `skills/`, `network/`, or `todo/` relative to the
+Mycelium plugin root—the ancestor containing `.codex-plugin/` and
+`.claude-plugin/`—not relative to the user's working repository. Keep
+`.living/`, `.mycelium/`, and project manifest paths relative to the user's
+repository.
+
 When invoked, determine which mode the user needs based on their request, then follow the corresponding protocol.
 
 For analysis, report generation, idea brainstorming, and code review, direct the user to the dedicated skills:
-- `/mycelium:analyze` — start or continue an analysis
-- `/mycelium:report` — generate a structured report
-- `/mycelium:ideas` — brainstorm with disciplinary personas
-- `/mycelium:transfer` — cross-pollinate learnings across sibling projects
-- `/mycelium:review` — review code/analysis changes (PR, commit, or diff) for the kinds of mistakes that matter in scientific work; supports `grill` mode for conversational interrogation of analytical decisions
-- `/mycelium:codex-review` — respond to Codex review comments on a PR: fix the flagged instance and audit the whole branch for other instances of the same error pattern, with an access-gated `@codex review` re-trigger
+- `/mycelium:analyze` or `$mycelium:analyze` — start or continue an analysis
+- `/mycelium:report` or `$mycelium:report` — generate a structured report
+- `/mycelium:ideas` or `$mycelium:ideas` — brainstorm with disciplinary personas
+- `/mycelium:transfer` or `$mycelium:transfer` — cross-pollinate learnings across sibling projects
+- `/mycelium:review` or `$mycelium:review` — review code/analysis changes (PR, commit, or diff) for the kinds of mistakes that matter in scientific work; supports `grill` mode for conversational interrogation of analytical decisions
+- `/mycelium:codex-review` or `$mycelium:codex-review` — respond to Codex review comments on a PR: fix the flagged instance and audit the whole branch for other instances of the same error pattern, with an access-gated `@codex review` re-trigger
 
 ---
 
@@ -48,11 +50,11 @@ For analysis, report generation, idea brainstorming, and code review, direct the
    git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git
    ```
 6. Ask which **domain** conventions to install from the network (e.g., bioinformatics, image-analysis, skill-bridge). Domain packs are those without `core: true`.
-7. Generate `CLAUDE.md` for the repo (from `skills/core/templates/CLAUDE.md.template`) that encodes the living repo protocol.
+7. Generate canonical `MYCELIUM.md` guidance plus thin `CLAUDE.md` and `AGENTS.md` adapters using `skills/core/scripts/init_repo.py`.
 8. Generate `ENVIRONMENTS_INSTALLATIONS.md` at repo root.
 9. Create descriptive manifests in each top-level directory (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, `ALGORITHM_MANIFEST.md`, `REFERENCE_MANIFEST.md`).
 10. Initialize `.living/` with empty `decisions.md`, `learnings.md`, `conventions.md`; create `.living/log/LOG_REGISTRY.md` (session log registry — tracks work across sessions). Create `.living/outputs/knowledge-transfers/` for cross-project transfer audit trail.
-11. **Bootstrap knowledge system**: If `~/.claude/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. The script also appends the Global Knowledge Domains routing table to every `~/.claude/projects/*/memory/MEMORY.md` (idempotent — skips files where the header is already present). Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py --summary-heuristic`.
+11. **Bootstrap knowledge system**: If `~/.mycelium/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. The script also appends the Global Knowledge Domains routing table to every `~/.claude/projects/*/memory/MEMORY.md` (idempotent — skips files where the header is already present). Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py --summary-heuristic`.
 12. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
 13. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
 
@@ -94,7 +96,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 3. User selects which to install.
 4. Run `skills/core/scripts/install_convention.py` to copy conventions into `.living/conventions/[name]/`.
 5. Update `.living/conventions/ACTIVE_CONVENTIONS.yaml`.
-6. Update `CLAUDE.md` to reference new convention pack.
+6. Update `MYCELIUM.md` to reference the new convention pack.
 
 ---
 
@@ -109,7 +111,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 2. Consult `skills/core/templates/learning-entry.md` for the entry format used in learnings.md (entries start with `### [YYYY-MM-DD]` and have **Category**, **Tags**, **mitigation_type**, and **structural_mitigation_candidate** fields — use Tags for pattern clustering, and `mitigation_type` for recurrence-risk assessment).
 3. Read `.living/learnings.md` and `.living/decisions.md`.
 4. Identify recurring patterns using the thresholds defined in `skill-generation-guide.md` — minimum 3 related entries sharing tags or themes. See the worked example in that guide for the complete input→output transformation. To surface near-duplicate entries automatically, run `python3 skills/core/scripts/detect_recurrence.py --living-dir <path>` — it flags clusters of `ambient-awareness` learnings that are strong candidates for convention promotion or structural mitigation.
-5. **Promote transferable knowledge**: For patterns that apply beyond the current project, write entries to the matching global domain file in `~/.claude/knowledge/{domain}.md` using the structured entry template (What/Evidence/When useful/Scope/Status/Last validated). Set `status: unreviewed` — the weekly audit will confirm.
+5. **Promote transferable knowledge**: For patterns that apply beyond the current project, write entries to the matching global domain file in `~/.mycelium/knowledge/{domain}.md` using the structured entry template (What/Evidence/When useful/Scope/Status/Last validated). Set `status: unreviewed` — the weekly audit will confirm.
 6. Propose new convention documents or checklists for project-specific patterns.
 7. Draft them in `.living/generated-conventions/[name]/` using the template at `skills/core/templates/generated-convention.md`.
 8. Include `ORIGIN.md` linking back to the learnings that spawned it.
@@ -124,7 +126,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 **Purpose**: Extract scientific findings from recent work and organize them into topic-based files.
 
 **Steps**:
-1. Dispatch a **sonnet** subagent (max_turns: 15) with the following instructions:
+1. Dispatch a capable subagent with the following instructions:
 2. Read the current project's recent session log (`.living/log/` most recent file) and any generated analysis outputs.
 3. Identify scientific findings — empirical observations, validated/invalidated hypotheses, quantitative results, or methodological discoveries about the domain. **NOT** tooling/process insights (those go to `learnings.md`).
 4. For each finding, check for existing topics:
@@ -151,8 +153,8 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 **Purpose**: Cross-pollinate learnings across sibling projects in a meta-project. Identifies insights from one project that would benefit others and **automatically applies** them to target projects' `.living/learnings.md` files.
 
 **Steps**:
-1. This mode delegates to the dedicated command file. Run the protocol in `commands/transfer.md`.
-2. The transfer command is designed to run as a background subagent — dispatch it with `sonnet` model and do not block on results.
+1. This mode delegates to the dedicated transfer skill. Read and follow `../transfer/SKILL.md`.
+2. The transfer skill is designed to run as a background subagent. Use a capable available model and do not block on results.
 3. Transfers are auto-applied to target projects' `.living/learnings.md` with `source: {project} (auto-transferred by mycelium)` for auditability.
 4. Audit reports are written to `{meta-project}/.living/outputs/knowledge-transfers/YYYY-MM-DD.md`.
 
@@ -243,7 +245,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 
 **Trigger**: "migrate this repo", "upgrade mycelium", "this is an old repo"
 
-**Purpose**: Bring a repo started on an earlier mycelium version up to current spec — adds the `.living/INDEX.md` knowledge-index callout to CLAUDE.md, tops up missing hooks (e.g. read-tracker), regenerates the heuristic SUMMARY block, and appends the Global Knowledge Domains routing table to MEMORY.md.
+**Purpose**: Bring a repo started on an earlier Mycelium version up to current spec — creates canonical `MYCELIUM.md` guidance and a Codex `AGENTS.md` adapter, migrates runtime state to `.mycelium/`, tops up Claude and Codex hooks, regenerates the heuristic SUMMARY block, and preserves Claude MEMORY.md routing where available.
 
 **Steps**:
 1. Run `python3 skills/core/scripts/migrate_existing_repos.py --repo .` (or `--scan <parent-dir>` to migrate every child).
@@ -280,16 +282,16 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 
 **Trigger**: "knowledge init", "set up knowledge", "initialize knowledge system", "progressive disclosure"
 
-**Purpose**: Bootstrap the global progressive disclosure knowledge system (`~/.claude/knowledge/`).
+**Purpose**: Bootstrap the global progressive disclosure knowledge system (`~/.mycelium/knowledge/`).
 
 **Steps**:
 1. Run `skills/core/scripts/init_knowledge.py` to create domain files from templates. Existing files are preserved (idempotent).
 2. For each project with a `.living/` directory: run `skills/core/scripts/generate_index.py` to create/update `.living/INDEX.md`.
 3. Check each project's MEMORY.md (in `~/.claude/projects/*/memory/`). If missing the "Global Knowledge Domains" table, append it from `skills/core/templates/knowledge/domain-table.md`.
-4. Verify the knowledge system is functional: check `~/.claude/knowledge/.last-audit` exists, confirm domain file count, report summary.
+4. Verify the knowledge system is functional: check `~/.mycelium/knowledge/.last-audit` exists, confirm domain file count, report summary.
 
 **Notes**:
-- This mode is **global** — it sets up `~/.claude/knowledge/` which is shared across all projects.
+- This mode is **global** — it sets up `~/.mycelium/knowledge/` which is shared across all projects.
 - Safe to run multiple times. Existing domain files and their entries are never overwritten.
 - The weekly audit (triggered by `mycelium-health.sh`) handles ongoing maintenance: staleness checks, INDEX.md regeneration, skills sync, dedup.
 - Domain files start empty (header + trigger only). Entries accumulate through the post-action protocol's knowledge promotion step and the crystallize mode.
@@ -308,13 +310,13 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 1. **Update manifests**: Update the relevant manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, etc.) with new/changed entries.
 2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder with current status, key findings, open questions.
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md` using the decision log template.
-4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template. **Required field**: set `mitigation_type` to one of `structural | convention | ambient-awareness` (see template comments for definitions). Also fill `structural_mitigation_candidate` — if you can name a concrete test or invariant, upgrade the entry to `structural`. **Knowledge promotion**: If the learning is transferable (would help in any project), also append to the matching global domain file in `~/.claude/knowledge/{domain}.md` with `status: unreviewed`. Use the structured entry template with a `when_useful` trigger condition.
+4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template. **Required field**: set `mitigation_type` to one of `structural | convention | ambient-awareness` (see template comments for definitions). Also fill `structural_mitigation_candidate` — if you can name a concrete test or invariant, upgrade the entry to `structural`. **Knowledge promotion**: If the learning is transferable (would help in any project), also append to the matching global domain file in `~/.mycelium/knowledge/{domain}.md` with `status: unreviewed`. Use the structured entry template with a `when_useful` trigger condition.
 5. **Log todos**: If future work is identified during the action, add items to `todo/TODO_REGISTRY.md` (and create detailed `todo/[item].md` files for complex items).
 6. **Validate**: Run `skills/core/scripts/validate_structure.py` to confirm repo still conforms.
 7. **Crystallize conventions**: Review `.living/learnings.md` for recurring patterns (3+ related entries on the same topic). If found, check whether an equivalent convention already exists in `.living/conventions.md` — if so, append new `Source:` citations and refine the text only if materially improved. If no equivalent exists, add a new convention with `Source:` citations linking to the originating learnings. Do not create near-duplicate conventions.
 8. **Update LOG_REGISTRY**: Update the LOG_REGISTRY.md row matching the current session ID. Replace the filename-stub Summary with a 1-sentence past-tense description of what was accomplished (no filenames unless the artifact is the primary output). Fill Key Outputs with semicolon-separated concrete artifacts, metrics, or decisions. Summary and Key Outputs must not duplicate each other.
 9. **Convention feedback**: If any convention pack practices were relevant, note whether they were helpful or had gaps.
-10. **Write session summary**: Write or update `.claude/last-session.md` with a 5-section summary covering ALL work since session start. Use the session summary template:
+10. **Write session summary**: Write or update `.mycelium/last-session.md` with a 5-section summary covering ALL work since session start. Use the session summary template:
 
    ```markdown
    SESSION RESUME — Last session (YYYY-MM-DD HH:MM):
@@ -338,63 +340,27 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 
    **Full-session coverage**: Run `git log --since=<session-start-timestamp>` and `git diff --stat` to capture all work since session start. If crystallization fires multiple times in a session, each write rebuilds the summary covering the entire session (cumulative, not incremental). The summary should get more expansive as the session progresses.
 
-### Automated Enforcement (Claude Code Hooks)
+### Automated Enforcement (Claude Code and Codex Hooks)
 
-Mycelium ships optional hook scripts in `hooks/` that enforce the post-action protocol automatically:
+Mycelium ships hook scripts in `skills/core/hooks/`. `init_repo.py` registers
+Claude hooks in `.claude/settings.local.json` and Codex hooks in
+`.codex/hooks.json`.
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `mycelium-health.sh` | SessionStart | Loads `.claude/last-session.md` for session resume (agent + user); warns if `.living/` is missing or incomplete; records session timestamp; triggers weekly knowledge audit if `~/.claude/knowledge/.last-audit` is >7 days old |
-| `mycelium-post-action.sh` | PostToolUse (Bash) | Detects code execution and directs Claude to run the full post-action protocol |
-| `mycelium-stop-check.sh` | Stop | Checks `.living/` was updated after significant work; warns if session summary (`.claude/last-session.md`) was not written |
+| `mycelium-health.sh` | SessionStart | Loads `.mycelium/last-session.md` for session resume (agent + user); warns if `.living/` is missing or incomplete; records session timestamp; triggers weekly knowledge audit if `~/.mycelium/knowledge/.last-audit` is >7 days old |
+| `mycelium-post-action.sh` | PostToolUse (shell) | Detects code execution and directs the active agent to run the full post-action protocol |
+| `mycelium-stop-check.sh` | Stop | Checks `.living/` was updated after significant work; warns if session summary (`.mycelium/last-session.md`) was not written |
 
-**Post-action enforcement**: The PostToolUse hook detects Python/R/Jupyter execution in Bash calls (excluding tests, linting, pip, one-liners) and injects a mandatory directive for Claude to execute the full post-action protocol — saving outputs, updating manifests, and logging to `.living/`. It is **debounced**: fires once per work cycle, then stays silent until `.living/` is updated (completing the cycle). This means Claude receives exactly one directive per burst of analysis work, not one per Bash call. The Stop hook serves as a safety net for non-analysis sessions.
+**Post-action enforcement**: The PostToolUse hook detects Python/R/Jupyter execution in Bash calls (excluding tests, linting, pip, one-liners) and injects a mandatory directive for the active agent. It is **debounced**: fires once per work cycle, then stays silent until `.living/` is updated. The Stop hook serves as a safety net for non-analysis sessions.
 
-**Stop hook logic**: The stop hook checks if `mycelium-post-action.sh` fired during the session (indicated by the presence of `.claude/mycelium-reminded.tmp`). If `.living/` was not updated afterward, it warns. If `.living/` was updated but `.claude/last-session.md` was not written (or is older than the session start), it emits a non-blocking warning reminding you to write the session summary. Read-only sessions, config-only sessions, and sessions without code execution are never checked.
+**Stop hook logic**: The stop hook checks if `mycelium-post-action.sh` fired during the session (indicated by the presence of `.mycelium/mycelium-reminded.tmp`). If `.living/` was not updated afterward, it warns. If `.living/` was updated but `.mycelium/last-session.md` was not written (or is older than the session start), it emits a non-blocking warning reminding you to write the session summary. Read-only sessions, config-only sessions, and sessions without code execution are never checked.
 
-**Installation**: Register the hooks in your project's `.claude/settings.local.json`:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/mycelium/skills/core/hooks/mycelium-health.sh"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/mycelium/skills/core/hooks/mycelium-post-action.sh"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/path/to/mycelium/skills/core/hooks/mycelium-stop-check.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Replace `/path/to/mycelium/` with the absolute path to your mycelium clone.
+Codex requires the project to be trusted and each changed command hook to be
+reviewed. It matches shell work as `exec_command`, and its activity tracker
+parses `apply_patch` headers. Read-access
+telemetry remains Claude-only because Codex does not expose internal file reads
+to `PostToolUse`.
 
 ### Subagent-Driven Sessions
 
@@ -404,7 +370,7 @@ When work is dispatched to subagents (main context = coordination only):
 2. **After all subagent batches complete**, the main context dispatches a crystallization subagent that:
    - Reviews the summary of what was accomplished
    - Appends entries to `.living/learnings.md` and `.living/decisions.md`
-   - Writes `.claude/last-session.md` using the 5-section session summary template (covering ALL work since session start, not just the latest batch — run `git log --since=<session-start-ts>` and `git diff --stat` to ground the summary in facts)
+   - Writes `.mycelium/last-session.md` using the 5-section session summary template (covering ALL work since session start, not just the latest batch — run `git log --since=<session-start-ts>` and `git diff --stat` to ground the summary in facts)
    - Checks cross-project relevance (if applicable)
 3. **The Stop hook enforces this** — it blocks session end if `.living/` wasn't updated after significant work, catching sessions where the crystallization step was forgotten.
 
@@ -416,9 +382,10 @@ Quick checks an agent or human can run to confirm mycelium is wired correctly:
 
 | Check | Command / location | Expected |
 |-------|--------------------|----------|
-| Hooks installed | `cat .claude/settings.local.json` | Five hooks: SessionStart→health, PostToolUse(Bash)→post-action, PostToolUse(Edit\|Write)→activity-tracker, PostToolUse(Read)→read-tracker, Stop→stop-check |
+| Claude hooks installed | `cat .claude/settings.local.json` | SessionStart, PostToolUse, and Stop registrations present |
+| Codex hooks installed | `cat .codex/hooks.json` | SessionStart, PostToolUse, and Stop registrations present |
 | INDEX.md has knowledge summary | `grep "BEGIN KNOWLEDGE SUMMARY" .living/INDEX.md` | Match present |
-| Read-access being logged | `tail .claude/mycelium-read-access.log` | Entries appearing whenever Claude reads `.living/` files |
+| Read-access being logged | `tail .mycelium/mycelium-read-access.log` | Entries appearing when Claude reads `.living/` files |
 | MEMORY.md routing table present | `grep "Global Knowledge Domains" ~/.claude/projects/*/memory/MEMORY.md` | At least one match |
 | Heuristic clusters populating | `python3 skills/core/scripts/generate_index.py --living-dir .living/ --summary-heuristic --dry-run` | Tag clusters with ≥2 entries shown |
 | recall_lessons.py works | `python3 skills/core/scripts/recall_lessons.py --living-dir .living/ --tag <known-tag>` | Matching entries printed |

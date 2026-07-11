@@ -1,20 +1,17 @@
 ---
+name: ideas
 description: >
-  Invoke this skill for ANY request involving brainstorming, ideation, or
-  generating new research ideas. This is the brainstorming and idea generation
-  skill. Use it when the user wants to brainstorm, generate ideas, get fresh
-  perspectives, hear what experts from different fields would think, find
-  creative angles they're missing, explore new analysis directions, or get
-  unstuck. Trigger phrases include: "brainstorm", "ideas", "fresh perspectives",
-  "what would a [expert] think", "I'm stuck", "creative angles", "wild ideas",
-  "what are we missing", "open to ideas", "before we write it up",
-  "persona brainstorm", "new directions", "where to go next". If the user's
-  request is open-ended and exploratory rather than a specific concrete task,
-  use this skill. Do NOT use for defined tasks like running a specific analysis,
-  fixing code, setting up projects, or ingesting data.
+  Brainstorm research ideas using installed persona and ideation conventions.
+  Use for fresh perspectives, creative angles, new analysis directions, expert
+  viewpoints, "what are we missing?", or other open-ended exploration. Do not
+  use for a defined analysis, code fix, project setup, or data ingestion task.
 ---
 
 # Mycelium — Ideas
+
+Resolve bundled `skills/` and `network/` paths relative to the Mycelium plugin
+root—the ancestor containing `.codex-plugin/` and `.claude-plugin/`. Resolve
+`.living/` paths relative to the user's repository.
 
 Generate creative analysis ideas by routing to installed idea convention packs, which provide persona catalogs, idea templates, and execution protocols.
 

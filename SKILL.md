@@ -1,1 +1,1 @@
-commands/core.md
+skills/core/SKILL.md

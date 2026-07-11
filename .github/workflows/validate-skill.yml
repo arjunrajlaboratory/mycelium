@@ -21,23 +21,42 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyyaml
+          pip install pytest pyyaml
 
-      - name: Validate command frontmatter
+      - name: Validate shared skill frontmatter and Codex metadata
         run: |
           python -c "
           import yaml
           from pathlib import Path
 
-          for cmd_file in sorted(Path('commands').glob('*.md')):
-              with open(cmd_file) as f:
+          skill_files = sorted(Path('skills').glob('*/SKILL.md'))
+          assert skill_files, 'no shared skills found'
+          for skill_file in skill_files:
+              with open(skill_file) as f:
                   content = f.read()
               parts = content.split('---', 2)
               if len(parts) < 3:
-                  raise ValueError(f'{cmd_file} missing YAML frontmatter (--- delimiters)')
+                  raise ValueError(f'{skill_file} missing YAML frontmatter')
               meta = yaml.safe_load(parts[1])
-              assert 'description' in meta, f'{cmd_file} frontmatter missing: description'
-              print(f'{cmd_file} valid: {meta[\"description\"][:60]}...')
+              assert set(meta) == {'name', 'description'}, f'{skill_file} frontmatter fields: {set(meta)}'
+              assert meta['name'] == skill_file.parent.name, f'{skill_file} name/folder mismatch'
+              agent_meta = skill_file.parent / 'agents' / 'openai.yaml'
+              assert agent_meta.exists(), f'{skill_file} missing agents/openai.yaml'
+              yaml.safe_load(agent_meta.read_text())
+              print(f'{skill_file} valid: {meta[\"description\"][:60]}...')
+          "
+
+      - name: Validate Claude and Codex plugin manifests
+        run: |
+          python -c "
+          import json
+          from pathlib import Path
+          claude = json.loads(Path('.claude-plugin/plugin.json').read_text())
+          codex = json.loads(Path('.codex-plugin/plugin.json').read_text())
+          assert claude['name'] == codex['name'] == 'mycelium'
+          assert claude['version'] == codex['version']
+          assert claude['skills'] == codex['skills'] == './skills/'
+          assert codex['interface']['displayName'] == 'Mycelium'
           "
 
       - name: Validate convention pack YAML files
@@ -74,6 +93,18 @@ jobs:
           tmpdir=$(mktemp -d)
           python skills/core/scripts/init_repo.py --target-dir "$tmpdir"
           python skills/core/scripts/validate_structure.py --target-dir "$tmpdir"
+          test -f "$tmpdir/MYCELIUM.md"
+          test -f "$tmpdir/AGENTS.md"
+          test -f "$tmpdir/.codex/hooks.json"
+
+      - name: Run Python compatibility tests
+        run: |
+          pytest -q skills/core/scripts --ignore=skills/core/scripts/knowledge_map
+
+      - name: Run hook compatibility tests
+        run: |
+          bash skills/core/hooks/test_stop_hook.sh
+          bash skills/core/hooks/test_hooks_stress.sh
 
       - name: Lint markdown files
         uses: DavidAnson/markdownlint-cli2-action@v19

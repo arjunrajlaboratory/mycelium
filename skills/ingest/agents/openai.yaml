@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Ingest"
+  short_description: "Ingest data with metadata and provenance"
+  default_prompt: "Use $mycelium:ingest to add these files with metadata, provenance, and manifest updates."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Codex Review"
+  short_description: "Address Codex comments across a branch"
+  default_prompt: "Use $mycelium:codex-review to address the Codex feedback and audit the full branch."

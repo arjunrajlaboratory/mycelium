@@ -1,7 +1,7 @@
 # Review checklists
 
 These files are loaded by the sub-agents dispatched from `/mycelium:review`.
-The main skill (`commands/review.md`) does NOT read them directly — it passes
+The main skill (`skills/review/SKILL.md`) does NOT read them directly — it passes
 the path to the appropriate sub-agent.
 
 ## Files in this directory
