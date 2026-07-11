@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Review"
+  short_description: "Review scientific code and analysis rigor"
+  default_prompt: "Use $mycelium:review to audit these changes for scientific and software correctness."

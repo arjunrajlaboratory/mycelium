@@ -13,7 +13,9 @@ tests can mock subprocess calls without touching the real filesystem or CLI.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -106,8 +108,28 @@ Example output:
 # LLM labeler
 # ---------------------------------------------------------------------------
 
-# Fallback path for the cmux-bundled claude binary
+# Fallback path for the cmux-bundled Claude binary
 _CMUX_CLAUDE = "/Applications/cmux.app/Contents/Resources/bin/claude"
+
+
+def _resolve_agent_cli(explicit_bin: str | None = None) -> tuple[list[str], str] | None:
+    """Return a command prefix and provider name for Claude or Codex."""
+    if explicit_bin:
+        prefix = [explicit_bin]
+    elif os.environ.get("MYCELIUM_AGENT_CLI", "").strip():
+        prefix = shlex.split(os.environ["MYCELIUM_AGENT_CLI"])
+    else:
+        binary = shutil.which("claude") or shutil.which("codex")
+        if not binary and Path(_CMUX_CLAUDE).exists():
+            binary = _CMUX_CLAUDE
+        if not binary:
+            return None
+        prefix = [binary]
+
+    if not prefix:
+        return None
+    kind = "codex" if Path(prefix[0]).name == "codex" else "claude"
+    return prefix, kind
 
 
 def llm_label(
@@ -116,30 +138,38 @@ def llm_label(
     run: object = subprocess.run,
 ) -> ProposedConcept | None:
     """
-    Ask a local claude CLI to label the cluster.
+    Ask a local Claude or Codex CLI to label the cluster.
 
-    Resolution order for the claude binary:
+    Resolution order for the agent binary:
       1. ``claude_bin`` parameter (if provided)
-      2. ``shutil.which("claude")``
-      3. ``/Applications/cmux.app/Contents/Resources/bin/claude`` (if it exists)
-      4. Return ``None`` (no binary found)
+      2. ``MYCELIUM_AGENT_CLI`` environment override
+      3. ``shutil.which("claude")``, then ``shutil.which("codex")``
+      4. bundled cmux Claude binary (if it exists)
+      5. Return ``None`` (no binary found)
 
     Returns ``None`` on any failure so callers can fall back to tfidf_label.
     """
-    # Resolve binary
-    bin_path: str | None = claude_bin
-    if not bin_path:
-        bin_path = shutil.which("claude")
-    if not bin_path and Path(_CMUX_CLAUDE).exists():
-        bin_path = _CMUX_CLAUDE
-    if not bin_path:
+    resolved = _resolve_agent_cli(claude_bin)
+    if not resolved:
         return None
+    prefix, kind = resolved
 
     prompt = _build_prompt(summary)
+    if kind == "codex":
+        command = prefix + [
+            "exec",
+            "--ephemeral",
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            prompt,
+        ]
+    else:
+        command = prefix + ["-p", prompt, "--output-format", "json"]
 
     try:
         result = run(
-            [bin_path, "-p", prompt, "--output-format", "json"],
+            command,
             capture_output=True,
             text=True,
             timeout=120,
@@ -150,7 +180,9 @@ def llm_label(
     if result.returncode != 0:
         return None
 
-    # Parse the claude --output-format json wrapper
+    # Claude wraps the answer in a JSON ``result`` field; Codex prints the
+    # final response directly. Accept either form so custom command wrappers
+    # can use the same interface.
     try:
         outer = json.loads(result.stdout)
         # The assistant reply is in the "result" field

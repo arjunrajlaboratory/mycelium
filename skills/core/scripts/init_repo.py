@@ -10,6 +10,8 @@ Usage:
 """
 
 import argparse
+import json
+import shlex
 import shutil
 import sys
 from datetime import UTC, datetime
@@ -59,6 +61,7 @@ def create_directory_structure(target_dir: Path):
         ".living/outputs",
         ".living/outputs/knowledge-transfers",
         ".living/skills",
+        ".mycelium",
         "algorithms",
         "analysis",
         "data",
@@ -74,6 +77,70 @@ def create_directory_structure(target_dir: Path):
         dir_path = target_dir / dir_name
         dir_path.mkdir(parents=True, exist_ok=True)
         print(f"  Created: {dir_name}/")
+
+    state_gitignore = target_dir / ".mycelium" / ".gitignore"
+    if not state_gitignore.exists():
+        state_gitignore.write_text("*\n!.gitignore\n")
+    write_plugin_root_pointer(target_dir)
+
+
+def mycelium_plugin_root() -> Path:
+    """Return the installed Mycelium plugin root for this script."""
+    return Path(__file__).resolve().parents[3]
+
+
+def write_plugin_root_pointer(target_dir: Path) -> bool:
+    """Write the machine-local path used by generated project guidance."""
+    state_dir = target_dir / ".mycelium"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    pointer = state_dir / "plugin-root"
+    expected = f"{mycelium_plugin_root()}\n"
+    before = pointer.read_text(encoding="utf-8") if pointer.exists() else None
+    if before != expected:
+        pointer.write_text(expected, encoding="utf-8")
+        return True
+    return False
+
+
+def create_agent_guidance(target_dir: Path):
+    """Create shared Mycelium guidance plus thin Claude and Codex adapters."""
+    templates_dir = Path(__file__).resolve().parent.parent / "templates"
+    canonical = templates_dir / "MYCELIUM.md.template"
+    canonical_target = target_dir / "MYCELIUM.md"
+    if canonical.exists() and not canonical_target.exists():
+        canonical_text = canonical.read_text(encoding="utf-8")
+        legacy_claude = target_dir / "CLAUDE.md"
+        if legacy_claude.exists():
+            legacy_text = legacy_claude.read_text(encoding="utf-8").replace(
+                ".claude/last-session.md", ".mycelium/last-session.md"
+            )
+            canonical_text = (
+                canonical_text.rstrip()
+                + "\n\n## Existing project guidance migrated from CLAUDE.md\n\n"
+                + "The content below is preserved from the pre-migration project. "
+                + "Resolve its bundled `skills/` and `network/` references through "
+                + "`.mycelium/plugin-root` as described above.\n\n"
+                + legacy_text.rstrip()
+                + "\n"
+            )
+        canonical_target.write_text(canonical_text, encoding="utf-8")
+        print("  Created: MYCELIUM.md")
+
+    for template_name, target_name in (
+        ("CLAUDE.md.template", "CLAUDE.md"),
+        ("AGENTS.md.template", "AGENTS.md"),
+    ):
+        template = templates_dir / template_name
+        target = target_dir / target_name
+        adapter = template.read_text(encoding="utf-8")
+        if not target.exists():
+            target.write_text(adapter, encoding="utf-8")
+            print(f"  Created: {target_name}")
+        elif "<!-- MYCELIUM:BEGIN -->" not in target.read_text(encoding="utf-8"):
+            callout = adapter[adapter.index("<!-- MYCELIUM:BEGIN -->") :]
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write("\n\n" + callout.rstrip() + "\n")
+            print(f"  Updated: {target_name} with Mycelium routing")
 
 
 def dir_to_manifest_name(dir_name: str) -> str:
@@ -123,17 +190,25 @@ def create_manifests(target_dir: Path):
 
 
 def create_todo_list(target_dir: Path):
-    """Create todo/TODOLIST.md for tracking future work items."""
-    todolist_path = target_dir / "todo" / "TODOLIST.md"
-    if not todolist_path.exists():
-        todolist_path.write_text(
-            "# Todo List\n\n"
-            "Master list of future work items. Each item can have a detailed writeup\n"
-            "in a separate `.md` file in this directory.\n\n"
-            "## Items\n\n"
-            "<!-- Add todo items below. Link to detailed writeups as needed. -->\n"
+    """Create the todo registry and item template used by the core skill."""
+    todo_dir = target_dir / "todo"
+    todo_dir.mkdir(parents=True, exist_ok=True)
+    registry = todo_dir / "TODO_REGISTRY.md"
+    if not registry.exists():
+        registry.write_text(
+            "# TODO Registry\n\n"
+            "| Item | Priority | Status | Category | Date | Author | File |\n"
+            "|------|----------|--------|----------|------|--------|------|\n\n"
+            "<!-- Add new entries above this line -->\n",
+            encoding="utf-8",
         )
-        print("  Created: todo/TODOLIST.md")
+        print("  Created: todo/TODO_REGISTRY.md")
+
+    item_template = todo_dir / "TODO_ITEM_TEMPLATE.md"
+    bundled_template = mycelium_plugin_root() / "todo" / "TODO_ITEM_TEMPLATE.md"
+    if not item_template.exists() and bundled_template.exists():
+        shutil.copy2(bundled_template, item_template)
+        print("  Created: todo/TODO_ITEM_TEMPLATE.md")
 
 
 def create_living_layer(target_dir: Path):
@@ -255,7 +330,7 @@ def create_skillpacks(target_dir: Path):
 def find_network_conventions_dir() -> Path | None:
     """Locate the network/conventions/ directory relative to this script."""
     candidates = [
-        Path(__file__).resolve().parent.parent.parent / "network" / "conventions",
+        Path(__file__).resolve().parents[3] / "network" / "conventions",
         Path.home() / ".mycelium" / "network" / "conventions",
     ]
     for candidate in candidates:
@@ -359,6 +434,44 @@ MYCELIUM_HOOK_BASENAMES = {
 }
 
 
+def _hook_basename(command: str) -> str:
+    """Return the script basename from a plain or env-prefixed command."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    return Path(parts[-1]).name if parts else ""
+
+
+def _hook_command_path(command: str) -> Path:
+    """Return the executable path from a hook command string."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    return Path(parts[-1]) if parts else Path()
+
+
+def _put_hook_first(handlers: list[dict], basename: str) -> None:
+    """Move a named hook ahead of sibling handlers without disturbing others."""
+    matching = [
+        handler
+        for handler in handlers
+        if _hook_basename(handler.get("command", "")) == basename
+    ]
+    if matching:
+        handlers[:] = matching + [handler for handler in handlers if handler not in matching]
+
+
+def _ensure_gitignore_entry(path: Path, entry: str) -> None:
+    """Append one exact ignore entry while preserving existing content."""
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    if entry in content.splitlines():
+        return
+    separator = "" if not content or content.endswith("\n") else "\n"
+    path.write_text(f"{content}{separator}{entry}\n", encoding="utf-8")
+
+
 def _consolidate_duplicate_hooks(
     hooks: dict,
     valid_replacement_for: dict[str, str] | None = None,
@@ -393,7 +506,7 @@ def _consolidate_duplicate_hooks(
             basename_to_cmds: dict[str, list[str]] = {}
             for h in entry.get("hooks", []):
                 cmd = h.get("command", "")
-                bn = Path(cmd).name
+                bn = _hook_basename(cmd)
                 if bn in MYCELIUM_HOOK_BASENAMES:
                     basename_to_cmds.setdefault(bn, []).append(cmd)
 
@@ -401,8 +514,8 @@ def _consolidate_duplicate_hooks(
             canonical: dict[str, str] = {}
             droppable_stale: set[str] = set()
             for bn, cmds in basename_to_cmds.items():
-                live = [c for c in cmds if Path(c).exists()]
-                stale = [c for c in cmds if not Path(c).exists()]
+                live = [c for c in cmds if _hook_command_path(c).exists()]
+                stale = [c for c in cmds if not _hook_command_path(c).exists()]
 
                 if live:
                     marketplace = [c for c in live if "/marketplaces/" in c]
@@ -428,7 +541,7 @@ def _consolidate_duplicate_hooks(
             new_hook_list = []
             for h in entry.get("hooks", []):
                 cmd = h.get("command", "")
-                bn = Path(cmd).name
+                bn = _hook_basename(cmd)
                 if bn in canonical and cmd != canonical[bn]:
                     removed += 1
                     continue
@@ -447,15 +560,13 @@ def install_claude_hooks(target_dir: Path):
     Two-pass:
     1. Consolidate any pre-existing duplicate entries (same script, different
        paths — e.g. marketplace + dev-repo). Prefers marketplace path.
-    2. Install any of the 5 mycelium hooks that are missing entirely. Match
+    2. Install the complete mycelium hook bundle that are missing entirely. Match
        by script *basename* not full path so a re-run with a different
        hooks-dir does not double-install.
 
     Handles the innermost-wins rule: subproject settings must include
-    the complete hook set or parent hooks won't fire.
+    the complete hook bundle or parent hooks won't fire.
     """
-    import json
-
     hooks_dir = find_mycelium_hooks_dir()
     if not hooks_dir:
         print("  Warning: Could not locate mycelium hooks directory.")
@@ -509,7 +620,7 @@ def install_claude_hooks(target_dir: Path):
     def _has_hook(hook_list: list, basename: str) -> bool:
         """Check if any entry registers the named script (path-agnostic)."""
         return any(
-            Path(h.get("command", "")).name == basename
+            _hook_basename(h.get("command", "")) == basename
             for entry in hook_list
             for h in entry.get("hooks", [])
         )
@@ -546,7 +657,7 @@ def install_claude_hooks(target_dir: Path):
         print("  Registered: PostToolUse (Edit|Write) → mycelium-activity-tracker.sh")
 
     # --- PostToolUse: mycelium-read-tracker.sh (matcher: Read) ---
-    # Logs each .living/ file read to .claude/mycelium-read-access.log so we
+    # Logs each .living/ file read to .mycelium/mycelium-read-access.log so we
     # can measure access rates over time. Silent — no agent-facing context.
     if not _has_hook(post_tool, "mycelium-read-tracker.sh"):
         read_entry = next((e for e in post_tool if e.get("matcher") == "Read"), None)
@@ -558,7 +669,7 @@ def install_claude_hooks(target_dir: Path):
 
     # --- PostToolUse: mycelium-data-tracker.sh (matcher: Bash) ---
     # Detects analysis invocations and appends one NDJSON event per detected
-    # script to .claude/mycelium-data-events.tmp under fcntl.flock. Consumed
+    # script to .mycelium/mycelium-data-events.tmp under fcntl.flock. Consumed
     # at Stop by mycelium-data-lineage-stop.sh.
     if not _has_hook(post_tool, "mycelium-data-tracker.sh"):
         bash_entry = next((e for e in post_tool if e.get("matcher") == "Bash"), None)
@@ -588,8 +699,65 @@ def install_claude_hooks(target_dir: Path):
         catch_all["hooks"].append(_hook_entry(data_lineage_stop_hook))
         print("  Registered: Stop → mycelium-data-lineage-stop.sh")
 
+    for group in stop:
+        _put_hook_first(group.get("hooks", []), "mycelium-data-lineage-stop.sh")
+
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
     print("  Wrote: .claude/settings.local.json")
+
+
+def install_codex_hooks(target_dir: Path):
+    """Create or update .codex/hooks.json with Codex-compatible hooks."""
+    hooks_dir = find_mycelium_hooks_dir()
+    if not hooks_dir:
+        print("  Warning: Could not locate mycelium hooks directory.")
+        print("  Codex hooks were not auto-installed.")
+        return
+
+    codex_dir = target_dir / ".codex"
+    codex_dir.mkdir(exist_ok=True)
+    hooks_path = codex_dir / "hooks.json"
+    config = json.loads(hooks_path.read_text()) if hooks_path.exists() else {}
+    hooks = config.setdefault("hooks", {})
+
+    def command(name: str) -> str:
+        script = shlex.quote(str(hooks_dir / name))
+        return f"MYCELIUM_HOOK_HOST=codex {script}"
+
+    def ensure(event: str, matcher: str, script: str):
+        groups = hooks.setdefault(event, [])
+        group = next(
+            (item for item in groups if item.get("matcher", "") == matcher), None
+        )
+        if group is None:
+            group = {"matcher": matcher, "hooks": []}
+            groups.append(group)
+        handlers = group.setdefault("hooks", [])
+        existing = [
+            handler
+            for handler in handlers
+            if _hook_basename(handler.get("command", "")) == script
+        ]
+        if existing:
+            existing[0]["command"] = command(script)
+            for duplicate in existing[1:]:
+                handlers.remove(duplicate)
+        else:
+            handlers.append({"type": "command", "command": command(script)})
+
+    ensure("SessionStart", "startup|resume|clear|compact", "mycelium-health.sh")
+    ensure("PostToolUse", "exec_command", "mycelium-post-action.sh")
+    ensure("PostToolUse", "exec_command", "mycelium-data-tracker.sh")
+    ensure("PostToolUse", "apply_patch", "mycelium-activity-tracker.sh")
+    ensure("Stop", "", "mycelium-stop-check.sh")
+    ensure("Stop", "", "mycelium-data-lineage-stop.sh")
+    for group in hooks.get("Stop", []):
+        _put_hook_first(group.get("hooks", []), "mycelium-data-lineage-stop.sh")
+
+    hooks_path.write_text(json.dumps(config, indent=2) + "\n")
+    gitignore = codex_dir / ".gitignore"
+    _ensure_gitignore_entry(gitignore, "hooks.json")
+    print("  Wrote: .codex/hooks.json")
 
 
 def create_environments_file(target_dir: Path):
@@ -896,6 +1064,9 @@ def main():
     print("\nCreating environment documentation...")
     create_environments_file(target_dir)
 
+    print("\nCreating agent guidance...")
+    create_agent_guidance(target_dir)
+
     print("\nInstalling core convention packs...")
     install_core_convention_packs(target_dir)
 
@@ -905,12 +1076,16 @@ def main():
     print("\nInstalling Claude Code hooks...")
     install_claude_hooks(target_dir)
 
+    print("\nInstalling Codex hooks...")
+    install_codex_hooks(target_dir)
+
     print("\n" + "=" * 50)
     print("Mycelium initialization complete!")
     print("\nNext steps:")
-    print("  1. Generate CLAUDE.md from the template")
+    print("  1. Review MYCELIUM.md, CLAUDE.md, and AGENTS.md")
     print(
-        "  2. Install domain conventions if needed (/mycelium:skill install-convention)"
+        "  2. Install domain conventions if needed "
+        "(/mycelium:core or $mycelium:core)"
     )
     print("  3. Run validate_structure.py to confirm setup")
     print("  4. Start working — the repo is now alive!")

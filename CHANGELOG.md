@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Codex plugin support and shared Agent Skills.** The Claude-only `commands/` workflows now live in the cross-platform `skills/<name>/SKILL.md` format with Codex UI metadata and a `.codex-plugin/plugin.json` manifest. Project initialization creates canonical `MYCELIUM.md` guidance, thin `CLAUDE.md` and `AGENTS.md` adapters, provider-neutral `.mycelium/` state, and hook configurations for both hosts. Hooks emit each host's wire format, parse Codex `apply_patch` activity, retain Stop enforcement and data lineage, and no longer launch a provider-specific background CLI. New compatibility tests cover packaging, initialization, SessionStart, PostToolUse, apply-patch tracking, and Stop behavior.
+
+### Fixed
+
+- **Codex compatibility follow-up.** Explicit skill prompts now use the installed `mycelium:` namespace; generated project guidance resolves bundled resources through `.mycelium/plugin-root`; migrations preserve existing project-specific `CLAUDE.md` guidance for Codex; scaffolds create the documented todo registry and item template; Codex hook configuration is always gitignored; and data-lineage consolidation retains the canonical Mycelium session ID independently of Stop-hook ordering.
+
 ### Changed
 
 - **`report-generator` convention pack (0.2.0 → 0.3.0): worked-example provenance, audience tiers, narrative-vs-structured Results, and shape-budget check.** Surfaced from comparing the v0.2.0 baseline output against the legacy report on a real A191 analysis. Six follow-ups: (1) Phase 1 manifest gains a `worked_examples[]` section with row-level provenance so Phase 6 can catch confabulated worked-example values (the failure mode the v0.2.0 worked-example gate could not detect — presence was enforced, contents were not); (2) Phase 0 gains an audience-tier ladder (A lay / B adjacent-field default / C in-field PI), recorded in `manifest.policies.acronym_*` and `intuition_leadin_default_form`, which the Phase 4 plain-English lint reads to modulate strictness; (3) Phase 0 gains a Results-structure question (narrative default vs structured Q/F/I headers), recorded in `manifest.policies.results_structure`; (4) Phase 5 framing critique gains an explicit subsection-title-states-finding test (topic-only Results titles get flagged); (5) Phase 6 numerical re-verify gains a Provenance-section completeness check that lists analysis scripts and flags any missing from the report's Provenance; (6) Phase 7 records main-text page count and flags shape-budget overruns (overview > 6 pages; overview+supplement > 14 pages; comprehensive < 5 pages) in `.compile-log.md`. Manifest example extended with `policies`, `worked_examples`, and a failure-mode worked example for the supplement.

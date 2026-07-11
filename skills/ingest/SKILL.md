@@ -1,18 +1,18 @@
 ---
+name: ingest
 description: >
-  Use this skill when the user wants to add, import, or ingest files or data
-  into the project. Trigger whenever someone mentions: adding data/files to
-  the project, ingesting a dataset, importing new data, bringing in files from
-  any source, having received results or files from collaborators or facilities,
-  needing to place files into the data directory, or setting up/initializing
-  mycelium. Covers all file types (CSV, FASTQ, XLSX, TIFF, JSON, FCS, TSV,
-  images, etc.). This skill copies/moves files into the project structure,
-  generates metadata, updates the data manifest, and documents provenance.
-  Do NOT use for: reading or analyzing existing project data, listing datasets,
-  deleting data, downloading from URLs, or editing code files.
+  Add or import files and datasets into a Mycelium project with metadata,
+  provenance, validation, and DATA_MANIFEST updates. Use for collaborator or
+  facility outputs and formats such as CSV, FASTQ, XLSX, TIFF, JSON, FCS, TSV,
+  or images. Do not use for analyzing existing data, listing datasets, deleting
+  data, downloading URLs, or editing code.
 ---
 
 # Mycelium — Ingest
+
+Resolve bundled `skills/` and `network/` paths relative to the Mycelium plugin
+root—the ancestor containing `.codex-plugin/` and `.claude-plugin/`. Resolve
+data and `.living/` paths relative to the user's repository.
 
 Pull a new dataset into the analytical framework, ensuring it is properly documented, validated, and registered.
 

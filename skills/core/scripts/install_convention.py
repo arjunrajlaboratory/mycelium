@@ -46,7 +46,7 @@ def find_network_dir(network_dir: Path | None) -> Path | None:
 
     # Search common locations
     candidates = [
-        Path(__file__).resolve().parent.parent.parent / "network" / "conventions",
+        Path(__file__).resolve().parents[3] / "network" / "conventions",
         Path.home() / ".mycelium" / "network" / "conventions",
     ]
     for candidate in candidates:
@@ -122,18 +122,20 @@ def update_active_conventions(target_dir: Path, name: str):
 
 
 def update_claude_md(target_dir: Path, name: str):
-    """Update CLAUDE.md to reference the new convention pack."""
-    claude_md = target_dir / "CLAUDE.md"
-    if not claude_md.exists():
-        print("  Skipping CLAUDE.md update (file not found)")
+    """Update canonical guidance, falling back to legacy CLAUDE.md."""
+    guidance_path = target_dir / "MYCELIUM.md"
+    if not guidance_path.exists():
+        guidance_path = target_dir / "CLAUDE.md"
+    if not guidance_path.exists():
+        print("  Skipping guidance update (MYCELIUM.md not found)")
         return
 
-    content = claude_md.read_text()
+    content = guidance_path.read_text()
     conv_ref = f"- **{name}** — See `.living/conventions/{name}/analysis-conventions.md`"
 
     # Already referenced?
     if f".living/conventions/{name}/" in content:
-        print(f"  CLAUDE.md already references {name}")
+        print(f"  {guidance_path.name} already references {name}")
         return
 
     # Try the new template format first: "### Domain (opt-in)" subsection
@@ -164,8 +166,8 @@ def update_claude_md(target_dir: Path, name: str):
     else:
         content += f"\n\n## Installed Convention Packs\n\n{conv_ref}\n"
 
-    claude_md.write_text(content)
-    print(f"  Updated {claude_md}")
+    guidance_path.write_text(content)
+    print(f"  Updated {guidance_path}")
 
 
 def main():
@@ -199,7 +201,7 @@ def main():
     print("\nUpdating active conventions registry...")
     update_active_conventions(target_dir, args.name)
 
-    print("\nUpdating CLAUDE.md...")
+    print("\nUpdating Mycelium guidance...")
     update_claude_md(target_dir, args.name)
 
     print("\n" + "=" * 50)

@@ -1,32 +1,19 @@
 ---
+name: codex-review
 description: >
-  ALWAYS invoke this skill when the user wants to respond to, address, or act on
-  Codex review comments on a pull request. Trigger phrases include: "respond to
-  Codex", "address the Codex comment(s)", "fix what Codex flagged", "handle the
-  Codex review", "Codex left comments", "reply to Codex", "@codex", "the bot
-  flagged this", "/mycelium:codex-review". Also trigger proactively when the user
-  pastes a Codex review comment or a link to one and asks you to fix it, or when
-  they are iterating with Codex on a PR and want the round to converge. The
-  defining behavior of this skill — and the reason to use it instead of an ad-hoc
-  fix — is that it does not just patch the single line Codex flagged: it
-  generalizes each comment into an underlying ERROR PATTERN and audits the WHOLE
-  branch for other instances of that same pattern, fixing them all in one pass so
-  later Codex rounds don't surface the same mistake one instance at a time. It
-  auto-detects scope (a specific comment if you point to one, otherwise all open
-  Codex comments on the PR), verifies the fixes against the project's tests, and
-  drafts a reply that summarizes both the targeted fix and the branch-wide audit.
-  When it posts, it appends `@codex review` to re-trigger Codex ONLY if it detects
-  the user already has Codex access on the repo (the Codex bot has previously
-  reviewed or commented on this PR); otherwise it asks first. Posting is
-  outward-facing, so it always drafts the reply, shows it, and posts only after
-  you confirm.
-  Do NOT trigger for: a general analysis-aware code review with no Codex comment
-  involved (/mycelium:review), writing NEW analysis code (/mycelium:analyze),
-  generating reports (/mycelium:report), or open-ended brainstorming
-  (/mycelium:ideas).
+  Address Codex review comments on a pull request. Use when the user asks to
+  respond to Codex, fix what Codex flagged, handle an @codex comment, or supplies
+  a Codex review link. Generalize each comment into an error pattern, audit the
+  whole branch for other instances, fix and test them, then draft a reply.
+  Confirm before posting or re-triggering review. Do not use for a general code
+  or scientific review without Codex feedback.
 ---
 
 # Mycelium — Codex Review
+
+Resolve bundled `skills/` paths relative to the Mycelium plugin root (two
+directories above this `SKILL.md`). Resolve repository and `.living/` paths
+relative to the user's working repository.
 
 Handle Codex review comments on a pull request so that each review round actually
 converges instead of looping. The point is in Step 3: when Codex flags one
@@ -200,7 +187,7 @@ place. Otherwise no logging is needed.
 
 ## Cross-references inside this skill
 
-- `commands/review.md` — the general analysis-aware review skill; use it when
+- `../review/SKILL.md` — the general analysis-aware review skill; use it when
   there is no Codex comment to respond to.
-- The mycelium core `Post-Action Hook Protocol` in `commands/core.md` governs
+- The mycelium core `Post-Action Hook Protocol` in `../core/SKILL.md` governs
   what to log to `.living/` when an audit surfaces a recurring pattern.

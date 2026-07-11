@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Analyze"
+  short_description: "Run robust, convention-aware data analysis"
+  default_prompt: "Use $mycelium:analyze to run this analysis with the project's Mycelium conventions."

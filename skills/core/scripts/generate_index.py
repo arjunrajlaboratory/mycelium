@@ -8,6 +8,8 @@ table with entry counts, last-modified dates, and key topics.
 import argparse
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -756,7 +758,7 @@ def build_llm_prompt(
         decisions_count: Total entry count in decisions.md.
 
     Returns:
-        Prompt string ready for passing to claude CLI.
+        Prompt string ready for passing to a supported agent CLI.
     """
 
     def _format_snippets(snippets: list[tuple[str, str]]) -> str:
@@ -799,8 +801,44 @@ Rules:
 """
 
 
+def _agent_cli_command() -> tuple[list[str], str]:
+    """Resolve a non-interactive Claude or Codex command.
+
+    ``MYCELIUM_AGENT_CLI`` may name a binary or a command prefix. Without an
+    override, Claude is preferred for backward compatibility and Codex is used
+    when Claude is unavailable.
+    """
+    override = os.environ.get("MYCELIUM_AGENT_CLI", "").strip()
+    if override:
+        prefix = shlex.split(override)
+        if not prefix:
+            raise FileNotFoundError("MYCELIUM_AGENT_CLI is empty")
+        kind = "codex" if Path(prefix[0]).name == "codex" else "claude"
+    else:
+        binary = shutil.which("claude") or shutil.which("codex")
+        if not binary:
+            raise FileNotFoundError("neither claude nor codex CLI was found")
+        prefix = [binary]
+        kind = Path(binary).name
+
+    if kind == "codex":
+        return (
+            prefix
+            + [
+                "exec",
+                "--ephemeral",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "-",
+            ],
+            kind,
+        )
+    return prefix + ["-p", "--model", "sonnet"], kind
+
+
 def call_llm(prompt: str) -> str:
-    """Call `claude -p` with --model sonnet and return the output.
+    """Call a supported local agent CLI and return its response.
 
     Args:
         prompt: The prompt string to pass via stdin.
@@ -809,10 +847,11 @@ def call_llm(prompt: str) -> str:
         The LLM's response string.
 
     Raises:
-        RuntimeError: If the claude CLI call fails or returns non-zero exit code.
+        RuntimeError: If the agent CLI call fails or returns non-zero exit code.
     """
+    command, kind = _agent_cli_command()
     result = subprocess.run(
-        ["claude", "-p", "--model", "sonnet"],
+        command,
         input=prompt,
         capture_output=True,
         text=True,
@@ -821,7 +860,7 @@ def call_llm(prompt: str) -> str:
     if result.returncode != 0:
         stderr = result.stderr.strip()
         raise RuntimeError(
-            f"claude CLI failed (exit {result.returncode}): {stderr or '(no stderr)'}"
+            f"{kind} CLI failed (exit {result.returncode}): {stderr or '(no stderr)'}"
         )
     return result.stdout
 

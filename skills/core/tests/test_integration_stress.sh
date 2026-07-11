@@ -31,7 +31,7 @@ make_repo() {
   touch "$dir/README.md"
   git -C "$dir" add README.md
   git -C "$dir" commit -q -m "init"
-  mkdir -p "$dir/.claude"
+  mkdir -p "$dir/.mycelium"
   echo "$dir"
 }
 
@@ -240,7 +240,7 @@ echo "TEST 4: Read tracker logs only .living/ reads"
   make_living "$REPO"
   write_learnings "$REPO/.living/learnings.md" 2
 
-  LOG_FILE="$REPO/.claude/mycelium-read-access.log"
+  LOG_FILE="$REPO/.mycelium/mycelium-read-access.log"
 
   # Send 5 .living/ read events
   for i in 1 2 3 4 5; do
@@ -465,7 +465,7 @@ echo "TEST 9: Read tracker accumulates entries across multiple sessions"
   make_living "$REPO"
   write_learnings "$REPO/.living/learnings.md" 2
 
-  LOG_FILE="$REPO/.claude/mycelium-read-access.log"
+  LOG_FILE="$REPO/.mycelium/mycelium-read-access.log"
 
   # Simulate session 1: 3 reads
   for i in 1 2 3; do

@@ -3,7 +3,7 @@
 # Detects analysis invocations (python/R/Rscript/jupyter/uv/poetry), regex-
 # extracts the script's data I/O at execution time, SHA-snapshots the script
 # + touched files, and appends one NDJSON event per detected script to
-# .claude/mycelium-data-events.tmp under fcntl.flock. Consumed at Stop by
+# .mycelium/mycelium-data-events.tmp under fcntl.flock. Consumed at Stop by
 # mycelium-data-lineage-stop.sh -> extract_data_lineage.py to assemble the
 # per-session manifest at .living/log/data-lineage/<sid>.json.
 #
@@ -20,31 +20,33 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$HERE/mycelium-hook-lib.sh"
 
 {
   INPUT=$(cat)
 
-  COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
+  COMMAND=$(printf '%s' "$INPUT" | mycelium_json_get 'tool_input.command')
   if [[ -z "$COMMAND" ]]; then exit 0; fi
 
-  SESSION_CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+  SESSION_CWD=$(printf '%s' "$INPUT" | mycelium_json_get 'cwd')
   if [[ -z "$SESSION_CWD" ]] || [[ ! -d "$SESSION_CWD" ]]; then exit 0; fi
 
   # Resolve REPO_ROOT from session cwd (not hook cwd — same lesson as the
   # other trackers). Bail unless the repo has .living/ (mycelium-enabled).
   REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo "")
   if [[ -z "$REPO_ROOT" ]] || [[ ! -d "$REPO_ROOT/.living" ]]; then exit 0; fi
+  mycelium_prepare_state_dir "$REPO_ROOT"
 
-  AGENT_ID=$(printf '%s' "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || echo "")
-  AGENT_TYPE=$(printf '%s' "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null || echo "")
+  AGENT_ID=$(printf '%s' "$INPUT" | mycelium_json_get 'agent_id')
+  AGENT_TYPE=$(printf '%s' "$INPUT" | mycelium_json_get 'agent_type')
 
   # Locate the Python extractor helper. Default: sibling in skills/core/scripts/.
   HELPER="${MYCELIUM_DATA_HELPER:-$HERE/../scripts/extract_data_lineage_event.py}"
   if [[ ! -f "$HELPER" ]]; then exit 0; fi
 
   TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  EVENTS_FILE="$REPO_ROOT/.claude/mycelium-data-events.tmp"
-  mkdir -p "$REPO_ROOT/.claude"
+  EVENTS_FILE="$STATE_DIR/mycelium-data-events.tmp"
+  mkdir -p "$STATE_DIR"
 
   # Build optional flags conditionally. macOS bash 3.2 treats empty-array
   # expansion as unbound under `set -u`, so use the ${arr+"${arr[@]}"} idiom

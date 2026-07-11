@@ -1,21 +1,18 @@
 ---
+name: report
 description: >
-  ALWAYS invoke this skill when a user wants to produce a written document from
-  analysis results in this repository. This skill loads project-specific report
-  templates, section-by-section writing guidance, provenance records, and a QC
-  checklist that are not available from general knowledge — you cannot write a
-  proper report without consulting it first. Trigger for: creating reports,
-  writeups, PDFs, or summary documents from completed analyses; drafting methods
-  or results sections for papers or manuscripts; producing any document artifact
-  the user wants to share, send, or hand off to someone (PI, collaborator,
-  team). The user's intent must be to create a downloadable/sharable document —
-  not to get a verbal explanation. Do NOT trigger for: answering questions about
-  results conversationally, explaining or interpreting findings in chat, creating
-  standalone charts or figures without a surrounding document, performing the
-  analysis itself, ingesting data, setting up repositories, or brainstorming.
+  Create a shareable report, PDF, manuscript section, or structured writeup from
+  completed Mycelium analyses. Load the project's report templates, provenance,
+  section guidance, and QC checklist. Use when the user wants a document artifact
+  for collaborators or publication. Do not use for conversational explanation,
+  standalone figures, performing analysis, ingestion, setup, or brainstorming.
 ---
 
 # Mycelium — Report
+
+Resolve bundled `skills/` and `network/` paths relative to the Mycelium plugin
+root—the ancestor containing `.codex-plugin/` and `.claude-plugin/`. Resolve
+reports and `.living/` paths relative to the user's repository.
 
 Generate a structured report from an analysis, routing to the appropriate report convention pack installed in this repository.
 

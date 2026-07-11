@@ -1,0 +1,28 @@
+{
+  "name": "mycelium",
+  "version": "0.6.0",
+  "description": "Self-documenting, self-improving framework for analytical repositories",
+  "author": {
+    "name": "Arjun Raj Laboratory",
+    "url": "https://github.com/arjunrajlaboratory"
+  },
+  "homepage": "https://github.com/arjunrajlaboratory/mycelium",
+  "repository": "https://github.com/arjunrajlaboratory/mycelium",
+  "license": "MIT",
+  "keywords": ["research", "analysis", "provenance", "knowledge-management"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Mycelium",
+    "shortDescription": "Living repositories for analytical work",
+    "longDescription": "Capture analytical decisions, learnings, findings, provenance, and reusable conventions as projects evolve.",
+    "developerName": "Arjun Raj Laboratory",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "websiteURL": "https://github.com/arjunrajlaboratory/mycelium",
+    "defaultPrompt": [
+      "Set up Mycelium in this repository.",
+      "Analyze this dataset using the project conventions.",
+      "Review this analysis for scientific correctness."
+    ]
+  }
+}

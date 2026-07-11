@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # mycelium-data-lineage-stop.sh — Claude Code Stop hook
 # At session end, if the session captured any data-analysis events into
-# .claude/mycelium-data-events.tmp, invokes extract_data_lineage.py to
+# .mycelium/mycelium-data-events.tmp, invokes extract_data_lineage.py to
 # consolidate them into .living/log/data-lineage/<session_id>.json and
 # writes a status sentinel at .living/log/.data-lineage-status-<sid>.json.
 #
@@ -18,28 +18,36 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$HERE/mycelium-hook-lib.sh"
 
 {
   INPUT=$(cat)
 
-  SESSION_CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
-  CLAUDE_UUID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+  SESSION_CWD=$(printf '%s' "$INPUT" | mycelium_json_get 'cwd')
+  HOST_SESSION_ID=$(printf '%s' "$INPUT" | mycelium_json_get 'session_id')
   if [[ -z "$SESSION_CWD" ]] || [[ ! -d "$SESSION_CWD" ]]; then exit 0; fi
 
   REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo "")
   if [[ -z "$REPO_ROOT" ]] || [[ ! -d "$REPO_ROOT/.living" ]]; then exit 0; fi
+  mycelium_prepare_state_dir "$REPO_ROOT"
 
-  EVENTS_FILE="$REPO_ROOT/.claude/mycelium-data-events.tmp"
+  SESSION_MARKER="$STATE_DIR/data-lineage-session-id.tmp"
+  trap 'rm -f "$SESSION_MARKER"' EXIT
+
+  EVENTS_FILE="$STATE_DIR/mycelium-data-events.tmp"
   if [[ ! -s "$EVENTS_FILE" ]]; then exit 0; fi  # no events this session
 
   # Resolve SESSION_ID. Prefer mycelium's date-counter format (YYYY-MM-DD-NNN)
   # so manifests cross-reference cleanly with LOG_REGISTRY rows. Mycelium
-  # writes the per-session log path into .claude/active-session-log.tmp at
+  # writes the per-session log path into .mycelium/active-session-log.tmp at
   # session start; the basename encodes the session ID. Fall back to Claude
   # Code's UUID only if mycelium hasn't recorded an active session.
-  SESSION_ID=""
-  ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
-  if [[ -f "$ACTIVE_LOG_FILE" ]]; then
+  SESSION_ID=$(head -1 "$SESSION_MARKER" 2>/dev/null || echo "")
+  if [[ ! "$SESSION_ID" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]+$ ]]; then
+    SESSION_ID=""
+  fi
+  ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
+  if [[ -z "$SESSION_ID" && -f "$ACTIVE_LOG_FILE" ]]; then
     LOG_PATH=$(head -1 "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
     if [[ -n "$LOG_PATH" ]]; then
       LOG_BASENAME=$(basename "$LOG_PATH" .md)
@@ -55,7 +63,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     fi
   fi
   if [[ -z "$SESSION_ID" ]]; then
-    SESSION_ID="$CLAUDE_UUID"
+    SESSION_ID="$HOST_SESSION_ID"
   fi
   if [[ -z "$SESSION_ID" ]]; then exit 0; fi
 
@@ -106,7 +114,7 @@ PYINNER
   # Rotate to a per-session-ID prev so successive sessions don't clobber
   # each other's raw events backup. The operator can inspect any recent
   # session's raw events as long as the file hasn't been pruned.
-  PREV_DIR="$REPO_ROOT/.claude/mycelium-data-events-prev"
+  PREV_DIR="$STATE_DIR/mycelium-data-events-prev"
   mkdir -p "$PREV_DIR"
   mv "$EVENTS_FILE" "$PREV_DIR/${SESSION_ID}.tmp"
   # Prune: keep only the 20 most recent per-session prev files. Cheap

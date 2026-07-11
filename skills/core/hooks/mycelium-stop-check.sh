@@ -11,6 +11,9 @@
 
 set -euo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$HERE/mycelium-hook-lib.sh"
+
 # Read stdin JSON
 INPUT=$(cat)
 
@@ -22,6 +25,10 @@ fi
 
 # Determine repo root early (used by both log finalization and .living/ checks)
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+if [ -z "$REPO_ROOT" ]; then
+  exit 0
+fi
+mycelium_prepare_state_dir "$REPO_ROOT"
 
 # Resolve this hook's mycelium-core dir once, in absolute form. Used to locate
 # the upsert script and the log-scribe template. BASH_SOURCE may be unset in
@@ -30,14 +37,13 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR=$(cd "$(dirname "$(dirname "$HOOK_SOURCE")")" 2>/dev/null && pwd || echo "")
 UPSERT_SCRIPT="$SCRIPT_DIR/scripts/upsert_registry_row.py"
-TEMPLATE_FILE="$SCRIPT_DIR/templates/log-scribe-prompt.md"
 
 # --- Session log finalization ---
-ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
+ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
 if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
   LOG_PATH=$(head -1 "$ACTIVE_LOG_FILE")
   OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
-  OUR_TS=$(cat "$REPO_ROOT/.claude/session-start-ts.tmp" 2>/dev/null || echo "")
+  OUR_TS=$(cat "$STATE_DIR/session-start-ts.tmp" 2>/dev/null || echo "")
 
   # Subagent detection: if owner timestamp exists and doesn't match ours, we're a subagent
   if [ -n "$OWNER_TS" ] && [ -n "$OUR_TS" ] && [ "$OWNER_TS" != "$OUR_TS" ]; then
@@ -52,7 +58,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
     # session-start-ts.tmp, which can be stale across crashed sessions and
     # produce nonsense durations like 14794 minutes for a 55-second session.
     LOG_REPO="$REPO_ROOT"
-    START_FILE="$LOG_REPO/.claude/session-start-ts.tmp"
+    START_FILE="$STATE_DIR/session-start-ts.tmp"
     NOW_TS=$(date +%s)
     DURATION_MIN=0
     START_TS=""
@@ -83,7 +89,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
     fi
     FILES_CHANGED=$((FILES_CHANGED_UNCOMMITTED + FILES_CHANGED_STAGED + FILES_CHANGED_COMMITTED))
     # Also count activity-tracked files (Edit/Write operations not yet in git)
-    ACTIVITY_FILE_CHECK="$LOG_REPO/.claude/mycelium-session-activity.tmp"
+    ACTIVITY_FILE_CHECK="$STATE_DIR/mycelium-session-activity.tmp"
     if [ -f "$ACTIVITY_FILE_CHECK" ] && [ "$FILES_CHANGED" -eq 0 ]; then
       FILES_CHANGED=$(sort -u "$ACTIVITY_FILE_CHECK" | grep -c . || echo "0")
     fi
@@ -119,7 +125,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
     if [ "$ACTIVITY_COUNT" -eq 0 ] && [ "$COMMITS_THIS_SESSION" -eq 0 ] && [ "$UNCOMMITTED_RECENT" -eq 0 ]; then
       rm -f "$LOG_PATH"
       rm -f "$ACTIVE_LOG_FILE"
-      rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
+      rm -f "$STATE_DIR/session-start-ts.tmp"
       # No registry row, no finalization — clean exit (noise session)
     else
       # Auto-finalize the session log (factual record — no Claude needed)
@@ -133,7 +139,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       rm -f "${LOG_PATH}.bak"
 
       # Append file list from activity tracker or git diff
-      ACTIVITY_FILE="$LOG_REPO/.claude/mycelium-session-activity.tmp"
+      ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
       FILE_LIST_MD=""
       GIT_FILES=""
       if [ -f "$ACTIVITY_FILE" ]; then
@@ -195,9 +201,8 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
         fi
       fi
 
-      # Deterministic fallback Summary: commit subjects since session start.
-      # Runs in milliseconds, no LLM, no dependency. The haiku call (if available)
-      # will upgrade this to a semantic Summary; if not, this is what stays.
+      # Deterministic Summary: commit subjects since session start.
+      # Runs in milliseconds with no model or provider dependency.
       if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
         DETERMINISTIC_SUMMARY=$(git -C "$LOG_REPO" log --since="@${START_TS}" --pretty=format:'%s' 2>/dev/null \
           | head -3 | tr '\n' ';' | sed 's/;$//; s/;/; /g')
@@ -215,7 +220,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       fi
 
       # Auto-write last-session.md for next session context
-      _SESSION_FILE="$REPO_ROOT/.claude/last-session.md"
+      _SESSION_FILE="$STATE_DIR/last-session.md"
       _WORK_LINES=""
       # Try recent commit messages first
       if [ -n "${START_TS:-}" ]; then
@@ -242,12 +247,12 @@ LAST_SESSION_EOF
 
       # Clean up sentinels
       rm -f "$ACTIVE_LOG_FILE"
-      rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
+      rm -f "$STATE_DIR/session-start-ts.tmp"
     fi
   else
     # Log file doesn't exist (was deleted?) — clean up sentinels
     rm -f "$ACTIVE_LOG_FILE"
-    rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
+    rm -f "$STATE_DIR/session-start-ts.tmp"
   fi
 fi
 
@@ -264,8 +269,8 @@ fi
 
 # Check if any work was done this session.
 # Work detected by: mycelium-reminded.tmp (analysis or Edit/Write) or mycelium-session-activity.tmp
-REMINDER_FILE="$REPO_ROOT/.claude/mycelium-reminded.tmp"
-ACTIVITY_FILE="$REPO_ROOT/.claude/mycelium-session-activity.tmp"
+REMINDER_FILE="$STATE_DIR/mycelium-reminded.tmp"
+ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
 if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
   exit 0
 fi
@@ -273,8 +278,8 @@ fi
 # Use reminder timestamp if available, otherwise session start timestamp
 if [ -f "$REMINDER_FILE" ]; then
   WORK_TS=$(cat "$REMINDER_FILE")
-elif [ -f "$REPO_ROOT/.claude/session-start-ts.tmp" ]; then
-  WORK_TS=$(cat "$REPO_ROOT/.claude/session-start-ts.tmp")
+elif [ -f "$STATE_DIR/session-start-ts.tmp" ]; then
+  WORK_TS=$(cat "$STATE_DIR/session-start-ts.tmp")
 else
   WORK_TS=0
 fi
@@ -328,80 +333,12 @@ fi
 
 # If any was updated after the post-action hook fired, protocol was followed
 if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$CONVENTIONS_UPDATED" = true ] || [ "$FINDINGS_UPDATED" = true ]; then
-  # Try to spawn a background haiku log-scribe to upgrade the deterministic Summary
-  # to a semantic one. Completely silent — the main agent never sees a prompt,
-  # the Stop hook returns in 0s, the haiku writes the row when it finishes.
-  # Falls through gracefully if `claude` is not on PATH.
-  SCRIBE_DISPATCHED=false
-  if [ -f "$TEMPLATE_FILE" ] && [ -n "${SESSION_ID:-}" ]; then
-    # Probe for the claude CLI. Try PATH first, then common install locations.
-    CLAUDE_BIN=""
-    for candidate in \
-      "$(command -v claude 2>/dev/null)" \
-      "/Applications/cmux.app/Contents/Resources/bin/claude" \
-      "/opt/homebrew/bin/claude" \
-      "/usr/local/bin/claude" \
-      "$HOME/.local/bin/claude"; do
-      if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-        CLAUDE_BIN="$candidate"
-        break
-      fi
-    done
-
-    if [ -n "$CLAUDE_BIN" ]; then
-      START_TS_ISO=$(date -r "${START_TS:-0}" -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -d "@${START_TS:-0}" -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-      TODAY=$(date +%Y-%m-%d)
-      SCRIBE_PROMPT=$(SESSION_ID="$SESSION_ID" \
-                      PROJECT_SLUG="$PROJECT_SLUG" \
-                      LOG_PATH="$LOG_PATH" \
-                      REGISTRY_PATH="$LOG_DIR/LOG_REGISTRY.md" \
-                      REPO_ROOT="$REPO_ROOT" \
-                      START_TS_ISO="$START_TS_ISO" \
-                      DURATION_MIN="$DURATION_MIN" \
-                      FILES_CHANGED="$FILES_CHANGED" \
-                      BRANCH="$BRANCH" \
-                      DATE="$TODAY" \
-                      UPSERT_SCRIPT="$UPSERT_SCRIPT" \
-                      TEMPLATE_FILE="$TEMPLATE_FILE" \
-                      python3 - <<'PY'
-import os, sys
-text = open(os.environ["TEMPLATE_FILE"], encoding="utf-8").read()
-keys = ["SESSION_ID","PROJECT_SLUG","LOG_PATH","REGISTRY_PATH","REPO_ROOT",
-        "START_TS_ISO","DURATION_MIN","FILES_CHANGED","BRANCH","DATE","UPSERT_SCRIPT"]
-for k in keys:
-    text = text.replace("{{" + k + "}}", os.environ.get(k, ""))
-sys.stdout.write(text)
-PY
-)
-      SCRIBE_RUN_LOG="$LOG_DIR/.log-scribe-${SESSION_ID}.log"
-      # Spawn detached. No budget cap — the scribe must run to completion to
-      # write the ## Session Summary section into the log file (consumed by the
-      # knowledge graph) AND upsert the registry row. Cap removed 2026-06-18
-      # after run-logs showed "Error: Exceeded USD budget (0.05)" on every dispatch.
-      nohup "$CLAUDE_BIN" -p "$SCRIBE_PROMPT" \
-        --model claude-haiku-4-5 \
-        --output-format text \
-        --dangerously-skip-permissions \
-        >"$SCRIBE_RUN_LOG" 2>&1 </dev/null &
-      disown 2>/dev/null || true
-      SCRIBE_DISPATCHED=true
-    fi
-  fi
-
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
 
-  # Emit a small additionalContext: enhance .claude/last-session.md. If the
-  # scribe couldn't be dispatched (claude not on PATH), include a fallback
-  # instruction to update the registry row by hand.
-  if [ "$SCRIBE_DISPATCHED" = true ]; then
-    ENHANCE_MSG=".living/ updated. Enhance .claude/last-session.md (5 sections: work, decisions, blockers, state, next steps). Log-scribe is running in the background — the LOG_REGISTRY row will be upgraded automatically."
-  else
-    ENHANCE_MSG=".living/ updated. Enhance .claude/last-session.md (5 sections: work, decisions, blockers, state, next steps). Note: claude CLI not on PATH so log-scribe could not auto-dispatch; the deterministic Summary from commit subjects is in place. If you want a richer Summary, dispatch a haiku log-scribe subagent by hand or set PATH so the Stop hook can find claude."
-  fi
-  ESCAPED_ENHANCE=$(printf '%s' "$ENHANCE_MSG" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
-  printf '{"additionalContext": %s}\n' "$ESCAPED_ENHANCE"
+  ENHANCE_MSG=".living/ updated. Enhance .mycelium/last-session.md with work, decisions, blockers, current state, and next steps. The deterministic LOG_REGISTRY summary is already in place."
+  mycelium_emit_context "Stop" "$ENHANCE_MSG"
   exit 0
 fi
 

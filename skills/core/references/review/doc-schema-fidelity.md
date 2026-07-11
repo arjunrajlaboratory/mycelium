@@ -191,7 +191,7 @@ Your job is consistency, not correctness of the underlying choice.
 - `specification.md`, `*-spec.md`, `design.md` files
 - `.living/decisions.md`, `.living/learnings.md`,
   `.living/conventions.md`
-- `commands/*.md`, `SKILL.md` files
+- `skills/*/SKILL.md` files and `agents/openai.yaml` metadata
 - Type stubs and `__init__.py` re-exports
 - Schema files: `schema.yaml`, Pandera definitions, Pydantic
   models, dataclass definitions

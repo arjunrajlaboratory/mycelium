@@ -1,4 +1,4 @@
-"""Content-contract test for the /mycelium:codex-review command (issue #60).
+"""Content-contract test for the shared codex-review skill (issue #60).
 
 CI validates command frontmatter inline but does not run pytest, so this test is
 both the TDD driver for the command and a regression guard. It pins the
@@ -16,19 +16,19 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-COMMAND_PATH = REPO_ROOT / "commands" / "codex-review.md"
+COMMAND_PATH = REPO_ROOT / "skills" / "codex-review" / "SKILL.md"
 
 
 def _split_frontmatter(text):
-    assert text.startswith("---"), "command must start with YAML frontmatter"
+    assert text.startswith("---"), "skill must start with YAML frontmatter"
     parts = text.split("---", 2)
-    assert len(parts) >= 3, "command missing closing frontmatter delimiter"
+    assert len(parts) >= 3, "skill missing closing frontmatter delimiter"
     return yaml.safe_load(parts[1]), parts[2]
 
 
 @pytest.fixture
 def command_text():
-    assert COMMAND_PATH.exists(), f"missing command file: {COMMAND_PATH}"
+    assert COMMAND_PATH.exists(), f"missing skill file: {COMMAND_PATH}"
     return COMMAND_PATH.read_text()
 
 

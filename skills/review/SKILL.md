@@ -1,44 +1,20 @@
 ---
+name: review
 description: >
-  ALWAYS invoke this skill when the user wants to review, audit, sanity-check,
-  or grill any code or analysis change in a data-analysis, statistics, ML, or
-  bioinformatics project — pull requests, commits, branch diffs, working-tree
-  changes, or pasted diffs. Trigger phrases include: "review this PR", "review
-  this diff", "review this commit", "review my analysis", "code review",
-  "audit this code", "is this analysis right", "is this correct", "sanity
-  check this", "anything I'm missing", "before I merge", "/mycelium:review",
-  "/review my analysis", "grill me on this", "interrogate my analysis", "ask
-  me about my decisions". Also trigger proactively when the user pastes a diff
-  or a PR URL and asks for an opinion, when they finish writing analysis code
-  and want a second pair of eyes, or when they ask about correctness or
-  robustness of an analysis. This skill dispatches six specialized sub-agents
-  in parallel (statistical and causal inference; data pipeline and leakage;
-  bioinformatics; LLM-specific coding antipatterns; documentation/schema
-  fidelity; code quality and API design) and synthesizes a prioritized
-  Critical/Important/Minor/Nit report — you cannot produce a correct review
-  without consulting the per-domain checklists this skill loads, because they
-  encode silent failure modes (Excel gene-name corruption, scRNA-seq double
-  dipping, train/test contamination, time-series look-ahead, p-hacking via
-  forking-paths, sycophancy-driven parameter drift, hallucinated APIs,
-  definition drift, smuggled default parameters, undocumented implicit
-  behavior, pseudoreplication, reference-genome mismatch) that general code
-  review will not catch. After the static report is rendered the skill
-  offers an optional `tripwires` follow-up — behavioral checks
-  (fault-injection, metamorphic, and known-answer tests) that perturb
-  inputs and verify named scientific boundaries (missing data, sample
-  misalignment, label leakage, contrast direction) actually break the
-  pipeline rather than being silently absorbed. The skill also has a
-  `grill` mode that interviews the user conversationally about every
-  consequential analytical decision (estimand, sample-filtering thresholds,
-  multiple-comparison correction, train/test split, normalization,
-  reference choice) one question at a time.
-  Do NOT trigger for: writing NEW analysis code (/mycelium:analyze),
-  generating reports or paper sections (/mycelium:report), open-ended
-  brainstorming (/mycelium:ideas), repo initialization (/mycelium:core init),
-  or pure SWE code review with no analysis component.
+  Review or audit analytical code and scientific changes in statistics, ML,
+  bioinformatics, or data pipelines. Use for PRs, commits, diffs, sanity checks,
+  correctness questions, pre-merge review, tripwire testing, or conversational
+  grill mode. Consult the bundled statistical, leakage, bioinformatics,
+  documentation, LLM-failure, and code-quality checklists; synthesize prioritized
+  findings. Do not use for writing new analysis, reports, brainstorming, project
+  initialization, or pure software review with no analytical component.
 ---
 
 # Mycelium — Review
+
+Resolve bundled `skills/` paths relative to the Mycelium plugin root (two
+directories above this `SKILL.md`). Resolve repository and `.living/` paths
+relative to the user's working repository.
 
 Review code, analysis, or documentation changes for the kinds of mistakes that
 matter in scientific data work. Two modes plus one opt-in follow-up:
@@ -391,6 +367,6 @@ believe about each choice without exhausting them. If at any point they say
   follow-up (Step 5)
 - Per-agent checklists under `skills/core/references/review/` (six files;
   loaded by sub-agents, not by you)
-- The mycelium core `Post-Action Hook Protocol` from `commands/core.md`
+- The mycelium core `Post-Action Hook Protocol` from `../core/SKILL.md`
   governs what to log to `.living/` when a review surfaces a recurring
   pattern

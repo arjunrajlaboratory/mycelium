@@ -164,10 +164,10 @@ def check_analysis_docs(target_dir: Path, result: ValidationResult):
 
 
 def check_todo_directory(target_dir: Path, result: ValidationResult):
-    """Check that todo/TODOLIST.md exists."""
-    todolist_path = target_dir / "todo" / "TODOLIST.md"
-    if not todolist_path.exists():
-        result.error("todo/TODOLIST.md does not exist")
+    """Check that the todo registry and item template exist."""
+    for name in ("TODO_REGISTRY.md", "TODO_ITEM_TEMPLATE.md"):
+        if not (target_dir / "todo" / name).exists():
+            result.error(f"todo/{name} does not exist")
 
 
 def check_environments_file(target_dir: Path, result: ValidationResult):
@@ -175,6 +175,27 @@ def check_environments_file(target_dir: Path, result: ValidationResult):
     env_path = target_dir / "ENVIRONMENTS_INSTALLATIONS.md"
     if not env_path.exists():
         result.error("ENVIRONMENTS_INSTALLATIONS.md does not exist at repo root")
+
+
+def check_agent_guidance(target_dir: Path, result: ValidationResult):
+    """Check canonical guidance and host adapters."""
+    if not (target_dir / "MYCELIUM.md").exists():
+        result.error("MYCELIUM.md does not exist at repo root")
+    for name in ("CLAUDE.md", "AGENTS.md"):
+        path = target_dir / name
+        if not path.exists():
+            result.error(f"{name} does not exist at repo root")
+        elif "MYCELIUM" not in path.read_text(encoding="utf-8"):
+            result.warning(f"{name} does not route the agent to MYCELIUM.md")
+
+    state_gitignore = target_dir / ".mycelium" / ".gitignore"
+    if not state_gitignore.exists():
+        result.warning(".mycelium/.gitignore does not exist")
+
+    if not (target_dir / ".claude" / "settings.local.json").exists():
+        result.warning("Claude hook configuration is not installed")
+    if not (target_dir / ".codex" / "hooks.json").exists():
+        result.warning("Codex hook configuration is not installed")
 
 
 def check_data_structure(target_dir: Path, result: ValidationResult):
@@ -217,6 +238,9 @@ def main():
 
     print("Checking ENVIRONMENTS_INSTALLATIONS.md...")
     check_environments_file(target_dir, result)
+
+    print("Checking agent guidance and hooks...")
+    check_agent_guidance(target_dir, result)
 
     print("Checking data structure...")
     check_data_structure(target_dir, result)

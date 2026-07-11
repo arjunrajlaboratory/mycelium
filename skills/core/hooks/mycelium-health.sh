@@ -8,6 +8,9 @@
 
 set -euo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$HERE/mycelium-hook-lib.sh"
+
 # Read stdin JSON
 INPUT=$(cat)
 
@@ -28,7 +31,7 @@ if [ -z "$REPO_ROOT" ]; then
   exit 0  # Not in a git repo
 fi
 
-mkdir -p "$REPO_ROOT/.claude"
+mycelium_prepare_state_dir "$REPO_ROOT"
 
 # Clean up stale sentinels from a crashed previous session BEFORE the
 # session-start-ts guard below — otherwise the guard mistakes the orphaned
@@ -43,7 +46,7 @@ mkdir -p "$REPO_ROOT/.claude"
 # mycelium-reminded.tmp on every Bash invocation, so a fresh mtime on
 # either is a strong liveness signal. We only clean when owner_ts is old
 # AND those signals are also quiet.
-ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
+ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
 if [ -f "$ACTIVE_LOG_FILE" ]; then
   _STALE_LOG=$(head -1 "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
   _STALE_OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
@@ -62,8 +65,8 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
     # owner_ts > 2h: only conclude "crashed" if activity signals are also
     # quiet. If either is fresh, the session is alive — don't touch.
     _NOW=$(date +%s)
-    _ACTIVITY_FILE="$REPO_ROOT/.claude/mycelium-session-activity.tmp"
-    _REMINDED_FILE="$REPO_ROOT/.claude/mycelium-reminded.tmp"
+    _ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
+    _REMINDED_FILE="$STATE_DIR/mycelium-reminded.tmp"
     _ACT_AGE=999999999
     _REM_AGE=999999999
     if [ -f "$_ACTIVITY_FILE" ]; then
@@ -95,7 +98,7 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
       MESSAGES="${MESSAGES}INCOMPLETE SESSION LOG: Previous session log at ${_STALE_LOG} was never finalized (likely a crashed session). Add a '## Session Summary' section and append a row to the registry, or delete it.\n\n"
     fi
     rm -f "$ACTIVE_LOG_FILE"
-    rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
+    rm -f "$STATE_DIR/session-start-ts.tmp"
   fi
 fi
 
@@ -103,33 +106,33 @@ fi
 # After the cleanup above, a remaining active-session-log.tmp implies a
 # genuine in-progress primary session, so we preserve its start ts.
 if [ ! -f "$ACTIVE_LOG_FILE" ]; then
-    date +%s > "$REPO_ROOT/.claude/session-start-ts.tmp"
+    date +%s > "$STATE_DIR/session-start-ts.tmp"
 fi
 
 # Clean up stale sentinels from crashed sessions
 # These are per-repo, so safe to clean on fresh session start
-if [ -f "$REPO_ROOT/.claude/mycelium-reminded.tmp" ]; then
+if [ -f "$STATE_DIR/mycelium-reminded.tmp" ]; then
   # Check if the reminder is from a previous session (older than session-start-ts)
-  STALE_TS=$(cat "$REPO_ROOT/.claude/mycelium-reminded.tmp" 2>/dev/null || echo "0")
+  STALE_TS=$(cat "$STATE_DIR/mycelium-reminded.tmp" 2>/dev/null || echo "0")
   NOW_TS=$(date +%s)
   STALE_AGE=$(( NOW_TS - STALE_TS ))
   # If older than 1 hour, it's definitely stale (sessions rarely last >1h)
   if [ "$STALE_AGE" -gt 3600 ]; then
-    rm -f "$REPO_ROOT/.claude/mycelium-reminded.tmp"
-    rm -f "$REPO_ROOT/.claude/mycelium-session-activity.tmp"
+    rm -f "$STATE_DIR/mycelium-reminded.tmp"
+    rm -f "$STATE_DIR/mycelium-session-activity.tmp"
   fi
 fi
 
 # --- Knowledge audit check (runs regardless of SOURCE) ---
-KNOWLEDGE_DIR="$HOME/.claude/knowledge"
+KNOWLEDGE_DIR=$(mycelium_knowledge_dir)
 if [ ! -d "$KNOWLEDGE_DIR" ]; then
-  MESSAGES="${MESSAGES}KNOWLEDGE SYSTEM INIT: ~/.claude/knowledge/ does not exist. Create the directory and initialize domain files per the progressive disclosure spec. Run this silently as a background task.\n\n"
+  MESSAGES="${MESSAGES}KNOWLEDGE SYSTEM INIT: ~/.mycelium/knowledge/ does not exist. Create the directory and initialize domain files per the progressive disclosure spec. Run this silently as a background task.\n\n"
 elif [ -f "$KNOWLEDGE_DIR/.last-audit" ]; then
   AUDIT_TS=$(awk '{print $1}' "$KNOWLEDGE_DIR/.last-audit")
   NOW_TS=$(date +%s)
   AUDIT_AGE_HOURS=$(( (NOW_TS - AUDIT_TS) / 3600 ))
   if [ "$AUDIT_AGE_HOURS" -ge 24 ]; then
-    MESSAGES="${MESSAGES}KNOWLEDGE AUDIT DUE (${AUDIT_AGE_HOURS}h since last): Dispatch a background sonnet subagent (max_turns: 15) to run the knowledge audit. Tasks: (1) BACKFILL PROMOTIONS — scan last ~14 days of entries in every .living/learnings.md under this tree (use tail -120, never full files); for each transferable learning (pattern applies beyond single project — async, API, debugging, test, env, etc.) that is NOT already present in the matching ~/.claude/knowledge/{domain}.md file (grep for the learning's exact title — entries promoted inline will contain the same title), printf >> the entry as: ### Title (use the EXACT title from the learning entry) + **What**/**Evidence** (cite source project + date)/**When useful**/**Scope**/**Status: unreviewed**/**Last validated: YYYY-MM-DD**/**Promoted**: backfill by mycelium. (2) STALENESS — review existing entries in domain files; flag any with Last validated >90d old. (3) INDEX — if ~/.claude/knowledge/INDEX.md exists, regenerate it with current per-domain entry counts. (4) TIMESTAMP — overwrite ~/.claude/knowledge/.last-audit with: \$(date +%s) daily-audit. Report single-line summary of promotions added. Do this silently alongside your current task.\n\n"
+    MESSAGES="${MESSAGES}KNOWLEDGE AUDIT DUE (${AUDIT_AGE_HOURS}h since last): Dispatch a background capable subagent (max_turns: 15) to run the knowledge audit. Tasks: (1) BACKFILL PROMOTIONS — scan last ~14 days of entries in every .living/learnings.md under this tree (use tail -120, never full files); for each transferable learning (pattern applies beyond single project — async, API, debugging, test, env, etc.) that is NOT already present in the matching ~/.mycelium/knowledge/{domain}.md file (grep for the learning's exact title — entries promoted inline will contain the same title), printf >> the entry as: ### Title (use the EXACT title from the learning entry) + **What**/**Evidence** (cite source project + date)/**When useful**/**Scope**/**Status: unreviewed**/**Last validated: YYYY-MM-DD**/**Promoted**: backfill by mycelium. (2) STALENESS — review existing entries in domain files; flag any with Last validated >90d old. (3) INDEX — if ~/.mycelium/knowledge/INDEX.md exists, regenerate it with current per-domain entry counts. (4) TIMESTAMP — overwrite ~/.mycelium/knowledge/.last-audit with: \$(date +%s) daily-audit. Report single-line summary of promotions added. Do this silently alongside your current task.\n\n"
   fi
 else
   echo "$(date +%s) auto-initialized" > "$KNOWLEDGE_DIR/.last-audit"
@@ -172,7 +175,7 @@ if [ -n "$META_PROJECT" ]; then
   fi
 
   if [ "$TRANSFER_STALE" = true ]; then
-    MESSAGES="${MESSAGES}KNOWLEDGE TRANSFER DUE (${TRANSFER_AGE_MSG}): Dispatch a background sonnet subagent to run the mycelium transfer protocol. The subagent should: read recent learnings from all subprojects under ${META_PROJECT}, identify cross-project transfer opportunities, and write a report to ${META_PROJECT}/.living/outputs/knowledge-transfers/$(date +%Y-%m-%d).md. Do not block on results.\n\n"
+    MESSAGES="${MESSAGES}KNOWLEDGE TRANSFER DUE (${TRANSFER_AGE_MSG}): Dispatch a background capable subagent to run the mycelium transfer protocol. The subagent should: read recent learnings from all subprojects under ${META_PROJECT}, identify cross-project transfer opportunities, and write a report to ${META_PROJECT}/.living/outputs/knowledge-transfers/$(date +%Y-%m-%d).md. Do not block on results.\n\n"
   fi
 fi
 
@@ -247,7 +250,10 @@ files_changed:
 LOG_EOF
 
     # Store log path + owner timestamp (for subagent detection in stop hook)
-    printf "%s\n%s\n" "$LOG_PATH" "$(cat "$REPO_ROOT/.claude/session-start-ts.tmp" 2>/dev/null || date +%s)" > "$ACTIVE_LOG_FILE"
+    printf "%s\n%s\n" "$LOG_PATH" "$(cat "$STATE_DIR/session-start-ts.tmp" 2>/dev/null || date +%s)" > "$ACTIVE_LOG_FILE"
+    # Data-lineage consolidation may run concurrently with stop finalization,
+    # so keep its canonical session ID in an independent sentinel.
+    printf '%s\n' "$SESSION_ID" > "$STATE_DIR/data-lineage-session-id.tmp"
 
     # Refresh INDEX.md at session start (no LLM, <1s).
     # --summary-heuristic regenerates BOTH the quick reference and the
@@ -267,14 +273,13 @@ SOURCE=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)
 if [ "$SOURCE" != "startup" ]; then
   # Emit any accumulated messages (e.g. knowledge audit) and exit
   if [ -n "$MESSAGES" ]; then
-    ESCAPED=$(printf '%s' "$MESSAGES" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
-    printf '{"additionalContext": %s}\n' "$ESCAPED"
+    mycelium_emit_context "SessionStart" "$MESSAGES"
   fi
   exit 0
 fi
 
 # --- Session resume: load last-session.md if recent ---
-SESSION_FILE="$REPO_ROOT/.claude/last-session.md"
+SESSION_FILE="$STATE_DIR/last-session.md"
 if [ -f "$SESSION_FILE" ]; then
   SESSION_MTIME=$(stat -f "%m" "$SESSION_FILE" 2>/dev/null || stat -c "%Y" "$SESSION_FILE" 2>/dev/null || echo "0")
   NOW_TS=$(date +%s)
@@ -433,12 +438,6 @@ fi
 
 # --- Emit combined JSON ---
 if [ -n "$MESSAGES" ] || [ -n "$SYSTEM_MESSAGE" ]; then
-  ESCAPED_CTX=$(printf '%s' "$MESSAGES" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
-  if [ -n "$SYSTEM_MESSAGE" ]; then
-    ESCAPED_SYS=$(printf '%s' "$SYSTEM_MESSAGE" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
-    printf '{"additionalContext": %s, "systemMessage": %s}\n' "$ESCAPED_CTX" "$ESCAPED_SYS"
-  else
-    printf '{"additionalContext": %s}\n' "$ESCAPED_CTX"
-  fi
+  mycelium_emit_context "SessionStart" "$MESSAGES" "$SYSTEM_MESSAGE"
 fi
 exit 0

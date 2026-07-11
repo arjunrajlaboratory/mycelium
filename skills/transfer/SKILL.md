@@ -1,4 +1,5 @@
 ---
+name: transfer
 description: >
   Cross-pollinate learnings across Science subprojects by scanning recent
   .living/learnings.md entries and identifying actionable knowledge transfers.
@@ -7,6 +8,10 @@ description: >
 ---
 
 # Mycelium — Knowledge Transfer
+
+Resolve bundled `skills/` paths relative to the Mycelium plugin root (two
+directories above this `SKILL.md`). Resolve project and `.living/` paths
+relative to the repositories being scanned.
 
 Scan recent learnings across all subprojects, identify actionable cross-pollination opportunities, and **automatically apply** transfers to target projects' `.living/learnings.md` files. Generates an audit report afterward. This command is designed to run AS a subagent (background task), not in the main context.
 
@@ -125,5 +130,5 @@ date -u +"%Y-%m-%dT%H:%M:%SZ" > {meta-project}/.living/outputs/knowledge-transfe
 
 ## When this runs
 
-- **Automatic**: Dispatched as a background sonnet subagent at session start when >24h since last run (triggered by `mycelium-health.sh` checking `.last-run`)
+- **Automatic**: Dispatched as a background capable subagent at session start when >24h since last run (triggered by `mycelium-health.sh` checking `.last-run`)
 - **Manual**: User invokes `/mycelium:transfer` or says "transfer knowledge", "cross-pollinate", "sync learnings", or "knowledge transfer"

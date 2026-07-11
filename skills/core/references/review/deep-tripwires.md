@@ -749,7 +749,7 @@ What we learned the first time this ran end-to-end on a real project:
 
 ## Cross-references
 
-- `commands/review.md` Step 5 — where this is invoked
+- `skills/review/SKILL.md` Step 5 — where this is invoked
 - `skills/core/references/review/README.md` — the `suggested_tripwire`
   field on the finding contract
 - `skills/core/references/review/synthesis.md` — the `**Behavioral

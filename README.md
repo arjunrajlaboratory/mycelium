@@ -10,7 +10,7 @@
 
 Most analytical work disappears. You spend weeks figuring out the right normalization for a tricky dataset, discover that a particular clustering method fails silently on sparse data, or learn that a specific file format needs a workaround — and none of that knowledge is captured anywhere durable. The next person (or you, six months later) starts from scratch.
 
-Mycelium changes this. It gives every analytical project a memory — a structured layer that records decisions, captures hard-won insights, and tracks what was done and why. Drop the mycelium skill into [Claude Code](https://docs.anthropic.com/en/docs/claude-code), point it at any project, and it scaffolds a living analytical framework. Every analysis, dataset, and decision is registered. Learnings accumulate. Domain-specific best practices flow in from the network.
+Mycelium changes this. It gives every analytical project a memory — a structured layer that records decisions, captures hard-won insights, and tracks what was done and why. Install the Mycelium plugin in Claude Code or Codex, point it at any project, and it scaffolds a living analytical framework. Every analysis, dataset, and decision is registered. Learnings accumulate. Domain-specific best practices flow in from the network.
 
 **The bigger vision:** analytical projects shouldn't be isolated silos. A lab that works on RNA-seq, image analysis, and spatial transcriptomics is generating overlapping knowledge across all of those efforts — but that knowledge stays trapped in individual folders and the heads of the people who did the work. Mycelium is building toward a world where projects are nodes in a knowledge network: insights discovered in one project flow automatically to others that need them, domain expertise is packaged and shared, and the collective intelligence of a research group compounds over time instead of evaporating.
 
@@ -34,7 +34,7 @@ Mycelium is named after the underground fungal networks that connect trees in a 
 
 ### 1. Install the plugin
 
-**Option A — Marketplace install (recommended):**
+**Claude Code:**
 
 ```bash
 # Add the mycelium marketplace (one-time)
@@ -46,7 +46,17 @@ claude plugin install mycelium@mycelium
 
 This permanently registers the mycelium plugin with your Claude Code installation. The slash commands (`/mycelium:core`, `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`, `/mycelium:ingest`, `/mycelium:review`, `/mycelium:codex-review`, `/mycelium:transfer`) become available in all sessions.
 
-**Option B — Local / development install:**
+**Codex:**
+
+```bash
+codex plugin marketplace add arjunrajlaboratory/mycelium
+codex plugin add mycelium@mycelium
+```
+
+Start a new task after installation. Codex can invoke the bundled skills
+implicitly, through the plugin picker, or explicitly by skill name.
+
+**Local Claude development install:**
 
 ```bash
 git clone https://github.com/arjunrajlaboratory/mycelium.git
@@ -57,15 +67,18 @@ Replace `/path/to/mycelium` with the actual path where you cloned it. This loads
 
 ### 2. Initialize your project
 
-Open Claude Code in any project directory and say:
+Open Claude Code or Codex in any project directory and say:
 
 > "Set up mycelium" or "Initialize living repo"
 
-This scaffolds the living repository structure: directories, manifests, the `.living/` memory layer, and a `CLAUDE.md` that encodes the framework's protocols. **Core convention packs** (`robust-analysis`, `report-generator`, and `idea-generator`) are installed automatically — every repo gets defensive analysis practices, structured report generation, and creative ideation out of the box.
+This scaffolds the living repository structure, manifests, the `.living/`
+memory layer, canonical `MYCELIUM.md` guidance, and thin `CLAUDE.md` and
+`AGENTS.md` adapters. **Core convention packs** (`robust-analysis`,
+`report-generator`, and `idea-generator`) are installed automatically.
 
 ### 3. Install domain conventions (optional)
 
-Once mycelium is running in your project, install domain-specific convention packs by telling Claude:
+Once mycelium is running, install domain-specific convention packs by telling the active agent:
 
 > "Install bioinformatics conventions" or "Install image-analysis conventions"
 
@@ -73,15 +86,17 @@ This uses mycelium's built-in `install-convention` mode to copy domain conventio
 
 ### 4. Start working
 
-Work normally — analyze data, write code, build algorithms. Use the dedicated action skills:
+Work normally — analyze data, write code, build algorithms. Claude exposes the
+actions as `/mycelium:*` commands; Codex namespaces the same shared skills
+under the plugin name:
 
-- `/mycelium:analyze` — start or continue an analysis (routes to installed conventions)
-- `/mycelium:report` — generate a structured report
-- `/mycelium:ideas` — brainstorm with disciplinary personas
-- `/mycelium:ingest` — import new data with metadata and provenance
-- `/mycelium:review` — analysis-aware code review for PRs, commits, or working-tree changes
-- `/mycelium:codex-review` — address Codex review comments and audit the whole branch for the same error pattern in one pass
-- `/mycelium:transfer` — cross-pollinate learnings across sibling projects
+- `/mycelium:analyze` or `$mycelium:analyze` — start or continue an analysis (routes to installed conventions)
+- `/mycelium:report` or `$mycelium:report` — generate a structured report
+- `/mycelium:ideas` or `$mycelium:ideas` — brainstorm with disciplinary personas
+- `/mycelium:ingest` or `$mycelium:ingest` — import new data with metadata and provenance
+- `/mycelium:review` or `$mycelium:review` — analysis-aware code review for PRs, commits, or working-tree changes
+- `/mycelium:codex-review` or `$mycelium:codex-review` — address Codex review comments and audit the whole branch for the same error pattern in one pass
+- `/mycelium:transfer` or `$mycelium:transfer` — cross-pollinate learnings across sibling projects
 
 Mycelium's hooks enforce the post-action protocol automatically after every significant action:
 
@@ -99,13 +114,18 @@ After initialization, your project has this structure:
 
 ```
 project-root/
-├── CLAUDE.md                     # AI agent instructions
+├── MYCELIUM.md                   # Canonical living-repository protocol
+├── CLAUDE.md                     # Claude Code routing adapter
+├── AGENTS.md                     # Codex routing adapter
 ├── ENVIRONMENTS_INSTALLATIONS.md # Environment setup and dependencies
 ├── todo/                         # Future work tracking
 │   ├── TODO_REGISTRY.md          # Master registry of all items
 │   └── [item].md                 # Detailed writeup per item
-├── .claude/                      # Session state (gitignored)
+├── .mycelium/                    # Provider-neutral local session state
+│   ├── plugin-root               # Machine-local bundled-resource pointer
 │   └── last-session.md           # Cross-session resume context
+├── .claude/settings.local.json   # Claude hook registrations
+├── .codex/hooks.json             # Codex hook registrations
 ├── .living/                      # The memory layer
 │   ├── INDEX.md                  # Knowledge summary with cluster routing
 │   ├── decisions.md              # Why choices were made
@@ -134,25 +154,30 @@ Every directory has a descriptive manifest — a registry of its contents with s
 
 ## Hooks — Automated Enforcement
 
-Mycelium ships 5 Claude Code hooks that enforce the living repo protocol automatically:
+Mycelium ships seven hook scripts and registers the supported subset for each host:
 
 | Hook | Event | Purpose |
 |------|-------|---------|
 | `mycelium-health.sh` | SessionStart | Loads session resume context, refreshes INDEX.md counts, injects knowledge summaries, triggers daily knowledge audit, checks for pending cross-project transfers |
-| `mycelium-post-action.sh` | PostToolUse (Bash) | Detects code execution (Python/R/Jupyter) and injects the full 10-step post-action protocol. Debounced per work cycle. |
-| `mycelium-activity-tracker.sh` | PostToolUse (Edit\|Write) | Silently tracks file modifications so Edit/Write-only sessions are also enforced |
+| `mycelium-post-action.sh` | PostToolUse (shell) | Detects code execution (Python/R/Jupyter) and injects the full 10-step post-action protocol. Debounced per work cycle. |
+| `mycelium-activity-tracker.sh` | PostToolUse (file edits) | Silently tracks file modifications so edit-only sessions are also enforced |
 | `mycelium-read-tracker.sh` | PostToolUse (Read) | Logs `.living/` file access for consumption telemetry |
 | `mycelium-stop-check.sh` | Stop | Auto-finalizes session logs, blocks session end if `.living/` wasn't updated after significant work, reminds about session summary |
+| `mycelium-data-tracker.sh` | PostToolUse (shell) | Captures analysis data-lineage events |
+| `mycelium-data-lineage-stop.sh` | Stop | Consolidates session data-lineage events |
 
-Hooks are auto-registered by `init_repo.py` during project initialization. No manual configuration needed.
+Hooks are auto-registered by `init_repo.py`. Codex users must trust the project
+and review changed command hooks. Codex supports the `exec_command`,
+`apply_patch`, and Stop flows; read telemetry is Claude-only because Codex does
+not expose its internal file reads to `PostToolUse`.
 
 ## Progressive Disclosure Knowledge System
 
 Mycelium includes a three-tier knowledge system that routes agents to the right information at the right time:
 
-1. **MEMORY.md routing table** (always in context) — lightweight domain pointers that tell the agent where to look.
-2. **INDEX.md summaries** (injected at session start) — knowledge clusters per project, refreshed automatically. The default is a fast heuristic regenerated at every SessionStart in <1s; an opt-in LLM mode produces richer cluster narratives when desired.
-3. **Global domain files** (`~/.claude/knowledge/`) — cross-project knowledge organized by domain (Python, statistics, data engineering, etc.). Transferable learnings are promoted here automatically.
+1. **Agent guidance routing** — `CLAUDE.md` and `AGENTS.md` point to the canonical protocol and project index.
+2. **INDEX.md summaries** (injected at session start) — knowledge clusters per project, refreshed automatically. The default is a fast heuristic regenerated at every SessionStart in <1s; an opt-in LLM mode produces richer cluster narratives when desired. That mode uses a local Claude or Codex CLI; set `MYCELIUM_AGENT_CLI` to choose one explicitly.
+3. **Global domain files** (`~/.mycelium/knowledge/`) — provider-neutral cross-project knowledge organized by domain. Legacy `~/.claude/knowledge/` files are migrated without overwriting newer files.
 
 This replaces the naive approach of loading all `.living/` files at session start, which doesn't scale past the first few sessions.
 
@@ -160,7 +185,7 @@ This replaces the naive approach of loading all `.living/` files at session star
 
 Mycelium separates **skills** (actions) from **conventions** (reference material):
 
-- **Skills** are Claude Code slash commands that execute workflows: `/mycelium:core` (core orchestrator), `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`, `/mycelium:ingest`, `/mycelium:review`, `/mycelium:codex-review`, `/mycelium:transfer`
+- **Skills** are shared Agent Skills under `skills/<name>/SKILL.md`. Claude exposes them as namespaced slash commands; Codex discovers them through the Mycelium plugin.
 - **Convention packs** are collections of markdown files that skills consult for methodology guidance. They're swappable — different report conventions, different analysis approaches.
 - **Hooks** enforce the framework automatically — detecting code execution, tracking file edits, and ensuring `.living/` stays current without manual intervention.
 
@@ -213,7 +238,7 @@ Accumulate -> Crystallize -> Transfer -> Contribute
 ```
 
 1. **Accumulate**: As you work, log decisions and learnings. The project's `.living/` directory grows. Scientific findings are captured in topic-organized files with evidence tracking.
-2. **Crystallize**: Periodically review accumulated intelligence. Recurring patterns become formal conventions. Transferable knowledge is promoted to global domain files (`~/.claude/knowledge/`).
+2. **Crystallize**: Periodically review accumulated intelligence. Recurring patterns become formal conventions. Transferable knowledge is promoted to global domain files (`~/.mycelium/knowledge/`).
 3. **Transfer**: Cross-pollinate learnings across sibling projects. Insights discovered in one project are automatically adapted and applied to others that would benefit (`/mycelium:transfer`).
 4. **Contribute**: Conventions that are generally useful get packaged and shared back to the network.
 
@@ -221,9 +246,9 @@ This is how the ecosystem improves: individual projects learn, patterns are extr
 
 ## Repository Structure
 
-- **[`commands/`](commands/)** — Claude Code slash commands: `core.md` (orchestrator), `analyze.md`, `report.md`, `ideas.md`, `ingest.md`, `review.md`, `transfer.md`.
-- **[`skills/core/`](skills/core/)** — Bundled resources used by the commands:
-  - `hooks/` — 5 automation hooks (health, post-action, activity-tracker, read-tracker, stop-check)
+- **[`skills/`](skills/)** — Shared Claude/Codex skills. `core/` is the orchestrator; the other folders provide dedicated workflows.
+- **[`skills/core/`](skills/core/)** — Shared resources used by the skills:
+  - `hooks/` — provider-aware lifecycle hooks and compatibility helpers
   - `scripts/` — Python scripts for initialization, validation, index generation, findings crystallization, knowledge bootstrap
   - `templates/` — Templates for manifests, metadata, findings, conventions, reports, knowledge entries
   - `references/` — Reference docs for analysis, data ingestion, environment setup, and more

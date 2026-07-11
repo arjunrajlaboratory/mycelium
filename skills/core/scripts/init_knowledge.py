@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bootstrap the ~/.claude/knowledge/ directory from domain templates.
+"""Bootstrap the provider-neutral ~/.mycelium/knowledge/ directory.
 
 Creates one Markdown file per domain defined in
 skills/core/templates/knowledge/domains.yaml, using the header template.
@@ -7,6 +7,7 @@ Existing files are never overwritten.
 """
 
 import argparse
+import shutil
 import time
 from pathlib import Path
 
@@ -195,6 +196,23 @@ def append_routing_to_memory_files(
     return appended, skipped
 
 
+def migrate_legacy_knowledge(legacy_dir: Path, knowledge_dir: Path) -> int:
+    """Copy missing files from the pre-v0.4 Claude-specific knowledge store."""
+    if not legacy_dir.is_dir() or legacy_dir.resolve() == knowledge_dir.resolve():
+        return 0
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for source in legacy_dir.iterdir():
+        if not source.is_file():
+            continue
+        destination = knowledge_dir / source.name
+        if destination.exists():
+            continue
+        shutil.copy2(source, destination)
+        copied += 1
+    return copied
+
+
 def init_knowledge(knowledge_dir: Path, mycelium_root: Path) -> None:
     templates_dir = mycelium_root / "skills" / "core" / "templates" / "knowledge"
     domains_yaml_path = templates_dir / "domains.yaml"
@@ -279,13 +297,13 @@ def _auto_detect_mycelium_root(script_path: Path) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Bootstrap the ~/.claude/knowledge/ directory from mycelium domain templates."
+        description="Bootstrap ~/.mycelium/knowledge/ from mycelium domain templates."
     )
     parser.add_argument(
         "--knowledge-dir",
         type=Path,
-        default=Path.home() / ".claude" / "knowledge",
-        help="Directory to create domain knowledge files in (default: ~/.claude/knowledge/)",
+        default=Path.home() / ".mycelium" / "knowledge",
+        help="Directory to create domain knowledge files in (default: ~/.mycelium/knowledge/)",
     )
     parser.add_argument(
         "--mycelium-root",
@@ -337,6 +355,11 @@ def main() -> None:
             f"{total} files scanned"
         )
     else:
+        migrated = migrate_legacy_knowledge(
+            Path.home() / ".claude" / "knowledge", knowledge_dir
+        )
+        if migrated:
+            print(f"Migrated {migrated} legacy knowledge files into {knowledge_dir}")
         init_knowledge(knowledge_dir, mycelium_root)
 
 

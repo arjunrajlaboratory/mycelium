@@ -328,8 +328,7 @@ class TestInstallClaudeHooksIdempotent:
             json.dumps(settings, indent=2), encoding="utf-8"
         )
 
-        # Run install — should be a complete no-op (all 7 hooks already
-        # live at marketplace paths)
+        # Run install — paths stay unchanged, but dependency order is repaired.
         ir.install_claude_hooks(repo)
 
         result = json.loads((repo / ".claude" / "settings.local.json").read_text())
@@ -338,6 +337,8 @@ class TestInstallClaudeHooksIdempotent:
         assert len(cmds) == len(ir.MYCELIUM_HOOK_BASENAMES)
         for cmd in cmds:
             assert "/marketplaces/" in cmd
+        stop_handlers = result["hooks"]["Stop"][0]["hooks"]
+        assert Path(stop_handlers[0]["command"]).name == "mycelium-data-lineage-stop.sh"
 
     def test_consolidates_existing_duplicates_then_installs_missing(
         self, tmp_path: Path
