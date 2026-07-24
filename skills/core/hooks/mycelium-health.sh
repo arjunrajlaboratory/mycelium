@@ -30,6 +30,18 @@ fi
 
 mkdir -p "$REPO_ROOT/.claude"
 
+# Per-session scoped runtime paths (sets ACTIVE_LOG_FILE, START_TS_FILE,
+# REMINDER_FILE, ACTIVITY_FILE, EVENTS_FILE). Concurrent chats get distinct
+# session_ids -> distinct dirs, so a new session never inherits another's
+# sentinels. Subagents share their parent's session_id -> same dir.
+. "$(dirname "${BASH_SOURCE[0]:-$0}")/mycelium-run-paths.sh"
+
+# Note: with session-scoped runtime state, a new session never inherits another
+# session's sentinels, so no cross-session cleanup is needed for correctness.
+# Abandoned per-session dirs under .claude/mycelium/run/ are tiny and git-ignored;
+# they are intentionally NOT reaped here to avoid racing a concurrently-starting
+# chat whose dir is still initializing.
+
 # Clean up stale sentinels from a crashed previous session BEFORE the
 # session-start-ts guard below — otherwise the guard mistakes the orphaned
 # active-session-log.tmp for an in-progress session, skips refreshing the
@@ -43,7 +55,7 @@ mkdir -p "$REPO_ROOT/.claude"
 # mycelium-reminded.tmp on every Bash invocation, so a fresh mtime on
 # either is a strong liveness signal. We only clean when owner_ts is old
 # AND those signals are also quiet.
-ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
+# ACTIVE_LOG_FILE is set by mycelium-run-paths.sh (session-scoped).
 if [ -f "$ACTIVE_LOG_FILE" ]; then
   _STALE_LOG=$(head -1 "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
   _STALE_OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
@@ -62,8 +74,8 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
     # owner_ts > 2h: only conclude "crashed" if activity signals are also
     # quiet. If either is fresh, the session is alive — don't touch.
     _NOW=$(date +%s)
-    _ACTIVITY_FILE="$REPO_ROOT/.claude/mycelium-session-activity.tmp"
-    _REMINDED_FILE="$REPO_ROOT/.claude/mycelium-reminded.tmp"
+    _ACTIVITY_FILE="$ACTIVITY_FILE"
+    _REMINDED_FILE="$REMINDER_FILE"
     _ACT_AGE=999999999
     _REM_AGE=999999999
     if [ -f "$_ACTIVITY_FILE" ]; then
@@ -95,7 +107,7 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
       MESSAGES="${MESSAGES}INCOMPLETE SESSION LOG: Previous session log at ${_STALE_LOG} was never finalized (likely a crashed session). Add a '## Session Summary' section and append a row to the registry, or delete it.\n\n"
     fi
     rm -f "$ACTIVE_LOG_FILE"
-    rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
+    rm -f "$START_TS_FILE"
   fi
 fi
 
@@ -103,20 +115,20 @@ fi
 # After the cleanup above, a remaining active-session-log.tmp implies a
 # genuine in-progress primary session, so we preserve its start ts.
 if [ ! -f "$ACTIVE_LOG_FILE" ]; then
-    date +%s > "$REPO_ROOT/.claude/session-start-ts.tmp"
+    date +%s > "$START_TS_FILE"
 fi
 
 # Clean up stale sentinels from crashed sessions
 # These are per-repo, so safe to clean on fresh session start
-if [ -f "$REPO_ROOT/.claude/mycelium-reminded.tmp" ]; then
+if [ -f "$REMINDER_FILE" ]; then
   # Check if the reminder is from a previous session (older than session-start-ts)
-  STALE_TS=$(cat "$REPO_ROOT/.claude/mycelium-reminded.tmp" 2>/dev/null || echo "0")
+  STALE_TS=$(cat "$REMINDER_FILE" 2>/dev/null || echo "0")
   NOW_TS=$(date +%s)
   STALE_AGE=$(( NOW_TS - STALE_TS ))
   # If older than 1 hour, it's definitely stale (sessions rarely last >1h)
   if [ "$STALE_AGE" -gt 3600 ]; then
-    rm -f "$REPO_ROOT/.claude/mycelium-reminded.tmp"
-    rm -f "$REPO_ROOT/.claude/mycelium-session-activity.tmp"
+    rm -f "$REMINDER_FILE"
+    rm -f "$ACTIVITY_FILE"
   fi
 fi
 
@@ -194,22 +206,32 @@ if [ -d "$LIVING_DIR" ]; then
 REGISTRY_EOF
   fi
 
-  # Create new log file only if no active session log exists (fresh process start)
-  # If active-session-log.tmp exists, we're a subagent — skip log creation
+  # Create a new log only if this session_id has no active log yet. If it does,
+  # we're a subagent or a resumed/compacted re-entry of the same chat (both
+  # share the session_id) — reuse the existing log. A concurrent *separate*
+  # chat has a different session_id, so its ACTIVE_LOG_FILE is a different file.
   if [ ! -f "$ACTIVE_LOG_FILE" ]; then
     TODAY=$(date +%Y-%m-%d)
-    # Determine session counter for today
-    EXISTING_COUNT=0
-    for _f in "$LOG_DIR"/${TODAY}-*.md; do
-      [ -f "$_f" ] && [ "$(basename "$_f")" != "LOG_REGISTRY.md" ] && EXISTING_COUNT=$((EXISTING_COUNT + 1))
-    done
-    SESSION_NUM=$(printf "%03d" $((EXISTING_COUNT + 1)))
-
     # Derive slug from project directory name
     PROJECT_NAME=$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]' | tr ' _' '--' | tr -cd '[:alnum:]-')
-    SESSION_ID="${TODAY}-${SESSION_NUM}"
-    LOG_FILENAME="${SESSION_ID}-${PROJECT_NAME}.md"
-    LOG_PATH="$LOG_DIR/$LOG_FILENAME"
+
+    # Atomically claim the next session slot for today. Replaces a count+1 loop
+    # that raced when two chats started the same day (both picked the same NNN
+    # and clobbered one log). The script reserves the filename via O_EXCL; the
+    # cat below overwrites that empty placeholder with real frontmatter.
+    _ALLOC_SCRIPT="$(dirname "$(dirname "$(realpath "$0")")")/scripts/allocate_session_slot.py"
+    if [ -f "$_ALLOC_SCRIPT" ] && _SLOT=$(python3 "$_ALLOC_SCRIPT" "$LOG_DIR" "$TODAY" "$PROJECT_NAME" 2>/dev/null); then
+      SESSION_ID=$(printf '%s' "$_SLOT" | cut -f1)
+      LOG_PATH=$(printf '%s' "$_SLOT" | cut -f2)
+    else
+      # Fallback: non-atomic count+1 (script missing / older install).
+      EXISTING_COUNT=0
+      for _f in "$LOG_DIR"/${TODAY}-*.md; do
+        [ -f "$_f" ] && [ "$(basename "$_f")" != "LOG_REGISTRY.md" ] && EXISTING_COUNT=$((EXISTING_COUNT + 1))
+      done
+      SESSION_ID="${TODAY}-$(printf "%03d" $((EXISTING_COUNT + 1)))"
+      LOG_PATH="$LOG_DIR/${SESSION_ID}-${PROJECT_NAME}.md"
+    fi
 
     # Detect project and branch
     BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
@@ -247,7 +269,7 @@ files_changed:
 LOG_EOF
 
     # Store log path + owner timestamp (for subagent detection in stop hook)
-    printf "%s\n%s\n" "$LOG_PATH" "$(cat "$REPO_ROOT/.claude/session-start-ts.tmp" 2>/dev/null || date +%s)" > "$ACTIVE_LOG_FILE"
+    printf "%s\n%s\n" "$LOG_PATH" "$(cat "$START_TS_FILE" 2>/dev/null || date +%s)" > "$ACTIVE_LOG_FILE"
 
     # Refresh INDEX.md at session start (no LLM, <1s).
     # --summary-heuristic regenerates BOTH the quick reference and the

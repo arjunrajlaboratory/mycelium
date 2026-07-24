@@ -43,8 +43,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   if [[ ! -f "$HELPER" ]]; then exit 0; fi
 
   TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  EVENTS_FILE="$REPO_ROOT/.claude/mycelium-data-events.tmp"
-  mkdir -p "$REPO_ROOT/.claude"
+  # Per-session scoped runtime paths (sets EVENTS_FILE, ...).
+  . "$HERE/mycelium-run-paths.sh"
 
   # Build optional flags conditionally. macOS bash 3.2 treats empty-array
   # expansion as unbound under `set -u`, so use the ${arr+"${arr[@]}"} idiom

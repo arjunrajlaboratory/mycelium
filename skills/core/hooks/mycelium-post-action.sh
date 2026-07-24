@@ -89,7 +89,8 @@ fi
 
 # --- Build combined directive ---
 
-ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
+# Per-session scoped runtime paths (sets ACTIVE_LOG_FILE, REMINDER_FILE, ...).
+. "$(dirname "${BASH_SOURCE[0]:-$0}")/mycelium-run-paths.sh"
 LOG_DIRECTIVE=""
 LIVING_DIRECTIVE=""
 
@@ -100,7 +101,7 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
 fi
 
 # Part 2: .living/ update reminder (debounced — existing behavior)
-REMINDER_FILE="$REPO_ROOT/.claude/mycelium-reminded.tmp"
+# REMINDER_FILE is set by mycelium-run-paths.sh (session-scoped).
 mkdir -p "$REPO_ROOT/.claude"
 
 SHOULD_REMIND=true

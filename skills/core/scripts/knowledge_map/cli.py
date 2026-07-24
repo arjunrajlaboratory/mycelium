@@ -12,8 +12,12 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from mycelium_locks import file_lock  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +60,16 @@ def cmd_build(args: argparse.Namespace) -> int:
     graph_dir = portfolio / ".living" / "graph"
     graph_dir.mkdir(parents=True, exist_ok=True)
 
+    # Serialise the whole build under one exclusive lock: it rmtree-rebuilds the
+    # vault and mints entry IDs from the ledger's current max, so two concurrent
+    # builds would delete each other's output and hand out colliding IDs.
+    with file_lock(str(graph_dir / ".build.lock")):
+        return _cmd_build_impl(args, portfolio, graph_dir)
+
+
+def _cmd_build_impl(
+    args: argparse.Namespace, portfolio: Path, graph_dir: Path
+) -> int:
     baseline_path: Path | None = None
     if args.baseline:
         baseline_path = Path(args.baseline).expanduser().resolve()

@@ -45,7 +45,7 @@ Pull a new dataset into the analytical framework, ensuring it is properly docume
    - Use the templates at `skills/core/templates/schema.yaml`, `skills/core/templates/provenance.md`, and `skills/core/templates/summary_stats.md` as starting points.
    - Required fields: source, date acquired, schema/column descriptions, known issues, access restrictions.
 
-7. **Update `data/DATA_MANIFEST.md`** with a new entry using `skills/core/templates/dataset-manifest-entry.yaml`.
+7. **Update `data/DATA_MANIFEST.md`** with a new entry using `skills/core/templates/dataset-manifest-entry.yaml`. Upsert the row with `python3 skills/core/scripts/upsert_manifest_row.py data/DATA_MANIFEST.md <dataset-id> "<row>"` rather than hand-editing, so concurrent chats stay collision-safe (see `skills/core/references/concurrency.md`).
 
 8. **Log decisions**: If any choices were made during ingestion (excluding records, choosing formats, handling encoding issues), append to `.living/decisions.md`.
 

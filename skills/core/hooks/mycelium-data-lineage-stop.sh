@@ -29,7 +29,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo "")
   if [[ -z "$REPO_ROOT" ]] || [[ ! -d "$REPO_ROOT/.living" ]]; then exit 0; fi
 
-  EVENTS_FILE="$REPO_ROOT/.claude/mycelium-data-events.tmp"
+  # Per-session scoped runtime paths (sets EVENTS_FILE, ACTIVE_LOG_FILE, ...).
+  . "$HERE/mycelium-run-paths.sh"
   if [[ ! -s "$EVENTS_FILE" ]]; then exit 0; fi  # no events this session
 
   # Resolve SESSION_ID. Prefer mycelium's date-counter format (YYYY-MM-DD-NNN)
@@ -38,7 +39,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   # session start; the basename encodes the session ID. Fall back to Claude
   # Code's UUID only if mycelium hasn't recorded an active session.
   SESSION_ID=""
-  ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
+  # ACTIVE_LOG_FILE is set by mycelium-run-paths.sh (session-scoped).
   if [[ -f "$ACTIVE_LOG_FILE" ]]; then
     LOG_PATH=$(head -1 "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
     if [[ -n "$LOG_PATH" ]]; then

@@ -54,7 +54,7 @@ Start a new analysis or continue an existing one, routing to the appropriate con
    - This is complementary to `/mycelium:review`, not a substitute. Lint catches structural patterns cheaply; review catches semantic and statistical issues.
 
 7. **Run the post-action hook protocol** after significant steps (see `/mycelium:core` for the full protocol):
-   - Update `analysis/ANALYSIS_MANIFEST.md`
+   - Update `analysis/ANALYSIS_MANIFEST.md` (upsert the row with `python3 skills/core/scripts/upsert_manifest_row.py <manifest> <analysis-id> "<row>"` so concurrent chats don't clobber it — see `skills/core/references/concurrency.md`)
    - Update the analysis documentation file
    - Log decisions to `.living/decisions.md`
    - Log learnings to `.living/learnings.md`

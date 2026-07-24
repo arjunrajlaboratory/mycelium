@@ -68,6 +68,10 @@ desktop.ini
 # Claude Code session state (local only — never commit)
 .claude/last-session.md
 .claude/session-start-ts.tmp
+.claude/mycelium/
+
+# Mycelium concurrency lockfiles (transient advisory flock sidecars)
+.*.lock
 
 # R
 .Rhistory

@@ -20,6 +20,15 @@ if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 
+# Skip subagent stops. Subagents share the parent's session_id (and thus its
+# scoped run dir), so finalizing here would prematurely close the parent's
+# still-active session. The main agent fires "Stop"; subagents fire
+# "SubagentStop" — only guard against the latter being wired to this hook.
+HOOK_EVENT=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('hook_event_name',''))" 2>/dev/null || echo "")
+if [ "$HOOK_EVENT" = "SubagentStop" ]; then
+  exit 0
+fi
+
 # Determine repo root early (used by both log finalization and .living/ checks)
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 
@@ -33,11 +42,15 @@ UPSERT_SCRIPT="$SCRIPT_DIR/scripts/upsert_registry_row.py"
 TEMPLATE_FILE="$SCRIPT_DIR/templates/log-scribe-prompt.md"
 
 # --- Session log finalization ---
-ACTIVE_LOG_FILE="$REPO_ROOT/.claude/active-session-log.tmp"
-if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
+# Per-session scoped runtime paths (sets ACTIVE_LOG_FILE, START_TS_FILE,
+# REMINDER_FILE, ACTIVITY_FILE, ...). Guarded reads below tolerate REPO_ROOT="".
+if [ -n "$REPO_ROOT" ]; then
+  . "$(dirname "${BASH_SOURCE[0]:-$0}")/mycelium-run-paths.sh"
+fi
+if [ -n "$REPO_ROOT" ] && [ -f "${ACTIVE_LOG_FILE:-}" ]; then
   LOG_PATH=$(head -1 "$ACTIVE_LOG_FILE")
   OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
-  OUR_TS=$(cat "$REPO_ROOT/.claude/session-start-ts.tmp" 2>/dev/null || echo "")
+  OUR_TS=$(cat "$START_TS_FILE" 2>/dev/null || echo "")
 
   # Subagent detection: if owner timestamp exists and doesn't match ours, we're a subagent
   if [ -n "$OWNER_TS" ] && [ -n "$OUR_TS" ] && [ "$OWNER_TS" != "$OUR_TS" ]; then
@@ -52,7 +65,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
     # session-start-ts.tmp, which can be stale across crashed sessions and
     # produce nonsense durations like 14794 minutes for a 55-second session.
     LOG_REPO="$REPO_ROOT"
-    START_FILE="$LOG_REPO/.claude/session-start-ts.tmp"
+    START_FILE="$START_TS_FILE"  # session-scoped (mycelium-run-paths.sh)
     NOW_TS=$(date +%s)
     DURATION_MIN=0
     START_TS=""
@@ -83,7 +96,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
     fi
     FILES_CHANGED=$((FILES_CHANGED_UNCOMMITTED + FILES_CHANGED_STAGED + FILES_CHANGED_COMMITTED))
     # Also count activity-tracked files (Edit/Write operations not yet in git)
-    ACTIVITY_FILE_CHECK="$LOG_REPO/.claude/mycelium-session-activity.tmp"
+    ACTIVITY_FILE_CHECK="$ACTIVITY_FILE"  # session-scoped (mycelium-run-paths.sh)
     if [ -f "$ACTIVITY_FILE_CHECK" ] && [ "$FILES_CHANGED" -eq 0 ]; then
       FILES_CHANGED=$(sort -u "$ACTIVITY_FILE_CHECK" | grep -c . || echo "0")
     fi
@@ -119,7 +132,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
     if [ "$ACTIVITY_COUNT" -eq 0 ] && [ "$COMMITS_THIS_SESSION" -eq 0 ] && [ "$UNCOMMITTED_RECENT" -eq 0 ]; then
       rm -f "$LOG_PATH"
       rm -f "$ACTIVE_LOG_FILE"
-      rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
+      rm -f "$START_TS_FILE"
       # No registry row, no finalization — clean exit (noise session)
     else
       # Auto-finalize the session log (factual record — no Claude needed)
@@ -133,7 +146,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       rm -f "${LOG_PATH}.bak"
 
       # Append file list from activity tracker or git diff
-      ACTIVITY_FILE="$LOG_REPO/.claude/mycelium-session-activity.tmp"
+      # ACTIVITY_FILE is session-scoped (mycelium-run-paths.sh).
       FILE_LIST_MD=""
       GIT_FILES=""
       if [ -f "$ACTIVITY_FILE" ]; then
@@ -242,12 +255,12 @@ LAST_SESSION_EOF
 
       # Clean up sentinels
       rm -f "$ACTIVE_LOG_FILE"
-      rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
+      rm -f "$START_TS_FILE"
     fi
   else
     # Log file doesn't exist (was deleted?) — clean up sentinels
     rm -f "$ACTIVE_LOG_FILE"
-    rm -f "$REPO_ROOT/.claude/session-start-ts.tmp"
+    rm -f "$START_TS_FILE"
   fi
 fi
 
@@ -264,8 +277,7 @@ fi
 
 # Check if any work was done this session.
 # Work detected by: mycelium-reminded.tmp (analysis or Edit/Write) or mycelium-session-activity.tmp
-REMINDER_FILE="$REPO_ROOT/.claude/mycelium-reminded.tmp"
-ACTIVITY_FILE="$REPO_ROOT/.claude/mycelium-session-activity.tmp"
+# REMINDER_FILE and ACTIVITY_FILE are session-scoped (mycelium-run-paths.sh).
 if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
   exit 0
 fi
@@ -273,8 +285,8 @@ fi
 # Use reminder timestamp if available, otherwise session start timestamp
 if [ -f "$REMINDER_FILE" ]; then
   WORK_TS=$(cat "$REMINDER_FILE")
-elif [ -f "$REPO_ROOT/.claude/session-start-ts.tmp" ]; then
-  WORK_TS=$(cat "$REPO_ROOT/.claude/session-start-ts.tmp")
+elif [ -f "$START_TS_FILE" ]; then
+  WORK_TS=$(cat "$START_TS_FILE")
 else
   WORK_TS=0
 fi

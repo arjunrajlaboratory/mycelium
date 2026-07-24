@@ -6,12 +6,16 @@ table with entry counts, last-modified dates, and key topics.
 """
 
 import argparse
+import contextlib
 import os
 import re
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mycelium_locks import file_lock  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Sentinel constants for structured INDEX.md blocks
@@ -1050,41 +1054,50 @@ def main() -> None:
     if not living_dir.is_dir():
         parser.error(f"--living-dir '{living_dir}' is not a directory.")
 
-    if args.counts_only:
-        if args.dry_run:
-            print(build_quick_reference(living_dir))
-        else:
-            update_index_counts_only(living_dir)
-    elif args.summary_heuristic:
-        if args.dry_run:
-            print(build_quick_reference(living_dir))
-            print()
-            print(build_heuristic_summary(living_dir))
-        else:
-            update_index_summary_heuristic(living_dir)
-    elif args.summarize:
-        if args.dry_run:
-            # For summarize dry-run, show what would be written without saving
-            # We still call the LLM but print instead of write
-            index_path = living_dir / "INDEX.md"
-            _original_write = index_path.write_text
+    # Serialise INDEX.md writers so concurrent sessions (e.g. two SessionStart
+    # hooks) can't interleave writes or lose each other's regeneration. Dry-run
+    # only prints, so it takes no lock.
+    _lock = (
+        contextlib.nullcontext()
+        if args.dry_run
+        else file_lock(str(living_dir / "INDEX.md"))
+    )
+    with _lock:
+        if args.counts_only:
+            if args.dry_run:
+                print(build_quick_reference(living_dir))
+            else:
+                update_index_counts_only(living_dir)
+        elif args.summary_heuristic:
+            if args.dry_run:
+                print(build_quick_reference(living_dir))
+                print()
+                print(build_heuristic_summary(living_dir))
+            else:
+                update_index_summary_heuristic(living_dir)
+        elif args.summarize:
+            if args.dry_run:
+                # For summarize dry-run, show what would be written without saving
+                # We still call the LLM but print instead of write
+                index_path = living_dir / "INDEX.md"
+                _original_write = index_path.write_text
 
-            def _dry_write(text: str, **_kwargs: object) -> None:
-                print(text)
+                def _dry_write(text: str, **_kwargs: object) -> None:
+                    print(text)
 
-            index_path.write_text = _dry_write  # type: ignore[method-assign]
-            update_index_summarize(living_dir)
-            index_path.write_text = _original_write  # type: ignore[method-assign]
+                index_path.write_text = _dry_write  # type: ignore[method-assign]
+                update_index_summarize(living_dir)
+                index_path.write_text = _original_write  # type: ignore[method-assign]
+            else:
+                update_index_summarize(living_dir)
         else:
-            update_index_summarize(living_dir)
-    else:
-        content = generate_index(living_dir)
-        if args.dry_run:
-            print(content)
-        else:
-            index_path = living_dir / "INDEX.md"
-            index_path.write_text(content, encoding="utf-8")
-            print(f"Written: {index_path}")
+            content = generate_index(living_dir)
+            if args.dry_run:
+                print(content)
+            else:
+                index_path = living_dir / "INDEX.md"
+                index_path.write_text(content, encoding="utf-8")
+                print(f"Written: {index_path}")
 
 
 if __name__ == "__main__":

@@ -19,6 +19,9 @@ import os
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mycelium_locks import file_lock  # noqa: E402
+
 
 def _row_session_id(line: str) -> str:
     """Extract the session-id column from a registry row.
@@ -70,36 +73,40 @@ def main(argv: list[str]) -> int:
     if not new_row.endswith("\n"):
         new_row = new_row + "\n"
 
-    with open(registry_path, encoding="utf-8") as f:
-        lines = f.readlines()
+    # Serialise the whole read-modify-write so concurrent sessions can't drop
+    # each other's rows (atomic replace alone prevents corruption, not lost
+    # updates).
+    with file_lock(registry_path):
+        with open(registry_path, encoding="utf-8") as f:
+            lines = f.readlines()
 
-    replaced = False
-    out_lines: list[str] = []
-    for line in lines:
-        sid = _row_session_id(line)
-        if not replaced and sid == session_id and not _is_header_or_separator(sid):
+        replaced = False
+        out_lines: list[str] = []
+        for line in lines:
+            sid = _row_session_id(line)
+            if not replaced and sid == session_id and not _is_header_or_separator(sid):
+                out_lines.append(new_row)
+                replaced = True
+            else:
+                out_lines.append(line)
+
+        if not replaced:
+            if out_lines and not out_lines[-1].endswith("\n"):
+                out_lines[-1] = out_lines[-1] + "\n"
             out_lines.append(new_row)
-            replaced = True
-        else:
-            out_lines.append(line)
 
-    if not replaced:
-        if out_lines and not out_lines[-1].endswith("\n"):
-            out_lines[-1] = out_lines[-1] + "\n"
-        out_lines.append(new_row)
-
-    target_dir = os.path.dirname(os.path.abspath(registry_path)) or "."
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=".log_registry.", suffix=".tmp", dir=target_dir
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-            tmp.writelines(out_lines)
-        os.replace(tmp_path, registry_path)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
+        target_dir = os.path.dirname(os.path.abspath(registry_path)) or "."
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".log_registry.", suffix=".tmp", dir=target_dir
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                tmp.writelines(out_lines)
+            os.replace(tmp_path, registry_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
 
     print("upserted" if replaced else "appended")
     return 0

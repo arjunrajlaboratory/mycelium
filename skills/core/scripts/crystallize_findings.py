@@ -14,10 +14,14 @@ with .living/ to discover the meta-project root.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from mycelium_locks import file_lock  # noqa: E402
 
 
 def find_meta_root(start: Path) -> Path | None:
@@ -342,10 +346,13 @@ def rebuild_project_registry(findings_dir: Path) -> None:
         )
 
     registry_path = findings_dir / "FINDINGS_REGISTRY.md"
-    registry_path.write_text(
-        template_header + "\n" + "\n".join(table_rows) + "\n",
-        encoding="utf-8",
-    )
+    # Lock so a full rebuild can't clobber a concurrent agent row-upsert
+    # (both take the same <path>.lock).
+    with file_lock(str(registry_path)):
+        registry_path.write_text(
+            template_header + "\n" + "\n".join(table_rows) + "\n",
+            encoding="utf-8",
+        )
 
 
 def main() -> int:
@@ -384,7 +391,8 @@ def main() -> int:
         return 0
 
     index_path = findings_dir / "INDEX.md"
-    index_path.write_text(content, encoding="utf-8")
+    with file_lock(str(index_path)):
+        index_path.write_text(content, encoding="utf-8")
     print(f"INDEX.md written to {index_path}")
 
     # Rebuild per-project FINDINGS_REGISTRY.md for each subproject
