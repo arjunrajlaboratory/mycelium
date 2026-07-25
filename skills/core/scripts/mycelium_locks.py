@@ -22,14 +22,19 @@ from typing import Iterator
 
 
 @contextlib.contextmanager
-def file_lock(target_path: str, timeout: float = 30.0) -> Iterator[None]:
+def file_lock(target_path: str) -> Iterator[None]:
     """Hold an exclusive advisory lock for the duration of the block.
 
-    The lock is taken on a sibling ``<target>.lock`` file (never on the target
-    itself, so an atomic-replace of the target can't drop the lock). On
-    platforms without ``fcntl`` (e.g. Windows) this degrades to a no-op rather
-    than crashing — the pre-existing atomic-replace still prevents corruption,
-    only lost updates remain possible.
+    Uses a blocking ``fcntl.flock`` on a dot-prefixed sibling ``.<name>.lock``
+    file (kept off the target itself so an atomic-replace can't drop the lock).
+    Blocking is safe against deadlock: flock is released automatically when the
+    holder's fd closes OR the holding process dies, so a crashed holder never
+    blocks us — we only ever wait out a live holder's bounded critical section.
+    Never proceeds without the lock, so it can't reintroduce the races it guards.
+
+    On platforms without ``fcntl`` (e.g. Windows) this degrades to a no-op —
+    the callers' atomic-replace still prevents corruption, only lost updates
+    remain possible.
     """
     try:
         import fcntl
@@ -37,28 +42,12 @@ def file_lock(target_path: str, timeout: float = 30.0) -> Iterator[None]:
         yield
         return
 
-    # Dot-prefixed sibling lockfile: hidden + git-ignorable, and kept off the
-    # target itself so an atomic-replace of the target can't drop the lock.
     _abs = os.path.abspath(target_path)
     lock_path = os.path.join(os.path.dirname(_abs), f".{os.path.basename(_abs)}.lock")
     os.makedirs(os.path.dirname(_abs) or ".", exist_ok=True)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        import time
-
-        deadline = None  # set lazily to avoid importing time when uncontended
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError:
-                if deadline is None:
-                    deadline = time.monotonic() + timeout
-                if time.monotonic() >= deadline:
-                    # Give up waiting and proceed anyway: a slow writer must not
-                    # deadlock a session's Stop hook. Atomic-replace still holds.
-                    break
-                time.sleep(0.05)
+        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         with contextlib.suppress(OSError):

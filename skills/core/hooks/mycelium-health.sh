@@ -219,7 +219,7 @@ REGISTRY_EOF
     # that raced when two chats started the same day (both picked the same NNN
     # and clobbered one log). The script reserves the filename via O_EXCL; the
     # cat below overwrites that empty placeholder with real frontmatter.
-    _ALLOC_SCRIPT="$(dirname "$(dirname "$(realpath "$0")")")/scripts/allocate_session_slot.py"
+    _ALLOC_SCRIPT="$(dirname "$(dirname "${BASH_SOURCE[0]:-$0}")")/scripts/allocate_session_slot.py"
     if [ -f "$_ALLOC_SCRIPT" ] && _SLOT=$(python3 "$_ALLOC_SCRIPT" "$LOG_DIR" "$TODAY" "$PROJECT_NAME" 2>/dev/null); then
       SESSION_ID=$(printf '%s' "$_SLOT" | cut -f1)
       LOG_PATH=$(printf '%s' "$_SLOT" | cut -f2)
@@ -238,10 +238,13 @@ REGISTRY_EOF
     STARTED=$(date +%Y-%m-%dT%H:%M:%S%z)
     TIME_SHORT=$(date +%H:%M)
 
-    # Find previous session log for this project (glob-safe, no pipefail risk)
+    # Find previous session log for this project (glob-safe, no pipefail risk).
+    # Skip our own just-allocated LOG_PATH: the O_EXCL slot claim created it
+    # before this scan, so without the guard "Resuming from" would point at the
+    # current session.
     PREV_LOG=""
     for _pf in "$LOG_DIR"/*-${PROJECT_NAME}.md; do
-      [ -f "$_pf" ] && PREV_LOG="$_pf"
+      [ -f "$_pf" ] && [ "$_pf" != "$LOG_PATH" ] && PREV_LOG="$_pf"
     done
     if [ -n "$PREV_LOG" ]; then
       PREV_LINK="$(basename "$PREV_LOG")"

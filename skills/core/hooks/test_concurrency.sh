@@ -16,6 +16,7 @@ set -uo pipefail
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 HEALTH="$HOOKS_DIR/mycelium-health.sh"
 STOP="$HOOKS_DIR/mycelium-stop-check.sh"
+ACTIVITY="$HOOKS_DIR/mycelium-activity-tracker.sh"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[0;33m'; NC='\033[0m'
 PASS=0; FAIL=0
@@ -136,6 +137,39 @@ echo "TEST 7: SubagentStop event → no finalization"
     pass "subagent stop left the parent log open"
   else
     fail "subagent stop wrongly finalized the parent log"
+  fi
+}
+
+# ── TEST 8: subagent (same session_id) → activity attributed to parent ───────
+echo "TEST 8: subagent shares parent's session_id → activity under parent dir"
+{
+  R=$(new_repo)
+  # Parent edits a file (Edit/Write PostToolUse).
+  (cd "$R" && printf '{"session_id":"chat-AAA","tool_input":{"file_path":"%s/parent.py"}}' "$R" | bash "$ACTIVITY" >/dev/null 2>&1)
+  # Subagent shares the parent's session_id (distinct agent_id) and edits another.
+  (cd "$R" && printf '{"session_id":"chat-AAA","agent_id":"sub","tool_input":{"file_path":"%s/child.py"}}' "$R" | bash "$ACTIVITY" >/dev/null 2>&1)
+  AF="$R/.claude/mycelium/run/chat-AAA/mycelium-session-activity.tmp"
+  # A different chat's dir must not contain them.
+  BF="$R/.claude/mycelium/run/chat-BBB/mycelium-session-activity.tmp"
+  if [ -f "$AF" ] && grep -q "parent.py" "$AF" && grep -q "child.py" "$AF" && [ ! -f "$BF" ]; then
+    pass "parent + subagent edits recorded under the single parent session"
+  else
+    fail "subagent activity not attributed to parent session" "AF=$(cat "$AF" 2>/dev/null)"
+  fi
+}
+
+# ── TEST 9: legacy (no session_id) and scoped chats don't interfere ──────────
+echo "TEST 9: legacy + scoped chats each get their own log"
+{
+  R=$(new_repo)
+  start_session "$R" "scoped-1"   # scoped chat
+  start_session "$R" ""            # legacy chat (no session_id)
+  if [ -f "$R/.claude/mycelium/run/scoped-1/active-session-log.tmp" ] \
+     && [ -f "$R/.claude/active-session-log.tmp" ] \
+     && [ "$(count_logs "$R")" = "2" ]; then
+    pass "scoped chat used its run dir, legacy chat used flat .claude/; 2 logs"
+  else
+    fail "legacy/scoped interference" "logs=$(count_logs "$R")"
   fi
 }
 

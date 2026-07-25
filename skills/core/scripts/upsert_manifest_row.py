@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """Lock-protected, atomic upsert of a row into a mycelium markdown-table registry.
 
-Manifests (ANALYSIS_MANIFEST.md, DATA_MANIFEST.md, TODO_REGISTRY.md,
-FINDINGS_REGISTRY.md, ...) are otherwise mutated by the agent's Edit tool —
-a read-modify-write with no coordination, so two concurrent chats adding
-entries clobber each other or produce merge conflicts. Routing those updates
-through this helper serialises them with an flock and writes atomically.
+For markdown-TABLE registries — FINDINGS_REGISTRY.md, LOG_REGISTRY.md,
+TODO_REGISTRY.md — which are otherwise mutated by the agent's Edit tool, a
+read-modify-write with no coordination, so two concurrent chats adding entries
+clobber each other or produce merge conflicts. Routing those updates through
+this helper serialises them with an flock and writes atomically.
+
+NOT for the YAML-block manifests (ANALYSIS_MANIFEST.md, DATA_MANIFEST.md), which
+are `### name` headers + fenced YAML blocks + prose, not tables — this helper
+requires the new row to be a markdown table row (starts with '|').
 
 Usage:
     python3 upsert_manifest_row.py <registry_path> <key> <new_row> [--key-col N]
 
-Finds the first data row whose column N (default 1, the first table column)
-equals <key> exactly and replaces it; otherwise appends <new_row>. Header and
-separator rows are never matched. Prints 'upserted' or 'appended'.
+Finds the first data row (after the table's separator line) whose column N
+(default 1, the first table column) equals <key> exactly and replaces it;
+otherwise appends <new_row>. Header and separator rows are never matched.
+Prints 'upserted' or 'appended'.
 """
 
 from __future__ import annotations

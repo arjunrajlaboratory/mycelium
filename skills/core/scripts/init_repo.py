@@ -857,6 +857,29 @@ def audit_existing_structure(target_dir: Path) -> dict:
     return plan
 
 
+def ensure_gitignore(target_dir: Path):
+    """Ensure the target repo ignores mycelium's transient runtime files.
+
+    Per-session runtime dirs (.claude/mycelium/) and concurrency lockfiles
+    (.<name>.lock) live inside the repo and must never be committed. Idempotent:
+    keyed on the '.claude/mycelium/' line.
+    """
+    gitignore = target_dir / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    if ".claude/mycelium/" in existing:
+        return
+    block = (
+        "# Mycelium runtime (transient, never commit)\n"
+        ".claude/mycelium/\n"
+        ".claude/*.tmp\n"
+        ".*.lock\n"
+    )
+    new = existing.rstrip("\n")
+    new = (new + "\n\n" + block) if new else block
+    gitignore.write_text(new, encoding="utf-8")
+    print("  Updated: .gitignore with mycelium runtime rules")
+
+
 def main():
     args = parse_args()
     target_dir = args.target_dir.resolve()
@@ -904,6 +927,9 @@ def main():
 
     print("\nInstalling Claude Code hooks...")
     install_claude_hooks(target_dir)
+
+    print("\nEnsuring .gitignore covers runtime files...")
+    ensure_gitignore(target_dir)
 
     print("\n" + "=" * 50)
     print("Mycelium initialization complete!")
