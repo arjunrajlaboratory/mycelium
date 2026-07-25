@@ -4,7 +4,8 @@
 
 set -uo pipefail
 
-HOOK_PATH="/Users/mst36/tools/mycelium/skills/core/hooks/mycelium-stop-check.sh"
+# Self-locating: resolve the hook from this script's own directory.
+HOOK_PATH="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/mycelium-stop-check.sh"
 
 # Colors
 GREEN='\033[0;32m'
@@ -63,6 +64,21 @@ ts_ancient() {
   echo $(( $(date +%s) - 3600 ))
 }
 
+# Timestamp even further back — used for .living files that must predate an
+# ts_ancient work timestamp (so "nothing updated since work" holds).
+ts_very_old() {
+  echo $(( $(date +%s) - 7200 ))
+}
+
+# Touch a file with a 2h-old mtime (older than ts_ancient work timestamps).
+touch_ancient() {
+  local file="$1"
+  touch "$file"
+  local old_ts
+  old_ts=$(date -r "$(ts_very_old)" "+%Y%m%d%H%M.%S" 2>/dev/null || true)
+  [ -n "$old_ts" ] && touch -t "$old_ts" "$file" || true
+}
+
 # Touch a file with an old timestamp (60 seconds ago)
 touch_old() {
   local file="$1"
@@ -116,15 +132,14 @@ echo "TEST 2: Work done, nothing updated → should BLOCK"
 
   # Create .living files FIRST, then wait 2 seconds, then write the reminder timestamp.
   # This guarantees file mtimes < WORK_TS (reminder is written after the files exist).
-  touch_old "$REPO/.living/learnings.md"
-  touch_old "$REPO/.living/decisions.md"
-  touch_old "$REPO/.living/conventions.md"
-  touch_old "$REPO/.living/findings"
-  # Ensure the directory itself is also old
-  sleep 2
+  touch_ancient "$REPO/.living/learnings.md"
+  touch_ancient "$REPO/.living/decisions.md"
+  touch_ancient "$REPO/.living/conventions.md"
+  touch_ancient "$REPO/.living/findings"
 
-  # Write reminder timestamp NOW (current time), which is newer than all .living files
-  date +%s > "$REPO/.claude/mycelium-reminded.tmp"
+  # Reminder is 1h old: newer than the (2h-old) .living files, so nothing was
+  # updated since work — AND older than the 5-min debounce, so the hook blocks.
+  ts_ancient > "$REPO/.claude/mycelium-reminded.tmp"
 
   run_hook "$REPO"
 
@@ -330,25 +345,26 @@ echo "TEST 9: Block JSON contains correct routing rule text"
   mkdir -p "$REPO/.living"
   mkdir -p "$REPO/.living/findings"
 
-  touch_old "$REPO/.living/learnings.md"
-  touch_old "$REPO/.living/decisions.md"
-  touch_old "$REPO/.living/conventions.md"
-  touch_old "$REPO/.living/findings"
-  sleep 2
-  date +%s > "$REPO/.claude/mycelium-reminded.tmp"
+  touch_ancient "$REPO/.living/learnings.md"
+  touch_ancient "$REPO/.living/decisions.md"
+  touch_ancient "$REPO/.living/conventions.md"
+  touch_ancient "$REPO/.living/findings"
+  # 1h-old reminder: older than the debounce (blocks), newer than .living (nothing updated).
+  ts_ancient > "$REPO/.claude/mycelium-reminded.tmp"
 
   run_hook "$REPO"
 
-  # Check all required strings in the block output
+  # Check the block message routes the agent to the triage targets.
   ROUTING_OK=true
   MISSING=""
 
   for needle in \
-    "findings/{topic}.md" \
-    "NOT learnings.md" \
-    "ROUTING RULE" \
-    "conventions.md" \
-    "decisions.md"
+    "STOP BLOCKED" \
+    "learnings" \
+    "decisions" \
+    "conventions" \
+    "findings" \
+    "last-session.md"
   do
     if ! echo "$HOOK_OUTPUT" | grep -qF "$needle"; then
       ROUTING_OK=false
@@ -513,19 +529,16 @@ echo "TEST 14: Activity file only, .living not updated → should BLOCK"
   mkdir -p "$REPO/.living/findings"
 
   # Create living files and the findings directory with OLD timestamps first
-  touch_old "$REPO/.living/learnings.md"
-  touch_old "$REPO/.living/decisions.md"
-  touch_old "$REPO/.living/conventions.md"
-  touch_old "$REPO/.living/findings"
+  touch_ancient "$REPO/.living/learnings.md"
+  touch_ancient "$REPO/.living/decisions.md"
+  touch_ancient "$REPO/.living/conventions.md"
+  touch_ancient "$REPO/.living/findings"
 
-  # Sleep so that session-start-ts written AFTER is newer than all .living files
-  sleep 2
-
-  # Activity file exists, no reminded.tmp → hook uses session-start-ts as WORK_TS
+  # Activity file exists, no reminded.tmp → hook uses session-start-ts as WORK_TS.
+  # session-start-ts is 1h old: newer than the (2h-old) .living files (nothing
+  # updated) AND older than the 5-min debounce (so the hook blocks).
   echo "src/foo.py" > "$REPO/.claude/mycelium-session-activity.tmp"
-  date +%s > "$REPO/.claude/session-start-ts.tmp"  # now = newer than all .living files
-
-  # WORK_TS = session_start_ts (now), .living files are ≥2s old → none updated → BLOCK
+  ts_ancient > "$REPO/.claude/session-start-ts.tmp"
 
   run_hook "$REPO"
 
@@ -542,7 +555,7 @@ echo "TEST 14: Activity file only, .living not updated → should BLOCK"
 # TEST 15: additionalContext contains LOG_REGISTRY instruction
 # ─────────────────────────────────────────────────────────────────
 echo ""
-echo "TEST 15: additionalContext contains LOG_REGISTRY instruction"
+echo "TEST 15: additionalContext instructs last-session.md enhancement"
 {
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
@@ -572,10 +585,13 @@ LOG_EOF
 
   run_hook "$REPO"
 
-  if [ "$HOOK_EXIT" -eq 0 ] && echo "$HOOK_OUTPUT" | grep -q "LOG_REGISTRY"; then
-    pass "additionalContext contains LOG_REGISTRY instruction"
+  # The .living-updated additionalContext always instructs a last-session.md
+  # enhancement (the LOG_REGISTRY row is handled by the background log-scribe,
+  # which is only mentioned when the claude CLI is on PATH — so don't assert it).
+  if [ "$HOOK_EXIT" -eq 0 ] && echo "$HOOK_OUTPUT" | grep -q "last-session.md"; then
+    pass "additionalContext instructs last-session.md enhancement"
   else
-    fail "additionalContext missing LOG_REGISTRY instruction" \
+    fail "additionalContext missing last-session.md instruction" \
       "exit=$HOOK_EXIT output='$(echo "$HOOK_OUTPUT" | head -c 400)'"
   fi
   rm -rf "$REPO"

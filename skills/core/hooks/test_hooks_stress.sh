@@ -7,8 +7,10 @@
 
 set -euo pipefail
 
-READ_TRACKER_HOOK="/Users/mst36/tools/mycelium/skills/core/hooks/mycelium-read-tracker.sh"
-HEALTH_HOOK="/Users/mst36/tools/mycelium/skills/core/hooks/mycelium-health.sh"
+# Self-locating: resolve the hooks from this script's own directory.
+HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+READ_TRACKER_HOOK="$HOOKS_DIR/mycelium-read-tracker.sh"
+HEALTH_HOOK="$HOOKS_DIR/mycelium-health.sh"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -354,17 +356,15 @@ health_json() {
   printf '{"cwd":"%s","source":"startup"}' "$cwd"
 }
 
-# ── TEST 13: INDEX.md with sentinels → KNOWLEDGE MAP injected ────────────────
+# ── TEST 13: structured INDEX.md → KNOWLEDGE MAP injected ────────────────────
 echo ""
-echo "TEST 13: INDEX.md with sentinels → KNOWLEDGE MAP injected"
+echo "TEST 13: structured INDEX.md → KNOWLEDGE MAP injected (regenerated summary)"
 {
   setup_test_env
-  # NOTE: INDEX.md must include BOTH a <!-- BEGIN QUICK REFERENCE --> block AND the
-  # <!-- BEGIN KNOWLEDGE SUMMARY --> block.  The health hook calls generate_index.py
-  # --counts-only before checking sentinels.  That script rewrites the QUICK REFERENCE
-  # block in-place when it finds QUICK REFERENCE sentinels; if those sentinels are
-  # absent it treats the file as legacy and REPLACES IT ENTIRELY, destroying the
-  # KNOWLEDGE SUMMARY sentinels before the injection check can run.
+  # The health hook runs generate_index.py --summary-heuristic first, which
+  # REGENERATES the KNOWLEDGE SUMMARY block from the learnings' tags — so the
+  # injected content is the freshly-generated summary, not this seed text. We
+  # therefore assert only that a KNOWLEDGE MAP section is injected, not its body.
   cat > "$TEST_DIR/.living/INDEX.md" << 'INDEXEOF'
 # INDEX
 
@@ -386,23 +386,22 @@ INDEXEOF
   HH_OUTPUT=$(cd "$TEST_DIR" && printf '%s' "$(health_json)" | bash "$HEALTH_HOOK" 2>/dev/null)
   HH_EXIT=$?
 
-  if echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP" \
-    && echo "$HH_OUTPUT" | grep -q "Data Pipelines"; then
-    pass "Sentinel markers present → KNOWLEDGE MAP section injected with cluster content"
+  if echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
+    pass "Structured INDEX → KNOWLEDGE MAP section injected"
   else
-    fail "KNOWLEDGE MAP not injected despite sentinel markers" \
+    fail "KNOWLEDGE MAP not injected from structured INDEX" \
       "output=$(echo "$HH_OUTPUT" | head -c 300)"
   fi
   cleanup_test_env
 }
 
-# ── TEST 14: INDEX.md without sentinels (legacy) → NO injection ───────────────
+# ── TEST 14: legacy INDEX.md → upgraded to structured + injected ─────────────
 echo ""
-echo "TEST 14: INDEX.md without sentinels (legacy format) → NO injection"
+echo "TEST 14: legacy INDEX.md (no sentinels) → regenerated to structured, injected"
 {
   setup_test_env
-  # A legacy file with no sentinels.  generate_index.py will replace it entirely
-  # with a QUICK REFERENCE-only file, which also has no KNOWLEDGE SUMMARY → no injection.
+  # A legacy file with no sentinels. --summary-heuristic replaces it with a
+  # structured INDEX that has a KNOWLEDGE SUMMARY block → that block is injected.
   cat > "$TEST_DIR/.living/INDEX.md" << 'INDEXEOF'
 # INDEX
 
@@ -412,44 +411,45 @@ INDEXEOF
 
   HH_OUTPUT=$(cd "$TEST_DIR" && printf '%s' "$(health_json)" | bash "$HEALTH_HOOK" 2>/dev/null)
 
-  if ! echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
-    pass "Legacy INDEX.md (no sentinels) → no KNOWLEDGE MAP injection"
+  if echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP" \
+    && grep -q "<!-- BEGIN KNOWLEDGE SUMMARY -->" "$TEST_DIR/.living/INDEX.md"; then
+    pass "Legacy INDEX.md → regenerated with sentinels and KNOWLEDGE MAP injected"
   else
-    fail "Legacy INDEX.md injected KNOWLEDGE MAP unexpectedly" \
+    fail "Legacy INDEX.md not upgraded/injected" \
       "output=$(echo "$HH_OUTPUT" | head -c 300)"
   fi
   cleanup_test_env
 }
 
-# ── TEST 15: No INDEX.md file → NO injection, no error ───────────────────────
+# ── TEST 15: No INDEX.md file → regen creates it + injects, exit 0 ───────────
 echo ""
-echo "TEST 15: No INDEX.md file → NO injection, no error"
+echo "TEST 15: No INDEX.md → generate_index creates it, KNOWLEDGE MAP injected, exit 0"
 {
   setup_test_env
-  # Ensure INDEX.md does not exist
+  # Ensure INDEX.md does not exist; --summary-heuristic should create it.
   rm -f "$TEST_DIR/.living/INDEX.md"
 
   HH_OUTPUT=$(cd "$TEST_DIR" && printf '%s' "$(health_json)" | bash "$HEALTH_HOOK" 2>/dev/null)
   HH_EXIT=$?
 
-  if [ "$HH_EXIT" -eq 0 ] && ! echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
-    pass "No INDEX.md → exit 0, no KNOWLEDGE MAP injection"
+  if [ "$HH_EXIT" -eq 0 ] \
+    && [ -f "$TEST_DIR/.living/INDEX.md" ] \
+    && echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
+    pass "No INDEX.md → exit 0, INDEX.md created and KNOWLEDGE MAP injected"
   else
     fail "No INDEX.md produced unexpected output" \
-      "exit=$HH_EXIT output=$(echo "$HH_OUTPUT" | head -c 200)"
+      "exit=$HH_EXIT created=$([ -f "$TEST_DIR/.living/INDEX.md" ] && echo y || echo n) output=$(echo "$HH_OUTPUT" | head -c 200)"
   fi
   cleanup_test_env
 }
 
-# ── TEST 16: Empty KNOWLEDGE SUMMARY block → NO injection ────────────────────
+# ── TEST 16: empty KNOWLEDGE SUMMARY block → regenerated + injected ──────────
 echo ""
-echo "TEST 16: Empty KNOWLEDGE SUMMARY block → NO injection"
+echo "TEST 16: empty KNOWLEDGE SUMMARY block → repopulated by regen, injected"
 {
   setup_test_env
-  # Must include QUICK REFERENCE sentinels so generate_index.py does in-place
-  # replacement instead of wiping the entire file (which would also destroy the
-  # empty KNOWLEDGE SUMMARY block).  Even after replacement the KNOWLEDGE SUMMARY
-  # block remains empty → awk returns "" → no injection.
+  # Start with an empty KNOWLEDGE SUMMARY block. --summary-heuristic repopulates
+  # it from the learnings, so the injected block is no longer empty.
   cat > "$TEST_DIR/.living/INDEX.md" << 'INDEXEOF'
 # INDEX
 
@@ -464,10 +464,10 @@ INDEXEOF
 
   HH_OUTPUT=$(cd "$TEST_DIR" && printf '%s' "$(health_json)" | bash "$HEALTH_HOOK" 2>/dev/null)
 
-  if ! echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
-    pass "Empty sentinel block → no KNOWLEDGE MAP injection (awk returns empty string)"
+  if echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
+    pass "Empty sentinel block → repopulated and KNOWLEDGE MAP injected"
   else
-    fail "Empty sentinel block unexpectedly injected KNOWLEDGE MAP" \
+    fail "Empty sentinel block was not repopulated/injected" \
       "output=$(echo "$HH_OUTPUT" | head -c 300)"
   fi
   cleanup_test_env
@@ -617,16 +617,13 @@ echo "TEST 21: Entry counts correct in MYCELIUM SUMMARY (3 learnings, 2 decision
   cleanup_test_env
 }
 
-# ── TEST 22: Only QUICK REFERENCE sentinels, no SUMMARY sentinels → no injection
+# ── TEST 22: QUICK REFERENCE only → KNOWLEDGE SUMMARY added + injected ───────
 echo ""
-echo "TEST 22: Only QUICK REFERENCE sentinels (no SUMMARY sentinels) → no KNOWLEDGE MAP"
+echo "TEST 22: QUICK REFERENCE sentinels only → KNOWLEDGE SUMMARY added, injected"
 {
   setup_test_env
-  # Use the real sentinel text that generate_index.py recognises:
-  #   <!-- BEGIN QUICK REFERENCE --> / <!-- END QUICK REFERENCE -->
-  # This makes generate_index.py do an in-place replacement of only the QUICK
-  # REFERENCE block, leaving the rest of the file intact — which contains no
-  # KNOWLEDGE SUMMARY block at all.  Result: no KNOWLEDGE MAP injection.
+  # An INDEX with only QUICK REFERENCE sentinels. --summary-heuristic adds a
+  # KNOWLEDGE SUMMARY block (regenerated from tags), which is then injected.
   cat > "$TEST_DIR/.living/INDEX.md" << 'INDEXEOF'
 # INDEX
 
@@ -640,10 +637,11 @@ INDEXEOF
 
   HH_OUTPUT=$(cd "$TEST_DIR" && printf '%s' "$(health_json)" | bash "$HEALTH_HOOK" 2>/dev/null)
 
-  if ! echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP"; then
-    pass "QUICK REFERENCE sentinels only → no KNOWLEDGE MAP injection (requires BEGIN KNOWLEDGE SUMMARY)"
+  if echo "$HH_OUTPUT" | grep -q "KNOWLEDGE MAP" \
+    && grep -q "<!-- BEGIN KNOWLEDGE SUMMARY -->" "$TEST_DIR/.living/INDEX.md"; then
+    pass "QUICK REFERENCE only → KNOWLEDGE SUMMARY block added and injected"
   else
-    fail "QUICK REFERENCE sentinels triggered KNOWLEDGE MAP injection unexpectedly" \
+    fail "QUICK REFERENCE only → summary not added/injected" \
       "output=$(echo "$HH_OUTPUT" | head -c 300)"
   fi
   cleanup_test_env
