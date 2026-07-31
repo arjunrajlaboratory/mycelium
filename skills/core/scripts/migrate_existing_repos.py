@@ -230,26 +230,21 @@ def migrate_runtime_state(repo_path: Path, dry_run: bool = False) -> bool:
 
 
 def topup_codex_hooks(repo_path: Path, dry_run: bool = False) -> bool:
-    """Install the Codex hook bundle and report whether it changed."""
+    """Remove cache-path Codex hooks now superseded by plugin hooks."""
     hooks_path = repo_path / ".codex" / "hooks.json"
     before = hooks_path.read_text() if hooks_path.exists() else None
+    gitignore = repo_path / ".codex" / ".gitignore"
+    gitignore_before = gitignore.read_text() if gitignore.exists() else None
     if dry_run:
-        hooks_dir = ir.find_mycelium_hooks_dir()
-        if not hooks_dir:
+        if before is None:
             return False
         config = json.loads(before) if before is not None else {}
         expected = json.loads(json.dumps(config))
-        ir._update_codex_hooks_config(expected, hooks_dir)
-        gitignore = repo_path / ".codex" / ".gitignore"
-        ignored = (
-            gitignore.read_text(encoding="utf-8").splitlines()
-            if gitignore.exists()
-            else []
-        )
-        return expected != config or "hooks.json" not in ignored
+        return ir._remove_codex_hooks_config(expected)
     ir.install_codex_hooks(repo_path)
     after = hooks_path.read_text() if hooks_path.exists() else None
-    return before != after
+    gitignore_after = gitignore.read_text() if gitignore.exists() else None
+    return before != after or gitignore_before != gitignore_after
 
 
 def ensure_todo_contract(repo_path: Path, dry_run: bool = False) -> bool:
@@ -333,7 +328,7 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
         "Cross-agent guidance": _action_status(guidance_applied),
         "Runtime state migration": _action_status(runtime_applied),
         "Claude hooks top-up": _action_status(hooks_applied),
-        "Codex hooks top-up": _action_status(codex_hooks_applied),
+        "Legacy Codex hook cleanup": _action_status(codex_hooks_applied),
         "Todo contract": _action_status(todo_applied),
         "INDEX.md regen": _action_status(index_applied),
     }

@@ -15,6 +15,7 @@ import yaml
 
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 PLUGIN_ROOT = Path(__file__).resolve().parents[3]
+PLUGIN_HOOKS_DIR = PLUGIN_ROOT / "hooks"
 KNOWLEDGE_MAP_DIR = Path(__file__).resolve().parent / "knowledge_map"
 if str(KNOWLEDGE_MAP_DIR) not in sys.path:
     sys.path.insert(0, str(KNOWLEDGE_MAP_DIR))
@@ -40,6 +41,22 @@ def _run_hook(name: str, repo: Path, payload: dict) -> subprocess.CompletedProce
     env["MYCELIUM_HOOK_HOST"] = "codex"
     return subprocess.run(
         [str(HOOKS_DIR / name)],
+        cwd=repo,
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+
+def _run_plugin_hook(
+    name: str, repo: Path, payload: dict, plugin_root: Path = PLUGIN_ROOT
+) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env["PLUGIN_ROOT"] = str(plugin_root)
+    return subprocess.run(
+        [str(PLUGIN_HOOKS_DIR / "mycelium-codex-dispatch.sh"), name],
         cwd=repo,
         input=json.dumps(payload),
         text=True,
@@ -78,6 +95,22 @@ def test_codex_plugin_manifest_points_to_shared_skills():
     assert manifest["name"] == "mycelium"
     assert manifest["skills"] == "./skills/"
     assert manifest["version"] == "0.6.0"
+
+
+def test_codex_plugin_bundles_stable_dynamic_hooks():
+    config = json.loads((PLUGIN_HOOKS_DIR / "hooks.json").read_text())
+    commands = [
+        handler["command"]
+        for groups in config["hooks"].values()
+        for group in groups
+        for handler in group["hooks"]
+    ]
+    assert len(commands) == 6
+    assert all("${PLUGIN_ROOT}" in command for command in commands)
+    assert all("mycelium-codex-dispatch.sh" in command for command in commands)
+    assert all('${PLUGIN_ROOT:-}' in command for command in commands)
+    assert not any("plugins/cache" in command for command in commands)
+    assert os.access(PLUGIN_HOOKS_DIR / "mycelium-codex-dispatch.sh", os.X_OK)
 
 
 def test_readme_documents_codex_install_update_and_migration():
@@ -182,7 +215,7 @@ def test_codex_cli_can_drive_optional_concept_labeling():
     assert seen["command"][:2] == ["/usr/local/bin/codex", "exec"]
 
 
-def test_init_writes_codex_hooks_and_agent_guidance(tmp_path, capsys):
+def test_init_uses_plugin_bundled_codex_hooks_and_agent_guidance(tmp_path, capsys):
     repo = _repo(tmp_path, living=False)
     init_repo.create_directory_structure(repo)
     init_repo.create_todo_list(repo)
@@ -203,32 +236,10 @@ def test_init_writes_codex_hooks_and_agent_guidance(tmp_path, capsys):
     guidance = (repo / "MYCELIUM.md").read_text()
     assert "$(cat .mycelium/plugin-root)" in guidance
     assert "python3 skills/core/scripts/" not in guidance
-    config = json.loads((repo / ".codex" / "hooks.json").read_text())
-    commands = [
-        handler["command"]
-        for groups in config["hooks"].values()
-        for group in groups
-        for handler in group["hooks"]
-    ]
-    assert len(commands) == 6
-    assert all(command.startswith("MYCELIUM_HOOK_HOST=codex ") for command in commands)
-    assert not any("mycelium-read-tracker.sh" in command for command in commands)
-    assert any(
-        group["matcher"] == "Bash"
-        for group in config["hooks"]["PostToolUse"]
-    )
-    assert not any(
-        group["matcher"] == "exec_command"
-        for group in config["hooks"]["PostToolUse"]
-    )
-    assert any(
-        group["matcher"] == "apply_patch"
-        for group in config["hooks"]["PostToolUse"]
-    )
-    stop_handlers = config["hooks"]["Stop"][0]["hooks"]
-    assert "mycelium-data-lineage-stop.sh" in stop_handlers[0]["command"]
+    assert not (repo / ".codex" / "hooks.json").exists()
+    assert "bundled with the Mycelium plugin via PLUGIN_ROOT" in install_output
     assert "open /hooks" in install_output
-    assert "trust all six Mycelium command hooks" in install_output
+    assert "trust all six Mycelium hooks" in install_output
 
 
 def test_existing_guidance_is_carried_into_shared_canonical_file(tmp_path):
@@ -245,7 +256,7 @@ def test_existing_guidance_is_carried_into_shared_canonical_file(tmp_path):
     assert "MYCELIUM:BEGIN" in (repo / "CLAUDE.md").read_text()
 
 
-def test_existing_codex_gitignore_is_extended(tmp_path):
+def test_existing_codex_gitignore_is_not_changed_for_plugin_hooks(tmp_path):
     repo = _repo(tmp_path, living=False)
     codex_dir = repo / ".codex"
     codex_dir.mkdir()
@@ -254,10 +265,10 @@ def test_existing_codex_gitignore_is_extended(tmp_path):
     init_repo.install_codex_hooks(repo)
 
     ignored = (codex_dir / ".gitignore").read_text().splitlines()
-    assert ignored == ["config.toml", "hooks.json"]
+    assert ignored == ["config.toml"]
 
 
-def test_existing_exec_command_hooks_are_moved_to_bash(tmp_path):
+def test_existing_project_mycelium_hooks_are_removed(tmp_path):
     repo = _repo(tmp_path, living=False)
     codex_dir = repo / ".codex"
     codex_dir.mkdir()
@@ -286,18 +297,130 @@ def test_existing_exec_command_hooks_are_moved_to_bash(tmp_path):
     init_repo.install_codex_hooks(repo)
 
     config = json.loads((codex_dir / "hooks.json").read_text())
-    post_tool = config["hooks"]["PostToolUse"]
-    assert not any(group["matcher"] == "exec_command" for group in post_tool)
-    bash_handlers = next(group for group in post_tool if group["matcher"] == "Bash")[
-        "hooks"
-    ]
-    basenames = {
-        init_repo._hook_basename(handler["command"]) for handler in bash_handlers
-    }
-    assert {"mycelium-post-action.sh", "mycelium-data-tracker.sh"} <= basenames
+    assert "PostToolUse" not in config["hooks"]
     assert config["hooks"]["PreToolUse"] == [
         {"matcher": "custom", "hooks": []}
     ]
+
+
+def test_legacy_only_codex_config_and_ignore_entry_are_removed(tmp_path):
+    repo = _repo(tmp_path, living=False)
+    codex_dir = repo / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / ".gitignore").write_text("config.toml\nhooks.json\n")
+    config = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "startup",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "MYCELIUM_HOOK_HOST=codex "
+                                "/removed/cache/mycelium-health.sh"
+                            ),
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    (codex_dir / "hooks.json").write_text(json.dumps(config))
+
+    assert init_repo.install_codex_hooks(repo) is True
+
+    assert not (codex_dir / "hooks.json").exists()
+    assert (codex_dir / ".gitignore").read_text().splitlines() == ["config.toml"]
+
+
+def test_plugin_dispatcher_noops_outside_mycelium_repo(tmp_path):
+    repo = _repo(tmp_path, living=False)
+    result = _run_plugin_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "turn-noop"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert not (repo / ".mycelium").exists()
+
+
+def test_plugin_dispatcher_refreshes_pointer_and_runs_hook(tmp_path):
+    repo = _repo(tmp_path)
+    state_dir = repo / ".mycelium"
+    state_dir.mkdir()
+    (state_dir / "plugin-root").write_text("/removed/cache/path\n")
+
+    result = _run_plugin_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "turn-plugin"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert (state_dir / "plugin-root").read_text().strip() == str(PLUGIN_ROOT)
+    assert (state_dir / "active-session-log.tmp").is_file()
+
+
+def test_exact_bundled_hook_command_survives_relocated_cache_path(tmp_path):
+    repo = _repo(tmp_path)
+    relocated_root = tmp_path / "cache with spaces" / "0.6.0+codex.test"
+    relocated_root.parent.mkdir()
+    relocated_root.symlink_to(PLUGIN_ROOT, target_is_directory=True)
+    config = json.loads((PLUGIN_HOOKS_DIR / "hooks.json").read_text())
+    command = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    env = os.environ.copy()
+    env["PLUGIN_ROOT"] = str(relocated_root)
+
+    result = subprocess.run(
+        command,
+        cwd=repo,
+        input=json.dumps(
+            {"cwd": str(repo), "source": "startup", "turn_id": "turn-relocated"}
+        ),
+        text=True,
+        capture_output=True,
+        env=env,
+        shell=True,
+        executable="/bin/bash",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["hookSpecificOutput"]["hookEventName"] == (
+        "SessionStart"
+    )
+    pointer = repo / ".mycelium" / "plugin-root"
+    assert pointer.read_text().strip() == str(relocated_root)
+
+
+def test_bundled_codex_hook_command_noops_without_plugin_root(tmp_path):
+    repo = _repo(tmp_path)
+    config = json.loads((PLUGIN_HOOKS_DIR / "hooks.json").read_text())
+    command = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    env = os.environ.copy()
+    env.pop("PLUGIN_ROOT", None)
+
+    result = subprocess.run(
+        command,
+        cwd=repo,
+        input=json.dumps(
+            {"cwd": str(repo), "source": "startup", "turn_id": "turn-noncodex"}
+        ),
+        text=True,
+        capture_output=True,
+        env=env,
+        shell=True,
+        executable="/bin/bash",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert not (repo / ".mycelium").exists()
 
 
 def test_codex_session_start_uses_nested_context(tmp_path):

@@ -1,0 +1,53 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -n \"${PLUGIN_ROOT:-}\" ]; then \"${PLUGIN_ROOT}/hooks/mycelium-codex-dispatch.sh\" mycelium-health.sh; fi"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -n \"${PLUGIN_ROOT:-}\" ]; then \"${PLUGIN_ROOT}/hooks/mycelium-codex-dispatch.sh\" mycelium-post-action.sh; fi"
+          },
+          {
+            "type": "command",
+            "command": "if [ -n \"${PLUGIN_ROOT:-}\" ]; then \"${PLUGIN_ROOT}/hooks/mycelium-codex-dispatch.sh\" mycelium-data-tracker.sh; fi"
+          }
+        ]
+      },
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -n \"${PLUGIN_ROOT:-}\" ]; then \"${PLUGIN_ROOT}/hooks/mycelium-codex-dispatch.sh\" mycelium-activity-tracker.sh; fi"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -n \"${PLUGIN_ROOT:-}\" ]; then \"${PLUGIN_ROOT}/hooks/mycelium-codex-dispatch.sh\" mycelium-data-lineage-stop.sh; fi"
+          },
+          {
+            "type": "command",
+            "command": "if [ -n \"${PLUGIN_ROOT:-}\" ]; then \"${PLUGIN_ROOT}/hooks/mycelium-codex-dispatch.sh\" mycelium-stop-check.sh; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
