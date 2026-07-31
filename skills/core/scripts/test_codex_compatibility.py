@@ -88,6 +88,8 @@ def test_readme_documents_codex_install_update_and_migration():
     assert "codex plugin list --json" in readme
     assert "Use `$mycelium:core` to migrate" in readme
     assert "Migration is idempotent" in readme
+    assert "open `/hooks`" in readme
+    assert "trust all six Mycelium command hooks" in readme
 
 
 def test_hook_mtime_helper_returns_numeric_epoch(tmp_path):
@@ -180,12 +182,13 @@ def test_codex_cli_can_drive_optional_concept_labeling():
     assert seen["command"][:2] == ["/usr/local/bin/codex", "exec"]
 
 
-def test_init_writes_codex_hooks_and_agent_guidance(tmp_path):
+def test_init_writes_codex_hooks_and_agent_guidance(tmp_path, capsys):
     repo = _repo(tmp_path, living=False)
     init_repo.create_directory_structure(repo)
     init_repo.create_todo_list(repo)
     init_repo.create_agent_guidance(repo)
     init_repo.install_codex_hooks(repo)
+    install_output = capsys.readouterr().out
 
     assert (repo / "MYCELIUM.md").is_file()
     assert "MYCELIUM:BEGIN" in (repo / "AGENTS.md").read_text()
@@ -224,6 +227,8 @@ def test_init_writes_codex_hooks_and_agent_guidance(tmp_path):
     )
     stop_handlers = config["hooks"]["Stop"][0]["hooks"]
     assert "mycelium-data-lineage-stop.sh" in stop_handlers[0]["command"]
+    assert "open /hooks" in install_output
+    assert "trust all six Mycelium command hooks" in install_output
 
 
 def test_existing_guidance_is_carried_into_shared_canonical_file(tmp_path):
@@ -330,6 +335,62 @@ def test_codex_post_tool_use_uses_nested_context(tmp_path):
     assert (repo / ".mycelium" / "mycelium-reminded.tmp").is_file()
 
 
+def test_codex_post_tool_use_reads_only_log_path_marker_line(tmp_path):
+    repo = _repo(tmp_path)
+    state = repo / ".mycelium"
+    state.mkdir()
+    log_path = repo / ".living" / "log" / "session.md"
+    log_path.parent.mkdir()
+    log_path.write_text("# Session\n")
+    owner_timestamp = "1785528000"
+    (state / "active-session-log.tmp").write_text(
+        f"{log_path}\n{owner_timestamp}\n"
+    )
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": "python analysis.py"},
+            "turn_id": "turn-log-marker",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert str(log_path) in context
+    assert owner_timestamp not in context
+
+
+def test_codex_data_tracker_preserves_unresolved_wrapper_execution(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "run.py").write_text(
+        "from analysis import main\n\nif __name__ == '__main__':\n    main()\n"
+    )
+
+    result = _run_hook(
+        "mycelium-data-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": "python run.py --help"},
+            "turn_id": "turn-lineage-wrapper",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    events_path = repo / ".mycelium" / "mycelium-data-events.tmp"
+    event = json.loads(events_path.read_text().strip())
+    assert event["script"] == str(repo / "run.py")
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+    assert event["outputs"] == []
+    assert event["lineage_warnings"]
+
+
 def test_codex_apply_patch_activity_tracks_each_file(tmp_path):
     repo = _repo(tmp_path)
     patch = """*** Begin Patch
@@ -379,6 +440,76 @@ def test_codex_stop_legacy_block_shape_remains_supported(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["decision"] == "block"
     assert "STOP BLOCKED" in payload["reason"]
+
+
+def test_codex_stop_counts_unique_tracked_untracked_and_activity_paths(tmp_path):
+    repo = _repo(tmp_path)
+    state = repo / ".mycelium"
+    state.mkdir()
+    (state / ".gitignore").write_text("*\n!.gitignore\n")
+    log_path = repo / ".living" / "log" / "2026-07-31-001-repo.md"
+    log_path.parent.mkdir()
+    log_path.write_text(
+        "---\n"
+        "session_id: 2026-07-31-001\n"
+        "project: repo\n"
+        "branch: main\n"
+        "started:\n"
+        "ended:\n"
+        "duration_minutes:\n"
+        "files_changed:\n"
+        "---\n"
+    )
+    (repo / "tracked.txt").write_text("before\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    commit_env = os.environ.copy()
+    commit_env["GIT_AUTHOR_DATE"] = "2000-01-01T00:00:00+0000"
+    commit_env["GIT_COMMITTER_DATE"] = "2000-01-01T00:00:00+0000"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Mycelium Test",
+            "-c",
+            "user.email=mycelium@example.invalid",
+            "commit",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+        env=commit_env,
+    )
+
+    session_start = int(time.time()) - 60
+    (state / "active-session-log.tmp").write_text(
+        f"{log_path}\n{session_start}\n"
+    )
+    (state / "session-start-ts.tmp").write_text(str(session_start))
+    (state / "mycelium-reminded.tmp").write_text(str(session_start))
+    (repo / "tracked.txt").write_text("after\n")
+    (repo / "alpha.txt").write_text("alpha\n")
+    (repo / "beta.txt").write_text("beta\n")
+    # beta overlaps with git's untracked signal; gamma exists only in the
+    # activity tracker. The final total must be a unique union of four paths.
+    (state / "mycelium-session-activity.tmp").write_text(
+        f"{repo / 'beta.txt'}\ngamma.txt\n"
+    )
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "turn-count"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    finalized = log_path.read_text()
+    assert "files_changed: 4" in finalized
+    assert finalized.count("- `beta.txt`") == 1
+    assert "- `alpha.txt`" in finalized
+    assert "- `gamma.txt`" in finalized
+    assert "- `tracked.txt`" in finalized
 
 
 def test_data_lineage_keeps_canonical_id_after_stop_state_cleanup(tmp_path):

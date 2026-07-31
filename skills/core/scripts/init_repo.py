@@ -873,6 +873,10 @@ def install_codex_hooks(target_dir: Path):
     gitignore = codex_dir / ".gitignore"
     _ensure_gitignore_entry(gitignore, "hooks.json")
     print("  Wrote: .codex/hooks.json")
+    print(
+        "  Codex action required: open /hooks, review and trust all six "
+        "Mycelium command hooks, then start a fresh task."
+    )
 
 
 def create_environments_file(target_dir: Path):

@@ -44,6 +44,8 @@ Event shape (NDJSON, one line each) — produced by the tracker hook:
       "git_sha": "c3d4...",
       "inputs":  [{"path", "sha256", "n_rows"?}],
       "outputs": [{"path", "sha256", "n_rows"?}],
+      "io_detection": "static" | "unresolved",
+      "lineage_warnings": ["..."],
       "filters_detected": ["df.query(...)", ...],
       "seeds_detected": [42, ...]
     }
@@ -174,6 +176,9 @@ def normalize_event(
         "git_sha": raw.get("git_sha"),
         "inputs": [enrich_file_record(r) for r in (raw.get("inputs") or [])],
         "outputs": [enrich_file_record(r) for r in (raw.get("outputs") or [])],
+        "io_detection": raw.get("io_detection")
+        or ("static" if raw.get("inputs") or raw.get("outputs") else "unresolved"),
+        "lineage_warnings": list(raw.get("lineage_warnings") or []),
         "filters_detected": list(raw.get("filters_detected") or []),
         "seeds_detected": list(raw.get("seeds_detected") or []),
     }
@@ -221,6 +226,11 @@ def build_manifest(
             scripts_executed.append(entry)
         if isinstance(e.get("bash_wall_s"), (int, float)):
             total_wall += float(e["bash_wall_s"])
+        for warning in e.get("lineage_warnings", []):
+            label = e.get("script") or e.get("bash_cmd") or f"event at {e['ts']}"
+            rendered = f"{label}: {warning}"
+            if rendered not in warnings:
+                warnings.append(rendered)
         for rec in e["inputs"]:
             key = rec.get("path", "")
             if key and key not in unique_inputs:

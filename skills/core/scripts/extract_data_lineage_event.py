@@ -6,9 +6,11 @@ analysis invocations (python/R/Rscript/jupyter/uv-run/poetry-run/conda-run,
 including inline -c and -e), extracts script source, regex-scans for data
 I/O and seeds, SHAs the script and the touched files AT EXECUTION TIME.
 
-If the command isn't an analysis OR no data I/O is detected, exits 0 silently.
+If the command isn't an analysis or its script is unreadable, exits 0 silently.
 Otherwise emits one NDJSON line per detected script (so `python a.py && python
-b.py` produces up to two events).
+b.py` produces up to two events). Executions whose file paths are dynamic or
+hidden behind imports are retained with `io_detection: "unresolved"` and an
+explicit warning rather than being silently discarded.
 
 With --append-to, lines are appended to the file under fcntl.flock(LOCK_EX)
 to make parallel-tool appends safe (shell `>>` is only atomic up to PIPE_BUF;
@@ -230,7 +232,7 @@ def build_event_for_detection(
 ) -> dict | None:
     """Build one NDJSON event dict for a single (script_path, inline) detection.
 
-    Returns None if the detection has no data I/O or the script is unreadable.
+    Returns None only if the script is unreadable or the detection is empty.
     """
     script_path, inline_source = detection
     source = ""
@@ -255,8 +257,13 @@ def build_event_for_detection(
         return None
 
     inputs, outputs, filters, seeds = scan_source(source)
-    if not inputs and not outputs:
-        return None
+    io_detection = "static" if inputs or outputs else "unresolved"
+    lineage_warnings = []
+    if io_detection == "unresolved":
+        lineage_warnings.append(
+            "No literal input/output paths were detected; the script may "
+            "resolve paths dynamically or delegate I/O through imports."
+        )
 
     return {
         "ts": args.ts,
@@ -271,6 +278,8 @@ def build_event_for_detection(
         "git_sha": git_sha,
         "inputs": [file_record(p, cwd) for p in inputs],
         "outputs": [file_record(p, cwd) for p in outputs],
+        "io_detection": io_detection,
+        "lineage_warnings": lineage_warnings,
         "filters_detected": filters,
         "seeds_detected": seeds,
     }

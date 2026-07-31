@@ -79,19 +79,34 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       [ "$DURATION_MIN" -lt 0 ] && DURATION_MIN=0
     fi
 
-    # Compute files changed since session start (committed + uncommitted + staged + activity tracker)
-    FILES_CHANGED=0
-    FILES_CHANGED_UNCOMMITTED=$({ git -C "$LOG_REPO" diff --name-only 2>/dev/null || true; } | wc -l | tr -d ' ')
-    FILES_CHANGED_STAGED=$({ git -C "$LOG_REPO" diff --cached --name-only 2>/dev/null || true; } | wc -l | tr -d ' ')
-    FILES_CHANGED_COMMITTED=0
-    if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
-      FILES_CHANGED_COMMITTED=$({ git -C "$LOG_REPO" log --since="@${START_TS}" --name-only --pretty=format: 2>/dev/null || true; } | sort -u | { grep -v '^$' || true; } | wc -l | tr -d ' ')
-    fi
-    FILES_CHANGED=$((FILES_CHANGED_UNCOMMITTED + FILES_CHANGED_STAGED + FILES_CHANGED_COMMITTED))
-    # Also count activity-tracked files (Edit/Write operations not yet in git)
+    # Build one unique file set across every signal. Counting each signal
+    # independently double-counted staged/unstaged/committed paths, while only
+    # consulting the activity tracker as a fallback omitted untracked outputs.
     ACTIVITY_FILE_CHECK="$STATE_DIR/mycelium-session-activity.tmp"
-    if [ -f "$ACTIVITY_FILE_CHECK" ] && [ "$FILES_CHANGED" -eq 0 ]; then
-      FILES_CHANGED=$(sort -u "$ACTIVITY_FILE_CHECK" | grep -c . || echo "0")
+    SESSION_CHANGED_FILES=$(
+      {
+        git -C "$LOG_REPO" diff --name-only 2>/dev/null || true
+        git -C "$LOG_REPO" diff --cached --name-only 2>/dev/null || true
+        git -C "$LOG_REPO" ls-files --others --exclude-standard 2>/dev/null || true
+        if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
+          git -C "$LOG_REPO" log --since="@${START_TS}" --name-only --pretty=format: 2>/dev/null || true
+        fi
+        if [ -f "$ACTIVITY_FILE_CHECK" ]; then
+          # Codex normally records repo-relative paths, while Claude may send
+          # absolute paths. Normalize the latter before de-duplication.
+          while IFS= read -r activity_path; do
+            [ -z "$activity_path" ] && continue
+            case "$activity_path" in
+              "$LOG_REPO"/*) printf '%s\n' "${activity_path#"$LOG_REPO"/}" ;;
+              *) printf '%s\n' "$activity_path" ;;
+            esac
+          done < "$ACTIVITY_FILE_CHECK"
+        fi
+      } | sed '/^[[:space:]]*$/d' | sort -u
+    )
+    FILES_CHANGED=0
+    if [ -n "$SESSION_CHANGED_FILES" ]; then
+      FILES_CHANGED=$(printf '%s\n' "$SESSION_CHANGED_FILES" | grep -c . || echo "0")
     fi
 
     # Compute session-local activity: Edit/Write (activity tracker), commits, OR Bash-mutated files
@@ -138,31 +153,19 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       sed -i.bak "s|^files_changed:.*|files_changed: ${FILES_CHANGED}|" "$LOG_PATH" 2>/dev/null
       rm -f "${LOG_PATH}.bak"
 
-      # Append file list from activity tracker or git diff
+      # Append the same de-duplicated file set used for files_changed.
       ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
       FILE_LIST_MD=""
-      GIT_FILES=""
-      if [ -f "$ACTIVITY_FILE" ]; then
-        FILE_LIST_MD=$(sort -u "$ACTIVITY_FILE" | sed 's|^|- `|;s|$|`|')
-      fi
-      if [ -z "$FILE_LIST_MD" ]; then
-        # Fallback to git diff
-        GIT_FILES=$(git -C "$LOG_REPO" diff --name-only HEAD 2>/dev/null || echo "")
-        if [ -n "$GIT_FILES" ]; then
-          FILE_LIST_MD=$(echo "$GIT_FILES" | sed 's|^|- `|;s|$|`|')
-        fi
+      if [ -n "$SESSION_CHANGED_FILES" ]; then
+        FILE_LIST_MD=$(printf '%s\n' "$SESSION_CHANGED_FILES" | sed 's|^|- `|;s|$|`|')
       fi
       # Append a timestamped session-end entry (health hook extracts this for next-session context)
       END_TIME_SHORT=$(date +%H:%M)
       if [ -n "$FILE_LIST_MD" ]; then
         # Build a readable summary for the timestamped entry
-        FILE_SUMMARY=""
-        if [ -f "$ACTIVITY_FILE" ]; then
-          FILE_SUMMARY=$(sort -u "$ACTIVITY_FILE" | head -3 | xargs -I {} basename {} 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
-        fi
-        if [ -z "$FILE_SUMMARY" ] && [ -n "$GIT_FILES" ]; then
-          FILE_SUMMARY=$(echo "$GIT_FILES" | head -3 | xargs -I {} basename {} 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
-        fi
+        FILE_SUMMARY=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -3 \
+          | while IFS= read -r changed_path; do basename "$changed_path"; done \
+          | tr '\n' ',' | sed 's/,$//; s/,/, /g')
         if [ "$FILES_CHANGED" -gt 3 ]; then
           FILE_SUMMARY="${FILE_SUMMARY} (+$((FILES_CHANGED - 3)) more)"
         fi
@@ -175,13 +178,14 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       PROJECT_SLUG=$({ grep '^project:' "$LOG_PATH" || echo "project: unknown"; } | sed 's/^project: *//')
       SESSION_ID=$({ grep '^session_id:' "$LOG_PATH" || echo "session_id: unknown"; } | sed 's/^session_id: *//')
       BRANCH=$({ grep '^branch:' "$LOG_PATH" || echo "branch: unknown"; } | sed 's/^branch: *//')
-      # Summary from first 3 unique files
+      # Summary from the first 3 paths in the same unique session file set.
       SUMMARY=""
-      if [ -f "$ACTIVITY_FILE" ]; then
-        SUMMARY=$(sort -u "$ACTIVITY_FILE" | head -3 | xargs -I {} basename {} 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
-        UNIQUE_COUNT=$(sort -u "$ACTIVITY_FILE" | grep -c . || echo "0")
-        if [ "$UNIQUE_COUNT" -gt 3 ]; then
-          SUMMARY="${SUMMARY} (+$((UNIQUE_COUNT - 3)) more)"
+      if [ -n "$SESSION_CHANGED_FILES" ]; then
+        SUMMARY=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -3 \
+          | while IFS= read -r changed_path; do basename "$changed_path"; done \
+          | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+        if [ "$FILES_CHANGED" -gt 3 ]; then
+          SUMMARY="${SUMMARY} (+$((FILES_CHANGED - 3)) more)"
         fi
       fi
       # Atomic upsert via the script resolved at the top of this hook ($UPSERT_SCRIPT).
@@ -226,9 +230,9 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       if [ -n "${START_TS:-}" ]; then
           _WORK_LINES=$(git -C "$REPO_ROOT" log --since="@${START_TS}" --pretty=format:"- %s" 2>/dev/null | head -10)
       fi
-      # Fall back to modified file list
-      if [ -z "$_WORK_LINES" ] && [ -f "$ACTIVITY_FILE" ]; then
-          _WORK_LINES=$(sort -u "$ACTIVITY_FILE" | head -10 | while read -r _f; do echo "- Modified \`$(basename "$_f")\`"; done)
+      # Fall back to the de-duplicated modified file list.
+      if [ -z "$_WORK_LINES" ] && [ -n "$SESSION_CHANGED_FILES" ]; then
+          _WORK_LINES=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -10 | while IFS= read -r _f; do echo "- Modified \`$(basename "$_f")\`"; done)
       fi
       # Last resort: generic summary
       if [ -z "$_WORK_LINES" ]; then

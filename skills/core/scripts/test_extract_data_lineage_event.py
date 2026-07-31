@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from extract_data_lineage_event import (  # noqa: E402
+    build_event_for_detection,
     detect_script,
     detect_scripts,
     is_analysis,
@@ -284,6 +286,27 @@ def test_write_events_creates_parent_dir(tmp_path: Path) -> None:
     target = tmp_path / "nested" / "deep" / "events.tmp"
     write_events(['{"z":3}\n'], target)
     assert target.read_text() == '{"z":3}\n'
+
+
+def test_dynamic_or_imported_io_is_retained_as_unresolved(tmp_path: Path) -> None:
+    script = tmp_path / "run.py"
+    script.write_text(
+        "from pipeline import main\n\nif __name__ == '__main__':\n    main()\n"
+    )
+    args = argparse.Namespace(
+        ts="2026-07-31T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py --help",
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+    assert event["outputs"] == []
+    assert "resolve paths dynamically" in event["lineage_warnings"][0]
 
 
 # ---------- end-to-end main() with multi-script + --append-to ----------

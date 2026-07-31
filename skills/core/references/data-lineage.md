@@ -4,10 +4,11 @@ Per-session capture of analysis-script provenance: what scripts ran, against
 which input files, producing which outputs — with SHA-256 snapshots taken **at
 execution time** so iterative edit-run-edit-run loops don't lose history.
 
-The subsystem is independent from the rest of mycelium's logging: it fires only
-when actual data analysis is detected (`python`, `R`, `Rscript`, `jupyter`,
+The subsystem is independent from the rest of mycelium's logging: it fires when
+an analysis-script invocation is detected (`python`, `R`, `Rscript`, `jupyter`,
 `uv run python`, `poetry run python`, `conda run … python`, including inline
-`-c` / `-e`). Sessions that don't touch data produce no output.
+`-c` / `-e`). If static scanning cannot resolve any file paths, the execution
+is retained as unresolved with an explicit warning rather than dropped.
 
 ## Components
 
@@ -30,7 +31,7 @@ Per-session (`<sid>` = mycelium date-counter `YYYY-MM-DD-NNN`, or Claude Code
 UUID fallback if mycelium hasn't recorded an active session):
 
 ```
-.claude/
+.mycelium/
   mycelium-data-events.tmp                  # NDJSON, one event per detected script
   mycelium-data-events-prev/<sid>.tmp       # rotated on Stop (20-file cap)
 .living/
@@ -60,6 +61,8 @@ PostToolUse hooks in parallel would otherwise interleave NDJSON lines.
   "git_sha": "c3d4...",
   "inputs":  [{"path", "sha256", "size_bytes", "n_rows"?}],
   "outputs": [{"path", "sha256", "size_bytes"}],
+  "io_detection": "static",
+  "lineage_warnings": [],
   "filters_detected": ["df.query(...)", ...],
   "seeds_detected": [42, ...]
 }
@@ -73,6 +76,12 @@ A `python a.py && python b.py` chain emits **two** events (one per detected
 script). Inline `-c` scripts emit one event each; their `script` field is
 `null`, with the source embedded under `script_source` and identified by
 `script_sha256`.
+
+When paths are dynamic or I/O is delegated through imports, the event instead
+uses `"io_detection": "unresolved"`, leaves `inputs` and `outputs` empty, and
+adds a `lineage_warnings` entry. Stop-time consolidation promotes that warning
+to the manifest's `extraction_warnings` list. This preserves evidence that the
+script ran without implying that its lineage was fully captured.
 
 ## Manifest schema (consolidated at Stop)
 
@@ -117,7 +126,7 @@ list. Repeated invocations of the same inline source collapse to one entry.
 - Filters: `.query(…)`, `.sample(…)`, `.filter(…)`, boolean masks (`df[df.col > x]` / `df[df['col'] != '']`), `.loc[…]` / `.iloc[…]`, `.merge(…)`, `.join(…)`, `pd.concat(…)`
 - Seeds: `np.random.seed(N)`, `random.seed(N)`, `torch.manual_seed(N)`, `np.random.default_rng(N)`
 
-**Not detected (deliberate)**:
+**Not statically resolved (recorded as warnings)**:
 - R-side I/O (only R *invocation* is detected, not its inputs/outputs)
 - Generic `open(path)` reads — false-positive risk too high
 - Dynamic paths (`pd.read_csv(some_var)`) — only string literals are captured
