@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Codex compatibility follow-up.** Explicit skill prompts now use the installed `mycelium:` namespace; generated project guidance resolves bundled resources through `.mycelium/plugin-root`; migrations preserve existing project-specific `CLAUDE.md` guidance for Codex; scaffolds create the documented todo registry and item template; Codex hook configuration is always gitignored; and data-lineage consolidation retains the canonical Mycelium session ID independently of Stop-hook ordering.
+- **Codex compatibility follow-up.** Explicit skill prompts now use the installed `mycelium:` namespace; generated project guidance resolves bundled resources through `.mycelium/plugin-root`; migrations preserve existing project-specific `CLAUDE.md` guidance for Codex; scaffolds create the documented todo registry and item template; Codex hook configuration is always gitignored; and data-lineage consolidation retains the canonical Mycelium session ID independently of Stop-hook ordering. Codex shell hooks use the host's canonical `Bash` matcher. Migration now repairs earlier `exec_command` registrations, misplaced or stale Claude hooks, and repo-local bundled-resource commands in both guidance and generated indexes; dry-runs audit all seven Claude registrations.
 
 ### Changed
 

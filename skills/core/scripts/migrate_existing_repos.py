@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Idempotent backfill for repos initialized on earlier mycelium versions.
 
-Performs four upgrade actions per target repo:
+Performs the provider-neutral upgrade actions needed by current Mycelium repos:
 
 1. **CLAUDE.md re-anchor** — inserts a "Knowledge index" callout pointing
    at `.living/INDEX.md` if no INDEX.md reference is present.
-2. **Hook top-up** — adds any of the 5-hook default bundle that the repo
+2. **Hook top-up** — adds any of the 7-hook default bundle that the repo
    is missing, preserving existing hook entries (no duplicates).
 3. **INDEX.md regen** — runs `generate_index.py --summary-heuristic` so
    the freshly-anchored INDEX.md actually has cluster content.
@@ -38,8 +38,12 @@ import init_repo as ir  # noqa: E402
 # The "Knowledge index" callout that gets inserted into CLAUDE.md if missing.
 # Single-block insertion is safer than rewriting Quick Orientation in
 # repos with heavily-customized CLAUDE.md files.
-KNOWLEDGE_INDEX_CALLOUT = """\
-> **Knowledge index (read first):** [`.living/INDEX.md`](.living/INDEX.md) is an auto-generated map of tag clusters, most-recent entries, and a tag → entry-ID inverted index. The SessionStart hook keeps it fresh — trust it. For targeted lookup: `python3 skills/core/scripts/recall_lessons.py --living-dir .living/ --tag <tag>` (also `--id L-42`, `--since YYYY-MM-DD`).
+LEGACY_RECALL_COMMAND = "python3 skills/core/scripts/recall_lessons.py"
+PLUGIN_RECALL_COMMAND = (
+    'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+)
+KNOWLEDGE_INDEX_CALLOUT = f"""\
+> **Knowledge index (read first):** [`.living/INDEX.md`](.living/INDEX.md) is an auto-generated map of tag clusters, most-recent entries, and a tag → entry-ID inverted index. The SessionStart hook keeps it fresh — trust it. For targeted lookup: `{PLUGIN_RECALL_COMMAND} --living-dir .living/ --tag <tag>` (also `--id L-42`, `--since YYYY-MM-DD`).
 """
 
 # Markers used to detect "already migrated" — any of these strings means
@@ -64,8 +68,15 @@ def reanchor_claude_md(repo_path: Path, dry_run: bool = False) -> bool:
         return False
 
     content = claude_md.read_text(encoding="utf-8")
+    repaired_content = content.replace(LEGACY_RECALL_COMMAND, PLUGIN_RECALL_COMMAND)
     if any(marker in content for marker in INDEX_MENTIONED_MARKERS):
-        return False
+        if repaired_content == content:
+            return False
+        if not dry_run:
+            claude_md.write_text(repaired_content, encoding="utf-8")
+        return True
+
+    content = repaired_content
 
     # Insert the callout right after the first "## Quick Orientation" header
     # if present, otherwise after the first H1.
@@ -116,7 +127,7 @@ def topup_hooks(repo_path: Path, dry_run: bool = False) -> bool:
     """Top up missing hooks in .claude/settings.local.json.
 
     Reuses init_repo.install_claude_hooks which is already idempotent.
-    Returns True if any hook was added, False if all 5 were already present.
+    Returns True if any hook was added, False if all 7 were already present.
     """
     settings_path = repo_path / ".claude" / "settings.local.json"
     before_signature = ""
@@ -132,21 +143,28 @@ def topup_hooks(repo_path: Path, dry_run: bool = False) -> bool:
         if not settings_path.exists():
             return True
         existing = json.loads(settings_path.read_text())
-        hook_cmds = {
-            h.get("command", "")
-            for entries in existing.get("hooks", {}).values()
-            for entry in entries
-            for h in entry.get("hooks", [])
-        }
-        required = {
-            "mycelium-health.sh",
-            "mycelium-post-action.sh",
-            "mycelium-stop-check.sh",
-            "mycelium-activity-tracker.sh",
-            "mycelium-read-tracker.sh",
-        }
-        present = {Path(c).name for c in hook_cmds}
-        return bool(required - present)
+        hooks = existing.get("hooks", {})
+        for event, matcher, basename in ir.CLAUDE_HOOK_SPECS:
+            matches = [
+                handler
+                for group in hooks.get(event, [])
+                if group.get("matcher", "") == matcher
+                for handler in group.get("hooks", [])
+                if ir._hook_basename(handler.get("command", "")) == basename
+                and ir._hook_command_path(handler.get("command", "")).exists()
+            ]
+            if len(matches) != 1:
+                return True
+
+        all_mycelium_commands = [
+            handler.get("command", "")
+            for groups in hooks.values()
+            for group in groups
+            for handler in group.get("hooks", [])
+            if ir._hook_basename(handler.get("command", ""))
+            in ir.MYCELIUM_HOOK_BASENAMES
+        ]
+        return len(all_mycelium_commands) != len(ir.CLAUDE_HOOK_SPECS)
 
     # Actual install: reuse init_repo's idempotent installer
     ir.install_claude_hooks(repo_path)
@@ -162,12 +180,26 @@ def ensure_cross_agent_guidance(repo_path: Path, dry_run: bool = False) -> bool:
     paths = [repo_path / name for name in ("MYCELIUM.md", "CLAUDE.md", "AGENTS.md")]
     before = {path.name: path.read_text() if path.exists() else None for path in paths}
     if dry_run:
-        return any(value is None for value in before.values()) or any(
-            value is not None and "<!-- MYCELIUM:BEGIN -->" not in value
-            for name, value in before.items()
-            if name != "MYCELIUM.md"
+        return (
+            any(value is None for value in before.values())
+            or any(
+                value is not None and "<!-- MYCELIUM:BEGIN -->" not in value
+                for name, value in before.items()
+                if name != "MYCELIUM.md"
+            )
+            or any(
+                value is not None and LEGACY_RECALL_COMMAND in value
+                for value in before.values()
+            )
         )
     ir.create_agent_guidance(repo_path)
+    for path in paths:
+        if not path.exists():
+            continue
+        content = path.read_text(encoding="utf-8")
+        repaired = content.replace(LEGACY_RECALL_COMMAND, PLUGIN_RECALL_COMMAND)
+        if repaired != content:
+            path.write_text(repaired, encoding="utf-8")
     after = {path.name: path.read_text() if path.exists() else None for path in paths}
     return before != after
 
@@ -202,7 +234,19 @@ def topup_codex_hooks(repo_path: Path, dry_run: bool = False) -> bool:
     hooks_path = repo_path / ".codex" / "hooks.json"
     before = hooks_path.read_text() if hooks_path.exists() else None
     if dry_run:
-        return before is None or "MYCELIUM_HOOK_HOST=codex" not in before
+        hooks_dir = ir.find_mycelium_hooks_dir()
+        if not hooks_dir:
+            return False
+        config = json.loads(before) if before is not None else {}
+        expected = json.loads(json.dumps(config))
+        ir._update_codex_hooks_config(expected, hooks_dir)
+        gitignore = repo_path / ".codex" / ".gitignore"
+        ignored = (
+            gitignore.read_text(encoding="utf-8").splitlines()
+            if gitignore.exists()
+            else []
+        )
+        return expected != config or "hooks.json" not in ignored
     ir.install_codex_hooks(repo_path)
     after = hooks_path.read_text() if hooks_path.exists() else None
     return before != after

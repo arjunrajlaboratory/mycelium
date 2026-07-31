@@ -53,6 +53,8 @@ class TestReanchorClaudeMd:
         content = (fake_repo / "CLAUDE.md").read_text()
         assert ".living/INDEX.md" in content
         assert "Knowledge index" in content
+        assert '"$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"' in content
+        assert "python3 skills/core/scripts/recall_lessons.py" not in content
         # Callout sits inside Quick Orientation section, before the numbered list
         assert content.index("Knowledge index") < content.index("Read `.living/` first")
 
@@ -67,6 +69,20 @@ class TestReanchorClaudeMd:
         )
         applied = mig.reanchor_claude_md(fake_repo)
         assert applied is False
+
+    def test_repairs_legacy_recall_command_when_already_anchored(
+        self, fake_repo: Path
+    ) -> None:
+        (fake_repo / "CLAUDE.md").write_text(
+            "# Project\n\nSee .living/INDEX.md.\n\n"
+            "Run `python3 skills/core/scripts/recall_lessons.py --tag test`.\n",
+            encoding="utf-8",
+        )
+
+        assert mig.reanchor_claude_md(fake_repo) is True
+        content = (fake_repo / "CLAUDE.md").read_text()
+        assert mig.LEGACY_RECALL_COMMAND not in content
+        assert mig.PLUGIN_RECALL_COMMAND in content
 
     def test_returns_false_when_claude_md_missing(self, tmp_path: Path) -> None:
         empty_repo = tmp_path / "no-claude"
@@ -96,12 +112,14 @@ class TestTopupHooks:
             for entry in entries
             for h in entry.get("hooks", [])
         }
-        # All 5 default hooks present
+        # All 7 default hooks present
         assert "mycelium-health.sh" in hook_cmds
         assert "mycelium-post-action.sh" in hook_cmds
         assert "mycelium-stop-check.sh" in hook_cmds
         assert "mycelium-activity-tracker.sh" in hook_cmds
         assert "mycelium-read-tracker.sh" in hook_cmds
+        assert "mycelium-data-tracker.sh" in hook_cmds
+        assert "mycelium-data-lineage-stop.sh" in hook_cmds
 
     def test_idempotent(self, fake_repo: Path) -> None:
         mig.topup_hooks(fake_repo)
@@ -123,6 +141,95 @@ class TestTopupHooks:
         )
         # Unrelated permissions preserved
         assert settings["permissions"]["allow"] == ["Bash(git status:*)"]
+
+    def test_dry_run_detects_missing_data_lineage_hooks(self, fake_repo: Path) -> None:
+        mig.topup_hooks(fake_repo)
+        settings_path = fake_repo / ".claude" / "settings.local.json"
+        settings = json.loads(settings_path.read_text())
+        missing = {"mycelium-data-tracker.sh", "mycelium-data-lineage-stop.sh"}
+        for groups in settings["hooks"].values():
+            for group in groups:
+                group["hooks"] = [
+                    hook
+                    for hook in group.get("hooks", [])
+                    if Path(hook.get("command", "")).name not in missing
+                ]
+        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+        assert mig.topup_hooks(fake_repo, dry_run=True) is True
+
+    def test_dry_run_and_migration_repair_wrong_matcher(self, fake_repo: Path) -> None:
+        mig.topup_hooks(fake_repo)
+        settings_path = fake_repo / ".claude" / "settings.local.json"
+        settings = json.loads(settings_path.read_text())
+        health_group = settings["hooks"]["SessionStart"][0]
+        health_group["matcher"] = "startup"
+        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+        assert mig.topup_hooks(fake_repo, dry_run=True) is True
+        assert mig.topup_hooks(fake_repo) is True
+
+        repaired = json.loads(settings_path.read_text())
+        health_groups = [
+            group
+            for group in repaired["hooks"]["SessionStart"]
+            if group.get("matcher", "") == ""
+        ]
+        assert len(health_groups) == 1
+        assert any(
+            mig.ir._hook_basename(handler["command"]) == "mycelium-health.sh"
+            for handler in health_groups[0]["hooks"]
+        )
+
+    def test_dry_run_and_migration_repair_wrong_event(self, fake_repo: Path) -> None:
+        mig.topup_hooks(fake_repo)
+        settings_path = fake_repo / ".claude" / "settings.local.json"
+        settings = json.loads(settings_path.read_text())
+        health_group = settings["hooks"]["SessionStart"][0]
+        health = next(
+            handler
+            for handler in health_group["hooks"]
+            if mig.ir._hook_basename(handler["command"]) == "mycelium-health.sh"
+        )
+        health_group["hooks"].remove(health)
+        settings["hooks"]["Stop"][0]["hooks"].append(health)
+        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+        assert mig.topup_hooks(fake_repo, dry_run=True) is True
+        assert mig.topup_hooks(fake_repo) is True
+
+        repaired = json.loads(settings_path.read_text())
+        locations = [
+            (event, group.get("matcher", ""))
+            for event, groups in repaired["hooks"].items()
+            for group in groups
+            for handler in group.get("hooks", [])
+            if mig.ir._hook_basename(handler.get("command", ""))
+            == "mycelium-health.sh"
+        ]
+        assert locations == [("SessionStart", "")]
+
+    def test_dry_run_and_migration_replace_stale_path(self, fake_repo: Path) -> None:
+        mig.topup_hooks(fake_repo)
+        settings_path = fake_repo / ".claude" / "settings.local.json"
+        settings = json.loads(settings_path.read_text())
+        health = settings["hooks"]["SessionStart"][0]["hooks"][0]
+        health["command"] = "/removed/install/mycelium-health.sh"
+        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+        assert mig.topup_hooks(fake_repo, dry_run=True) is True
+        assert mig.topup_hooks(fake_repo) is True
+
+        repaired = json.loads(settings_path.read_text())
+        commands = [
+            handler["command"]
+            for group in repaired["hooks"]["SessionStart"]
+            for handler in group.get("hooks", [])
+            if mig.ir._hook_basename(handler.get("command", ""))
+            == "mycelium-health.sh"
+        ]
+        assert len(commands) == 1
+        assert mig.ir._hook_command_path(commands[0]).exists()
 
 
 class TestRegenIndex:
@@ -148,7 +255,10 @@ class TestMigrateOne:
         result1 = mig.migrate_one(fake_repo)
         applied_count1 = sum(1 for v in result1.values() if v == "applied")
         assert applied_count1 == 7
-        assert "# Fake Project" in (fake_repo / "MYCELIUM.md").read_text()
+        canonical = (fake_repo / "MYCELIUM.md").read_text()
+        assert "# Fake Project" in canonical
+        assert "python3 skills/core/scripts/recall_lessons.py" not in canonical
+        assert "$(cat .mycelium/plugin-root)" in canonical
         assert (fake_repo / ".mycelium" / "plugin-root").is_file()
 
         # Second run: structural changes (CLAUDE.md, hooks) skipped.
@@ -161,6 +271,39 @@ class TestMigrateOne:
         assert result2["Claude hooks top-up"] == "skipped (already up-to-date)"
         assert result2["Codex hooks top-up"] == "skipped (already up-to-date)"
         assert result2["Todo contract"] == "skipped (already up-to-date)"
+
+    def test_repairs_previously_migrated_guidance_and_codex_matcher(
+        self, fake_repo: Path
+    ) -> None:
+        mig.migrate_one(fake_repo)
+        for name in ("CLAUDE.md", "MYCELIUM.md"):
+            path = fake_repo / name
+            path.write_text(
+                path.read_text().replace(
+                    mig.PLUGIN_RECALL_COMMAND, mig.LEGACY_RECALL_COMMAND
+                ),
+                encoding="utf-8",
+            )
+        hooks_path = fake_repo / ".codex" / "hooks.json"
+        hooks = json.loads(hooks_path.read_text())
+        for group in hooks["hooks"]["PostToolUse"]:
+            if group["matcher"] == "Bash":
+                group["matcher"] = "exec_command"
+        hooks_path.write_text(json.dumps(hooks, indent=2), encoding="utf-8")
+
+        assert mig.topup_codex_hooks(fake_repo, dry_run=True) is True
+        result = mig.migrate_one(fake_repo)
+
+        assert result["Cross-agent guidance"] == "applied"
+        assert result["Codex hooks top-up"] == "applied"
+        for name in ("CLAUDE.md", "MYCELIUM.md"):
+            content = (fake_repo / name).read_text()
+            assert mig.LEGACY_RECALL_COMMAND not in content
+            assert mig.PLUGIN_RECALL_COMMAND in content
+        repaired_hooks = json.loads(hooks_path.read_text())
+        post_tool = repaired_hooks["hooks"]["PostToolUse"]
+        assert not any(group["matcher"] == "exec_command" for group in post_tool)
+        assert any(group["matcher"] == "Bash" for group in post_tool)
 
     def test_skips_when_no_living_dir(self, tmp_path: Path) -> None:
         no_living = tmp_path / "not-mycelium"

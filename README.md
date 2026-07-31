@@ -167,9 +167,10 @@ Mycelium ships seven hook scripts and registers the supported subset for each ho
 | `mycelium-data-lineage-stop.sh` | Stop | Consolidates session data-lineage events |
 
 Hooks are auto-registered by `init_repo.py`. Codex users must trust the project
-and review changed command hooks. Codex supports the `exec_command`,
-`apply_patch`, and Stop flows; read telemetry is Claude-only because Codex does
-not expose its internal file reads to `PostToolUse`.
+and review changed command hooks. Codex exposes shell and unified-exec work to
+hooks under the `Bash` matcher and exposes file edits as `apply_patch`; read
+telemetry is Claude-only because Codex does not expose its internal file reads
+to `PostToolUse`.
 
 ## Progressive Disclosure Knowledge System
 
