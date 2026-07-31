@@ -482,6 +482,22 @@ def _ensure_gitignore_entry(path: Path, entry: str) -> None:
     path.write_text(f"{content}{separator}{entry}\n", encoding="utf-8")
 
 
+def _remove_gitignore_entry(path: Path, entry: str) -> bool:
+    """Remove one exact ignore entry while preserving every other line."""
+    if not path.exists():
+        return False
+    content = path.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    retained = [line for line in lines if line != entry]
+    if retained == lines:
+        return False
+    if retained:
+        path.write_text("\n".join(retained) + "\n", encoding="utf-8")
+    else:
+        path.unlink()
+    return True
+
+
 def _consolidate_duplicate_hooks(
     hooks: dict,
     valid_replacement_for: dict[str, str] | None = None,
@@ -775,108 +791,78 @@ def install_claude_hooks(target_dir: Path):
     print("  Wrote: .claude/settings.local.json")
 
 
-CODEX_HOOK_SPECS = (
-    ("SessionStart", "startup|resume|clear|compact", "mycelium-health.sh"),
-    ("PostToolUse", "Bash", "mycelium-post-action.sh"),
-    ("PostToolUse", "Bash", "mycelium-data-tracker.sh"),
-    ("PostToolUse", "apply_patch", "mycelium-activity-tracker.sh"),
-    ("Stop", "", "mycelium-stop-check.sh"),
-    ("Stop", "", "mycelium-data-lineage-stop.sh"),
-)
+def _remove_codex_hooks_config(config: dict) -> bool:
+    """Remove deprecated project-local Mycelium hook registrations.
 
+    Codex plugins provide ``PLUGIN_ROOT`` only to plugin-bundled hooks. Older
+    Mycelium versions wrote resolved cache paths into project hooks.json files;
+    those paths break whenever Codex replaces the plugin cache. Preserve every
+    unrelated user hook and remove only handlers whose command resolves to a
+    known Mycelium hook basename.
+    """
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
 
-def _codex_hook_command(hooks_dir: Path, name: str) -> str:
-    """Build a Codex hook command with the host compatibility marker."""
-    script = shlex.quote(str(hooks_dir / name))
-    return f"MYCELIUM_HOOK_HOST=codex {script}"
-
-
-def _update_codex_hooks_config(config: dict, hooks_dir: Path) -> None:
-    """Apply the canonical Mycelium hook registrations to a Codex config."""
-    hooks = config.setdefault("hooks", {})
-    emptied_group_ids: set[int] = set()
-
-    def ensure(event: str, matcher: str, script: str):
-        groups = hooks.setdefault(event, [])
-
-        # Move registrations written by older Mycelium versions (notably the
-        # obsolete `exec_command` shell matcher) instead of leaving inert
-        # duplicates behind.
-        for item in groups:
-            if item.get("matcher", "") == matcher:
-                continue
-            handlers = item.get("hooks", [])
-            retained = [
+    changed = False
+    for event in list(hooks):
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            continue
+        retained_groups = []
+        for group in groups:
+            handlers = group.get("hooks", [])
+            retained_handlers = [
                 handler
                 for handler in handlers
-                if _hook_basename(handler.get("command", "")) != script
+                if _hook_basename(handler.get("command", ""))
+                not in MYCELIUM_HOOK_BASENAMES
             ]
-            item["hooks"] = retained
-            if handlers and not retained:
-                emptied_group_ids.add(id(item))
-
-        group = next(
-            (item for item in groups if item.get("matcher", "") == matcher), None
-        )
-        if group is None:
-            group = {"matcher": matcher, "hooks": []}
-            groups.append(group)
-        handlers = group.setdefault("hooks", [])
-        existing = [
-            handler
-            for handler in handlers
-            if _hook_basename(handler.get("command", "")) == script
-        ]
-        if existing:
-            existing[0]["command"] = _codex_hook_command(hooks_dir, script)
-            for duplicate in existing[1:]:
-                handlers.remove(duplicate)
+            removed_here = len(retained_handlers) != len(handlers)
+            changed = changed or removed_here
+            if removed_here:
+                group["hooks"] = retained_handlers
+            # Drop groups emptied by this cleanup, but preserve unrelated
+            # user-authored empty matcher groups exactly as they were.
+            if retained_handlers or not removed_here:
+                retained_groups.append(group)
+        if retained_groups:
+            hooks[event] = retained_groups
         else:
-            handlers.append(
-                {
-                    "type": "command",
-                    "command": _codex_hook_command(hooks_dir, script),
-                }
-            )
+            del hooks[event]
+            changed = True
 
-    for event, matcher, script in CODEX_HOOK_SPECS:
-        ensure(event, matcher, script)
-
-    # Drop only matcher groups emptied while moving old Mycelium registrations.
-    # Preserve unrelated user-authored empty groups.
-    for event, groups in hooks.items():
-        hooks[event] = [
-            group
-            for group in groups
-            if id(group) not in emptied_group_ids or group.get("hooks")
-        ]
-
-    for group in hooks.get("Stop", []):
-        _put_hook_first(group.get("hooks", []), "mycelium-data-lineage-stop.sh")
+    if not hooks:
+        config.pop("hooks", None)
+    return changed
 
 
 def install_codex_hooks(target_dir: Path):
-    """Create or update .codex/hooks.json with Codex-compatible hooks."""
-    hooks_dir = find_mycelium_hooks_dir()
-    if not hooks_dir:
-        print("  Warning: Could not locate mycelium hooks directory.")
-        print("  Codex hooks were not auto-installed.")
-        return
-
+    """Remove obsolete repo-local hooks; Codex hooks ship with the plugin."""
     codex_dir = target_dir / ".codex"
-    codex_dir.mkdir(exist_ok=True)
     hooks_path = codex_dir / "hooks.json"
-    config = json.loads(hooks_path.read_text()) if hooks_path.exists() else {}
-    _update_codex_hooks_config(config, hooks_dir)
-
-    hooks_path.write_text(json.dumps(config, indent=2) + "\n")
     gitignore = codex_dir / ".gitignore"
-    _ensure_gitignore_entry(gitignore, "hooks.json")
-    print("  Wrote: .codex/hooks.json")
+    changed = False
+    if hooks_path.exists():
+        config = json.loads(hooks_path.read_text())
+        changed = _remove_codex_hooks_config(config)
+        if changed:
+            if config:
+                hooks_path.write_text(json.dumps(config, indent=2) + "\n")
+            else:
+                hooks_path.unlink()
+                _remove_gitignore_entry(gitignore, "hooks.json")
+            print("  Removed deprecated project-local Mycelium Codex hooks.")
+
+    if codex_dir.exists() and not any(codex_dir.iterdir()):
+        codex_dir.rmdir()
+
+    print("  Codex hooks are bundled with the Mycelium plugin via PLUGIN_ROOT.")
     print(
-        "  Codex action required: open /hooks, review and trust all six "
-        "Mycelium command hooks, then start a fresh task."
+        "  Codex action required after plugin install or upgrade: in the CLI, "
+        "open /hooks, trust all six Mycelium hooks, exit Codex, and restart it."
     )
+    return changed
 
 
 def create_environments_file(target_dir: Path):
@@ -1195,7 +1181,7 @@ def main():
     print("\nInstalling Claude Code hooks...")
     install_claude_hooks(target_dir)
 
-    print("\nInstalling Codex hooks...")
+    print("\nConfiguring Codex hook compatibility...")
     install_codex_hooks(target_dir)
 
     print("\n" + "=" * 50)

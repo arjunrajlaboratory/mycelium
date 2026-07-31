@@ -95,7 +95,9 @@ jobs:
           python skills/core/scripts/validate_structure.py --target-dir "$tmpdir"
           test -f "$tmpdir/MYCELIUM.md"
           test -f "$tmpdir/AGENTS.md"
-          test -f "$tmpdir/.codex/hooks.json"
+          test ! -f "$tmpdir/.codex/hooks.json"
+          test -f hooks/hooks.json
+          test -x hooks/mycelium-codex-dispatch.sh
 
       - name: Run Python compatibility tests
         run: |

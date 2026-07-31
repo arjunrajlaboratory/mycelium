@@ -194,8 +194,14 @@ def check_agent_guidance(target_dir: Path, result: ValidationResult):
 
     if not (target_dir / ".claude" / "settings.local.json").exists():
         result.warning("Claude hook configuration is not installed")
-    if not (target_dir / ".codex" / "hooks.json").exists():
-        result.warning("Codex hook configuration is not installed")
+    codex_hooks = target_dir / ".codex" / "hooks.json"
+    if codex_hooks.exists() and "mycelium-" in codex_hooks.read_text(
+        encoding="utf-8"
+    ):
+        result.warning(
+            "Legacy project-local Mycelium Codex hooks are installed; "
+            "run the Mycelium migration to use stable plugin-bundled hooks"
+        )
 
 
 def check_data_structure(target_dir: Path, result: ValidationResult):

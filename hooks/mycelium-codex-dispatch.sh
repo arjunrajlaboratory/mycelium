@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Stable entrypoint for Mycelium's plugin-bundled Codex hooks.
+#
+# Codex supplies PLUGIN_ROOT for plugin hooks. Keeping that expansion in the
+# bundled hook definition avoids embedding a versioned plugin-cache path into
+# every initialized repository. The dispatcher also keeps globally enabled
+# plugin hooks silent outside Mycelium repositories.
+
+set -euo pipefail
+
+HOOK_NAME="${1:-}"
+case "$HOOK_NAME" in
+  mycelium-health.sh|mycelium-post-action.sh|mycelium-data-tracker.sh|mycelium-activity-tracker.sh|mycelium-data-lineage-stop.sh|mycelium-stop-check.sh)
+    ;;
+  *)
+    printf 'Unknown Mycelium Codex hook: %s\n' "$HOOK_NAME" >&2
+    exit 64
+    ;;
+esac
+
+ROOT="${PLUGIN_ROOT:-}"
+if [[ -z "$ROOT" ]]; then
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+SCRIPT="$ROOT/skills/core/hooks/$HOOK_NAME"
+if [[ ! -x "$SCRIPT" ]]; then
+  printf 'Mycelium hook executable not found: %s\n' "$SCRIPT" >&2
+  exit 127
+fi
+
+INPUT=$(cat)
+SESSION_CWD=$(printf '%s' "$INPUT" | python3 -c '
+import json, sys
+try:
+    value = json.load(sys.stdin)
+except Exception:
+    value = {}
+print(value.get("cwd") or "")
+' 2>/dev/null || true)
+if [[ -z "$SESSION_CWD" || ! -d "$SESSION_CWD" ]]; then
+  SESSION_CWD=$(pwd)
+fi
+
+REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || true)
+if [[ -z "$REPO_ROOT" || ! -d "$REPO_ROOT/.living" ]]; then
+  exit 0
+fi
+
+# The pointer is local runtime state. Refresh it automatically so generated
+# project guidance continues to find bundled resources after plugin upgrades.
+STATE_DIR="$REPO_ROOT/.mycelium"
+mkdir -p "$STATE_DIR"
+if [[ ! -f "$STATE_DIR/.gitignore" ]]; then
+  printf '*\n!.gitignore\n' > "$STATE_DIR/.gitignore"
+fi
+POINTER="$STATE_DIR/plugin-root"
+if [[ ! -f "$POINTER" || "$(cat "$POINTER" 2>/dev/null || true)" != "$ROOT" ]]; then
+  printf '%s\n' "$ROOT" > "$POINTER"
+fi
+
+export MYCELIUM_HOOK_HOST=codex
+cd "$REPO_ROOT"
+printf '%s' "$INPUT" | "$SCRIPT"

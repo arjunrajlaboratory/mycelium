@@ -56,6 +56,12 @@ codex plugin add mycelium@mycelium
 Start a new task after installation. Codex can invoke the bundled skills
 implicitly, through the plugin picker, or explicitly by skill name.
 
+Before the first Mycelium task, launch the Codex CLI, open `/hooks`, and trust
+all six Mycelium plugin hooks. Fully exit Codex afterward and restart it so the
+approved `SessionStart` hook is present from process startup. The hooks are
+bundled with the plugin and resolve through Codex's dynamic `PLUGIN_ROOT`; they
+do not embed a versioned cache path into your repositories.
+
 **Local Claude development install:**
 
 ```bash
@@ -76,12 +82,12 @@ memory layer, canonical `MYCELIUM.md` guidance, and thin `CLAUDE.md` and
 `AGENTS.md` adapters. **Core convention packs** (`robust-analysis`,
 `report-generator`, and `idea-generator`) are installed automatically.
 
-**Codex one-time hook approval:** after initialization or migration, open
-`/hooks`, review the six Mycelium command hooks, and trust them. Then start a
-fresh task so `SessionStart` runs with the approved commands. Codex deliberately
-skips untrusted project command hooks; reinstalling or upgrading Mycelium can
-change their exact cached paths, in which case `/hooks` will ask you to approve
-the updated commands again.
+**Codex hook approval:** if you did not approve the plugin hooks during
+installation, open `/hooks` in the Codex CLI, trust all six Mycelium command
+hooks, fully exit Codex, and restart it before opening the initialized project.
+Codex deliberately skips untrusted command hooks. An upgrade asks for approval
+again only when a bundled hook definition changes, not merely because the
+plugin cache moved.
 
 ### 3. Install domain conventions (optional)
 
@@ -132,9 +138,12 @@ skills are discovered. You can confirm the installed version with:
 codex plugin list --json
 ```
 
-Existing Mycelium repositories continue to work without an immediate migration.
-To opt an older repository into the current provider-neutral guidance, runtime
-state, and Claude/Codex hooks, open a new task in that repository and ask:
+Existing Claude-backed Mycelium repositories continue to work without an
+immediate migration. Repositories created with the early Codex preview may
+contain `.codex/hooks.json` entries with a versioned cache path; run the
+idempotent migration once after this update to remove those obsolete entries
+in favor of the plugin-bundled hooks. To migrate, open a new task in that
+repository and ask:
 
 > Use `$mycelium:core` to migrate this existing Mycelium repository. Show me the
 > dry run first.
@@ -159,7 +168,6 @@ project-root/
 │   ├── plugin-root               # Machine-local bundled-resource pointer
 │   └── last-session.md           # Cross-session resume context
 ├── .claude/settings.local.json   # Claude hook registrations
-├── .codex/hooks.json             # Codex hook registrations
 ├── .living/                      # The memory layer
 │   ├── INDEX.md                  # Knowledge summary with cluster routing
 │   ├── decisions.md              # Why choices were made
@@ -200,11 +208,14 @@ Mycelium ships seven hook scripts and registers the supported subset for each ho
 | `mycelium-data-tracker.sh` | PostToolUse (shell) | Captures analysis data-lineage events |
 | `mycelium-data-lineage-stop.sh` | Stop | Consolidates session data-lineage events |
 
-Hooks are auto-registered by `init_repo.py`. Codex users must trust the project,
-open `/hooks`, and trust all six Mycelium command hooks before starting a fresh
-task. Codex exposes shell and unified-exec work to hooks under the `Bash`
-matcher and exposes file edits as `apply_patch`; read telemetry is Claude-only
-because Codex does not expose its internal file reads to `PostToolUse`.
+Claude hooks are registered per repository by `init_repo.py`. Codex hooks are
+bundled once with the plugin in `hooks/hooks.json`; a small dispatcher no-ops
+outside Mycelium repositories, refreshes `.mycelium/plugin-root`, and invokes
+the shared scripts through Codex's dynamic `PLUGIN_ROOT`. Codex users must open
+`/hooks` in the CLI and trust all six Mycelium command hooks, then fully exit
+and restart Codex. Codex exposes shell and unified-exec work under the `Bash`
+matcher and file edits as `apply_patch`; read telemetry is Claude-only because
+Codex does not expose its internal file reads to `PostToolUse`.
 
 ## Progressive Disclosure Knowledge System
 

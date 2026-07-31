@@ -251,10 +251,12 @@ class TestRegenIndex:
 
 class TestMigrateOne:
     def test_runs_all_actions_idempotently(self, fake_repo: Path) -> None:
-        # First run applies guidance, state, both hook hosts, and INDEX refresh.
+        # First run applies guidance, state, Claude hooks, and INDEX refresh.
+        # Codex hooks are plugin-bundled, so a repo with no legacy registrations
+        # needs no project-local Codex change.
         result1 = mig.migrate_one(fake_repo)
         applied_count1 = sum(1 for v in result1.values() if v == "applied")
-        assert applied_count1 == 7
+        assert applied_count1 == 6
         canonical = (fake_repo / "MYCELIUM.md").read_text()
         assert "# Fake Project" in canonical
         assert "python3 skills/core/scripts/recall_lessons.py" not in canonical
@@ -269,10 +271,12 @@ class TestMigrateOne:
         assert result2["Cross-agent guidance"] == "skipped (already up-to-date)"
         assert result2["Runtime state migration"] == "skipped (already up-to-date)"
         assert result2["Claude hooks top-up"] == "skipped (already up-to-date)"
-        assert result2["Codex hooks top-up"] == "skipped (already up-to-date)"
+        assert result2["Legacy Codex hook cleanup"] == (
+            "skipped (already up-to-date)"
+        )
         assert result2["Todo contract"] == "skipped (already up-to-date)"
 
-    def test_repairs_previously_migrated_guidance_and_codex_matcher(
+    def test_repairs_guidance_and_removes_legacy_project_codex_hooks(
         self, fake_repo: Path
     ) -> None:
         mig.migrate_one(fake_repo)
@@ -284,26 +288,44 @@ class TestMigrateOne:
                 ),
                 encoding="utf-8",
             )
-        hooks_path = fake_repo / ".codex" / "hooks.json"
-        hooks = json.loads(hooks_path.read_text())
-        for group in hooks["hooks"]["PostToolUse"]:
-            if group["matcher"] == "Bash":
-                group["matcher"] = "exec_command"
+        codex_dir = fake_repo / ".codex"
+        codex_dir.mkdir(exist_ok=True)
+        hooks_path = codex_dir / "hooks.json"
+        hooks = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "exec_command",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    "MYCELIUM_HOOK_HOST=codex "
+                                    "/removed/cache/mycelium-post-action.sh"
+                                ),
+                            }
+                        ],
+                    }
+                ],
+                "PreToolUse": [{"matcher": "custom", "hooks": []}],
+            }
+        }
         hooks_path.write_text(json.dumps(hooks, indent=2), encoding="utf-8")
 
         assert mig.topup_codex_hooks(fake_repo, dry_run=True) is True
         result = mig.migrate_one(fake_repo)
 
         assert result["Cross-agent guidance"] == "applied"
-        assert result["Codex hooks top-up"] == "applied"
+        assert result["Legacy Codex hook cleanup"] == "applied"
         for name in ("CLAUDE.md", "MYCELIUM.md"):
             content = (fake_repo / name).read_text()
             assert mig.LEGACY_RECALL_COMMAND not in content
             assert mig.PLUGIN_RECALL_COMMAND in content
         repaired_hooks = json.loads(hooks_path.read_text())
-        post_tool = repaired_hooks["hooks"]["PostToolUse"]
-        assert not any(group["matcher"] == "exec_command" for group in post_tool)
-        assert any(group["matcher"] == "Bash" for group in post_tool)
+        assert "PostToolUse" not in repaired_hooks["hooks"]
+        assert repaired_hooks["hooks"]["PreToolUse"] == [
+            {"matcher": "custom", "hooks": []}
+        ]
 
     def test_skips_when_no_living_dir(self, tmp_path: Path) -> None:
         no_living = tmp_path / "not-mycelium"

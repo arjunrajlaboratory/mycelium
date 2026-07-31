@@ -13,7 +13,6 @@ project-root/
 ├── .mycelium/                             # Gitignored provider-neutral session state
 │   └── plugin-root                        # Machine-local bundled-resource pointer
 ├── .claude/settings.local.json            # Claude hook registrations
-├── .codex/hooks.json                      # Codex hook registrations
 ├── .living/                               # The memory layer
 │   ├── decisions.md                       # Append-only log: why choices were made
 │   ├── learnings.md                       # Append-only log: gotchas, surprises, insights
