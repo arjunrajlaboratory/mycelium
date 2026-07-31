@@ -112,7 +112,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       while IFS= read -r f; do
         [ -z "$f" ] && continue
         if [ -e "$LOG_REPO/$f" ]; then
-          FILE_MTIME=$(stat -f "%m" "$LOG_REPO/$f" 2>/dev/null || stat -c "%Y" "$LOG_REPO/$f" 2>/dev/null || echo "0")
+          FILE_MTIME=$(mycelium_file_mtime "$LOG_REPO/$f")
           if [ "$FILE_MTIME" -gt "$START_TS" ] 2>/dev/null; then
             UNCOMMITTED_RECENT=$((UNCOMMITTED_RECENT + 1))
           fi
@@ -292,21 +292,21 @@ DECISIONS_UPDATED=false
 CONVENTIONS_UPDATED=false
 
 if [ -f "$LIVING_DIR/learnings.md" ]; then
-  LEARNINGS_MTIME=$(stat -f "%m" "$LIVING_DIR/learnings.md" 2>/dev/null || stat -c "%Y" "$LIVING_DIR/learnings.md" 2>/dev/null || echo "0")
+  LEARNINGS_MTIME=$(mycelium_file_mtime "$LIVING_DIR/learnings.md")
   if [ "$LEARNINGS_MTIME" -gt "$REMINDER_TS" ]; then
     LEARNINGS_UPDATED=true
   fi
 fi
 
 if [ -f "$LIVING_DIR/decisions.md" ]; then
-  DECISIONS_MTIME=$(stat -f "%m" "$LIVING_DIR/decisions.md" 2>/dev/null || stat -c "%Y" "$LIVING_DIR/decisions.md" 2>/dev/null || echo "0")
+  DECISIONS_MTIME=$(mycelium_file_mtime "$LIVING_DIR/decisions.md")
   if [ "$DECISIONS_MTIME" -gt "$REMINDER_TS" ]; then
     DECISIONS_UPDATED=true
   fi
 fi
 
 if [ -f "$LIVING_DIR/conventions.md" ]; then
-  CONVENTIONS_MTIME=$(stat -f "%m" "$LIVING_DIR/conventions.md" 2>/dev/null || stat -c "%Y" "$LIVING_DIR/conventions.md" 2>/dev/null || echo "0")
+  CONVENTIONS_MTIME=$(mycelium_file_mtime "$LIVING_DIR/conventions.md")
   if [ "$CONVENTIONS_MTIME" -gt "$REMINDER_TS" ]; then
     CONVENTIONS_UPDATED=true
   fi
@@ -315,7 +315,7 @@ fi
 FINDINGS_UPDATED=false
 FINDINGS_DIR="$LIVING_DIR/findings"
 if [ -d "$FINDINGS_DIR" ]; then
-  FINDINGS_MTIME=$(stat -f "%m" "$FINDINGS_DIR" 2>/dev/null || stat -c "%Y" "$FINDINGS_DIR" 2>/dev/null || echo "0")
+  FINDINGS_MTIME=$(mycelium_file_mtime "$FINDINGS_DIR")
   if [ "$FINDINGS_MTIME" -gt "$REMINDER_TS" ]; then
     FINDINGS_UPDATED=true
   fi

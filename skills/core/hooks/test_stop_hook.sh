@@ -67,16 +67,13 @@ ts_ancient() {
 # Touch a file with an old timestamp (60 seconds ago)
 touch_old() {
   local file="$1"
-  touch "$file"
-  # macOS: touch -t takes YYYYMMDDHHMM.SS
-  local old_ts
-  old_ts=$(date -r "$(ts_old)" "+%Y%m%d%H%M.%S" 2>/dev/null || true)
-  if [ -n "$old_ts" ]; then
-    touch -t "$old_ts" "$file"
-  else
-    # Fallback: just leave as-is, the reminder timestamp will be newer
-    true
-  fi
+  python3 - "$file" <<'PY'
+import os, sys, time
+if not os.path.exists(sys.argv[1]):
+    open(sys.argv[1], "a").close()
+stamp = time.time() - 60
+os.utime(sys.argv[1], (stamp, stamp))
+PY
 }
 
 touch_very_old() {
