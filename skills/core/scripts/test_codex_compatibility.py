@@ -80,6 +80,16 @@ def test_codex_plugin_manifest_points_to_shared_skills():
     assert manifest["version"] == "0.6.0"
 
 
+def test_readme_documents_codex_install_update_and_migration():
+    readme = (PLUGIN_ROOT / "README.md").read_text()
+    assert "codex plugin marketplace add arjunrajlaboratory/mycelium" in readme
+    assert "codex plugin add mycelium@mycelium" in readme
+    assert "codex plugin marketplace upgrade mycelium" in readme
+    assert "codex plugin list --json" in readme
+    assert "Use `$mycelium:core` to migrate" in readme
+    assert "Migration is idempotent" in readme
+
+
 def test_shared_skill_layout_resolves_convention_network():
     assert init_repo.find_network_conventions_dir() == PLUGIN_ROOT / "network" / "conventions"
 
