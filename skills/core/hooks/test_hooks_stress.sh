@@ -55,6 +55,16 @@ cleanup_test_env() {
   unset TEST_DIR
 }
 
+set_mtime_epoch() {
+  local path="$1"
+  local epoch="$2"
+  python3 - "$path" "$epoch" <<'PY'
+import os, sys
+stamp = int(sys.argv[2])
+os.utime(sys.argv[1], (stamp, stamp))
+PY
+}
+
 # Run the read-tracker hook from inside TEST_DIR with JSON on stdin
 # Sets RT_EXIT and RT_OUTPUT
 run_read_tracker() {
@@ -677,11 +687,8 @@ OLD_LOG_EOF
   # Aged activity files match the crash time
   echo "src/old.py" > "$TEST_DIR/.mycelium/mycelium-session-activity.tmp"
   echo "$TEN_DAYS_AGO" > "$TEST_DIR/.mycelium/mycelium-reminded.tmp"
-  OLD_FMT=$(date -r "$TEN_DAYS_AGO" "+%Y%m%d%H%M.%S" 2>/dev/null || true)
-  if [ -n "$OLD_FMT" ]; then
-    touch -t "$OLD_FMT" "$TEST_DIR/.mycelium/mycelium-session-activity.tmp"
-    touch -t "$OLD_FMT" "$TEST_DIR/.mycelium/mycelium-reminded.tmp"
-  fi
+  set_mtime_epoch "$TEST_DIR/.mycelium/mycelium-session-activity.tmp" "$TEN_DAYS_AGO"
+  set_mtime_epoch "$TEST_DIR/.mycelium/mycelium-reminded.tmp" "$TEN_DAYS_AGO"
 
   run_health_hook
 
@@ -798,11 +805,8 @@ OLD_LOG_EOF
   printf '%s\n%s\n' "$OLD_LOG" "$TWO_DAYS" > "$TEST_DIR/.mycelium/active-session-log.tmp"
   echo "src/old.py" > "$TEST_DIR/.mycelium/mycelium-session-activity.tmp"
   echo "$TWO_DAYS" > "$TEST_DIR/.mycelium/mycelium-reminded.tmp"
-  STALE_FMT=$(date -r "$TWO_DAYS" "+%Y%m%d%H%M.%S" 2>/dev/null || true)
-  if [ -n "$STALE_FMT" ]; then
-    touch -t "$STALE_FMT" "$TEST_DIR/.mycelium/mycelium-session-activity.tmp"
-    touch -t "$STALE_FMT" "$TEST_DIR/.mycelium/mycelium-reminded.tmp"
-  fi
+  set_mtime_epoch "$TEST_DIR/.mycelium/mycelium-session-activity.tmp" "$TWO_DAYS"
+  set_mtime_epoch "$TEST_DIR/.mycelium/mycelium-reminded.tmp" "$TWO_DAYS"
 
   run_health_hook
 
