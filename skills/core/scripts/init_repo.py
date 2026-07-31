@@ -433,6 +433,16 @@ MYCELIUM_HOOK_BASENAMES = {
     "mycelium-data-lineage-stop.sh",
 }
 
+CLAUDE_HOOK_SPECS = (
+    ("SessionStart", "", "mycelium-health.sh"),
+    ("PostToolUse", "Bash", "mycelium-post-action.sh"),
+    ("PostToolUse", "Edit|Write", "mycelium-activity-tracker.sh"),
+    ("PostToolUse", "Read", "mycelium-read-tracker.sh"),
+    ("PostToolUse", "Bash", "mycelium-data-tracker.sh"),
+    ("Stop", "", "mycelium-stop-check.sh"),
+    ("Stop", "", "mycelium-data-lineage-stop.sh"),
+)
+
 
 def _hook_basename(command: str) -> str:
     """Return the script basename from a plain or env-prefixed command."""
@@ -552,6 +562,61 @@ def _consolidate_duplicate_hooks(
             entry["hooks"] = new_hook_list
 
     return removed, kept_by_basename
+
+
+def _normalize_claude_hook_locations(hooks: dict) -> None:
+    """Keep each Mycelium Claude hook once, under its canonical matcher."""
+    for expected_event, expected_matcher, basename in CLAUDE_HOOK_SPECS:
+        candidates: list[tuple[str, dict]] = []
+        emptied_group_ids: set[int] = set()
+
+        for event, groups in hooks.items():
+            for group in groups:
+                handlers = group.get("hooks", [])
+                retained = []
+                for handler in handlers:
+                    if _hook_basename(handler.get("command", "")) == basename:
+                        candidates.append((event, handler))
+                    else:
+                        retained.append(handler)
+                if len(retained) != len(handlers):
+                    group["hooks"] = retained
+                    if not retained:
+                        emptied_group_ids.add(id(group))
+
+        target_groups = hooks.setdefault(expected_event, [])
+        target = next(
+            (
+                group
+                for group in target_groups
+                if group.get("matcher", "") == expected_matcher
+            ),
+            None,
+        )
+        if target is None:
+            target = {"matcher": expected_matcher, "hooks": []}
+            target_groups.append(target)
+
+        live = [
+            item for item in candidates if _hook_command_path(item[1]["command"]).exists()
+        ]
+        marketplace = [
+            item for item in live if "/marketplaces/" in item[1]["command"]
+        ]
+        correctly_scoped = [item for item in live if item[0] == expected_event]
+        selected = (marketplace or correctly_scoped or live or candidates)[0][1]
+        target.setdefault("hooks", []).append(selected)
+
+        # Remove only groups this pass emptied. User-authored empty groups are
+        # preserved, and the target group remains even if it was moved in place.
+        for event, groups in hooks.items():
+            hooks[event] = [
+                group
+                for group in groups
+                if group is target
+                or id(group) not in emptied_group_ids
+                or group.get("hooks")
+            ]
 
 
 def install_claude_hooks(target_dir: Path):
@@ -699,11 +764,95 @@ def install_claude_hooks(target_dir: Path):
         catch_all["hooks"].append(_hook_entry(data_lineage_stop_hook))
         print("  Registered: Stop → mycelium-data-lineage-stop.sh")
 
+    # Older installs may have a valid script under the wrong matcher or event.
+    # Normalize after filling gaps so migration both detects and repairs them.
+    _normalize_claude_hook_locations(hooks)
+
     for group in stop:
         _put_hook_first(group.get("hooks", []), "mycelium-data-lineage-stop.sh")
 
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
     print("  Wrote: .claude/settings.local.json")
+
+
+CODEX_HOOK_SPECS = (
+    ("SessionStart", "startup|resume|clear|compact", "mycelium-health.sh"),
+    ("PostToolUse", "Bash", "mycelium-post-action.sh"),
+    ("PostToolUse", "Bash", "mycelium-data-tracker.sh"),
+    ("PostToolUse", "apply_patch", "mycelium-activity-tracker.sh"),
+    ("Stop", "", "mycelium-stop-check.sh"),
+    ("Stop", "", "mycelium-data-lineage-stop.sh"),
+)
+
+
+def _codex_hook_command(hooks_dir: Path, name: str) -> str:
+    """Build a Codex hook command with the host compatibility marker."""
+    script = shlex.quote(str(hooks_dir / name))
+    return f"MYCELIUM_HOOK_HOST=codex {script}"
+
+
+def _update_codex_hooks_config(config: dict, hooks_dir: Path) -> None:
+    """Apply the canonical Mycelium hook registrations to a Codex config."""
+    hooks = config.setdefault("hooks", {})
+    emptied_group_ids: set[int] = set()
+
+    def ensure(event: str, matcher: str, script: str):
+        groups = hooks.setdefault(event, [])
+
+        # Move registrations written by older Mycelium versions (notably the
+        # obsolete `exec_command` shell matcher) instead of leaving inert
+        # duplicates behind.
+        for item in groups:
+            if item.get("matcher", "") == matcher:
+                continue
+            handlers = item.get("hooks", [])
+            retained = [
+                handler
+                for handler in handlers
+                if _hook_basename(handler.get("command", "")) != script
+            ]
+            item["hooks"] = retained
+            if handlers and not retained:
+                emptied_group_ids.add(id(item))
+
+        group = next(
+            (item for item in groups if item.get("matcher", "") == matcher), None
+        )
+        if group is None:
+            group = {"matcher": matcher, "hooks": []}
+            groups.append(group)
+        handlers = group.setdefault("hooks", [])
+        existing = [
+            handler
+            for handler in handlers
+            if _hook_basename(handler.get("command", "")) == script
+        ]
+        if existing:
+            existing[0]["command"] = _codex_hook_command(hooks_dir, script)
+            for duplicate in existing[1:]:
+                handlers.remove(duplicate)
+        else:
+            handlers.append(
+                {
+                    "type": "command",
+                    "command": _codex_hook_command(hooks_dir, script),
+                }
+            )
+
+    for event, matcher, script in CODEX_HOOK_SPECS:
+        ensure(event, matcher, script)
+
+    # Drop only matcher groups emptied while moving old Mycelium registrations.
+    # Preserve unrelated user-authored empty groups.
+    for event, groups in hooks.items():
+        hooks[event] = [
+            group
+            for group in groups
+            if id(group) not in emptied_group_ids or group.get("hooks")
+        ]
+
+    for group in hooks.get("Stop", []):
+        _put_hook_first(group.get("hooks", []), "mycelium-data-lineage-stop.sh")
 
 
 def install_codex_hooks(target_dir: Path):
@@ -718,41 +867,7 @@ def install_codex_hooks(target_dir: Path):
     codex_dir.mkdir(exist_ok=True)
     hooks_path = codex_dir / "hooks.json"
     config = json.loads(hooks_path.read_text()) if hooks_path.exists() else {}
-    hooks = config.setdefault("hooks", {})
-
-    def command(name: str) -> str:
-        script = shlex.quote(str(hooks_dir / name))
-        return f"MYCELIUM_HOOK_HOST=codex {script}"
-
-    def ensure(event: str, matcher: str, script: str):
-        groups = hooks.setdefault(event, [])
-        group = next(
-            (item for item in groups if item.get("matcher", "") == matcher), None
-        )
-        if group is None:
-            group = {"matcher": matcher, "hooks": []}
-            groups.append(group)
-        handlers = group.setdefault("hooks", [])
-        existing = [
-            handler
-            for handler in handlers
-            if _hook_basename(handler.get("command", "")) == script
-        ]
-        if existing:
-            existing[0]["command"] = command(script)
-            for duplicate in existing[1:]:
-                handlers.remove(duplicate)
-        else:
-            handlers.append({"type": "command", "command": command(script)})
-
-    ensure("SessionStart", "startup|resume|clear|compact", "mycelium-health.sh")
-    ensure("PostToolUse", "exec_command", "mycelium-post-action.sh")
-    ensure("PostToolUse", "exec_command", "mycelium-data-tracker.sh")
-    ensure("PostToolUse", "apply_patch", "mycelium-activity-tracker.sh")
-    ensure("Stop", "", "mycelium-stop-check.sh")
-    ensure("Stop", "", "mycelium-data-lineage-stop.sh")
-    for group in hooks.get("Stop", []):
-        _put_hook_first(group.get("hooks", []), "mycelium-data-lineage-stop.sh")
+    _update_codex_hooks_config(config, hooks_dir)
 
     hooks_path.write_text(json.dumps(config, indent=2) + "\n")
     gitignore = codex_dir / ".gitignore"

@@ -357,8 +357,8 @@ Claude hooks in `.claude/settings.local.json` and Codex hooks in
 **Stop hook logic**: The stop hook checks if `mycelium-post-action.sh` fired during the session (indicated by the presence of `.mycelium/mycelium-reminded.tmp`). If `.living/` was not updated afterward, it warns. If `.living/` was updated but `.mycelium/last-session.md` was not written (or is older than the session start), it emits a non-blocking warning reminding you to write the session summary. Read-only sessions, config-only sessions, and sessions without code execution are never checked.
 
 Codex requires the project to be trusted and each changed command hook to be
-reviewed. It matches shell work as `exec_command`, and its activity tracker
-parses `apply_patch` headers. Read-access
+reviewed. It matches shell and unified-exec work under `Bash`, and its activity
+tracker parses `apply_patch` headers. Read-access
 telemetry remains Claude-only because Codex does not expose internal file reads
 to `PostToolUse`.
 

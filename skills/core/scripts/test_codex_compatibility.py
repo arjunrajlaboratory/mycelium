@@ -159,6 +159,10 @@ def test_init_writes_codex_hooks_and_agent_guidance(tmp_path):
     assert all(command.startswith("MYCELIUM_HOOK_HOST=codex ") for command in commands)
     assert not any("mycelium-read-tracker.sh" in command for command in commands)
     assert any(
+        group["matcher"] == "Bash"
+        for group in config["hooks"]["PostToolUse"]
+    )
+    assert not any(
         group["matcher"] == "exec_command"
         for group in config["hooks"]["PostToolUse"]
     )
@@ -196,6 +200,49 @@ def test_existing_codex_gitignore_is_extended(tmp_path):
     assert ignored == ["config.toml", "hooks.json"]
 
 
+def test_existing_exec_command_hooks_are_moved_to_bash(tmp_path):
+    repo = _repo(tmp_path, living=False)
+    codex_dir = repo / ".codex"
+    codex_dir.mkdir()
+    hooks = {
+        "hooks": {
+            "PostToolUse": [
+                {
+                    "matcher": "exec_command",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "MYCELIUM_HOOK_HOST=codex /old/mycelium-post-action.sh",
+                        },
+                        {
+                            "type": "command",
+                            "command": "MYCELIUM_HOOK_HOST=codex /old/mycelium-data-tracker.sh",
+                        },
+                    ],
+                }
+            ],
+            "PreToolUse": [{"matcher": "custom", "hooks": []}],
+        }
+    }
+    (codex_dir / "hooks.json").write_text(json.dumps(hooks), encoding="utf-8")
+
+    init_repo.install_codex_hooks(repo)
+
+    config = json.loads((codex_dir / "hooks.json").read_text())
+    post_tool = config["hooks"]["PostToolUse"]
+    assert not any(group["matcher"] == "exec_command" for group in post_tool)
+    bash_handlers = next(group for group in post_tool if group["matcher"] == "Bash")[
+        "hooks"
+    ]
+    basenames = {
+        init_repo._hook_basename(handler["command"]) for handler in bash_handlers
+    }
+    assert {"mycelium-post-action.sh", "mycelium-data-tracker.sh"} <= basenames
+    assert config["hooks"]["PreToolUse"] == [
+        {"matcher": "custom", "hooks": []}
+    ]
+
+
 def test_codex_session_start_uses_nested_context(tmp_path):
     repo = _repo(tmp_path, living=False)
     result = _run_hook(
@@ -218,7 +265,7 @@ def test_codex_post_tool_use_uses_nested_context(tmp_path):
         repo,
         {
             "cwd": str(repo),
-            "tool_name": "exec_command",
+            "tool_name": "Bash",
             "tool_input": {"command": "python analysis.py"},
             "turn_id": "turn-2",
         },

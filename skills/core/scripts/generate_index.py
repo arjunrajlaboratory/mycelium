@@ -451,7 +451,8 @@ _DATE_RE = re.compile(r"\[(\d{4}-\d{2}-\d{2})\]")
 _HEURISTIC_FOOTER = (
     "_Heuristic clustering: tags with ≥2 entries, top 6 by count. "
     "To fetch matching entries: "
-    "`python3 skills/core/scripts/recall_lessons.py --living-dir <path> --tag <tag>` "
+    "`python3 \"$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py\" "
+    "--living-dir <path> --tag <tag>` "
     "or `--id L-N`._"
 )
 

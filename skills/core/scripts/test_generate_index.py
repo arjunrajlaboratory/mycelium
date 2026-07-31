@@ -574,6 +574,8 @@ class TestHeuristicSummary:
             ],
         )
         block = gi.build_heuristic_summary(living_dir)
+        assert '"$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"' in block
+        assert "python3 skills/core/scripts/recall_lessons.py" not in block
         # debugging has 3, pytest has 2, asyncio has 2 — all included
         assert "**debugging** (3 entries)" in block
         assert "**pytest** (2 entries)" in block

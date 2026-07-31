@@ -17,7 +17,7 @@ import init_repo as ir  # noqa: E402
 
 
 def _make_hook_dir(parent: Path, label: str) -> Path:
-    """Create a directory containing all 5 mycelium hook scripts as real files.
+    """Create a directory containing all 7 mycelium hook scripts as real files.
     `label` differentiates marketplace/dev/third in tests."""
     if label == "marketplace":
         d = parent / ".claude" / "plugins" / "marketplaces" / "mycelium" / "hooks"
@@ -290,7 +290,7 @@ class TestInstallClaudeHooksIdempotent:
         repo = tmp_path / "repo"
         (repo / ".claude").mkdir(parents=True)
 
-        # Pre-seed settings with real marketplace-path entries for all 5 hooks
+        # Pre-seed settings with real marketplace-path entries for all 7 hooks
         def _entry(bn: str) -> dict:
             return {"type": "command", "command": str(marketplace / bn)}
 
