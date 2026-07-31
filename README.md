@@ -108,6 +108,33 @@ Mycelium's hooks enforce the post-action protocol automatically after every sign
 - Recurring patterns crystallize into conventions
 - Transferable knowledge is promoted to global domain files
 
+## Updating Mycelium in Codex
+
+Refresh the marketplace snapshot and install the version it now advertises:
+
+```bash
+codex plugin marketplace upgrade mycelium
+codex plugin add mycelium@mycelium
+```
+
+The first command refreshes the configured Git marketplace; the second updates
+the installed plugin cache. Start a new Codex task afterward so the updated
+skills are discovered. You can confirm the installed version with:
+
+```bash
+codex plugin list --json
+```
+
+Existing Mycelium repositories continue to work without an immediate migration.
+To opt an older repository into the current provider-neutral guidance, runtime
+state, and Claude/Codex hooks, open a new task in that repository and ask:
+
+> Use `$mycelium:core` to migrate this existing Mycelium repository. Show me the
+> dry run first.
+
+Migration is idempotent, so it is safe to run again after future updates. It
+preserves project-specific guidance and existing `.living/` knowledge.
+
 ## What a Mycelium-Enabled Project Looks Like
 
 After initialization, your project has this structure:
