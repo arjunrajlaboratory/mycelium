@@ -111,6 +111,27 @@ def test_hook_mtime_helper_returns_numeric_epoch(tmp_path):
     assert abs(int(result.stdout.strip()) - int(target.stat().st_mtime)) <= 1
 
 
+def test_hook_file_size_helper_returns_numeric_bytes(tmp_path):
+    target = tmp_path / "sized.txt"
+    target.write_bytes(b"portable-size")
+    hook_lib = HOOKS_DIR / "mycelium-hook-lib.sh"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; mycelium_file_size "$2"',
+            "size-test",
+            str(hook_lib),
+            str(target),
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.strip().isdigit()
+    assert int(result.stdout.strip()) == target.stat().st_size
+
+
 def test_shared_skill_layout_resolves_convention_network():
     assert init_repo.find_network_conventions_dir() == PLUGIN_ROOT / "network" / "conventions"
 

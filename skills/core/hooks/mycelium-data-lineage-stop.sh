@@ -87,7 +87,7 @@ source "$HERE/mycelium-hook-lib.sh"
   END=$(date +%s)
 
   # Write structured status sentinel via Python (handles quoting safely).
-  EVENTS_SIZE=$(stat -f%z "$EVENTS_FILE" 2>/dev/null || stat -c%s "$EVENTS_FILE" 2>/dev/null || echo 0)
+  EVENTS_SIZE=$(mycelium_file_size "$EVENTS_FILE")
   WALL=$((END - START))
   python3 - "$STATUS_FILE" "$SESSION_ID" "$EXIT_CODE" "$WALL" "$EVENTS_SIZE" "$OUT_FILE" "$LOG_TMP" <<'PYINNER'
 import json, sys, datetime
