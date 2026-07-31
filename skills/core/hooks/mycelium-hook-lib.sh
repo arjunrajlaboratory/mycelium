@@ -21,6 +21,32 @@ mycelium_knowledge_dir() {
   printf '%s\n' "${MYCELIUM_KNOWLEDGE_DIR:-$HOME/.mycelium/knowledge}"
 }
 
+mycelium_file_mtime() {
+  local path="${1:-}"
+  local value=""
+
+  if [[ -z "$path" || ! -e "$path" ]]; then
+    printf '0\n'
+    return
+  fi
+
+  # GNU stat uses -c; BSD/macOS stat uses -f. GNU `stat -f "%m"` exits
+  # successfully but prints a mount point, so validate the result before use.
+  value=$(stat -c "%Y" "$path" 2>/dev/null || true)
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+    return
+  fi
+
+  value=$(stat -f "%m" "$path" 2>/dev/null || true)
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+    return
+  fi
+
+  printf '0\n'
+}
+
 mycelium_hook_host() {
   case "${MYCELIUM_HOOK_HOST:-}" in
     codex|claude) printf '%s\n' "$MYCELIUM_HOOK_HOST" ;;

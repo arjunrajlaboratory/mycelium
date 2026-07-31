@@ -70,15 +70,11 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
     _ACT_AGE=999999999
     _REM_AGE=999999999
     if [ -f "$_ACTIVITY_FILE" ]; then
-      _ACT_MTIME=$(stat -f "%m" "$_ACTIVITY_FILE" 2>/dev/null \
-                   || stat -c "%Y" "$_ACTIVITY_FILE" 2>/dev/null \
-                   || echo 0)
+      _ACT_MTIME=$(mycelium_file_mtime "$_ACTIVITY_FILE")
       _ACT_AGE=$(( _NOW - _ACT_MTIME ))
     fi
     if [ -f "$_REMINDED_FILE" ]; then
-      _REM_MTIME=$(stat -f "%m" "$_REMINDED_FILE" 2>/dev/null \
-                   || stat -c "%Y" "$_REMINDED_FILE" 2>/dev/null \
-                   || echo 0)
+      _REM_MTIME=$(mycelium_file_mtime "$_REMINDED_FILE")
       _REM_AGE=$(( _NOW - _REM_MTIME ))
     fi
     # Clean only if BOTH activity signals are also old (> 2h). If either is
@@ -281,7 +277,7 @@ fi
 # --- Session resume: load last-session.md if recent ---
 SESSION_FILE="$STATE_DIR/last-session.md"
 if [ -f "$SESSION_FILE" ]; then
-  SESSION_MTIME=$(stat -f "%m" "$SESSION_FILE" 2>/dev/null || stat -c "%Y" "$SESSION_FILE" 2>/dev/null || echo "0")
+  SESSION_MTIME=$(mycelium_file_mtime "$SESSION_FILE")
   NOW_TS=$(date +%s)
   SESSION_AGE_DAYS=$(( (NOW_TS - SESSION_MTIME) / 86400 ))
   if [ "$SESSION_AGE_DAYS" -lt 7 ]; then

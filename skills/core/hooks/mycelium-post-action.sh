@@ -113,16 +113,16 @@ if [[ -f "$REMINDER_FILE" ]]; then
   LEARNINGS_MTIME=0
   DECISIONS_MTIME=0
   if [[ -f "$LIVING_DIR/learnings.md" ]]; then
-    LEARNINGS_MTIME=$(stat -f "%m" "$LIVING_DIR/learnings.md" 2>/dev/null || stat -c "%Y" "$LIVING_DIR/learnings.md" 2>/dev/null || echo "0")
+    LEARNINGS_MTIME=$(mycelium_file_mtime "$LIVING_DIR/learnings.md")
   fi
   if [[ -f "$LIVING_DIR/decisions.md" ]]; then
-    DECISIONS_MTIME=$(stat -f "%m" "$LIVING_DIR/decisions.md" 2>/dev/null || stat -c "%Y" "$LIVING_DIR/decisions.md" 2>/dev/null || echo "0")
+    DECISIONS_MTIME=$(mycelium_file_mtime "$LIVING_DIR/decisions.md")
   fi
   LATEST_LIVING=$((LEARNINGS_MTIME > DECISIONS_MTIME ? LEARNINGS_MTIME : DECISIONS_MTIME))
   # Also check findings directory mtime (updated when any finding file is written)
   FINDINGS_DIR="$LIVING_DIR/findings"
   if [ -d "$FINDINGS_DIR" ]; then
-    FINDINGS_MTIME=$(stat -f "%m" "$FINDINGS_DIR" 2>/dev/null || stat -c "%Y" "$FINDINGS_DIR" 2>/dev/null || echo "0")
+    FINDINGS_MTIME=$(mycelium_file_mtime "$FINDINGS_DIR")
     if [ "$FINDINGS_MTIME" -gt "$LATEST_LIVING" ]; then
       LATEST_LIVING="$FINDINGS_MTIME"
     fi
