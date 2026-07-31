@@ -60,9 +60,10 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 14. **Codex only**: Mycelium's six hooks are bundled with the plugin and use
     Codex's dynamic `PLUGIN_ROOT`; initialization must not write versioned
     plugin-cache paths into `.codex/hooks.json`. After first installing the
-    plugin, or when an upgrade changes a hook definition, tell the user to open
-    `/hooks` in the Codex CLI, trust the six plugin hooks, fully exit Codex, and
-    restart it so the approved hook set is loaded at SessionStart.
+    plugin, or after an upgrade resolves `PLUGIN_ROOT` to a new cache path, tell
+    the user to open `/hooks` in the Codex CLI, trust the six plugin hooks,
+    fully exit Codex, and restart it so the approved hook set is loaded at
+    SessionStart.
 
 **References to consult**:
 - `skills/core/references/folder-structure.md` — canonical target structure
@@ -367,13 +368,14 @@ Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 **Stop hook logic**: The stop hook checks if `mycelium-post-action.sh` fired during the session (indicated by the presence of `.mycelium/mycelium-reminded.tmp`). If `.living/` was not updated afterward, it warns. If `.living/` was updated but `.mycelium/last-session.md` was not written (or is older than the session start), it emits a non-blocking warning reminding you to write the session summary. Read-only sessions, config-only sessions, and sessions without code execution are never checked.
 
 Codex requires each exact plugin command hook to be reviewed and trusted through
-`/hooks`; untrusted hooks are skipped. After first install, or an upgrade that
-changes a hook definition, approve all six Mycelium hooks, fully exit Codex,
-and restart it. Codex matches shell and unified-exec work under `Bash`, and its
-activity tracker parses `apply_patch` headers. The plugin dispatcher refreshes
-`.mycelium/plugin-root` automatically, so cache replacement does not invalidate
-hook paths. Read-access telemetry remains Claude-only because Codex does not
-expose internal file reads to `PostToolUse`.
+`/hooks`; untrusted hooks are skipped. After first install or any plugin
+upgrade, approve all six Mycelium hooks, fully exit Codex, and restart it.
+Codex matches shell and unified-exec work under `Bash`, and its activity tracker
+parses `apply_patch` headers. The plugin registry and dispatcher resolve the
+live `PLUGIN_ROOT` and refresh `.mycelium/plugin-root` automatically, so cache
+replacement does not leave dead hook paths in repositories. Read-access
+telemetry remains Claude-only because Codex does not expose internal file reads
+to `PostToolUse`.
 
 ### Subagent-Driven Sessions
 

@@ -85,9 +85,10 @@ memory layer, canonical `MYCELIUM.md` guidance, and thin `CLAUDE.md` and
 **Codex hook approval:** if you did not approve the plugin hooks during
 installation, open `/hooks` in the Codex CLI, trust all six Mycelium command
 hooks, fully exit Codex, and restart it before opening the initialized project.
-Codex deliberately skips untrusted command hooks. An upgrade asks for approval
-again only when a bundled hook definition changes, not merely because the
-plugin cache moved.
+Codex deliberately skips untrusted command hooks. Revisit `/hooks` after plugin
+upgrades: Codex resolves `PLUGIN_ROOT` to the new live cache path, so the
+displayed command and its trust record can change even though repositories no
+longer retain the old path.
 
 ### 3. Install domain conventions (optional)
 
