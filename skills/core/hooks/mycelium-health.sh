@@ -255,7 +255,7 @@ LOG_EOF
     # --summary-heuristic regenerates BOTH the quick reference and the
     # KNOWLEDGE SUMMARY block from tag annotations. Falls back to
     # --counts-only if the script is too old to know the new flag.
-    GENERATE_INDEX_SCRIPT="$(dirname "$(dirname "$(realpath "$0")")")/scripts/generate_index.py"
+    GENERATE_INDEX_SCRIPT="$HERE/../scripts/generate_index.py"
     if [ -f "$GENERATE_INDEX_SCRIPT" ]; then
       python3 "$GENERATE_INDEX_SCRIPT" --living-dir "$LIVING_DIR" --summary-heuristic >/dev/null 2>&1 \
         || python3 "$GENERATE_INDEX_SCRIPT" --living-dir "$LIVING_DIR" --counts-only >/dev/null 2>&1 \

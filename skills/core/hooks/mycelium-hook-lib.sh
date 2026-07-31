@@ -47,6 +47,32 @@ mycelium_file_mtime() {
   printf '0\n'
 }
 
+mycelium_file_size() {
+  local path="${1:-}"
+  local value=""
+
+  if [[ -z "$path" || ! -e "$path" ]]; then
+    printf '0\n'
+    return
+  fi
+
+  # As with mtimes, try GNU first and validate before falling back to BSD.
+  # GNU `stat -f%z` can otherwise succeed with non-size filesystem output.
+  value=$(stat -c "%s" "$path" 2>/dev/null || true)
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+    return
+  fi
+
+  value=$(stat -f "%z" "$path" 2>/dev/null || true)
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+    return
+  fi
+
+  printf '0\n'
+}
+
 mycelium_hook_host() {
   case "${MYCELIUM_HOOK_HOST:-}" in
     codex|claude) printf '%s\n' "$MYCELIUM_HOOK_HOST" ;;
