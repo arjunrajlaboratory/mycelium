@@ -99,7 +99,9 @@ LIVING_DIRECTIVE=""
 
 # Part 1: Log append (always fires, no debounce)
 if [ -f "$ACTIVE_LOG_FILE" ]; then
-  LOG_PATH=$(cat "$ACTIVE_LOG_FILE")
+  # SessionStart stores the log path on line 1 and the owning session's
+  # timestamp on line 2. Only the path belongs in the agent directive.
+  LOG_PATH=$(head -1 "$ACTIVE_LOG_FILE")
   LOG_DIRECTIVE="SESSION LOG UPDATE: Append a 2-3 line timestamped entry to ${LOG_PATH} describing what you just did, the result, and any notable outputs. Format: ### HH:MM — <action title> followed by bullet points with Command, Result, and Output fields as applicable."
 fi
 

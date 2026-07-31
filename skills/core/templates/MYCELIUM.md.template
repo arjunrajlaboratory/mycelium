@@ -108,6 +108,12 @@ Mycelium hooks are auto-installed for both Claude Code and Codex during `init`:
 
 The PostToolUse hook ensures the protocol runs automatically after analysis/data/algorithm work. Read-only and config-only sessions are never interrupted.
 
+Codex requires a one-time approval for each exact project command hook. After
+initialization, migration, or a Mycelium upgrade that changes cached hook paths,
+open `/hooks`, review and trust all six Mycelium hooks, then start a fresh task.
+Until that approval, Codex intentionally skips the commands even though
+`.codex/hooks.json` contains their registrations.
+
 ### Knowledge Transfer (Cross-Project)
 
 If this project is part of a multi-project portfolio (parent directory has `.living/`), the `mycelium-health.sh` hook checks daily whether cross-project knowledge transfer is due. When triggered, a background subagent scans recent learnings across sibling projects and automatically applies relevant transfers to this project's `.living/learnings.md`. Transfer entries are tagged with `(auto-transferred by mycelium)` for auditability. Audit reports are stored in the parent project's `.living/outputs/knowledge-transfers/`.

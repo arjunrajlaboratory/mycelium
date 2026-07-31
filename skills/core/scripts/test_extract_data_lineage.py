@@ -158,6 +158,52 @@ def test_normalize_preserves_provided_script_sha() -> None:
     assert e["script_sha256"] == "abc"
 
 
+def test_normalize_preserves_unresolved_lineage_metadata() -> None:
+    warnings: list[str] = []
+    e = normalize_event(
+        {
+            "ts": "2026-07-31T12:00:00Z",
+            "script": "run.py",
+            "io_detection": "unresolved",
+            "lineage_warnings": ["Dynamic paths were not resolved."],
+        },
+        warnings,
+        0,
+    )
+
+    assert e is not None
+    assert e["io_detection"] == "unresolved"
+    assert e["lineage_warnings"] == ["Dynamic paths were not resolved."]
+
+
+def test_build_manifest_promotes_event_lineage_warnings() -> None:
+    event = {
+        "ts": "2026-07-31T12:00:00Z",
+        "agent_id": None,
+        "agent_type": None,
+        "bash_cmd": "python run.py",
+        "bash_exit": None,
+        "bash_wall_s": None,
+        "script": "run.py",
+        "script_sha256": "abc",
+        "script_source": None,
+        "git_sha": None,
+        "inputs": [],
+        "outputs": [],
+        "io_detection": "unresolved",
+        "lineage_warnings": ["Dynamic paths were not resolved."],
+        "filters_detected": [],
+        "seeds_detected": [],
+    }
+
+    manifest = build_manifest([event], "sid", "/repo", [])
+
+    assert manifest["n_actions"] == 1
+    assert manifest["extraction_warnings"] == [
+        "run.py: Dynamic paths were not resolved."
+    ]
+
+
 # ---------- build_manifest ----------
 
 

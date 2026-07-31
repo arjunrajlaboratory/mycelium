@@ -57,6 +57,10 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 11. **Bootstrap knowledge system**: If `~/.mycelium/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. The script also appends the Global Knowledge Domains routing table to every `~/.claude/projects/*/memory/MEMORY.md` (idempotent — skips files where the header is already present). Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py --summary-heuristic`.
 12. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
 13. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
+14. **Codex only**: tell the user to open `/hooks`, review and trust all six
+    Mycelium command hooks, then start a fresh task. This approval is required
+    after initialization and whenever an upgrade changes the exact cached hook
+    commands; untrusted project hooks are intentionally skipped by Codex.
 
 **References to consult**:
 - `skills/core/references/folder-structure.md` — canonical target structure
@@ -251,6 +255,8 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 1. Run `python3 skills/core/scripts/migrate_existing_repos.py --repo .` (or `--scan <parent-dir>` to migrate every child).
 2. Each action is idempotent — re-running on an already-migrated repo is a no-op.
 3. Use `--dry-run` first to preview changes.
+4. **Codex only**: after a real migration, tell the user to open `/hooks`,
+   review and trust all six Mycelium hook commands, then start a fresh task.
 
 ---
 
@@ -356,9 +362,11 @@ Claude hooks in `.claude/settings.local.json` and Codex hooks in
 
 **Stop hook logic**: The stop hook checks if `mycelium-post-action.sh` fired during the session (indicated by the presence of `.mycelium/mycelium-reminded.tmp`). If `.living/` was not updated afterward, it warns. If `.living/` was updated but `.mycelium/last-session.md` was not written (or is older than the session start), it emits a non-blocking warning reminding you to write the session summary. Read-only sessions, config-only sessions, and sessions without code execution are never checked.
 
-Codex requires the project to be trusted and each changed command hook to be
-reviewed. It matches shell and unified-exec work under `Bash`, and its activity
-tracker parses `apply_patch` headers. Read-access
+Codex requires the project to be trusted and each exact command hook to be
+reviewed and trusted through `/hooks`; untrusted hooks are skipped. After init,
+migration, or a plugin upgrade that changes cached command paths, approve all
+six Mycelium hooks and start a fresh task. Codex matches shell and unified-exec
+work under `Bash`, and its activity tracker parses `apply_patch` headers. Read-access
 telemetry remains Claude-only because Codex does not expose internal file reads
 to `PostToolUse`.
 
@@ -384,6 +392,7 @@ Quick checks an agent or human can run to confirm mycelium is wired correctly:
 |-------|--------------------|----------|
 | Claude hooks installed | `cat .claude/settings.local.json` | SessionStart, PostToolUse, and Stop registrations present |
 | Codex hooks installed | `cat .codex/hooks.json` | SessionStart, PostToolUse, and Stop registrations present |
+| Codex hooks trusted | Open `/hooks` | All six Mycelium command hooks show as trusted |
 | INDEX.md has knowledge summary | `grep "BEGIN KNOWLEDGE SUMMARY" .living/INDEX.md` | Match present |
 | Read-access being logged | `tail .mycelium/mycelium-read-access.log` | Entries appearing when Claude reads `.living/` files |
 | MEMORY.md routing table present | `grep "Global Knowledge Domains" ~/.claude/projects/*/memory/MEMORY.md` | At least one match |
