@@ -623,6 +623,151 @@ def test_main_rejects_unproven_shell_text_matches(
 
 
 @pytest.mark.parametrize(
+    "command",
+    [
+        'python "a.py".bak',
+        'Rscript "a.R".bak',
+        'jupyter execute "a.ipynb".bak',
+        '"/tmp/python".bak a.py',
+        "env -S 'echo prefix' python a.py",
+        "env --split-string='echo prefix' python a.py",
+        "env -S 'python -u' a.py",
+    ],
+)
+def test_main_rejects_partial_shell_words_and_env_split_strings(
+    tmp_path: Path, command: str
+) -> None:
+    """Never attribute an argv fragment or env-expanded argument as a command."""
+    import subprocess
+
+    for filename, content in (
+        ("a.py", "import pandas as pd\npd.read_csv('python.csv')\n"),
+        ("a.py.bak", "import pandas as pd\npd.read_csv('backup.csv')\n"),
+        ("a.R", "read.csv('r.csv')\n"),
+        ("a.R.bak", "read.csv('r-backup.csv')\n"),
+        ("a.ipynb", "{}\n"),
+        ("a.ipynb.bak", "{}\n"),
+    ):
+        (tmp_path / filename).write_text(content)
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            "0",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "command,relative_directory",
+    [
+        ("env -C sub python a.py", "sub"),
+        ("env --chdir=sub python a.py", "sub"),
+        ("conda run --cwd sub python a.py", "sub"),
+        ("uv run --directory sub python a.py", "sub"),
+        ("env -C sub env -C deeper python a.py", "sub/deeper"),
+    ],
+)
+def test_main_applies_wrapper_working_directories(
+    tmp_path: Path, command: str, relative_directory: str
+) -> None:
+    import json
+    import subprocess
+
+    workdir = tmp_path / relative_directory
+    workdir.mkdir(parents=True)
+    script = workdir / "a.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            "0",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(target.read_text())
+    assert event["script"] == str(script)
+    assert event["inputs"][0]["path"] == str(workdir / "input.csv")
+
+
+def test_main_rejects_missing_wrapper_working_directory(tmp_path: Path) -> None:
+    import subprocess
+
+    (tmp_path / "a.py").write_text(
+        "import pandas as pd\npd.read_csv('input.csv')\n"
+    )
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            "env -C missing python a.py",
+            "--bash-exit",
+            "1",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not target.exists()
+
+
+def test_detect_script_accepts_redirection_after_complete_shell_word(
+    tmp_path: Path,
+) -> None:
+    script, inline = detect_script("python analysis.py>run.log", tmp_path)
+
+    assert script == tmp_path / "analysis.py"
+    assert inline is None
+
+
+@pytest.mark.parametrize(
     "command,exit_code",
     [
         ("true && python a.py", 1),

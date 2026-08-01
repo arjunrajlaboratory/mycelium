@@ -44,7 +44,7 @@ EMBED_LIMIT_BYTES = 100 * 1024
 # --- Script-path / inline-source extraction ---
 _SHELL_DOUBLE_QUOTED_COMPONENT = r'"(?:\\.|[^"\\])*"'
 _SHELL_SINGLE_QUOTED_COMPONENT = r"'[^']*'"
-_SHELL_BARE_COMPONENT = r"(?:\\.|[^\s|&;()\"'])"
+_SHELL_BARE_COMPONENT = r"(?:\\.|[^\s|&;()<>\"'])"
 _SHELL_WORD_COMPONENT = (
     rf"(?:{_SHELL_DOUBLE_QUOTED_COMPONENT}|{_SHELL_SINGLE_QUOTED_COMPONENT}"
     rf"|{_SHELL_BARE_COMPONENT})"
@@ -63,10 +63,14 @@ def _shell_word_ending_pattern(ending: str) -> str:
     # another variable-length bare repetition here creates catastrophic
     # backtracking for ordinary escaped paths.
     bare = ending
-    return (
+    candidate = (
         rf"(?:{_SHELL_WORD_COMPONENT})*"
         rf"(?:{double_quoted}|{single_quoted}|{bare})"
     )
+    # A suffix inside a quoted component is not necessarily the end of argv:
+    # ``"analysis.py".bak`` is one shell word. Require a control/whitespace
+    # boundary so the regex cannot hash or scan an argv fragment.
+    return rf"{candidate}(?=$|[\s|&;()<>])"
 
 
 def _shell_executable_pattern(name: str) -> str:
@@ -527,24 +531,34 @@ def _current_command_prefix(fragment: str) -> list[str] | None:
     if tokens is None:
         return None
 
-    depth = 0
-    segment: list[str] = []
+    # Keep one current-command segment per subshell depth. The fragment ends at
+    # the candidate, so a legitimate command inside ``( ... )`` necessarily
+    # has an unmatched opening parenthesis here. Command substitutions remain
+    # conservative because their child context is marked dynamic.
+    segments: list[list[str]] = [[]]
+    dynamic_contexts = [False]
     for token in tokens:
         if token == "(":
-            depth += 1
-            segment.append(token)
+            command_substitution = bool(
+                segments[-1] and segments[-1][-1].endswith("$")
+            )
+            segments.append([])
+            dynamic_contexts.append(dynamic_contexts[-1] or command_substitution)
         elif token == ")":
-            if depth == 0:
+            if len(segments) == 1:
                 return None
-            depth -= 1
-            segment.append(token)
-        elif depth == 0 and token in {";", "\n", "&&", "||", "|", "&"}:
-            segment = []
+            segments.pop()
+            dynamic_contexts.pop()
+            # A completed compound command is not an execution wrapper for a
+            # later token in the same simple command.
+            segments[-1].append("__mycelium_compound_command__")
+        elif token in {";", "\n", "&&", "||", "|", "&"}:
+            segments[-1] = []
         else:
-            segment.append(token)
-    if depth:
+            segments[-1].append(token)
+    if dynamic_contexts[-1]:
         return None
-    return segment
+    return segments[-1]
 
 
 _ASSIGNMENT_RX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
@@ -570,8 +584,23 @@ def _consume_value_option(
     return index + 2 if index + 1 < len(tokens) else -1
 
 
-def _consume_execution_wrapper(tokens: list[str], index: int) -> int | None:
-    """Return the next wrapper index, ``len(tokens)``, or ``None`` on misuse.
+def _resolve_wrapper_directory(value: str, cwd: Path) -> Path | None:
+    """Resolve a static wrapper cwd, rejecting dynamic or unusable targets."""
+    if not value or any(marker in value for marker in ("$", "`")):
+        return None
+    target = Path(os.path.expanduser(value))
+    if not target.is_absolute():
+        target = cwd / target
+    target = Path(os.path.abspath(target))
+    if not target.is_dir() or not os.access(target, os.X_OK):
+        return None
+    return target
+
+
+def _consume_execution_wrapper(
+    tokens: list[str], index: int, cwd: Path
+) -> tuple[int, Path] | None:
+    """Return the next wrapper index/cwd, or ``None`` on misuse.
 
     ``tokens`` contains only text before the candidate interpreter. Therefore
     consuming the complete prefix proves that every preceding token is wrapper
@@ -586,20 +615,47 @@ def _consume_execution_wrapper(tokens: list[str], index: int) -> int | None:
             if token in {"-v", "-V", "--help"}:
                 return None
             if token == "--":
-                return index + 1 if index + 1 < len(tokens) else len(tokens)
+                next_index = index + 1 if index + 1 < len(tokens) else len(tokens)
+                return next_index, cwd
             if token == "-p":
                 index += 1
                 continue
             break
-        return index
+        return index, cwd
 
     if wrapper == "env":
-        value_options = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+        value_options = {"-u", "--unset"}
         flag_options = {"-i", "-0", "--ignore-environment", "--null"}
         while index < len(tokens):
             token = tokens[index]
             if token in {"--help", "--version"}:
                 return None
+            if token in {"-S", "--split-string"} or token.startswith(
+                ("-S", "--split-string=")
+            ):
+                # env expands this value into multiple argv entries. Without
+                # reconstructing that command, a later interpreter token may
+                # merely be an argument to the expanded executable.
+                return None
+            if token in {"-C", "--chdir"}:
+                if index + 1 >= len(tokens):
+                    return None
+                updated_cwd = _resolve_wrapper_directory(tokens[index + 1], cwd)
+                if updated_cwd is None:
+                    return None
+                cwd = updated_cwd
+                index += 2
+                continue
+            if token.startswith("--chdir=") or (
+                token.startswith("-C") and token != "-C"
+            ):
+                value = token.split("=", 1)[1] if "=" in token else token[2:]
+                updated_cwd = _resolve_wrapper_directory(value, cwd)
+                if updated_cwd is None:
+                    return None
+                cwd = updated_cwd
+                index += 1
+                continue
             consumed = _consume_value_option(tokens, index, value_options)
             if consumed == -1:
                 return None
@@ -613,12 +669,13 @@ def _consume_execution_wrapper(tokens: list[str], index: int) -> int | None:
                 index += 1
                 continue
             if token == "--":
-                return index + 1 if index + 1 < len(tokens) else len(tokens)
+                next_index = index + 1 if index + 1 < len(tokens) else len(tokens)
+                return next_index, cwd
             if _ASSIGNMENT_RX.match(token):
                 index += 1
                 continue
             break
-        return index
+        return index, cwd
 
     if wrapper == "time":
         value_options = {"-f", "--format", "-o", "--output"}
@@ -646,9 +703,10 @@ def _consume_execution_wrapper(tokens: list[str], index: int) -> int | None:
                 index += 1
                 continue
             if token == "--":
-                return index + 1 if index + 1 < len(tokens) else len(tokens)
+                next_index = index + 1 if index + 1 < len(tokens) else len(tokens)
+                return next_index, cwd
             break
-        return index
+        return index, cwd
 
     if wrapper == "exec":
         while index < len(tokens):
@@ -662,12 +720,13 @@ def _consume_execution_wrapper(tokens: list[str], index: int) -> int | None:
                 index += 1
                 continue
             if token == "--":
-                return index + 1 if index + 1 < len(tokens) else len(tokens)
+                next_index = index + 1 if index + 1 < len(tokens) else len(tokens)
+                return next_index, cwd
             if re.fullmatch(r"-[cl]+", token):
                 index += 1
                 continue
             break
-        return index
+        return index, cwd
 
     if wrapper == "nice":
         while index < len(tokens):
@@ -683,11 +742,12 @@ def _consume_execution_wrapper(tokens: list[str], index: int) -> int | None:
                 index += 1
                 continue
             if token == "--":
-                return index + 1 if index + 1 < len(tokens) else len(tokens)
+                next_index = index + 1 if index + 1 < len(tokens) else len(tokens)
+                return next_index, cwd
             if token.startswith("-"):
                 return None
             break
-        return index
+        return index, cwd
 
     if wrapper == "timeout":
         value_options = {"-k", "--kill-after", "-s", "--signal"}
@@ -717,17 +777,16 @@ def _consume_execution_wrapper(tokens: list[str], index: int) -> int | None:
         # timeout requires a duration before the command it executes.
         if index >= len(tokens):
             return None
-        return index + 1
+        return index + 1, cwd
 
     if wrapper in {"conda", "uv", "poetry"}:
         if index >= len(tokens) or tokens[index] != "run":
             return None
         index += 1
         value_options = {
-            "conda": {"-n", "--name", "-p", "--prefix", "--cwd"},
+            "conda": {"-n", "--name", "-p", "--prefix"},
             "uv": {
                 "--project",
-                "--directory",
                 "--python",
                 "--with",
                 "--with-editable",
@@ -736,10 +795,27 @@ def _consume_execution_wrapper(tokens: list[str], index: int) -> int | None:
             },
             "poetry": set(),
         }[wrapper]
+        cwd_option = {"conda": "--cwd", "uv": "--directory"}.get(wrapper)
         while index < len(tokens):
             token = tokens[index]
             if token in {"-h", "--help", "-V", "--version"}:
                 return None
+            if cwd_option and token == cwd_option:
+                if index + 1 >= len(tokens):
+                    return None
+                updated_cwd = _resolve_wrapper_directory(tokens[index + 1], cwd)
+                if updated_cwd is None:
+                    return None
+                cwd = updated_cwd
+                index += 2
+                continue
+            if cwd_option and token.startswith(f"{cwd_option}="):
+                updated_cwd = _resolve_wrapper_directory(token.split("=", 1)[1], cwd)
+                if updated_cwd is None:
+                    return None
+                cwd = updated_cwd
+                index += 1
+                continue
             consumed = _consume_value_option(tokens, index, value_options)
             if consumed == -1:
                 return None
@@ -750,42 +826,47 @@ def _consume_execution_wrapper(tokens: list[str], index: int) -> int | None:
                 index += 1
                 continue
             if token == "--":
-                return index + 1 if index + 1 < len(tokens) else len(tokens)
+                next_index = index + 1 if index + 1 < len(tokens) else len(tokens)
+                return next_index, cwd
             if token.startswith("-"):
                 index += 1
                 continue
             break
-        return index
+        return index, cwd
 
     return None
 
 
-def _prefix_expects_executable(prefix: list[str]) -> bool:
-    """Whether a token prefix is only assignments and execution wrappers."""
+def _prefix_execution_cwd(prefix: list[str], initial_cwd: Path) -> Path | None:
+    """Return the cwd when a prefix is only assignments/execution wrappers."""
     index = 0
     while index < len(prefix) and _ASSIGNMENT_RX.match(prefix[index]):
         index += 1
     if index == len(prefix):
-        return True
+        return initial_cwd
 
     saw_wrapper = False
+    cwd = initial_cwd
     while index < len(prefix):
         if Path(prefix[index]).name not in _EXECUTION_WRAPPERS:
-            return False
+            return None
         saw_wrapper = True
-        next_index = _consume_execution_wrapper(prefix, index)
-        if next_index is None or next_index <= index:
-            return False
-        index = next_index
-    return saw_wrapper
+        consumed = _consume_execution_wrapper(prefix, index, cwd)
+        if consumed is None or consumed[0] <= index:
+            return None
+        index, cwd = consumed
+    return cwd if saw_wrapper else None
 
 
-def _match_is_command_invocation(bash_cmd: str, offset: int) -> bool:
-    """Reject interpreter text that is an argument, comment, or quoted body."""
+def _command_effective_cwd(
+    bash_cmd: str, offset: int, initial_cwd: Path
+) -> Path | None:
+    """Return the candidate command cwd, or ``None`` if execution is unproven."""
     prefix = _current_command_prefix(bash_cmd[:offset])
     if prefix is None:
-        return False
-    return _prefix_expects_executable(prefix)
+        return None
+    base_cwd = _effective_cwd(bash_cmd, offset, initial_cwd)
+    return _prefix_execution_cwd(prefix, base_cwd)
 
 
 def _simple_command_status(segment: list[str], cwd: Path) -> bool | None:
@@ -923,7 +1004,7 @@ def _match_is_proven_executed(
         unquoted_shell
     ):
         return False
-    if not _match_is_command_invocation(bash_cmd, offset):
+    if _command_effective_cwd(bash_cmd, offset, initial_cwd) is None:
         return False
     before_ops, _, before_ambiguous = _top_level_control_context(bash_cmd[:offset])
     if before_ambiguous:
@@ -970,12 +1051,14 @@ def _detect_scripts_with_cwd(
             continue
         if not include_python_inline:
             continue
+        effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
+        if effective_cwd is None:
+            continue
         if require_execution_evidence and not _match_is_proven_executed(
             bash_cmd, m.start(), bash_exit, cwd
         ):
             continue
         src = m.group("source")
-        effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
         identity = (src, effective_cwd)
         if identity not in seen_inline:
             out.append((None, src, effective_cwd))
@@ -983,18 +1066,23 @@ def _detect_scripts_with_cwd(
     for m in RX_R_E.finditer(bash_cmd):
         if not _match_has_expected_executable(m, RX_R_E):
             continue
+        effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
+        if effective_cwd is None:
+            continue
         if require_execution_evidence and not _match_is_proven_executed(
             bash_cmd, m.start(), bash_exit, cwd
         ):
             continue
         src = m.group("source")
-        effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
         identity = (src, effective_cwd)
         if identity not in seen_inline:
             out.append((None, src, effective_cwd))
             seen_inline.add(identity)
     for m in RX_PYTHON_M.finditer(bash_cmd):
         if not _match_has_expected_executable(m, RX_PYTHON_M):
+            continue
+        effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
+        if effective_cwd is None:
             continue
         if require_execution_evidence and not _match_is_proven_executed(
             bash_cmd, m.start(), bash_exit, cwd
@@ -1003,7 +1091,6 @@ def _detect_scripts_with_cwd(
         module = m.group("module")
         if module in IGNORED_PYTHON_MODULES:
             continue
-        effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
         source = f"# Python module execution: {module}"
         identity = (source, effective_cwd)
         if identity not in seen_inline:
@@ -1017,11 +1104,13 @@ def _detect_scripts_with_cwd(
         for m in pattern.finditer(bash_cmd):
             if not _match_has_expected_executable(m, pattern):
                 continue
+            effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
+            if effective_cwd is None:
+                continue
             if require_execution_evidence and not _match_is_proven_executed(
                 bash_cmd, m.start(), bash_exit, cwd
             ):
                 continue
-            effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
             try:
                 path_words = shlex.split(m.group("path"), comments=False, posix=True)
             except ValueError:

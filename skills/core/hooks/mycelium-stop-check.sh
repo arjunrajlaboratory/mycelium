@@ -82,6 +82,7 @@ mycelium_accept_lineage_session() {
 HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR=$(cd "$(dirname "$(dirname "$HOOK_SOURCE")")" 2>/dev/null && pwd || echo "")
 UPSERT_SCRIPT="${MYCELIUM_REGISTRY_UPSERT_HELPER:-$SCRIPT_DIR/scripts/upsert_registry_row.py}"
+FINALIZE_LOG_SCRIPT="${MYCELIUM_LOG_FINALIZER_HELPER:-$SCRIPT_DIR/scripts/finalize_session_log.py}"
 
 # --- Session log finalization ---
 ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
@@ -343,33 +344,25 @@ ${_WORK_LINES}
 - ${_BRANCH_NOTE}
 LAST_SESSION_EOF
 
-      # All fallible transaction participants have accepted the session. Only
-      # now publish final state in the log, which lets SessionStart distinguish
-      # an accepted session from one that still needs a deterministic retry.
+      # All other transaction participants have accepted the session. Publish
+      # the completed frontmatter and matching footer with one atomic replace,
+      # so SessionStart can never observe an ended log without its footer.
       ENDED=$(date +%Y-%m-%dT%H:%M:%S%z)
-      sed -i.bak "s|^ended:.*|ended: ${ENDED}|" "$LOG_PATH" 2>/dev/null
-      sed -i.bak "s|^duration_minutes:.*|duration_minutes: ${DURATION_MIN}|" "$LOG_PATH" 2>/dev/null
-      sed -i.bak "s|^files_changed:.*|files_changed: ${FILES_CHANGED}|" "$LOG_PATH" 2>/dev/null
-      rm -f "${LOG_PATH}.bak"
-
-      FILE_LIST_MD=""
-      if [ -n "$SESSION_CHANGED_FILES" ]; then
-        FILE_LIST_MD=$(printf '%s\n' "$SESSION_CHANGED_FILES" | sed 's|^|- `|;s|$|`|')
-      fi
       END_TIME_SHORT=$(date +%H:%M)
-      if grep -q '^### .* — Session ended (' "$LOG_PATH" 2>/dev/null; then
-        : # An interrupted accepted finalization is safe to retry idempotently.
-      elif [ -n "$FILE_LIST_MD" ]; then
-        FILE_SUMMARY=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -3 \
-          | while IFS= read -r changed_path; do basename "$changed_path"; done \
-          | tr '\n' ',' | sed 's/,$//; s/,/, /g')
-        if [ "$FILES_CHANGED" -gt 3 ]; then
-          FILE_SUMMARY="${FILE_SUMMARY} (+$((FILES_CHANGED - 3)) more)"
-        fi
-        printf "\n### %s — Session ended (%sm, %s files)\n- Modified: %s\n\n### Files Modified\n%s\n" "$END_TIME_SHORT" "$DURATION_MIN" "$FILES_CHANGED" "$FILE_SUMMARY" "$FILE_LIST_MD" >> "$LOG_PATH"
-      else
-        printf "\n### %s — Session ended (%sm, %s files)\n" "$END_TIME_SHORT" "$DURATION_MIN" "$FILES_CHANGED" >> "$LOG_PATH"
+      if [ ! -f "$FINALIZE_LOG_SCRIPT" ] \
+        || ! printf '%s' "$SESSION_CHANGED_FILES" \
+          | python3 "$FINALIZE_LOG_SCRIPT" \
+            --log-path "$LOG_PATH" \
+            --ended "$ENDED" \
+            --duration-minutes "$DURATION_MIN" \
+            --files-changed "$FILES_CHANGED" \
+            --end-time "$END_TIME_SHORT" \
+            >/dev/null 2>"$LOG_DIR/.finalize_session_log.err"; then
+        mycelium_emit_stop_block \
+          "STOP BLOCKED — session log finalization failed. The active log and session baselines were preserved; inspect the helper installation, then retry Stop."
+        exit 0
       fi
+      rm -f "$LOG_DIR/.finalize_session_log.err"
 
       # Clean up sentinels
       rm -f "$ACTIVE_LOG_FILE"
