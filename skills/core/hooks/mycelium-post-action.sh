@@ -44,46 +44,12 @@ DETECT_ARGS=(
   --cwd "$SESSION_CWD"
   --ts "$(date +%Y-%m-%dT%H:%M:%S%z)"
   --bash-cmd "$COMMAND"
-  --check-execution
+  --check-post-action
 )
 if [[ "$BASH_EXIT" =~ ^-?[0-9]+$ ]]; then
   DETECT_ARGS+=(--bash-exit "$BASH_EXIT")
 fi
 if ! python3 "$DETECTOR" "${DETECT_ARGS[@]}" >/dev/null 2>&1; then
-  exit 0
-fi
-
-# --- Exclusions: filter out non-analysis execution ---
-
-# pytest / unittest
-if echo "$COMMAND" | grep -qE '(pytest|python3?\s+-m\s+(pytest|unittest))'; then
-  exit 0
-fi
-
-# pip / package management
-if echo "$COMMAND" | grep -qE '(pip\s+install|pip3\s+install|uv\s+pip|setup\.py)'; then
-  exit 0
-fi
-
-# python -c one-liners
-if echo "$COMMAND" | grep -qE 'python3?\s+-c\s+'; then
-  exit 0
-fi
-
-# python -m (only skip known non-analysis modules)
-if echo "$COMMAND" | grep -qE 'python3?\s+-m\s+(pip|venv|ensurepip|compileall|site|http\.server|json\.tool|zipfile|tarfile|timeit|cProfile|pdb|doctest|pydoc)'; then
-  exit 0
-fi
-
-# linting / formatting
-if echo "$COMMAND" | grep -qE '(ruff|black|isort|mypy|pyright|flake8)'; then
-  exit 0
-fi
-
-# Mycelium's structure validator is a read-only lifecycle check, not analysis.
-# Excluding its stable plugin-relative path prevents the required validation
-# step from opening a new bookkeeping cycle immediately before Stop.
-if echo "$COMMAND" | grep -qE "skills/core/scripts/validate_structure\\.py([\"'[:space:]]|$)"; then
   exit 0
 fi
 

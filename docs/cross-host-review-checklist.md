@@ -139,6 +139,10 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] AND, OR, pipelines, subshells, heredocs, comments, and quoted text are
       interpreted conservatively, with tests for both false positives and false
       negatives.
+- [ ] Multiline Python/R control words and heredoc-like text inside quoted
+      arguments are not mistaken for shell structure; tooling exclusions are
+      based on the executed program/module/script rather than substrings in
+      ordinary quoted or unquoted arguments.
 - [ ] Exit evidence is associated with the command that actually executed.
 - [ ] Nested and changed working directories resolve script and output paths
       correctly.

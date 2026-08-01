@@ -611,6 +611,67 @@ def test_main_rejects_unproven_shell_text_matches(
 
 
 @pytest.mark.parametrize(
+    "command,source_fragment",
+    [
+        (
+            "python -c \"import pandas as pd\n"
+            "if True:\n"
+            "    pd.read_csv('input.csv')\n"
+            "for value in [1]:\n"
+            "    pass\"",
+            "if True:",
+        ),
+        (
+            "R -e 'values <- 1\n"
+            "for (value in values) {\n"
+            '  read.csv("input.csv")\n'
+            "}'",
+            "for (value in values)",
+        ),
+        (
+            "python -c \"import pandas as pd\n"
+            "text = '<<EOF'\n"
+            "pd.read_csv('input.csv')\"",
+            "text = '<<EOF'",
+        ),
+    ],
+)
+def test_main_accepts_shell_syntax_inside_quoted_inline_source(
+    tmp_path: Path, command: str, source_fragment: str
+) -> None:
+    """Quoted language syntax must not be parsed as shell control flow."""
+    import json
+    import subprocess
+
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            "0",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(target.read_text())
+    assert source_fragment in event["script_source"]
+
+
+@pytest.mark.parametrize(
     "command",
     [
         "uv run --frozen python a.py",
