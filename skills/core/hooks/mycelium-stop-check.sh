@@ -35,6 +35,10 @@ LINEAGE_HOOK="$HERE/mycelium-data-lineage-stop.sh"
 if [[ -x "$LINEAGE_HOOK" ]]; then
   printf '%s' "$INPUT" | "$LINEAGE_HOOK" || true
 fi
+LINEAGE_EVENT_COUNT=0
+if [[ -s "$STATE_DIR/mycelium-data-events.tmp" ]]; then
+  LINEAGE_EVENT_COUNT=1
+fi
 
 # Accepting Stop owns final cleanup of data-lineage state. Retaining both files
 # across a blocked Stop lets later analysis append to the same manifest.
@@ -165,9 +169,12 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       REMINDER_COUNT=1
     fi
 
-    # Short session check: skip finalization only if NO evidence of work in any signal.
-    # Duration is irrelevant — a long session that only read files is still noise.
-    if [ "$ACTIVITY_COUNT" -eq 0 ] && [ "$REMINDER_COUNT" -eq 0 ] && [ "$FILES_CHANGED" -eq 0 ]; then
+    # Skip finalization only if NO evidence of work exists in any signal.
+    # Lineage-only inline analyses still reserve their session ID and manifest.
+    if [ "$ACTIVITY_COUNT" -eq 0 ] \
+      && [ "$REMINDER_COUNT" -eq 0 ] \
+      && [ "$FILES_CHANGED" -eq 0 ] \
+      && [ "$LINEAGE_EVENT_COUNT" -eq 0 ]; then
       rm -f "$LOG_PATH"
       rm -f "$ACTIVE_LOG_FILE"
       rm -f "$STATE_DIR/session-start-ts.tmp"
@@ -239,8 +246,10 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       # Deterministic Summary: commit subjects since session start.
       # Runs in milliseconds with no model or provider dependency.
       if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
-        DETERMINISTIC_SUMMARY=$(git -C "$LOG_REPO" log --since="@${START_TS}" --pretty=format:'%s' 2>/dev/null \
-          | head -3 | tr '\n' ';' | sed 's/;$//; s/;/; /g')
+        DETERMINISTIC_SUMMARY=$(
+          { git -C "$LOG_REPO" log --since="@${START_TS}" --pretty=format:'%s' 2>/dev/null || true; } \
+            | head -3 | tr '\n' ';' | sed 's/;$//; s/;/; /g'
+        )
         # Cap at 200 chars
         if [ ${#DETERMINISTIC_SUMMARY} -gt 200 ]; then
           DETERMINISTIC_SUMMARY="${DETERMINISTIC_SUMMARY:0:197}..."
@@ -259,11 +268,17 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       _WORK_LINES=""
       # Try recent commit messages first
       if [ -n "${START_TS:-}" ]; then
-          _WORK_LINES=$(git -C "$REPO_ROOT" log --since="@${START_TS}" --pretty=format:"- %s" 2>/dev/null | head -10)
+          _WORK_LINES=$(
+            { git -C "$REPO_ROOT" log --since="@${START_TS}" --pretty=format:"- %s" 2>/dev/null || true; } \
+              | head -10
+          )
       fi
       # Fall back to the de-duplicated modified file list.
       if [ -z "$_WORK_LINES" ] && [ -n "$SESSION_CHANGED_FILES" ]; then
           _WORK_LINES=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -10 | while IFS= read -r _f; do echo "- Modified \`$(basename "$_f")\`"; done)
+      fi
+      if [ -z "$_WORK_LINES" ] && [ "$LINEAGE_EVENT_COUNT" -gt 0 ]; then
+          _WORK_LINES="- Captured data-lineage provenance"
       fi
       # Last resort: generic summary
       if [ -z "$_WORK_LINES" ]; then

@@ -120,7 +120,8 @@ def _session_reflog_change_paths(
     the HEAD immediately before it captures the actual session delta: an amend
     excludes unchanged historical paths, while a normal commit that restores
     baseline content remains visible. Checkout and rebase bookkeeping update
-    the prior HEAD but do not themselves claim historical paths as session work.
+    the prior HEAD but do not themselves claim historical paths as session work;
+    content-producing rebase actions do.
     ``None`` asks callers to use the legacy timestamp fallback when the reflog
     was pruned or cannot be aligned with the snapshot.
     """
@@ -142,6 +143,12 @@ def _session_reflog_change_paths(
         "merge:",
         "cherry-pick:",
         "revert:",
+        "rebase (pick):",
+        "rebase (reword):",
+        "rebase (edit):",
+        "rebase (squash):",
+        "rebase (fixup):",
+        "rebase (continue):",
     )
     for current_head, action in session_records:
         if action.startswith(content_actions):

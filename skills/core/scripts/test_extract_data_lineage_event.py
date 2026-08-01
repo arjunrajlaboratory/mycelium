@@ -508,3 +508,98 @@ def test_main_resets_execution_context_after_list_separator(tmp_path: Path) -> N
     event = json.loads(target.read_text())
     assert event["script"] == str(script)
     assert event["bash_exit"] is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "if false; then\ncd sub\npython a.py\nfi",
+        "for item in; do\npython a.py\ndone",
+        "case x in\ny) python a.py ;;\nesac",
+        "analyze() {\npython a.py\n}",
+        "cat <<'EOF'\npython a.py\nEOF",
+        "# python a.py",
+        "echo python a.py",
+        "uv run echo python a.py",
+        "conda run echo python a.py",
+        "poetry run echo python a.py",
+    ],
+)
+def test_main_rejects_unproven_shell_text_matches(
+    tmp_path: Path, command: str
+) -> None:
+    """Only interpreter tokens in supported, executed command positions count."""
+    import subprocess
+
+    (tmp_path / "a.py").write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "a.py").write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            "0",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "uv run --frozen python a.py",
+        "conda run -n analysis python a.py",
+        "poetry run python a.py",
+    ],
+)
+def test_main_accepts_supported_execution_wrappers(
+    tmp_path: Path, command: str
+) -> None:
+    import json
+    import subprocess
+
+    script = tmp_path / "a.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            "0",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text())["script"] == str(script)

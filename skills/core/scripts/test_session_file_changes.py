@@ -148,6 +148,28 @@ def test_temporary_branch_commit_is_retained_after_returning_to_baseline(
     ]
 
 
+def test_rebase_pick_is_recorded_as_session_work(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    original_branch = subprocess.check_output(
+        ["git", "-C", str(repo), "branch", "--show-current"], text=True
+    ).strip()
+    _git(repo, "switch", "-q", "-c", "feature")
+    (repo / "feature.txt").write_text("feature work\n")
+    _git(repo, "add", "feature.txt")
+    _git(repo, "commit", "-q", "-m", "feature commit")
+    _git(repo, "switch", "-q", original_branch)
+    (repo / "main.txt").write_text("new base\n")
+    _git(repo, "add", "main.txt")
+    _git(repo, "commit", "-q", "-m", "advance base")
+    _git(repo, "switch", "-q", "feature")
+    baseline = build_snapshot(repo)
+    session_start = int(time.time()) - 1
+
+    _git(repo, "rebase", original_branch)
+
+    assert collect_changes(repo, baseline, start_ts=session_start) == ["feature.txt"]
+
+
 def test_rewritten_history_falls_back_when_head_reflog_is_disabled(
     tmp_path: Path,
 ) -> None:
