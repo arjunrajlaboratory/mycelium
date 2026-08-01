@@ -42,12 +42,17 @@ make_repo() {
   echo "$dir"
 }
 
-# Run the hook from inside the repo, piping '{}' as stdin
+# Run the hook from inside the repo with an explicit JSON payload.
 # Returns: sets HOOK_EXIT and HOOK_OUTPUT
-run_hook() {
+run_hook_with_input() {
   local repo="$1"
-  HOOK_OUTPUT=$(cd "$repo" && echo '{}' | bash "$HOOK_PATH" 2>/dev/null)
+  local input="$2"
+  HOOK_OUTPUT=$(cd "$repo" && printf '%s\n' "$input" | bash "$HOOK_PATH" 2>/dev/null)
   HOOK_EXIT=$?
+}
+
+run_hook() {
+  run_hook_with_input "$1" '{}'
 }
 
 # ─────────────────────────────────────────────────────────────────
@@ -131,7 +136,7 @@ echo "TEST 2: Work done, nothing updated → should BLOCK"
   # Ensure the directory itself is also old
   sleep 2
 
-  # Use an old work timestamp so the five-minute debounce has elapsed.
+  # Use an old work timestamp so every .living file is clearly older.
   ts_ancient > "$REPO/.mycelium/mycelium-reminded.tmp"
 
   run_hook "$REPO"
@@ -436,10 +441,10 @@ echo "TEST 11: Activity file only (no reminded.tmp) → work detected"
 }
 
 # ─────────────────────────────────────────────────────────────────
-# TEST 12: Short session bypass (< 5 min, 0 files)
+# TEST 12: A session with no work signal is discarded as noise
 # ─────────────────────────────────────────────────────────────────
 echo ""
-echo "TEST 12: Short session (< 5 min, 0 files) → log deleted, clean exit"
+echo "TEST 12: No-work session → log deleted, clean exit"
 {
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
@@ -462,47 +467,45 @@ LOG_EOF
   # active-session-log.tmp: line 1 = log path, line 2 = owner_ts
   printf '%s\n%s\n' "$LOG_PATH" "$(date +%s)" > "$REPO/.mycelium/active-session-log.tmp"
 
-  # session-start-ts.tmp = now (< 5 min ago)
+  # Record an ordinary fresh session start.
   date +%s > "$REPO/.mycelium/session-start-ts.tmp"
 
   # No activity file, no git changes → FILES_CHANGED = 0
   # Duration = 0 min (start_ts = now)
-  # Both < 5 min AND 0 files → short session path
+  # No activity and no session-local files → noise-session path.
 
   run_hook "$REPO"
 
   # Hook should delete the log file and exit 0
   if [ "$HOOK_EXIT" -eq 0 ] && [ ! -f "$LOG_PATH" ]; then
-    pass "Short session → log deleted, exit 0"
+    pass "No-work session → log deleted, exit 0"
   elif [ "$HOOK_EXIT" -eq 0 ]; then
     # Log may or may not still exist if duration check doesn't trigger exactly
-    pass "Short session → exit 0 (acceptable)"
+    pass "No-work session → exit 0 (acceptable)"
   else
-    fail "Short session → expected clean exit 0" \
+    fail "No-work session → expected clean exit 0" \
       "exit=$HOOK_EXIT log_exists=$([ -f "$LOG_PATH" ] && echo yes || echo no)"
   fi
   rm -rf "$REPO"
 }
 
 # ─────────────────────────────────────────────────────────────────
-# BONUS TEST 13: stop_hook_active=true → immediate exit 0
+# BONUS TEST 13: stop_hook_active=true cannot bypass outstanding work
 # ─────────────────────────────────────────────────────────────────
 echo ""
-echo "TEST 13: stop_hook_active=true in stdin → immediate exit 0"
+echo "TEST 13: stop_hook_active=true cannot bypass lifecycle enforcement"
 {
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
   ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
   touch_old "$REPO/.living/learnings.md"
 
-  # Pass stop_hook_active: true in stdin
-  HOOK_OUTPUT=$(cd "$REPO" && echo '{"stop_hook_active": true}' | bash "$HOOK_PATH" 2>/dev/null)
-  HOOK_EXIT=$?
+  run_hook_with_input "$REPO" '{"stop_hook_active": true}'
 
-  if [ "$HOOK_EXIT" -eq 0 ] && [ -z "$HOOK_OUTPUT" ]; then
-    pass "stop_hook_active=true → immediate exit 0, empty output"
+  if echo "$HOOK_OUTPUT" | grep -q '"decision": "block"'; then
+    pass "stop_hook_active=true preserves outstanding lifecycle enforcement"
   else
-    fail "stop_hook_active=true → expected immediate exit 0" \
+    fail "stop_hook_active=true bypassed outstanding lifecycle enforcement" \
       "exit=$HOOK_EXIT output='$HOOK_OUTPUT'"
   fi
   rm -rf "$REPO"
@@ -531,7 +534,7 @@ echo "TEST 14: Activity file only, .living not updated → should BLOCK"
   echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
   ts_ancient > "$REPO/.mycelium/session-start-ts.tmp"
 
-  # WORK_TS is older than five minutes but newer than the .living files.
+  # WORK_TS is newer than the .living files.
 
   run_hook "$REPO"
 
@@ -677,6 +680,180 @@ LOG_EOF
   else
     fail "Missing started: → expected fallback to .tmp + sane duration" \
       "exit=$HOOK_EXIT duration=$DUR"
+  fi
+  rm -rf "$REPO"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# TEST 18: Fresh meaningful work still blocks at the actual Stop event
+# ─────────────────────────────────────────────────────────────────
+echo ""
+echo "TEST 18: Fresh work with stale .living/ → should BLOCK immediately"
+{
+  REPO=$(make_repo)
+  mkdir -p "$REPO/.living/findings"
+  touch_very_old "$REPO/.living/learnings.md"
+  touch_very_old "$REPO/.living/decisions.md"
+  touch_very_old "$REPO/.living/conventions.md"
+  touch_very_old "$REPO/.living/findings"
+
+  date +%s > "$REPO/.mycelium/mycelium-reminded.tmp"
+  echo "src/fresh.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
+
+  run_hook "$REPO"
+
+  if echo "$HOOK_OUTPUT" | grep -q '"decision": "block"'; then
+    pass "Fresh work is enforced at Stop without a time-based bypass"
+  else
+    fail "Fresh work should block when .living/ is stale" \
+      "exit=$HOOK_EXIT output='$(echo "$HOOK_OUTPUT" | head -c 300)'"
+  fi
+  rm -rf "$REPO"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# TEST 19: Pre-existing dirty tree does not inflate session file count
+# ─────────────────────────────────────────────────────────────────
+echo ""
+echo "TEST 19: Session log counts only current-session paths"
+{
+  REPO=$(make_repo)
+  mkdir -p "$REPO/.living/log" "$REPO/preexisting"
+  echo "old work" > "$REPO/preexisting/old.txt"
+
+  LOG_PATH="$REPO/.living/log/2026-01-01-001-test.md"
+  STARTED=$(date '+%Y-%m-%dT%H:%M:%S%z')
+  cat > "$LOG_PATH" <<LOG_EOF
+---
+session_id: 2026-01-01-001
+project: test
+branch: main
+started: ${STARTED}
+ended:
+duration_minutes:
+files_changed:
+---
+
+## Session Log
+LOG_EOF
+  START_TS=$(date +%s)
+  echo "$START_TS" > "$REPO/.mycelium/session-start-ts.tmp"
+  printf '%s\n%s\n' "$LOG_PATH" "$START_TS" > "$REPO/.mycelium/active-session-log.tmp"
+  python3 "$HERE/../scripts/session_file_changes.py" snapshot \
+    --repo-root "$REPO" \
+    --output "$REPO/.mycelium/session-file-baseline.json"
+
+  DISPOSABLE="$REPO/MYCELIUM_HOOK_AUDIT_DISPOSABLE.tmp"
+  echo "probe" > "$DISPOSABLE"
+  echo "$DISPOSABLE" > "$REPO/.mycelium/mycelium-session-activity.tmp"
+  rm "$DISPOSABLE"
+
+  run_hook "$REPO"
+
+  FILE_COUNT=$(grep '^files_changed:' "$LOG_PATH" | awk '{print $2}')
+  if [ "$FILE_COUNT" = "1" ] \
+    && grep -q 'MYCELIUM_HOOK_AUDIT_DISPOSABLE.tmp' "$LOG_PATH" \
+    && ! grep -q 'preexisting/old.txt' "$LOG_PATH"; then
+    pass "Pre-existing dirty files excluded; deleted activity path retained"
+  else
+    fail "Expected exactly one session-local path" \
+      "files_changed=$FILE_COUNT log='$(tail -20 "$LOG_PATH")'"
+  fi
+  rm -rf "$REPO"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# TEST 20: A blocked Stop remains blocked until .living/ is updated
+# ─────────────────────────────────────────────────────────────────
+echo ""
+echo "TEST 20: Repeated Stop cannot bypass missing lifecycle bookkeeping"
+{
+  REPO=$(make_repo)
+  mkdir -p "$REPO/.living/log" "$REPO/.living/findings"
+  touch_very_old "$REPO/.living/learnings.md"
+  touch_very_old "$REPO/.living/decisions.md"
+  touch_very_old "$REPO/.living/conventions.md"
+  touch_very_old "$REPO/.living/findings"
+
+  LOG_PATH="$REPO/.living/log/2026-01-01-001-test.md"
+  STARTED=$(date '+%Y-%m-%dT%H:%M:%S%z')
+  cat > "$LOG_PATH" <<LOG_EOF
+---
+session_id: 2026-01-01-001
+project: test
+branch: main
+started: ${STARTED}
+ended:
+duration_minutes:
+files_changed:
+---
+LOG_EOF
+  START_TS=$(date +%s)
+  echo "$START_TS" > "$REPO/.mycelium/session-start-ts.tmp"
+  printf '%s\n%s\n' "$LOG_PATH" "$START_TS" > "$REPO/.mycelium/active-session-log.tmp"
+  date +%s > "$REPO/.mycelium/mycelium-reminded.tmp"
+  echo "src/fresh.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
+
+  run_hook "$REPO"
+  FIRST_OUTPUT="$HOOK_OUTPUT"
+  run_hook_with_input "$REPO" '{"stop_hook_active": true}'
+  SECOND_OUTPUT="$HOOK_OUTPUT"
+
+  if echo "$FIRST_OUTPUT" | grep -q '"decision": "block"' \
+    && echo "$SECOND_OUTPUT" | grep -q '"decision": "block"' \
+    && [ -f "$REPO/.mycelium/session-start-ts.tmp" ]; then
+    pass "Stop remains blocked and preserves the work timestamp"
+  else
+    fail "A second Stop bypassed lifecycle enforcement" \
+      "first='$FIRST_OUTPUT' second='$SECOND_OUTPUT'"
+  fi
+  rm -rf "$REPO"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# TEST 21: Significant code execution is work even with no changed files
+# ─────────────────────────────────────────────────────────────────
+echo ""
+echo "TEST 21: Reminder-only analysis preserves and enforces the session"
+{
+  REPO=$(make_repo)
+  mkdir -p "$REPO/.living/log" "$REPO/.living/findings"
+  touch_very_old "$REPO/.living/learnings.md"
+  touch_very_old "$REPO/.living/decisions.md"
+  touch_very_old "$REPO/.living/conventions.md"
+  touch_very_old "$REPO/.living/findings"
+
+  LOG_PATH="$REPO/.living/log/2026-01-01-001-test.md"
+  STARTED=$(date '+%Y-%m-%dT%H:%M:%S%z')
+  cat > "$LOG_PATH" <<LOG_EOF
+---
+session_id: 2026-01-01-001
+project: test
+branch: main
+started: ${STARTED}
+ended:
+duration_minutes:
+files_changed:
+---
+LOG_EOF
+  START_TS=$(date +%s)
+  echo "$START_TS" > "$REPO/.mycelium/session-start-ts.tmp"
+  printf '%s\n%s\n' "$LOG_PATH" "$START_TS" > "$REPO/.mycelium/active-session-log.tmp"
+  python3 "$HERE/../scripts/session_file_changes.py" snapshot \
+    --repo-root "$REPO" \
+    --output "$REPO/.mycelium/session-file-baseline.json"
+  date +%s > "$REPO/.mycelium/mycelium-reminded.tmp"
+
+  run_hook "$REPO"
+
+  if [ -f "$LOG_PATH" ] \
+    && grep -q '^ended: [0-9]' "$LOG_PATH" \
+    && grep -q '^files_changed: 0' "$LOG_PATH" \
+    && echo "$HOOK_OUTPUT" | grep -q '"decision": "block"'; then
+    pass "Reminder-only code execution finalizes and enforces the session"
+  else
+    fail "Significant code execution was discarded as a noise session" \
+      "log_exists=$([ -f "$LOG_PATH" ] && echo yes || echo no) output='$HOOK_OUTPUT'"
   fi
   rm -rf "$REPO"
 }

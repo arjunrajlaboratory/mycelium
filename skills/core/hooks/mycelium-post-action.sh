@@ -78,6 +78,13 @@ if echo "$COMMAND" | grep -qE '(ruff|black|isort|mypy|pyright|flake8)'; then
   exit 0
 fi
 
+# Mycelium's structure validator is a read-only lifecycle check, not analysis.
+# Excluding its stable plugin-relative path prevents the required validation
+# step from opening a new bookkeeping cycle immediately before Stop.
+if echo "$COMMAND" | grep -qE "skills/core/scripts/validate_structure\\.py([\"'[:space:]]|$)"; then
+  exit 0
+fi
+
 # --- Repo and .living/ checks ---
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")

@@ -14,14 +14,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/mycelium-hook-lib.sh"
 
-# Read stdin JSON
-INPUT=$(cat)
-
-# Prevent infinite recursion: if stop_hook_active is set, let it through
-STOP_HOOK_ACTIVE=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(str(d.get('stop_hook_active', False)).lower())" 2>/dev/null || echo "false")
-if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
-  exit 0
-fi
+# Consume the hook payload. Claude Code and Codex set stop_hook_active=true
+# after a Stop hook asks the model to continue. That flag must not bypass an
+# outstanding Mycelium reminder: the state checks below naturally stop
+# blocking once .living/ has been updated, which is the recursion guard.
+cat >/dev/null
 
 # Determine repo root early (used by both log finalization and .living/ checks)
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
@@ -79,68 +76,69 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       [ "$DURATION_MIN" -lt 0 ] && DURATION_MIN=0
     fi
 
-    # Build one unique file set across every signal. Counting each signal
-    # independently double-counted staged/unstaged/committed paths, while only
-    # consulting the activity tracker as a fallback omitted untracked outputs.
+    # Build one unique, session-local file set. SessionStart snapshots the
+    # pre-existing dirty state, so an uncommitted repository does not make
+    # every old path look like work from this session.
     ACTIVITY_FILE_CHECK="$STATE_DIR/mycelium-session-activity.tmp"
-    SESSION_CHANGED_FILES=$(
-      {
-        git -C "$LOG_REPO" diff --name-only 2>/dev/null || true
-        git -C "$LOG_REPO" diff --cached --name-only 2>/dev/null || true
-        git -C "$LOG_REPO" ls-files --others --exclude-standard 2>/dev/null || true
-        if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
-          git -C "$LOG_REPO" log --since="@${START_TS}" --name-only --pretty=format: 2>/dev/null || true
-        fi
-        if [ -f "$ACTIVITY_FILE_CHECK" ]; then
-          # Codex normally records repo-relative paths, while Claude may send
-          # absolute paths. Normalize the latter before de-duplication.
-          while IFS= read -r activity_path; do
-            [ -z "$activity_path" ] && continue
-            case "$activity_path" in
-              "$LOG_REPO"/*) printf '%s\n' "${activity_path#"$LOG_REPO"/}" ;;
-              *) printf '%s\n' "$activity_path" ;;
-            esac
-          done < "$ACTIVITY_FILE_CHECK"
-        fi
-      } | sed '/^[[:space:]]*$/d' | sort -u
-    )
+    SESSION_BASELINE_FILE="$STATE_DIR/session-file-baseline.json"
+    SESSION_CHANGES_SCRIPT="${MYCELIUM_SESSION_CHANGES_HELPER:-$SCRIPT_DIR/scripts/session_file_changes.py}"
+    ACTIVE_LOG_REL=""
+    case "$LOG_PATH" in
+      "$LOG_REPO"/*) ACTIVE_LOG_REL="${LOG_PATH#"$LOG_REPO"/}" ;;
+    esac
+    if [ -f "$SESSION_CHANGES_SCRIPT" ]; then
+      _CHANGE_ARGS=(collect --repo-root "$LOG_REPO" --baseline "$SESSION_BASELINE_FILE" --activity-file "$ACTIVITY_FILE_CHECK")
+      if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
+        _CHANGE_ARGS+=(--start-ts "$START_TS")
+      fi
+      if [ -n "$ACTIVE_LOG_REL" ]; then
+        _CHANGE_ARGS+=(--exclude "$ACTIVE_LOG_REL")
+      fi
+      _CHANGE_ARGS+=(--exclude ".living/log/LOG_REGISTRY.md")
+      _CHANGE_ARGS+=(--exclude-prefix ".living/log/")
+      SESSION_CHANGED_FILES=$(python3 "$SESSION_CHANGES_SCRIPT" "${_CHANGE_ARGS[@]}" 2>/dev/null || true)
+    else
+      # Compatibility fallback for an incomplete/older installation.
+      SESSION_CHANGED_FILES=$(
+        {
+          if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
+            git -C "$LOG_REPO" log --since="@${START_TS}" --name-only --pretty=format: 2>/dev/null || true
+          fi
+          if [ -f "$ACTIVITY_FILE_CHECK" ]; then
+            while IFS= read -r activity_path; do
+              [ -z "$activity_path" ] && continue
+              case "$activity_path" in
+                "$LOG_REPO"/*) printf '%s\n' "${activity_path#"$LOG_REPO"/}" ;;
+                *) printf '%s\n' "$activity_path" ;;
+              esac
+            done < "$ACTIVITY_FILE_CHECK"
+          fi
+        } | sed '/^[[:space:]]*$/d' | sort -u
+      )
+    fi
     FILES_CHANGED=0
     if [ -n "$SESSION_CHANGED_FILES" ]; then
       FILES_CHANGED=$(printf '%s\n' "$SESSION_CHANGED_FILES" | grep -c . || echo "0")
     fi
 
-    # Compute session-local activity: Edit/Write (activity tracker), commits, OR Bash-mutated files
-    # (files in `git status` whose mtime is newer than session start). The mtime signal catches
-    # `sed -i`, `perl -pi`, formatters, and any other Bash mutation that bypasses the Edit/Write
-    # activity tracker. Without it we incorrectly discard sessions that did real work via Bash.
+    # Explicit Edit/Write activity is an independent work signal. The helper's
+    # file set already includes committed and Bash-mutated paths.
     ACTIVITY_COUNT=0
     if [ -f "$ACTIVITY_FILE_CHECK" ]; then
       ACTIVITY_COUNT=$(sort -u "$ACTIVITY_FILE_CHECK" | grep -c . 2>/dev/null || echo "0")
     fi
-    COMMITS_THIS_SESSION=0
-    UNCOMMITTED_RECENT=0
-    if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
-      COMMITS_THIS_SESSION=$({ git -C "$LOG_REPO" log --since="@${START_TS}" --oneline 2>/dev/null || true; } | grep -c . || echo "0")
-      # Files in `git status` whose mtime is > session start. `awk 'NF{print $NF}'` extracts
-      # the filename (last whitespace-separated token), handling `M  filename` and `?? filename`.
-      # Renames (`R  oldname -> newname`) collapse to `newname`, which is the right behavior.
-      while IFS= read -r f; do
-        [ -z "$f" ] && continue
-        if [ -e "$LOG_REPO/$f" ]; then
-          FILE_MTIME=$(mycelium_file_mtime "$LOG_REPO/$f")
-          if [ "$FILE_MTIME" -gt "$START_TS" ] 2>/dev/null; then
-            UNCOMMITTED_RECENT=$((UNCOMMITTED_RECENT + 1))
-          fi
-        fi
-      done < <(git -C "$LOG_REPO" status --porcelain 2>/dev/null | awk 'NF{print $NF}')
+    REMINDER_COUNT=0
+    if [ -f "$STATE_DIR/mycelium-reminded.tmp" ]; then
+      REMINDER_COUNT=1
     fi
 
     # Short session check: skip finalization only if NO evidence of work in any signal.
     # Duration is irrelevant — a long session that only read files is still noise.
-    if [ "$ACTIVITY_COUNT" -eq 0 ] && [ "$COMMITS_THIS_SESSION" -eq 0 ] && [ "$UNCOMMITTED_RECENT" -eq 0 ]; then
+    if [ "$ACTIVITY_COUNT" -eq 0 ] && [ "$REMINDER_COUNT" -eq 0 ] && [ "$FILES_CHANGED" -eq 0 ]; then
       rm -f "$LOG_PATH"
       rm -f "$ACTIVE_LOG_FILE"
       rm -f "$STATE_DIR/session-start-ts.tmp"
+      rm -f "$SESSION_BASELINE_FILE"
       # No registry row, no finalization — clean exit (noise session)
     else
       # Auto-finalize the session log (factual record — no Claude needed)
@@ -251,12 +249,12 @@ LAST_SESSION_EOF
 
       # Clean up sentinels
       rm -f "$ACTIVE_LOG_FILE"
-      rm -f "$STATE_DIR/session-start-ts.tmp"
+      rm -f "$SESSION_BASELINE_FILE"
     fi
   else
     # Log file doesn't exist (was deleted?) — clean up sentinels
     rm -f "$ACTIVE_LOG_FILE"
-    rm -f "$STATE_DIR/session-start-ts.tmp"
+    rm -f "$STATE_DIR/session-file-baseline.json"
   fi
 fi
 
@@ -276,6 +274,7 @@ fi
 REMINDER_FILE="$STATE_DIR/mycelium-reminded.tmp"
 ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
 if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
+  rm -f "$STATE_DIR/session-start-ts.tmp"
   exit 0
 fi
 
@@ -340,17 +339,10 @@ if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$CON
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
+  rm -f "$STATE_DIR/session-start-ts.tmp"
 
   ENHANCE_MSG=".living/ updated. Enhance .mycelium/last-session.md with work, decisions, blockers, current state, and next steps. The deterministic LOG_REGISTRY summary is already in place."
   mycelium_emit_context "Stop" "$ENHANCE_MSG"
-  exit 0
-fi
-
-# Debounce: if work started less than 5 minutes ago, don't block yet — session is likely still active
-NOW_TS_CHECK=$(date +%s)
-WORK_AGE=$(( NOW_TS_CHECK - WORK_TS ))
-if [ "$WORK_AGE" -lt 300 ]; then
-  # Work is < 5 min old — session likely still in progress, don't block
   exit 0
 fi
 

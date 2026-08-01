@@ -52,6 +52,52 @@ def test_detect_script_path(tmp_path: Path) -> None:
     assert inline is None
 
 
+def test_detect_script_path_honors_preceding_absolute_cd(tmp_path: Path) -> None:
+    analysis_dir = tmp_path / "analysis" / "spatial-coorganization"
+    analysis_dir.mkdir(parents=True)
+    script, inline = detect_script(
+        f'cd "{analysis_dir}" && PATH="/tmp/venv/bin:$PATH" python run.py --help',
+        tmp_path,
+    )
+    assert script == analysis_dir / "run.py"
+    assert inline is None
+
+
+def test_detect_scripts_tracks_relative_cd_between_invocations(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = first / "second"
+    second.mkdir(parents=True)
+
+    detections = detect_scripts(
+        "cd first && python one.py ; cd second && python two.py", tmp_path
+    )
+
+    assert detections == [(first / "one.py", None), (second / "two.py", None)]
+
+
+def test_detect_scripts_treats_newline_as_command_separator(tmp_path: Path) -> None:
+    analysis_dir = tmp_path / "analysis"
+    analysis_dir.mkdir()
+
+    detections = detect_scripts("cd analysis\npython run.py", tmp_path)
+
+    assert detections == [(analysis_dir / "run.py", None)]
+
+
+def test_detect_scripts_does_not_leak_cd_out_of_subshell(tmp_path: Path) -> None:
+    analysis_dir = tmp_path / "analysis"
+    analysis_dir.mkdir()
+
+    detections = detect_scripts(
+        "(cd analysis && python nested.py); python root.py", tmp_path
+    )
+
+    assert detections == [
+        (analysis_dir / "nested.py", None),
+        (tmp_path / "root.py", None),
+    ]
+
+
 def test_detect_script_inline_python_c() -> None:
     cmd = """python -c "import pandas; pd.read_csv('x.csv')" """
     script, inline = detect_script(cmd, Path("/tmp"))
@@ -346,3 +392,44 @@ def test_main_emits_two_events_for_chained_inline(tmp_path: Path) -> None:
     scripts = [l.get("script_source") for l in lines]
     assert "pd.read_parquet('a.parquet')" in scripts[0]
     assert "pd.read_csv('b.csv')" in scripts[1]
+
+
+def test_main_honors_cd_for_script_and_relative_data_paths(tmp_path: Path) -> None:
+    import json
+    import subprocess
+
+    analysis_dir = tmp_path / "analysis" / "spatial-coorganization"
+    analysis_dir.mkdir(parents=True)
+    (analysis_dir / "run.py").write_text(
+        "import pandas as pd\npd.read_csv('input.csv')\n"
+    )
+    (analysis_dir / "input.csv").write_text("value\n1\n")
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+    command = (
+        f'cd "{analysis_dir}" && PYTHONDONTWRITEBYTECODE=1 '
+        'PATH="/tmp/venv/bin:$PATH" python run.py --help'
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-07-31T12:00:00Z",
+            "--bash-cmd",
+            command,
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(target.read_text())
+    assert event["script"] == str(analysis_dir / "run.py")
+    assert event["inputs"][0]["path"] == str(analysis_dir / "input.csv")

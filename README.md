@@ -218,6 +218,12 @@ and restart Codex. Codex exposes shell and unified-exec work under the `Bash`
 matcher and file edits as `apply_patch`; read telemetry is Claude-only because
 Codex does not expose its internal file reads to `PostToolUse`.
 
+SessionStart snapshots any pre-existing dirty or untracked work. Stop therefore
+records only files changed during the current task, blocks immediately when
+meaningful work has not been reflected into `.living/`, and cannot be bypassed
+by retrying Stop. Data-lineage tracking also follows preceding shell `cd`
+commands when resolving relative analysis and data paths.
+
 ## Progressive Disclosure Knowledge System
 
 Mycelium includes a three-tier knowledge system that routes agents to the right information at the right time:

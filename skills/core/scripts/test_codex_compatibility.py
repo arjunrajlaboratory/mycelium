@@ -458,6 +458,29 @@ def test_codex_post_tool_use_uses_nested_context(tmp_path):
     assert (repo / ".mycelium" / "mycelium-reminded.tmp").is_file()
 
 
+def test_codex_post_tool_use_ignores_mycelium_structure_validator(tmp_path):
+    repo = _repo(tmp_path)
+    command = (
+        "python3 \"$(sed -n '1p' .mycelium/plugin-root)/skills/core/"
+        "scripts/validate_structure.py\" --target-dir ."
+    )
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "turn_id": "turn-structure-validator",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert not (repo / ".mycelium" / "mycelium-reminded.tmp").exists()
+
+
 def test_codex_post_tool_use_reads_only_log_path_marker_line(tmp_path):
     repo = _repo(tmp_path)
     state = repo / ".mycelium"

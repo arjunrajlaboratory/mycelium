@@ -822,6 +822,49 @@ OLD_LOG_EOF
   cleanup_test_env
 }
 
+# ── TEST 27: Fresh primary SessionStart snapshots pre-existing dirty state ──
+echo ""
+echo "TEST 27: SessionStart writes a usable repository baseline"
+{
+  setup_test_env
+  echo "pre-existing" > "$TEST_DIR/preexisting.txt"
+
+  run_health_hook
+
+  BASELINE="$TEST_DIR/.mycelium/session-file-baseline.json"
+  CHANGES=$(python3 "$HERE/../scripts/session_file_changes.py" collect \
+    --repo-root "$TEST_DIR" \
+    --baseline "$BASELINE" \
+    --activity-file "$TEST_DIR/.mycelium/mycelium-session-activity.tmp" \
+    --exclude ".living/log/LOG_REGISTRY.md" 2>/dev/null)
+  if [ -s "$BASELINE" ] && [ -z "$CHANGES" ]; then
+    pass "SessionStart baseline exists and excludes pre-existing dirty state"
+  else
+    fail "Expected a usable baseline with no immediate changes" \
+      "baseline_exists=$([ -s "$BASELINE" ] && echo yes || echo no) changes='$CHANGES'"
+  fi
+  cleanup_test_env
+}
+
+# ── TEST 28: A new primary task clears recent leftovers from a completed task ──
+echo ""
+echo "TEST 28: Fresh SessionStart clears recent reminder/activity leftovers"
+{
+  setup_test_env
+  date +%s > "$TEST_DIR/.mycelium/mycelium-reminded.tmp"
+  echo "old-task.py" > "$TEST_DIR/.mycelium/mycelium-session-activity.tmp"
+
+  run_health_hook
+
+  if [ ! -e "$TEST_DIR/.mycelium/mycelium-reminded.tmp" ] \
+    && [ ! -e "$TEST_DIR/.mycelium/mycelium-session-activity.tmp" ]; then
+    pass "Fresh primary task starts without previous lifecycle state"
+  else
+    fail "Expected recent leftovers to be removed for the new primary task" ""
+  fi
+  cleanup_test_env
+}
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
