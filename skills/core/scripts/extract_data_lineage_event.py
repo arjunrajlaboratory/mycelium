@@ -59,6 +59,20 @@ RX_SCRIPT_PATH = re.compile(
     r"(?:python3?|Rscript|jupyter\s+(?:nbconvert|execute))\s+(?:--\S+\s+)*([^\s|&;]+\.(?:py|R|r|ipynb))"
 )
 
+# The hook receives a shell command string and one overall exit status, not an
+# execution trace. AND/OR lists can be reasoned about conservatively, but shell
+# compound commands and heredocs cannot: an interpreter token may live in a
+# skipped branch, a zero-iteration loop, a function body, or heredoc content.
+# Reject the whole command in those cases rather than fabricate provenance.
+_CONTROL_BOUNDARY = r"(?:^|&&|\|\||[;|\n])"
+RX_UNSUPPORTED_SHELL_STRUCTURE = re.compile(
+    rf"(?m){_CONTROL_BOUNDARY}[ \t]*"
+    r"(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|select|function|coproc)\b"
+    rf"|{_CONTROL_BOUNDARY}[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*\([ \t]*\)[ \t]*\{{"
+    rf"|{_CONTROL_BOUNDARY}[ \t]*\{{"
+    r"|<<-?"
+)
+
 # --- Data I/O source-scanning regexes ---
 INPUT_REGEXES = [
     re.compile(
@@ -290,10 +304,124 @@ def _top_level_control_context(fragment: str) -> tuple[list[str], bool, bool]:
     return operators, later_list, current_list_ambiguous or malformed
 
 
+def _current_command_prefix(fragment: str) -> list[str] | None:
+    """Return tokens before a candidate in its current simple command."""
+    try:
+        lexer = shlex.shlex(fragment, posix=True, punctuation_chars=";&|()\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        raw_tokens = list(lexer)
+    except ValueError:
+        return None
+
+    tokens: list[str] = []
+    punctuation = set(";&|()\n")
+    for token in raw_tokens:
+        if token and set(token) <= punctuation:
+            index = 0
+            while index < len(token):
+                pair = token[index : index + 2]
+                if pair in {"&&", "||"}:
+                    tokens.append(pair)
+                    index += 2
+                else:
+                    tokens.append(token[index])
+                    index += 1
+        else:
+            tokens.append(token)
+
+    depth = 0
+    segment: list[str] = []
+    for token in tokens:
+        if token == "(":
+            depth += 1
+            segment.append(token)
+        elif token == ")":
+            if depth == 0:
+                return None
+            depth -= 1
+            segment.append(token)
+        elif depth == 0 and token in {";", "\n", "&&", "||", "|", "&"}:
+            segment = []
+        else:
+            segment.append(token)
+    if depth:
+        return None
+    return segment
+
+
+def _match_is_command_invocation(bash_cmd: str, offset: int) -> bool:
+    """Reject interpreter text that is an argument, comment, or quoted body."""
+    prefix = _current_command_prefix(bash_cmd[:offset])
+    if prefix is None:
+        return False
+    while prefix and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", prefix[0]):
+        prefix.pop(0)
+    if not prefix or prefix == ["command"]:
+        return True
+    if prefix[0] == "env":
+        # `env` may contain options and assignments before the executable, but
+        # another ordinary command token means Python/R is merely an argument.
+        ordinary = [
+            token
+            for token in prefix[1:]
+            if not token.startswith("-")
+            and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token)
+        ]
+        return not ordinary
+    if len(prefix) < 2 or prefix[1] != "run":
+        return False
+    wrapper = prefix[0]
+    if wrapper not in {"conda", "uv", "poetry"}:
+        return False
+
+    value_options = {
+        "conda": {"-n", "--name", "-p", "--prefix", "--cwd"},
+        "uv": {
+            "--project",
+            "--directory",
+            "--python",
+            "--with",
+            "--with-editable",
+            "--with-requirements",
+            "--env-file",
+        },
+        "poetry": set(),
+    }[wrapper]
+    arguments = prefix[2:]
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token in {"-h", "--help", "-V", "--version"}:
+            return False
+        if token == "--":
+            return index == len(arguments) - 1
+        if token in value_options:
+            index += 2
+            if index > len(arguments):
+                return False
+            continue
+        if any(token.startswith(f"{option}=") for option in value_options):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        # A non-option token before Python/R is another executable, so the
+        # interpreter is merely one of its arguments.
+        return False
+    return True
+
+
 def _match_is_proven_executed(
     bash_cmd: str, offset: int, bash_exit: int | None
 ) -> bool:
     """Conservatively decide whether a textual script match actually ran."""
+    if RX_UNSUPPORTED_SHELL_STRUCTURE.search(bash_cmd):
+        return False
+    if not _match_is_command_invocation(bash_cmd, offset):
+        return False
     before_ops, _, before_ambiguous = _top_level_control_context(bash_cmd[:offset])
     if before_ambiguous:
         return False
@@ -527,6 +655,11 @@ def main() -> int:
     ap.add_argument("--agent-type", default=None)
     ap.add_argument("--bash-exit", type=int, default=None)
     ap.add_argument(
+        "--check-execution",
+        action="store_true",
+        help="Exit 0 only when a supported analysis invocation is proven to run.",
+    )
+    ap.add_argument(
         "--append-to",
         type=Path,
         default=None,
@@ -535,7 +668,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if not is_analysis(args.bash_cmd):
-        return 0
+        return 1 if args.check_execution else 0
 
     cwd = Path(args.cwd)
     detections = _detect_scripts_with_cwd(
@@ -544,6 +677,8 @@ def main() -> int:
         bash_exit=args.bash_exit,
         require_execution_evidence=True,
     )
+    if args.check_execution:
+        return 0 if detections else 1
     if not detections:
         return 0
 

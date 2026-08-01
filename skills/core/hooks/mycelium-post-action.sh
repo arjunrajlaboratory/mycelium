@@ -23,31 +23,33 @@ if [[ -z "$COMMAND" ]]; then
   exit 0
 fi
 
-# --- Detection: is this a significant code execution? ---
+# --- Detection: is this a proven significant code execution? ---
 
-is_significant=false
-
-# Python script execution (not one-liners, not package management, not tests)
-if echo "$COMMAND" | grep -qE '(^|&&|\||\;|[[:space:]])python3?\s+[^-].*\.py'; then
-  is_significant=true
+# Share the data-lineage parser's command-position and control-flow checks so
+# skipped compound branches and interpreter text used as arguments cannot open
+# a false bookkeeping cycle.
+SESSION_CWD=$(printf '%s' "$INPUT" | mycelium_json_get 'cwd')
+if [[ -z "$SESSION_CWD" || ! -d "$SESSION_CWD" ]]; then
+  SESSION_CWD=$(pwd)
 fi
-
-# Rscript execution
-if echo "$COMMAND" | grep -qE '(^|&&|\||\;|[[:space:]])Rscript\s+'; then
-  is_significant=true
+BASH_EXIT=$(printf '%s' "$INPUT" | mycelium_bash_exit)
+if [[ -z "$BASH_EXIT" && "$(mycelium_hook_host)" == "claude" ]]; then
+  BASH_EXIT=0
 fi
-
-# Jupyter notebook execution
-if echo "$COMMAND" | grep -qE '(^|&&|\||\;|[[:space:]])jupyter\s+(nbconvert|execute)'; then
-  is_significant=true
+DETECTOR="${MYCELIUM_EXECUTION_HELPER:-$HERE/../scripts/extract_data_lineage_event.py}"
+if [[ ! -f "$DETECTOR" ]]; then
+  exit 0
 fi
-
-# conda run with python script
-if echo "$COMMAND" | grep -qE 'conda\s+run\s+.*python.*\.py'; then
-  is_significant=true
+DETECT_ARGS=(
+  --cwd "$SESSION_CWD"
+  --ts "$(date +%Y-%m-%dT%H:%M:%S%z)"
+  --bash-cmd "$COMMAND"
+  --check-execution
+)
+if [[ "$BASH_EXIT" =~ ^-?[0-9]+$ ]]; then
+  DETECT_ARGS+=(--bash-exit "$BASH_EXIT")
 fi
-
-if [[ "$is_significant" != true ]]; then
+if ! python3 "$DETECTOR" "${DETECT_ARGS[@]}" >/dev/null 2>&1; then
   exit 0
 fi
 

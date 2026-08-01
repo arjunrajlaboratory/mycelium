@@ -469,6 +469,34 @@ def test_codex_post_tool_use_uses_nested_context(tmp_path):
     assert (repo / ".mycelium" / "mycelium-reminded.tmp").is_file()
 
 
+def test_codex_post_action_rejects_unproven_shell_text_matches(tmp_path):
+    repo = _repo(tmp_path)
+    reminder = repo / ".mycelium" / "mycelium-reminded.tmp"
+
+    for index, command in enumerate(
+        (
+            "if false; then\npython analysis.py\nfi",
+            "echo python analysis.py",
+            "uv run echo python analysis.py",
+        )
+    ):
+        result = _run_hook(
+            "mycelium-post-action.sh",
+            repo,
+            {
+                "cwd": str(repo),
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_response": {"exit_code": 0},
+                "turn_id": f"turn-unproven-{index}",
+            },
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ""
+        assert not reminder.exists()
+
+
 def test_codex_post_tool_use_ignores_mycelium_structure_validator(tmp_path):
     repo = _repo(tmp_path)
     command = (
@@ -832,3 +860,57 @@ def test_data_lineage_state_survives_blocked_stop_until_acceptance(tmp_path):
     assert not events_file.exists()
     archived_events = state / "mycelium-data-events-prev" / f"{session_id}.tmp"
     assert archived_events.read_text() == first_event + second_event
+
+
+def test_lineage_only_session_preserves_log_and_reserves_session_id(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "lineage-start-1"},
+    )
+    assert start.returncode == 0, start.stderr
+
+    state = repo / ".mycelium"
+    first_session_id = (state / "data-lineage-session-id.tmp").read_text().strip()
+    first_log = Path((state / "active-session-log.tmp").read_text().splitlines()[0])
+    event = {
+        "ts": "2026-08-01T12:00:00Z",
+        "script": None,
+        "script_source": "import pandas as pd; pd.read_csv('input.csv')",
+        "inputs": [{"path": "input.csv", "_missing": True}],
+        "outputs": [],
+    }
+    (state / "mycelium-data-events.tmp").write_text(json.dumps(event) + "\n")
+
+    stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "session_id": "host-lineage-only",
+            "stop_hook_active": False,
+            "turn_id": "lineage-stop-1",
+        },
+    )
+
+    assert stop.returncode == 0, stop.stderr
+    assert first_log.is_file()
+    manifest = repo / ".living" / "log" / "data-lineage" / f"{first_session_id}.json"
+    assert manifest.is_file()
+    archive = (
+        state / "mycelium-data-events-prev" / f"{first_session_id}.tmp"
+    )
+    assert archive.is_file()
+
+    second_start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "lineage-start-2"},
+    )
+    assert second_start.returncode == 0, second_start.stderr
+    second_session_id = (state / "data-lineage-session-id.tmp").read_text().strip()
+    assert second_session_id != first_session_id
+    assert int(second_session_id.rsplit("-", 1)[1]) == int(
+        first_session_id.rsplit("-", 1)[1]
+    ) + 1
