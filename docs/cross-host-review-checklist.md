@@ -85,9 +85,13 @@ hook, filesystem, or lifecycle boundaries.
       they may mutate—including guidance, hook configuration, todo, index, and
       runtime state—before the first write, so a later rejection cannot leave a
       partial migration.
-- [ ] Repository-controlled inputs that can be copied or summarized into tracked
-      state (for example legacy session context and living-layer entries) cannot
-      be symlinks to host-private files.
+- [ ] Inputs that can be copied or summarized into project or global state (for
+      example legacy session context, living-layer entries, legacy global
+      knowledge, and provider MEMORY files) reject symlinks in the file itself
+      and in every ancestor before any read or write.
+- [ ] Global initialization and migration preflight every source and destination
+      before the first mutation; command-line path normalization preserves
+      symlink evidence instead of resolving it away before validation.
 - [ ] Legacy Claude-only repositories continue to work without mandatory
       migration unless a migration is explicitly documented.
 - [ ] Early Codex installations with repository-local `.codex/hooks.json` are

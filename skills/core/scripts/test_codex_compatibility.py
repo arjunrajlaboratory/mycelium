@@ -535,6 +535,27 @@ def test_plugin_dispatcher_refuses_symlinked_living_before_creating_state(tmp_pa
     assert not (repo / ".mycelium").exists()
 
 
+def test_hook_does_not_import_legacy_session_through_symlinked_claude_dir(tmp_path):
+    repo = _repo(tmp_path)
+    outside_claude = tmp_path / "outside-claude"
+    outside_claude.mkdir()
+    legacy = outside_claude / "last-session.md"
+    original = "host-private legacy session\n"
+    legacy.write_text(original)
+    (repo / ".claude").symlink_to(outside_claude, target_is_directory=True)
+
+    result = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "linked-legacy"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert legacy.read_text() == original
+    assert not (repo / ".mycelium" / "last-session.md").exists()
+    assert (repo / ".mycelium" / "active-session-log.tmp").exists()
+
+
 def test_init_pointer_writer_refuses_symlinked_state_directory(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

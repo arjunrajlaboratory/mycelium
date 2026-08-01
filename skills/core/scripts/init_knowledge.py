@@ -7,6 +7,7 @@ Existing files are never overwritten.
 """
 
 import argparse
+import os
 import shutil
 import time
 from pathlib import Path
@@ -141,9 +142,16 @@ MEMORY_ROUTING_HEADER = "## Global Knowledge Domains"
 
 def _glob_memory_files(claude_projects_dir: Path) -> list[Path]:
     """Find all `~/.claude/projects/*/memory/MEMORY.md` files."""
+    _reject_symlink_components(claude_projects_dir)
     if not claude_projects_dir.is_dir():
         return []
-    return sorted(claude_projects_dir.glob("*/memory/MEMORY.md"))
+    memory_files = sorted(claude_projects_dir.glob("*/memory/MEMORY.md"))
+    # Validate the complete set before the caller modifies its first file.
+    for memory_path in memory_files:
+        _reject_symlink_components(memory_path)
+        if not memory_path.is_file():
+            raise ValueError(f"MEMORY path is not a regular file: {memory_path}")
+    return memory_files
 
 
 def _append_routing_table(memory_path: Path, table_text: str) -> bool:
@@ -152,8 +160,11 @@ def _append_routing_table(memory_path: Path, table_text: str) -> bool:
     Returns True if appended, False if header already present (no-op).
     Always idempotent — re-running on a populated MEMORY.md is a no-op.
     """
+    _reject_symlink_components(memory_path)
     if not memory_path.exists():
         return False
+    if not memory_path.is_file():
+        raise ValueError(f"MEMORY path is not a regular file: {memory_path}")
     existing = memory_path.read_text(encoding="utf-8")
     if MEMORY_ROUTING_HEADER in existing:
         return False
@@ -196,18 +207,46 @@ def append_routing_to_memory_files(
     return appended, skipped
 
 
+def _reject_symlink_components(path: Path) -> None:
+    """Reject any existing symlink in a path without resolving through it."""
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"Refusing symlinked managed path: {current}")
+
+
 def migrate_legacy_knowledge(legacy_dir: Path, knowledge_dir: Path) -> int:
     """Copy missing files from the pre-v0.4 Claude-specific knowledge store."""
+    _reject_symlink_components(legacy_dir)
+    _reject_symlink_components(knowledge_dir)
     if not legacy_dir.is_dir() or legacy_dir.resolve() == knowledge_dir.resolve():
         return 0
-    knowledge_dir.mkdir(parents=True, exist_ok=True)
-    copied = 0
+
+    if knowledge_dir.exists() and not knowledge_dir.is_dir():
+        raise ValueError(f"Knowledge path is not a directory: {knowledge_dir}")
+
+    pending: list[tuple[Path, Path]] = []
     for source in legacy_dir.iterdir():
+        _reject_symlink_components(source)
         if not source.is_file():
             continue
         destination = knowledge_dir / source.name
+        _reject_symlink_components(destination)
         if destination.exists():
+            if not destination.is_file():
+                raise ValueError(
+                    f"Knowledge destination is not a regular file: {destination}"
+                )
             continue
+        pending.append((source, destination))
+
+    # Preflight the complete copy set before creating the destination or
+    # importing any content, avoiding partial migrations on a later rejection.
+    knowledge_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for source, destination in pending:
         shutil.copy2(source, destination)
         copied += 1
     return copied
@@ -228,6 +267,27 @@ def init_knowledge(knowledge_dir: Path, mycelium_root: Path) -> None:
     header_template = header_template_path.read_text()
 
     domains: list[dict] = domains_data.get("domains", [])
+
+    # Validate every managed destination before creating or changing any of
+    # them. This prevents a later linked entry from producing a partial init.
+    _reject_symlink_components(knowledge_dir)
+    if knowledge_dir.exists() and not knowledge_dir.is_dir():
+        raise ValueError(f"Knowledge path is not a directory: {knowledge_dir}")
+    domain_paths = [
+        knowledge_dir / f"{domain.get('name', '')}.md"
+        for domain in domains
+        if domain.get("name", "")
+    ]
+    managed_paths = domain_paths + [
+        knowledge_dir / ".last-audit",
+        knowledge_dir / ".audit-log.md",
+    ]
+    for managed_path in managed_paths:
+        _reject_symlink_components(managed_path)
+        if managed_path.exists() and not managed_path.is_file():
+            raise ValueError(
+                f"Knowledge destination is not a regular file: {managed_path}"
+            )
 
     # --- Create knowledge directory ----------------------------------------
     knowledge_dir.mkdir(parents=True, exist_ok=True)
@@ -333,7 +393,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    knowledge_dir: Path = args.knowledge_dir.expanduser().resolve()
+    # Keep user-controlled paths lexical so validation can still see links.
+    knowledge_dir = Path(os.path.abspath(args.knowledge_dir.expanduser()))
 
     mycelium_root: Path
     if args.mycelium_root is None:
@@ -342,7 +403,9 @@ def main() -> None:
         mycelium_root = args.mycelium_root.expanduser().resolve()
 
     projects_dir = (
-        args.projects_dir.expanduser().resolve() if args.projects_dir else None
+        Path(os.path.abspath(args.projects_dir.expanduser()))
+        if args.projects_dir
+        else None
     )
 
     if args.memory_only:

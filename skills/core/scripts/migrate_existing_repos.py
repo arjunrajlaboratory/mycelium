@@ -228,7 +228,10 @@ def ensure_cross_agent_guidance(repo_path: Path, dry_run: bool = False) -> bool:
 
 def migrate_runtime_state(repo_path: Path, dry_run: bool = False) -> bool:
     """Move durable session context from .claude/ to provider-neutral state."""
-    legacy = repo_path / ".claude" / "last-session.md"
+    legacy_dir = ir.ensure_safe_project_directory(
+        repo_path, ".claude", create=False
+    )
+    legacy = legacy_dir / "last-session.md"
     ir.ensure_safe_regular_file(legacy)
     state_dir = ir.ensure_safe_project_directory(
         repo_path, ".mycelium", create=not dry_run

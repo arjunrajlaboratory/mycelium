@@ -120,8 +120,168 @@ class TestAppendRoutingToMemoryFiles:
         # No mashed-together lines
         assert "No trailing nl## Global Knowledge Domains" not in text
 
+    def test_rejects_symlinked_memory_file_without_modifying_target(
+        self, fake_projects: Path
+    ) -> None:
+        victim = fake_projects.parent / "private-memory.md"
+        original = "# Host-private memory\n"
+        victim.write_text(original)
+        memory_dir = fake_projects / "linked" / "memory"
+        memory_dir.mkdir(parents=True)
+        (memory_dir / "MEMORY.md").symlink_to(victim)
+
+        with pytest.raises(ValueError, match="symlink"):
+            ik.append_routing_to_memory_files(
+                mycelium_root=_MYCELIUM_ROOT,
+                claude_projects_dir=fake_projects,
+            )
+
+        assert victim.read_text() == original
+
+
+class TestMigrateLegacyKnowledge:
+    def test_rejects_symlinked_source_before_creating_destination(
+        self, tmp_path: Path
+    ) -> None:
+        legacy = tmp_path / "legacy"
+        legacy.mkdir()
+        victim = tmp_path / "private.md"
+        original = "host-private knowledge\n"
+        victim.write_text(original)
+        (legacy / "safe.md").write_text("safe legacy knowledge\n")
+        (legacy / "linked.md").symlink_to(victim)
+        knowledge = tmp_path / "knowledge"
+
+        with pytest.raises(ValueError, match="symlink"):
+            ik.migrate_legacy_knowledge(legacy, knowledge)
+
+        assert victim.read_text() == original
+        assert not knowledge.exists()
+
+    def test_rejects_symlinked_legacy_directory(self, tmp_path: Path) -> None:
+        victim_dir = tmp_path / "private-knowledge"
+        victim_dir.mkdir()
+        (victim_dir / "private.md").write_text("host-private knowledge\n")
+        legacy = tmp_path / "legacy"
+        legacy.symlink_to(victim_dir, target_is_directory=True)
+        knowledge = tmp_path / "knowledge"
+
+        with pytest.raises(ValueError, match="symlink"):
+            ik.migrate_legacy_knowledge(legacy, knowledge)
+
+        assert not knowledge.exists()
+
+    def test_rejects_symlinked_legacy_ancestor(self, tmp_path: Path) -> None:
+        actual_parent = tmp_path / "actual-parent"
+        legacy = actual_parent / "legacy"
+        legacy.mkdir(parents=True)
+        (legacy / "private.md").write_text("host-private knowledge\n")
+        linked_parent = tmp_path / "linked-parent"
+        linked_parent.symlink_to(actual_parent, target_is_directory=True)
+        knowledge = tmp_path / "knowledge"
+
+        with pytest.raises(ValueError, match="symlink"):
+            ik.migrate_legacy_knowledge(linked_parent / "legacy", knowledge)
+
+        assert not knowledge.exists()
+
+    def test_rejects_dangling_destination_symlink(self, tmp_path: Path) -> None:
+        legacy = tmp_path / "legacy"
+        legacy.mkdir()
+        (legacy / "entry.md").write_text("safe legacy knowledge\n")
+        knowledge = tmp_path / "knowledge"
+        knowledge.mkdir()
+        victim = tmp_path / "outside-destination.md"
+        (knowledge / "entry.md").symlink_to(victim)
+
+        with pytest.raises(ValueError, match="symlink"):
+            ik.migrate_legacy_knowledge(legacy, knowledge)
+
+        assert not victim.exists()
+
+    def test_rejects_symlinked_destination_ancestor(self, tmp_path: Path) -> None:
+        legacy = tmp_path / "legacy"
+        legacy.mkdir()
+        (legacy / "entry.md").write_text("safe legacy knowledge\n")
+        outside = tmp_path / "outside-knowledge"
+        outside.mkdir()
+        linked_parent = tmp_path / "linked-destination"
+        linked_parent.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="symlink"):
+            ik.migrate_legacy_knowledge(legacy, linked_parent / "knowledge")
+
+        assert not (outside / "knowledge").exists()
+
+
+class TestInitKnowledgeSafety:
+    def test_rejects_symlinked_knowledge_directory_before_writing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        outside = tmp_path / "outside-knowledge"
+        outside.mkdir()
+        knowledge = tmp_path / "knowledge"
+        knowledge.symlink_to(outside, target_is_directory=True)
+        monkeypatch.setattr(ik, "append_routing_to_memory_files", lambda *_: (0, 0))
+
+        with pytest.raises(ValueError, match="symlink"):
+            ik.init_knowledge(knowledge, _MYCELIUM_ROOT)
+
+        assert list(outside.iterdir()) == []
+
+    def test_rejects_symlinked_domain_before_any_managed_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge = tmp_path / "knowledge"
+        knowledge.mkdir()
+        victim = tmp_path / "private-documentation.md"
+        original = "host-private global knowledge\n"
+        victim.write_text(original)
+        (knowledge / "documentation.md").symlink_to(victim)
+        monkeypatch.setattr(ik, "append_routing_to_memory_files", lambda *_: (0, 0))
+
+        with pytest.raises(ValueError, match="symlink"):
+            ik.init_knowledge(knowledge, _MYCELIUM_ROOT)
+
+        assert victim.read_text() == original
+        assert sorted(path.name for path in knowledge.iterdir()) == [
+            "documentation.md"
+        ]
+
 
 class TestMemoryOnlyCli:
+    def test_rejects_symlinked_projects_dir_without_modifying_memory(
+        self, tmp_path: Path
+    ) -> None:
+        import subprocess
+
+        actual_projects = tmp_path / "actual-projects"
+        actual_projects.mkdir()
+        memory = _make_project(actual_projects, "linked", "# Private memory\n")
+        original = memory.read_text()
+        linked_projects = tmp_path / "linked-projects"
+        linked_projects.symlink_to(actual_projects, target_is_directory=True)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(_SCRIPT_DIR / "init_knowledge.py"),
+                "--knowledge-dir",
+                str(tmp_path / "unused-knowledge"),
+                "--mycelium-root",
+                str(_MYCELIUM_ROOT),
+                "--projects-dir",
+                str(linked_projects),
+                "--memory-only",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode != 0
+        assert "symlink" in result.stderr
+        assert memory.read_text() == original
+
     def test_memory_only_flag_skips_domain_creation(
         self, fake_projects: Path, tmp_path: Path
     ) -> None:
