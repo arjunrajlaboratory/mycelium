@@ -763,6 +763,112 @@ def test_main_accepts_common_python_executable_and_flag_forms(
     assert json.loads(target.read_text())["script"] == str(script)
 
 
+@pytest.mark.parametrize(
+    "command,filename,content",
+    [
+        (
+            'python "analysis script.py"',
+            "analysis script.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
+            "python 'analysis script.py'",
+            "analysis script.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
+            r"python analysis\ script.py",
+            "analysis script.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
+            'uv run python "analysis script.py"',
+            "analysis script.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
+            '"/tmp/venv with space/bin/python" "analysis script.py"',
+            "analysis script.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
+            r"/tmp/venv\ with\ space/bin/python analysis\ script.py",
+            "analysis script.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
+            'python -W "ignore: message" "analysis script.py"',
+            "analysis script.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
+            'Rscript "analysis script.R"',
+            "analysis script.R",
+            "read.csv('input.csv')\n",
+        ),
+        (
+            r"Rscript analysis\ script.R",
+            "analysis script.R",
+            "read.csv('input.csv')\n",
+        ),
+        (
+            '"/tmp/R env/Rscript" "analysis script.R"',
+            "analysis script.R",
+            "read.csv('input.csv')\n",
+        ),
+        (
+            'jupyter execute "analysis notebook.ipynb"',
+            "analysis notebook.ipynb",
+            "{}\n",
+        ),
+        (
+            r"jupyter execute analysis\ notebook.ipynb",
+            "analysis notebook.ipynb",
+            "{}\n",
+        ),
+        (
+            '"/tmp/Jupyter env/jupyter" execute "analysis; Ω notebook.ipynb"',
+            "analysis; Ω notebook.ipynb",
+            "{}\n",
+        ),
+    ],
+)
+def test_main_accepts_shell_encoded_whitespace_in_script_paths(
+    tmp_path: Path, command: str, filename: str, content: str
+) -> None:
+    """Quoted and escaped spaces must survive script-path extraction."""
+    import json
+    import subprocess
+
+    script = tmp_path / filename
+    script.write_text(content)
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            "0",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text())["script"] == str(script)
+
+
 def test_main_retains_python_module_execution_as_unresolved_lineage(
     tmp_path: Path,
 ) -> None:

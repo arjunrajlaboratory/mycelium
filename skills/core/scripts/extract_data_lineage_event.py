@@ -42,20 +42,50 @@ SIZE_LIMIT_BYTES = 100 * 1024 * 1024
 EMBED_LIMIT_BYTES = 100 * 1024
 
 # --- Script-path / inline-source extraction ---
-_PYTHON_EXE = r"(?:[^\s|&;()\"']*/)?python(?:\d+(?:\.\d+)*)?"
+_SHELL_DOUBLE_QUOTED_WORD = r'"(?:\\.|[^"\\])*"'
+_SHELL_SINGLE_QUOTED_WORD = r"'[^']*'"
+_SHELL_BARE_WORD = r"(?:\\.|[^\s|&;()\"'])+"
+_SHELL_WORD = (
+    rf"(?:{_SHELL_DOUBLE_QUOTED_WORD}|{_SHELL_SINGLE_QUOTED_WORD}|{_SHELL_BARE_WORD})"
+)
+
+
+def _shell_executable_pattern(name: str) -> str:
+    """Return a regex fragment for a bare or wholly quoted executable path."""
+    double_quoted = rf'"(?:(?:\\.|[^"\\])*/)?{name}"'
+    single_quoted = rf"'(?:[^']*/)?{name}'"
+    bare = rf"(?:(?:\\.|[^\s|&;()\"'])*/)?{name}"
+    return rf"(?:{double_quoted}|{single_quoted}|{bare})"
+
+
+def _shell_path_pattern(extension: str) -> str:
+    """Return a regex fragment for one shell word ending in ``extension``."""
+    double_quoted = rf'"(?:\\.|[^"\\])*{extension}"'
+    single_quoted = rf"'[^']*{extension}'"
+    bare = rf"(?:\\.|[^\s|&;()\"'])+{extension}"
+    return rf"(?:{double_quoted}|{single_quoted}|{bare})"
+
+
+_PYTHON_EXE = _shell_executable_pattern(r"python(?:\d+(?:\.\d+)*)?")
 _PYTHON_COMMAND = rf"(?<![A-Za-z0-9_.-]){_PYTHON_EXE}"
 _PYTHON_FLAG = (
     r"(?:-[bBdEhiIOPqRsStuUvVx]+"
-    r"|-W\s+[^\s|&;]+"
-    r"|-W[^\s|&;]+"
-    r"|-X\s+[^\s|&;]+"
-    r"|-X[^\s|&;]+"
+    rf"|-W\s+{_SHELL_WORD}"
+    rf"|-W{_SHELL_WORD}"
+    rf"|-X\s+{_SHELL_WORD}"
+    rf"|-X{_SHELL_WORD}"
     r"|--"
-    r"|--check-hash-based-pycs(?:=|\s+)[^\s|&;]+"
+    rf"|--check-hash-based-pycs(?:=|\s+){_SHELL_WORD}"
     r"|--(?:debug|inspect|interactive|isolated|optimize|dont-write-bytecode"
     r"|no-user-site|no-site|unbuffered|verbose|version|help))"
 )
 _PYTHON_FLAGS = rf"(?:{_PYTHON_FLAG}\s+)*"
+_PYTHON_SCRIPT_PATH = _shell_path_pattern(r"\.py")
+_R_EXE = _shell_executable_pattern("R")
+_R_SCRIPT_EXE = _shell_executable_pattern("Rscript")
+_R_SCRIPT_PATH = _shell_path_pattern(r"\.(?:R|r)")
+_JUPYTER_EXE = _shell_executable_pattern("jupyter")
+_JUPYTER_SCRIPT_PATH = _shell_path_pattern(r"\.ipynb")
 
 RX_PYTHON_C = re.compile(
     rf"{_PYTHON_COMMAND}\s+{_PYTHON_FLAGS}-c\s+(?P<quote>['\"])(?P<source>.+?)(?P=quote)",
@@ -65,20 +95,20 @@ RX_PYTHON_M = re.compile(
     rf"{_PYTHON_COMMAND}\s+{_PYTHON_FLAGS}-m\s+(?P<module>[A-Za-z_][A-Za-z0-9_.]*)"
 )
 RX_PYTHON_SCRIPT_PATH = re.compile(
-    rf"{_PYTHON_COMMAND}\s+{_PYTHON_FLAGS}(?P<path>[^\s|&;]+\.py)"
+    rf"{_PYTHON_COMMAND}\s+{_PYTHON_FLAGS}(?P<path>{_PYTHON_SCRIPT_PATH})"
 )
 RX_R_E = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:[^\s|&;()\"']*/)?R\s+"
-    r"(?:--\S+\s+)*-e\s+(?P<quote>['\"])(?P<source>.+?)(?P=quote)",
+    rf"(?<![A-Za-z0-9_.-]){_R_EXE}\s+"
+    rf"(?:--\S+\s+)*-e\s+(?P<quote>['\"])(?P<source>.+?)(?P=quote)",
     re.DOTALL,
 )
 RX_R_SCRIPT_PATH = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:[^\s|&;()\"']*/)?Rscript\s+"
-    r"(?:--\S+\s+)*(?P<path>[^\s|&;]+\.(?:R|r))"
+    rf"(?<![A-Za-z0-9_.-]){_R_SCRIPT_EXE}\s+"
+    rf"(?:--\S+\s+)*(?P<path>{_R_SCRIPT_PATH})"
 )
 RX_JUPYTER_SCRIPT_PATH = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:[^\s|&;()\"']*/)?jupyter\s+"
-    r"(?:nbconvert|execute)\s+(?:--\S+\s+)*(?P<path>[^\s|&;]+\.ipynb)"
+    rf"(?<![A-Za-z0-9_.-]){_JUPYTER_EXE}\s+"
+    rf"(?:nbconvert|execute)\s+(?:--\S+\s+)*(?P<path>{_JUPYTER_SCRIPT_PATH})"
 )
 IGNORED_PYTHON_MODULES = {
     "black",
@@ -676,7 +706,13 @@ def _detect_scripts_with_cwd(
             ):
                 continue
             effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
-            raw_path = m.group("path").strip("\"'")
+            try:
+                path_words = shlex.split(m.group("path"), comments=False, posix=True)
+            except ValueError:
+                continue
+            if len(path_words) != 1:
+                continue
+            raw_path = path_words[0]
             if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES or any(
                 raw_path.endswith(suffix) for suffix in IGNORED_SCRIPT_SUFFIXES
             ):
