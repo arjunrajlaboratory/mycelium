@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import generate_index
@@ -686,6 +687,357 @@ def test_codex_apply_patch_activity_resolves_paths_from_nested_cwd(tmp_path):
     assert result.returncode == 0, result.stderr
     activity = repo / ".mycelium" / "mycelium-session-activity.tmp"
     assert activity.read_text().splitlines() == ["nested/a.py"]
+
+
+def test_codex_apply_patch_activity_ignores_failed_tool_result(tmp_path):
+    repo = _repo(tmp_path)
+    patch = """*** Begin Patch
+*** Add File: should-not-count.py
++content
+*** End Patch"""
+
+    result = _run_hook(
+        "mycelium-activity-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "apply_patch",
+            "tool_input": {"command": patch},
+            "tool_response": {"exit_code": 1, "output": "patch failed"},
+            "turn_id": "turn-failed-patch",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (repo / ".mycelium" / "mycelium-session-activity.tmp").exists()
+    assert not (repo / ".mycelium" / "mycelium-reminded.tmp").exists()
+
+
+def test_codex_apply_patch_activity_ignores_failed_string_response(tmp_path):
+    repo = _repo(tmp_path)
+    patch = """*** Begin Patch
+*** Add File: should-not-count.py
++content
+*** End Patch"""
+
+    result = _run_hook(
+        "mycelium-activity-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "apply_patch",
+            "tool_input": {"command": patch},
+            "tool_response": "Error: invalid patch context",
+            "turn_id": "turn-failed-string-patch",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (repo / ".mycelium" / "mycelium-session-activity.tmp").exists()
+
+
+def test_codex_apply_patch_activity_canonicalizes_symlinked_cwd(tmp_path):
+    repo = _repo(tmp_path)
+    nested = repo / "nested"
+    nested.mkdir()
+    alias = tmp_path / "repo-alias"
+    alias.symlink_to(repo, target_is_directory=True)
+    patch = """*** Begin Patch
+*** Add File: a.py
++content
+*** End Patch"""
+
+    result = _run_hook(
+        "mycelium-activity-tracker.sh",
+        repo,
+        {
+            "cwd": str(alias / "nested"),
+            "tool_name": "apply_patch",
+            "tool_input": {"command": patch},
+            "tool_response": {"exit_code": 0},
+            "turn_id": "turn-symlinked-cwd",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    activity = repo / ".mycelium" / "mycelium-session-activity.tmp"
+    assert activity.read_text().splitlines() == ["nested/a.py"]
+
+
+def test_hooks_refuse_symlinked_mycelium_state_directory(tmp_path):
+    repo = _repo(tmp_path)
+    victim = tmp_path / "outside-state"
+    victim.mkdir()
+    (repo / ".mycelium").symlink_to(victim, target_is_directory=True)
+
+    result = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "unsafe-state"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert list(victim.iterdir()) == []
+
+
+def test_hooks_refuse_symlinked_living_directory(tmp_path):
+    repo = _repo(tmp_path, living=False)
+    victim = tmp_path / "outside-living"
+    victim.mkdir()
+    (repo / ".living").symlink_to(victim, target_is_directory=True)
+
+    result = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "unsafe-living"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert list(victim.iterdir()) == []
+
+
+def test_bash_only_repository_change_blocks_without_living_update(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "bash-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    log_path = Path((state / "active-session-log.tmp").read_text().splitlines()[0])
+    (repo / "bash-only.txt").write_text("created by a Bash command\n")
+
+    stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "bash-stop"},
+    )
+
+    assert json.loads(stop.stdout)["decision"] == "block"
+    assert (state / "active-session-log.tmp").is_file()
+    assert "ended:\n" in log_path.read_text()
+
+
+def test_blocked_stop_preserves_transaction_and_final_log_includes_continuation(
+    tmp_path,
+):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "block-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    active_marker = state / "active-session-log.tmp"
+    baseline = state / "session-file-baseline.json"
+    log_path = Path(active_marker.read_text().splitlines()[0])
+
+    (repo / "first.py").write_text("print('first')\n")
+    activity = _run_hook(
+        "mycelium-activity-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "command": "*** Begin Patch\n*** Add File: first.py\n+first\n*** End Patch"
+            },
+            "tool_response": {"exit_code": 0},
+            "turn_id": "block-activity",
+        },
+    )
+    assert activity.returncode == 0, activity.stderr
+
+    first_stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "block-one"},
+    )
+    assert json.loads(first_stop.stdout)["decision"] == "block"
+    assert active_marker.is_file()
+    assert baseline.is_file()
+    assert "ended:\n" in log_path.read_text()
+    assert "Session ended" not in log_path.read_text()
+
+    (repo / "second.py").write_text("print('second')\n")
+    (repo / ".living" / "learnings.md").write_text(
+        "# learnings.md\n\nContinuation recorded.\n"
+    )
+    accepted = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": True, "turn_id": "block-two"},
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    finalized = log_path.read_text()
+    assert finalized.count("Session ended") == 1
+    assert "- `first.py`" in finalized
+    assert "- `second.py`" in finalized
+    assert not active_marker.exists()
+
+
+def test_same_second_living_content_update_is_accepted(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "same-second-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    (repo / "work.py").write_text("print('work')\n")
+    activity = _run_hook(
+        "mycelium-activity-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "command": "*** Begin Patch\n*** Add File: work.py\n+work\n*** End Patch"
+            },
+            "tool_response": {"exit_code": 0},
+            "turn_id": "same-second-activity",
+        },
+    )
+    assert activity.returncode == 0, activity.stderr
+    reminder = int(
+        (repo / ".mycelium" / "mycelium-reminded.tmp").read_text().strip()
+    )
+    learnings = repo / ".living" / "learnings.md"
+    learnings.write_text("# learnings.md\n\nUpdated in the same second.\n")
+    os.utime(learnings, (reminder, reminder))
+
+    stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "same-stop"},
+    )
+
+    assert stop.returncode == 0, stop.stderr
+    assert '"decision": "block"' not in stop.stdout
+
+
+def test_existing_finding_content_update_is_accepted(tmp_path):
+    repo = _repo(tmp_path)
+    finding = repo / ".living" / "findings" / "topic.md"
+    finding.parent.mkdir()
+    finding.write_text("# Existing finding\n\nBefore.\n")
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "finding-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    (repo / "work.py").write_text("print('work')\n")
+    activity = _run_hook(
+        "mycelium-activity-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "command": "*** Begin Patch\n*** Add File: work.py\n+work\n*** End Patch"
+            },
+            "tool_response": {"exit_code": 0},
+            "turn_id": "finding-activity",
+        },
+    )
+    assert activity.returncode == 0, activity.stderr
+    old_directory_times = finding.parent.stat().st_atime_ns, finding.parent.stat().st_mtime_ns
+    finding.write_text("# Existing finding\n\nAfter.\n")
+    os.utime(finding.parent, ns=old_directory_times)
+
+    stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "finding-stop"},
+    )
+
+    assert stop.returncode == 0, stop.stderr
+    assert '"decision": "block"' not in stop.stdout
+
+
+def test_concurrent_stop_finalizes_session_exactly_once(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "race-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    log_path = Path((state / "active-session-log.tmp").read_text().splitlines()[0])
+    session_id = log_path.name[:14]
+    (repo / "race.py").write_text("print('race')\n")
+    activity = _run_hook(
+        "mycelium-activity-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "command": "*** Begin Patch\n*** Add File: race.py\n+race\n*** End Patch"
+            },
+            "tool_response": {"exit_code": 0},
+            "turn_id": "race-activity",
+        },
+    )
+    assert activity.returncode == 0, activity.stderr
+    (repo / ".living" / "decisions.md").write_text(
+        "# decisions.md\n\nRace lifecycle recorded.\n"
+    )
+    payloads = [
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": f"race-{i}"}
+        for i in range(8)
+    ]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(
+                lambda payload: _run_hook("mycelium-stop-check.sh", repo, payload),
+                payloads,
+            )
+        )
+
+    assert all(result.returncode == 0 for result in results)
+    assert log_path.read_text().count("Session ended") == 1
+    registry = repo / ".living" / "log" / "LOG_REGISTRY.md"
+    assert registry.read_text().count(f"| {session_id} |") == 1
+    assert not (state / "active-session-log.tmp").exists()
+
+
+def test_stop_lock_recovers_empty_stale_lock_directory(tmp_path):
+    state = tmp_path / ".mycelium"
+    lock = state / "mycelium-stop.lock"
+    lock.mkdir(parents=True)
+    stale = time.time() - 600
+    os.utime(lock, (stale, stale))
+    hook_lib = HOOKS_DIR / "mycelium-hook-lib.sh"
+    command = (
+        f'source "{hook_lib}"\n'
+        f'mycelium_acquire_stop_lock "{state}"\n'
+        'printf "acquired\\n"\n'
+        "mycelium_release_stop_lock\n"
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "acquired\n"
+    assert not lock.exists()
+
+
+def test_ci_runs_integration_stress_suite():
+    workflow = (PLUGIN_ROOT / ".github" / "workflows" / "validate-skill.yml").read_text()
+    assert "bash skills/core/tests/test_integration_stress.sh" in workflow
 
 
 def test_codex_stop_legacy_block_shape_remains_supported(tmp_path):

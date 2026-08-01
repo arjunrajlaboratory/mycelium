@@ -4,16 +4,181 @@
 
 mycelium_prepare_state_dir() {
   local repo_root="$1"
-  STATE_DIR="${MYCELIUM_STATE_DIR:-$repo_root/.mycelium}"
-  mkdir -p "$STATE_DIR"
+  local requested_state=""
+  local living_dir=""
+  local unsafe_link=""
+
+  repo_root=$(cd "$repo_root" 2>/dev/null && pwd -P) || return 1
+  living_dir="$repo_root/.living"
+
+  # These hooks run from a globally trusted plugin but operate on an
+  # untrusted checkout. Never follow repository-controlled symlinks for state
+  # or lifecycle output: doing so would turn a normal hook into an arbitrary
+  # out-of-project writer.
+  if [[ -L "$living_dir" ]]; then
+    return 1
+  fi
+  if [[ -d "$living_dir" ]]; then
+    unsafe_link=$(find "$living_dir" -type l -print -quit 2>/dev/null || true)
+    if [[ -n "$unsafe_link" ]]; then
+      return 1
+    fi
+  fi
+
+  requested_state="${MYCELIUM_STATE_DIR:-$repo_root/.mycelium}"
+  if [[ "$requested_state" != /* ]]; then
+    requested_state="$repo_root/$requested_state"
+  fi
+  if [[ -L "$requested_state" ]]; then
+    return 1
+  fi
+  mkdir -p "$requested_state" || return 1
+  STATE_DIR=$(cd "$requested_state" 2>/dev/null && pwd -P) || return 1
+  case "$STATE_DIR" in
+    "$repo_root"/*) ;;
+    *) return 1 ;;
+  esac
+  unsafe_link=$(find "$STATE_DIR" -type l -print -quit 2>/dev/null || true)
+  if [[ -n "$unsafe_link" ]]; then
+    return 1
+  fi
 
   if [[ ! -f "$STATE_DIR/.gitignore" ]]; then
     printf '*\n!.gitignore\n' > "$STATE_DIR/.gitignore"
   fi
 
   # Preserve cross-session context from projects initialized before v0.4.
-  if [[ ! -f "$STATE_DIR/last-session.md" && -f "$repo_root/.claude/last-session.md" ]]; then
+  if [[ ! -f "$STATE_DIR/last-session.md" \
+    && -f "$repo_root/.claude/last-session.md" \
+    && ! -L "$repo_root/.claude/last-session.md" ]]; then
     cp "$repo_root/.claude/last-session.md" "$STATE_DIR/last-session.md"
+  fi
+
+  return 0
+}
+
+mycelium_living_changed() {
+  local repo_root="$1"
+  local baseline_file="$2"
+  local helper="$3"
+  local reminder_ts="${4:-0}"
+  local helper_status=2
+
+  if [[ -f "$helper" && -f "$baseline_file" ]]; then
+    if python3 "$helper" living-changed \
+      --repo-root "$repo_root" \
+      --baseline "$baseline_file" >/dev/null 2>&1; then
+      return 0
+    else
+      helper_status=$?
+    fi
+    if [[ "$helper_status" -eq 1 ]]; then
+      return 1
+    fi
+  fi
+
+  # Rolling-upgrade fallback for sessions whose baseline predates content
+  # fingerprints. Nanosecond mtimes avoid the old same-second false negative,
+  # and every finding file is checked rather than only the directory mtime.
+  python3 - "$repo_root" "$reminder_ts" <<'PY' >/dev/null 2>&1
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+try:
+    threshold_ns = int(sys.argv[2]) * 1_000_000_000
+except ValueError:
+    threshold_ns = 0
+living = root / ".living"
+paths = [living / name for name in ("learnings.md", "decisions.md", "conventions.md")]
+findings = living / "findings"
+if findings.is_dir() and not findings.is_symlink():
+    paths.extend(path for path in findings.rglob("*") if path.is_file())
+for path in paths:
+    try:
+        if path.stat().st_mtime_ns > threshold_ns:
+            raise SystemExit(0)
+    except OSError:
+        pass
+raise SystemExit(1)
+PY
+}
+
+mycelium_refresh_work_cycle() {
+  local repo_root="$1"
+  local helper="$2"
+  local reminder_file="$STATE_DIR/mycelium-reminded.tmp"
+  local baseline_file="$STATE_DIR/living-reminder-baseline.json"
+  local reminder_ts=0
+  local should_refresh=false
+
+  if [[ ! -f "$reminder_file" ]]; then
+    should_refresh=true
+  else
+    reminder_ts=$(head -1 "$reminder_file" 2>/dev/null || echo 0)
+    if mycelium_living_changed \
+      "$repo_root" "$baseline_file" "$helper" "$reminder_ts"; then
+      should_refresh=true
+    fi
+  fi
+
+  if [[ "$should_refresh" != true ]]; then
+    return 1
+  fi
+
+  if [[ -f "$helper" ]]; then
+    python3 "$helper" living-snapshot \
+      --repo-root "$repo_root" \
+      --output "$baseline_file" >/dev/null 2>&1 \
+      || rm -f "$baseline_file"
+  fi
+  date +%s > "$reminder_file"
+  return 0
+}
+
+mycelium_acquire_stop_lock() {
+  local state_dir="$1"
+  local attempts=0
+  local owner_pid=""
+  local owner_ts=""
+  local now_ts=""
+  local lock_mtime=0
+  local owner_is_live=false
+
+  MYCELIUM_STOP_LOCK_DIR="$state_dir/mycelium-stop.lock"
+  while ! mkdir "$MYCELIUM_STOP_LOCK_DIR" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    owner_pid=""
+    owner_ts=""
+    owner_is_live=false
+    if [[ -f "$MYCELIUM_STOP_LOCK_DIR/owner" ]]; then
+      read -r owner_pid owner_ts < "$MYCELIUM_STOP_LOCK_DIR/owner" || true
+      if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+        owner_is_live=true
+      fi
+    fi
+    now_ts=$(date +%s)
+    lock_mtime=$(mycelium_file_mtime "$MYCELIUM_STOP_LOCK_DIR")
+    if [[ "$owner_is_live" != true && "$lock_mtime" =~ ^[0-9]+$ ]] \
+      && (( now_ts - lock_mtime > 300 )); then
+      rm -f "$MYCELIUM_STOP_LOCK_DIR/owner"
+      rmdir "$MYCELIUM_STOP_LOCK_DIR" 2>/dev/null || true
+      continue
+    fi
+    if (( attempts >= 600 )); then
+      return 1
+    fi
+    sleep 0.05
+  done
+  printf '%s %s\n' "$$" "$(date +%s)" > "$MYCELIUM_STOP_LOCK_DIR/owner"
+  return 0
+}
+
+mycelium_release_stop_lock() {
+  if [[ -n "${MYCELIUM_STOP_LOCK_DIR:-}" ]]; then
+    rm -f "$MYCELIUM_STOP_LOCK_DIR/owner"
+    rmdir "$MYCELIUM_STOP_LOCK_DIR" 2>/dev/null || true
   fi
 }
 

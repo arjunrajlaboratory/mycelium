@@ -35,7 +35,7 @@ source "$HERE/mycelium-hook-lib.sh"
   if [[ -z "$REPO_ROOT" ]]; then
     exit 0
   fi
-  mycelium_prepare_state_dir "$REPO_ROOT"
+  mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
 
   # Extract the relative .living/... portion of the path
   # e.g. /Users/mst36/repo/.living/INDEX.md → .living/INDEX.md

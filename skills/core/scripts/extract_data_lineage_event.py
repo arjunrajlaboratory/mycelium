@@ -41,22 +41,70 @@ from pathlib import Path
 SIZE_LIMIT_BYTES = 100 * 1024 * 1024
 EMBED_LIMIT_BYTES = 100 * 1024
 
-# --- Analysis-invocation detection ---
-ANALYSIS_PATTERNS = [
-    re.compile(r"(?:^|&&|\||;|\s)python3?\s+"),
-    re.compile(r"(?:^|&&|\||;|\s)Rscript\s+"),
-    re.compile(r"(?:^|&&|\||;|\s)R\s+(?:--\S+\s+)*-e\s+"),
-    re.compile(r"(?:^|&&|\||;|\s)jupyter\s+(?:nbconvert|execute)\s+"),
-    re.compile(r"(?:^|&&|\||;|\s)conda\s+run\s+.*python"),
-    re.compile(r"(?:^|&&|\||;|\s)uv\s+run\s+.*python"),
-    re.compile(r"(?:^|&&|\||;|\s)poetry\s+run\s+.*python"),
-]
-
 # --- Script-path / inline-source extraction ---
-RX_PYTHON_C = re.compile(r"""python3?\s+-c\s+(['"])(.+?)\1""", re.DOTALL)
-RX_R_E = re.compile(r"""R\s+(?:--\S+\s+)*-e\s+(['"])(.+?)\1""", re.DOTALL)
-RX_SCRIPT_PATH = re.compile(
-    r"(?:python3?|Rscript|jupyter\s+(?:nbconvert|execute))\s+(?:--\S+\s+)*([^\s|&;]+\.(?:py|R|r|ipynb))"
+_PYTHON_EXE = r"(?:[^\s|&;()\"']*/)?python(?:\d+(?:\.\d+)*)?"
+_PYTHON_COMMAND = rf"(?<![A-Za-z0-9_.-]){_PYTHON_EXE}"
+_PYTHON_FLAG = (
+    r"(?:-[bBdEhiIOPqRsStuUvVx]+"
+    r"|-W\s+[^\s|&;]+"
+    r"|-W[^\s|&;]+"
+    r"|-X\s+[^\s|&;]+"
+    r"|-X[^\s|&;]+"
+    r"|--"
+    r"|--check-hash-based-pycs(?:=|\s+)[^\s|&;]+"
+    r"|--(?:debug|inspect|interactive|isolated|optimize|dont-write-bytecode"
+    r"|no-user-site|no-site|unbuffered|verbose|version|help))"
+)
+_PYTHON_FLAGS = rf"(?:{_PYTHON_FLAG}\s+)*"
+
+RX_PYTHON_C = re.compile(
+    rf"{_PYTHON_COMMAND}\s+{_PYTHON_FLAGS}-c\s+(?P<quote>['\"])(?P<source>.+?)(?P=quote)",
+    re.DOTALL,
+)
+RX_PYTHON_M = re.compile(
+    rf"{_PYTHON_COMMAND}\s+{_PYTHON_FLAGS}-m\s+(?P<module>[A-Za-z_][A-Za-z0-9_.]*)"
+)
+RX_PYTHON_SCRIPT_PATH = re.compile(
+    rf"{_PYTHON_COMMAND}\s+{_PYTHON_FLAGS}(?P<path>[^\s|&;]+\.py)"
+)
+RX_R_E = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:[^\s|&;()\"']*/)?R\s+"
+    r"(?:--\S+\s+)*-e\s+(?P<quote>['\"])(?P<source>.+?)(?P=quote)",
+    re.DOTALL,
+)
+RX_R_SCRIPT_PATH = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:[^\s|&;()\"']*/)?Rscript\s+"
+    r"(?:--\S+\s+)*(?P<path>[^\s|&;]+\.(?:R|r))"
+)
+RX_JUPYTER_SCRIPT_PATH = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:[^\s|&;()\"']*/)?jupyter\s+"
+    r"(?:nbconvert|execute)\s+(?:--\S+\s+)*(?P<path>[^\s|&;]+\.ipynb)"
+)
+IGNORED_PYTHON_MODULES = {
+    "compileall",
+    "cProfile",
+    "doctest",
+    "ensurepip",
+    "http.server",
+    "json.tool",
+    "pdb",
+    "pip",
+    "pydoc",
+    "pytest",
+    "site",
+    "tarfile",
+    "timeit",
+    "unittest",
+    "venv",
+    "zipfile",
+}
+ANALYSIS_PATTERNS = (
+    RX_PYTHON_C,
+    RX_PYTHON_M,
+    RX_PYTHON_SCRIPT_PATH,
+    RX_R_E,
+    RX_R_SCRIPT_PATH,
+    RX_JUPYTER_SCRIPT_PATH,
 )
 
 # The hook receives a shell command string and one overall exit status, not an
@@ -360,7 +408,7 @@ def _match_is_command_invocation(bash_cmd: str, offset: int) -> bool:
         prefix.pop(0)
     if not prefix or prefix == ["command"]:
         return True
-    if prefix[0] == "env":
+    if Path(prefix[0]).name == "env":
         # `env` may contain options and assignments before the executable, but
         # another ordinary command token means Python/R is merely an argument.
         ordinary = [
@@ -461,7 +509,7 @@ def _detect_scripts_with_cwd(
             bash_cmd, m.start(), bash_exit
         ):
             continue
-        src = m.group(2)
+        src = m.group("source")
         effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
         identity = (src, effective_cwd)
         if identity not in seen_inline:
@@ -472,25 +520,44 @@ def _detect_scripts_with_cwd(
             bash_cmd, m.start(), bash_exit
         ):
             continue
-        src = m.group(2)
+        src = m.group("source")
         effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
         identity = (src, effective_cwd)
         if identity not in seen_inline:
             out.append((None, src, effective_cwd))
             seen_inline.add(identity)
-    for m in RX_SCRIPT_PATH.finditer(bash_cmd):
+    for m in RX_PYTHON_M.finditer(bash_cmd):
         if require_execution_evidence and not _match_is_proven_executed(
             bash_cmd, m.start(), bash_exit
         ):
             continue
+        module = m.group("module")
+        if module in IGNORED_PYTHON_MODULES:
+            continue
         effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
-        path = Path(m.group(1))
-        if not path.is_absolute():
-            path = effective_cwd / path
-        path = Path(os.path.abspath(path))
-        if path not in seen_paths:
-            out.append((path, None, effective_cwd))
-            seen_paths.add(path)
+        source = f"# Python module execution: {module}"
+        identity = (source, effective_cwd)
+        if identity not in seen_inline:
+            out.append((None, source, effective_cwd))
+            seen_inline.add(identity)
+    for pattern in (
+        RX_PYTHON_SCRIPT_PATH,
+        RX_R_SCRIPT_PATH,
+        RX_JUPYTER_SCRIPT_PATH,
+    ):
+        for m in pattern.finditer(bash_cmd):
+            if require_execution_evidence and not _match_is_proven_executed(
+                bash_cmd, m.start(), bash_exit
+            ):
+                continue
+            effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
+            path = Path(m.group("path"))
+            if not path.is_absolute():
+                path = effective_cwd / path
+            path = Path(os.path.abspath(path))
+            if path not in seen_paths:
+                out.append((path, None, effective_cwd))
+                seen_paths.add(path)
     return out
 
 

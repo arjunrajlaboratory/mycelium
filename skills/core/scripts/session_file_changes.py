@@ -12,6 +12,7 @@ create/delete ``apply_patch`` probe).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
+LIVING_FILES = ("learnings.md", "decisions.md", "conventions.md")
 
 
 def _run_git(repo_root: Path, *args: str) -> bytes:
@@ -200,6 +202,52 @@ def read_worktree_state(repo_root: Path) -> dict[str, dict[str, Any]]:
     return entries
 
 
+def _content_fingerprint(path: Path) -> dict[str, Any] | None:
+    """Return a content identity that does not depend on timestamp precision."""
+    try:
+        stat = path.lstat()
+    except OSError:
+        return None
+    if path.is_symlink():
+        try:
+            target = os.readlink(path)
+        except OSError:
+            target = ""
+        return {"kind": "symlink", "target": target}
+    if not path.is_file():
+        return {"kind": "other", "mode": stat.st_mode}
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return {
+        "kind": "file",
+        "size": stat.st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def read_living_state(repo_root: Path) -> dict[str, dict[str, Any]]:
+    """Fingerprint lifecycle artifacts whose content satisfies Stop."""
+    living_dir = repo_root / ".living"
+    candidates = [living_dir / name for name in LIVING_FILES]
+    findings_dir = living_dir / "findings"
+    if findings_dir.is_dir() and not findings_dir.is_symlink():
+        candidates.extend(path for path in findings_dir.rglob("*") if not path.is_dir())
+    elif findings_dir.exists() or findings_dir.is_symlink():
+        candidates.append(findings_dir)
+
+    state: dict[str, dict[str, Any]] = {}
+    for path in candidates:
+        fingerprint = _content_fingerprint(path)
+        if fingerprint is not None:
+            state[path.relative_to(repo_root).as_posix()] = fingerprint
+    return state
+
+
 def build_snapshot(repo_root: Path) -> dict[str, Any]:
     reflog = _head_reflog(repo_root)
     return {
@@ -207,11 +255,11 @@ def build_snapshot(repo_root: Path) -> dict[str, Any]:
         "head": _head(repo_root),
         "head_reflog_entries": len(reflog) if reflog is not None else None,
         "files": read_worktree_state(repo_root),
+        "living_files": read_living_state(repo_root),
     }
 
 
-def write_snapshot(repo_root: Path, output: Path) -> None:
-    payload = build_snapshot(repo_root)
+def _write_payload(output: Path, payload: dict[str, Any]) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
         prefix=f".{output.name}.", suffix=".tmp", dir=output.parent
@@ -228,6 +276,22 @@ def write_snapshot(repo_root: Path, output: Path) -> None:
             pass
 
 
+def write_snapshot(repo_root: Path, output: Path) -> None:
+    _write_payload(output, build_snapshot(repo_root))
+
+
+def write_living_snapshot(repo_root: Path, output: Path) -> None:
+    """Write the minimal baseline needed for lifecycle-content comparison."""
+    _write_payload(
+        output,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "files": {},
+            "living_files": read_living_state(repo_root),
+        },
+    )
+
+
 def load_snapshot(path: Path | None) -> dict[str, Any] | None:
     if path is None:
         return None
@@ -242,6 +306,13 @@ def load_snapshot(path: Path | None) -> dict[str, Any] | None:
     if not isinstance(value.get("files"), dict):
         return None
     return value
+
+
+def living_changed(repo_root: Path, baseline: dict[str, Any] | None) -> bool | None:
+    """Return lifecycle-content change state, or None for an old baseline."""
+    if baseline is None or not isinstance(baseline.get("living_files"), dict):
+        return None
+    return read_living_state(repo_root) != baseline["living_files"]
 
 
 def _normalize_repo_path(repo_root: Path, raw_path: str) -> str | None:
@@ -388,6 +459,10 @@ def _build_parser() -> argparse.ArgumentParser:
     snapshot_parser.add_argument("--repo-root", type=Path, required=True)
     snapshot_parser.add_argument("--output", type=Path, required=True)
 
+    living_snapshot_parser = subparsers.add_parser("living-snapshot")
+    living_snapshot_parser.add_argument("--repo-root", type=Path, required=True)
+    living_snapshot_parser.add_argument("--output", type=Path, required=True)
+
     collect_parser = subparsers.add_parser("collect")
     collect_parser.add_argument("--repo-root", type=Path, required=True)
     collect_parser.add_argument("--baseline", type=Path)
@@ -395,6 +470,10 @@ def _build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--start-ts", type=int)
     collect_parser.add_argument("--exclude", action="append", default=[])
     collect_parser.add_argument("--exclude-prefix", action="append", default=[])
+
+    living_parser = subparsers.add_parser("living-changed")
+    living_parser.add_argument("--repo-root", type=Path, required=True)
+    living_parser.add_argument("--baseline", type=Path, required=True)
     return parser
 
 
@@ -404,6 +483,15 @@ def main() -> int:
     if args.command == "snapshot":
         write_snapshot(repo_root, args.output)
         return 0
+    if args.command == "living-snapshot":
+        write_living_snapshot(repo_root, args.output)
+        return 0
+
+    if args.command == "living-changed":
+        changed = living_changed(repo_root, load_snapshot(args.baseline))
+        if changed is None:
+            return 2
+        return 0 if changed else 1
 
     baseline = load_snapshot(args.baseline)
     changes = collect_changes(

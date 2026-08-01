@@ -31,7 +31,7 @@ if [ -z "$REPO_ROOT" ]; then
   exit 0  # Not in a git repo
 fi
 
-mycelium_prepare_state_dir "$REPO_ROOT"
+mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
 
 # Clean up stale sentinels from a crashed previous session BEFORE the
 # session-start-ts guard below — otherwise the guard mistakes the orphaned

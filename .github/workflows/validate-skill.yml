@@ -107,6 +107,7 @@ jobs:
         run: |
           bash skills/core/hooks/test_stop_hook.sh
           bash skills/core/hooks/test_hooks_stress.sh
+          bash skills/core/tests/test_integration_stress.sh
 
       - name: Lint markdown files
         uses: DavidAnson/markdownlint-cli2-action@v19

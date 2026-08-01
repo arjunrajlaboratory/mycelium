@@ -30,7 +30,7 @@ source "$HERE/mycelium-hook-lib.sh"
 
   REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo "")
   if [[ -z "$REPO_ROOT" ]] || [[ ! -d "$REPO_ROOT/.living" ]]; then exit 0; fi
-  mycelium_prepare_state_dir "$REPO_ROOT"
+  mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
 
   SESSION_MARKER="$STATE_DIR/data-lineage-session-id.tmp"
 

@@ -497,8 +497,11 @@ echo "TEST 13: stop_hook_active=true cannot bypass lifecycle enforcement"
 {
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
-  ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
   touch_old "$REPO/.living/learnings.md"
+  python3 "$HERE/../scripts/session_file_changes.py" snapshot \
+    --repo-root "$REPO" \
+    --output "$REPO/.mycelium/living-reminder-baseline.json"
+  ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
 
   run_hook_with_input "$REPO" '{"stop_hook_active": true}'
 
@@ -629,6 +632,12 @@ LOG_EOF
 
   # Force the non-bypass branch by adding activity — duration won't be < 5 anymore
   echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
+  touch "$REPO/.living/learnings.md"
+  python3 "$HERE/../scripts/session_file_changes.py" snapshot \
+    --repo-root "$REPO" \
+    --output "$REPO/.mycelium/living-reminder-baseline.json"
+  date +%s > "$REPO/.mycelium/mycelium-reminded.tmp"
+  printf '\nDuration test recorded.\n' >> "$REPO/.living/learnings.md"
 
   run_hook "$REPO"
 
@@ -671,6 +680,12 @@ LOG_EOF
   date +%s > "$REPO/.mycelium/session-start-ts.tmp"
   printf '%s\n%s\n' "$LOG_PATH" "$(date +%s)" > "$REPO/.mycelium/active-session-log.tmp"
   echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
+  touch "$REPO/.living/learnings.md"
+  python3 "$HERE/../scripts/session_file_changes.py" snapshot \
+    --repo-root "$REPO" \
+    --output "$REPO/.mycelium/living-reminder-baseline.json"
+  date +%s > "$REPO/.mycelium/mycelium-reminded.tmp"
+  printf '\nFallback duration test recorded.\n' >> "$REPO/.living/learnings.md"
 
   run_hook "$REPO"
 
@@ -719,6 +734,7 @@ echo "TEST 19: Session log counts only current-session paths"
 {
   REPO=$(make_repo)
   mkdir -p "$REPO/.living/log" "$REPO/preexisting"
+  printf '# Learnings\n' > "$REPO/.living/learnings.md"
   echo "old work" > "$REPO/preexisting/old.txt"
 
   LOG_PATH="$REPO/.living/log/2026-01-01-001-test.md"
@@ -747,16 +763,18 @@ LOG_EOF
   echo "probe" > "$DISPOSABLE"
   echo "$DISPOSABLE" > "$REPO/.mycelium/mycelium-session-activity.tmp"
   rm "$DISPOSABLE"
+  printf '\nDisposable-path accounting recorded.\n' >> "$REPO/.living/learnings.md"
 
   run_hook "$REPO"
 
   FILE_COUNT=$(grep '^files_changed:' "$LOG_PATH" | awk '{print $2}')
-  if [ "$FILE_COUNT" = "1" ] \
+  if [ "$FILE_COUNT" = "2" ] \
     && grep -q 'MYCELIUM_HOOK_AUDIT_DISPOSABLE.tmp' "$LOG_PATH" \
+    && grep -q '.living/learnings.md' "$LOG_PATH" \
     && ! grep -q 'preexisting/old.txt' "$LOG_PATH"; then
-    pass "Pre-existing dirty files excluded; deleted activity path retained"
+    pass "Pre-existing dirty files excluded; session lifecycle and deleted paths retained"
   else
-    fail "Expected exactly one session-local path" \
+    fail "Expected exactly two session-local paths" \
       "files_changed=$FILE_COUNT log='$(tail -20 "$LOG_PATH")'"
   fi
   rm -rf "$REPO"
@@ -847,12 +865,13 @@ LOG_EOF
   run_hook "$REPO"
 
   if [ -f "$LOG_PATH" ] \
-    && grep -q '^ended: [0-9]' "$LOG_PATH" \
-    && grep -q '^files_changed: 0' "$LOG_PATH" \
+    && grep -q '^ended:$' "$LOG_PATH" \
+    && ! grep -q 'Session ended' "$LOG_PATH" \
+    && [ -f "$REPO/.mycelium/active-session-log.tmp" ] \
     && echo "$HOOK_OUTPUT" | grep -q '"decision": "block"'; then
-    pass "Reminder-only code execution finalizes and enforces the session"
+    pass "Reminder-only code execution blocks without finalizing the session"
   else
-    fail "Significant code execution was discarded as a noise session" \
+    fail "Blocked analysis mutated final lifecycle state" \
       "log_exists=$([ -f "$LOG_PATH" ] && echo yes || echo no) output='$HOOK_OUTPUT'"
   fi
   rm -rf "$REPO"

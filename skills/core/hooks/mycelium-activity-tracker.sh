@@ -19,6 +19,51 @@ source "$HERE/mycelium-hook-lib.sh"
 
 INPUT=$(cat)
 
+# PostToolUse payloads describe attempted edits as well as successful ones.
+# Ignore an explicitly failed result; an absent status remains compatible with
+# Claude's Edit/Write payloads and older Codex versions.
+TOOL_SUCCEEDED=$(printf '%s' "$INPUT" | python3 -c '
+import json, re, sys
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    print("unknown")
+    raise SystemExit
+response = payload.get("tool_response")
+if isinstance(response, str) and re.match(
+    r"^\s*(?:error|failed|patch failed|invalid (?:context|patch))\b",
+    response,
+    re.IGNORECASE,
+):
+    print("false")
+    raise SystemExit
+
+def exit_code(value):
+    if isinstance(value, dict):
+        if value.get("isError") is True or value.get("success") is False:
+            return 1
+        for key in ("exit_code", "exitCode", "return_code", "returncode"):
+            candidate = value.get(key)
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                return candidate
+        for candidate in value.values():
+            found = exit_code(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = exit_code(candidate)
+            if found is not None:
+                return found
+    return None
+
+status = exit_code(response)
+print("unknown" if status is None else ("true" if status == 0 else "false"))
+')
+if [[ "$TOOL_SUCCEEDED" == false ]]; then
+  exit 0
+fi
+
 # --- Repo and .living/ checks ---
 
 SESSION_CWD=$(printf '%s' "$INPUT" | mycelium_json_get 'cwd')
@@ -29,7 +74,7 @@ REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo 
 if [[ -z "$REPO_ROOT" ]]; then
   exit 0
 fi
-mycelium_prepare_state_dir "$REPO_ROOT"
+mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
 
 # Only enforce in mycelium-enabled repos
 if [[ ! -d "$REPO_ROOT/.living" ]]; then
@@ -69,8 +114,8 @@ try:
     payload = json.load(sys.stdin)
 except Exception:
     raise SystemExit(0)
-session_cwd = os.path.abspath(sys.argv[1])
-repo_root = os.path.abspath(sys.argv[2])
+session_cwd = os.path.realpath(sys.argv[1])
+repo_root = os.path.realpath(sys.argv[2])
 
 def emit(raw_path):
     if not isinstance(raw_path, str) or not raw_path:
@@ -78,7 +123,7 @@ def emit(raw_path):
     path = os.path.expanduser(raw_path)
     if not os.path.isabs(path):
         path = os.path.join(session_cwd, path)
-    path = os.path.abspath(path)
+    path = os.path.realpath(path)
     relative = os.path.relpath(path, repo_root)
     if relative == os.pardir or relative.startswith(os.pardir + os.sep):
         return
@@ -99,12 +144,12 @@ if [[ "$touched" != true ]]; then
   exit 0
 fi
 
-# --- Create reminder file if it doesn't exist (triggers stop hook) ---
-# Only on first activity — don't overwrite timestamp from post-action hook
+# --- Start or refresh the lifecycle work cycle ---
 
-REMINDER_FILE="$STATE_DIR/mycelium-reminded.tmp"
-if [[ ! -f "$REMINDER_FILE" ]]; then
-  date +%s > "$REMINDER_FILE"
-fi
+# The baseline fingerprints .living/ content before the agent records this
+# work. If the prior cycle was already documented, refresh it so subsequent
+# edits cannot be accepted using an older lifecycle update.
+SESSION_CHANGES_HELPER="${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"
+mycelium_refresh_work_cycle "$REPO_ROOT" "$SESSION_CHANGES_HELPER" || true
 
 exit 0

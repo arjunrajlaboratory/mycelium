@@ -224,6 +224,12 @@ meaningful work has not been reflected into `.living/`, and cannot be bypassed
 by retrying Stop. Data-lineage tracking also follows preceding shell `cd`
 commands when resolving relative analysis and data paths.
 
+For filesystem safety, `.mycelium/` and `.living/` must be real directories
+inside the repository, not symlinks. Hooks safely no-op when either tree
+contains a symlink, preventing a repository-controlled path from redirecting a
+globally trusted hook outside the project. Replace the symlink with a local
+directory and rerun structure validation before relying on lifecycle hooks.
+
 ## Progressive Disclosure Knowledge System
 
 Mycelium includes a three-tier knowledge system that routes agents to the right information at the right time:
