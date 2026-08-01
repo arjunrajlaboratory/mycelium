@@ -193,22 +193,33 @@ def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
             tokens.append(token)
 
     cwd = initial_cwd
-    subshell_cwds: list[Path] = []
+    subshell_states: list[tuple[Path, bool]] = []
     segment: list[str] = []
+    segment_is_conditional = False
     for token in tokens:
-        if token in {"&&", "||", ";", "\n"}:
-            cwd = _apply_cd(segment, cwd)
+        if token in {"&&", "||"}:
+            # A segment on the right of either operator may be skipped. Since
+            # PostToolUse does not expose per-segment execution, never carry a
+            # conditional cd into a later command's inferred cwd.
+            if not segment_is_conditional:
+                cwd = _apply_cd(segment, cwd)
             segment = []
+            segment_is_conditional = True
+        elif token in {";", "\n"}:
+            if not segment_is_conditional:
+                cwd = _apply_cd(segment, cwd)
+            segment = []
+            segment_is_conditional = False
         elif token in {"|", "&"}:
             # A cd in a pipeline/subshell does not reliably affect the parent.
             segment = []
         elif token == "(":
             segment = []
-            subshell_cwds.append(cwd)
+            subshell_states.append((cwd, segment_is_conditional))
         elif token == ")":
             segment = []
-            if subshell_cwds:
-                cwd = subshell_cwds.pop()
+            if subshell_states:
+                cwd, segment_is_conditional = subshell_states.pop()
         else:
             segment.append(token)
     return cwd

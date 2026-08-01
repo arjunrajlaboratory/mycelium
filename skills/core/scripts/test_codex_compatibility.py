@@ -568,6 +568,31 @@ def test_codex_apply_patch_activity_tracks_each_file(tmp_path):
     assert ".living/learnings.md" not in activity
 
 
+def test_codex_apply_patch_activity_resolves_paths_from_nested_cwd(tmp_path):
+    repo = _repo(tmp_path)
+    nested = repo / "nested"
+    nested.mkdir()
+    patch = """*** Begin Patch
+*** Add File: a.py
++content
+*** End Patch"""
+
+    result = _run_hook(
+        "mycelium-activity-tracker.sh",
+        repo,
+        {
+            "cwd": str(nested),
+            "tool_name": "apply_patch",
+            "tool_input": {"command": patch},
+            "turn_id": "turn-nested-patch",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    activity = repo / ".mycelium" / "mycelium-session-activity.tmp"
+    assert activity.read_text().splitlines() == ["nested/a.py"]
+
+
 def test_codex_stop_legacy_block_shape_remains_supported(tmp_path):
     repo = _repo(tmp_path)
     state = repo / ".mycelium"

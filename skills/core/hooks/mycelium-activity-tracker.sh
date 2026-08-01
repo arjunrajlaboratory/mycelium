@@ -64,22 +64,36 @@ while IFS= read -r FILE_PATH; do
   fi
   touched=true
 done < <(printf '%s' "$INPUT" | python3 -c '
-import json, re, sys
+import json, os, re, sys
 try:
     payload = json.load(sys.stdin)
 except Exception:
     raise SystemExit(0)
+session_cwd = os.path.abspath(sys.argv[1])
+repo_root = os.path.abspath(sys.argv[2])
+
+def emit(raw_path):
+    if not isinstance(raw_path, str) or not raw_path:
+        return
+    path = os.path.expanduser(raw_path)
+    if not os.path.isabs(path):
+        path = os.path.join(session_cwd, path)
+    path = os.path.abspath(path)
+    relative = os.path.relpath(path, repo_root)
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        return
+    print(relative)
+
 tool_input = payload.get("tool_input") or {}
 path = tool_input.get("file_path")
-if isinstance(path, str) and path:
-    print(path)
+emit(path)
 command = tool_input.get("command")
 if isinstance(command, str):
     for line in command.splitlines():
         match = re.match(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", line)
         if match:
-            print(match.group(1))
-')
+            emit(match.group(1))
+' "$SESSION_CWD" "$REPO_ROOT")
 
 if [[ "$touched" != true ]]; then
   exit 0

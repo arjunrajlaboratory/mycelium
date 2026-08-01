@@ -82,6 +82,24 @@ def test_detect_script_preserves_cwd_when_cd_target_is_missing(tmp_path: Path) -
     assert inline is None
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "false && cd sub; python a.py",
+        "true || cd sub; python a.py",
+    ],
+)
+def test_detect_script_does_not_apply_conditionally_skipped_cd(
+    tmp_path: Path, command: str
+) -> None:
+    (tmp_path / "sub").mkdir()
+
+    script, inline = detect_script(command, tmp_path)
+
+    assert script == tmp_path / "a.py"
+    assert inline is None
+
+
 def test_detect_scripts_treats_newline_as_command_separator(tmp_path: Path) -> None:
     analysis_dir = tmp_path / "analysis"
     analysis_dir.mkdir()
