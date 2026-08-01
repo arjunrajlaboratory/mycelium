@@ -42,32 +42,46 @@ SIZE_LIMIT_BYTES = 100 * 1024 * 1024
 EMBED_LIMIT_BYTES = 100 * 1024
 
 # --- Script-path / inline-source extraction ---
-_SHELL_DOUBLE_QUOTED_WORD = r'"(?:\\.|[^"\\])*"'
-_SHELL_SINGLE_QUOTED_WORD = r"'[^']*'"
-_SHELL_BARE_WORD = r"(?:\\.|[^\s|&;()\"'])+"
-_SHELL_WORD = (
-    rf"(?:{_SHELL_DOUBLE_QUOTED_WORD}|{_SHELL_SINGLE_QUOTED_WORD}|{_SHELL_BARE_WORD})"
+_SHELL_DOUBLE_QUOTED_COMPONENT = r'"(?:\\.|[^"\\])*"'
+_SHELL_SINGLE_QUOTED_COMPONENT = r"'[^']*'"
+_SHELL_BARE_COMPONENT = r"(?:\\.|[^\s|&;()\"'])"
+_SHELL_WORD_COMPONENT = (
+    rf"(?:{_SHELL_DOUBLE_QUOTED_COMPONENT}|{_SHELL_SINGLE_QUOTED_COMPONENT}"
+    rf"|{_SHELL_BARE_COMPONENT})"
 )
+# A POSIX shell word may concatenate adjacent quoted and unquoted components:
+# ``"analysis script".py`` and ``'analysis'\ script.py`` are each one argv
+# value. Model the whole word, not just one of its lexical components.
+_SHELL_WORD = rf"(?:{_SHELL_WORD_COMPONENT})+"
+
+
+def _shell_word_ending_pattern(ending: str) -> str:
+    """Return a shell-word regex whose final component ends in ``ending``."""
+    double_quoted = rf'"(?:\\.|[^"\\])*{ending}"'
+    single_quoted = rf"'[^']*{ending}'"
+    # Bare atoms are already represented by the prefix repetition. Keeping
+    # another variable-length bare repetition here creates catastrophic
+    # backtracking for ordinary escaped paths.
+    bare = ending
+    return (
+        rf"(?:{_SHELL_WORD_COMPONENT})*"
+        rf"(?:{double_quoted}|{single_quoted}|{bare})"
+    )
 
 
 def _shell_executable_pattern(name: str) -> str:
-    """Return a regex fragment for a bare or wholly quoted executable path."""
-    double_quoted = rf'"(?:(?:\\.|[^"\\])*/)?{name}"'
-    single_quoted = rf"'(?:[^']*/)?{name}'"
-    bare = rf"(?:(?:\\.|[^\s|&;()\"'])*/)?{name}"
-    return rf"(?:{double_quoted}|{single_quoted}|{bare})"
+    """Return a shell-word candidate ending in an executable basename."""
+    return _shell_word_ending_pattern(name)
 
 
 def _shell_path_pattern(extension: str) -> str:
     """Return a regex fragment for one shell word ending in ``extension``."""
-    double_quoted = rf'"(?:\\.|[^"\\])*{extension}"'
-    single_quoted = rf"'[^']*{extension}'"
-    bare = rf"(?:\\.|[^\s|&;()\"'])+{extension}"
-    return rf"(?:{double_quoted}|{single_quoted}|{bare})"
+    return _shell_word_ending_pattern(extension)
 
 
-_PYTHON_EXE = _shell_executable_pattern(r"python(?:\d+(?:\.\d+)*)?")
-_PYTHON_COMMAND = rf"(?<![A-Za-z0-9_.-]){_PYTHON_EXE}"
+_PYTHON_EXE_NAME = r"python(?:\d+(?:\.\d+)*)?"
+_PYTHON_EXE = _shell_executable_pattern(_PYTHON_EXE_NAME)
+_PYTHON_COMMAND = rf"(?<![A-Za-z0-9_.-])(?P<python_exe>{_PYTHON_EXE})"
 _PYTHON_FLAG = (
     r"(?:-[bBdEhiIOPqRsStuUvVx]+"
     rf"|-W\s+{_SHELL_WORD}"
@@ -98,16 +112,16 @@ RX_PYTHON_SCRIPT_PATH = re.compile(
     rf"{_PYTHON_COMMAND}\s+{_PYTHON_FLAGS}(?P<path>{_PYTHON_SCRIPT_PATH})"
 )
 RX_R_E = re.compile(
-    rf"(?<![A-Za-z0-9_.-]){_R_EXE}\s+"
+    rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+"
     rf"(?:--\S+\s+)*-e\s+(?P<quote>['\"])(?P<source>.+?)(?P=quote)",
     re.DOTALL,
 )
 RX_R_SCRIPT_PATH = re.compile(
-    rf"(?<![A-Za-z0-9_.-]){_R_SCRIPT_EXE}\s+"
+    rf"(?<![A-Za-z0-9_.-])(?P<rscript_exe>{_R_SCRIPT_EXE})\s+"
     rf"(?:--\S+\s+)*(?P<path>{_R_SCRIPT_PATH})"
 )
 RX_JUPYTER_SCRIPT_PATH = re.compile(
-    rf"(?<![A-Za-z0-9_.-]){_JUPYTER_EXE}\s+"
+    rf"(?<![A-Za-z0-9_.-])(?P<jupyter_exe>{_JUPYTER_EXE})\s+"
     rf"(?:nbconvert|execute)\s+(?:--\S+\s+)*(?P<path>{_JUPYTER_SCRIPT_PATH})"
 )
 IGNORED_PYTHON_MODULES = {
@@ -146,6 +160,25 @@ ANALYSIS_PATTERNS = (
     RX_R_SCRIPT_PATH,
     RX_JUPYTER_SCRIPT_PATH,
 )
+
+_PATTERN_EXECUTABLES = {
+    RX_PYTHON_C: ("python_exe", re.compile(_PYTHON_EXE_NAME)),
+    RX_PYTHON_M: ("python_exe", re.compile(_PYTHON_EXE_NAME)),
+    RX_PYTHON_SCRIPT_PATH: ("python_exe", re.compile(_PYTHON_EXE_NAME)),
+    RX_R_E: ("r_exe", re.compile(r"R")),
+    RX_R_SCRIPT_PATH: ("rscript_exe", re.compile(r"Rscript")),
+    RX_JUPYTER_SCRIPT_PATH: ("jupyter_exe", re.compile(r"jupyter")),
+}
+
+
+def _match_has_expected_executable(match: re.Match[str], pattern: re.Pattern) -> bool:
+    """Validate a permissive raw shell-word candidate after quote decoding."""
+    group, basename_pattern = _PATTERN_EXECUTABLES[pattern]
+    try:
+        words = shlex.split(match.group(group), comments=False, posix=True)
+    except ValueError:
+        return False
+    return len(words) == 1 and basename_pattern.fullmatch(Path(words[0]).name) is not None
 
 # The hook receives a shell command string and one overall exit status, not an
 # execution trace. AND/OR lists can be reasoned about conservatively, but shell
@@ -319,7 +352,11 @@ def sha256_file(p: Path) -> str | None:
 
 
 def is_analysis(bash_cmd: str) -> bool:
-    return any(p.search(bash_cmd) for p in ANALYSIS_PATTERNS)
+    return any(
+        _match_has_expected_executable(match, pattern)
+        for pattern in ANALYSIS_PATTERNS
+        for match in pattern.finditer(bash_cmd)
+    )
 
 
 def detect_script(bash_cmd: str, cwd: Path) -> tuple[Path | None, str | None]:
@@ -510,67 +547,245 @@ def _current_command_prefix(fragment: str) -> list[str] | None:
     return segment
 
 
+_ASSIGNMENT_RX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+_EXECUTION_WRAPPERS = {
+    "command",
+    "env",
+    "time",
+    "exec",
+    "nice",
+    "timeout",
+    "conda",
+    "uv",
+    "poetry",
+}
+
+
+def _consume_value_option(
+    tokens: list[str], index: int, value_options: set[str]
+) -> int | None:
+    """Consume one option plus its separate value, failing if it is absent."""
+    if tokens[index] not in value_options:
+        return None
+    return index + 2 if index + 1 < len(tokens) else -1
+
+
+def _consume_execution_wrapper(tokens: list[str], index: int) -> int | None:
+    """Return the next wrapper index, ``len(tokens)``, or ``None`` on misuse.
+
+    ``tokens`` contains only text before the candidate interpreter. Therefore
+    consuming the complete prefix proves that every preceding token is wrapper
+    syntax and that the interpreter is the command those wrappers will execute.
+    """
+    wrapper = Path(tokens[index]).name
+    index += 1
+
+    if wrapper == "command":
+        while index < len(tokens):
+            token = tokens[index]
+            if token in {"-v", "-V", "--help"}:
+                return None
+            if token == "--":
+                return index + 1 if index + 1 < len(tokens) else len(tokens)
+            if token == "-p":
+                index += 1
+                continue
+            break
+        return index
+
+    if wrapper == "env":
+        value_options = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+        flag_options = {"-i", "-0", "--ignore-environment", "--null"}
+        while index < len(tokens):
+            token = tokens[index]
+            if token in {"--help", "--version"}:
+                return None
+            consumed = _consume_value_option(tokens, index, value_options)
+            if consumed == -1:
+                return None
+            if consumed is not None:
+                index = consumed
+                continue
+            if any(token.startswith(f"{option}=") for option in value_options):
+                index += 1
+                continue
+            if token in flag_options:
+                index += 1
+                continue
+            if token == "--":
+                return index + 1 if index + 1 < len(tokens) else len(tokens)
+            if _ASSIGNMENT_RX.match(token):
+                index += 1
+                continue
+            break
+        return index
+
+    if wrapper == "time":
+        value_options = {"-f", "--format", "-o", "--output"}
+        flag_options = {
+            "-p",
+            "--portability",
+            "-a",
+            "--append",
+            "-v",
+            "--verbose",
+            "--quiet",
+        }
+        while index < len(tokens):
+            token = tokens[index]
+            consumed = _consume_value_option(tokens, index, value_options)
+            if consumed == -1:
+                return None
+            if consumed is not None:
+                index = consumed
+                continue
+            if any(token.startswith(f"{option}=") for option in value_options):
+                index += 1
+                continue
+            if token in flag_options:
+                index += 1
+                continue
+            if token == "--":
+                return index + 1 if index + 1 < len(tokens) else len(tokens)
+            break
+        return index
+
+    if wrapper == "exec":
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "-a":
+                if index + 1 >= len(tokens):
+                    return None
+                index += 2
+                continue
+            if token.startswith("--argv0="):
+                index += 1
+                continue
+            if token == "--":
+                return index + 1 if index + 1 < len(tokens) else len(tokens)
+            if re.fullmatch(r"-[cl]+", token):
+                index += 1
+                continue
+            break
+        return index
+
+    if wrapper == "nice":
+        while index < len(tokens):
+            token = tokens[index]
+            if token in {"--help", "--version"}:
+                return None
+            if token in {"-n", "--adjustment"}:
+                if index + 1 >= len(tokens):
+                    return None
+                index += 2
+                continue
+            if token.startswith("--adjustment=") or re.fullmatch(r"-\d+", token):
+                index += 1
+                continue
+            if token == "--":
+                return index + 1 if index + 1 < len(tokens) else len(tokens)
+            if token.startswith("-"):
+                return None
+            break
+        return index
+
+    if wrapper == "timeout":
+        value_options = {"-k", "--kill-after", "-s", "--signal"}
+        flag_options = {"--foreground", "--preserve-status", "--verbose"}
+        while index < len(tokens):
+            token = tokens[index]
+            if token in {"--help", "--version"}:
+                return None
+            consumed = _consume_value_option(tokens, index, value_options)
+            if consumed == -1:
+                return None
+            if consumed is not None:
+                index = consumed
+                continue
+            if any(token.startswith(f"{option}=") for option in value_options):
+                index += 1
+                continue
+            if token in flag_options:
+                index += 1
+                continue
+            if token == "--":
+                index += 1
+                break
+            if token.startswith("-"):
+                return None
+            break
+        # timeout requires a duration before the command it executes.
+        if index >= len(tokens):
+            return None
+        return index + 1
+
+    if wrapper in {"conda", "uv", "poetry"}:
+        if index >= len(tokens) or tokens[index] != "run":
+            return None
+        index += 1
+        value_options = {
+            "conda": {"-n", "--name", "-p", "--prefix", "--cwd"},
+            "uv": {
+                "--project",
+                "--directory",
+                "--python",
+                "--with",
+                "--with-editable",
+                "--with-requirements",
+                "--env-file",
+            },
+            "poetry": set(),
+        }[wrapper]
+        while index < len(tokens):
+            token = tokens[index]
+            if token in {"-h", "--help", "-V", "--version"}:
+                return None
+            consumed = _consume_value_option(tokens, index, value_options)
+            if consumed == -1:
+                return None
+            if consumed is not None:
+                index = consumed
+                continue
+            if any(token.startswith(f"{option}=") for option in value_options):
+                index += 1
+                continue
+            if token == "--":
+                return index + 1 if index + 1 < len(tokens) else len(tokens)
+            if token.startswith("-"):
+                index += 1
+                continue
+            break
+        return index
+
+    return None
+
+
+def _prefix_expects_executable(prefix: list[str]) -> bool:
+    """Whether a token prefix is only assignments and execution wrappers."""
+    index = 0
+    while index < len(prefix) and _ASSIGNMENT_RX.match(prefix[index]):
+        index += 1
+    if index == len(prefix):
+        return True
+
+    saw_wrapper = False
+    while index < len(prefix):
+        if Path(prefix[index]).name not in _EXECUTION_WRAPPERS:
+            return False
+        saw_wrapper = True
+        next_index = _consume_execution_wrapper(prefix, index)
+        if next_index is None or next_index <= index:
+            return False
+        index = next_index
+    return saw_wrapper
+
+
 def _match_is_command_invocation(bash_cmd: str, offset: int) -> bool:
     """Reject interpreter text that is an argument, comment, or quoted body."""
     prefix = _current_command_prefix(bash_cmd[:offset])
     if prefix is None:
         return False
-    while prefix and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", prefix[0]):
-        prefix.pop(0)
-    if not prefix or prefix == ["command"]:
-        return True
-    if Path(prefix[0]).name == "env":
-        # `env` may contain options and assignments before the executable, but
-        # another ordinary command token means Python/R is merely an argument.
-        ordinary = [
-            token
-            for token in prefix[1:]
-            if not token.startswith("-")
-            and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", token)
-        ]
-        return not ordinary
-    if len(prefix) < 2 or prefix[1] != "run":
-        return False
-    wrapper = prefix[0]
-    if wrapper not in {"conda", "uv", "poetry"}:
-        return False
-
-    value_options = {
-        "conda": {"-n", "--name", "-p", "--prefix", "--cwd"},
-        "uv": {
-            "--project",
-            "--directory",
-            "--python",
-            "--with",
-            "--with-editable",
-            "--with-requirements",
-            "--env-file",
-        },
-        "poetry": set(),
-    }[wrapper]
-    arguments = prefix[2:]
-    index = 0
-    while index < len(arguments):
-        token = arguments[index]
-        if token in {"-h", "--help", "-V", "--version"}:
-            return False
-        if token == "--":
-            return index == len(arguments) - 1
-        if token in value_options:
-            index += 2
-            if index > len(arguments):
-                return False
-            continue
-        if any(token.startswith(f"{option}=") for option in value_options):
-            index += 1
-            continue
-        if token.startswith("-"):
-            index += 1
-            continue
-        # A non-option token before Python/R is another executable, so the
-        # interpreter is merely one of its arguments.
-        return False
-    return True
+    return _prefix_expects_executable(prefix)
 
 
 def _simple_command_status(segment: list[str], cwd: Path) -> bool | None:
@@ -751,6 +966,8 @@ def _detect_scripts_with_cwd(
     seen_paths: set[Path] = set()
     seen_inline: set[tuple[str, Path]] = set()
     for m in RX_PYTHON_C.finditer(bash_cmd):
+        if not _match_has_expected_executable(m, RX_PYTHON_C):
+            continue
         if not include_python_inline:
             continue
         if require_execution_evidence and not _match_is_proven_executed(
@@ -764,6 +981,8 @@ def _detect_scripts_with_cwd(
             out.append((None, src, effective_cwd))
             seen_inline.add(identity)
     for m in RX_R_E.finditer(bash_cmd):
+        if not _match_has_expected_executable(m, RX_R_E):
+            continue
         if require_execution_evidence and not _match_is_proven_executed(
             bash_cmd, m.start(), bash_exit, cwd
         ):
@@ -775,6 +994,8 @@ def _detect_scripts_with_cwd(
             out.append((None, src, effective_cwd))
             seen_inline.add(identity)
     for m in RX_PYTHON_M.finditer(bash_cmd):
+        if not _match_has_expected_executable(m, RX_PYTHON_M):
+            continue
         if require_execution_evidence and not _match_is_proven_executed(
             bash_cmd, m.start(), bash_exit, cwd
         ):
@@ -794,6 +1015,8 @@ def _detect_scripts_with_cwd(
         RX_JUPYTER_SCRIPT_PATH,
     ):
         for m in pattern.finditer(bash_cmd):
+            if not _match_has_expected_executable(m, pattern):
+                continue
             if require_execution_evidence and not _match_is_proven_executed(
                 bash_cmd, m.start(), bash_exit, cwd
             ):

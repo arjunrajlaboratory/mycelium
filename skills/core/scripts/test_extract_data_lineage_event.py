@@ -574,6 +574,15 @@ def test_main_resets_execution_context_after_list_separator(tmp_path: Path) -> N
         "uv run echo python a.py",
         "conda run echo python a.py",
         "poetry run echo python a.py",
+        "time echo python a.py",
+        "exec echo python a.py",
+        "nice echo python a.py",
+        "timeout 1s echo python a.py",
+        "exec -a python echo a.py",
+        "nice -n python echo a.py",
+        "timeout --signal python 1s echo a.py",
+        "notpython a.py",
+        'echo "python" a.py',
     ],
 )
 def test_main_rejects_unproven_shell_text_matches(
@@ -757,6 +766,15 @@ def test_main_accepts_shell_syntax_inside_quoted_inline_source(
         "uv run --frozen python a.py",
         "conda run -n analysis python a.py",
         "poetry run python a.py",
+        "time python a.py",
+        "time -p python a.py",
+        "exec python a.py",
+        "exec -a analysis python a.py",
+        "nice python a.py",
+        "nice -n 5 python a.py",
+        "timeout 10s python a.py",
+        "timeout --signal=KILL --kill-after=2s 10s python a.py",
+        "time nice -n 5 timeout 10s python a.py",
     ],
 )
 def test_main_accepts_supported_execution_wrappers(
@@ -862,6 +880,16 @@ def test_main_accepts_common_python_executable_and_flag_forms(
             "import pandas as pd\npd.read_csv('input.csv')\n",
         ),
         (
+            r"python 'analysis'\ script.py",
+            "analysis script.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
+            'python "analysis script".py',
+            "analysis script.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
             'python "analysis #1.py"',
             "analysis #1.py",
             "import pandas as pd\npd.read_csv('input.csv')\n",
@@ -892,7 +920,17 @@ def test_main_accepts_common_python_executable_and_flag_forms(
             "import pandas as pd\npd.read_csv('input.csv')\n",
         ),
         (
+            '"/tmp/venv with space"/bin/python "analysis script".py',
+            "analysis script.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
             'python -W "ignore: message" "analysis script.py"',
+            "analysis script.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
+            'python -W "ignore: "message "analysis script".py',
             "analysis script.py",
             "import pandas as pd\npd.read_csv('input.csv')\n",
         ),
@@ -903,6 +941,16 @@ def test_main_accepts_common_python_executable_and_flag_forms(
         ),
         (
             r"Rscript analysis\ script.R",
+            "analysis script.R",
+            "read.csv('input.csv')\n",
+        ),
+        (
+            'Rscript "analysis script".R',
+            "analysis script.R",
+            "read.csv('input.csv')\n",
+        ),
+        (
+            'nice "/tmp/R env"/bin/Rscript "analysis script".R',
             "analysis script.R",
             "read.csv('input.csv')\n",
         ),
@@ -918,6 +966,17 @@ def test_main_accepts_common_python_executable_and_flag_forms(
         ),
         (
             r"jupyter execute analysis\ notebook.ipynb",
+            "analysis notebook.ipynb",
+            "{}\n",
+        ),
+        (
+            'jupyter execute "analysis notebook".ipynb',
+            "analysis notebook.ipynb",
+            "{}\n",
+        ),
+        (
+            'exec timeout 10s "/tmp/Jupyter env"/bin/jupyter execute '
+            '"analysis notebook".ipynb',
             "analysis notebook.ipynb",
             "{}\n",
         ),

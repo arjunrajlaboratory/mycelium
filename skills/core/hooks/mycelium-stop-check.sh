@@ -234,38 +234,12 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       rm -f "$STATE_DIR/living-reminder-baseline.json"
       # No registry row, no finalization — clean exit (noise session)
     else
-      # Auto-finalize the session log (factual record — no Claude needed)
+      # Prepare the finalization transaction, but do not stamp the log as
+      # accepted until every required registry/context write has succeeded.
+      # SessionStart treats a nonempty `ended:` field as definitive cleanup
+      # evidence, so writing it before a failed registry upsert loses retry
+      # ownership on resume/compact.
       LOG_DIR=$(dirname "$LOG_PATH")
-      ENDED=$(date +%Y-%m-%dT%H:%M:%S%z)
-
-      # Update frontmatter in-place using sed
-      sed -i.bak "s|^ended:.*|ended: ${ENDED}|" "$LOG_PATH" 2>/dev/null
-      sed -i.bak "s|^duration_minutes:.*|duration_minutes: ${DURATION_MIN}|" "$LOG_PATH" 2>/dev/null
-      sed -i.bak "s|^files_changed:.*|files_changed: ${FILES_CHANGED}|" "$LOG_PATH" 2>/dev/null
-      rm -f "${LOG_PATH}.bak"
-
-      # Append the same de-duplicated file set used for files_changed.
-      ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
-      FILE_LIST_MD=""
-      if [ -n "$SESSION_CHANGED_FILES" ]; then
-        FILE_LIST_MD=$(printf '%s\n' "$SESSION_CHANGED_FILES" | sed 's|^|- `|;s|$|`|')
-      fi
-      # Append a timestamped session-end entry (health hook extracts this for next-session context)
-      END_TIME_SHORT=$(date +%H:%M)
-      if grep -q '^### .* — Session ended (' "$LOG_PATH" 2>/dev/null; then
-        : # Retry after a registry failure without duplicating the log footer.
-      elif [ -n "$FILE_LIST_MD" ]; then
-        # Build a readable summary for the timestamped entry
-        FILE_SUMMARY=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -3 \
-          | while IFS= read -r changed_path; do basename "$changed_path"; done \
-          | tr '\n' ',' | sed 's/,$//; s/,/, /g')
-        if [ "$FILES_CHANGED" -gt 3 ]; then
-          FILE_SUMMARY="${FILE_SUMMARY} (+$((FILES_CHANGED - 3)) more)"
-        fi
-        printf "\n### %s — Session ended (%sm, %s files)\n- Modified: %s\n\n### Files Modified\n%s\n" "$END_TIME_SHORT" "$DURATION_MIN" "$FILES_CHANGED" "$FILE_SUMMARY" "$FILE_LIST_MD" >> "$LOG_PATH"
-      else
-        printf "\n### %s — Session ended (%sm, %s files)\n" "$END_TIME_SHORT" "$DURATION_MIN" "$FILES_CHANGED" >> "$LOG_PATH"
-      fi
 
       # Append to LOG_REGISTRY.md
       PROJECT_SLUG=$({ grep '^project:' "$LOG_PATH" || echo "project: unknown"; } | sed 's/^project: *//')
@@ -368,6 +342,34 @@ ${_WORK_LINES}
 ## Current state
 - ${_BRANCH_NOTE}
 LAST_SESSION_EOF
+
+      # All fallible transaction participants have accepted the session. Only
+      # now publish final state in the log, which lets SessionStart distinguish
+      # an accepted session from one that still needs a deterministic retry.
+      ENDED=$(date +%Y-%m-%dT%H:%M:%S%z)
+      sed -i.bak "s|^ended:.*|ended: ${ENDED}|" "$LOG_PATH" 2>/dev/null
+      sed -i.bak "s|^duration_minutes:.*|duration_minutes: ${DURATION_MIN}|" "$LOG_PATH" 2>/dev/null
+      sed -i.bak "s|^files_changed:.*|files_changed: ${FILES_CHANGED}|" "$LOG_PATH" 2>/dev/null
+      rm -f "${LOG_PATH}.bak"
+
+      FILE_LIST_MD=""
+      if [ -n "$SESSION_CHANGED_FILES" ]; then
+        FILE_LIST_MD=$(printf '%s\n' "$SESSION_CHANGED_FILES" | sed 's|^|- `|;s|$|`|')
+      fi
+      END_TIME_SHORT=$(date +%H:%M)
+      if grep -q '^### .* — Session ended (' "$LOG_PATH" 2>/dev/null; then
+        : # An interrupted accepted finalization is safe to retry idempotently.
+      elif [ -n "$FILE_LIST_MD" ]; then
+        FILE_SUMMARY=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -3 \
+          | while IFS= read -r changed_path; do basename "$changed_path"; done \
+          | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+        if [ "$FILES_CHANGED" -gt 3 ]; then
+          FILE_SUMMARY="${FILE_SUMMARY} (+$((FILES_CHANGED - 3)) more)"
+        fi
+        printf "\n### %s — Session ended (%sm, %s files)\n- Modified: %s\n\n### Files Modified\n%s\n" "$END_TIME_SHORT" "$DURATION_MIN" "$FILES_CHANGED" "$FILE_SUMMARY" "$FILE_LIST_MD" >> "$LOG_PATH"
+      else
+        printf "\n### %s — Session ended (%sm, %s files)\n" "$END_TIME_SHORT" "$DURATION_MIN" "$FILES_CHANGED" >> "$LOG_PATH"
+      fi
 
       # Clean up sentinels
       rm -f "$ACTIVE_LOG_FILE"

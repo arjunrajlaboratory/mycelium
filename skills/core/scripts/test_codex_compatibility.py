@@ -1047,6 +1047,70 @@ def test_codex_post_action_accepts_quoted_script_path_with_spaces(tmp_path):
     assert "MYCELIUM POST-ACTION PROTOCOL" in context
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        'time python "analysis script".py',
+        'exec nice -n 5 timeout 10s python "analysis script".py',
+    ],
+)
+def test_codex_post_action_accepts_wrapped_concatenated_script_paths(
+    tmp_path, command
+):
+    repo = _repo(tmp_path)
+    script = repo / "analysis script.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": {"exit_code": 0},
+            "turn_id": "turn-wrapped-concatenated-script-path",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "MYCELIUM POST-ACTION PROTOCOL" in context
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'time python "analysis script".py',
+        'exec nice -n 5 timeout 10s python "analysis script".py',
+    ],
+)
+def test_codex_data_tracker_accepts_wrapped_concatenated_script_paths(
+    tmp_path, command
+):
+    repo = _repo(tmp_path)
+    script = repo / "analysis script.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+
+    result = _run_hook(
+        "mycelium-data-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": {"exit_code": 0},
+            "turn_id": "turn-wrapped-concatenated-lineage",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(
+        (repo / ".mycelium" / "mycelium-data-events.tmp").read_text()
+    )
+    assert event["script"] == str(script)
+
+
 def test_codex_data_tracker_accepts_escaped_script_path_with_spaces(tmp_path):
     repo = _repo(tmp_path)
     script = repo / "analysis script.py"
@@ -1462,6 +1526,18 @@ def test_stop_preserves_transaction_when_registry_upsert_fails(tmp_path):
     assert "registry finalization failed" in failed_payload["reason"]
     assert active_marker.is_file()
     assert (state / "session-file-baseline.json").is_file()
+    assert "ended:\n" in log_path.read_text()
+    assert "Session ended" not in log_path.read_text()
+
+    resumed = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "resume", "turn_id": "upsert-resume"},
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert active_marker.is_file()
+    assert Path(active_marker.read_text().splitlines()[0]) == log_path
+    assert log_path.name[:14] == session_id
 
     retried = _run_hook(
         "mycelium-stop-check.sh",
@@ -1827,6 +1903,13 @@ def test_codex_stop_counts_unique_tracked_untracked_and_activity_paths(tmp_path)
     (state / ".gitignore").write_text("*\n!.gitignore\n")
     log_path = repo / ".living" / "log" / "2026-07-31-001-repo.md"
     log_path.parent.mkdir()
+    (log_path.parent / "LOG_REGISTRY.md").write_text(
+        "# Session Log Registry\n\n"
+        "| Date | Session ID | Project | Branch | Duration | Files Changed | "
+        "Summary | Key Outputs | Status | Tags | Log |\n"
+        "|------|-----------|---------|--------|----------|---------------|"
+        "---------|-------------|--------|------|-----|\n"
+    )
     log_path.write_text(
         "---\n"
         "session_id: 2026-07-31-001\n"
