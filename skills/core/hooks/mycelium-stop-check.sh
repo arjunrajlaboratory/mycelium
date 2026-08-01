@@ -18,7 +18,8 @@ source "$HERE/mycelium-hook-lib.sh"
 # after a Stop hook asks the model to continue. That flag must not bypass an
 # outstanding Mycelium reminder: the state checks below naturally stop
 # blocking once .living/ has been updated, which is the recursion guard.
-cat >/dev/null
+INPUT=$(cat)
+HOST_SESSION_ID=$(printf '%s' "$INPUT" | mycelium_json_get 'session_id')
 
 # Determine repo root early (used by both log finalization and .living/ checks)
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
@@ -26,6 +27,31 @@ if [ -z "$REPO_ROOT" ]; then
   exit 0
 fi
 mycelium_prepare_state_dir "$REPO_ROOT"
+
+# Accepting Stop owns final cleanup of data-lineage state. The lineage hook
+# runs first and may be followed by a blocking decision here; retaining both
+# files across that block lets later analysis append to the same manifest.
+mycelium_accept_lineage_session() {
+  local session_marker="$STATE_DIR/data-lineage-session-id.tmp"
+  local events_file="$STATE_DIR/mycelium-data-events.tmp"
+  local session_id
+  session_id=$(head -1 "$session_marker" 2>/dev/null || echo "")
+  if [[ -z "$session_id" ]]; then
+    session_id="$HOST_SESSION_ID"
+  fi
+  if [[ ! "$session_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    session_id="unattributed-$(date +%s)"
+  fi
+
+  if [[ -f "$events_file" ]]; then
+    local prev_dir="$STATE_DIR/mycelium-data-events-prev"
+    mkdir -p "$prev_dir"
+    mv "$events_file" "$prev_dir/${session_id}.tmp"
+    # Keep only the 20 most recent raw-event archives.
+    ls -t "$prev_dir"/*.tmp 2>/dev/null | tail -n +21 | xargs rm -f 2>/dev/null || true
+  fi
+  rm -f "$session_marker"
+}
 
 # Resolve this hook's mycelium-core dir once, in absolute form. Used to locate
 # the upsert script and the log-scribe template. BASH_SOURCE may be unset in
@@ -266,6 +292,7 @@ fi
 # If no .living/ directory, skip (SessionStart hook handles scaffolding)
 LIVING_DIR="$REPO_ROOT/.living"
 if [ ! -d "$LIVING_DIR" ]; then
+  mycelium_accept_lineage_session
   exit 0
 fi
 
@@ -275,6 +302,7 @@ REMINDER_FILE="$STATE_DIR/mycelium-reminded.tmp"
 ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
 if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
   rm -f "$STATE_DIR/session-start-ts.tmp"
+  mycelium_accept_lineage_session
   exit 0
 fi
 
@@ -343,6 +371,7 @@ if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$CON
 
   ENHANCE_MSG=".living/ updated. Enhance .mycelium/last-session.md with work, decisions, blockers, current state, and next steps. The deterministic LOG_REGISTRY summary is already in place."
   mycelium_emit_context "Stop" "$ENHANCE_MSG"
+  mycelium_accept_lineage_session
   exit 0
 fi
 

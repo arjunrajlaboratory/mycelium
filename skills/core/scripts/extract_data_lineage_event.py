@@ -193,33 +193,42 @@ def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
             tokens.append(token)
 
     cwd = initial_cwd
-    subshell_states: list[tuple[Path, bool]] = []
+    subshell_states: list[tuple[Path, bool, bool]] = []
     segment: list[str] = []
     segment_is_conditional = False
+    chain_has_or = False
     for token in tokens:
         if token in {"&&", "||"}:
-            # A segment on the right of either operator may be skipped. Since
-            # PostToolUse does not expose per-segment execution, never carry a
-            # conditional cd into a later command's inferred cwd.
             if not segment_is_conditional:
+                # The first segment in an AND-OR list always executes.
+                cwd = _apply_cd(segment, cwd)
+            elif token == "&&" and not chain_has_or:
+                # Reaching the matched command at the end of an uninterrupted
+                # AND chain proves that each earlier segment in that chain ran
+                # successfully. A mixed OR chain is ambiguous: for
+                # ``true || cd sub && python a.py``, Python runs while cd does
+                # not, so retain the prior cwd in that case.
                 cwd = _apply_cd(segment, cwd)
             segment = []
             segment_is_conditional = True
+            if token == "||":
+                chain_has_or = True
         elif token in {";", "\n"}:
             if not segment_is_conditional:
                 cwd = _apply_cd(segment, cwd)
             segment = []
             segment_is_conditional = False
+            chain_has_or = False
         elif token in {"|", "&"}:
             # A cd in a pipeline/subshell does not reliably affect the parent.
             segment = []
         elif token == "(":
             segment = []
-            subshell_states.append((cwd, segment_is_conditional))
+            subshell_states.append((cwd, segment_is_conditional, chain_has_or))
         elif token == ")":
             segment = []
             if subshell_states:
-                cwd, segment_is_conditional = subshell_states.pop()
+                cwd, segment_is_conditional, chain_has_or = subshell_states.pop()
         else:
             segment.append(token)
     return cwd

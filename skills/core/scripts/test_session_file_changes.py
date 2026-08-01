@@ -101,6 +101,32 @@ def test_amending_old_commit_reports_only_tree_delta(tmp_path: Path) -> None:
     assert collect_changes(repo, baseline, start_ts=session_start) == ["new.txt"]
 
 
+def test_session_commit_restoring_baseline_content_is_detected(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    config = repo / "config.txt"
+    original_branch = subprocess.check_output(
+        ["git", "-C", str(repo), "branch", "--show-current"], text=True
+    ).strip()
+    _git(repo, "switch", "-q", "-c", "existing-feature")
+    config.write_text("feature value\n")
+    _git(repo, "add", "config.txt")
+    _git(repo, "commit", "-q", "-m", "pre-existing feature config")
+    _git(repo, "switch", "-q", original_branch)
+    config.write_text("baseline\n")
+    _git(repo, "add", "config.txt")
+    _git(repo, "commit", "-q", "-m", "baseline config")
+    baseline = build_snapshot(repo)
+
+    # Reflog position, not timestamp separation, defines the session boundary.
+    session_start = int(time.time())
+    _git(repo, "switch", "-q", "existing-feature")
+    config.write_text("baseline\n")
+    _git(repo, "add", "config.txt")
+    _git(repo, "commit", "-q", "-m", "align config with baseline")
+
+    assert collect_changes(repo, baseline, start_ts=session_start) == ["config.txt"]
+
+
 def test_activity_file_retains_deleted_paths_and_ignores_external_paths(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     baseline = build_snapshot(repo)
