@@ -14,8 +14,10 @@ This repository is a **mycelium-enabled living repository**. It carries its own 
 Mycelium scripts, references, and templates remain in the installed plugin,
 not in this project. `.mycelium/plugin-root` records the current machine-local
 plugin root. Resolve any path beginning with `skills/` or `network/` against
-that directory. Re-run Mycelium migration after a plugin upgrade to refresh
-the pointer and hook paths.
+that directory. Trusted Codex plugin hooks refresh the pointer automatically
+after an upgrade. For Claude Code, or for a repository created before the
+provider-neutral pointer existed, re-run the idempotent Mycelium migration if
+the installed bundle path changes.
 
 ## Installed Convention Packs
 
@@ -114,9 +116,11 @@ or depend on a project-local `.codex/hooks.json`:
 The PostToolUse hook ensures the protocol runs automatically after analysis/data/algorithm work. Read-only and config-only sessions are never interrupted.
 
 Codex requires a one-time approval for each exact plugin command hook. After
-installing or upgrading Mycelium, open `/hooks` in the Codex CLI, review and
-trust all five Mycelium hooks, fully exit Codex, then start a fresh task. Until
-approval, Codex intentionally skips the plugin-bundled commands.
+installing or upgrading Mycelium, open `/hooks` in a current Codex CLI—not the
+desktop app—review and trust all five Mycelium hooks, fully exit Codex, then
+start a fresh task. If `/hooks` is absent, run `codex update` and relaunch the
+CLI first. Until approval, Codex intentionally skips the plugin-bundled
+commands.
 
 ### Knowledge Transfer (Cross-Project)
 

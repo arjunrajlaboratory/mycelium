@@ -476,6 +476,54 @@ def test_main_honors_cd_for_script_and_relative_data_paths(tmp_path: Path) -> No
     assert event["inputs"][0]["path"] == str(analysis_dir / "input.csv")
 
 
+@pytest.mark.parametrize(
+    "command,expected_event",
+    [
+        ("cd missing || python a.py", True),
+        ("false || python a.py", True),
+        ("cd existing || python a.py", False),
+        ("true || python a.py", False),
+        ("unknown-command || python a.py", False),
+    ],
+)
+def test_main_tracks_only_proven_executed_successful_or_alternatives(
+    tmp_path: Path, command: str, expected_event: bool
+) -> None:
+    import json
+    import subprocess
+
+    (tmp_path / "existing").mkdir()
+    script = tmp_path / "a.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            "0",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert target.exists() is expected_event
+    if expected_event:
+        assert json.loads(target.read_text())["script"] == str(script)
+
+
 def test_main_resets_execution_context_after_list_separator(tmp_path: Path) -> None:
     """An earlier pipeline must not make a later unconditional list ambiguous."""
     import json

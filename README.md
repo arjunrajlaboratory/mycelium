@@ -56,11 +56,13 @@ codex plugin add mycelium@mycelium
 Start a new task after installation. Codex can invoke the bundled skills
 implicitly, through the plugin picker, or explicitly by skill name.
 
-Before the first Mycelium task, launch the Codex CLI, open `/hooks`, and trust
-all five Mycelium plugin hooks. Fully exit Codex afterward and restart it so the
-approved `SessionStart` hook is present from process startup. The hooks are
-bundled with the plugin and resolve through Codex's dynamic `PLUGIN_ROOT`; they
-do not embed a versioned cache path into your repositories.
+Before the first Mycelium task, launch a current Codex CLI, open `/hooks`, and
+trust all five Mycelium plugin hooks. `/hooks` is a CLI command, not a Codex
+desktop-app slash command; if the CLI does not list it, run `codex update` and
+relaunch the CLI. Fully exit Codex afterward and restart it so the approved
+`SessionStart` hook is present from process startup. The hooks are bundled with
+the plugin and resolve through Codex's dynamic `PLUGIN_ROOT`; they do not embed
+a versioned cache path into your repositories.
 
 **Local Claude development install:**
 
@@ -83,12 +85,13 @@ memory layer, canonical `MYCELIUM.md` guidance, and thin `CLAUDE.md` and
 `report-generator`, and `idea-generator`) are installed automatically.
 
 **Codex hook approval:** if you did not approve the plugin hooks during
-installation, open `/hooks` in the Codex CLI, trust all five Mycelium command
-hooks, fully exit Codex, and restart it before opening the initialized project.
-Codex deliberately skips untrusted command hooks. Revisit `/hooks` after plugin
-upgrades: Codex resolves `PLUGIN_ROOT` to the new live cache path, so the
-displayed command and its trust record can change even though repositories no
-longer retain the old path.
+installation, open `/hooks` in a current Codex CLI—not the desktop app—and trust
+all five Mycelium command hooks. If `/hooks` is absent, run `codex update` and
+relaunch the CLI. Fully exit Codex and restart it before opening the initialized
+project. Codex deliberately skips untrusted command hooks. Revisit `/hooks`
+after plugin upgrades: Codex resolves `PLUGIN_ROOT` to the new live cache path,
+so the displayed command and its trust record can change even though
+repositories no longer retain the old path.
 
 ### 3. Install domain conventions (optional)
 
@@ -213,10 +216,12 @@ Claude hooks are registered per repository by `init_repo.py`. Codex hooks are
 bundled once with the plugin in `hooks/hooks.json`; a small dispatcher no-ops
 outside Mycelium repositories, refreshes `.mycelium/plugin-root`, and invokes
 the shared scripts through Codex's dynamic `PLUGIN_ROOT`. Codex users must open
-`/hooks` in the CLI and trust all five Mycelium command hooks, then fully exit
-and restart Codex. Codex exposes shell and unified-exec work under the `Bash`
-matcher and file edits as `apply_patch`; read telemetry is Claude-only because
-Codex does not expose its internal file reads to `PostToolUse`.
+`/hooks` in a current CLI—not the desktop app—and trust all five Mycelium
+command hooks, then fully exit and restart Codex. Run `codex update` first if
+the CLI does not expose `/hooks`. Codex exposes shell and unified-exec work
+under the `Bash` matcher and file edits as `apply_patch`; read telemetry is
+Claude-only because Codex does not expose its internal file reads to
+`PostToolUse`.
 
 SessionStart snapshots any pre-existing dirty or untracked work. Stop therefore
 records only files changed during the current task, blocks immediately when

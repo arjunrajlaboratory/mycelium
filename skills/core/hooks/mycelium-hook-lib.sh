@@ -7,6 +7,8 @@ mycelium_prepare_state_dir() {
   local requested_state=""
   local living_dir=""
   local unsafe_link=""
+  local plugin_pointer=""
+  local pointer_tmp=""
 
   repo_root=$(cd "$repo_root" 2>/dev/null && pwd -P) || return 1
   living_dir="$repo_root/.living"
@@ -26,12 +28,45 @@ mycelium_prepare_state_dir() {
   fi
 
   requested_state="${MYCELIUM_STATE_DIR:-$repo_root/.mycelium}"
-  if [[ "$requested_state" != /* ]]; then
-    requested_state="$repo_root/$requested_state"
-  fi
-  if [[ -L "$requested_state" ]]; then
-    return 1
-  fi
+  requested_state=$(python3 - "$repo_root" "$requested_state" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve(strict=True)
+candidate = Path(sys.argv[2])
+if not candidate.is_absolute():
+    candidate = root / candidate
+candidate = Path(os.path.abspath(candidate))
+try:
+    relative = candidate.relative_to(root)
+except ValueError:
+    raise SystemExit(1)
+if not relative.parts:
+    raise SystemExit(1)
+
+# Reject every existing symlink or non-directory component before mkdir. This
+# validates the path before the shell can follow a repository-controlled link.
+current = root
+for part in relative.parts:
+    current = current / part
+    try:
+        mode = current.lstat().st_mode
+    except FileNotFoundError:
+        continue
+    except OSError:
+        raise SystemExit(1)
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise SystemExit(1)
+
+try:
+    candidate.resolve(strict=False).relative_to(root)
+except (OSError, RuntimeError, ValueError):
+    raise SystemExit(1)
+print(candidate)
+PY
+  ) || return 1
   mkdir -p "$requested_state" || return 1
   STATE_DIR=$(cd "$requested_state" 2>/dev/null && pwd -P) || return 1
   case "$STATE_DIR" in
@@ -45,6 +80,27 @@ mycelium_prepare_state_dir() {
 
   if [[ ! -f "$STATE_DIR/.gitignore" ]]; then
     printf '*\n!.gitignore\n' > "$STATE_DIR/.gitignore"
+  fi
+
+  # Codex plugin hooks carry their live bundle root through the dispatcher.
+  # Refresh the generated guidance pointer only after the shared state safety
+  # checks above, and replace it atomically rather than following an existing
+  # path with shell redirection.
+  if [[ -n "${MYCELIUM_PLUGIN_ROOT:-}" ]]; then
+    plugin_pointer="$STATE_DIR/plugin-root"
+    if [[ -L "$plugin_pointer" \
+      || ( -e "$plugin_pointer" && ! -f "$plugin_pointer" ) ]]; then
+      return 1
+    fi
+    if [[ ! -f "$plugin_pointer" \
+      || "$(cat "$plugin_pointer" 2>/dev/null || true)" != "$MYCELIUM_PLUGIN_ROOT" ]]; then
+      pointer_tmp=$(mktemp "$STATE_DIR/.plugin-root.tmp.XXXXXX") || return 1
+      if ! printf '%s\n' "$MYCELIUM_PLUGIN_ROOT" > "$pointer_tmp" \
+        || ! mv -f "$pointer_tmp" "$plugin_pointer"; then
+        rm -f "$pointer_tmp"
+        return 1
+      fi
+    fi
   fi
 
   # Preserve cross-session context from projects initialized before v0.4.

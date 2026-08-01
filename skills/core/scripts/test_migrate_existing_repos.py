@@ -2,6 +2,7 @@
 """Tests for migrate_existing_repos.py."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -250,6 +251,20 @@ class TestRegenIndex:
         assert applied is False
 
 
+class TestMigrateRuntimeState:
+    def test_refuses_symlinked_state_before_writing(self, fake_repo: Path) -> None:
+        victim = fake_repo.parent / "outside-state"
+        victim.mkdir()
+        (victim / "plugin-root").write_text("do-not-overwrite\n")
+        (fake_repo / ".mycelium").symlink_to(victim, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="symlink"):
+            mig.migrate_runtime_state(fake_repo)
+
+        assert (victim / "plugin-root").read_text() == "do-not-overwrite\n"
+        assert sorted(path.name for path in victim.iterdir()) == ["plugin-root"]
+
+
 class TestMigrateOne:
     def test_runs_all_actions_idempotently(self, fake_repo: Path) -> None:
         # First run applies guidance, state, Claude hooks, and INDEX refresh.
@@ -276,6 +291,19 @@ class TestMigrateOne:
             "skipped (already up-to-date)"
         )
         assert result2["Todo contract"] == "skipped (already up-to-date)"
+
+    def test_idempotent_run_does_not_rewrite_claude_settings(
+        self, fake_repo: Path
+    ) -> None:
+        mig.migrate_one(fake_repo)
+        settings = fake_repo / ".claude" / "settings.local.json"
+        old_ns = 946_684_800_000_000_000
+        os.utime(settings, ns=(old_ns, old_ns))
+
+        result = mig.migrate_one(fake_repo)
+
+        assert result["Claude hooks top-up"] == "skipped (already up-to-date)"
+        assert settings.stat().st_mtime_ns == old_ns
 
     def test_repairs_guidance_and_removes_legacy_project_codex_hooks(
         self, fake_repo: Path

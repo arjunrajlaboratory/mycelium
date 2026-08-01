@@ -55,6 +55,8 @@ hook, filesystem, or lifecycle boundaries.
       installation assumption.
 - [ ] The dispatcher resolves only packaged hook scripts and rejects traversal,
       unexpected names, and unsafe roots.
+- [ ] A globally dispatched hook performs no project write before the shared
+      `.living`/`.mycelium` containment and symlink checks have succeeded.
 - [ ] Installation works from the packaged plugin, not only from a source
       checkout.
 
@@ -76,6 +78,9 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Re-running initialization is idempotent.
 - [ ] Dry-run migration performs no writes.
 - [ ] Actual migration is idempotent and validates successfully afterward.
+- [ ] A migration action reported as skipped does not rewrite byte-identical
+      managed configuration or churn its timestamp; deliberate data refreshes
+      such as INDEX regeneration are identified separately.
 - [ ] Legacy Claude-only repositories continue to work without mandatory
       migration unless a migration is explicitly documented.
 - [ ] Early Codex installations with repository-local `.codex/hooks.json` are
@@ -181,6 +186,8 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Lock acquisition has bounded failure behavior and stale-lock handling.
 - [ ] `.mycelium`, `.living`, marker files, and output parents cannot redirect
       writes outside the project through symlinks.
+- [ ] Machine-local pointer refreshes reject existing links and use atomic
+      replacement instead of truncating a repository-controlled path.
 - [ ] Repository containment checks use canonical paths and reject traversal,
       prefix collisions, and nonexistent-parent tricks.
 - [ ] Cleanup cannot delete a path outside the project, even when state files

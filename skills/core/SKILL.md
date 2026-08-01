@@ -61,9 +61,10 @@ For analysis, report generation, idea brainstorming, and code review, direct the
     Codex's dynamic `PLUGIN_ROOT`; initialization must not write versioned
     plugin-cache paths into `.codex/hooks.json`. After first installing the
     plugin, or after an upgrade resolves `PLUGIN_ROOT` to a new cache path, tell
-    the user to open `/hooks` in the Codex CLI, trust the five plugin hooks,
-    fully exit Codex, and restart it so the approved hook set is loaded at
-    SessionStart.
+    the user to open `/hooks` in a current Codex CLI (not the desktop app),
+    trust the five plugin hooks, fully exit Codex, and restart it so the
+    approved hook set is loaded at SessionStart. If `/hooks` is absent, tell
+    them to run `codex update` and relaunch the CLI first.
 
 **References to consult**:
 - `skills/core/references/folder-structure.md` — canonical target structure
@@ -259,8 +260,9 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 2. Each action is idempotent — re-running on an already-migrated repo is a no-op.
 3. Use `--dry-run` first to preview changes.
 4. **Codex only**: after a real migration following plugin install or upgrade,
-   tell the user to open `/hooks` in the CLI, review and trust all five Mycelium
-   plugin hooks, fully exit Codex, and restart it.
+   tell the user to open `/hooks` in a current CLI (not the desktop app), review
+   and trust all five Mycelium plugin hooks, fully exit Codex, and restart it.
+   If `/hooks` is absent, run `codex update` and relaunch the CLI first.
 
 ---
 
@@ -368,8 +370,10 @@ Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 **Stop hook logic**: SessionStart snapshots the repository's existing dirty state, so Stop reports only paths changed during the current session. The stop hook checks if `mycelium-post-action.sh` fired during the session (indicated by the presence of `.mycelium/mycelium-reminded.tmp`). If `.living/` was not updated afterward, it blocks immediately—even for a short session—and preserves its work timestamp so repeated Stop attempts cannot bypass enforcement. If `.living/` was updated, it emits a non-blocking reminder to enhance the deterministic session summary. Read-only sessions, config-only sessions, and sessions without meaningful activity are never checked.
 
 Codex requires each exact plugin command hook to be reviewed and trusted through
-`/hooks`; untrusted hooks are skipped. After first install or any plugin
-upgrade, approve all five Mycelium hooks, fully exit Codex, and restart it.
+`/hooks` in the current CLI; the desktop app does not expose that slash command.
+If `/hooks` is absent from the CLI, run `codex update` and relaunch it. After
+first install or any plugin upgrade, approve all five Mycelium hooks, fully exit
+Codex, and restart it.
 Codex matches shell and unified-exec work under `Bash`, and its activity tracker
 parses `apply_patch` headers. The plugin registry and dispatcher resolve the
 live `PLUGIN_ROOT` and refresh `.mycelium/plugin-root` automatically, so cache
@@ -401,7 +405,7 @@ Quick checks an agent or human can run to confirm mycelium is wired correctly:
 |-------|--------------------|----------|
 | Claude hooks installed | `cat .claude/settings.local.json` | SessionStart, PostToolUse, and Stop registrations present |
 | Codex hooks bundled | Inspect the installed plugin's `hooks/hooks.json` | Five `PLUGIN_ROOT`-based SessionStart, PostToolUse, and Stop registrations present |
-| Codex hooks trusted | Open `/hooks` in the Codex CLI | All five Mycelium plugin hooks show as trusted |
+| Codex hooks trusted | Open `/hooks` in a current Codex CLI (not the desktop app; run `codex update` if absent) | All five Mycelium plugin hooks show as trusted |
 | INDEX.md has knowledge summary | `grep "BEGIN KNOWLEDGE SUMMARY" .living/INDEX.md` | Match present |
 | Read-access being logged | `tail .mycelium/mycelium-read-access.log` | Entries appearing when Claude reads `.living/` files |
 | MEMORY.md routing table present | `grep "Global Knowledge Domains" ~/.claude/projects/*/memory/MEMORY.md` | At least one match |
