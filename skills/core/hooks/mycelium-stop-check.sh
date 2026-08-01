@@ -28,9 +28,16 @@ if [ -z "$REPO_ROOT" ]; then
 fi
 mycelium_prepare_state_dir "$REPO_ROOT"
 
-# Accepting Stop owns final cleanup of data-lineage state. The lineage hook
-# runs first and may be followed by a blocking decision here; retaining both
-# files across that block lets later analysis append to the same manifest.
+# Consolidate lineage in-process before lifecycle enforcement. Hook runtimes
+# launch sibling command hooks concurrently, so registering consolidation as a
+# separate Stop handler would race the accepted-Stop cleanup below.
+LINEAGE_HOOK="$HERE/mycelium-data-lineage-stop.sh"
+if [[ -x "$LINEAGE_HOOK" ]]; then
+  printf '%s' "$INPUT" | "$LINEAGE_HOOK" || true
+fi
+
+# Accepting Stop owns final cleanup of data-lineage state. Retaining both files
+# across a blocked Stop lets later analysis append to the same manifest.
 mycelium_accept_lineage_session() {
   local session_marker="$STATE_DIR/data-lineage-session-id.tmp"
   local events_file="$STATE_DIR/mycelium-data-events.tmp"

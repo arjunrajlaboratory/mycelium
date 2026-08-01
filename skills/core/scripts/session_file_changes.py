@@ -76,8 +76,30 @@ def _decode_paths(payload: bytes) -> set[str]:
     return {_decode_path(raw) for raw in payload.split(b"\0") if raw}
 
 
-def _head_reflog(repo_root: Path) -> list[tuple[str, str]]:
-    payload = _run_git(repo_root, "reflog", "show", "--format=%H%x00%gs")
+def _head_reflog(repo_root: Path) -> list[tuple[str, str]] | None:
+    exists = subprocess.run(
+        ["git", "-C", str(repo_root), "reflog", "exists", "HEAD"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if exists.returncode != 0:
+        return None
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "reflog",
+            "show",
+            "--format=%H%x00%gs",
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return None
+    payload = result.stdout
     records: list[tuple[str, str]] = []
     for record in payload.splitlines():
         raw_oid, separator, raw_action = record.partition(b"\0")
@@ -103,6 +125,8 @@ def _session_reflog_change_paths(
     was pruned or cannot be aligned with the snapshot.
     """
     records = _head_reflog(repo_root)
+    if records is None:
+        return None
     if len(records) < baseline_reflog_entries:
         return None
     new_entry_count = len(records) - baseline_reflog_entries
@@ -170,10 +194,11 @@ def read_worktree_state(repo_root: Path) -> dict[str, dict[str, Any]]:
 
 
 def build_snapshot(repo_root: Path) -> dict[str, Any]:
+    reflog = _head_reflog(repo_root)
     return {
         "schema_version": SCHEMA_VERSION,
         "head": _head(repo_root),
-        "head_reflog_entries": len(_head_reflog(repo_root)),
+        "head_reflog_entries": len(reflog) if reflog is not None else None,
         "files": read_worktree_state(repo_root),
     }
 
@@ -247,11 +272,13 @@ def _committed_paths(
     start_ts: int | None,
 ) -> set[str]:
     current_head = _head(repo_root)
-    if current_head is None or current_head == baseline_head:
+    if current_head is None:
         return set()
     if baseline_head:
-        if not _is_ancestor(repo_root, baseline_head, current_head) and isinstance(
-            baseline_reflog_entries, int
+        is_descendant = _is_ancestor(repo_root, baseline_head, current_head)
+        if (
+            (current_head == baseline_head or not is_descendant)
+            and isinstance(baseline_reflog_entries, int)
         ):
             reflog_paths = _session_reflog_change_paths(
                 repo_root,
@@ -261,6 +288,9 @@ def _committed_paths(
             if reflog_paths is not None:
                 return reflog_paths
 
+        if current_head == baseline_head:
+            return set()
+
         log_args = ["log", f"{baseline_head}..{current_head}"]
         if start_ts is not None:
             # A HEAD transition may be only a checkout of an existing branch.
@@ -269,7 +299,7 @@ def _committed_paths(
             log_args.append(f"--since=@{start_ts}")
         log_args.extend(("--name-only", "-z", "--pretty=format:"))
         committed = _decode_paths(_run_git(repo_root, *log_args))
-        if not _is_ancestor(repo_root, baseline_head, current_head):
+        if not is_descendant:
             # Amend/rebase/branch-switch transitions rewrite ancestry. Commit
             # path lists can then contain unchanged historical files, while a
             # raw tree diff can contain an existing destination branch. Their

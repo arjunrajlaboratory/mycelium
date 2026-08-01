@@ -127,6 +127,48 @@ def test_session_commit_restoring_baseline_content_is_detected(tmp_path: Path) -
     assert collect_changes(repo, baseline, start_ts=session_start) == ["config.txt"]
 
 
+def test_temporary_branch_commit_is_retained_after_returning_to_baseline(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    original_branch = subprocess.check_output(
+        ["git", "-C", str(repo), "branch", "--show-current"], text=True
+    ).strip()
+    baseline = build_snapshot(repo)
+    session_start = int(time.time()) - 1
+
+    _git(repo, "switch", "-q", "-c", "temporary-work")
+    (repo / "temporary.txt").write_text("committed during session\n")
+    _git(repo, "add", "temporary.txt")
+    _git(repo, "commit", "-q", "-m", "temporary session work")
+    _git(repo, "switch", "-q", original_branch)
+
+    assert collect_changes(repo, baseline, start_ts=session_start) == [
+        "temporary.txt"
+    ]
+
+
+def test_rewritten_history_falls_back_when_head_reflog_is_disabled(
+    tmp_path: Path,
+) -> None:
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "Test")
+    _git(tmp_path, "config", "core.logAllRefUpdates", "false")
+    (tmp_path / "old.txt").write_text("pre-session content\n")
+    _git(tmp_path, "add", "old.txt")
+    _git(tmp_path, "commit", "-q", "-m", "pre-session commit")
+    baseline = build_snapshot(tmp_path)
+    session_start = int(time.time()) - 1
+
+    assert baseline["head_reflog_entries"] is None
+    (tmp_path / "new.txt").write_text("added during session\n")
+    _git(tmp_path, "add", "new.txt")
+    _git(tmp_path, "commit", "-q", "--amend", "--no-edit")
+
+    assert collect_changes(tmp_path, baseline, start_ts=session_start) == ["new.txt"]
+
+
 def test_activity_file_retains_deleted_paths_and_ignores_external_paths(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     baseline = build_snapshot(repo)

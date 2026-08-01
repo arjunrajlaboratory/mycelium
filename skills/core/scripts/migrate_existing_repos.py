@@ -5,7 +5,7 @@ Performs the provider-neutral upgrade actions needed by current Mycelium repos:
 
 1. **CLAUDE.md re-anchor** — inserts a "Knowledge index" callout pointing
    at `.living/INDEX.md` if no INDEX.md reference is present.
-2. **Hook top-up** — adds any of the 7-hook default bundle that the repo
+2. **Hook top-up** — adds any of the 6-hook default bundle that the repo
    is missing, preserving existing hook entries (no duplicates).
 3. **INDEX.md regen** — runs `generate_index.py --summary-heuristic` so
    the freshly-anchored INDEX.md actually has cluster content.
@@ -127,7 +127,7 @@ def topup_hooks(repo_path: Path, dry_run: bool = False) -> bool:
     """Top up missing hooks in .claude/settings.local.json.
 
     Reuses init_repo.install_claude_hooks which is already idempotent.
-    Returns True if any hook was added, False if all 7 were already present.
+    Returns True if any hook was added, False if all 6 were already present.
     """
     settings_path = repo_path / ".claude" / "settings.local.json"
     before_signature = ""
@@ -162,9 +162,15 @@ def topup_hooks(repo_path: Path, dry_run: bool = False) -> bool:
             for group in groups
             for handler in group.get("hooks", [])
             if ir._hook_basename(handler.get("command", ""))
-            in ir.MYCELIUM_HOOK_BASENAMES
+            in ir.ALL_MYCELIUM_HOOK_BASENAMES
         ]
-        return len(all_mycelium_commands) != len(ir.CLAUDE_HOOK_SPECS)
+        return (
+            len(all_mycelium_commands) != len(ir.CLAUDE_HOOK_SPECS)
+            or any(
+                ir._hook_basename(command) in ir.LEGACY_MYCELIUM_HOOK_BASENAMES
+                for command in all_mycelium_commands
+            )
+        )
 
     # Actual install: reuse init_repo's idempotent installer
     ir.install_claude_hooks(repo_path)
@@ -180,6 +186,9 @@ def ensure_cross_agent_guidance(repo_path: Path, dry_run: bool = False) -> bool:
     paths = [repo_path / name for name in ("MYCELIUM.md", "CLAUDE.md", "AGENTS.md")]
     before = {path.name: path.read_text() if path.exists() else None for path in paths}
     if dry_run:
+        canonical_template = (
+            _SCRIPT_DIR.parent / "templates" / "MYCELIUM.md.template"
+        ).read_text(encoding="utf-8")
         return (
             any(value is None for value in before.values())
             or any(
@@ -190,6 +199,13 @@ def ensure_cross_agent_guidance(repo_path: Path, dry_run: bool = False) -> bool:
             or any(
                 value is not None and LEGACY_RECALL_COMMAND in value
                 for value in before.values()
+            )
+            or (
+                before["MYCELIUM.md"] is not None
+                and ir.refresh_generated_guidance(
+                    before["MYCELIUM.md"], canonical_template
+                )
+                != before["MYCELIUM.md"]
             )
         )
     ir.create_agent_guidance(repo_path)

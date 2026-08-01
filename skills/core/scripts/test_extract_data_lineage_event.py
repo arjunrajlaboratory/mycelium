@@ -416,6 +416,8 @@ def test_main_emits_two_events_for_chained_inline(tmp_path: Path) -> None:
             "2026-05-26T20:00:00Z",
             "--bash-cmd",
             cmd,
+            "--bash-exit",
+            "0",
             "--append-to",
             str(target),
         ],
@@ -458,6 +460,8 @@ def test_main_honors_cd_for_script_and_relative_data_paths(tmp_path: Path) -> No
             "2026-07-31T12:00:00Z",
             "--bash-cmd",
             command,
+            "--bash-exit",
+            "0",
             "--append-to",
             str(target),
         ],
@@ -470,3 +474,37 @@ def test_main_honors_cd_for_script_and_relative_data_paths(tmp_path: Path) -> No
     event = json.loads(target.read_text())
     assert event["script"] == str(analysis_dir / "run.py")
     assert event["inputs"][0]["path"] == str(analysis_dir / "input.csv")
+
+
+def test_main_resets_execution_context_after_list_separator(tmp_path: Path) -> None:
+    """An earlier pipeline must not make a later unconditional list ambiguous."""
+    import json
+    import subprocess
+
+    script = tmp_path / "run.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            "printf x | cat; python run.py",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(target.read_text())
+    assert event["script"] == str(script)
+    assert event["bash_exit"] is None

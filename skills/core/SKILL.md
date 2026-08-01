@@ -57,11 +57,11 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 11. **Bootstrap knowledge system**: If `~/.mycelium/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. The script also appends the Global Knowledge Domains routing table to every `~/.claude/projects/*/memory/MEMORY.md` (idempotent — skips files where the header is already present). Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py --summary-heuristic`.
 12. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
 13. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
-14. **Codex only**: Mycelium's six hooks are bundled with the plugin and use
+14. **Codex only**: Mycelium's five command hooks are bundled with the plugin and use
     Codex's dynamic `PLUGIN_ROOT`; initialization must not write versioned
     plugin-cache paths into `.codex/hooks.json`. After first installing the
     plugin, or after an upgrade resolves `PLUGIN_ROOT` to a new cache path, tell
-    the user to open `/hooks` in the Codex CLI, trust the six plugin hooks,
+    the user to open `/hooks` in the Codex CLI, trust the five plugin hooks,
     fully exit Codex, and restart it so the approved hook set is loaded at
     SessionStart.
 
@@ -259,7 +259,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 2. Each action is idempotent — re-running on an already-migrated repo is a no-op.
 3. Use `--dry-run` first to preview changes.
 4. **Codex only**: after a real migration following plugin install or upgrade,
-   tell the user to open `/hooks` in the CLI, review and trust all six Mycelium
+   tell the user to open `/hooks` in the CLI, review and trust all five Mycelium
    plugin hooks, fully exit Codex, and restart it.
 
 ---
@@ -353,7 +353,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 ### Automated Enforcement (Claude Code and Codex Hooks)
 
 Mycelium ships shared hook scripts in `skills/core/hooks/`. `init_repo.py`
-registers Claude hooks in `.claude/settings.local.json`. Codex discovers six
+registers Claude hooks in `.claude/settings.local.json`. Codex discovers five
 plugin-bundled registrations from `hooks/hooks.json`; their dispatcher uses
 Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 
@@ -361,7 +361,7 @@ Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 |------|-------|---------|
 | `mycelium-health.sh` | SessionStart | Loads `.mycelium/last-session.md` for session resume (agent + user); warns if `.living/` is missing or incomplete; records session timestamp; triggers weekly knowledge audit if `~/.mycelium/knowledge/.last-audit` is >7 days old |
 | `mycelium-post-action.sh` | PostToolUse (shell) | Detects code execution and directs the active agent to run the full post-action protocol |
-| `mycelium-stop-check.sh` | Stop | Checks `.living/` was updated after significant work; warns if session summary (`.mycelium/last-session.md`) was not written |
+| `mycelium-stop-check.sh` | Stop | Consolidates data lineage synchronously, checks `.living/` was updated after significant work, and warns if the session summary was not written |
 
 **Post-action enforcement**: The PostToolUse hook detects Python/R/Jupyter execution in Bash calls (excluding tests, linting, pip, one-liners) and injects a mandatory directive for the active agent. It is **debounced**: fires once per work cycle, then stays silent until `.living/` is updated. The Stop hook serves as a safety net for non-analysis sessions.
 
@@ -369,7 +369,7 @@ Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 
 Codex requires each exact plugin command hook to be reviewed and trusted through
 `/hooks`; untrusted hooks are skipped. After first install or any plugin
-upgrade, approve all six Mycelium hooks, fully exit Codex, and restart it.
+upgrade, approve all five Mycelium hooks, fully exit Codex, and restart it.
 Codex matches shell and unified-exec work under `Bash`, and its activity tracker
 parses `apply_patch` headers. The plugin registry and dispatcher resolve the
 live `PLUGIN_ROOT` and refresh `.mycelium/plugin-root` automatically, so cache
@@ -400,8 +400,8 @@ Quick checks an agent or human can run to confirm mycelium is wired correctly:
 | Check | Command / location | Expected |
 |-------|--------------------|----------|
 | Claude hooks installed | `cat .claude/settings.local.json` | SessionStart, PostToolUse, and Stop registrations present |
-| Codex hooks bundled | Inspect the installed plugin's `hooks/hooks.json` | Six `PLUGIN_ROOT`-based SessionStart, PostToolUse, and Stop registrations present |
-| Codex hooks trusted | Open `/hooks` in the Codex CLI | All six Mycelium plugin hooks show as trusted |
+| Codex hooks bundled | Inspect the installed plugin's `hooks/hooks.json` | Five `PLUGIN_ROOT`-based SessionStart, PostToolUse, and Stop registrations present |
+| Codex hooks trusted | Open `/hooks` in the Codex CLI | All five Mycelium plugin hooks show as trusted |
 | INDEX.md has knowledge summary | `grep "BEGIN KNOWLEDGE SUMMARY" .living/INDEX.md` | Match present |
 | Read-access being logged | `tail .mycelium/mycelium-read-access.log` | Entries appearing when Claude reads `.living/` files |
 | MEMORY.md routing table present | `grep "Global Knowledge Domains" ~/.claude/projects/*/memory/MEMORY.md` | At least one match |

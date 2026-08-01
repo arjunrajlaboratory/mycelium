@@ -112,14 +112,15 @@ class TestTopupHooks:
             for entry in entries
             for h in entry.get("hooks", [])
         }
-        # All 7 default hooks present
+        # All 6 registered Claude hooks present. Lineage consolidation is an
+        # internal phase of mycelium-stop-check.sh, not a sibling Stop handler.
         assert "mycelium-health.sh" in hook_cmds
         assert "mycelium-post-action.sh" in hook_cmds
         assert "mycelium-stop-check.sh" in hook_cmds
         assert "mycelium-activity-tracker.sh" in hook_cmds
         assert "mycelium-read-tracker.sh" in hook_cmds
         assert "mycelium-data-tracker.sh" in hook_cmds
-        assert "mycelium-data-lineage-stop.sh" in hook_cmds
+        assert "mycelium-data-lineage-stop.sh" not in hook_cmds
 
     def test_idempotent(self, fake_repo: Path) -> None:
         mig.topup_hooks(fake_repo)
@@ -146,7 +147,7 @@ class TestTopupHooks:
         mig.topup_hooks(fake_repo)
         settings_path = fake_repo / ".claude" / "settings.local.json"
         settings = json.loads(settings_path.read_text())
-        missing = {"mycelium-data-tracker.sh", "mycelium-data-lineage-stop.sh"}
+        missing = {"mycelium-data-tracker.sh"}
         for groups in settings["hooks"].values():
             for group in groups:
                 group["hooks"] = [
@@ -326,6 +327,28 @@ class TestMigrateOne:
         assert repaired_hooks["hooks"]["PreToolUse"] == [
             {"matcher": "custom", "hooks": []}
         ]
+
+    def test_repairs_obsolete_project_local_codex_hook_guidance(
+        self, fake_repo: Path
+    ) -> None:
+        stale_guidance = (
+            "# Existing Mycelium guidance\n\n"
+            "### Automated Enforcement\n\n"
+            "Mycelium hooks are auto-installed for both Claude Code and Codex during `init`.\n\n"
+            "Codex requires a one-time approval for each exact project command hook.\n"
+            "Until that approval, Codex intentionally skips the commands even though\n"
+            "`.codex/hooks.json` contains their registrations.\n\n"
+            "### Knowledge Transfer (Cross-Project)\n\nExisting transfer guidance.\n"
+        )
+        (fake_repo / "MYCELIUM.md").write_text(stale_guidance, encoding="utf-8")
+
+        assert mig.ensure_cross_agent_guidance(fake_repo, dry_run=True) is True
+        assert mig.ensure_cross_agent_guidance(fake_repo) is True
+
+        repaired = (fake_repo / "MYCELIUM.md").read_text()
+        assert "plugin-bundled Codex command hooks" in repaired
+        assert ".codex/hooks.json` contains their registrations" not in repaired
+        assert "Existing transfer guidance." in repaired
 
     def test_skips_when_no_living_dir(self, tmp_path: Path) -> None:
         no_living = tmp_path / "not-mycelium"

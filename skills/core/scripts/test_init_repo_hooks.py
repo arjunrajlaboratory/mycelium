@@ -17,7 +17,7 @@ import init_repo as ir  # noqa: E402
 
 
 def _make_hook_dir(parent: Path, label: str) -> Path:
-    """Create a directory containing all 7 mycelium hook scripts as real files.
+    """Create a directory containing all 6 registered Claude hook scripts.
     `label` differentiates marketplace/dev/third in tests."""
     if label == "marketplace":
         d = parent / ".claude" / "plugins" / "marketplaces" / "mycelium" / "hooks"
@@ -283,6 +283,49 @@ class TestConsolidateDuplicateHooks:
 
 
 class TestInstallClaudeHooksIdempotent:
+    def test_replaces_standalone_lineage_stop_with_serialized_stop_hook(
+        self, tmp_path: Path
+    ) -> None:
+        marketplace = _make_hook_dir(tmp_path, "marketplace")
+        repo = tmp_path / "repo"
+        (repo / ".claude").mkdir(parents=True)
+        settings = {
+            "hooks": {
+                "Stop": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": str(marketplace / "mycelium-stop-check.sh"),
+                            },
+                            {
+                                "type": "command",
+                                "command": str(
+                                    marketplace / "mycelium-data-lineage-stop.sh"
+                                ),
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+        (repo / ".claude" / "settings.local.json").write_text(
+            json.dumps(settings, indent=2), encoding="utf-8"
+        )
+
+        ir.install_claude_hooks(repo)
+
+        repaired = json.loads(
+            (repo / ".claude" / "settings.local.json").read_text()
+        )
+        stop_commands = [
+            Path(handler["command"])
+            for group in repaired["hooks"]["Stop"]
+            for handler in group.get("hooks", [])
+        ]
+        assert stop_commands == [ir.find_mycelium_hooks_dir() / "mycelium-stop-check.sh"]
+
     def test_basename_match_prevents_double_install(self, tmp_path: Path) -> None:
         """If a hook is already registered at any path, don't add another
         entry pointing at a different path."""
@@ -290,7 +333,8 @@ class TestInstallClaudeHooksIdempotent:
         repo = tmp_path / "repo"
         (repo / ".claude").mkdir(parents=True)
 
-        # Pre-seed settings with real marketplace-path entries for all 7 hooks
+        # Pre-seed settings with marketplace-path entries, including the legacy
+        # standalone lineage Stop hook that migration must remove.
         def _entry(bn: str) -> dict:
             return {"type": "command", "command": str(marketplace / bn)}
 
@@ -333,12 +377,18 @@ class TestInstallClaudeHooksIdempotent:
 
         result = json.loads((repo / ".claude" / "settings.local.json").read_text())
         cmds = _flatten_hook_commands(result["hooks"])
-        # Still exactly 7 entries, all marketplace paths
+        # Exactly the six active Claude registrations remain.
         assert len(cmds) == len(ir.MYCELIUM_HOOK_BASENAMES)
         for cmd in cmds:
-            assert "/marketplaces/" in cmd
+            if Path(cmd).name != "mycelium-stop-check.sh":
+                assert "/marketplaces/" in cmd
         stop_handlers = result["hooks"]["Stop"][0]["hooks"]
-        assert Path(stop_handlers[0]["command"]).name == "mycelium-data-lineage-stop.sh"
+        assert [Path(handler["command"]).name for handler in stop_handlers] == [
+            "mycelium-stop-check.sh"
+        ]
+        assert Path(stop_handlers[0]["command"]) == (
+            ir.find_mycelium_hooks_dir() / "mycelium-stop-check.sh"
+        )
 
     def test_consolidates_existing_duplicates_then_installs_missing(
         self, tmp_path: Path

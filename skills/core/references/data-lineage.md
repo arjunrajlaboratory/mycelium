@@ -15,8 +15,8 @@ is retained as unresolved with an explicit warning rather than dropped.
 | File | Role |
 |------|------|
 | `skills/core/hooks/mycelium-data-tracker.sh` | PostToolUse:Bash. Per-Bash-call event capture. |
-| `skills/core/hooks/mycelium-data-lineage-stop.sh` | Stop. Consolidates cumulative events into a manifest before lifecycle enforcement. |
-| `skills/core/hooks/mycelium-stop-check.sh` | Stop. Retains lineage state when blocked; rotates it after Stop is accepted. |
+| `skills/core/hooks/mycelium-data-lineage-stop.sh` | Internal Stop phase. Consolidates cumulative events into a manifest before lifecycle enforcement. |
+| `skills/core/hooks/mycelium-stop-check.sh` | Registered Stop command. Runs lineage consolidation synchronously, retains state when blocked, and rotates it after Stop is accepted. |
 | `skills/core/scripts/extract_data_lineage_event.py` | Per-event extractor (called by tracker hook). |
 | `skills/core/scripts/extract_data_lineage.py` | Manifest assembler (called by stop hook). |
 
@@ -73,9 +73,10 @@ the Stop check accepts the session.
 }
 ```
 
-`bash_exit` / `bash_wall_s` are reserved — PostToolUse stdin doesn't currently
-expose exit code or wall time, but the fields stay in the schema so they can
-be populated forward-compatibly.
+`bash_exit` is populated when the host exposes a Bash exit code. Conditional
+analysis commands are recorded only when that status proves their AND/OR branch
+executed; ambiguous textual matches are skipped rather than asserted as
+provenance. `bash_wall_s` remains reserved for future host support.
 
 A `python a.py && python b.py` chain emits **two** events (one per detected
 script). Inline `-c` scripts emit one event each; their `script` field is
@@ -140,15 +141,17 @@ list. Repeated invocations of the same inline source collapse to one entry.
 
 - Script source larger than 100 KB is referenced by SHA but not embedded
 - Files larger than 100 MB get path + size only, no SHA
-- `bash_exit` and `bash_wall_s` are always `null` until Claude Code exposes
-  them through PostToolUse stdin
+- `bash_exit` is populated when the host exposes it; otherwise conditional
+  branches without independent execution evidence are omitted conservatively
+- `bash_wall_s` remains `null` until a host exposes reliable wall time
 
 ## Installation
 
-`init_repo.install_claude_hooks()` registers both hooks alongside the existing
-five. Existing mycelium-enabled repos get the new hooks back-filled by
-`migrate_existing_repos.py` — both flows are idempotent and consolidate stale
-duplicates.
+`init_repo.install_claude_hooks()` registers the tracker and the coordinating
+Stop hook. The lineage consolidation script is invoked synchronously from that
+coordinator rather than registered as a sibling. Existing Mycelium repositories
+are upgraded by `migrate_existing_repos.py`; the migration removes the old
+standalone registration and refreshes the coordinator path atomically.
 
 ## Extending the regex pack
 

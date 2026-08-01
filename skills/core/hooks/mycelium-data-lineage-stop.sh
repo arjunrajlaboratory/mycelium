@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# mycelium-data-lineage-stop.sh — Claude Code Stop hook
+# mycelium-data-lineage-stop.sh — internal Mycelium Stop phase
 # At session end, if the session captured any data-analysis events into
 # .mycelium/mycelium-data-events.tmp, invokes extract_data_lineage.py to
 # consolidate them into .living/log/data-lineage/<session_id>.json and
 # writes a status sentinel at .living/log/.data-lineage-status-<sid>.json.
 #
-# Runs before mycelium-stop-check.sh, which decides whether the Stop is accepted.
-# This hook deliberately leaves the canonical session marker and cumulative
-# events in place so a blocked Stop can continue the same lineage session.
+# Invoked synchronously by mycelium-stop-check.sh before it decides whether the
+# Stop is accepted. This script deliberately leaves the canonical session marker
+# and cumulative events in place so a blocked Stop can continue the same lineage
+# session. It must not be registered as a sibling Stop command because hook
+# runtimes may launch sibling commands concurrently.
 #
-# Install: registered automatically by init_repo.install_claude_hooks() under
-#   Stop. Innermost-wins: subproject settings need the complete bundle.
+# Called only by mycelium-stop-check.sh; it is not registered as its own hook.
 # Input: JSON on stdin: {session_id, cwd, ...}
 # Output: Silent.
 # Env override: MYCELIUM_DATA_EXTRACTOR may point at an alternate extractor.
