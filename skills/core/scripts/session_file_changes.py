@@ -20,7 +20,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 LIVING_FILES = ("learnings.md", "decisions.md", "conventions.md")
 
 
@@ -58,15 +58,20 @@ def _is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
     return result.returncode == 0
 
 
-def _stat_fingerprint(repo_root: Path, relative_path: str) -> dict[str, int] | None:
+def _stat_fingerprint(repo_root: Path, relative_path: str) -> dict[str, Any] | None:
     try:
-        stat = (repo_root / relative_path).lstat()
+        path = repo_root / relative_path
+        stat = path.lstat()
     except OSError:
         return None
     return {
         "mode": stat.st_mode,
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
+        # Metadata alone is not a content identity: a same-size rewrite can
+        # restore its original mtime (intentionally or through a coarse
+        # filesystem) and would otherwise disappear from the session delta.
+        "content": _content_fingerprint(path),
     }
 
 

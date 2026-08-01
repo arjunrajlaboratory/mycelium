@@ -567,6 +567,9 @@ def test_main_resets_execution_context_after_list_separator(tmp_path: Path) -> N
         "analyze() {\npython a.py\n}",
         "cat <<'EOF'\npython a.py\nEOF",
         "# python a.py",
+        "python #a.py",
+        "true # && python a.py",
+        "false # || python a.py",
         "echo python a.py",
         "uv run echo python a.py",
         "conda run echo python a.py",
@@ -598,6 +601,83 @@ def test_main_rejects_unproven_shell_text_matches(
             command,
             "--bash-exit",
             "0",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "command,exit_code",
+    [
+        ("true && python a.py", 1),
+        ("printf x | python a.py", 1),
+        ("printf x | python a.py", 0),
+    ],
+)
+def test_main_tracks_proven_execution_in_failed_and_and_pipeline_lists(
+    tmp_path: Path, command: str, exit_code: int
+) -> None:
+    """A failed analysis is still provenance when its execution is provable."""
+    import json
+    import subprocess
+
+    script = tmp_path / "a.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            str(exit_code),
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text())["script"] == str(script)
+
+
+def test_main_does_not_infer_failed_and_branch_after_unknown_prefix(
+    tmp_path: Path,
+) -> None:
+    import subprocess
+
+    (tmp_path / "a.py").write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            "unknown-command && python a.py",
+            "--bash-exit",
+            "1",
             "--append-to",
             str(target),
         ],
@@ -779,6 +859,21 @@ def test_main_accepts_common_python_executable_and_flag_forms(
         (
             r"python analysis\ script.py",
             "analysis script.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
+            'python "analysis #1.py"',
+            "analysis #1.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
+            r"python analysis\#1.py",
+            "analysis#1.py",
+            "import pandas as pd\npd.read_csv('input.csv')\n",
+        ),
+        (
+            "python analysis#1.py",
+            "analysis#1.py",
             "import pandas as pd\npd.read_csv('input.csv')\n",
         ),
         (

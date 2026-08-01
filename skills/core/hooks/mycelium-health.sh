@@ -48,11 +48,20 @@ mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
 # AND those signals are also quiet.
 ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
 if [ -f "$ACTIVE_LOG_FILE" ]; then
-  _STALE_LOG=$(head -1 "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
-  _STALE_OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
   _SHOULD_CLEAN=false
+  _STALE_LOG=""
+  _STALE_OWNER_TS=""
+  if _ACTIVE_MARKER=$(mycelium_read_active_log_marker "$REPO_ROOT" "$ACTIVE_LOG_FILE"); then
+    _STALE_LOG=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '1p')
+    _STALE_OWNER_TS=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '2p')
+  else
+    _SHOULD_CLEAN=true
+    MESSAGES="${MESSAGES}CORRUPT SESSION MARKER: Removed an invalid active-session marker without following its path. Session lifecycle state will be rebuilt safely.\n\n"
+  fi
   # Definitive signals — clean regardless of activity:
-  if [ -z "$_STALE_OWNER_TS" ]; then
+  if [ "$_SHOULD_CLEAN" = true ]; then
+    :
+  elif [ -z "$_STALE_OWNER_TS" ]; then
     # Old format (no owner TS) — clean up for format upgrade
     _SHOULD_CLEAN=true
   elif [ -n "$_STALE_LOG" ] && [ -f "$_STALE_LOG" ] && grep -q "^ended: [0-9]" "$_STALE_LOG"; then
@@ -114,6 +123,7 @@ if [ -f "$STATE_DIR/mycelium-reminded.tmp" ]; then
   # previous task—even if it ended less than an hour ago. Keeping it would
   # suppress the new task's PostToolUse directive and pollute its file list.
   STALE_TS=$(cat "$STATE_DIR/mycelium-reminded.tmp" 2>/dev/null || echo "0")
+  [[ "$STALE_TS" =~ ^[0-9]{1,18}$ ]] || STALE_TS=0
   NOW_TS=$(date +%s)
   STALE_AGE=$(( NOW_TS - STALE_TS ))
   if [ "$FRESH_PRIMARY_SESSION" = true ] || [ "$STALE_AGE" -gt 3600 ]; then
@@ -128,6 +138,7 @@ if [ ! -d "$KNOWLEDGE_DIR" ]; then
   MESSAGES="${MESSAGES}KNOWLEDGE SYSTEM INIT: ~/.mycelium/knowledge/ does not exist. Create the directory and initialize domain files per the progressive disclosure spec. Run this silently as a background task.\n\n"
 elif [ -f "$KNOWLEDGE_DIR/.last-audit" ]; then
   AUDIT_TS=$(awk '{print $1}' "$KNOWLEDGE_DIR/.last-audit")
+  [[ "$AUDIT_TS" =~ ^[0-9]{1,18}$ ]] || AUDIT_TS=0
   NOW_TS=$(date +%s)
   AUDIT_AGE_HOURS=$(( (NOW_TS - AUDIT_TS) / 3600 ))
   if [ "$AUDIT_AGE_HOURS" -ge 24 ]; then

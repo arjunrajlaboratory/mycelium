@@ -38,8 +38,13 @@ trap mycelium_release_stop_lock EXIT
 # launch sibling command hooks concurrently, so registering consolidation as a
 # separate Stop handler would race the accepted-Stop cleanup below.
 LINEAGE_HOOK="$HERE/mycelium-data-lineage-stop.sh"
-if [[ -x "$LINEAGE_HOOK" ]]; then
-  printf '%s' "$INPUT" | "$LINEAGE_HOOK" || true
+if [[ -s "$STATE_DIR/mycelium-data-events.tmp" ]]; then
+  if [[ ! -x "$LINEAGE_HOOK" ]] \
+    || ! printf '%s' "$INPUT" | "$LINEAGE_HOOK"; then
+    mycelium_emit_stop_block \
+      "STOP BLOCKED — data-lineage consolidation failed. Raw events and active session state were preserved; inspect the lineage status sentinel or hook installation, then retry Stop."
+    exit 0
+  fi
 fi
 LINEAGE_EVENT_COUNT=0
 if [[ -s "$STATE_DIR/mycelium-data-events.tmp" ]]; then
@@ -76,41 +81,35 @@ mycelium_accept_lineage_session() {
 # fails, leave SCRIPT_DIR empty and downstream existence checks will skip.
 HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR=$(cd "$(dirname "$(dirname "$HOOK_SOURCE")")" 2>/dev/null && pwd || echo "")
-UPSERT_SCRIPT="$SCRIPT_DIR/scripts/upsert_registry_row.py"
+UPSERT_SCRIPT="${MYCELIUM_REGISTRY_UPSERT_HELPER:-$SCRIPT_DIR/scripts/upsert_registry_row.py}"
 
 # --- Session log finalization ---
 ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
 if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
-  LOG_PATH=$(head -1 "$ACTIVE_LOG_FILE")
-  LOG_PATH=$(python3 - "$REPO_ROOT" "$LOG_PATH" <<'PY' 2>/dev/null || true
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1]).resolve()
-candidate = Path(sys.argv[2]).resolve(strict=False)
-try:
-    candidate.relative_to(root / ".living" / "log")
-except ValueError:
-    raise SystemExit(1)
-if candidate.is_symlink():
-    raise SystemExit(1)
-print(candidate)
-PY
-)
-  if [[ -z "$LOG_PATH" ]]; then
-    exit 0
+  ACTIVE_MARKER_VALID=true
+  if _ACTIVE_MARKER=$(mycelium_read_active_log_marker "$REPO_ROOT" "$ACTIVE_LOG_FILE"); then
+    LOG_PATH=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '1p')
+    OWNER_TS=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '2p')
+  else
+    # Remove only the invalid marker, then continue to independent lifecycle
+    # enforcement. Never follow or quote the untrusted path it contained.
+    ACTIVE_MARKER_VALID=false
+    LOG_PATH=""
+    OWNER_TS=""
+    rm -f "$ACTIVE_LOG_FILE"
   fi
-  OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
   OUR_TS=$(cat "$STATE_DIR/session-start-ts.tmp" 2>/dev/null || echo "")
 
   # Subagent detection: if owner timestamp exists and doesn't match ours, we're a subagent
-  if [ -n "$OWNER_TS" ] && [ -n "$OUR_TS" ] && [ "$OWNER_TS" != "$OUR_TS" ]; then
+  if [[ "$OWNER_TS" =~ ^[0-9]{1,18}$ \
+    && "$OUR_TS" =~ ^[0-9]{1,18}$ \
+    && "$OWNER_TS" != "$OUR_TS" ]]; then
       # Subagent: skip all finalization and .living/ checks
       # File activity is tracked in the shared activity file for the primary session
       exit 0
   fi
 
-  if [ -f "$LOG_PATH" ]; then
+  if [[ "$ACTIVE_MARKER_VALID" == true && -f "$LOG_PATH" ]]; then
     # Compute session duration. Prefer the frontmatter `started:` field
     # (set when the SessionStart hook created this log) over
     # session-start-ts.tmp, which can be stale across crashed sessions and
@@ -253,7 +252,9 @@ PY
       fi
       # Append a timestamped session-end entry (health hook extracts this for next-session context)
       END_TIME_SHORT=$(date +%H:%M)
-      if [ -n "$FILE_LIST_MD" ]; then
+      if grep -q '^### .* — Session ended (' "$LOG_PATH" 2>/dev/null; then
+        : # Retry after a registry failure without duplicating the log footer.
+      elif [ -n "$FILE_LIST_MD" ]; then
         # Build a readable summary for the timestamped entry
         FILE_SUMMARY=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -3 \
           | while IFS= read -r changed_path; do basename "$changed_path"; done \
@@ -270,6 +271,11 @@ PY
       PROJECT_SLUG=$({ grep '^project:' "$LOG_PATH" || echo "project: unknown"; } | sed 's/^project: *//')
       SESSION_ID=$({ grep '^session_id:' "$LOG_PATH" || echo "session_id: unknown"; } | sed 's/^session_id: *//')
       BRANCH=$({ grep '^branch:' "$LOG_PATH" || echo "branch: unknown"; } | sed 's/^branch: *//')
+      if [[ ! "$SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        mycelium_emit_stop_block \
+          "STOP BLOCKED — session registry finalization failed because the session ID is invalid. Active state was preserved for repair and retry."
+        exit 0
+      fi
       # Summary from the first 3 paths in the same unique session file set.
       SUMMARY=""
       if [ -n "$SESSION_CHANGED_FILES" ]; then
@@ -280,8 +286,13 @@ PY
           SUMMARY="${SUMMARY} (+$((FILES_CHANGED - 3)) more)"
         fi
       fi
+      PROJECT_SLUG=$(printf '%s' "$PROJECT_SLUG" | mycelium_registry_cell)
+      BRANCH=$(printf '%s' "$BRANCH" | mycelium_registry_cell)
+      SUMMARY=$(printf '%s' "$SUMMARY" | mycelium_registry_cell)
+      LOG_BASENAME=$(basename "$LOG_PATH")
       # Atomic upsert via the script resolved at the top of this hook ($UPSERT_SCRIPT).
-      NEW_ROW="| $(date +%Y-%m-%d) | ${SESSION_ID} | ${PROJECT_SLUG} | ${BRANCH} | ${DURATION_MIN}m | ${FILES_CHANGED} | ${SUMMARY} | | complete | | [log](${SESSION_ID}-${PROJECT_SLUG}.md) |"
+      NEW_ROW="| $(date +%Y-%m-%d) | ${SESSION_ID} | ${PROJECT_SLUG} | ${BRANCH} | ${DURATION_MIN}m | ${FILES_CHANGED} | ${SUMMARY} | | complete | | [log](${LOG_BASENAME}) |"
+      REGISTRY_OK=false
       if [ -f "$LOG_DIR/LOG_REGISTRY.md" ]; then
         if [ -f "$UPSERT_SCRIPT" ]; then
           # If the script rejects (e.g. wrong pipe count), the error stays in
@@ -290,11 +301,13 @@ PY
           # exists to perform.
           python3 "$UPSERT_SCRIPT" "$LOG_DIR/LOG_REGISTRY.md" "$SESSION_ID" "$NEW_ROW" \
             >/dev/null 2>"$LOG_DIR/.upsert_registry_row.err" \
-            && rm -f "$LOG_DIR/.upsert_registry_row.err"
-        else
-          # Script missing entirely — fall back to plain append so we don't lose the row.
-          echo "$NEW_ROW" >> "$LOG_DIR/LOG_REGISTRY.md"
+            && { rm -f "$LOG_DIR/.upsert_registry_row.err"; REGISTRY_OK=true; }
         fi
+      fi
+      if [[ "$REGISTRY_OK" != true ]]; then
+        mycelium_emit_stop_block \
+          "STOP BLOCKED — session registry finalization failed. The active log and session baselines were preserved; inspect .living/log/.upsert_registry_row.err or the helper installation, then retry Stop."
+        exit 0
       fi
 
       # Deterministic Summary: commit subjects since session start.
@@ -309,10 +322,17 @@ PY
           DETERMINISTIC_SUMMARY="${DETERMINISTIC_SUMMARY:0:197}..."
         fi
         if [ -n "$DETERMINISTIC_SUMMARY" ]; then
+          DETERMINISTIC_SUMMARY=$(printf '%s' "$DETERMINISTIC_SUMMARY" | mycelium_registry_cell)
           # Re-upsert the row with the deterministic Summary. Same row, better Summary.
-          NEW_ROW_DET="| $(date +%Y-%m-%d) | ${SESSION_ID} | ${PROJECT_SLUG} | ${BRANCH} | ${DURATION_MIN}m | ${FILES_CHANGED} | ${DETERMINISTIC_SUMMARY} | | complete | | [log](${SESSION_ID}-${PROJECT_SLUG}.md) |"
+          NEW_ROW_DET="| $(date +%Y-%m-%d) | ${SESSION_ID} | ${PROJECT_SLUG} | ${BRANCH} | ${DURATION_MIN}m | ${FILES_CHANGED} | ${DETERMINISTIC_SUMMARY} | | complete | | [log](${LOG_BASENAME}) |"
           if [ -f "$UPSERT_SCRIPT" ]; then
-            python3 "$UPSERT_SCRIPT" "$LOG_DIR/LOG_REGISTRY.md" "$SESSION_ID" "$NEW_ROW_DET" >/dev/null 2>&1 || true
+            if ! python3 "$UPSERT_SCRIPT" "$LOG_DIR/LOG_REGISTRY.md" "$SESSION_ID" "$NEW_ROW_DET" \
+              >/dev/null 2>"$LOG_DIR/.upsert_registry_row.err"; then
+              mycelium_emit_stop_block \
+                "STOP BLOCKED — session registry finalization failed while writing the deterministic summary. Active state was preserved for retry."
+              exit 0
+            fi
+            rm -f "$LOG_DIR/.upsert_registry_row.err"
           fi
         fi
       fi
@@ -356,7 +376,9 @@ LAST_SESSION_EOF
   else
     # Log file doesn't exist (was deleted?) — clean up sentinels
     rm -f "$ACTIVE_LOG_FILE"
-    rm -f "$STATE_DIR/session-file-baseline.json"
+    if [[ "${ACTIVE_MARKER_VALID:-false}" == true ]]; then
+      rm -f "$STATE_DIR/session-file-baseline.json"
+    fi
   fi
 fi
 
@@ -379,6 +401,7 @@ REMINDER_FILE="$STATE_DIR/mycelium-reminded.tmp"
 ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
 if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
   rm -f "$STATE_DIR/session-start-ts.tmp"
+  rm -f "$STATE_DIR/session-file-baseline.json"
   rm -f "$STATE_DIR/living-reminder-baseline.json"
   mycelium_accept_lineage_session
   exit 0
@@ -423,6 +446,7 @@ if [ "$LIVING_UPDATED" = true ]; then
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
   rm -f "$STATE_DIR/session-start-ts.tmp"
+  rm -f "$STATE_DIR/session-file-baseline.json"
   rm -f "$STATE_DIR/living-reminder-baseline.json"
 
   ENHANCE_MSG=".living/ updated. Enhance .mycelium/last-session.md with work, decisions, blockers, current state, and next steps. The deterministic LOG_REGISTRY summary is already in place."

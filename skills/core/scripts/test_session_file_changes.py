@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from session_file_changes import build_snapshot, collect_changes
+from session_file_changes import SCHEMA_VERSION, build_snapshot, collect_changes
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -34,6 +35,18 @@ def test_preexisting_dirty_and_untracked_files_are_not_session_changes(tmp_path:
     assert collect_changes(repo, baseline) == ["new.txt"]
 
 
+def test_worktree_content_fingerprint_uses_current_snapshot_schema(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    (repo / "preexisting.txt").write_text("content\n")
+
+    baseline = build_snapshot(repo)
+
+    assert baseline["schema_version"] == SCHEMA_VERSION == 2
+    assert baseline["files"]["preexisting.txt"]["stat"]["content"]["sha256"]
+
+
 def test_changes_to_preexisting_dirty_files_are_detected(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     dirty = repo / "README.md"
@@ -43,6 +56,36 @@ def test_changes_to_preexisting_dirty_files_are_detected(tmp_path: Path) -> None
     dirty.write_text("changed again during session with a different size\n")
 
     assert collect_changes(repo, baseline) == ["README.md"]
+
+
+def test_same_size_dirty_change_is_detected_when_mtime_is_restored(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    dirty = repo / "README.md"
+    dirty.write_text("dirty-before\n")
+    baseline = build_snapshot(repo)
+    original_times = dirty.stat().st_atime_ns, dirty.stat().st_mtime_ns
+
+    dirty.write_text("dirty-after!\n")
+    os.utime(dirty, ns=original_times)
+
+    assert collect_changes(repo, baseline) == ["README.md"]
+
+
+def test_same_size_untracked_change_is_detected_when_mtime_is_restored(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    untracked = repo / "preexisting.txt"
+    untracked.write_text("before\n")
+    baseline = build_snapshot(repo)
+    original_times = untracked.stat().st_atime_ns, untracked.stat().st_mtime_ns
+
+    untracked.write_text("after!\n")
+    os.utime(untracked, ns=original_times)
+
+    assert collect_changes(repo, baseline) == ["preexisting.txt"]
 
 
 def test_deleting_a_preexisting_untracked_file_is_detected(tmp_path: Path) -> None:

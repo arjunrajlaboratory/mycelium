@@ -74,13 +74,17 @@ the Stop check accepts the session.
 ```
 
 `bash_exit` is populated when the host exposes a Bash exit code. Conditional
-analysis commands are recorded only when that status proves their AND/OR branch
-executed; ambiguous textual matches are skipped rather than asserted as
-provenance. Compound shell commands, heredocs, and interpreter tokens outside a
-supported command position are omitted because the hook does not receive a
-per-command execution trace. `bash_wall_s` remains reserved for future host
-support. The post-action reminder hook uses the same execution check so skipped
-or merely quoted analysis text does not open a false lifecycle cycle.
+analysis commands are recorded only when the status or a statically known
+prefix proves their AND/OR branch executed. Every component of a supported
+pipeline is treated as executed, including a failed final analysis command.
+Unquoted shell comments are removed before inference, while quoted and escaped
+`#` characters remain part of arguments. Ambiguous textual matches are skipped
+rather than asserted as provenance. Compound shell commands, heredocs, and
+interpreter tokens outside a supported command position are omitted because the
+hook does not receive a per-command execution trace. `bash_wall_s` remains
+reserved for future host support. The post-action reminder hook uses the same
+execution check so skipped, commented, or merely quoted analysis text does not
+open a false lifecycle cycle.
 
 A `python a.py && python b.py` chain emits **two** events (one per detected
 script). Inline `-c` scripts emit one event each; their `script` field is

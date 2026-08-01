@@ -25,6 +25,57 @@ except ImportError:
     yaml = None
 
 
+MANAGED_INIT_DIRECTORIES = (
+    ".living",
+    ".living/conventions",
+    ".living/generated-conventions",
+    ".living/log",
+    ".living/findings",
+    ".living/outputs",
+    ".living/outputs/knowledge-transfers",
+    ".living/skills",
+    ".mycelium",
+    ".claude",
+    ".codex",
+    "algorithms",
+    "analysis",
+    "data",
+    "data/raw",
+    "data/processed",
+    "data/metadata",
+    "reference_material",
+    "skillpacks",
+    "todo",
+)
+
+MANAGED_INIT_FILES = (
+    ".mycelium/.gitignore",
+    ".mycelium/plugin-root",
+    ".living/decisions.md",
+    ".living/learnings.md",
+    ".living/conventions.md",
+    ".living/log/LOG_REGISTRY.md",
+    ".living/conventions/ACTIVE_CONVENTIONS.yaml",
+    "algorithms/ALGORITHM_MANIFEST.md",
+    "algorithms/_README_TEMPLATE.md",
+    "analysis/ANALYSIS_MANIFEST.md",
+    "analysis/_README_TEMPLATE.md",
+    "data/DATA_MANIFEST.md",
+    "reference_material/REFERENCE_MANIFEST.md",
+    "todo/TODO_REGISTRY.md",
+    "todo/TODO_ITEM_TEMPLATE.md",
+    "skillpacks/.gitignore",
+    "skillpacks/README.md",
+    "ENVIRONMENTS_INSTALLATIONS.md",
+    "MYCELIUM.md",
+    "CLAUDE.md",
+    "AGENTS.md",
+    ".claude/settings.local.json",
+    ".codex/hooks.json",
+    ".codex/.gitignore",
+)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Scaffold a mycelium-enabled living repository."
@@ -57,24 +108,9 @@ def check_existing_structure(target_dir: Path) -> bool:
 def create_directory_structure(target_dir: Path):
     """Create the canonical mycelium directory structure."""
     directories = [
-        ".living",
-        ".living/conventions",
-        ".living/generated-conventions",
-        ".living/log",
-        ".living/findings",
-        ".living/outputs",
-        ".living/outputs/knowledge-transfers",
-        ".living/skills",
-        ".mycelium",
-        "algorithms",
-        "analysis",
-        "data",
-        "data/raw",
-        "data/processed",
-        "data/metadata",
-        "reference_material",
-        "skillpacks",
-        "todo",
+        path
+        for path in MANAGED_INIT_DIRECTORIES
+        if path not in {".claude", ".codex"}
     ]
 
     for dir_name in directories:
@@ -152,6 +188,33 @@ def ensure_directory_tree_has_no_symlinks(directory: Path) -> None:
             candidate = root / name
             if candidate.is_symlink():
                 raise ValueError(f"Refusing symlinked Mycelium path: {candidate}")
+
+
+def preflight_initialization(target_dir: Path) -> None:
+    """Validate every repository-controlled initialization output before writes."""
+    target_dir.resolve(strict=True)
+    for relative_path in MANAGED_INIT_DIRECTORIES:
+        ensure_safe_project_directory(target_dir, relative_path, create=False)
+    for relative_path in MANAGED_INIT_FILES:
+        ensure_safe_regular_file(target_dir / relative_path)
+
+    for config_path in (
+        target_dir / ".claude" / "settings.local.json",
+        target_dir / ".codex" / "hooks.json",
+    ):
+        if config_path.exists():
+            json.loads(config_path.read_text(encoding="utf-8"))
+
+    network_dir = find_network_conventions_dir()
+    if network_dir:
+        for pack_name in get_core_convention_packs(network_dir):
+            destination = target_dir / ".living" / "conventions" / pack_name
+            ensure_safe_project_directory(
+                target_dir,
+                destination.relative_to(target_dir),
+                create=False,
+            )
+            ensure_directory_tree_has_no_symlinks(destination)
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -1314,6 +1377,8 @@ def main():
             "Use --restructure to audit and update, or remove .living/ to start fresh."
         )
         sys.exit(1)
+
+    preflight_initialization(target_dir)
 
     print("\nCreating directory structure...")
     create_directory_structure(target_dir)
