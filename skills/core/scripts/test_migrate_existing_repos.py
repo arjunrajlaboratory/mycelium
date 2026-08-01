@@ -305,6 +305,104 @@ class TestMigrateOne:
         assert result["Claude hooks top-up"] == "skipped (already up-to-date)"
         assert settings.stat().st_mtime_ns == old_ns
 
+    @pytest.mark.parametrize("name", ["MYCELIUM.md", "CLAUDE.md", "AGENTS.md"])
+    def test_refuses_symlinked_guidance_before_any_migration_write(
+        self, fake_repo: Path, name: str
+    ) -> None:
+        target = fake_repo / name
+        target.unlink(missing_ok=True)
+        victim = fake_repo.parent / f"outside-{name}"
+        original = "# External file\n\nDo not modify me.\n"
+        victim.write_text(original)
+        target.symlink_to(victim)
+        original_claude = (
+            (fake_repo / "CLAUDE.md").read_text()
+            if name != "CLAUDE.md"
+            else None
+        )
+
+        with pytest.raises(ValueError, match="symlink"):
+            mig.migrate_one(fake_repo)
+
+        assert victim.read_text() == original
+        if original_claude is not None:
+            assert (fake_repo / "CLAUDE.md").read_text() == original_claude
+        assert not (fake_repo / ".mycelium").exists()
+
+    @pytest.mark.parametrize(
+        ("relative_path", "victim_content"),
+        [
+            (".claude/settings.local.json", "{}\n"),
+            (
+                ".codex/hooks.json",
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PostToolUse": [
+                                {
+                                    "matcher": "Bash",
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": "/old/mycelium-post-action.sh",
+                                        },
+                                        {"type": "command", "command": "/user/hook.sh"},
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                )
+                + "\n",
+            ),
+            (".claude/last-session.md", "host-private-session-content\n"),
+            ("todo/TODO_REGISTRY.md", None),
+            (".living/INDEX.md", "# External index\n"),
+        ],
+    )
+    def test_refuses_other_symlinked_managed_files_before_any_migration_write(
+        self,
+        fake_repo: Path,
+        relative_path: str,
+        victim_content: str | None,
+    ) -> None:
+        target = fake_repo / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.unlink(missing_ok=True)
+        victim = fake_repo.parent / relative_path.replace("/", "-").lstrip(".")
+        if victim_content is not None:
+            victim.write_text(victim_content)
+        target.symlink_to(victim)
+        original_claude = (fake_repo / "CLAUDE.md").read_text()
+
+        with pytest.raises(ValueError, match="symlink"):
+            mig.migrate_one(fake_repo)
+
+        if victim_content is None:
+            assert not victim.exists()
+        else:
+            assert victim.read_text() == victim_content
+        assert (fake_repo / "CLAUDE.md").read_text() == original_claude
+        assert not (fake_repo / ".mycelium").exists()
+
+    def test_refuses_nested_living_symlink_before_any_migration_write(
+        self, fake_repo: Path
+    ) -> None:
+        findings = fake_repo / ".living" / "findings"
+        findings.mkdir()
+        victim = fake_repo.parent / "outside-living-input.md"
+        original = "host-private-living-content\n"
+        victim.write_text(original)
+        (findings / "linked.md").symlink_to(victim)
+        original_claude = (fake_repo / "CLAUDE.md").read_text()
+
+        with pytest.raises(ValueError, match="symlink"):
+            mig.migrate_one(fake_repo)
+
+        assert victim.read_text() == original
+        assert (fake_repo / "CLAUDE.md").read_text() == original_claude
+        assert not (fake_repo / ".mycelium").exists()
+
     def test_repairs_guidance_and_removes_legacy_project_codex_hooks(
         self, fake_repo: Path
     ) -> None:

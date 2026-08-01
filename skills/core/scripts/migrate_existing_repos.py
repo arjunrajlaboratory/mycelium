@@ -23,7 +23,6 @@ Usage:
 
 import argparse
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -64,6 +63,7 @@ def reanchor_claude_md(repo_path: Path, dry_run: bool = False) -> bool:
     Returns True if applied, False if no-op or CLAUDE.md missing.
     """
     claude_md = repo_path / "CLAUDE.md"
+    ir.ensure_safe_regular_file(claude_md)
     if not claude_md.exists():
         return False
 
@@ -73,7 +73,7 @@ def reanchor_claude_md(repo_path: Path, dry_run: bool = False) -> bool:
         if repaired_content == content:
             return False
         if not dry_run:
-            claude_md.write_text(repaired_content, encoding="utf-8")
+            ir._atomic_write_text(claude_md, repaired_content)
         return True
 
     content = repaired_content
@@ -119,7 +119,7 @@ def reanchor_claude_md(repo_path: Path, dry_run: bool = False) -> bool:
     new_content = "".join(new_lines)
 
     if not dry_run:
-        claude_md.write_text(new_content, encoding="utf-8")
+        ir._atomic_write_text(claude_md, new_content)
     return True
 
 
@@ -129,7 +129,11 @@ def topup_hooks(repo_path: Path, dry_run: bool = False) -> bool:
     Reuses init_repo.install_claude_hooks which is already idempotent.
     Returns True if any hook was added, False if all 6 were already present.
     """
-    settings_path = repo_path / ".claude" / "settings.local.json"
+    claude_dir = ir.ensure_safe_project_directory(
+        repo_path, ".claude", create=not dry_run
+    )
+    settings_path = claude_dir / "settings.local.json"
+    ir.ensure_safe_regular_file(settings_path)
     before_signature = ""
     if settings_path.exists():
         before_signature = json.dumps(
@@ -184,6 +188,8 @@ def topup_hooks(repo_path: Path, dry_run: bool = False) -> bool:
 def ensure_cross_agent_guidance(repo_path: Path, dry_run: bool = False) -> bool:
     """Create MYCELIUM.md and ensure Claude/Codex routing adapters exist."""
     paths = [repo_path / name for name in ("MYCELIUM.md", "CLAUDE.md", "AGENTS.md")]
+    for path in paths:
+        ir.ensure_safe_regular_file(path)
     before = {path.name: path.read_text() if path.exists() else None for path in paths}
     if dry_run:
         canonical_template = (
@@ -215,7 +221,7 @@ def ensure_cross_agent_guidance(repo_path: Path, dry_run: bool = False) -> bool:
         content = path.read_text(encoding="utf-8")
         repaired = content.replace(LEGACY_RECALL_COMMAND, PLUGIN_RECALL_COMMAND)
         if repaired != content:
-            path.write_text(repaired, encoding="utf-8")
+            ir._atomic_write_text(path, repaired)
     after = {path.name: path.read_text() if path.exists() else None for path in paths}
     return before != after
 
@@ -223,6 +229,7 @@ def ensure_cross_agent_guidance(repo_path: Path, dry_run: bool = False) -> bool:
 def migrate_runtime_state(repo_path: Path, dry_run: bool = False) -> bool:
     """Move durable session context from .claude/ to provider-neutral state."""
     legacy = repo_path / ".claude" / "last-session.md"
+    ir.ensure_safe_regular_file(legacy)
     state_dir = ir.ensure_safe_project_directory(
         repo_path, ".mycelium", create=not dry_run
     )
@@ -242,18 +249,21 @@ def migrate_runtime_state(repo_path: Path, dry_run: bool = False) -> bool:
     if dry_run:
         return needs_copy or needs_gitignore or needs_pointer
     if not gitignore.exists():
-        gitignore.write_text("*\n!.gitignore\n")
+        ir._atomic_write_text(gitignore, "*\n!.gitignore\n")
     if needs_copy:
-        shutil.copy2(legacy, destination)
+        ir._atomic_write_text(destination, legacy.read_text(encoding="utf-8"))
     ir.write_plugin_root_pointer(repo_path)
     return needs_copy or needs_gitignore or needs_pointer
 
 
 def topup_codex_hooks(repo_path: Path, dry_run: bool = False) -> bool:
     """Remove cache-path Codex hooks now superseded by plugin hooks."""
-    hooks_path = repo_path / ".codex" / "hooks.json"
+    codex_dir = ir.ensure_safe_project_directory(repo_path, ".codex", create=False)
+    hooks_path = codex_dir / "hooks.json"
+    ir.ensure_safe_regular_file(hooks_path)
     before = hooks_path.read_text() if hooks_path.exists() else None
-    gitignore = repo_path / ".codex" / ".gitignore"
+    gitignore = codex_dir / ".gitignore"
+    ir.ensure_safe_regular_file(gitignore)
     gitignore_before = gitignore.read_text() if gitignore.exists() else None
     if dry_run:
         if before is None:
@@ -269,10 +279,15 @@ def topup_codex_hooks(repo_path: Path, dry_run: bool = False) -> bool:
 
 def ensure_todo_contract(repo_path: Path, dry_run: bool = False) -> bool:
     """Ensure the registry and item template used by the core skill exist."""
+    todo_dir = ir.ensure_safe_project_directory(
+        repo_path, "todo", create=not dry_run
+    )
     required = [
-        repo_path / "todo" / "TODO_REGISTRY.md",
-        repo_path / "todo" / "TODO_ITEM_TEMPLATE.md",
+        todo_dir / "TODO_REGISTRY.md",
+        todo_dir / "TODO_ITEM_TEMPLATE.md",
     ]
+    for path in required:
+        ir.ensure_safe_regular_file(path)
     missing = any(not path.exists() for path in required)
     if dry_run:
         return missing
@@ -286,9 +301,12 @@ def regen_index(repo_path: Path, dry_run: bool = False) -> bool:
 
     Returns True if regenerated, False if no .living/ dir or dry-run.
     """
-    living_dir = repo_path / ".living"
+    living_dir = ir.ensure_safe_project_directory(
+        repo_path, ".living", create=False
+    )
     if not living_dir.is_dir():
         return False
+    ir.ensure_safe_regular_file(living_dir / "INDEX.md")
     if dry_run:
         return True
 
@@ -334,8 +352,27 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
     repo_path = repo_path.resolve()
     if not (repo_path / ".living").is_dir():
         return {"_skip": f"no .living/ at {repo_path}"}
-    ir.ensure_safe_project_directory(repo_path, ".living", create=False)
-    ir.ensure_safe_project_directory(repo_path, ".mycelium", create=False)
+    managed_directories = (".living", ".mycelium", ".claude", ".codex", "todo")
+    for relative in managed_directories:
+        ir.ensure_safe_project_directory(repo_path, relative, create=False)
+    ir.ensure_directory_tree_has_no_symlinks(repo_path / ".living")
+    managed_files = (
+        "MYCELIUM.md",
+        "CLAUDE.md",
+        "AGENTS.md",
+        ".living/INDEX.md",
+        ".mycelium/.gitignore",
+        ".mycelium/plugin-root",
+        ".mycelium/last-session.md",
+        ".claude/settings.local.json",
+        ".claude/last-session.md",
+        ".codex/hooks.json",
+        ".codex/.gitignore",
+        "todo/TODO_REGISTRY.md",
+        "todo/TODO_ITEM_TEMPLATE.md",
+    )
+    for relative in managed_files:
+        ir.ensure_safe_regular_file(repo_path / relative)
 
     claude_md_applied = reanchor_claude_md(repo_path, dry_run=dry_run)
     guidance_applied = ensure_cross_agent_guidance(repo_path, dry_run=dry_run)

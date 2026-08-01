@@ -289,6 +289,83 @@ def test_existing_guidance_is_carried_into_shared_canonical_file(tmp_path):
     assert "MYCELIUM:BEGIN" in (repo / "CLAUDE.md").read_text()
 
 
+@pytest.mark.parametrize("name", ["MYCELIUM.md", "CLAUDE.md", "AGENTS.md"])
+def test_agent_guidance_refuses_symlinked_targets_before_any_write(tmp_path, name):
+    repo = _repo(tmp_path, living=False)
+    victim = tmp_path / f"outside-{name}"
+    original = (
+        "# External file\n\n"
+        "### Automated Enforcement\n\nDo not replace me.\n\n"
+        "### Knowledge Transfer (Cross-Project)\n"
+    )
+    victim.write_text(original)
+    (repo / name).symlink_to(victim)
+
+    with pytest.raises(ValueError, match="symlink"):
+        init_repo.create_agent_guidance(repo)
+
+    assert victim.read_text() == original
+    assert sorted(path.name for path in repo.iterdir()) == [".git", name]
+
+
+def test_agent_guidance_atomic_update_preserves_existing_permissions(tmp_path):
+    repo = _repo(tmp_path, living=False)
+    claude = repo / "CLAUDE.md"
+    claude.write_text("# Private project guidance\n")
+    claude.chmod(0o600)
+
+    init_repo.create_agent_guidance(repo)
+
+    assert claude.stat().st_mode & 0o777 == 0o600
+    assert "MYCELIUM:BEGIN" in claude.read_text()
+
+
+def test_claude_hook_install_refuses_symlinked_settings(tmp_path):
+    repo = _repo(tmp_path, living=False)
+    claude_dir = repo / ".claude"
+    claude_dir.mkdir()
+    victim = tmp_path / "outside-claude-settings.json"
+    original = "{}\n"
+    victim.write_text(original)
+    (claude_dir / "settings.local.json").symlink_to(victim)
+
+    with pytest.raises(ValueError, match="symlink"):
+        init_repo.install_claude_hooks(repo)
+
+    assert victim.read_text() == original
+
+
+def test_codex_hook_cleanup_refuses_symlinked_config(tmp_path):
+    repo = _repo(tmp_path, living=False)
+    codex_dir = repo / ".codex"
+    codex_dir.mkdir()
+    victim = tmp_path / "outside-codex-hooks.json"
+    original = json.dumps(
+        {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "/old/mycelium-post-action.sh",
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+    victim.write_text(original)
+    (codex_dir / "hooks.json").symlink_to(victim)
+
+    with pytest.raises(ValueError, match="symlink"):
+        init_repo.install_codex_hooks(repo)
+
+    assert victim.read_text() == original
+
+
 def test_existing_codex_gitignore_is_not_changed_for_plugin_hooks(tmp_path):
     repo = _repo(tmp_path, living=False)
     codex_dir = repo / ".codex"
