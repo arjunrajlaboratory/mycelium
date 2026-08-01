@@ -603,3 +603,90 @@ def test_main_accepts_supported_execution_wrappers(
 
     assert result.returncode == 0, result.stderr
     assert json.loads(target.read_text())["script"] == str(script)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 -u a.py",
+        "python3 -W ignore a.py",
+        "python3 -Wignore a.py",
+        "python3 -Xdev a.py",
+        "python3 -- a.py",
+        "/usr/bin/python3 a.py",
+        "/tmp/project/.venv/bin/python a.py",
+        "/usr/bin/env python3 a.py",
+    ],
+)
+def test_main_accepts_common_python_executable_and_flag_forms(
+    tmp_path: Path, command: str
+) -> None:
+    """Interpreter paths and startup flags must not hide real analysis."""
+    import json
+    import subprocess
+
+    script = tmp_path / "a.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            "0",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text())["script"] == str(script)
+
+
+def test_main_retains_python_module_execution_as_unresolved_lineage(
+    tmp_path: Path,
+) -> None:
+    """A module invocation is work even when its source cannot be resolved."""
+    import json
+    import subprocess
+
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+    command = "python3 -u -m analysis_pipeline --input input.csv"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            "0",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(target.read_text())
+    assert event["bash_cmd"] == command
+    assert event["io_detection"] == "unresolved"
+    assert "analysis_pipeline" in event["script_source"]

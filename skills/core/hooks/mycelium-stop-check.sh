@@ -26,7 +26,13 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 if [ -z "$REPO_ROOT" ]; then
   exit 0
 fi
-mycelium_prepare_state_dir "$REPO_ROOT"
+mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
+if ! mycelium_acquire_stop_lock "$STATE_DIR"; then
+  # Another Stop invocation owns the transaction and will produce the single
+  # authoritative decision/finalization.
+  exit 0
+fi
+trap mycelium_release_stop_lock EXIT
 
 # Consolidate lineage in-process before lifecycle enforcement. Hook runtimes
 # launch sibling command hooks concurrently, so registering consolidation as a
@@ -76,6 +82,24 @@ UPSERT_SCRIPT="$SCRIPT_DIR/scripts/upsert_registry_row.py"
 ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
 if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
   LOG_PATH=$(head -1 "$ACTIVE_LOG_FILE")
+  LOG_PATH=$(python3 - "$REPO_ROOT" "$LOG_PATH" <<'PY' 2>/dev/null || true
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+candidate = Path(sys.argv[2]).resolve(strict=False)
+try:
+    candidate.relative_to(root / ".living" / "log")
+except ValueError:
+    raise SystemExit(1)
+if candidate.is_symlink():
+    raise SystemExit(1)
+print(candidate)
+PY
+)
+  if [[ -z "$LOG_PATH" ]]; then
+    exit 0
+  fi
   OWNER_TS=$(sed -n '2p' "$ACTIVE_LOG_FILE" 2>/dev/null || echo "")
   OUR_TS=$(cat "$STATE_DIR/session-start-ts.tmp" 2>/dev/null || echo "")
 
@@ -169,6 +193,35 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       REMINDER_COUNT=1
     fi
 
+    # Decide whether Stop is accepted before mutating any final state. File
+    # changes discovered from Git are an enforcement signal even when a Bash
+    # command bypassed the editor/activity hook. Lineage-only inline work keeps
+    # its log and session ID but does not require a scientific reflection.
+    ENFORCEMENT_REQUIRED=0
+    if [ "$ACTIVITY_COUNT" -gt 0 ] \
+      || [ "$REMINDER_COUNT" -gt 0 ] \
+      || [ "$FILES_CHANGED" -gt 0 ]; then
+      ENFORCEMENT_REQUIRED=1
+    fi
+    if [ "$ENFORCEMENT_REQUIRED" -eq 1 ]; then
+      WORK_TS=$(head -1 "$STATE_DIR/mycelium-reminded.tmp" 2>/dev/null || echo "$START_TS")
+      [[ "$WORK_TS" =~ ^[0-9]+$ ]] || WORK_TS=0
+      LIVING_BASELINE_FILE="$STATE_DIR/living-reminder-baseline.json"
+      if [[ ! -f "$LIVING_BASELINE_FILE" ]]; then
+        LIVING_BASELINE_FILE="$SESSION_BASELINE_FILE"
+      fi
+      if ! mycelium_living_changed \
+        "$REPO_ROOT" "$LIVING_BASELINE_FILE" "$SESSION_CHANGES_SCRIPT" "$WORK_TS"; then
+        FILE_NAMES=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -15 \
+          | while IFS= read -r changed_path; do basename "$changed_path"; done \
+          | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+        REASON="STOP BLOCKED — ${FILES_CHANGED} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update last-session.md."
+        ESCAPED_REASON=$(printf '%s' "$REASON" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
+        printf '{"decision": "block", "reason": %s}\n' "$ESCAPED_REASON"
+        exit 0
+      fi
+    fi
+
     # Skip finalization only if NO evidence of work exists in any signal.
     # Lineage-only inline analyses still reserve their session ID and manifest.
     if [ "$ACTIVITY_COUNT" -eq 0 ] \
@@ -179,6 +232,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       rm -f "$ACTIVE_LOG_FILE"
       rm -f "$STATE_DIR/session-start-ts.tmp"
       rm -f "$SESSION_BASELINE_FILE"
+      rm -f "$STATE_DIR/living-reminder-baseline.json"
       # No registry row, no finalization — clean exit (noise session)
     else
       # Auto-finalize the session log (factual record — no Claude needed)
@@ -314,6 +368,7 @@ fi
 # If no .living/ directory, skip (SessionStart hook handles scaffolding)
 LIVING_DIR="$REPO_ROOT/.living"
 if [ ! -d "$LIVING_DIR" ]; then
+  rm -f "$STATE_DIR/living-reminder-baseline.json"
   mycelium_accept_lineage_session
   exit 0
 fi
@@ -324,6 +379,7 @@ REMINDER_FILE="$STATE_DIR/mycelium-reminded.tmp"
 ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
 if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
   rm -f "$STATE_DIR/session-start-ts.tmp"
+  rm -f "$STATE_DIR/living-reminder-baseline.json"
   mycelium_accept_lineage_session
   exit 0
 fi
@@ -340,38 +396,15 @@ fi
 # Post-action hook fired. Check if .living/ was updated AFTER the reminder.
 REMINDER_TS="$WORK_TS"
 
-LEARNINGS_UPDATED=false
-DECISIONS_UPDATED=false
-CONVENTIONS_UPDATED=false
-
-if [ -f "$LIVING_DIR/learnings.md" ]; then
-  LEARNINGS_MTIME=$(mycelium_file_mtime "$LIVING_DIR/learnings.md")
-  if [ "$LEARNINGS_MTIME" -gt "$REMINDER_TS" ]; then
-    LEARNINGS_UPDATED=true
-  fi
+LIVING_UPDATED=false
+LIVING_BASELINE_FILE="$STATE_DIR/living-reminder-baseline.json"
+if [[ ! -f "$LIVING_BASELINE_FILE" ]]; then
+  LIVING_BASELINE_FILE="$STATE_DIR/session-file-baseline.json"
 fi
-
-if [ -f "$LIVING_DIR/decisions.md" ]; then
-  DECISIONS_MTIME=$(mycelium_file_mtime "$LIVING_DIR/decisions.md")
-  if [ "$DECISIONS_MTIME" -gt "$REMINDER_TS" ]; then
-    DECISIONS_UPDATED=true
-  fi
-fi
-
-if [ -f "$LIVING_DIR/conventions.md" ]; then
-  CONVENTIONS_MTIME=$(mycelium_file_mtime "$LIVING_DIR/conventions.md")
-  if [ "$CONVENTIONS_MTIME" -gt "$REMINDER_TS" ]; then
-    CONVENTIONS_UPDATED=true
-  fi
-fi
-
-FINDINGS_UPDATED=false
-FINDINGS_DIR="$LIVING_DIR/findings"
-if [ -d "$FINDINGS_DIR" ]; then
-  FINDINGS_MTIME=$(mycelium_file_mtime "$FINDINGS_DIR")
-  if [ "$FINDINGS_MTIME" -gt "$REMINDER_TS" ]; then
-    FINDINGS_UPDATED=true
-  fi
+SESSION_CHANGES_SCRIPT="${MYCELIUM_SESSION_CHANGES_HELPER:-$SCRIPT_DIR/scripts/session_file_changes.py}"
+if mycelium_living_changed \
+  "$REPO_ROOT" "$LIVING_BASELINE_FILE" "$SESSION_CHANGES_SCRIPT" "$REMINDER_TS"; then
+  LIVING_UPDATED=true
 fi
 
 # Build file context for triage instructions
@@ -385,11 +418,12 @@ fi
 # --- Session-end triage (short signals — full protocol is in the mycelium skill) ---
 
 # If any was updated after the post-action hook fired, protocol was followed
-if [ "$LEARNINGS_UPDATED" = true ] || [ "$DECISIONS_UPDATED" = true ] || [ "$CONVENTIONS_UPDATED" = true ] || [ "$FINDINGS_UPDATED" = true ]; then
+if [ "$LIVING_UPDATED" = true ]; then
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
   rm -f "$STATE_DIR/session-start-ts.tmp"
+  rm -f "$STATE_DIR/living-reminder-baseline.json"
 
   ENHANCE_MSG=".living/ updated. Enhance .mycelium/last-session.md with work, decisions, blockers, current state, and next steps. The deterministic LOG_REGISTRY summary is already in place."
   mycelium_emit_context "Stop" "$ENHANCE_MSG"

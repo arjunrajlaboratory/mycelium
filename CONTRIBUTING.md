@@ -88,6 +88,10 @@ The shared skills (`skills/*/SKILL.md`), hooks (`skills/core/hooks/`), scripts, 
 3. Maintainer review
 4. Changes to shared skill files and hooks require extra scrutiny — they affect all users
 5. Hook changes should include `bash -n` syntax validation and test scenarios
+6. Changes to plugin packaging, shared skills, lifecycle hooks, initialization,
+   migration, session accounting, or data lineage must use the
+   [cross-host compatibility review checklist](docs/cross-host-review-checklist.md)
+   before merge
 
 ## Code of Conduct
 
