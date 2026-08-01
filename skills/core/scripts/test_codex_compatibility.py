@@ -738,6 +738,117 @@ def test_codex_post_action_rejects_unproven_shell_text_matches(tmp_path):
         assert not reminder.exists()
 
 
+@pytest.mark.parametrize(
+    "argument,quoted",
+    [
+        ("setup\nif True:\n    print(1)", True),
+        ("pytest", True),
+        ("pip install package", True),
+        ("python -m pip", True),
+        ("ruff", True),
+        ("setup.py", True),
+        ("skills/core/scripts/validate_structure.py", True),
+        ("pytest", False),
+        ("pip install package", False),
+        ("python -m pip", False),
+        ("ruff", False),
+        ("setup.py", False),
+        ("skills/core/scripts/validate_structure.py", False),
+    ],
+)
+def test_codex_post_action_ignores_exclusion_text_in_script_arguments(
+    tmp_path, argument, quoted
+):
+    repo = _repo(tmp_path)
+    (repo / "analysis.py").write_text(
+        "import pandas as pd\npd.read_csv('input.csv')\n"
+    )
+
+    rendered_argument = f'"{argument}"' if quoted else argument
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": f"python analysis.py --expression {rendered_argument}"
+            },
+            "tool_response": {"exit_code": 0},
+            "turn_id": "turn-quoted-control-word",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "MYCELIUM POST-ACTION PROTOCOL" in context
+    assert (repo / ".mycelium" / "mycelium-reminded.tmp").is_file()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'python -c "import pandas as pd; pd.read_csv(\'input.csv\')"',
+        "python -m pytest",
+        "python -m ruff",
+        'python "setup.py"',
+    ],
+)
+def test_codex_post_action_ignores_actual_tooling_execution(tmp_path, command):
+    repo = _repo(tmp_path)
+    (repo / "setup.py").write_text("from setuptools import setup\nsetup()\n")
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": {"exit_code": 0},
+            "turn_id": "turn-tooling-execution",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert not (repo / ".mycelium" / "mycelium-reminded.tmp").exists()
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        'python -c "print(1)"',
+        "python -m pytest",
+        "python -m ruff",
+        'python "setup.py"',
+    ],
+)
+def test_codex_post_action_retains_analysis_after_tooling_prefix(tmp_path, prefix):
+    repo = _repo(tmp_path)
+    (repo / "setup.py").write_text("from setuptools import setup\nsetup()\n")
+    (repo / "analysis.py").write_text(
+        "import pandas as pd\npd.read_csv('input.csv')\n"
+    )
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": f"{prefix} && python analysis.py"},
+            "tool_response": {"exit_code": 0},
+            "turn_id": "turn-analysis-after-tooling",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "MYCELIUM POST-ACTION PROTOCOL" in context
+    assert (repo / ".mycelium" / "mycelium-reminded.tmp").is_file()
+
+
 def test_codex_post_tool_use_ignores_mycelium_structure_validator(tmp_path):
     repo = _repo(tmp_path)
     command = (
@@ -815,6 +926,37 @@ def test_codex_data_tracker_preserves_unresolved_wrapper_execution(tmp_path):
     assert event["inputs"] == []
     assert event["outputs"] == []
     assert event["lineage_warnings"]
+
+
+def test_codex_data_tracker_records_multiline_inline_language_control_flow(tmp_path):
+    repo = _repo(tmp_path)
+    command = (
+        "python -c \"import pandas as pd\n"
+        "if True:\n"
+        "    pd.read_csv('input.csv')\n"
+        "for value in [1]:\n"
+        "    pass\""
+    )
+
+    result = _run_hook(
+        "mycelium-data-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": {"exit_code": 0},
+            "turn_id": "turn-multiline-inline-lineage",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(
+        (repo / ".mycelium" / "mycelium-data-events.tmp").read_text()
+    )
+    assert event["script"] is None
+    assert "if True:" in event["script_source"]
+    assert event["inputs"][0]["path"] == str(repo / "input.csv")
 
 
 def test_codex_data_tracker_skips_analysis_in_failed_and_chain(tmp_path):

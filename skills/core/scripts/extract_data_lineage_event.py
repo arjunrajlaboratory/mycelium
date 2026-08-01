@@ -81,16 +81,22 @@ RX_JUPYTER_SCRIPT_PATH = re.compile(
     r"(?:nbconvert|execute)\s+(?:--\S+\s+)*(?P<path>[^\s|&;]+\.ipynb)"
 )
 IGNORED_PYTHON_MODULES = {
+    "black",
     "compileall",
     "cProfile",
     "doctest",
     "ensurepip",
+    "flake8",
     "http.server",
+    "isort",
     "json.tool",
+    "mypy",
     "pdb",
     "pip",
     "pydoc",
+    "pyright",
     "pytest",
+    "ruff",
     "site",
     "tarfile",
     "timeit",
@@ -98,6 +104,10 @@ IGNORED_PYTHON_MODULES = {
     "venv",
     "zipfile",
 }
+IGNORED_SCRIPT_SUFFIXES = {
+    "skills/core/scripts/validate_structure.py",
+}
+IGNORED_SCRIPT_BASENAMES = {"setup.py"}
 ANALYSIS_PATTERNS = (
     RX_PYTHON_C,
     RX_PYTHON_M,
@@ -120,6 +130,55 @@ RX_UNSUPPORTED_SHELL_STRUCTURE = re.compile(
     rf"|{_CONTROL_BOUNDARY}[ \t]*\{{"
     r"|<<-?"
 )
+
+
+def _unquoted_shell_text(command: str) -> str | None:
+    """Mask quoted arguments while preserving unquoted shell structure.
+
+    The returned text has the same length as ``command`` so boundaries remain
+    intact, but quoted language source cannot be mistaken for shell syntax.
+    Return ``None`` for an unterminated quote so callers can fail closed.
+    """
+    masked: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote is None:
+            if char == "\\":
+                masked.append(" ")
+                if index + 1 < len(command):
+                    masked.append(" ")
+                    index += 2
+                    continue
+                return None
+            elif char in {"'", '"'}:
+                quote = char
+                masked.append(" ")
+                index += 1
+                continue
+            else:
+                masked.append(char)
+                index += 1
+                continue
+        elif quote == "'":
+            masked.append(" ")
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        else:
+            masked.append(" ")
+            if char == "\\" and index + 1 < len(command):
+                masked.append(" ")
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+
+    return None if quote is not None else "".join(masked)
 
 # --- Data I/O source-scanning regexes ---
 INPUT_REGEXES = [
@@ -520,7 +579,10 @@ def _match_is_proven_executed(
     bash_cmd: str, offset: int, bash_exit: int | None, initial_cwd: Path
 ) -> bool:
     """Conservatively decide whether a textual script match actually ran."""
-    if RX_UNSUPPORTED_SHELL_STRUCTURE.search(bash_cmd):
+    unquoted_shell = _unquoted_shell_text(bash_cmd)
+    if unquoted_shell is None or RX_UNSUPPORTED_SHELL_STRUCTURE.search(
+        unquoted_shell
+    ):
         return False
     if not _match_is_command_invocation(bash_cmd, offset):
         return False
@@ -560,11 +622,14 @@ def _detect_scripts_with_cwd(
     *,
     bash_exit: int | None = None,
     require_execution_evidence: bool = False,
+    include_python_inline: bool = True,
 ) -> list[tuple[Path | None, str | None, Path]]:
     out: list[tuple[Path | None, str | None, Path]] = []
     seen_paths: set[Path] = set()
     seen_inline: set[tuple[str, Path]] = set()
     for m in RX_PYTHON_C.finditer(bash_cmd):
+        if not include_python_inline:
+            continue
         if require_execution_evidence and not _match_is_proven_executed(
             bash_cmd, m.start(), bash_exit, cwd
         ):
@@ -611,7 +676,12 @@ def _detect_scripts_with_cwd(
             ):
                 continue
             effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
-            path = Path(m.group("path"))
+            raw_path = m.group("path").strip("\"'")
+            if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES or any(
+                raw_path.endswith(suffix) for suffix in IGNORED_SCRIPT_SUFFIXES
+            ):
+                continue
+            path = Path(raw_path)
             if not path.is_absolute():
                 path = effective_cwd / path
             path = Path(os.path.abspath(path))
@@ -781,10 +851,20 @@ def main() -> int:
     ap.add_argument("--agent-id", default=None)
     ap.add_argument("--agent-type", default=None)
     ap.add_argument("--bash-exit", type=int, default=None)
-    ap.add_argument(
+    check_group = ap.add_mutually_exclusive_group()
+    check_group.add_argument(
         "--check-execution",
         action="store_true",
         help="Exit 0 only when a supported analysis invocation is proven to run.",
+    )
+    check_group.add_argument(
+        "--check-post-action",
+        action="store_true",
+        help=(
+            "Exit 0 only for a proven analysis that should open a Mycelium "
+            "bookkeeping cycle; excludes Python inline, tooling modules, and "
+            "managed utility scripts."
+        ),
     )
     ap.add_argument(
         "--append-to",
@@ -795,7 +875,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if not is_analysis(args.bash_cmd):
-        return 1 if args.check_execution else 0
+        return 1 if args.check_execution or args.check_post_action else 0
 
     cwd = Path(args.cwd)
     detections = _detect_scripts_with_cwd(
@@ -803,8 +883,9 @@ def main() -> int:
         cwd,
         bash_exit=args.bash_exit,
         require_execution_evidence=True,
+        include_python_inline=not args.check_post_action,
     )
-    if args.check_execution:
+    if args.check_execution or args.check_post_action:
         return 0 if detections else 1
     if not detections:
         return 0
