@@ -1111,6 +1111,33 @@ def test_codex_data_tracker_accepts_wrapped_concatenated_script_paths(
     assert event["script"] == str(script)
 
 
+def test_codex_data_tracker_applies_env_working_directory(tmp_path):
+    repo = _repo(tmp_path)
+    workdir = repo / "sub"
+    workdir.mkdir()
+    script = workdir / "analysis.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+
+    result = _run_hook(
+        "mycelium-data-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": "env -C sub python analysis.py"},
+            "tool_response": {"exit_code": 0},
+            "turn_id": "turn-env-working-directory",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(
+        (repo / ".mycelium" / "mycelium-data-events.tmp").read_text()
+    )
+    assert event["script"] == str(script)
+    assert event["inputs"][0]["path"] == str(workdir / "input.csv")
+
+
 def test_codex_data_tracker_accepts_escaped_script_path_with_spaces(tmp_path):
     repo = _repo(tmp_path)
     script = repo / "analysis script.py"
@@ -1549,6 +1576,62 @@ def test_stop_preserves_transaction_when_registry_upsert_fails(tmp_path):
     assert log_path.read_text().count("Session ended") == 1
     registry = repo / ".living" / "log" / "LOG_REGISTRY.md"
     assert registry.read_text().count(f"| {session_id} |") == 1
+    assert not active_marker.exists()
+
+
+def test_stop_preserves_transaction_when_atomic_log_finalization_fails(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "log-finalize-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    active_marker = state / "active-session-log.tmp"
+    log_path = Path(active_marker.read_text().splitlines()[0])
+    session_id = log_path.name[:14]
+    (repo / "work.py").write_text("print('work')\n")
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\nAtomic finalization must be retryable.\n"
+    )
+    failing_helper = tmp_path / "failing-log-finalizer.py"
+    failing_helper.write_text("raise SystemExit(31)\n")
+
+    failed = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "log-finalize-fail"},
+        {"MYCELIUM_LOG_FINALIZER_HELPER": str(failing_helper)},
+    )
+
+    assert failed.returncode == 0, failed.stderr
+    payload = json.loads(failed.stdout)
+    assert payload["decision"] == "block"
+    assert "session log finalization failed" in payload["reason"]
+    assert active_marker.is_file()
+    assert "ended:\n" in log_path.read_text()
+    assert "Session ended" not in log_path.read_text()
+
+    resumed = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "compact", "turn_id": "log-finalize-compact"},
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert Path(active_marker.read_text().splitlines()[0]) == log_path
+    assert log_path.name[:14] == session_id
+
+    retried = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": True, "turn_id": "log-finalize-retry"},
+    )
+    assert retried.returncode == 0, retried.stderr
+    assert '"decision": "block"' not in retried.stdout
+    finalized = log_path.read_text()
+    assert "ended:\n" not in finalized
+    assert finalized.count("Session ended") == 1
     assert not active_marker.exists()
 
 

@@ -145,6 +145,12 @@ hook, filesystem, or lifecycle boundaries.
       `/usr/bin/env`, plus execution wrappers such as `time`, `exec`, `nice`,
       and `timeout`, are detected (including nested forms) without confusing
       wrapper arguments or option values for executed scripts.
+- [ ] Wrapper options that rewrite argv, such as `env -S`/`--split-string`, are
+      either modeled completely or rejected conservatively; a later
+      interpreter-looking argument is never treated as the executed program.
+- [ ] Wrapper options that change cwd, including `env -C`/`--chdir`,
+      `conda run --cwd`, and `uv run --directory`, are applied in nesting order
+      before script, input, and output paths are resolved.
 - [ ] AND, OR, pipelines, subshells, heredocs, comments, and quoted text are
       interpreted conservatively, with tests for both false positives and false
       negatives.
@@ -166,6 +172,10 @@ hook, filesystem, or lifecycle boundaries.
       shell word (for example `"analysis script".py` or
       `'analysis'\ script.py`) are decoded as one interpreter, flag value, or
       script path rather than silently dropped.
+- [ ] Interpreter and script regexes require a complete shell-word boundary;
+      suffixes such as `"analysis.py".bak`, `"a.R".bak`, and
+      `"a.ipynb".bak` cannot be attributed to the shorter quoted filename,
+      while adjacent shell redirections remain valid word boundaries.
 - [ ] Inferred paths are canonicalized and proven to remain within the project
       before they are trusted or written.
 - [ ] `apply_patch` activity is recorded only after a successful tool result,
@@ -219,6 +229,10 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Concurrent SessionStart and PostToolUse writes cannot truncate or
       interleave state.
 - [ ] Log, registry, manifest, marker, and sentinel replacements are atomic.
+- [ ] A log's acceptance marker, duration/file-count frontmatter, and matching
+      completion footer are published as one atomic replacement; an injected
+      write/replace failure leaves the original unfinalized log and active
+      retry markers intact.
 - [ ] Lock acquisition has bounded failure behavior and stale-lock handling.
 - [ ] `.mycelium`, `.living`, marker files, and output parents cannot redirect
       writes outside the project through symlinks.
@@ -297,7 +311,11 @@ exercise them.
 | Registry summary contains `|`, or the registry/lineage helper fails | Table cells remain valid; helper failure blocks Stop and preserves retry state without duplicate finalization. |
 | Registry finalization fails, then SessionStart resumes or compacts before Stop retries | The same unfinalized log and session ID remain active; the retry produces one final log and registry row. |
 | Interpreter or script paths concatenate quoted, bare, and escaped shell-word components | Python, R, and Jupyter reminders and lineage use the single decoded argv value. |
+| A quoted interpreter/script suffix is followed by more characters in the same shell word, such as `python "a.py".bak` | The longer argv value is evaluated as a whole; no event is attributed to `a.py`. |
+| `env -S 'echo prefix' python a.py` or another argv-rewriting wrapper precedes an interpreter-looking argument | The parser rejects the ambiguous execution unless it fully models the wrapper expansion. |
+| `env -C sub`, `conda run --cwd sub`, or `uv run --directory sub` wraps an analysis command | Scripts and data paths resolve relative to the wrapper-selected directory; missing or dynamic directories are rejected. |
 | `time`, `exec`, `nice`, and `timeout` wrap or nest around an interpreter | Real executions are captured, while malformed options and an unrelated wrapped command containing interpreter text are rejected. |
+| Atomic session-log replacement fails after registry/context preparation | Stop blocks, frontmatter remains unaccepted with no footer, active state survives resume/compact, and one retry produces one footer. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |
 
