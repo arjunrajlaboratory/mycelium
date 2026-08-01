@@ -86,6 +86,21 @@ def test_switching_to_preexisting_branch_does_not_report_history(tmp_path: Path)
     assert collect_changes(repo, baseline, start_ts=session_start) == []
 
 
+def test_amending_old_commit_reports_only_tree_delta(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "old.txt").write_text("pre-session content\n")
+    _git(repo, "add", "old.txt")
+    _git(repo, "commit", "-q", "-m", "pre-session commit")
+    baseline = build_snapshot(repo)
+    session_start = int(time.time()) - 1
+
+    (repo / "new.txt").write_text("added during session\n")
+    _git(repo, "add", "new.txt")
+    _git(repo, "commit", "-q", "--amend", "--no-edit")
+
+    assert collect_changes(repo, baseline, start_ts=session_start) == ["new.txt"]
+
+
 def test_activity_file_retains_deleted_paths_and_ignores_external_paths(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     baseline = build_snapshot(repo)

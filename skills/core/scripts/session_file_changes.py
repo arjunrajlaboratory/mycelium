@@ -38,6 +38,24 @@ def _head(repo_root: Path) -> str | None:
     return value or None
 
 
+def _is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            descendant,
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
 def _stat_fingerprint(repo_root: Path, relative_path: str) -> dict[str, int] | None:
     try:
         stat = (repo_root / relative_path).lstat()
@@ -52,6 +70,10 @@ def _stat_fingerprint(repo_root: Path, relative_path: str) -> dict[str, int] | N
 
 def _decode_path(raw: bytes) -> str:
     return os.fsdecode(raw)
+
+
+def _decode_paths(payload: bytes) -> set[str]:
+    return {_decode_path(raw) for raw in payload.split(b"\0") if raw}
 
 
 def read_worktree_state(repo_root: Path) -> dict[str, dict[str, Any]]:
@@ -170,7 +192,25 @@ def _committed_paths(
             # destination branch's older history is not reported as new work.
             log_args.append(f"--since=@{start_ts}")
         log_args.extend(("--name-only", "-z", "--pretty=format:"))
-        payload = _run_git(repo_root, *log_args)
+        committed = _decode_paths(_run_git(repo_root, *log_args))
+        if not _is_ancestor(repo_root, baseline_head, current_head):
+            # Amend/rebase/branch-switch transitions rewrite ancestry. Commit
+            # path lists can then contain unchanged historical files, while a
+            # raw tree diff can contain an existing destination branch. Their
+            # intersection retains only recent commits whose final tree content
+            # actually differs from the session baseline.
+            tree_delta = _decode_paths(
+                _run_git(
+                    repo_root,
+                    "diff",
+                    "--name-only",
+                    "-z",
+                    baseline_head,
+                    current_head,
+                )
+            )
+            committed.intersection_update(tree_delta)
+        return committed
     elif start_ts is not None:
         payload = _run_git(
             repo_root,
@@ -182,7 +222,7 @@ def _committed_paths(
         )
     else:
         payload = _run_git(repo_root, "ls-tree", "-r", "--name-only", "-z", current_head)
-    return {_decode_path(raw) for raw in payload.split(b"\0") if raw}
+    return _decode_paths(payload)
 
 
 def collect_changes(
