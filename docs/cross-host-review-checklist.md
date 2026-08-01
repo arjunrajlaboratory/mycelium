@@ -131,7 +131,8 @@ hook, filesystem, or lifecycle boundaries.
 
 - [ ] Direct Python, R, and Jupyter execution is detected.
 - [ ] Absolute, versioned, virtual-environment, and PATH-resolved interpreter
-      names are detected.
+      names are detected, including quoted or backslash-escaped paths with
+      whitespace.
 - [ ] Interpreter flags, `-m` modules, and inline execution forms are handled
       according to the documented policy.
 - [ ] Common wrappers such as `uv`, `conda`, `poetry`, and `/usr/bin/env` are
@@ -147,8 +148,9 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Nested and changed working directories resolve script and output paths
       correctly.
 - [ ] Failed or conditional `cd` commands do not change the inferred directory.
-- [ ] Symlink aliases, spaces, and non-ASCII path components do not silently
-      drop valid activity.
+- [ ] Symlink aliases, quoted and backslash-escaped whitespace, shell
+      metacharacters inside quotes, and non-ASCII path components do not
+      silently drop valid script or notebook activity.
 - [ ] Inferred paths are canonicalized and proven to remain within the project
       before they are trusted or written.
 - [ ] `apply_patch` activity is recorded only after a successful tool result,

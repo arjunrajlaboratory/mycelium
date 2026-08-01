@@ -901,6 +901,53 @@ def test_codex_post_tool_use_reads_only_log_path_marker_line(tmp_path):
     assert owner_timestamp not in context
 
 
+def test_codex_post_action_accepts_quoted_script_path_with_spaces(tmp_path):
+    repo = _repo(tmp_path)
+    script = repo / "analysis script.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": 'python "analysis script.py"'},
+            "tool_response": {"exit_code": 0},
+            "turn_id": "turn-quoted-script-path",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "MYCELIUM POST-ACTION PROTOCOL" in context
+
+
+def test_codex_data_tracker_accepts_escaped_script_path_with_spaces(tmp_path):
+    repo = _repo(tmp_path)
+    script = repo / "analysis script.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+
+    result = _run_hook(
+        "mycelium-data-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": r"python analysis\ script.py"},
+            "tool_response": {"exit_code": 0},
+            "turn_id": "turn-escaped-script-path",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(
+        (repo / ".mycelium" / "mycelium-data-events.tmp").read_text()
+    )
+    assert event["script"] == str(script)
+    assert event["inputs"][0]["path"] == str(repo / "input.csv")
+
+
 def test_codex_data_tracker_preserves_unresolved_wrapper_execution(tmp_path):
     repo = _repo(tmp_path)
     (repo / "run.py").write_text(
