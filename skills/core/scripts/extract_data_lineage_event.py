@@ -199,18 +199,25 @@ def detect_script(bash_cmd: str, cwd: Path) -> tuple[Path | None, str | None]:
     return detections[0] if detections else (None, None)
 
 
-def _apply_cd(segment: list[str], cwd: Path) -> Path:
-    """Apply a simple shell ``cd`` segment without executing user input."""
+def _strip_assignments(segment: list[str]) -> list[str]:
+    """Remove leading POSIX-style environment assignments from a command."""
+    segment = list(segment)
     while segment and ("=" in segment[0] and not segment[0].startswith(("./", "/"))):
         name, _, _ = segment[0].partition("=")
         if not name.replace("_", "a").isalnum() or name[:1].isdigit():
             break
         segment = segment[1:]
+    return segment
+
+
+def _simple_cd_status(segment: list[str], cwd: Path) -> tuple[bool | None, Path]:
+    """Return a simple cd's known status and resulting cwd without executing it."""
+    segment = _strip_assignments(segment)
     if not segment or segment[0] != "cd":
-        return cwd
+        return None, cwd
     arguments = [value for value in segment[1:] if value != "--"]
     if len(arguments) != 1 or arguments[0] == "-" or "$" in arguments[0]:
-        return cwd
+        return None, cwd
     target = Path(os.path.expanduser(arguments[0]))
     if not target.is_absolute():
         target = cwd / target
@@ -219,24 +226,26 @@ def _apply_cd(segment: list[str], cwd: Path) -> Path:
     # directory change that the shell could not have made: in
     # ``cd missing || python a.py`` the Python command runs from the old cwd.
     if not target.is_dir() or not os.access(target, os.X_OK):
-        return cwd
-    return target
+        return False, cwd
+    return True, target
 
 
-def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
-    """Resolve preceding top-level ``cd`` commands for a command match."""
+def _apply_cd(segment: list[str], cwd: Path) -> Path:
+    """Apply a simple shell ``cd`` segment without executing user input."""
+    status, target = _simple_cd_status(segment, cwd)
+    return target if status is True else cwd
+
+
+def _shell_tokens(fragment: str) -> list[str] | None:
+    """Tokenize shell control punctuation while preserving quoted content."""
     try:
-        lexer = shlex.shlex(
-            bash_cmd[:offset], posix=True, punctuation_chars=";&|()\n"
-        )
-        # Preserve unquoted newlines as command separators. Quoted newlines
-        # stay inside their token and therefore cannot be mistaken for one.
+        lexer = shlex.shlex(fragment, posix=True, punctuation_chars=";&|()\n")
         lexer.whitespace = " \t\r"
         lexer.whitespace_split = True
         lexer.commenters = ""
         raw_tokens = list(lexer)
     except ValueError:
-        return initial_cwd
+        return None
 
     tokens: list[str] = []
     punctuation = set(";&|()\n")
@@ -253,6 +262,14 @@ def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
                     index += 1
         else:
             tokens.append(token)
+    return tokens
+
+
+def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
+    """Resolve preceding top-level ``cd`` commands for a command match."""
+    tokens = _shell_tokens(bash_cmd[:offset])
+    if tokens is None:
+        return initial_cwd
 
     cwd = initial_cwd
     subshell_states: list[tuple[Path, bool, bool]] = []
@@ -298,30 +315,9 @@ def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
 
 def _top_level_control_context(fragment: str) -> tuple[list[str], bool, bool]:
     """Return current-list operators, whether a later list exists, and ambiguity."""
-    try:
-        lexer = shlex.shlex(fragment, posix=True, punctuation_chars=";&|()\n")
-        lexer.whitespace = " \t\r"
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        raw_tokens = list(lexer)
-    except ValueError:
+    tokens = _shell_tokens(fragment)
+    if tokens is None:
         return [], False, True
-
-    tokens: list[str] = []
-    punctuation = set(";&|()\n")
-    for token in raw_tokens:
-        if token and set(token) <= punctuation:
-            index = 0
-            while index < len(token):
-                pair = token[index : index + 2]
-                if pair in {"&&", "||"}:
-                    tokens.append(pair)
-                    index += 2
-                else:
-                    tokens.append(token[index])
-                    index += 1
-        else:
-            tokens.append(token)
 
     depth = 0
     operators: list[str] = []
@@ -354,30 +350,9 @@ def _top_level_control_context(fragment: str) -> tuple[list[str], bool, bool]:
 
 def _current_command_prefix(fragment: str) -> list[str] | None:
     """Return tokens before a candidate in its current simple command."""
-    try:
-        lexer = shlex.shlex(fragment, posix=True, punctuation_chars=";&|()\n")
-        lexer.whitespace = " \t\r"
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        raw_tokens = list(lexer)
-    except ValueError:
+    tokens = _shell_tokens(fragment)
+    if tokens is None:
         return None
-
-    tokens: list[str] = []
-    punctuation = set(";&|()\n")
-    for token in raw_tokens:
-        if token and set(token) <= punctuation:
-            index = 0
-            while index < len(token):
-                pair = token[index : index + 2]
-                if pair in {"&&", "||"}:
-                    tokens.append(pair)
-                    index += 2
-                else:
-                    tokens.append(token[index])
-                    index += 1
-        else:
-            tokens.append(token)
 
     depth = 0
     segment: list[str] = []
@@ -462,8 +437,87 @@ def _match_is_command_invocation(bash_cmd: str, offset: int) -> bool:
     return True
 
 
+def _simple_command_status(segment: list[str], cwd: Path) -> bool | None:
+    """Return a statically knowable simple-command status, if available."""
+    segment = _strip_assignments(segment)
+    if segment[:1] == ["command"]:
+        segment = segment[1:]
+    if not segment:
+        return None
+    name = Path(segment[0]).name
+    if len(segment) == 1 and name == "false":
+        return False
+    if len(segment) == 1 and name in {"true", ":"}:
+        return True
+    status, _ = _simple_cd_status(segment, cwd)
+    return status
+
+
+def _or_prefix_is_proven_failed(fragment: str, initial_cwd: Path) -> bool:
+    """Prove that every alternative before a pure-OR candidate failed."""
+    tokens = _shell_tokens(fragment)
+    if tokens is None:
+        return False
+
+    cwd = initial_cwd
+    segment: list[str] = []
+    alternatives: list[list[str]] = []
+    operators: list[str] = []
+    depth = 0
+
+    def finish_completed_list() -> bool:
+        nonlocal cwd, segment, alternatives, operators
+        parts = alternatives + [segment]
+        if len(parts) == 1 and not operators:
+            status, target = _simple_cd_status(parts[0], cwd)
+            if status is True:
+                cwd = target
+        elif any(
+            _strip_assignments(part)[:1]
+            and Path(_strip_assignments(part)[0]).name
+            in {"cd", "pushd", "popd", "source", ".", "eval"}
+            for part in parts
+        ):
+            # A completed conditional list may have changed the parent shell's
+            # cwd, but the one overall status supplied to this hook cannot say
+            # which branch ran. Refuse to infer a later relative fallback.
+            return False
+        segment = []
+        alternatives = []
+        operators = []
+        return True
+
+    for token in tokens:
+        if token == "(":
+            depth += 1
+            if depth == 1:
+                return False
+        elif token == ")":
+            if depth == 0:
+                return False
+            depth -= 1
+        elif depth == 0 and token in {";", "\n"}:
+            if not finish_completed_list():
+                return False
+        elif depth == 0 and token in {"&&", "||", "|", "&"}:
+            alternatives.append(segment)
+            operators.append(token)
+            segment = []
+        else:
+            segment.append(token)
+    if depth or any(operator != "||" for operator in operators):
+        return False
+
+    # ``segment`` is the wrapper/assignment prefix of the candidate itself;
+    # only the completed alternatives before its final || determine whether it
+    # ran. Each must have a statically known failure status.
+    if not alternatives:
+        return False
+    return all(_simple_command_status(part, cwd) is False for part in alternatives)
+
+
 def _match_is_proven_executed(
-    bash_cmd: str, offset: int, bash_exit: int | None
+    bash_cmd: str, offset: int, bash_exit: int | None, initial_cwd: Path
 ) -> bool:
     """Conservatively decide whether a textual script match actually ran."""
     if RX_UNSUPPORTED_SHELL_STRUCTURE.search(bash_cmd):
@@ -490,7 +544,13 @@ def _match_is_proven_executed(
     if all(operator == "&&" for operator in all_ops):
         return bash_exit == 0
     if all(operator == "||" for operator in all_ops):
-        return bash_exit != 0
+        # A nonzero final status proves every OR alternative ran and failed.
+        # A successful list is normally ambiguous, but a final fallback is
+        # still proven to run when every preceding alternative has a known
+        # failure (notably ``cd missing || python a.py``).
+        return bash_exit != 0 or _or_prefix_is_proven_failed(
+            bash_cmd[:offset], initial_cwd
+        )
     return False
 
 
@@ -506,7 +566,7 @@ def _detect_scripts_with_cwd(
     seen_inline: set[tuple[str, Path]] = set()
     for m in RX_PYTHON_C.finditer(bash_cmd):
         if require_execution_evidence and not _match_is_proven_executed(
-            bash_cmd, m.start(), bash_exit
+            bash_cmd, m.start(), bash_exit, cwd
         ):
             continue
         src = m.group("source")
@@ -517,7 +577,7 @@ def _detect_scripts_with_cwd(
             seen_inline.add(identity)
     for m in RX_R_E.finditer(bash_cmd):
         if require_execution_evidence and not _match_is_proven_executed(
-            bash_cmd, m.start(), bash_exit
+            bash_cmd, m.start(), bash_exit, cwd
         ):
             continue
         src = m.group("source")
@@ -528,7 +588,7 @@ def _detect_scripts_with_cwd(
             seen_inline.add(identity)
     for m in RX_PYTHON_M.finditer(bash_cmd):
         if require_execution_evidence and not _match_is_proven_executed(
-            bash_cmd, m.start(), bash_exit
+            bash_cmd, m.start(), bash_exit, cwd
         ):
             continue
         module = m.group("module")
@@ -547,7 +607,7 @@ def _detect_scripts_with_cwd(
     ):
         for m in pattern.finditer(bash_cmd):
             if require_execution_evidence and not _match_is_proven_executed(
-                bash_cmd, m.start(), bash_exit
+                bash_cmd, m.start(), bash_exit, cwd
             ):
                 continue
             effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)

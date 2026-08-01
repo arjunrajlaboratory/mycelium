@@ -11,9 +11,11 @@ Usage:
 
 import argparse
 import json
+import os
 import shlex
 import shutil
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -44,6 +46,8 @@ def parse_args():
 def check_existing_structure(target_dir: Path) -> bool:
     """Check if the target directory already has a mycelium structure."""
     living_dir = target_dir / ".living"
+    if living_dir.is_symlink():
+        raise ValueError(f"Refusing symlinked Mycelium directory: {living_dir}")
     if living_dir.exists():
         print(f"Found existing .living/ directory at {living_dir}")
         return True
@@ -74,11 +78,11 @@ def create_directory_structure(target_dir: Path):
     ]
 
     for dir_name in directories:
-        dir_path = target_dir / dir_name
-        dir_path.mkdir(parents=True, exist_ok=True)
+        ensure_safe_project_directory(target_dir, dir_name, create=True)
         print(f"  Created: {dir_name}/")
 
     state_gitignore = target_dir / ".mycelium" / ".gitignore"
+    ensure_safe_regular_file(state_gitignore)
     if not state_gitignore.exists():
         state_gitignore.write_text("*\n!.gitignore\n")
     write_plugin_root_pointer(target_dir)
@@ -89,15 +93,78 @@ def mycelium_plugin_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def ensure_safe_project_directory(
+    target_dir: Path, relative_path: str | Path, *, create: bool
+) -> Path:
+    """Validate a project-local directory path without following symlinks."""
+    root = target_dir.resolve(strict=True)
+    relative = Path(relative_path)
+    if relative.is_absolute():
+        raise ValueError(f"Expected a project-relative directory: {relative}")
+    candidate = Path(os.path.abspath(root / relative))
+    try:
+        parts = candidate.relative_to(root).parts
+    except ValueError as exc:
+        raise ValueError(f"Directory escapes project root: {candidate}") from exc
+    if not parts:
+        raise ValueError("Refusing to use the project root as a managed directory")
+
+    current = root
+    for part in parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"Refusing symlinked Mycelium directory: {current}")
+        if current.exists() and not current.is_dir():
+            raise ValueError(f"Managed directory path is not a directory: {current}")
+
+    try:
+        candidate.resolve(strict=False).relative_to(root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(f"Directory escapes project root: {candidate}") from exc
+    if create:
+        candidate.mkdir(parents=True, exist_ok=True)
+        try:
+            candidate.resolve(strict=True).relative_to(root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(f"Directory escapes project root: {candidate}") from exc
+    return candidate
+
+
+def ensure_safe_regular_file(path: Path) -> None:
+    """Reject a managed file that is a symlink or a non-regular object."""
+    if path.is_symlink():
+        raise ValueError(f"Refusing symlinked Mycelium file: {path}")
+    if path.exists() and not path.is_file():
+        raise ValueError(f"Managed file path is not a regular file: {path}")
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Replace a validated project-local text file without following links."""
+    ensure_safe_regular_file(path)
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.tmp.", dir=path.parent, text=True
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_path, 0o644)
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def write_plugin_root_pointer(target_dir: Path) -> bool:
     """Write the machine-local path used by generated project guidance."""
-    state_dir = target_dir / ".mycelium"
-    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir = ensure_safe_project_directory(target_dir, ".mycelium", create=True)
     pointer = state_dir / "plugin-root"
+    ensure_safe_regular_file(pointer)
     expected = f"{mycelium_plugin_root()}\n"
     before = pointer.read_text(encoding="utf-8") if pointer.exists() else None
     if before != expected:
-        pointer.write_text(expected, encoding="utf-8")
+        _atomic_write_text(pointer, expected)
         return True
     return False
 
@@ -708,10 +775,12 @@ def install_claude_hooks(target_dir: Path):
     claude_dir = target_dir / ".claude"
     claude_dir.mkdir(exist_ok=True)
     settings_path = claude_dir / "settings.local.json"
+    original_content: str | None = None
 
     # Load existing settings if present
     if settings_path.exists():
-        settings = json.loads(settings_path.read_text())
+        original_content = settings_path.read_text()
+        settings = json.loads(original_content)
     else:
         settings = {}
 
@@ -837,8 +906,12 @@ def install_claude_hooks(target_dir: Path):
     # Normalize after filling gaps so migration both detects and repairs them.
     _normalize_claude_hook_locations(hooks)
 
-    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
-    print("  Wrote: .claude/settings.local.json")
+    rendered = json.dumps(settings, indent=2) + "\n"
+    if rendered != original_content:
+        settings_path.write_text(rendered)
+        print("  Wrote: .claude/settings.local.json")
+        return True
+    return False
 
 
 def _remove_codex_hooks_config(config: dict) -> bool:
@@ -909,8 +982,9 @@ def install_codex_hooks(target_dir: Path):
 
     print("  Codex hooks are bundled with the Mycelium plugin via PLUGIN_ROOT.")
     print(
-        "  Codex action required after plugin install or upgrade: in the CLI, "
-        "open /hooks, trust all five Mycelium hooks, exit Codex, and restart it."
+        "  Codex action required after plugin install or upgrade: in a current "
+        "CLI (not the desktop app), open /hooks, trust all five Mycelium hooks, "
+        "exit Codex, and restart it. If /hooks is absent, run codex update first."
     )
     return changed
 

@@ -223,11 +223,17 @@ def ensure_cross_agent_guidance(repo_path: Path, dry_run: bool = False) -> bool:
 def migrate_runtime_state(repo_path: Path, dry_run: bool = False) -> bool:
     """Move durable session context from .claude/ to provider-neutral state."""
     legacy = repo_path / ".claude" / "last-session.md"
-    state_dir = repo_path / ".mycelium"
+    state_dir = ir.ensure_safe_project_directory(
+        repo_path, ".mycelium", create=not dry_run
+    )
     destination = state_dir / "last-session.md"
+    ir.ensure_safe_regular_file(destination)
     needs_copy = legacy.exists() and not destination.exists()
-    needs_gitignore = not (state_dir / ".gitignore").exists()
+    gitignore = state_dir / ".gitignore"
+    ir.ensure_safe_regular_file(gitignore)
+    needs_gitignore = not gitignore.exists()
     pointer = state_dir / "plugin-root"
+    ir.ensure_safe_regular_file(pointer)
     expected_pointer = f"{ir.mycelium_plugin_root()}\n"
     needs_pointer = (
         not pointer.exists()
@@ -235,8 +241,6 @@ def migrate_runtime_state(repo_path: Path, dry_run: bool = False) -> bool:
     )
     if dry_run:
         return needs_copy or needs_gitignore or needs_pointer
-    state_dir.mkdir(exist_ok=True)
-    gitignore = state_dir / ".gitignore"
     if not gitignore.exists():
         gitignore.write_text("*\n!.gitignore\n")
     if needs_copy:
@@ -330,6 +334,8 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
     repo_path = repo_path.resolve()
     if not (repo_path / ".living").is_dir():
         return {"_skip": f"no .living/ at {repo_path}"}
+    ir.ensure_safe_project_directory(repo_path, ".living", create=False)
+    ir.ensure_safe_project_directory(repo_path, ".mycelium", create=False)
 
     claude_md_applied = reanchor_claude_md(repo_path, dry_run=dry_run)
     guidance_applied = ensure_cross_agent_guidance(repo_path, dry_run=dry_run)
@@ -356,7 +362,12 @@ def scan_for_repos(scan_root: Path) -> list[Path]:
         return []
     repos: list[Path] = []
     for child in sorted(scan_root.iterdir()):
-        if child.is_dir() and (child / ".living").is_dir():
+        if (
+            child.is_dir()
+            and not child.is_symlink()
+            and (child / ".living").is_dir()
+            and not (child / ".living").is_symlink()
+        ):
             repos.append(child)
     return repos
 

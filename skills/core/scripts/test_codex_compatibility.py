@@ -11,6 +11,7 @@ from pathlib import Path
 
 import generate_index
 import init_repo
+import pytest
 import yaml
 
 
@@ -37,9 +38,16 @@ def _repo(tmp_path: Path, living: bool = True) -> Path:
     return repo
 
 
-def _run_hook(name: str, repo: Path, payload: dict) -> subprocess.CompletedProcess:
+def _run_hook(
+    name: str,
+    repo: Path,
+    payload: dict,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["MYCELIUM_HOOK_HOST"] = "codex"
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [str(HOOKS_DIR / name)],
         cwd=repo,
@@ -52,10 +60,16 @@ def _run_hook(name: str, repo: Path, payload: dict) -> subprocess.CompletedProce
 
 
 def _run_plugin_hook(
-    name: str, repo: Path, payload: dict, plugin_root: Path = PLUGIN_ROOT
+    name: str,
+    repo: Path,
+    payload: dict,
+    plugin_root: Path = PLUGIN_ROOT,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["PLUGIN_ROOT"] = str(plugin_root)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [str(PLUGIN_HOOKS_DIR / "mycelium-codex-dispatch.sh"), name],
         cwd=repo,
@@ -125,6 +139,7 @@ def test_codex_plugin_serializes_stop_lineage_and_enforcement():
 
 def test_readme_documents_codex_install_update_and_migration():
     readme = (PLUGIN_ROOT / "README.md").read_text()
+    normalized = " ".join(readme.split())
     assert "codex plugin marketplace add arjunrajlaboratory/mycelium" in readme
     assert "codex plugin add mycelium@mycelium" in readme
     assert "codex plugin marketplace upgrade mycelium" in readme
@@ -132,7 +147,9 @@ def test_readme_documents_codex_install_update_and_migration():
     assert "Use `$mycelium:core` to migrate" in readme
     assert "Migration is idempotent" in readme
     assert "open `/hooks`" in readme
-    assert "trust all five Mycelium command hooks" in readme
+    assert "trust all five Mycelium command hooks" in normalized
+    assert "not a Codex desktop-app slash command" in normalized
+    assert "codex update" in readme
 
 
 def test_hook_mtime_helper_returns_numeric_epoch(tmp_path):
@@ -248,10 +265,14 @@ def test_init_uses_plugin_bundled_codex_hooks_and_agent_guidance(tmp_path, capsy
     assert "python3 skills/core/scripts/" not in guidance
     assert "plugin-bundled Codex command hooks" in guidance
     assert ".codex/hooks.json` contains their registrations" not in guidance
+    assert "Trusted Codex plugin hooks refresh the pointer automatically" in guidance
+    assert "Re-run Mycelium migration after a plugin upgrade" not in guidance
     assert not (repo / ".codex" / "hooks.json").exists()
     assert "bundled with the Mycelium plugin via PLUGIN_ROOT" in install_output
     assert "open /hooks" in install_output
     assert "trust all five Mycelium hooks" in install_output
+    assert "not the desktop app" in install_output
+    assert "codex update" in install_output
 
 
 def test_existing_guidance_is_carried_into_shared_canonical_file(tmp_path):
@@ -375,6 +396,127 @@ def test_plugin_dispatcher_refreshes_pointer_and_runs_hook(tmp_path):
     assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
     assert (state_dir / "plugin-root").read_text().strip() == str(PLUGIN_ROOT)
     assert (state_dir / "active-session-log.tmp").is_file()
+
+
+def test_plugin_dispatcher_refuses_symlinked_state_before_pointer_refresh(tmp_path):
+    repo = _repo(tmp_path)
+    victim = tmp_path / "outside-state"
+    victim.mkdir()
+    pointer = victim / "plugin-root"
+    pointer.write_text("do-not-overwrite\n")
+    (repo / ".mycelium").symlink_to(victim, target_is_directory=True)
+
+    result = _run_plugin_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "unsafe-dispatch"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert pointer.read_text() == "do-not-overwrite\n"
+    assert sorted(path.name for path in victim.iterdir()) == ["plugin-root"]
+
+
+def test_plugin_dispatcher_refuses_symlinked_pointer_without_clobbering_target(
+    tmp_path,
+):
+    repo = _repo(tmp_path)
+    state_dir = repo / ".mycelium"
+    state_dir.mkdir()
+    victim = tmp_path / "outside-pointer"
+    victim.write_text("do-not-overwrite\n")
+    (state_dir / "plugin-root").symlink_to(victim)
+
+    result = _run_plugin_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "unsafe-pointer"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert victim.read_text() == "do-not-overwrite\n"
+    assert not (state_dir / "active-session-log.tmp").exists()
+
+
+def test_plugin_dispatcher_refuses_symlinked_living_before_creating_state(tmp_path):
+    repo = _repo(tmp_path, living=False)
+    victim = tmp_path / "outside-living"
+    victim.mkdir()
+    (repo / ".living").symlink_to(victim, target_is_directory=True)
+
+    result = _run_plugin_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "unsafe-living"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert list(victim.iterdir()) == []
+    assert not (repo / ".mycelium").exists()
+
+
+def test_init_pointer_writer_refuses_symlinked_state_directory(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    victim = tmp_path / "outside-init-state"
+    victim.mkdir()
+    (repo / ".mycelium").symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        init_repo.write_plugin_root_pointer(repo)
+
+    assert list(victim.iterdir()) == []
+
+
+def test_init_pointer_writer_refuses_symlinked_pointer(tmp_path):
+    repo = tmp_path / "repo"
+    state_dir = repo / ".mycelium"
+    state_dir.mkdir(parents=True)
+    victim = tmp_path / "outside-init-pointer"
+    victim.write_text("do-not-overwrite\n")
+    (state_dir / "plugin-root").symlink_to(victim)
+
+    with pytest.raises(ValueError, match="symlink"):
+        init_repo.write_plugin_root_pointer(repo)
+
+    assert victim.read_text() == "do-not-overwrite\n"
+
+
+def test_hooks_reject_outside_state_override_before_creating_directory(tmp_path):
+    repo = _repo(tmp_path)
+    victim = tmp_path / "outside-override"
+
+    result = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "outside-override"},
+        {"MYCELIUM_STATE_DIR": "../outside-override"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert not victim.exists()
+
+
+def test_hooks_reject_state_override_through_symlinked_parent(tmp_path):
+    repo = _repo(tmp_path)
+    victim = tmp_path / "outside-parent"
+    victim.mkdir()
+    (repo / "redirect").symlink_to(victim, target_is_directory=True)
+
+    result = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "linked-override"},
+        {"MYCELIUM_STATE_DIR": "redirect/state"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert list(victim.iterdir()) == []
 
 
 def test_exact_bundled_hook_command_survives_relocated_cache_path(tmp_path):
