@@ -152,7 +152,13 @@ def _apply_cd(segment: list[str], cwd: Path) -> Path:
     target = Path(os.path.expanduser(arguments[0]))
     if not target.is_absolute():
         target = cwd / target
-    return Path(os.path.abspath(target))
+    target = Path(os.path.abspath(target))
+    # The hook sees the command only after the shell ran. Do not propagate a
+    # directory change that the shell could not have made: in
+    # ``cd missing || python a.py`` the Python command runs from the old cwd.
+    if not target.is_dir() or not os.access(target, os.X_OK):
+        return cwd
+    return target
 
 
 def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:

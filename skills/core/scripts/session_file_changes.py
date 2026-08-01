@@ -163,14 +163,14 @@ def _committed_paths(
     if current_head is None or current_head == baseline_head:
         return set()
     if baseline_head:
-        payload = _run_git(
-            repo_root,
-            "log",
-            f"{baseline_head}..{current_head}",
-            "--name-only",
-            "-z",
-            "--pretty=format:",
-        )
+        log_args = ["log", f"{baseline_head}..{current_head}"]
+        if start_ts is not None:
+            # A HEAD transition may be only a checkout of an existing branch.
+            # Restrict the range to commits created during this session so the
+            # destination branch's older history is not reported as new work.
+            log_args.append(f"--since=@{start_ts}")
+        log_args.extend(("--name-only", "-z", "--pretty=format:"))
+        payload = _run_git(repo_root, *log_args)
     elif start_ts is not None:
         payload = _run_git(
             repo_root,
