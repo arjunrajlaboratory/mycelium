@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -58,12 +59,31 @@ def test_deleting_a_preexisting_untracked_file_is_detected(tmp_path: Path) -> No
 def test_committed_files_since_snapshot_are_detected(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     baseline = build_snapshot(repo)
+    session_start = int(time.time()) - 1
 
     (repo / "README.md").write_text("committed during session\n")
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-q", "-m", "session change")
 
-    assert collect_changes(repo, baseline) == ["README.md"]
+    assert collect_changes(repo, baseline, start_ts=session_start) == ["README.md"]
+
+
+def test_switching_to_preexisting_branch_does_not_report_history(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    original_branch = subprocess.check_output(
+        ["git", "-C", str(repo), "branch", "--show-current"], text=True
+    ).strip()
+    _git(repo, "switch", "-q", "-c", "existing-feature")
+    (repo / "feature.txt").write_text("pre-existing branch work\n")
+    _git(repo, "add", "feature.txt")
+    _git(repo, "commit", "-q", "-m", "pre-existing feature")
+    _git(repo, "switch", "-q", original_branch)
+    baseline = build_snapshot(repo)
+
+    session_start = int(time.time()) + 1
+    _git(repo, "switch", "-q", "existing-feature")
+
+    assert collect_changes(repo, baseline, start_ts=session_start) == []
 
 
 def test_activity_file_retains_deleted_paths_and_ignores_external_paths(tmp_path: Path) -> None:

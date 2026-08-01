@@ -75,6 +75,13 @@ def test_detect_scripts_tracks_relative_cd_between_invocations(tmp_path: Path) -
     assert detections == [(first / "one.py", None), (second / "two.py", None)]
 
 
+def test_detect_script_preserves_cwd_when_cd_target_is_missing(tmp_path: Path) -> None:
+    script, inline = detect_script("cd missing || python a.py", tmp_path)
+
+    assert script == tmp_path / "a.py"
+    assert inline is None
+
+
 def test_detect_scripts_treats_newline_as_command_separator(tmp_path: Path) -> None:
     analysis_dir = tmp_path / "analysis"
     analysis_dir.mkdir()
