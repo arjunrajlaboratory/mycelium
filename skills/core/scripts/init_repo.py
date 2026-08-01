@@ -84,7 +84,7 @@ def create_directory_structure(target_dir: Path):
     state_gitignore = target_dir / ".mycelium" / ".gitignore"
     ensure_safe_regular_file(state_gitignore)
     if not state_gitignore.exists():
-        state_gitignore.write_text("*\n!.gitignore\n")
+        _atomic_write_text(state_gitignore, "*\n!.gitignore\n")
     write_plugin_root_pointer(target_dir)
 
 
@@ -138,9 +138,26 @@ def ensure_safe_regular_file(path: Path) -> None:
         raise ValueError(f"Managed file path is not a regular file: {path}")
 
 
+def ensure_directory_tree_has_no_symlinks(directory: Path) -> None:
+    """Reject links nested anywhere below a managed directory."""
+    if not directory.exists():
+        return
+    if directory.is_symlink():
+        raise ValueError(f"Refusing symlinked Mycelium directory: {directory}")
+    for current_root, directory_names, file_names in os.walk(
+        directory, followlinks=False
+    ):
+        root = Path(current_root)
+        for name in directory_names + file_names:
+            candidate = root / name
+            if candidate.is_symlink():
+                raise ValueError(f"Refusing symlinked Mycelium path: {candidate}")
+
+
 def _atomic_write_text(path: Path, content: str) -> None:
     """Replace a validated project-local text file without following links."""
     ensure_safe_regular_file(path)
+    mode = path.stat().st_mode & 0o7777 if path.exists() else 0o644
     descriptor, temp_name = tempfile.mkstemp(
         prefix=f".{path.name}.tmp.", dir=path.parent, text=True
     )
@@ -150,10 +167,19 @@ def _atomic_write_text(path: Path, content: str) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temp_path, 0o644)
+        os.chmod(temp_path, mode)
         os.replace(temp_path, path)
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def _write_text_if_missing(path: Path, content: str) -> bool:
+    """Create a managed text file atomically, rejecting links and special files."""
+    ensure_safe_regular_file(path)
+    if path.exists():
+        return False
+    _atomic_write_text(path, content)
+    return True
 
 
 def write_plugin_root_pointer(target_dir: Path) -> bool:
@@ -187,13 +213,20 @@ def create_agent_guidance(target_dir: Path):
     """Create shared Mycelium guidance plus thin Claude and Codex adapters."""
     templates_dir = Path(__file__).resolve().parent.parent / "templates"
     canonical = templates_dir / "MYCELIUM.md.template"
-    canonical_target = target_dir / "MYCELIUM.md"
+    guidance_targets = {
+        name: target_dir / name for name in ("MYCELIUM.md", "CLAUDE.md", "AGENTS.md")
+    }
+    # Validate every target up front so discovering an unsafe later adapter
+    # cannot leave earlier guidance partially modified.
+    for target in guidance_targets.values():
+        ensure_safe_regular_file(target)
+    canonical_target = guidance_targets["MYCELIUM.md"]
     if canonical.exists():
         canonical_text = canonical.read_text(encoding="utf-8")
     else:
         canonical_text = ""
     if canonical_text and not canonical_target.exists():
-        legacy_claude = target_dir / "CLAUDE.md"
+        legacy_claude = guidance_targets["CLAUDE.md"]
         if legacy_claude.exists():
             legacy_text = legacy_claude.read_text(encoding="utf-8").replace(
                 ".claude/last-session.md", ".mycelium/last-session.md"
@@ -207,13 +240,13 @@ def create_agent_guidance(target_dir: Path):
                 + legacy_text.rstrip()
                 + "\n"
             )
-        canonical_target.write_text(canonical_text, encoding="utf-8")
+        _atomic_write_text(canonical_target, canonical_text)
         print("  Created: MYCELIUM.md")
     elif canonical_text and canonical_target.exists():
         current = canonical_target.read_text(encoding="utf-8")
         refreshed = refresh_generated_guidance(current, canonical_text)
         if refreshed != current:
-            canonical_target.write_text(refreshed, encoding="utf-8")
+            _atomic_write_text(canonical_target, refreshed)
             print("  Updated: MYCELIUM.md automated enforcement guidance")
 
     for template_name, target_name in (
@@ -221,15 +254,15 @@ def create_agent_guidance(target_dir: Path):
         ("AGENTS.md.template", "AGENTS.md"),
     ):
         template = templates_dir / template_name
-        target = target_dir / target_name
+        target = guidance_targets[target_name]
         adapter = template.read_text(encoding="utf-8")
         if not target.exists():
-            target.write_text(adapter, encoding="utf-8")
+            _atomic_write_text(target, adapter)
             print(f"  Created: {target_name}")
         elif "<!-- MYCELIUM:BEGIN -->" not in target.read_text(encoding="utf-8"):
             callout = adapter[adapter.index("<!-- MYCELIUM:BEGIN -->") :]
-            with target.open("a", encoding="utf-8") as handle:
-                handle.write("\n\n" + callout.rstrip() + "\n")
+            current = target.read_text(encoding="utf-8")
+            _atomic_write_text(target, current + "\n\n" + callout.rstrip() + "\n")
             print(f"  Updated: {target_name} with Mycelium routing")
 
 
@@ -259,11 +292,11 @@ def create_manifests(target_dir: Path):
     for dir_name in manifest_dirs:
         manifest_filename = dir_to_manifest_name(dir_name)
         manifest_path = target_dir / dir_name / manifest_filename
-        if not manifest_path.exists():
-            manifest_path.write_text(
-                f"# {dir_name.replace('_', ' ').title()} Manifest\n\n"
-                "<!-- Add entries below using the appropriate manifest entry template. -->\n"
-            )
+        if _write_text_if_missing(
+            manifest_path,
+            f"# {dir_name.replace('_', ' ').title()} Manifest\n\n"
+            "<!-- Add entries below using the appropriate manifest entry template. -->\n",
+        ):
             print(f"  Created: {dir_name}/{manifest_filename}")
 
     # Drop README templates so new analyses/algorithms have a concrete start
@@ -274,36 +307,36 @@ def create_manifests(target_dir: Path):
     ):
         src = templates_dir / src_name
         dst = target_dir / target_subdir / "_README_TEMPLATE.md"
-        if src.exists() and not dst.exists():
-            dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        if src.exists() and _write_text_if_missing(
+            dst, src.read_text(encoding="utf-8")
+        ):
             print(f"  Created: {target_subdir}/_README_TEMPLATE.md")
 
 
 def create_todo_list(target_dir: Path):
     """Create the todo registry and item template used by the core skill."""
-    todo_dir = target_dir / "todo"
-    todo_dir.mkdir(parents=True, exist_ok=True)
+    todo_dir = ensure_safe_project_directory(target_dir, "todo", create=True)
     registry = todo_dir / "TODO_REGISTRY.md"
-    if not registry.exists():
-        registry.write_text(
-            "# TODO Registry\n\n"
-            "| Item | Priority | Status | Category | Date | Author | File |\n"
-            "|------|----------|--------|----------|------|--------|------|\n\n"
-            "<!-- Add new entries above this line -->\n",
-            encoding="utf-8",
-        )
+    if _write_text_if_missing(
+        registry,
+        "# TODO Registry\n\n"
+        "| Item | Priority | Status | Category | Date | Author | File |\n"
+        "|------|----------|--------|----------|------|--------|------|\n\n"
+        "<!-- Add new entries above this line -->\n",
+    ):
         print("  Created: todo/TODO_REGISTRY.md")
 
     item_template = todo_dir / "TODO_ITEM_TEMPLATE.md"
     bundled_template = mycelium_plugin_root() / "todo" / "TODO_ITEM_TEMPLATE.md"
-    if not item_template.exists() and bundled_template.exists():
-        shutil.copy2(bundled_template, item_template)
+    if bundled_template.exists() and _write_text_if_missing(
+        item_template, bundled_template.read_text(encoding="utf-8")
+    ):
         print("  Created: todo/TODO_ITEM_TEMPLATE.md")
 
 
 def create_living_layer(target_dir: Path):
     """Initialize the .living/ memory layer with empty files."""
-    living_dir = target_dir / ".living"
+    living_dir = ensure_safe_project_directory(target_dir, ".living", create=True)
 
     files = {
         "decisions.md": (
@@ -333,28 +366,27 @@ def create_living_layer(target_dir: Path):
 
     for filename, content in files.items():
         file_path = living_dir / filename
-        if not file_path.exists():
-            file_path.write_text(content)
+        if _write_text_if_missing(file_path, content):
             print(f"  Created: .living/{filename}")
 
     # Session log registry
     registry_path = living_dir / "log" / "LOG_REGISTRY.md"
-    if not registry_path.exists():
-        registry_path.write_text(
-            "# Session Log Registry\n\n"
-            "| Date | Session ID | Project | Branch | Duration | Files Changed "
-            "| Summary | Key Outputs | Status | Tags | Log |\n"
-            "|------|-----------|---------|--------|----------|---------------"
-            "|---------|-------------|--------|------|-----|\n"
-        )
+    if _write_text_if_missing(
+        registry_path,
+        "# Session Log Registry\n\n"
+        "| Date | Session ID | Project | Branch | Duration | Files Changed "
+        "| Summary | Key Outputs | Status | Tags | Log |\n"
+        "|------|-----------|---------|--------|----------|---------------"
+        "|---------|-------------|--------|------|-----|\n",
+    ):
         print("  Created: .living/log/LOG_REGISTRY.md")
 
     # Create ACTIVE_CONVENTIONS.yaml
     conventions_yaml = living_dir / "conventions" / "ACTIVE_CONVENTIONS.yaml"
-    if not conventions_yaml.exists():
-        conventions_yaml.write_text(
-            "# Active Convention Packs\n# Updated by install_convention.py\n\nactive_conventions: []\n"
-        )
+    if _write_text_if_missing(
+        conventions_yaml,
+        "# Active Convention Packs\n# Updated by install_convention.py\n\nactive_conventions: []\n",
+    ):
         print("  Created: .living/conventions/ACTIVE_CONVENTIONS.yaml")
 
 
@@ -365,55 +397,56 @@ def create_skillpacks(target_dir: Path):
     the skill-bridge convention. They are NOT installed as agent skill packs —
     they sit inert on disk and are read on demand by convention-routed workflows.
     """
-    skillpacks_dir = target_dir / "skillpacks"
-    skillpacks_dir.mkdir(exist_ok=True)
+    skillpacks_dir = ensure_safe_project_directory(
+        target_dir, "skillpacks", create=True
+    )
 
     gitignore_path = skillpacks_dir / ".gitignore"
-    if not gitignore_path.exists():
-        gitignore_path.write_text(
-            "# Skill pack repos are cloned here but NOT tracked by this project's git.\n"
-            "# They are their own git repos and should be updated independently.\n"
-            "#\n"
-            "# To set up:\n"
-            "#   cd skillpacks/\n"
-            "#   git clone https://github.com/K-Dense-AI/scientific-agent-skills.git\n"
-            "#   git clone https://github.com/GPTomics/bioSkills.git\n"
-            "#   git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git\n"
-            "#\n"
-            "# These repos are inert reference libraries. Do NOT install them as\n"
-            "# agent skill packs. The skill-bridge convention reads specific files\n"
-            "# from them on demand.\n\n"
-            "*\n"
-            "!.gitignore\n"
-            "!README.md\n"
-        )
+    if _write_text_if_missing(
+        gitignore_path,
+        "# Skill pack repos are cloned here but NOT tracked by this project's git.\n"
+        "# They are their own git repos and should be updated independently.\n"
+        "#\n"
+        "# To set up:\n"
+        "#   cd skillpacks/\n"
+        "#   git clone https://github.com/K-Dense-AI/scientific-agent-skills.git\n"
+        "#   git clone https://github.com/GPTomics/bioSkills.git\n"
+        "#   git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git\n"
+        "#\n"
+        "# These repos are inert reference libraries. Do NOT install them as\n"
+        "# agent skill packs. The skill-bridge convention reads specific files\n"
+        "# from them on demand.\n\n"
+        "*\n"
+        "!.gitignore\n"
+        "!README.md\n",
+    ):
         print("  Created: skillpacks/.gitignore")
 
     readme_path = skillpacks_dir / "README.md"
-    if not readme_path.exists():
-        readme_path.write_text(
-            "# Skill Packs\n\n"
-            "External skill repositories cloned here for use by the `skill-bridge` convention pack. "
-            "These are **inert reference libraries** — never installed as agent skill packs.\n\n"
-            "## Setup\n\n"
-            "```bash\n"
-            "cd skillpacks/\n"
-            "git clone https://github.com/K-Dense-AI/scientific-agent-skills.git\n"
-            "git clone https://github.com/GPTomics/bioSkills.git\n"
-            "git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git\n"
-            "```\n\n"
-            "## Updating\n\n"
-            "```bash\n"
-            "cd skillpacks/scientific-agent-skills && git pull\n"
-            "cd ../bioSkills && git pull\n"
-            "cd ../Autonomous-Science && git pull\n"
-            "```\n\n"
-            "## How These Are Used\n\n"
-            "The `skill-bridge` convention pack (in `.living/conventions/skill-bridge/` or "
-            "`network/conventions/skill-bridge/`) routes analysis workflows to specific "
-            "SKILL.md files within these repos. The agent reads one file at a time "
-            "(~150-200 lines per analysis step), never loading the full repos into context.\n"
-        )
+    if _write_text_if_missing(
+        readme_path,
+        "# Skill Packs\n\n"
+        "External skill repositories cloned here for use by the `skill-bridge` convention pack. "
+        "These are **inert reference libraries** — never installed as agent skill packs.\n\n"
+        "## Setup\n\n"
+        "```bash\n"
+        "cd skillpacks/\n"
+        "git clone https://github.com/K-Dense-AI/scientific-agent-skills.git\n"
+        "git clone https://github.com/GPTomics/bioSkills.git\n"
+        "git clone https://github.com/arjunrajlaboratory/Autonomous-Science.git\n"
+        "```\n\n"
+        "## Updating\n\n"
+        "```bash\n"
+        "cd skillpacks/scientific-agent-skills && git pull\n"
+        "cd ../bioSkills && git pull\n"
+        "cd ../Autonomous-Science && git pull\n"
+        "```\n\n"
+        "## How These Are Used\n\n"
+        "The `skill-bridge` convention pack (in `.living/conventions/skill-bridge/` or "
+        "`network/conventions/skill-bridge/`) routes analysis workflows to specific "
+        "SKILL.md files within these repos. The agent reads one file at a time "
+        "(~150-200 lines per analysis step), never loading the full repos into context.\n",
+    ):
         print("  Created: skillpacks/README.md")
 
 
@@ -497,7 +530,7 @@ def install_core_convention_packs(target_dir: Path):
         + "\n".join(entries)
         + "\n"
     )
-    yaml_path.write_text(yaml_content)
+    _atomic_write_text(yaml_path, yaml_content)
     print(f"  Updated ACTIVE_CONVENTIONS.yaml with {len(core_packs)} core packs")
 
 
@@ -568,15 +601,17 @@ def _put_hook_first(handlers: list[dict], basename: str) -> None:
 
 def _ensure_gitignore_entry(path: Path, entry: str) -> None:
     """Append one exact ignore entry while preserving existing content."""
+    ensure_safe_regular_file(path)
     content = path.read_text(encoding="utf-8") if path.exists() else ""
     if entry in content.splitlines():
         return
     separator = "" if not content or content.endswith("\n") else "\n"
-    path.write_text(f"{content}{separator}{entry}\n", encoding="utf-8")
+    _atomic_write_text(path, f"{content}{separator}{entry}\n")
 
 
 def _remove_gitignore_entry(path: Path, entry: str) -> bool:
     """Remove one exact ignore entry while preserving every other line."""
+    ensure_safe_regular_file(path)
     if not path.exists():
         return False
     content = path.read_text(encoding="utf-8")
@@ -585,7 +620,7 @@ def _remove_gitignore_entry(path: Path, entry: str) -> bool:
     if retained == lines:
         return False
     if retained:
-        path.write_text("\n".join(retained) + "\n", encoding="utf-8")
+        _atomic_write_text(path, "\n".join(retained) + "\n")
     else:
         path.unlink()
     return True
@@ -772,9 +807,9 @@ def install_claude_hooks(target_dir: Path):
         print("  Hooks were not auto-installed. Install them manually.")
         return
 
-    claude_dir = target_dir / ".claude"
-    claude_dir.mkdir(exist_ok=True)
+    claude_dir = ensure_safe_project_directory(target_dir, ".claude", create=True)
     settings_path = claude_dir / "settings.local.json"
+    ensure_safe_regular_file(settings_path)
     original_content: str | None = None
 
     # Load existing settings if present
@@ -908,7 +943,7 @@ def install_claude_hooks(target_dir: Path):
 
     rendered = json.dumps(settings, indent=2) + "\n"
     if rendered != original_content:
-        settings_path.write_text(rendered)
+        _atomic_write_text(settings_path, rendered)
         print("  Wrote: .claude/settings.local.json")
         return True
     return False
@@ -962,16 +997,18 @@ def _remove_codex_hooks_config(config: dict) -> bool:
 
 def install_codex_hooks(target_dir: Path):
     """Remove obsolete repo-local hooks; Codex hooks ship with the plugin."""
-    codex_dir = target_dir / ".codex"
+    codex_dir = ensure_safe_project_directory(target_dir, ".codex", create=False)
     hooks_path = codex_dir / "hooks.json"
     gitignore = codex_dir / ".gitignore"
+    ensure_safe_regular_file(hooks_path)
+    ensure_safe_regular_file(gitignore)
     changed = False
     if hooks_path.exists():
         config = json.loads(hooks_path.read_text())
         changed = _remove_codex_hooks_config(config)
         if changed:
             if config:
-                hooks_path.write_text(json.dumps(config, indent=2) + "\n")
+                _atomic_write_text(hooks_path, json.dumps(config, indent=2) + "\n")
             else:
                 hooks_path.unlink()
                 _remove_gitignore_entry(gitignore, "hooks.json")
@@ -992,8 +1029,8 @@ def install_codex_hooks(target_dir: Path):
 def create_environments_file(target_dir: Path):
     """Create ENVIRONMENTS_INSTALLATIONS.md at repo root."""
     env_path = target_dir / "ENVIRONMENTS_INSTALLATIONS.md"
-    if not env_path.exists():
-        env_path.write_text(
+    if _write_text_if_missing(
+        env_path,
             "# Environments & Installations\n\n"
             "## Primary Environment\n\n"
             "- **Manager**: \n"
@@ -1006,8 +1043,8 @@ def create_environments_file(target_dir: Path):
             "## Dependencies\n\n"
             "<!-- Add dependencies as they are installed. -->\n\n"
             "## System Dependencies\n\n"
-            "<!-- Add system-level dependencies here. -->\n"
-        )
+            "<!-- Add system-level dependencies here. -->\n",
+    ):
         print("  Created: ENVIRONMENTS_INSTALLATIONS.md")
 
 

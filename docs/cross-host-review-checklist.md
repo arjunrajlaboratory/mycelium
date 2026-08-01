@@ -81,6 +81,13 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] A migration action reported as skipped does not rewrite byte-identical
       managed configuration or churn its timestamp; deliberate data refreshes
       such as INDEX regeneration are identified separately.
+- [ ] Initialization and migration preflight every repository-controlled output
+      they may mutate—including guidance, hook configuration, todo, index, and
+      runtime state—before the first write, so a later rejection cannot leave a
+      partial migration.
+- [ ] Repository-controlled inputs that can be copied or summarized into tracked
+      state (for example legacy session context and living-layer entries) cannot
+      be symlinks to host-private files.
 - [ ] Legacy Claude-only repositories continue to work without mandatory
       migration unless a migration is explicitly documented.
 - [ ] Early Codex installations with repository-local `.codex/hooks.json` are
@@ -188,6 +195,8 @@ hook, filesystem, or lifecycle boundaries.
       writes outside the project through symlinks.
 - [ ] Machine-local pointer refreshes reject existing links and use atomic
       replacement instead of truncating a repository-controlled path.
+- [ ] Atomic replacement preserves stricter existing file permissions instead
+      of resetting every updated file to a permissive default mode.
 - [ ] Repository containment checks use canonical paths and reject traversal,
       prefix collisions, and nonexistent-parent tricks.
 - [ ] Cleanup cannot delete a path outside the project, even when state files
