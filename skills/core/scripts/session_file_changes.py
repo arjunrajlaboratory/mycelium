@@ -76,6 +76,67 @@ def _decode_paths(payload: bytes) -> set[str]:
     return {_decode_path(raw) for raw in payload.split(b"\0") if raw}
 
 
+def _head_reflog(repo_root: Path) -> list[tuple[str, str]]:
+    payload = _run_git(repo_root, "reflog", "show", "--format=%H%x00%gs")
+    records: list[tuple[str, str]] = []
+    for record in payload.splitlines():
+        raw_oid, separator, raw_action = record.partition(b"\0")
+        oid = raw_oid.decode("ascii", errors="ignore").strip()
+        if separator and oid:
+            records.append((oid, os.fsdecode(raw_action)))
+    return records
+
+
+def _session_reflog_change_paths(
+    repo_root: Path,
+    baseline_head: str,
+    baseline_reflog_entries: int,
+) -> set[str] | None:
+    """Replay content-producing HEAD transitions after the snapshot.
+
+    Reflog entries are newest-first. Comparing each commit-like transition to
+    the HEAD immediately before it captures the actual session delta: an amend
+    excludes unchanged historical paths, while a normal commit that restores
+    baseline content remains visible. Checkout and rebase bookkeeping update
+    the prior HEAD but do not themselves claim historical paths as session work.
+    ``None`` asks callers to use the legacy timestamp fallback when the reflog
+    was pruned or cannot be aligned with the snapshot.
+    """
+    records = _head_reflog(repo_root)
+    if len(records) < baseline_reflog_entries:
+        return None
+    new_entry_count = len(records) - baseline_reflog_entries
+    session_records = list(reversed(records[:new_entry_count]))
+    previous_head = baseline_head
+    changed: set[str] = set()
+    content_actions = (
+        "commit:",
+        "commit (initial):",
+        "commit (amend):",
+        "commit (merge):",
+        "merge ",
+        "merge:",
+        "cherry-pick:",
+        "revert:",
+    )
+    for current_head, action in session_records:
+        if action.startswith(content_actions):
+            changed.update(
+                _decode_paths(
+                    _run_git(
+                        repo_root,
+                        "diff",
+                        "--name-only",
+                        "-z",
+                        previous_head,
+                        current_head,
+                    )
+                )
+            )
+        previous_head = current_head
+    return changed
+
+
 def read_worktree_state(repo_root: Path) -> dict[str, dict[str, Any]]:
     """Return porcelain status plus file metadata, keyed by repository path."""
     payload = _run_git(
@@ -112,6 +173,7 @@ def build_snapshot(repo_root: Path) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "head": _head(repo_root),
+        "head_reflog_entries": len(_head_reflog(repo_root)),
         "files": read_worktree_state(repo_root),
     }
 
@@ -179,12 +241,26 @@ def _activity_paths(repo_root: Path, activity_file: Path | None) -> set[str]:
 
 
 def _committed_paths(
-    repo_root: Path, baseline_head: str | None, start_ts: int | None
+    repo_root: Path,
+    baseline_head: str | None,
+    baseline_reflog_entries: int | None,
+    start_ts: int | None,
 ) -> set[str]:
     current_head = _head(repo_root)
     if current_head is None or current_head == baseline_head:
         return set()
     if baseline_head:
+        if not _is_ancestor(repo_root, baseline_head, current_head) and isinstance(
+            baseline_reflog_entries, int
+        ):
+            reflog_paths = _session_reflog_change_paths(
+                repo_root,
+                baseline_head,
+                baseline_reflog_entries,
+            )
+            if reflog_paths is not None:
+                return reflog_paths
+
         log_args = ["log", f"{baseline_head}..{current_head}"]
         if start_ts is not None:
             # A HEAD transition may be only a checkout of an existing branch.
@@ -254,6 +330,7 @@ def collect_changes(
         _committed_paths(
             repo_root,
             baseline.get("head") if baseline else None,
+            baseline.get("head_reflog_entries") if baseline else None,
             start_ts,
         )
     )

@@ -15,7 +15,8 @@ is retained as unresolved with an explicit warning rather than dropped.
 | File | Role |
 |------|------|
 | `skills/core/hooks/mycelium-data-tracker.sh` | PostToolUse:Bash. Per-Bash-call event capture. |
-| `skills/core/hooks/mycelium-data-lineage-stop.sh` | Stop. Consolidates events into a manifest. |
+| `skills/core/hooks/mycelium-data-lineage-stop.sh` | Stop. Consolidates cumulative events into a manifest before lifecycle enforcement. |
+| `skills/core/hooks/mycelium-stop-check.sh` | Stop. Retains lineage state when blocked; rotates it after Stop is accepted. |
 | `skills/core/scripts/extract_data_lineage_event.py` | Per-event extractor (called by tracker hook). |
 | `skills/core/scripts/extract_data_lineage.py` | Manifest assembler (called by stop hook). |
 
@@ -33,7 +34,7 @@ UUID fallback if mycelium hasn't recorded an active session):
 ```
 .mycelium/
   mycelium-data-events.tmp                  # NDJSON, one event per detected script
-  mycelium-data-events-prev/<sid>.tmp       # rotated on Stop (20-file cap)
+  mycelium-data-events-prev/<sid>.tmp       # rotated on accepted Stop (20-file cap)
 .living/
   log/
     data-lineage/<sid>.json                 # consolidated manifest
@@ -44,6 +45,10 @@ The events tmp file is appended to under `fcntl.flock(LOCK_EX)` from inside the
 Python helper. Shell `>>` is only atomic up to `PIPE_BUF` (~4 KB on macOS),
 and embedded script source can exceed that — concurrent Bash tools firing
 PostToolUse hooks in parallel would otherwise interleave NDJSON lines.
+If lifecycle enforcement blocks Stop, the marker and cumulative event file stay
+in place; the next Stop attempt rebuilds the same session manifest with any
+additional analysis events. Cleanup and raw-event rotation happen only after
+the Stop check accepts the session.
 
 ## Event schema (NDJSON, one line per detected script)
 

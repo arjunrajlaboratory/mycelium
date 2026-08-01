@@ -5,9 +5,9 @@
 # consolidate them into .living/log/data-lineage/<session_id>.json and
 # writes a status sentinel at .living/log/.data-lineage-status-<sid>.json.
 #
-# Independent of mycelium-stop-check.sh (which handles the .living/-update
-# enforcement + log-scribe dispatch). Both can run on the same Stop event;
-# order doesn't matter.
+# Runs before mycelium-stop-check.sh, which decides whether the Stop is accepted.
+# This hook deliberately leaves the canonical session marker and cumulative
+# events in place so a blocked Stop can continue the same lineage session.
 #
 # Install: registered automatically by init_repo.install_claude_hooks() under
 #   Stop. Innermost-wins: subproject settings need the complete bundle.
@@ -32,7 +32,6 @@ source "$HERE/mycelium-hook-lib.sh"
   mycelium_prepare_state_dir "$REPO_ROOT"
 
   SESSION_MARKER="$STATE_DIR/data-lineage-session-id.tmp"
-  trap 'rm -f "$SESSION_MARKER"' EXIT
 
   EVENTS_FILE="$STATE_DIR/mycelium-data-events.tmp"
   if [[ ! -s "$EVENTS_FILE" ]]; then exit 0; fi  # no events this session
@@ -109,17 +108,6 @@ with open(status_file, "w", encoding="utf-8") as out:
     }, out, indent=2)
 PYINNER
   rm -f "$LOG_TMP"
-
-  # Clear the events tmp file so the next session starts fresh.
-  # Rotate to a per-session-ID prev so successive sessions don't clobber
-  # each other's raw events backup. The operator can inspect any recent
-  # session's raw events as long as the file hasn't been pruned.
-  PREV_DIR="$STATE_DIR/mycelium-data-events-prev"
-  mkdir -p "$PREV_DIR"
-  mv "$EVENTS_FILE" "$PREV_DIR/${SESSION_ID}.tmp"
-  # Prune: keep only the 20 most recent per-session prev files. Cheap
-  # quota; one tmp file is typically a few KB to ~hundreds of KB.
-  ls -t "$PREV_DIR"/*.tmp 2>/dev/null | tail -n +21 | xargs rm -f 2>/dev/null || true
 
   # Prune status sentinels to the 20 most recent so .living/log/ doesn't grow
   # without bound. Sentinels are dot-prefixed; explicit glob avoids matching

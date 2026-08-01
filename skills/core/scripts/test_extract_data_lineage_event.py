@@ -100,6 +100,18 @@ def test_detect_script_does_not_apply_conditionally_skipped_cd(
     assert inline is None
 
 
+def test_detect_script_applies_cd_proven_by_executed_and_chain(tmp_path: Path) -> None:
+    analysis_dir = tmp_path / "sub"
+    analysis_dir.mkdir()
+
+    script, inline = detect_script(
+        "test -d sub && cd sub && python a.py", tmp_path
+    )
+
+    assert script == analysis_dir / "a.py"
+    assert inline is None
+
+
 def test_detect_scripts_treats_newline_as_command_separator(tmp_path: Path) -> None:
     analysis_dir = tmp_path / "analysis"
     analysis_dir.mkdir()

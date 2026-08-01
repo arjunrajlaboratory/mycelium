@@ -683,33 +683,89 @@ def test_codex_stop_counts_unique_tracked_untracked_and_activity_paths(tmp_path)
     assert "- `tracked.txt`" in finalized
 
 
-def test_data_lineage_keeps_canonical_id_after_stop_state_cleanup(tmp_path):
+def test_data_lineage_state_survives_blocked_stop_until_acceptance(tmp_path):
     repo = _repo(tmp_path)
     state = repo / ".mycelium"
     state.mkdir()
     (state / ".gitignore").write_text("*\n!.gitignore\n")
-    (state / "data-lineage-session-id.tmp").write_text("2026-07-10-007\n")
-    (state / "mycelium-data-events.tmp").write_text(
+    session_id = "2026-07-10-007"
+    session_marker = state / "data-lineage-session-id.tmp"
+    events_file = state / "mycelium-data-events.tmp"
+    session_marker.write_text(f"{session_id}\n")
+    first_event = (
         json.dumps(
             {
                 "ts": "2026-07-10T12:00:00Z",
-                "script": "analysis/demo.py",
+                "script": "analysis/first.py",
                 "inputs": [],
                 "outputs": [],
             }
         )
         + "\n"
     )
+    events_file.write_text(first_event)
+    work_started = int(time.time()) - 60
+    (state / "mycelium-reminded.tmp").write_text(str(work_started))
+    (state / "mycelium-session-activity.tmp").write_text("analysis/first.py\n")
+    for path in (repo / ".living").iterdir():
+        os.utime(path, (work_started - 60, work_started - 60))
     assert not (state / "active-session-log.tmp").exists()
 
-    result = _run_hook(
+    first_lineage = _run_hook(
         "mycelium-data-lineage-stop.sh",
         repo,
         {"cwd": str(repo), "session_id": "host-uuid", "turn_id": "turn-5"},
     )
 
-    assert result.returncode == 0, result.stderr
-    output = repo / ".living" / "log" / "data-lineage" / "2026-07-10-007.json"
+    assert first_lineage.returncode == 0, first_lineage.stderr
+    output = repo / ".living" / "log" / "data-lineage" / f"{session_id}.json"
     assert output.is_file()
-    assert json.loads(output.read_text())["session_id"] == "2026-07-10-007"
-    assert not (state / "data-lineage-session-id.tmp").exists()
+    assert json.loads(output.read_text())["session_id"] == session_id
+    first_stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "turn-5"},
+    )
+    assert json.loads(first_stop.stdout)["decision"] == "block"
+    assert session_marker.read_text().strip() == session_id
+    assert events_file.read_text() == first_event
+
+    second_event = (
+        json.dumps(
+            {
+                "ts": "2026-07-10T12:01:00Z",
+                "script": "analysis/second.py",
+                "inputs": [],
+                "outputs": [],
+            }
+        )
+        + "\n"
+    )
+    with events_file.open("a") as handle:
+        handle.write(second_event)
+    second_lineage = _run_hook(
+        "mycelium-data-lineage-stop.sh",
+        repo,
+        {"cwd": str(repo), "session_id": "host-uuid", "turn_id": "turn-6"},
+    )
+    assert second_lineage.returncode == 0, second_lineage.stderr
+    manifest = json.loads(output.read_text())
+    assert manifest["session_id"] == session_id
+    assert [action["script"] for action in manifest["actions"]] == [
+        "analysis/first.py",
+        "analysis/second.py",
+    ]
+
+    learnings = repo / ".living" / "learnings.md"
+    learnings.write_text("# learnings\n\n- lifecycle updated\n")
+    accepted_stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": True, "turn_id": "turn-7"},
+    )
+    assert accepted_stop.returncode == 0, accepted_stop.stderr
+    assert '"decision": "block"' not in accepted_stop.stdout
+    assert not session_marker.exists()
+    assert not events_file.exists()
+    archived_events = state / "mycelium-data-events-prev" / f"{session_id}.tmp"
+    assert archived_events.read_text() == first_event + second_event
