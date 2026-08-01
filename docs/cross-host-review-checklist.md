@@ -121,6 +121,9 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] A lineage-only session reserves and uses a consistent session identifier.
 - [ ] The first blocked Stop preserves the active log, baseline, raw events, and
       enforcement state needed by the continuation.
+- [ ] A failed registry, lineage, or context write followed by a resumed or
+      compacted SessionStart preserves the same unfinalized log, session ID, and
+      baselines so Stop can retry the original transaction.
 - [ ] Work performed after a blocked Stop appears in the eventual final log and
       lineage output.
 - [ ] Only an accepted Stop finalizes the log and registry entry and removes or
@@ -138,8 +141,10 @@ hook, filesystem, or lifecycle boundaries.
       whitespace.
 - [ ] Interpreter flags, `-m` modules, and inline execution forms are handled
       according to the documented policy.
-- [ ] Common wrappers such as `uv`, `conda`, `poetry`, and `/usr/bin/env` are
-      detected without confusing wrapper arguments for executed scripts.
+- [ ] Common environment/package wrappers such as `uv`, `conda`, `poetry`, and
+      `/usr/bin/env`, plus execution wrappers such as `time`, `exec`, `nice`,
+      and `timeout`, are detected (including nested forms) without confusing
+      wrapper arguments or option values for executed scripts.
 - [ ] AND, OR, pipelines, subshells, heredocs, comments, and quoted text are
       interpreted conservatively, with tests for both false positives and false
       negatives.
@@ -157,6 +162,10 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Symlink aliases, quoted and backslash-escaped whitespace, shell
       metacharacters inside quotes, and non-ASCII path components do not
       silently drop valid script or notebook activity.
+- [ ] Adjacent quoted, unquoted, and backslash-escaped components that form one
+      shell word (for example `"analysis script".py` or
+      `'analysis'\ script.py`) are decoded as one interpreter, flag value, or
+      script path rather than silently dropped.
 - [ ] Inferred paths are canonicalized and proven to remain within the project
       before they are trusted or written.
 - [ ] `apply_patch` activity is recorded only after a successful tool result,
@@ -286,6 +295,9 @@ exercise them.
 | `true && python failed.py` exits nonzero, or Python is a pipeline component | The provably executed analysis is recorded; an unknown failed AND prefix remains omitted. |
 | Shell operators and Python text occur only after an unquoted `#` comment marker | No reminder or lineage event is created; quoted and escaped hashes remain valid arguments. |
 | Registry summary contains `|`, or the registry/lineage helper fails | Table cells remain valid; helper failure blocks Stop and preserves retry state without duplicate finalization. |
+| Registry finalization fails, then SessionStart resumes or compacts before Stop retries | The same unfinalized log and session ID remain active; the retry produces one final log and registry row. |
+| Interpreter or script paths concatenate quoted, bare, and escaped shell-word components | Python, R, and Jupyter reminders and lineage use the single decoded argv value. |
+| `time`, `exec`, `nice`, and `timeout` wrap or nest around an interpreter | Real executions are captured, while malformed options and an unrelated wrapped command containing interpreter text are rejected. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |
 

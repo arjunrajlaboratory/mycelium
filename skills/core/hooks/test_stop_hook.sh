@@ -42,6 +42,17 @@ make_repo() {
   echo "$dir"
 }
 
+init_log_registry() {
+  local repo="$1"
+  mkdir -p "$repo/.living/log"
+  cat > "$repo/.living/log/LOG_REGISTRY.md" << 'REGISTRY_EOF'
+# Session Log Registry
+
+| Date | Session ID | Project | Branch | Duration | Files Changed | Summary | Key Outputs | Status | Tags | Log |
+|------|-----------|---------|--------|----------|---------------|---------|-------------|--------|------|-----|
+REGISTRY_EOF
+}
+
 # Run the hook from inside the repo with an explicit JSON payload.
 # Returns: sets HOOK_EXIT and HOOK_OUTPUT
 run_hook_with_input() {
@@ -603,6 +614,7 @@ echo "TEST 16: duration_minutes uses frontmatter started: when present"
 {
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
+  init_log_registry "$REPO"
 
   LOG_PATH="$REPO/.living/log/2026-01-01-001-test.md"
   mkdir -p "$(dirname "$LOG_PATH")"
@@ -660,6 +672,7 @@ echo "TEST 17: missing frontmatter started: falls back to session-start-ts.tmp"
 {
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
+  init_log_registry "$REPO"
 
   LOG_PATH="$REPO/.living/log/2026-01-01-001-test.md"
   mkdir -p "$(dirname "$LOG_PATH")"
@@ -734,6 +747,7 @@ echo "TEST 19: Session log counts only current-session paths"
 {
   REPO=$(make_repo)
   mkdir -p "$REPO/.living/log" "$REPO/preexisting"
+  init_log_registry "$REPO"
   printf '# Learnings\n' > "$REPO/.living/learnings.md"
   echo "old work" > "$REPO/preexisting/old.txt"
 

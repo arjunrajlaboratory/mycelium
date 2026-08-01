@@ -7,8 +7,10 @@ execution time** so iterative edit-run-edit-run loops don't lose history.
 The subsystem is independent from the rest of mycelium's logging: it fires when
 an analysis-script invocation is detected (`python`, `R`, `Rscript`, `jupyter`,
 `uv run python`, `poetry run python`, `conda run … python`, including inline
-`-c` / `-e`). If static scanning cannot resolve any file paths, the execution
-is retained as unresolved with an explicit warning rather than dropped.
+`-c` / `-e`). Standard shell execution wrappers (`time`, `exec`, `nice`, and
+`timeout`) may precede or nest around those interpreters. If static scanning
+cannot resolve any file paths, the execution is retained as unresolved with an
+explicit warning rather than dropped.
 
 ## Components
 
@@ -86,6 +88,10 @@ reserved for future host support. The post-action reminder hook uses the same
 execution check so skipped, commented, or merely quoted analysis text does not
 open a false lifecycle cycle.
 
+Interpreter, flag, script, and notebook arguments are decoded as shell words,
+including adjacent quoted, bare, and backslash-escaped components such as
+`"analysis script".py` and `'analysis'\ script.py`.
+
 A `python a.py && python b.py` chain emits **two** events (one per detected
 script). Inline `-c` scripts emit one event each; their `script` field is
 `null`, with the source embedded under `script_source` and identified by
@@ -133,6 +139,8 @@ list. Repeated invocations of the same inline source collapse to one entry.
 - `conda run … python …`
 - `uv run … python …`
 - `poetry run … python …`
+- `time`, `exec`, `nice`, and `timeout` before or nested around any supported
+  interpreter invocation
 
 **Data I/O patterns scanned in the script body** (case-sensitive Python idioms):
 - Reads: `pd.read_{parquet,csv,tsv,feather,hdf,h5,json,excel,stata,sas,orc,pickle,table}`, `ad.read_h5ad`, `ad.read_csv`, `np.load`, `xr.open_{dataset,dataarray,zarr,mfdataset}`, `sc.read{,_h5ad,_csv,_mtx,_10x_h5,_10x_mtx}`
