@@ -101,19 +101,22 @@ fi
 # Record session-start timestamp — only for primary sessions (not subagents).
 # After the cleanup above, a remaining active-session-log.tmp implies a
 # genuine in-progress primary session, so we preserve its start ts.
+FRESH_PRIMARY_SESSION=false
 if [ ! -f "$ACTIVE_LOG_FILE" ]; then
     date +%s > "$STATE_DIR/session-start-ts.tmp"
+    FRESH_PRIMARY_SESSION=true
 fi
 
 # Clean up stale sentinels from crashed sessions
 # These are per-repo, so safe to clean on fresh session start
 if [ -f "$STATE_DIR/mycelium-reminded.tmp" ]; then
-  # Check if the reminder is from a previous session (older than session-start-ts)
+  # With no active owner log, any reminder/activity pair belongs to the
+  # previous task—even if it ended less than an hour ago. Keeping it would
+  # suppress the new task's PostToolUse directive and pollute its file list.
   STALE_TS=$(cat "$STATE_DIR/mycelium-reminded.tmp" 2>/dev/null || echo "0")
   NOW_TS=$(date +%s)
   STALE_AGE=$(( NOW_TS - STALE_TS ))
-  # If older than 1 hour, it's definitely stale (sessions rarely last >1h)
-  if [ "$STALE_AGE" -gt 3600 ]; then
+  if [ "$FRESH_PRIMARY_SESSION" = true ] || [ "$STALE_AGE" -gt 3600 ]; then
     rm -f "$STATE_DIR/mycelium-reminded.tmp"
     rm -f "$STATE_DIR/mycelium-session-activity.tmp"
   fi
@@ -260,6 +263,18 @@ LOG_EOF
       python3 "$GENERATE_INDEX_SCRIPT" --living-dir "$LIVING_DIR" --summary-heuristic >/dev/null 2>&1 \
         || python3 "$GENERATE_INDEX_SCRIPT" --living-dir "$LIVING_DIR" --counts-only >/dev/null 2>&1 \
         || true
+    fi
+
+    # Snapshot the repository only after SessionStart's own log/INDEX writes.
+    # Stop compares against this baseline so pre-existing dirty or untracked
+    # work is not misreported as activity from the current session.
+    SESSION_CHANGES_SCRIPT="${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"
+    SESSION_BASELINE_FILE="$STATE_DIR/session-file-baseline.json"
+    if [ -f "$SESSION_CHANGES_SCRIPT" ]; then
+      python3 "$SESSION_CHANGES_SCRIPT" snapshot \
+        --repo-root "$REPO_ROOT" \
+        --output "$SESSION_BASELINE_FILE" >/dev/null 2>&1 \
+        || rm -f "$SESSION_BASELINE_FILE"
     fi
   fi
 fi

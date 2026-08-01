@@ -365,7 +365,7 @@ Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 
 **Post-action enforcement**: The PostToolUse hook detects Python/R/Jupyter execution in Bash calls (excluding tests, linting, pip, one-liners) and injects a mandatory directive for the active agent. It is **debounced**: fires once per work cycle, then stays silent until `.living/` is updated. The Stop hook serves as a safety net for non-analysis sessions.
 
-**Stop hook logic**: The stop hook checks if `mycelium-post-action.sh` fired during the session (indicated by the presence of `.mycelium/mycelium-reminded.tmp`). If `.living/` was not updated afterward, it warns. If `.living/` was updated but `.mycelium/last-session.md` was not written (or is older than the session start), it emits a non-blocking warning reminding you to write the session summary. Read-only sessions, config-only sessions, and sessions without code execution are never checked.
+**Stop hook logic**: SessionStart snapshots the repository's existing dirty state, so Stop reports only paths changed during the current session. The stop hook checks if `mycelium-post-action.sh` fired during the session (indicated by the presence of `.mycelium/mycelium-reminded.tmp`). If `.living/` was not updated afterward, it blocks immediately—even for a short session—and preserves its work timestamp so repeated Stop attempts cannot bypass enforcement. If `.living/` was updated, it emits a non-blocking reminder to enhance the deterministic session summary. Read-only sessions, config-only sessions, and sessions without meaningful activity are never checked.
 
 Codex requires each exact plugin command hook to be reviewed and trusted through
 `/hooks`; untrusted hooks are skipped. After first install or any plugin
@@ -375,7 +375,9 @@ parses `apply_patch` headers. The plugin registry and dispatcher resolve the
 live `PLUGIN_ROOT` and refresh `.mycelium/plugin-root` automatically, so cache
 replacement does not leave dead hook paths in repositories. Read-access
 telemetry remains Claude-only because Codex does not expose internal file reads
-to `PostToolUse`.
+to `PostToolUse`. Data-lineage extraction follows preceding shell `cd` commands,
+so relative script and data paths are resolved from the directory where the
+analysis actually ran.
 
 ### Subagent-Driven Sessions
 

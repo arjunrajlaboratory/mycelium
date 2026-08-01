@@ -30,7 +30,9 @@ import argparse
 import fcntl
 import hashlib
 import json
+import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -135,6 +137,109 @@ def detect_script(bash_cmd: str, cwd: Path) -> tuple[Path | None, str | None]:
     return detections[0] if detections else (None, None)
 
 
+def _apply_cd(segment: list[str], cwd: Path) -> Path:
+    """Apply a simple shell ``cd`` segment without executing user input."""
+    while segment and ("=" in segment[0] and not segment[0].startswith(("./", "/"))):
+        name, _, _ = segment[0].partition("=")
+        if not name.replace("_", "a").isalnum() or name[:1].isdigit():
+            break
+        segment = segment[1:]
+    if not segment or segment[0] != "cd":
+        return cwd
+    arguments = [value for value in segment[1:] if value != "--"]
+    if len(arguments) != 1 or arguments[0] == "-" or "$" in arguments[0]:
+        return cwd
+    target = Path(os.path.expanduser(arguments[0]))
+    if not target.is_absolute():
+        target = cwd / target
+    return Path(os.path.abspath(target))
+
+
+def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
+    """Resolve preceding top-level ``cd`` commands for a command match."""
+    try:
+        lexer = shlex.shlex(
+            bash_cmd[:offset], posix=True, punctuation_chars=";&|()\n"
+        )
+        # Preserve unquoted newlines as command separators. Quoted newlines
+        # stay inside their token and therefore cannot be mistaken for one.
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        raw_tokens = list(lexer)
+    except ValueError:
+        return initial_cwd
+
+    tokens: list[str] = []
+    punctuation = set(";&|()\n")
+    for token in raw_tokens:
+        if token and set(token) <= punctuation:
+            index = 0
+            while index < len(token):
+                pair = token[index : index + 2]
+                if pair in {"&&", "||"}:
+                    tokens.append(pair)
+                    index += 2
+                else:
+                    tokens.append(token[index])
+                    index += 1
+        else:
+            tokens.append(token)
+
+    cwd = initial_cwd
+    subshell_cwds: list[Path] = []
+    segment: list[str] = []
+    for token in tokens:
+        if token in {"&&", "||", ";", "\n"}:
+            cwd = _apply_cd(segment, cwd)
+            segment = []
+        elif token in {"|", "&"}:
+            # A cd in a pipeline/subshell does not reliably affect the parent.
+            segment = []
+        elif token == "(":
+            segment = []
+            subshell_cwds.append(cwd)
+        elif token == ")":
+            segment = []
+            if subshell_cwds:
+                cwd = subshell_cwds.pop()
+        else:
+            segment.append(token)
+    return cwd
+
+
+def _detect_scripts_with_cwd(
+    bash_cmd: str, cwd: Path
+) -> list[tuple[Path | None, str | None, Path]]:
+    out: list[tuple[Path | None, str | None, Path]] = []
+    seen_paths: set[Path] = set()
+    seen_inline: set[tuple[str, Path]] = set()
+    for m in RX_PYTHON_C.finditer(bash_cmd):
+        src = m.group(2)
+        effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
+        identity = (src, effective_cwd)
+        if identity not in seen_inline:
+            out.append((None, src, effective_cwd))
+            seen_inline.add(identity)
+    for m in RX_R_E.finditer(bash_cmd):
+        src = m.group(2)
+        effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
+        identity = (src, effective_cwd)
+        if identity not in seen_inline:
+            out.append((None, src, effective_cwd))
+            seen_inline.add(identity)
+    for m in RX_SCRIPT_PATH.finditer(bash_cmd):
+        effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
+        path = Path(m.group(1))
+        if not path.is_absolute():
+            path = effective_cwd / path
+        path = Path(os.path.abspath(path))
+        if path not in seen_paths:
+            out.append((path, None, effective_cwd))
+            seen_paths.add(path)
+    return out
+
+
 def detect_scripts(bash_cmd: str, cwd: Path) -> list[tuple[Path | None, str | None]]:
     """Return every (script_path, inline_source) detection in the command.
 
@@ -142,27 +247,10 @@ def detect_scripts(bash_cmd: str, cwd: Path) -> list[tuple[Path | None, str | No
     file-based forms work too. Each tuple has exactly one non-None field.
     Deduped by identity (same path or same inline source appears once).
     """
-    out: list[tuple[Path | None, str | None]] = []
-    seen_paths: set[Path] = set()
-    seen_inline: set[str] = set()
-    for m in RX_PYTHON_C.finditer(bash_cmd):
-        src = m.group(2)
-        if src not in seen_inline:
-            out.append((None, src))
-            seen_inline.add(src)
-    for m in RX_R_E.finditer(bash_cmd):
-        src = m.group(2)
-        if src not in seen_inline:
-            out.append((None, src))
-            seen_inline.add(src)
-    for m in RX_SCRIPT_PATH.finditer(bash_cmd):
-        path = Path(m.group(1))
-        if not path.is_absolute():
-            path = cwd / path
-        if path not in seen_paths:
-            out.append((path, None))
-            seen_paths.add(path)
-    return out
+    return [
+        (script_path, inline_source)
+        for script_path, inline_source, _ in _detect_scripts_with_cwd(bash_cmd, cwd)
+    ]
 
 
 def _dedupe(seq: list[str]) -> list[str]:
@@ -323,7 +411,7 @@ def main() -> int:
         return 0
 
     cwd = Path(args.cwd)
-    detections = detect_scripts(args.bash_cmd, cwd)
+    detections = _detect_scripts_with_cwd(args.bash_cmd, cwd)
     if not detections:
         return 0
 
@@ -331,8 +419,10 @@ def main() -> int:
     git_sha = get_git_sha(cwd)
 
     lines: list[str] = []
-    for d in detections:
-        event = build_event_for_detection(d, args, cwd, git_sha)
+    for script_path, inline_source, effective_cwd in detections:
+        event = build_event_for_detection(
+            (script_path, inline_source), args, effective_cwd, git_sha
+        )
         if event is not None:
             lines.append(json.dumps(event) + "\n")
 
