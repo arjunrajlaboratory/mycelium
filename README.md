@@ -57,7 +57,7 @@ Start a new task after installation. Codex can invoke the bundled skills
 implicitly, through the plugin picker, or explicitly by skill name.
 
 Before the first Mycelium task, launch the Codex CLI, open `/hooks`, and trust
-all six Mycelium plugin hooks. Fully exit Codex afterward and restart it so the
+all five Mycelium plugin hooks. Fully exit Codex afterward and restart it so the
 approved `SessionStart` hook is present from process startup. The hooks are
 bundled with the plugin and resolve through Codex's dynamic `PLUGIN_ROOT`; they
 do not embed a versioned cache path into your repositories.
@@ -83,7 +83,7 @@ memory layer, canonical `MYCELIUM.md` guidance, and thin `CLAUDE.md` and
 `report-generator`, and `idea-generator`) are installed automatically.
 
 **Codex hook approval:** if you did not approve the plugin hooks during
-installation, open `/hooks` in the Codex CLI, trust all six Mycelium command
+installation, open `/hooks` in the Codex CLI, trust all five Mycelium command
 hooks, fully exit Codex, and restart it before opening the initialized project.
 Codex deliberately skips untrusted command hooks. Revisit `/hooks` after plugin
 upgrades: Codex resolves `PLUGIN_ROOT` to the new live cache path, so the
@@ -205,15 +205,15 @@ Mycelium ships seven hook scripts and registers the supported subset for each ho
 | `mycelium-post-action.sh` | PostToolUse (shell) | Detects code execution (Python/R/Jupyter) and injects the full 10-step post-action protocol. Debounced per work cycle. |
 | `mycelium-activity-tracker.sh` | PostToolUse (file edits) | Silently tracks file modifications so edit-only sessions are also enforced |
 | `mycelium-read-tracker.sh` | PostToolUse (Read) | Logs `.living/` file access for consumption telemetry |
-| `mycelium-stop-check.sh` | Stop | Auto-finalizes session logs, blocks session end if `.living/` wasn't updated after significant work, reminds about session summary |
+| `mycelium-stop-check.sh` | Stop | Serializes data-lineage consolidation, auto-finalizes session logs, blocks session end if `.living/` wasn't updated after significant work, reminds about session summary |
 | `mycelium-data-tracker.sh` | PostToolUse (shell) | Captures analysis data-lineage events |
-| `mycelium-data-lineage-stop.sh` | Stop | Consolidates session data-lineage events |
+| `mycelium-data-lineage-stop.sh` | Internal Stop phase | Consolidates session data-lineage events synchronously inside `mycelium-stop-check.sh`; it is not registered as a sibling command hook |
 
 Claude hooks are registered per repository by `init_repo.py`. Codex hooks are
 bundled once with the plugin in `hooks/hooks.json`; a small dispatcher no-ops
 outside Mycelium repositories, refreshes `.mycelium/plugin-root`, and invokes
 the shared scripts through Codex's dynamic `PLUGIN_ROOT`. Codex users must open
-`/hooks` in the CLI and trust all six Mycelium command hooks, then fully exit
+`/hooks` in the CLI and trust all five Mycelium command hooks, then fully exit
 and restart Codex. Codex exposes shell and unified-exec work under the `Bash`
 matcher and file edits as `apply_patch`; read telemetry is Claude-only because
 Codex does not expose its internal file reads to `PostToolUse`.

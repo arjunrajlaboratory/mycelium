@@ -20,6 +20,7 @@ stdout (legacy mode, used by tests).
 Usage (from the tracker hook):
     extract_data_lineage_event.py --cwd <session_cwd> --ts <iso8601> \\
         --bash-cmd <full bash command> \\
+        [--bash-exit <status>] \\
         [--agent-id <id>] [--agent-type <type>] \\
         [--append-to <events.tmp path>]
 """
@@ -41,7 +42,6 @@ SIZE_LIMIT_BYTES = 100 * 1024 * 1024
 EMBED_LIMIT_BYTES = 100 * 1024
 
 # --- Analysis-invocation detection ---
-# Note: bash_exit/bash_wall_s remain None until PostToolUse stdin exposes them.
 ANALYSIS_PATTERNS = [
     re.compile(r"(?:^|&&|\||;|\s)python3?\s+"),
     re.compile(r"(?:^|&&|\||;|\s)Rscript\s+"),
@@ -234,13 +234,105 @@ def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
     return cwd
 
 
+def _top_level_control_context(fragment: str) -> tuple[list[str], bool, bool]:
+    """Return current-list operators, whether a later list exists, and ambiguity."""
+    try:
+        lexer = shlex.shlex(fragment, posix=True, punctuation_chars=";&|()\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        raw_tokens = list(lexer)
+    except ValueError:
+        return [], False, True
+
+    tokens: list[str] = []
+    punctuation = set(";&|()\n")
+    for token in raw_tokens:
+        if token and set(token) <= punctuation:
+            index = 0
+            while index < len(token):
+                pair = token[index : index + 2]
+                if pair in {"&&", "||"}:
+                    tokens.append(pair)
+                    index += 2
+                else:
+                    tokens.append(token[index])
+                    index += 1
+        else:
+            tokens.append(token)
+
+    depth = 0
+    operators: list[str] = []
+    later_list = False
+    current_list_ambiguous = False
+    malformed = False
+    for token in tokens:
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            if depth == 0:
+                malformed = True
+            else:
+                depth -= 1
+        elif depth == 0 and token in {";", "\n"}:
+            operators = []
+            later_list = True
+            # A completed list is an execution boundary. Unsupported control
+            # operators in an earlier list cannot make the next list's first
+            # command conditional or uncertain.
+            current_list_ambiguous = False
+        elif depth == 0 and token in {"&&", "||"}:
+            operators.append(token)
+        elif depth == 0 and token in {"|", "&"}:
+            current_list_ambiguous = True
+    if depth:
+        malformed = True
+    return operators, later_list, current_list_ambiguous or malformed
+
+
+def _match_is_proven_executed(
+    bash_cmd: str, offset: int, bash_exit: int | None
+) -> bool:
+    """Conservatively decide whether a textual script match actually ran."""
+    before_ops, _, before_ambiguous = _top_level_control_context(bash_cmd[:offset])
+    if before_ambiguous:
+        return False
+    if not before_ops:
+        # The first command in an AND-OR list always executes.
+        return True
+    if bash_exit is None:
+        return False
+
+    after_ops, has_later_list, after_ambiguous = _top_level_control_context(
+        bash_cmd[offset:]
+    )
+    if has_later_list or after_ambiguous:
+        # The overall exit status belongs to a later list or an unsupported
+        # compound construct, so it cannot prove this conditional branch ran.
+        return False
+    all_ops = before_ops + after_ops
+    if all(operator == "&&" for operator in all_ops):
+        return bash_exit == 0
+    if all(operator == "||" for operator in all_ops):
+        return bash_exit != 0
+    return False
+
+
 def _detect_scripts_with_cwd(
-    bash_cmd: str, cwd: Path
+    bash_cmd: str,
+    cwd: Path,
+    *,
+    bash_exit: int | None = None,
+    require_execution_evidence: bool = False,
 ) -> list[tuple[Path | None, str | None, Path]]:
     out: list[tuple[Path | None, str | None, Path]] = []
     seen_paths: set[Path] = set()
     seen_inline: set[tuple[str, Path]] = set()
     for m in RX_PYTHON_C.finditer(bash_cmd):
+        if require_execution_evidence and not _match_is_proven_executed(
+            bash_cmd, m.start(), bash_exit
+        ):
+            continue
         src = m.group(2)
         effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
         identity = (src, effective_cwd)
@@ -248,6 +340,10 @@ def _detect_scripts_with_cwd(
             out.append((None, src, effective_cwd))
             seen_inline.add(identity)
     for m in RX_R_E.finditer(bash_cmd):
+        if require_execution_evidence and not _match_is_proven_executed(
+            bash_cmd, m.start(), bash_exit
+        ):
+            continue
         src = m.group(2)
         effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
         identity = (src, effective_cwd)
@@ -255,6 +351,10 @@ def _detect_scripts_with_cwd(
             out.append((None, src, effective_cwd))
             seen_inline.add(identity)
     for m in RX_SCRIPT_PATH.finditer(bash_cmd):
+        if require_execution_evidence and not _match_is_proven_executed(
+            bash_cmd, m.start(), bash_exit
+        ):
+            continue
         effective_cwd = _effective_cwd(bash_cmd, m.start(), cwd)
         path = Path(m.group(1))
         if not path.is_absolute():
@@ -384,7 +484,7 @@ def build_event_for_detection(
         "agent_id": args.agent_id or None,
         "agent_type": args.agent_type or None,
         "bash_cmd": args.bash_cmd,
-        "bash_exit": None,  # not currently exposed in PostToolUse stdin
+        "bash_exit": getattr(args, "bash_exit", None),
         "bash_wall_s": None,
         "script": str(script_path) if script_path else None,
         "script_sha256": script_sha,
@@ -425,6 +525,7 @@ def main() -> int:
     ap.add_argument("--bash-cmd", required=True)
     ap.add_argument("--agent-id", default=None)
     ap.add_argument("--agent-type", default=None)
+    ap.add_argument("--bash-exit", type=int, default=None)
     ap.add_argument(
         "--append-to",
         type=Path,
@@ -437,7 +538,12 @@ def main() -> int:
         return 0
 
     cwd = Path(args.cwd)
-    detections = _detect_scripts_with_cwd(args.bash_cmd, cwd)
+    detections = _detect_scripts_with_cwd(
+        args.bash_cmd,
+        cwd,
+        bash_exit=args.bash_exit,
+        require_execution_evidence=True,
+    )
     if not detections:
         return 0
 

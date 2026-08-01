@@ -95,6 +95,50 @@ except Exception:
 ' "$dotted_path"
 }
 
+mycelium_bash_exit() {
+  python3 -c '
+import json, re, sys
+try:
+    response = json.load(sys.stdin).get("tool_response")
+except Exception:
+    response = None
+
+keys = ("exit_code", "exitCode", "return_code", "returncode")
+
+def find_structured(value):
+    if isinstance(value, dict):
+        for key in keys:
+            candidate = value.get(key)
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                return candidate
+        for candidate in value.values():
+            if not isinstance(candidate, (dict, list)):
+                continue
+            found = find_structured(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = find_structured(candidate)
+            if found is not None:
+                return found
+    return None
+
+result = find_structured(response)
+if result is None and isinstance(response, str):
+    match = re.search(
+        r"(?:exit(?:ed)?(?:[ _-]with)?(?:[ _-]code)?|return(?:[ _-]code)?)"
+        r"[\":= ]+(-?\d+)",
+        response,
+        re.IGNORECASE,
+    )
+    if match:
+        result = int(match.group(1))
+if result is not None:
+    print(result)
+'
+}
+
 mycelium_emit_context() {
   local event="$1"
   local context="$2"

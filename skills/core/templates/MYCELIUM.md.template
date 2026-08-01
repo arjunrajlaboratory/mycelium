@@ -98,21 +98,25 @@ No domain conventions installed yet. Install with mycelium's `install-convention
 
 ### Automated Enforcement
 
-Mycelium hooks are auto-installed for both Claude Code and Codex during `init`:
+Mycelium installs six repository-local Claude Code hooks during `init`. Codex
+uses five plugin-bundled Codex command hooks, so initialization does not create
+or depend on a project-local `.codex/hooks.json`:
 
 | Hook | Event | What it does |
 |------|-------|--------------|
 | `mycelium-health.sh` | SessionStart | Checks `.living/` health, records session timestamp |
 | `mycelium-post-action.sh` | PostToolUse (shell) | Detects code execution and directs the active agent to run the full post-action protocol (debounced: one directive per work cycle) |
-| `mycelium-stop-check.sh` | Stop | Safety net — blocks session end only if the post-action hook fired but `.living/` was never updated |
+| `mycelium-data-tracker.sh` | PostToolUse (shell) | Captures execution-time data-lineage events for analysis commands |
+| `mycelium-activity-tracker.sh` | PostToolUse (edits) | Records edited paths for session-local change accounting |
+| `mycelium-read-tracker.sh` | PostToolUse (reads; Claude only) | Records access to living-memory files; Codex does not expose internal reads |
+| `mycelium-stop-check.sh` | Stop | Serializes lineage consolidation before lifecycle enforcement, then blocks only if significant work was not reflected into `.living/` |
 
 The PostToolUse hook ensures the protocol runs automatically after analysis/data/algorithm work. Read-only and config-only sessions are never interrupted.
 
-Codex requires a one-time approval for each exact project command hook. After
-initialization, migration, or a Mycelium upgrade that changes cached hook paths,
-open `/hooks`, review and trust all six Mycelium hooks, then start a fresh task.
-Until that approval, Codex intentionally skips the commands even though
-`.codex/hooks.json` contains their registrations.
+Codex requires a one-time approval for each exact plugin command hook. After
+installing or upgrading Mycelium, open `/hooks` in the Codex CLI, review and
+trust all five Mycelium hooks, fully exit Codex, then start a fresh task. Until
+approval, Codex intentionally skips the plugin-bundled commands.
 
 ### Knowledge Transfer (Cross-Project)
 

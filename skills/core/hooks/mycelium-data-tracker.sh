@@ -39,6 +39,12 @@ source "$HERE/mycelium-hook-lib.sh"
 
   AGENT_ID=$(printf '%s' "$INPUT" | mycelium_json_get 'agent_id')
   AGENT_TYPE=$(printf '%s' "$INPUT" | mycelium_json_get 'agent_type')
+  BASH_EXIT=$(printf '%s' "$INPUT" | mycelium_bash_exit)
+  if [[ -z "$BASH_EXIT" && "$(mycelium_hook_host)" == "claude" ]]; then
+    # Claude Code invokes this PostToolUse registration only for successful
+    # Bash calls; failures use its separate failure event.
+    BASH_EXIT=0
+  fi
 
   # Locate the Python extractor helper. Default: sibling in skills/core/scripts/.
   HELPER="${MYCELIUM_DATA_HELPER:-$HERE/../scripts/extract_data_lineage_event.py}"
@@ -54,6 +60,9 @@ source "$HERE/mycelium-hook-lib.sh"
   AGENT_FLAGS=()
   if [[ -n "$AGENT_ID" ]]; then AGENT_FLAGS+=(--agent-id "$AGENT_ID"); fi
   if [[ -n "$AGENT_TYPE" ]]; then AGENT_FLAGS+=(--agent-type "$AGENT_TYPE"); fi
+  if [[ "$BASH_EXIT" =~ ^-?[0-9]+$ ]]; then
+    AGENT_FLAGS+=(--bash-exit "$BASH_EXIT")
+  fi
 
   # --append-to delegates the file write to Python so we get fcntl.flock-
   # protected appends. Shell `>>` is only atomic for writes <= PIPE_BUF, and

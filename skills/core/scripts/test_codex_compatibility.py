@@ -105,12 +105,21 @@ def test_codex_plugin_bundles_stable_dynamic_hooks():
         for group in groups
         for handler in group["hooks"]
     ]
-    assert len(commands) == 6
+    assert len(commands) == 5
     assert all("${PLUGIN_ROOT}" in command for command in commands)
     assert all("mycelium-codex-dispatch.sh" in command for command in commands)
     assert all('${PLUGIN_ROOT:-}' in command for command in commands)
     assert not any("plugins/cache" in command for command in commands)
     assert os.access(PLUGIN_HOOKS_DIR / "mycelium-codex-dispatch.sh", os.X_OK)
+
+
+def test_codex_plugin_serializes_stop_lineage_and_enforcement():
+    config = json.loads((PLUGIN_HOOKS_DIR / "hooks.json").read_text())
+    stop_handlers = config["hooks"]["Stop"][0]["hooks"]
+
+    assert len(stop_handlers) == 1
+    assert "mycelium-stop-check.sh" in stop_handlers[0]["command"]
+    assert "mycelium-data-lineage-stop.sh" not in stop_handlers[0]["command"]
 
 
 def test_readme_documents_codex_install_update_and_migration():
@@ -122,7 +131,7 @@ def test_readme_documents_codex_install_update_and_migration():
     assert "Use `$mycelium:core` to migrate" in readme
     assert "Migration is idempotent" in readme
     assert "open `/hooks`" in readme
-    assert "trust all six Mycelium command hooks" in readme
+    assert "trust all five Mycelium command hooks" in readme
 
 
 def test_hook_mtime_helper_returns_numeric_epoch(tmp_path):
@@ -236,10 +245,12 @@ def test_init_uses_plugin_bundled_codex_hooks_and_agent_guidance(tmp_path, capsy
     guidance = (repo / "MYCELIUM.md").read_text()
     assert "$(cat .mycelium/plugin-root)" in guidance
     assert "python3 skills/core/scripts/" not in guidance
+    assert "plugin-bundled Codex command hooks" in guidance
+    assert ".codex/hooks.json` contains their registrations" not in guidance
     assert not (repo / ".codex" / "hooks.json").exists()
     assert "bundled with the Mycelium plugin via PLUGIN_ROOT" in install_output
     assert "open /hooks" in install_output
-    assert "trust all six Mycelium hooks" in install_output
+    assert "trust all five Mycelium hooks" in install_output
 
 
 def test_existing_guidance_is_carried_into_shared_canonical_file(tmp_path):
@@ -537,6 +548,62 @@ def test_codex_data_tracker_preserves_unresolved_wrapper_execution(tmp_path):
     assert event["lineage_warnings"]
 
 
+def test_codex_data_tracker_skips_analysis_in_failed_and_chain(tmp_path):
+    repo = _repo(tmp_path)
+    analysis_dir = repo / "analysis"
+    analysis_dir.mkdir()
+    (analysis_dir / "run.py").write_text(
+        "import pandas as pd\npd.read_csv('input.csv')\n"
+    )
+
+    result = _run_hook(
+        "mycelium-data-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "false && cd analysis && python run.py"
+            },
+            "tool_response": {"exit_code": 1, "output": ""},
+            "turn_id": "turn-skipped-lineage",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (repo / ".mycelium" / "mycelium-data-events.tmp").exists()
+
+
+def test_codex_data_tracker_records_proven_successful_and_chain(tmp_path):
+    repo = _repo(tmp_path)
+    analysis_dir = repo / "analysis"
+    analysis_dir.mkdir()
+    (analysis_dir / "run.py").write_text(
+        "import pandas as pd\npd.read_csv('input.csv')\n"
+    )
+
+    result = _run_hook(
+        "mycelium-data-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "test -d analysis && cd analysis && python run.py"
+            },
+            "tool_response": {"exit_code": 0, "output": ""},
+            "turn_id": "turn-proven-lineage",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(
+        (repo / ".mycelium" / "mycelium-data-events.tmp").read_text()
+    )
+    assert event["script"] == str(analysis_dir / "run.py")
+    assert event["bash_exit"] == 0
+
+
 def test_codex_apply_patch_activity_tracks_each_file(tmp_path):
     repo = _repo(tmp_path)
     patch = """*** Begin Patch
@@ -711,22 +778,20 @@ def test_data_lineage_state_survives_blocked_stop_until_acceptance(tmp_path):
         os.utime(path, (work_started - 60, work_started - 60))
     assert not (state / "active-session-log.tmp").exists()
 
-    first_lineage = _run_hook(
-        "mycelium-data-lineage-stop.sh",
-        repo,
-        {"cwd": str(repo), "session_id": "host-uuid", "turn_id": "turn-5"},
-    )
-
-    assert first_lineage.returncode == 0, first_lineage.stderr
-    output = repo / ".living" / "log" / "data-lineage" / f"{session_id}.json"
-    assert output.is_file()
-    assert json.loads(output.read_text())["session_id"] == session_id
     first_stop = _run_hook(
         "mycelium-stop-check.sh",
         repo,
-        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "turn-5"},
+        {
+            "cwd": str(repo),
+            "session_id": "host-uuid",
+            "stop_hook_active": False,
+            "turn_id": "turn-5",
+        },
     )
     assert json.loads(first_stop.stdout)["decision"] == "block"
+    output = repo / ".living" / "log" / "data-lineage" / f"{session_id}.json"
+    assert output.is_file()
+    assert json.loads(output.read_text())["session_id"] == session_id
     assert session_marker.read_text().strip() == session_id
     assert events_file.read_text() == first_event
 
@@ -743,28 +808,26 @@ def test_data_lineage_state_survives_blocked_stop_until_acceptance(tmp_path):
     )
     with events_file.open("a") as handle:
         handle.write(second_event)
-    second_lineage = _run_hook(
-        "mycelium-data-lineage-stop.sh",
+    learnings = repo / ".living" / "learnings.md"
+    learnings.write_text("# learnings\n\n- lifecycle updated\n")
+    accepted_stop = _run_hook(
+        "mycelium-stop-check.sh",
         repo,
-        {"cwd": str(repo), "session_id": "host-uuid", "turn_id": "turn-6"},
+        {
+            "cwd": str(repo),
+            "session_id": "host-uuid",
+            "stop_hook_active": True,
+            "turn_id": "turn-7",
+        },
     )
-    assert second_lineage.returncode == 0, second_lineage.stderr
+    assert accepted_stop.returncode == 0, accepted_stop.stderr
+    assert '"decision": "block"' not in accepted_stop.stdout
     manifest = json.loads(output.read_text())
     assert manifest["session_id"] == session_id
     assert [action["script"] for action in manifest["actions"]] == [
         "analysis/first.py",
         "analysis/second.py",
     ]
-
-    learnings = repo / ".living" / "learnings.md"
-    learnings.write_text("# learnings\n\n- lifecycle updated\n")
-    accepted_stop = _run_hook(
-        "mycelium-stop-check.sh",
-        repo,
-        {"cwd": str(repo), "stop_hook_active": True, "turn_id": "turn-7"},
-    )
-    assert accepted_stop.returncode == 0, accepted_stop.stderr
-    assert '"decision": "block"' not in accepted_stop.stdout
     assert not session_marker.exists()
     assert not events_file.exists()
     archived_events = state / "mycelium-data-events-prev" / f"{session_id}.tmp"

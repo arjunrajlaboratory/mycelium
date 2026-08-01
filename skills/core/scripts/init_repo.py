@@ -102,13 +102,30 @@ def write_plugin_root_pointer(target_dir: Path) -> bool:
     return False
 
 
+def refresh_generated_guidance(content: str, canonical: str) -> str:
+    """Refresh Mycelium's managed enforcement section in existing guidance."""
+    heading = "### Automated Enforcement"
+    next_heading = "### Knowledge Transfer (Cross-Project)"
+    current_start = content.find(heading)
+    current_end = content.find(next_heading, current_start + len(heading))
+    canonical_start = canonical.find(heading)
+    canonical_end = canonical.find(next_heading, canonical_start + len(heading))
+    if min(current_start, current_end, canonical_start, canonical_end) < 0:
+        return content
+    replacement = canonical[canonical_start:canonical_end]
+    return content[:current_start] + replacement + content[current_end:]
+
+
 def create_agent_guidance(target_dir: Path):
     """Create shared Mycelium guidance plus thin Claude and Codex adapters."""
     templates_dir = Path(__file__).resolve().parent.parent / "templates"
     canonical = templates_dir / "MYCELIUM.md.template"
     canonical_target = target_dir / "MYCELIUM.md"
-    if canonical.exists() and not canonical_target.exists():
+    if canonical.exists():
         canonical_text = canonical.read_text(encoding="utf-8")
+    else:
+        canonical_text = ""
+    if canonical_text and not canonical_target.exists():
         legacy_claude = target_dir / "CLAUDE.md"
         if legacy_claude.exists():
             legacy_text = legacy_claude.read_text(encoding="utf-8").replace(
@@ -125,6 +142,12 @@ def create_agent_guidance(target_dir: Path):
             )
         canonical_target.write_text(canonical_text, encoding="utf-8")
         print("  Created: MYCELIUM.md")
+    elif canonical_text and canonical_target.exists():
+        current = canonical_target.read_text(encoding="utf-8")
+        refreshed = refresh_generated_guidance(current, canonical_text)
+        if refreshed != current:
+            canonical_target.write_text(refreshed, encoding="utf-8")
+            print("  Updated: MYCELIUM.md automated enforcement guidance")
 
     for template_name, target_name in (
         ("CLAUDE.md.template", "CLAUDE.md"),
@@ -430,8 +453,12 @@ MYCELIUM_HOOK_BASENAMES = {
     "mycelium-activity-tracker.sh",
     "mycelium-read-tracker.sh",
     "mycelium-data-tracker.sh",
-    "mycelium-data-lineage-stop.sh",
 }
+
+LEGACY_MYCELIUM_HOOK_BASENAMES = {"mycelium-data-lineage-stop.sh"}
+ALL_MYCELIUM_HOOK_BASENAMES = (
+    MYCELIUM_HOOK_BASENAMES | LEGACY_MYCELIUM_HOOK_BASENAMES
+)
 
 CLAUDE_HOOK_SPECS = (
     ("SessionStart", "", "mycelium-health.sh"),
@@ -440,7 +467,6 @@ CLAUDE_HOOK_SPECS = (
     ("PostToolUse", "Read", "mycelium-read-tracker.sh"),
     ("PostToolUse", "Bash", "mycelium-data-tracker.sh"),
     ("Stop", "", "mycelium-stop-check.sh"),
-    ("Stop", "", "mycelium-data-lineage-stop.sh"),
 )
 
 
@@ -635,6 +661,31 @@ def _normalize_claude_hook_locations(hooks: dict) -> None:
             ]
 
 
+def _remove_claude_hook_basenames(hooks: dict, basenames: set[str]) -> int:
+    """Remove deprecated Mycelium handlers without disturbing user hooks."""
+    removed = 0
+    for event, groups in list(hooks.items()):
+        retained_groups = []
+        for group in groups:
+            handlers = group.get("hooks", [])
+            retained_handlers = [
+                handler
+                for handler in handlers
+                if _hook_basename(handler.get("command", "")) not in basenames
+            ]
+            removed += len(handlers) - len(retained_handlers)
+            if retained_handlers:
+                group["hooks"] = retained_handlers
+                retained_groups.append(group)
+            elif not handlers:
+                retained_groups.append(group)
+        if retained_groups:
+            hooks[event] = retained_groups
+        else:
+            del hooks[event]
+    return removed
+
+
 def install_claude_hooks(target_dir: Path):
     """Create or update .claude/settings.local.json with mycelium hooks.
 
@@ -666,6 +717,19 @@ def install_claude_hooks(target_dir: Path):
 
     hooks = settings.setdefault("hooks", {})
 
+    deprecated_removed = _remove_claude_hook_basenames(
+        hooks, LEGACY_MYCELIUM_HOOK_BASENAMES
+    )
+    if deprecated_removed:
+        # The previously registered stop-check may come from an older live
+        # marketplace cache and therefore may not contain the new synchronous
+        # lineage phase. Replace it from this installer, not merely by basename.
+        _remove_claude_hook_basenames(hooks, {"mycelium-stop-check.sh"})
+        print(
+            "  Removed deprecated standalone data-lineage Stop hook; "
+            "mycelium-stop-check.sh now serializes consolidation."
+        )
+
     # --- Pass 1: consolidate duplicates and drop stale entries ---
     # Build the replacement map: basename → known-good path on disk.
     # The consolidation pass uses this to determine when it's safe to drop
@@ -693,7 +757,6 @@ def install_claude_hooks(target_dir: Path):
     activity_tracker_hook = str(hooks_dir / "mycelium-activity-tracker.sh")
     read_tracker_hook = str(hooks_dir / "mycelium-read-tracker.sh")
     data_tracker_hook = str(hooks_dir / "mycelium-data-tracker.sh")
-    data_lineage_stop_hook = str(hooks_dir / "mycelium-data-lineage-stop.sh")
 
     def _hook_entry(cmd: str) -> dict:
         return {"type": "command", "command": cmd}
@@ -770,22 +833,9 @@ def install_claude_hooks(target_dir: Path):
         catch_all["hooks"].append(_hook_entry(stop_hook))
         print("  Registered: Stop → mycelium-stop-check.sh")
 
-    # --- Stop: mycelium-data-lineage-stop.sh ---
-    # Consolidates per-session data lineage events into a manifest.
-    if not _has_hook(stop, "mycelium-data-lineage-stop.sh"):
-        catch_all = next((e for e in stop if e.get("matcher", "") == ""), None)
-        if catch_all is None:
-            catch_all = {"matcher": "", "hooks": []}
-            stop.append(catch_all)
-        catch_all["hooks"].append(_hook_entry(data_lineage_stop_hook))
-        print("  Registered: Stop → mycelium-data-lineage-stop.sh")
-
     # Older installs may have a valid script under the wrong matcher or event.
     # Normalize after filling gaps so migration both detects and repairs them.
     _normalize_claude_hook_locations(hooks)
-
-    for group in stop:
-        _put_hook_first(group.get("hooks", []), "mycelium-data-lineage-stop.sh")
 
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
     print("  Wrote: .claude/settings.local.json")
@@ -816,7 +866,7 @@ def _remove_codex_hooks_config(config: dict) -> bool:
                 handler
                 for handler in handlers
                 if _hook_basename(handler.get("command", ""))
-                not in MYCELIUM_HOOK_BASENAMES
+                not in ALL_MYCELIUM_HOOK_BASENAMES
             ]
             removed_here = len(retained_handlers) != len(handlers)
             changed = changed or removed_here
@@ -860,7 +910,7 @@ def install_codex_hooks(target_dir: Path):
     print("  Codex hooks are bundled with the Mycelium plugin via PLUGIN_ROOT.")
     print(
         "  Codex action required after plugin install or upgrade: in the CLI, "
-        "open /hooks, trust all six Mycelium hooks, exit Codex, and restart it."
+        "open /hooks, trust all five Mycelium hooks, exit Codex, and restart it."
     )
     return changed
 
