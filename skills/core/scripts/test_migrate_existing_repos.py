@@ -252,6 +252,25 @@ class TestRegenIndex:
 
 
 class TestMigrateRuntimeState:
+    def test_refuses_symlinked_legacy_parent_before_writing(
+        self, fake_repo: Path
+    ) -> None:
+        outside_claude = fake_repo.parent / "outside-claude"
+        outside_claude.mkdir()
+        legacy = outside_claude / "last-session.md"
+        original = "host-private legacy session\n"
+        legacy.write_text(original)
+        (fake_repo / ".claude").rmdir()
+        (fake_repo / ".claude").symlink_to(
+            outside_claude, target_is_directory=True
+        )
+
+        with pytest.raises(ValueError, match="symlink"):
+            mig.migrate_runtime_state(fake_repo)
+
+        assert legacy.read_text() == original
+        assert not (fake_repo / ".mycelium").exists()
+
     def test_refuses_symlinked_state_before_writing(self, fake_repo: Path) -> None:
         victim = fake_repo.parent / "outside-state"
         victim.mkdir()

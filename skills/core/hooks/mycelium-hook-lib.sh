@@ -6,6 +6,8 @@ mycelium_prepare_state_dir() {
   local repo_root="$1"
   local requested_state=""
   local living_dir=""
+  local legacy_dir=""
+  local legacy_session=""
   local unsafe_link=""
   local plugin_pointer=""
   local pointer_tmp=""
@@ -104,10 +106,14 @@ PY
   fi
 
   # Preserve cross-session context from projects initialized before v0.4.
+  legacy_dir="$repo_root/.claude"
+  legacy_session="$legacy_dir/last-session.md"
   if [[ ! -f "$STATE_DIR/last-session.md" \
-    && -f "$repo_root/.claude/last-session.md" \
-    && ! -L "$repo_root/.claude/last-session.md" ]]; then
-    cp "$repo_root/.claude/last-session.md" "$STATE_DIR/last-session.md"
+    && -d "$legacy_dir" \
+    && ! -L "$legacy_dir" \
+    && -f "$legacy_session" \
+    && ! -L "$legacy_session" ]]; then
+    cp "$legacy_session" "$STATE_DIR/last-session.md"
   fi
 
   return 0
