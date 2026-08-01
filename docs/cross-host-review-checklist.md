@@ -114,6 +114,9 @@ hook, filesystem, or lifecycle boundaries.
       starts.
 - [ ] The active-log marker has one documented format, and every reader parses
       that format rather than treating the whole file as a path.
+- [ ] Every active-log reader validates the marker path as a regular file under
+      `.living/log`, validates the owner timestamp, and never emits, follows, or
+      trusts a corrupt marker supplied by repository state.
 - [ ] A no-work session exits without creating misleading activity or lineage.
 - [ ] A lineage-only session reserves and uses a consistent session identifier.
 - [ ] The first blocked Stop preserves the active log, baseline, raw events, and
@@ -145,6 +148,9 @@ hook, filesystem, or lifecycle boundaries.
       based on the executed program/module/script rather than substrings in
       ordinary quoted or unquoted arguments.
 - [ ] Exit evidence is associated with the command that actually executed.
+- [ ] Failed commands that are provably reached through a known-success AND
+      prefix, or started as a pipeline component, still produce lineage; shell
+      operators appearing only inside an unquoted comment produce nothing.
 - [ ] Nested and changed working directories resolve script and output paths
       correctly.
 - [ ] Failed or conditional `cd` commands do not change the inferred directory.
@@ -173,6 +179,8 @@ hook, filesystem, or lifecycle boundaries.
       intentional and do not suppress real scientific or source changes.
 - [ ] The final file list is deduplicated without losing the strongest evidence
       for a change.
+- [ ] Pre-existing dirty and untracked files use a content identity, so a
+      same-size rewrite whose mtime is restored still counts as session work.
 
 ## 7. Data Lineage Integrity
 
@@ -190,6 +198,8 @@ hook, filesystem, or lifecycle boundaries.
       session's lineage.
 - [ ] Accepted cleanup archives or rotates raw events only after the manifest
       and session log have been written successfully.
+- [ ] Extractor failure blocks Stop visibly and preserves the active marker,
+      baseline, session ID, and raw events for a deterministic retry.
 
 ## 8. Concurrency, Atomicity, and Filesystem Safety
 
@@ -228,10 +238,15 @@ hook, filesystem, or lifecycle boundaries.
       hooks do not assume a `python` alias exists when only `python3` is present.
 - [ ] Missing helpers, missing optional dependencies, invalid JSON, malformed
       timestamps, and partially written state fail safely.
+- [ ] Malformed reminder, audit, owner, and session-start timestamps cannot
+      abort SessionStart or trigger the subagent Stop bypass.
 - [ ] Paths with spaces and non-ASCII characters work in shell, Python, JSON,
       and Markdown output.
 - [ ] Hook failures do not silently erase evidence or leave the repository in a
       state that appears successfully finalized.
+- [ ] Registry values derived from filenames, branches, commits, or frontmatter
+      cannot break the Markdown table; a rejected registry upsert blocks Stop
+      and an eventual retry does not duplicate the session-end footer.
 - [ ] Security-sensitive failures prefer a visible safe refusal over an
       out-of-project write or destructive cleanup.
 
@@ -266,6 +281,12 @@ exercise them.
 | Python runs as `python3 -u`, `python3 -W`, an absolute or venv interpreter, `/usr/bin/env python3`, or `python -m` | Execution reminders and lineage events are emitted according to policy. |
 | Project path contains spaces or Unicode | Hooks, state, logs, and lineage remain correct. |
 | Runtime state is malformed or partially written | The hook fails visibly without destructive cleanup or out-of-project writes. |
+| Active-log marker points outside `.living/log` | PostToolUse omits the unsafe log directive; Stop still enforces outstanding work and never reveals or follows the path. |
+| A dirty or untracked file is rewritten with the same size and restored mtime | Session accounting detects the content change. |
+| `true && python failed.py` exits nonzero, or Python is a pipeline component | The provably executed analysis is recorded; an unknown failed AND prefix remains omitted. |
+| Shell operators and Python text occur only after an unquoted `#` comment marker | No reminder or lineage event is created; quoted and escaped hashes remain valid arguments. |
+| Registry summary contains `|`, or the registry/lineage helper fails | Table cells remain valid; helper failure blocks Stop and preserves retry state without duplicate finalization. |
+| Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |
 
 ## Validation Gate

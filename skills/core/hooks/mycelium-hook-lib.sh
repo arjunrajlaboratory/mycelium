@@ -119,6 +119,74 @@ PY
   return 0
 }
 
+mycelium_read_active_log_marker() {
+  local repo_root="$1"
+  local marker_file="$2"
+  local raw_path=""
+  local owner_ts=""
+  local extra_line=""
+  local line_count=""
+  local safe_path=""
+
+  [[ -f "$marker_file" && ! -L "$marker_file" ]] || return 1
+  raw_path=$(sed -n '1p' "$marker_file" 2>/dev/null || true)
+  owner_ts=$(sed -n '2p' "$marker_file" 2>/dev/null || true)
+  extra_line=$(sed -n '3p' "$marker_file" 2>/dev/null || true)
+  line_count=$(wc -l < "$marker_file" 2>/dev/null | tr -d '[:space:]' || true)
+  [[ "$line_count" == 2 && -n "$raw_path" \
+    && "$owner_ts" =~ ^[0-9]{1,18}$ && -z "$extra_line" ]] || return 1
+
+  safe_path=$(python3 - "$repo_root" "$raw_path" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve(strict=True)
+raw = Path(sys.argv[2])
+if not raw.is_absolute():
+    raise SystemExit(1)
+log_root = (root / ".living" / "log").resolve(strict=False)
+candidate = Path(os.path.abspath(raw))
+try:
+    relative = candidate.resolve(strict=False).relative_to(log_root)
+except (OSError, RuntimeError, ValueError):
+    raise SystemExit(1)
+if len(relative.parts) != 1:
+    raise SystemExit(1)
+try:
+    mode = candidate.lstat().st_mode
+except FileNotFoundError:
+    pass
+except OSError:
+    raise SystemExit(1)
+else:
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise SystemExit(1)
+print(candidate)
+PY
+  ) || return 1
+  [[ -n "$safe_path" ]] || return 1
+  printf '%s\n%s\n' "$safe_path" "$owner_ts"
+}
+
+mycelium_registry_cell() {
+  python3 -c '
+import html
+import sys
+value = sys.stdin.read().replace("\r", " ").replace("\n", " ")
+print(html.escape(" ".join(value.split()), quote=True).replace("|", "&#124;"))
+'
+}
+
+mycelium_emit_stop_block() {
+  local reason="$1"
+  local escaped_reason=""
+  escaped_reason=$(printf '%s' "$reason" | python3 -c \
+    'import json, sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null) || return 1
+  printf '{"decision": "block", "reason": %s}\n' "$escaped_reason"
+}
+
 mycelium_living_changed() {
   local repo_root="$1"
   local baseline_file="$2"

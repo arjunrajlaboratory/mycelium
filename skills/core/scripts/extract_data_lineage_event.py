@@ -162,6 +162,47 @@ RX_UNSUPPORTED_SHELL_STRUCTURE = re.compile(
 )
 
 
+def _strip_unquoted_shell_comments(command: str) -> str | None:
+    """Mask shell comments while preserving offsets and quoted/escaped hashes."""
+    masked = list(command)
+    quote: str | None = None
+    at_word_start = True
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote is None:
+            if char == "\\":
+                at_word_start = False
+                index += 2
+                continue
+            if char in {"'", '"'}:
+                quote = char
+                at_word_start = False
+                index += 1
+                continue
+            if char == "#" and at_word_start:
+                while index < len(command) and command[index] != "\n":
+                    masked[index] = " "
+                    index += 1
+                at_word_start = True
+                continue
+            at_word_start = char.isspace() or char in ";|&()"
+            index += 1
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if char == "\\" and index + 1 < len(command):
+            index += 2
+            continue
+        if char == '"':
+            quote = None
+        index += 1
+    return None if quote is not None else "".join(masked)
+
+
 def _unquoted_shell_text(command: str) -> str | None:
     """Mask quoted arguments while preserving unquoted shell structure.
 
@@ -169,15 +210,18 @@ def _unquoted_shell_text(command: str) -> str | None:
     intact, but quoted language source cannot be mistaken for shell syntax.
     Return ``None`` for an unterminated quote so callers can fail closed.
     """
+    command_without_comments = _strip_unquoted_shell_comments(command)
+    if command_without_comments is None:
+        return None
     masked: list[str] = []
     quote: str | None = None
     index = 0
-    while index < len(command):
-        char = command[index]
+    while index < len(command_without_comments):
+        char = command_without_comments[index]
         if quote is None:
             if char == "\\":
                 masked.append(" ")
-                if index + 1 < len(command):
+                if index + 1 < len(command_without_comments):
                     masked.append(" ")
                     index += 2
                     continue
@@ -199,7 +243,7 @@ def _unquoted_shell_text(command: str) -> str | None:
             continue
         else:
             masked.append(" ")
-            if char == "\\" and index + 1 < len(command):
+            if char == "\\" and index + 1 < len(command_without_comments):
                 masked.append(" ")
                 index += 2
                 continue
@@ -327,6 +371,9 @@ def _apply_cd(segment: list[str], cwd: Path) -> Path:
 
 def _shell_tokens(fragment: str) -> list[str] | None:
     """Tokenize shell control punctuation while preserving quoted content."""
+    fragment = _strip_unquoted_shell_comments(fragment)
+    if fragment is None:
+        return None
     try:
         lexer = shlex.shlex(fragment, posix=True, punctuation_chars=";&|()\n")
         lexer.whitespace = " \t\r"
@@ -430,7 +477,7 @@ def _top_level_control_context(fragment: str) -> tuple[list[str], bool, bool]:
             current_list_ambiguous = False
         elif depth == 0 and token in {"&&", "||"}:
             operators.append(token)
-        elif depth == 0 and token in {"|", "&"}:
+        elif depth == 0 and token == "&":
             current_list_ambiguous = True
     if depth:
         malformed = True
@@ -605,10 +652,57 @@ def _or_prefix_is_proven_failed(fragment: str, initial_cwd: Path) -> bool:
     return all(_simple_command_status(part, cwd) is False for part in alternatives)
 
 
+def _and_prefix_is_proven_successful(fragment: str, initial_cwd: Path) -> bool:
+    """Prove that every simple command before a pure-AND candidate succeeded."""
+    tokens = _shell_tokens(fragment)
+    if tokens is None:
+        return False
+
+    cwd = initial_cwd
+    segment: list[str] = []
+    completed: list[list[str]] = []
+    operators: list[str] = []
+    depth = 0
+    for token in tokens:
+        if token == "(":
+            depth += 1
+            if depth == 1:
+                return False
+        elif token == ")":
+            if depth == 0:
+                return False
+            depth -= 1
+        elif depth == 0 and token in {";", "\n", "||", "|", "&"}:
+            return False
+        elif depth == 0 and token == "&&":
+            completed.append(segment)
+            operators.append(token)
+            status, target = _simple_cd_status(segment, cwd)
+            if status is True:
+                cwd = target
+            segment = []
+        else:
+            segment.append(token)
+    if depth or not operators:
+        return False
+    cwd = initial_cwd
+    for part in completed:
+        status = _simple_command_status(part, cwd)
+        if status is not True:
+            return False
+        _, cwd = _simple_cd_status(part, cwd)
+    return True
+
+
 def _match_is_proven_executed(
     bash_cmd: str, offset: int, bash_exit: int | None, initial_cwd: Path
 ) -> bool:
     """Conservatively decide whether a textual script match actually ran."""
+    command_without_comments = _strip_unquoted_shell_comments(bash_cmd)
+    if command_without_comments is None:
+        return False
+    if command_without_comments[offset : offset + 1] != bash_cmd[offset : offset + 1]:
+        return False
     unquoted_shell = _unquoted_shell_text(bash_cmd)
     if unquoted_shell is None or RX_UNSUPPORTED_SHELL_STRUCTURE.search(
         unquoted_shell
@@ -622,9 +716,6 @@ def _match_is_proven_executed(
     if not before_ops:
         # The first command in an AND-OR list always executes.
         return True
-    if bash_exit is None:
-        return False
-
     after_ops, has_later_list, after_ambiguous = _top_level_control_context(
         bash_cmd[offset:]
     )
@@ -634,13 +725,15 @@ def _match_is_proven_executed(
         return False
     all_ops = before_ops + after_ops
     if all(operator == "&&" for operator in all_ops):
-        return bash_exit == 0
+        return bash_exit == 0 or _and_prefix_is_proven_successful(
+            bash_cmd[:offset], initial_cwd
+        )
     if all(operator == "||" for operator in all_ops):
         # A nonzero final status proves every OR alternative ran and failed.
         # A successful list is normally ambiguous, but a final fallback is
         # still proven to run when every preceding alternative has a known
         # failure (notably ``cd missing || python a.py``).
-        return bash_exit != 0 or _or_prefix_is_proven_failed(
+        return (bash_exit is not None and bash_exit != 0) or _or_prefix_is_proven_failed(
             bash_cmd[:offset], initial_cwd
         )
     return False

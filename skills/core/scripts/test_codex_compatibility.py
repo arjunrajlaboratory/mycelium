@@ -308,6 +308,54 @@ def test_agent_guidance_refuses_symlinked_targets_before_any_write(tmp_path, nam
     assert sorted(path.name for path in repo.iterdir()) == [".git", name]
 
 
+def test_fresh_init_preflights_all_managed_outputs_before_mutation(tmp_path):
+    repo = _repo(tmp_path, living=False)
+    victim = tmp_path / "outside-agents.md"
+    victim.write_text("external guidance\n")
+    (repo / "AGENTS.md").symlink_to(victim)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(init_repo.__file__).resolve()),
+            "--target-dir",
+            str(repo),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "symlink" in result.stderr
+    assert victim.read_text() == "external guidance\n"
+    assert sorted(path.name for path in repo.iterdir()) == [".git", "AGENTS.md"]
+
+
+def test_fresh_init_preflights_malformed_hook_config_before_mutation(tmp_path):
+    repo = _repo(tmp_path, living=False)
+    claude_dir = repo / ".claude"
+    claude_dir.mkdir()
+    settings = claude_dir / "settings.local.json"
+    settings.write_text("{invalid json\n")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(init_repo.__file__).resolve()),
+            "--target-dir",
+            str(repo),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert settings.read_text() == "{invalid json\n"
+    assert sorted(path.name for path in repo.iterdir()) == [".claude", ".git"]
+
+
 def test_agent_guidance_atomic_update_preserves_existing_permissions(tmp_path):
     repo = _repo(tmp_path, living=False)
     claude = repo / "CLAUDE.md"
@@ -710,6 +758,81 @@ def test_codex_post_tool_use_uses_nested_context(tmp_path):
     assert (repo / ".mycelium" / "mycelium-reminded.tmp").is_file()
 
 
+def test_codex_post_action_rejects_outside_active_log_marker(tmp_path):
+    repo = _repo(tmp_path)
+    state = repo / ".mycelium"
+    state.mkdir()
+    outside_log = tmp_path / "outside-session.md"
+    outside_log.write_text("do not direct writes here\n")
+    (state / "active-session-log.tmp").write_text(
+        f"{outside_log}\n{int(time.time())}\n"
+    )
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": "python analysis.py"},
+            "tool_response": {"exit_code": 0},
+            "turn_id": "outside-active-log",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert str(outside_log) not in result.stdout
+    assert "MYCELIUM POST-ACTION PROTOCOL" in result.stdout
+    assert outside_log.read_text() == "do not direct writes here\n"
+
+
+def test_session_start_replaces_outside_active_log_marker_safely(tmp_path):
+    repo = _repo(tmp_path)
+    state = repo / ".mycelium"
+    state.mkdir()
+    outside_log = tmp_path / "outside-health-session.md"
+    outside_log.write_text("external session\n")
+    (state / "active-session-log.tmp").write_text(
+        f"{outside_log}\n{int(time.time())}\n"
+    )
+
+    result = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "corrupt-health"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert str(outside_log) not in result.stdout
+    assert "CORRUPT SESSION MARKER" in result.stdout
+    marker_lines = (state / "active-session-log.tmp").read_text().splitlines()
+    assert len(marker_lines) == 2
+    assert Path(marker_lines[0]).parent == repo / ".living" / "log"
+    assert outside_log.read_text() == "external session\n"
+
+
+def test_session_start_recovers_malformed_runtime_timestamps(tmp_path):
+    repo = _repo(tmp_path)
+    state = repo / ".mycelium"
+    state.mkdir()
+    (state / "mycelium-reminded.tmp").write_text("not-a-timestamp\n")
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    (knowledge / ".last-audit").write_text("also-not-a-timestamp\n")
+
+    result = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "bad-timestamps"},
+        {"MYCELIUM_KNOWLEDGE_DIR": str(knowledge)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (state / "active-session-log.tmp").is_file()
+    assert not (state / "mycelium-reminded.tmp").exists()
+    assert "KNOWLEDGE AUDIT DUE" in result.stdout
+
+
 def test_codex_post_action_rejects_unproven_shell_text_matches(tmp_path):
     repo = _repo(tmp_path)
     reminder = repo / ".mycelium" / "mycelium-reminded.tmp"
@@ -719,6 +842,7 @@ def test_codex_post_action_rejects_unproven_shell_text_matches(tmp_path):
             "if false; then\npython analysis.py\nfi",
             "echo python analysis.py",
             "uv run echo python analysis.py",
+            "true # && python analysis.py",
         )
     ):
         result = _run_hook(
@@ -1223,6 +1347,213 @@ def test_hooks_refuse_symlinked_living_directory(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert list(victim.iterdir()) == []
+
+
+def test_invalid_active_log_marker_cannot_bypass_stop_enforcement(tmp_path):
+    repo = _repo(tmp_path)
+    state = repo / ".mycelium"
+    state.mkdir()
+    work_started = int(time.time()) + 60
+    outside_log = tmp_path / "outside-session.md"
+    outside_log.write_text("external\n")
+    active_marker = state / "active-session-log.tmp"
+    active_marker.write_text(f"{outside_log}\n{work_started}\n")
+    (state / "session-start-ts.tmp").write_text(f"{work_started}\n")
+    (state / "mycelium-reminded.tmp").write_text(f"{work_started}\n")
+    (state / "mycelium-session-activity.tmp").write_text("analysis.py\n")
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "invalid-log"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == "block"
+    assert str(outside_log) not in result.stdout
+    assert outside_log.read_text() == "external\n"
+    assert (state / "mycelium-reminded.tmp").is_file()
+
+
+def test_malformed_session_start_timestamp_cannot_trigger_subagent_bypass(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "owner-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    (state / "session-start-ts.tmp").write_text("not-a-timestamp\n")
+    work_started = int(time.time()) + 60
+    (state / "mycelium-reminded.tmp").write_text(f"{work_started}\n")
+    (state / "mycelium-session-activity.tmp").write_text("analysis.py\n")
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "owner-stop"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == "block"
+    assert (state / "active-session-log.tmp").is_file()
+
+
+def test_stop_sanitizes_registry_cells_with_pipe_characters(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "pipe-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    log_path = Path((state / "active-session-log.tmp").read_text().splitlines()[0])
+    session_id = log_path.name[:14]
+    (repo / "changed|file.txt").write_text("work\n")
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\nPipe-containing paths are valid.\n"
+    )
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "pipe-stop"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"decision": "block"' not in result.stdout
+    registry = repo / ".living" / "log" / "LOG_REGISTRY.md"
+    assert registry.read_text().count(f"| {session_id} |") == 1
+    assert "changed&#124;file.txt" in registry.read_text()
+    assert not (repo / ".living" / "log" / ".upsert_registry_row.err").exists()
+
+
+def test_stop_preserves_transaction_when_registry_upsert_fails(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "upsert-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    active_marker = state / "active-session-log.tmp"
+    log_path = Path(active_marker.read_text().splitlines()[0])
+    session_id = log_path.name[:14]
+    (repo / "work.py").write_text("print('work')\n")
+    (repo / ".living" / "decisions.md").write_text(
+        "# Decision Log\n\nRegistry failure must be retried.\n"
+    )
+    failing_helper = tmp_path / "failing-upsert.py"
+    failing_helper.write_text("raise SystemExit(23)\n")
+
+    failed = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "upsert-fail"},
+        {"MYCELIUM_REGISTRY_UPSERT_HELPER": str(failing_helper)},
+    )
+
+    assert failed.returncode == 0, failed.stderr
+    failed_payload = json.loads(failed.stdout)
+    assert failed_payload["decision"] == "block"
+    assert "registry finalization failed" in failed_payload["reason"]
+    assert active_marker.is_file()
+    assert (state / "session-file-baseline.json").is_file()
+
+    retried = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": True, "turn_id": "upsert-retry"},
+    )
+    assert retried.returncode == 0, retried.stderr
+    assert '"decision": "block"' not in retried.stdout
+    assert log_path.read_text().count("Session ended") == 1
+    registry = repo / ".living" / "log" / "LOG_REGISTRY.md"
+    assert registry.read_text().count(f"| {session_id} |") == 1
+    assert not active_marker.exists()
+
+
+def test_stop_preserves_lineage_state_when_consolidation_fails(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "lineage-fail-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    active_marker = state / "active-session-log.tmp"
+    events = state / "mycelium-data-events.tmp"
+    events.write_text(
+        json.dumps(
+            {
+                "ts": "2026-08-01T12:00:00Z",
+                "script": "analysis/fail.py",
+                "inputs": [],
+                "outputs": [],
+            }
+        )
+        + "\n"
+    )
+    failing_extractor = tmp_path / "failing-extractor.py"
+    failing_extractor.write_text("raise SystemExit(29)\n")
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "session_id": "host-lineage-failure",
+            "stop_hook_active": False,
+            "turn_id": "lineage-fail-stop",
+        },
+        {"MYCELIUM_DATA_EXTRACTOR": str(failing_extractor)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["decision"] == "block"
+    assert "lineage consolidation failed" in payload["reason"]
+    assert events.is_file()
+    assert (state / "data-lineage-session-id.tmp").is_file()
+    assert active_marker.is_file()
+
+
+def test_stop_rejects_unsafe_host_lineage_session_id(tmp_path):
+    repo = _repo(tmp_path)
+    state = repo / ".mycelium"
+    state.mkdir()
+    events = state / "mycelium-data-events.tmp"
+    events.write_text(
+        json.dumps(
+            {
+                "ts": "2026-08-01T12:00:00Z",
+                "script": "analysis/run.py",
+                "inputs": [],
+                "outputs": [],
+            }
+        )
+        + "\n"
+    )
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "session_id": "../../outside-lineage",
+            "stop_hook_active": False,
+            "turn_id": "unsafe-lineage-id",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == "block"
+    assert events.is_file()
+    assert not (repo / ".living" / "outside-lineage.json").exists()
 
 
 def test_bash_only_repository_change_blocks_without_living_update(tmp_path):
