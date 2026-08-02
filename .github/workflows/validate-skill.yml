@@ -50,11 +50,15 @@ jobs:
         run: |
           python -c "
           import json
+          import re
           from pathlib import Path
           claude = json.loads(Path('.claude-plugin/plugin.json').read_text())
           codex = json.loads(Path('.codex-plugin/plugin.json').read_text())
           assert claude['name'] == codex['name'] == 'mycelium'
-          assert claude['version'] == codex['version']
+          codex_base, separator, cachebuster = codex['version'].partition('+')
+          assert claude['version'] == codex_base
+          if separator:
+              assert re.fullmatch(r'codex\.[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*', cachebuster)
           assert claude['skills'] == codex['skills'] == './skills/'
           assert codex['interface']['displayName'] == 'Mycelium'
           "

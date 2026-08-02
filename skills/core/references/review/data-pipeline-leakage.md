@@ -87,6 +87,19 @@ You do NOT own:
 - Aggregation function on the wrong axis
 - Mean of percentages when a weighted mean is correct
 
+### Cross-input comparability
+
+- Compare schemas, feature sets, identifier namespaces, units, and label
+  vocabularies across every input that is pooled or compared; checking each
+  file independently is not enough.
+- When labels or groups are derived upstream from measurements, verify the same
+  derivation rule, thresholds, reference, and software version were used across
+  inputs. Otherwise a biological-looking contrast can be a labeling-pipeline
+  contrast.
+- Report intersections, input-only fields/features, and any harmonization or
+  imputation. Flag silent intersection/union behavior that changes the
+  estimand or makes panels incomparable.
+
 ### Missing values
 
 - `dropna()` before splitting train/test (changes the n)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -205,6 +206,45 @@ def test_detect_script_jupyter_rejects_unknown_separated_option_arity() -> None:
     )
 
     assert script is None
+    assert inline is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "jupyter nbconvert a.ipynb # --show-config",
+        "jupyter nbconvert a.ipynb > converted.ipynb # --show-config-json",
+    ],
+)
+def test_jupyter_terminal_option_in_unquoted_comment_is_ignored(
+    tmp_path: Path, command: str
+) -> None:
+    """A commented terminal flag is not part of Jupyter's argv."""
+    script = tmp_path / "a.ipynb"
+    script.write_text("{}\n")
+
+    detected, inline = detect_script(command, tmp_path)
+
+    assert detected == script
+    assert inline is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"jupyter nbconvert a.ipynb --output prefix\#value",
+        "jupyter nbconvert a.ipynb --output 'prefix # --show-config'",
+    ],
+)
+def test_jupyter_hash_in_argv_is_not_treated_as_comment(
+    tmp_path: Path, command: str
+) -> None:
+    script = tmp_path / "a.ipynb"
+    script.write_text("{}\n")
+
+    detected, inline = detect_script(command, tmp_path)
+
+    assert detected == script
     assert inline is None
 
 
@@ -444,6 +484,115 @@ def test_dynamic_or_imported_io_is_retained_as_unresolved(tmp_path: Path) -> Non
     assert event["inputs"] == []
     assert event["outputs"] == []
     assert "resolve paths dynamically" in event["lineage_warnings"][0]
+
+
+def test_dynamic_literal_filenames_are_recovered_from_repository(tmp_path: Path) -> None:
+    """Existing uniquely named data files recover Path-composed I/O."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    raw = tmp_path / "data" / "raw" / "sample.h5ad"
+    output = tmp_path / "analysis" / "demo" / "outputs" / "summary.csv"
+    raw.parent.mkdir(parents=True)
+    output.parent.mkdir(parents=True)
+    raw.write_bytes(b"raw-data")
+    output.write_text("value\n1\n")
+    script = tmp_path / "analysis" / "demo" / "run.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "RAW = Path(__file__).parents[2] / 'data' / 'raw'\n"
+        "OUT = Path(__file__).parent / 'outputs'\n"
+        "SPECS = [{'filename': 'sample.h5ad'}]\n"
+        "path = RAW / SPECS[0]['filename']\n"
+        "adata = read_h5ad(path)\n"
+        "table.to_csv(OUT / 'summary.csv')\n"
+    )
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python analysis/demo/run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "static+repository"
+    assert [item["path"] for item in event["inputs"]] == [str(raw)]
+    assert [item["path"] for item in event["outputs"]] == [str(output)]
+    assert event["lineage_warnings"] == []
+
+
+def test_dynamic_literal_recovery_rejects_ambiguous_basenames(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    for directory in (tmp_path / "data" / "raw", tmp_path / "data" / "other"):
+        directory.mkdir(parents=True)
+        (directory / "sample.csv").write_text("x\n")
+    script = tmp_path / "run.py"
+    script.write_text("pd.read_csv(root / 'sample.csv')\n")
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+    assert event["outputs"] == []
+
+
+def test_repository_recovery_does_not_duplicate_direct_static_path(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    raw = tmp_path / "data" / "raw" / "sample.csv"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("x\n")
+    script = tmp_path / "run.py"
+    script.write_text("pd.read_csv('data/raw/sample.csv')\n")
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "static"
+    assert [item["path"] for item in event["inputs"]] == [str(raw)]
+
+
+def test_repository_recovery_does_not_alias_absolute_external_literal(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    in_repo = tmp_path / "data" / "raw" / "sample.csv"
+    in_repo.parent.mkdir(parents=True)
+    in_repo.write_text("x\n")
+    script = tmp_path / "run.py"
+    script.write_text("pd.read_csv('/external/source/sample.csv')\n")
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "static"
+    assert [item["path"] for item in event["inputs"]] == [
+        "/external/source/sample.csv"
+    ]
 
 
 # ---------- end-to-end main() with multi-script + --append-to ----------

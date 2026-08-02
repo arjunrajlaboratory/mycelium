@@ -136,6 +136,7 @@ HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR=$(cd "$(dirname "$(dirname "$HOOK_SOURCE")")" 2>/dev/null && pwd || echo "")
 UPSERT_SCRIPT="${MYCELIUM_REGISTRY_UPSERT_HELPER:-$SCRIPT_DIR/scripts/upsert_registry_row.py}"
 FINALIZE_LOG_SCRIPT="${MYCELIUM_LOG_FINALIZER_HELPER:-$SCRIPT_DIR/scripts/finalize_session_log.py}"
+FINALIZE_HANDOFF_SCRIPT="${MYCELIUM_HANDOFF_FINALIZER_HELPER:-$SCRIPT_DIR/scripts/finalize_handoff.py}"
 
 # --- Session log finalization ---
 if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
@@ -318,6 +319,22 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
           SUMMARY="${SUMMARY} (+$((FILES_CHANGED - 3)) more)"
         fi
       fi
+      # Prefer commit subjects when the agent has not already authored a row.
+      # Compute the best machine fallback before the single preserving upsert;
+      # otherwise a preliminary filename row looks "authored" to a second
+      # upsert and accidentally defeats this deterministic summary.
+      if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
+        DETERMINISTIC_SUMMARY=$(
+          { git -C "$LOG_REPO" log --since="@${START_TS}" --pretty=format:'%s' 2>/dev/null || true; } \
+            | head -3 | tr '\n' ';' | sed 's/;$//; s/;/; /g'
+        )
+        if [ ${#DETERMINISTIC_SUMMARY} -gt 200 ]; then
+          DETERMINISTIC_SUMMARY="${DETERMINISTIC_SUMMARY:0:197}..."
+        fi
+        if [ -n "$DETERMINISTIC_SUMMARY" ]; then
+          SUMMARY="$DETERMINISTIC_SUMMARY"
+        fi
+      fi
       PROJECT_SLUG=$(printf '%s' "$PROJECT_SLUG" | mycelium_registry_cell)
       BRANCH=$(printf '%s' "$BRANCH" | mycelium_registry_cell)
       SUMMARY=$(printf '%s' "$SUMMARY" | mycelium_registry_cell)
@@ -331,7 +348,7 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
           # .upsert_registry_row.err for operator debugging. Do NOT echo the
           # row on rejection — that would defeat the validation the script
           # exists to perform.
-          python3 "$UPSERT_SCRIPT" "$LOG_DIR/LOG_REGISTRY.md" "$SESSION_ID" "$NEW_ROW" \
+          python3 "$UPSERT_SCRIPT" --preserve-authored "$LOG_DIR/LOG_REGISTRY.md" "$SESSION_ID" "$NEW_ROW" \
             >/dev/null 2>"$LOG_DIR/.upsert_registry_row.err" \
             && { rm -f "$LOG_DIR/.upsert_registry_row.err"; REGISTRY_OK=true; }
         fi
@@ -340,33 +357,6 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
         mycelium_emit_stop_block \
           "STOP BLOCKED — session registry finalization failed. The active log and session baselines were preserved; inspect .living/log/.upsert_registry_row.err or the helper installation, then retry Stop."
         exit 0
-      fi
-
-      # Deterministic Summary: commit subjects since session start.
-      # Runs in milliseconds with no model or provider dependency.
-      if [ -n "$START_TS" ] && [ "$START_TS" -gt 0 ] 2>/dev/null; then
-        DETERMINISTIC_SUMMARY=$(
-          { git -C "$LOG_REPO" log --since="@${START_TS}" --pretty=format:'%s' 2>/dev/null || true; } \
-            | head -3 | tr '\n' ';' | sed 's/;$//; s/;/; /g'
-        )
-        # Cap at 200 chars
-        if [ ${#DETERMINISTIC_SUMMARY} -gt 200 ]; then
-          DETERMINISTIC_SUMMARY="${DETERMINISTIC_SUMMARY:0:197}..."
-        fi
-        if [ -n "$DETERMINISTIC_SUMMARY" ]; then
-          DETERMINISTIC_SUMMARY=$(printf '%s' "$DETERMINISTIC_SUMMARY" | mycelium_registry_cell)
-          # Re-upsert the row with the deterministic Summary. Same row, better Summary.
-          NEW_ROW_DET="| $(date +%Y-%m-%d) | ${SESSION_ID} | ${PROJECT_SLUG} | ${BRANCH} | ${DURATION_MIN}m | ${FILES_CHANGED} | ${DETERMINISTIC_SUMMARY} | | complete | | [log](${LOG_BASENAME}) |"
-          if [ -f "$UPSERT_SCRIPT" ]; then
-            if ! python3 "$UPSERT_SCRIPT" "$LOG_DIR/LOG_REGISTRY.md" "$SESSION_ID" "$NEW_ROW_DET" \
-              >/dev/null 2>"$LOG_DIR/.upsert_registry_row.err"; then
-              mycelium_emit_stop_block \
-                "STOP BLOCKED — session registry finalization failed while writing the deterministic summary. Active state was preserved for retry."
-              exit 0
-            fi
-            rm -f "$LOG_DIR/.upsert_registry_row.err"
-          fi
-        fi
       fi
 
       # Auto-write last-session.md for next session context
@@ -464,11 +454,52 @@ LAST_SESSION_EOF
         fi
       fi
 
+      if [ ! -f "$FINALIZE_HANDOFF_SCRIPT" ]; then
+        mycelium_emit_stop_block \
+          "STOP BLOCKED — session handoff finalization failed. Active state was preserved for retry."
+        exit 0
+      fi
+
       # All other transaction participants have accepted the session. Publish
       # the completed frontmatter and matching footer with one atomic replace,
       # so SessionStart can never observe an ended log without its footer.
-      ENDED=$(date +%Y-%m-%dT%H:%M:%S%z)
-      END_TIME_SHORT=$(date +%H:%M)
+      # A retry sentinel distinguishes a fully accepted ended log from the
+      # narrow state where the log committed but handoff publication did not.
+      # It also pins the timestamp so a retry cannot make frontmatter/footer
+      # disagree about when Stop was accepted.
+      HANDOFF_PENDING_FILE="$STATE_DIR/handoff-finalization-pending.tmp"
+      ENDED=""
+      END_TIME_SHORT=""
+      if [[ ( -e "$HANDOFF_PENDING_FILE" || -L "$HANDOFF_PENDING_FILE" ) \
+        && ( ! -f "$HANDOFF_PENDING_FILE" || -L "$HANDOFF_PENDING_FILE" ) ]]; then
+        mycelium_emit_stop_block \
+          "STOP BLOCKED — handoff retry state is unsafe. Active state was preserved for repair."
+        exit 0
+      fi
+      if [ -f "$HANDOFF_PENDING_FILE" ] && [ ! -L "$HANDOFF_PENDING_FILE" ]; then
+        _HANDOFF_PENDING_LINES=$(awk 'END { print NR }' "$HANDOFF_PENDING_FILE" 2>/dev/null || true)
+        if [ "$_HANDOFF_PENDING_LINES" = 2 ]; then
+          ENDED=$(sed -n '1p' "$HANDOFF_PENDING_FILE" 2>/dev/null || true)
+          END_TIME_SHORT=$(sed -n '2p' "$HANDOFF_PENDING_FILE" 2>/dev/null || true)
+        fi
+      fi
+      if [[ ! "$ENDED" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{4}$ \
+        || ! "$END_TIME_SHORT" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then
+        ENDED=$(date +%Y-%m-%dT%H:%M:%S%z)
+        END_TIME_SHORT=$(date +%H:%M)
+        _HANDOFF_PENDING_TMP=$(mktemp "$STATE_DIR/.handoff-finalization-pending.tmp.XXXXXX") || {
+          mycelium_emit_stop_block \
+            "STOP BLOCKED — session handoff finalization could not reserve retry state. Active state was preserved."
+          exit 0
+        }
+        if ! printf '%s\n%s\n' "$ENDED" "$END_TIME_SHORT" > "$_HANDOFF_PENDING_TMP" \
+          || ! mv -f "$_HANDOFF_PENDING_TMP" "$HANDOFF_PENDING_FILE"; then
+          rm -f "$_HANDOFF_PENDING_TMP"
+          mycelium_emit_stop_block \
+            "STOP BLOCKED — session handoff finalization could not reserve retry state. Active state was preserved."
+          exit 0
+        fi
+      fi
       if [ ! -f "$FINALIZE_LOG_SCRIPT" ] \
         || ! printf '%s' "$SESSION_CHANGED_FILES" \
           | python3 "$FINALIZE_LOG_SCRIPT" \
@@ -484,10 +515,20 @@ LAST_SESSION_EOF
       fi
       rm -f "$LOG_DIR/.finalize_session_log.err"
 
-      # Clean up sentinels
-      rm -f "$ACTIVE_LOG_FILE"
-      rm -f "$ACTIVE_OWNER_FILE"
-      rm -f "$SESSION_BASELINE_FILE"
+      # Only now is it truthful to publish an authoritative accepted state in
+      # the rich handoff. If this atomic write fails, the pending sentinel keeps
+      # SessionStart and Stop on the same retryable transaction.
+      if ! python3 "$FINALIZE_HANDOFF_SCRIPT" \
+        --handoff "$_SESSION_FILE" \
+        --accepted-at "$ENDED" \
+        >/dev/null 2>"$LOG_DIR/.finalize_handoff.err"; then
+        mycelium_emit_stop_block \
+          "STOP BLOCKED — session handoff finalization failed. Active state was preserved for retry."
+        exit 0
+      fi
+      rm -f "$LOG_DIR/.finalize_handoff.err"
+      # Keep the active marker and retry sentinel until the shared enforcement
+      # and lineage phase below accepts and archives the whole transaction.
     fi
   else
     # Log file doesn't exist (was deleted?) — clean up sentinels
@@ -507,7 +548,10 @@ fi
 # If no .living/ directory, skip (SessionStart hook handles scaffolding)
 LIVING_DIR="$REPO_ROOT/.living"
 if [ ! -d "$LIVING_DIR" ]; then
+  rm -f "$ACTIVE_LOG_FILE"
   rm -f "$ACTIVE_OWNER_FILE"
+  rm -f "$STATE_DIR/handoff-finalization-pending.tmp"
+  rm -f "$STATE_DIR/session-file-baseline.json"
   rm -f "$STATE_DIR/living-reminder-baseline.json"
   mycelium_accept_lineage_session
   exit 0
@@ -518,7 +562,9 @@ fi
 REMINDER_FILE="$STATE_DIR/mycelium-reminded.tmp"
 ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
 if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
+  rm -f "$ACTIVE_LOG_FILE"
   rm -f "$ACTIVE_OWNER_FILE"
+  rm -f "$STATE_DIR/handoff-finalization-pending.tmp"
   rm -f "$STATE_DIR/session-start-ts.tmp"
   rm -f "$STATE_DIR/session-file-baseline.json"
   rm -f "$STATE_DIR/living-reminder-baseline.json"
@@ -565,7 +611,9 @@ if [ "$LIVING_UPDATED" = true ]; then
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
+  rm -f "$ACTIVE_LOG_FILE"
   rm -f "$ACTIVE_OWNER_FILE"
+  rm -f "$STATE_DIR/handoff-finalization-pending.tmp"
   rm -f "$STATE_DIR/session-start-ts.tmp"
   rm -f "$STATE_DIR/session-file-baseline.json"
   rm -f "$STATE_DIR/living-reminder-baseline.json"

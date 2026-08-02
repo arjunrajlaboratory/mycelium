@@ -115,6 +115,7 @@ if [[ -z "$REPO_ROOT" ]]; then
   exit 0
 fi
 mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
+mycelium_payload_owns_active_session "$REPO_ROOT" "$INPUT" || exit 0
 
 # Only enforce in mycelium-enabled repos
 if [[ ! -d "$REPO_ROOT/.living" ]]; then

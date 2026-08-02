@@ -28,6 +28,7 @@ Usage (from the tracker hook):
 from __future__ import annotations
 
 import argparse
+import ast
 import fcntl
 import hashlib
 import json
@@ -185,6 +186,12 @@ IGNORED_PYTHON_MODULES = {
     "zipfile",
 }
 IGNORED_SCRIPT_SUFFIXES = {
+    "skills/core/scripts/finalize_handoff.py",
+    "skills/core/scripts/finalize_session_log.py",
+    "skills/core/scripts/generate_index.py",
+    "skills/core/scripts/session_file_changes.py",
+    "skills/core/scripts/upsert_registry_row.py",
+    "skills/core/scripts/validate_review_report.py",
     "skills/core/scripts/validate_structure.py",
 }
 IGNORED_SCRIPT_BASENAMES = {"setup.py"}
@@ -549,6 +556,9 @@ def _simple_command_suffix(command: str, offset: int) -> str | None:
 
 def _simple_command_argv(fragment: str) -> list[str] | None:
     """Tokenize argv while consuming shell redirection operators and targets."""
+    fragment = _strip_unquoted_shell_comments(fragment)
+    if fragment is None:
+        return None
     try:
         lexer = shlex.shlex(
             fragment,
@@ -1335,6 +1345,160 @@ def scan_source(source: str) -> tuple[list[str], list[str], list[str], list[int]
     return _dedupe(inputs), _dedupe(outputs), _dedupe(filters), sorted(set(seeds))
 
 
+_DATA_FILE_SUFFIXES = {
+    ".csv",
+    ".tsv",
+    ".txt",
+    ".json",
+    ".jsonl",
+    ".parquet",
+    ".feather",
+    ".h5",
+    ".hdf5",
+    ".h5ad",
+    ".loom",
+    ".xlsx",
+    ".xls",
+    ".rds",
+    ".rdata",
+    ".npy",
+    ".npz",
+    ".pkl",
+    ".pickle",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".svg",
+    ".pdf",
+}
+_INPUT_DIRECTORY_NAMES = {"data", "input", "inputs", "raw", "source"}
+_OUTPUT_DIRECTORY_NAMES = {
+    "figure",
+    "figures",
+    "output",
+    "outputs",
+    "processed",
+    "report",
+    "reports",
+    "result",
+    "results",
+    "table",
+    "tables",
+    "validation",
+}
+_REPOSITORY_SCAN_EXCLUDES = {
+    ".git",
+    ".mycelium",
+    ".living",
+    ".venv",
+    "node_modules",
+    "__pycache__",
+}
+
+
+def _repository_root(cwd: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    root = result.stdout.strip()
+    return Path(root) if result.returncode == 0 and root else None
+
+
+def _literal_data_filenames(source: str) -> set[str]:
+    """Collect concrete data-like string literals without executing source."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    values: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        value = node.value.strip()
+        if not value or "\x00" in value or "$" in value:
+            continue
+        if Path(value).is_absolute() or re.match(
+            r"^[A-Za-z][A-Za-z0-9+.-]*://", value
+        ):
+            continue
+        if Path(value).suffix.lower() in _DATA_FILE_SUFFIXES:
+            values.add(value)
+    return values
+
+
+def _repository_literal_io(source: str, cwd: Path) -> tuple[list[str], list[str]]:
+    """Recover unique existing paths named by dynamic Path expressions.
+
+    This is a conservative post-execution fallback. It never guesses when a
+    basename occurs more than once in the repository, and it classifies only
+    conventional input/output directory names. The literal regex scanner
+    remains authoritative for direct reader/writer calls.
+    """
+    literals = _literal_data_filenames(source)
+    root = _repository_root(cwd)
+    if not literals or root is None:
+        return [], []
+
+    wanted_basenames = {Path(value).name for value in literals}
+    matches: dict[str, list[Path]] = {name: [] for name in wanted_basenames}
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in _REPOSITORY_SCAN_EXCLUDES
+            and not (Path(directory) / name).is_symlink()
+        ]
+        for filename in filenames:
+            if filename in matches:
+                candidate = Path(directory) / filename
+                if not candidate.is_symlink():
+                    matches[filename].append(candidate)
+
+    inputs: list[str] = []
+    outputs: list[str] = []
+    for value in sorted(literals):
+        candidates = matches.get(Path(value).name, [])
+        if len(candidates) != 1:
+            continue
+        candidate = candidates[0]
+        lowered_parts = {part.lower() for part in candidate.relative_to(root).parts}
+        if lowered_parts & _OUTPUT_DIRECTORY_NAMES:
+            outputs.append(str(candidate))
+        elif lowered_parts & _INPUT_DIRECTORY_NAMES:
+            inputs.append(str(candidate))
+    return _dedupe(inputs), _dedupe(outputs)
+
+
+def _merge_recovered_paths(
+    static_paths: list[str], recovered_paths: list[str], cwd: Path
+) -> tuple[list[str], list[str]]:
+    """Merge repository recovery without duplicating equivalent static paths."""
+
+    def identity(value: str) -> str:
+        path = Path(value)
+        if not path.is_absolute():
+            path = cwd / path
+        return os.path.normpath(os.path.abspath(path))
+
+    merged = list(static_paths)
+    seen = {identity(value) for value in static_paths}
+    added: list[str] = []
+    for value in recovered_paths:
+        canonical = identity(value)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        merged.append(value)
+        added.append(value)
+    return merged, added
+
+
 def file_record(path_str: str, cwd: Path) -> dict:
     path = Path(path_str)
     if not path.is_absolute():
@@ -1397,7 +1561,13 @@ def build_event_for_detection(
         return None
 
     inputs, outputs, filters, seeds = scan_source(source)
-    io_detection = "static" if inputs or outputs else "unresolved"
+    recovered_inputs, recovered_outputs = _repository_literal_io(source, cwd)
+    inputs, added_inputs = _merge_recovered_paths(inputs, recovered_inputs, cwd)
+    outputs, added_outputs = _merge_recovered_paths(outputs, recovered_outputs, cwd)
+    if added_inputs or added_outputs:
+        io_detection = "static+repository"
+    else:
+        io_detection = "static" if inputs or outputs else "unresolved"
     lineage_warnings = []
     if io_detection == "unresolved":
         lineage_warnings.append(

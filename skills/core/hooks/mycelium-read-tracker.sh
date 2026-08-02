@@ -36,6 +36,7 @@ source "$HERE/mycelium-hook-lib.sh"
     exit 0
   fi
   mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
+  mycelium_payload_owns_active_session "$REPO_ROOT" "$INPUT" || exit 0
 
   # Extract the relative .living/... portion of the path
   # e.g. /Users/mst36/repo/.living/INDEX.md → .living/INDEX.md

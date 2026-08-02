@@ -68,6 +68,14 @@ synthesis dedupe.
   name in adata.var_names[:10])`)
 - AnnData built from a 2D array with no explicit observation /
   variable axes labeling
+- Before comparing or concatenating multiple AnnData objects, explicitly
+  compare `var_names`, feature counts, identifier types, reference versions,
+  and cell-label vocabularies. A shared matrix shape does not prove shared
+  biological features.
+- If cell types or annotations were generated upstream, verify that every input
+  used the same annotation method, marker/reference set, thresholds, and
+  version. Treat unexplained per-panel annotation provenance as a comparability
+  defect, not merely missing documentation.
 
 ### Duplicate gene symbols and identifier disambiguation
 

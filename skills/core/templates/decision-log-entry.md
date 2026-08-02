@@ -1,7 +1,7 @@
 <!-- Decision Log Entry Template -->
 <!-- Copy this block and append to .living/decisions.md -->
 
-## [YYYY-MM-DD] [Short Decision Title]
+### [YYYY-MM-DD] [Short Decision Title]
 
 **Context**: [What situation or problem prompted this decision?]
 

@@ -103,6 +103,18 @@ class TestCountsOnly:
         # conventions uses "sections"
         assert "2 sections" in content
 
+    def test_shipped_decision_template_uses_counted_entry_heading(
+        self, tmp_path: Path
+    ) -> None:
+        template = (
+            _SCRIPT_DIR.parent / "templates" / "decision-log-entry.md"
+        ).read_text()
+        path = tmp_path / "decision-template-contract.md"
+        path.write_text(template)
+        count, _ = gi.count_headers_and_topics(path, "decisions")
+
+        assert count == 1
+
     def test_preserves_existing_summary_block(self, living_dir: Path) -> None:
         """--counts-only must not touch an existing KNOWLEDGE_SUMMARY block."""
         _write_learnings(living_dir, 1)

@@ -20,9 +20,15 @@ def _row(session_id: str, summary: str = "did stuff", date: str = "2026-05-21") 
     return f"| {date} | {session_id} | proj | main | 12m | 3 | {summary} |  | complete |  | [log]({session_id}-proj.md) |"
 
 
-def _run(registry: Path, session_id: str, row: str) -> subprocess.CompletedProcess:
+def _run(
+    registry: Path, session_id: str, row: str, *, preserve_authored: bool = False
+) -> subprocess.CompletedProcess:
+    command = [sys.executable, str(SCRIPT)]
+    if preserve_authored:
+        command.append("--preserve-authored")
+    command.extend([str(registry), session_id, row])
     return subprocess.run(
-        [sys.executable, str(SCRIPT), str(registry), session_id, row],
+        command,
         capture_output=True,
         text=True,
     )
@@ -127,6 +133,36 @@ def test_file_without_trailing_newline_gets_one_on_append(tmp_path: Path) -> Non
     # Final char must be a newline, and rows must be separated correctly
     assert content.endswith("\n")
     assert "---|\n|" in content  # separator row followed by data row on new line
+
+
+def test_preserve_authored_keeps_rich_summary_outputs_and_tags(tmp_path: Path) -> None:
+    registry = tmp_path / "LOG_REGISTRY.md"
+    existing = (
+        "| 2026-08-01 | 2026-08-01-001 | proj | old | 1m | 1 | "
+        "Compared ROI-level cell-type proportions | tables/counts.csv; figures/overview.png "
+        "| active | gastruloid; review | [log](old.md) |"
+    )
+    registry.write_text(HEADER + existing + "\n")
+    final = (
+        "| 2026-08-02 | 2026-08-01-001 | proj | main | 8m | 7 | "
+        "run.py, summary.csv | | complete | | [log](new.md) |"
+    )
+
+    result = _run(
+        registry,
+        "2026-08-01-001",
+        final,
+        preserve_authored=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    content = registry.read_text()
+    assert "Compared ROI-level cell-type proportions" in content
+    assert "tables/counts.csv; figures/overview.png" in content
+    assert "gastruloid; review" in content
+    assert "| main | 8m | 7 |" in content
+    assert "| complete |" in content
+    assert "[log](new.md)" in content
 
 
 if __name__ == "__main__":

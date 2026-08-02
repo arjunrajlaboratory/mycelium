@@ -19,8 +19,9 @@ relative to the user's working repository.
 Review code, analysis, or documentation changes for the kinds of mistakes that
 matter in scientific data work. Two modes plus one opt-in follow-up:
 
-- **Default**: dispatch six specialized sub-agents in parallel, then synthesize
-  a single prioritized report.
+- **Default**: dispatch six specialized sub-agents, parallelized up to the
+  host capacity and run in waves when necessary, then synthesize a single
+  prioritized report.
 - **`grill`**: walk the user through every consequential analytical decision
   conversationally, one question at a time.
 - **Tripwires (opt-in, offered after default)**: perturb inputs and verify
@@ -82,14 +83,19 @@ common substrate.
 
 ### Step 2 — Dispatch six sub-agents in parallel (or run their checklists in-line)
 
-If the `Agent` tool is available to you, send a single message with six
-concurrent `Agent` tool calls (subagent_type `general-purpose` is fine; for
-very large diffs prefer `Explore`). If the `Agent` tool is *not* available
-(common when this skill runs from inside a sub-agent context that doesn't
-expose it), execute each sub-agent's checklist in-line: read each checklist
-file in turn, apply it to the diff, collect findings, then proceed to
-synthesis. Either way the output contract and the synthesis steps are the
-same.
+If the `Agent` tool is available to you, schedule all six specialists while
+respecting the host capacity (subagent_type `general-purpose` is fine; for very
+large diffs prefer `Explore`). Run as many concurrently as the host permits,
+wait for that wave to finish, and dispatch the remaining specialists in later
+waves. Do not assume that six slots are available. If dispatch reports
+`agent thread limit reached`, wait for an active specialist to finish and retry
+the undispatched specialist once; if capacity remains unavailable, run that
+checklist in-line. If the `Agent` tool is *not* available (common when this
+skill runs from inside a sub-agent context that doesn't expose it), execute
+each specialist's checklist in-line: read each checklist file in turn, apply it
+to the diff, collect findings, then proceed to synthesis. Either way the output
+contract and the synthesis steps are the same, and every applicable checklist
+must run exactly once.
 
 Each sub-agent (or in-line pass) gets:
 
@@ -139,6 +145,9 @@ form:
    flagging the same line with different framings is the common case —
    keep the more actionable framing and add a one-line "see also" if the
    other framing adds value.
+   One root cause gets one finding ID even when it has several consequences,
+   affected files, or remediation steps. Nest those details under that finding;
+   do not inflate the total by splitting one defect into multiple framings.
 2. Recalibrate severity to two levels: **Major** (fix this — result
    invalid, misleading, or insecure) and **Minor** (consider improving —
    doesn't change the conclusion). Drop pure stylistic nits a linter
@@ -162,6 +171,12 @@ form:
    category list Major findings first, then Minor.
 7. Number findings F1, F2, F3 ... globally so the Key decisions and
    Questions sections can link to them where useful.
+8. Derive every reported count from the final `##### F<n>.` headings. Add the
+   required Finding tally table, then run the deterministic validator before
+   reporting or writing a handoff:
+   `python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/validate_review_report.py" <report>`.
+   If it fails, repair IDs, severities, or tallies and rerun it. Never copy an
+   earlier draft's hand-count into chat or `.mycelium/last-session.md`.
 
 ### Step 4 — Render the report
 
@@ -226,14 +241,27 @@ context). The diff can't answer these — only the analyst can.
 - **Statistics & causal inference**: <one sentence>
 - ...
 
+## Finding tally
+
+| Category | Major | Minor | Total |
+| --- | ---: | ---: | ---: |
+| Statistics & causal inference | N | N | N |
+| Data pipeline & leakage | N | N | N |
+| Bioinformatics | N | N | N |
+| LLM coding antipatterns | N | N | N |
+| Documentation & schema fidelity | N | N | N |
+| Code quality | N | N | N |
+| **Total** | **N** | **N** | **N** |
+
 ## Notes
 - Cross-cutting observations: compound findings sharing one remediation
   path, "did this code ever run" questions, etc.
 ```
 
 Print the path of the written file at the end. The chat reply should
-surface the count of Major findings per category and the "Key decisions"
-list so the user sees the shape of the report without opening the file.
+surface the validator-confirmed count of Major findings per category and the
+"Key decisions" list so the user sees the shape of the report without opening
+the file.
 
 ### Step 5 — Offer tripwires (opt-in behavioral follow-up)
 
