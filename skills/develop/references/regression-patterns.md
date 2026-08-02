@@ -223,3 +223,19 @@ terminal-looking text inside an option value cannot hide real execution.
 **Regression evidence:** Cover each terminal flag before and after an apparent
 input, with ordinary flags, assignment forms, quoted values containing similar
 text, and a neighboring command that really executes.
+
+## 16. A fallback is appended to partial stdout
+
+**Failure:** `value=$(command || echo fallback)` assumes failure produced no
+stdout. A command such as Git on an unborn branch prints a partial value and
+then exits nonzero, so the substitution contains two lines and corrupts a
+scalar, path, or generated document.
+
+**Invariant:** Capture the primary command separately, branch on its status,
+and overwrite—not append—with a fallback or secondary query. Validate the final
+value's shape before embedding it, and encode it for the destination format.
+
+**Regression evidence:** Exercise a command that emits stdout and fails. Require
+one typed scalar in the generated artifact, then round-trip it through every
+consumer. Include destination-sensitive values such as YAML-looking Git branch
+names.
