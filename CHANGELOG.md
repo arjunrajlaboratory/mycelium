@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-08-02
 
 ### Added
 
@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cross-host maintainer skills.** New shared `develop` and `lifecycle-audit` skills turn the recurring compatibility-review lessons into reusable workflows: branch-wide error-pattern sweeps, observed red/green TDD, whole-operation safety checks, exact installed-artifact verification, and black-box Claude Code/Codex lifecycle audits that never substitute manual hook calls for host dispatch.
 
 ### Fixed
+
+- **Current Claude Code hook context delivery.** SessionStart and PostToolUse
+  responses now place `additionalContext` inside the event-specific
+  `hookSpecificOutput` envelope required by current Claude Code, restoring
+  model-visible summaries and post-action reminders while preserving Codex's
+  structured context and Stop behavior.
 
 - **Live-owner and lineage-recovery follow-up.** Host-identified late
   PostToolUse events can no longer recreate lifecycle state after their active

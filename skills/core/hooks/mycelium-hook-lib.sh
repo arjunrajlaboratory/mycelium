@@ -593,20 +593,15 @@ import json
 import sys
 
 host, event, context, system_message = sys.argv[1:]
-if host == "codex":
-    if event == "Stop":
-        payload = {"systemMessage": system_message or context}
-    else:
-        payload = {
-            "hookSpecificOutput": {
-                "hookEventName": event,
-                "additionalContext": context,
-            }
-        }
-        if system_message:
-            payload["systemMessage"] = system_message
+if host == "codex" and event == "Stop":
+    payload = {"systemMessage": system_message or context}
 else:
-    payload = {"additionalContext": context}
+    payload = {
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": context,
+        }
+    }
     if system_message:
         payload["systemMessage"] = system_message
 print(json.dumps(payload))

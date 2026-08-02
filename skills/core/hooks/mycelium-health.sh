@@ -4,7 +4,7 @@
 #
 # Install: Add to .claude/settings.local.json under "SessionStart" hooks
 # Input: JSON on stdin with {cwd, source, ...}
-# Output: Single JSON with additionalContext if issues found
+# Output: Single JSON with structured additionalContext if issues found
 
 set -euo pipefail
 

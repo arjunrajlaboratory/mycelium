@@ -74,6 +74,11 @@ hook, filesystem, or lifecycle boundaries.
       release explicitly documents a breaking change.
 - [ ] Repository-local Claude hook registrations retain all required lifecycle
       handlers and do not acquire Codex-only assumptions.
+- [ ] Context-bearing Claude SessionStart and PostToolUse hooks return
+      `additionalContext` inside `hookSpecificOutput` with the matching
+      `hookEventName`; decision and universal control fields remain at their
+      documented levels, and a fresh real task confirms the model receives the
+      context rather than merely showing successful hook stdout.
 - [ ] Standalone or obsolete lineage Stop handlers are not reintroduced.
 - [ ] Custom user instructions, hooks, and existing `.living` content survive
       initialization and migration.
@@ -429,6 +434,7 @@ exercise them.
 | The agent writes a fresh five-section `last-session.md` before Stop | Stop preserves authored content, adds/updates its authoritative accepted-status block, and removes stale standalone "Stop pending" lines; a missing, stale, or partial handoff receives an atomic five-section fallback instead. |
 | A code-mode local tool returns model-facing `input_text` blocks containing serialized result JSON | Exit status is recovered recursively for lineage, conditional execution, and failed-edit activity classification. |
 | Current Codex Bash PostToolUse supplies an empty `tool_response` before its outer command event completes | The analysis execution is retained, exit status and wall time stay null, and no success value is fabricated. |
+| Current Claude SessionStart or PostToolUse returns context | The raw hook response uses `hookSpecificOutput` with the matching event name, and a fresh Claude task receives the context in its model-visible system reminder. |
 | Claude Code cross-discovers the plugin's Codex `hooks/hooks.json` adapter | The Codex dispatcher exits silently under Claude while the native project hooks produce one lifecycle effect. |
 | Multiple SessionStart hooks race, or today's log numbers contain a gap | One primary log and one atomic versioned marker are created; no occupied log number is reused. |
 | SessionStart runs before the repository's first commit, including on a YAML-looking branch name | The prospective branch is stored as one YAML string, injected as one summary value, and decoded without quotes during Stop finalization. |

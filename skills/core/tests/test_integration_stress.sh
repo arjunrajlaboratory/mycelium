@@ -217,7 +217,7 @@ SUMMARY_EOF
     PARSED=$(echo "$HOOK_OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print('ok')" 2>/dev/null || echo "INVALID")
     if [ "$PARSED" = "ok" ]; then
       # Verify expected sections in additionalContext
-      CTX=$(echo "$HOOK_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('additionalContext',''))" 2>/dev/null)
+      CTX=$(echo "$HOOK_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('hookSpecificOutput', {}).get('additionalContext',''))" 2>/dev/null)
       if echo "$CTX" | grep -q "MYCELIUM SUMMARY" && echo "$CTX" | grep -q "KNOWLEDGE MAP"; then
         pass "T3 — valid JSON with MYCELIUM SUMMARY and KNOWLEDGE MAP sections"
       else
