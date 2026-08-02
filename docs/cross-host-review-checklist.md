@@ -117,6 +117,9 @@ hook, filesystem, or lifecycle boundaries.
       sessions.
 - [ ] Session identifiers and log names are unique under rapid or concurrent
       starts.
+- [ ] Fresh initialization on an unborn Git branch records one valid branch
+      scalar; a failing command's partial stdout is replaced rather than
+      concatenated with fallback text.
 - [ ] A primary session publishes a per-host invocation owner token before its
       active marker; a nested child Stop validates that token before lineage,
       finalization, enforcement, or cleanup and cannot consume primary state.
@@ -301,6 +304,9 @@ hook, filesystem, or lifecycle boundaries.
       hooks do not assume a `python` alias exists when only `python3` is present.
 - [ ] Missing helpers, missing optional dependencies, invalid JSON, malformed
       timestamps, and partially written state fail safely.
+- [ ] Shell fallbacks do not use `command || echo fallback` when the command can
+      emit stdout before failing; captured values are single-line and encoded
+      for their JSON, YAML, Markdown, or path destination.
 - [ ] Malformed reminder, audit, owner, and session-start timestamps cannot
       abort SessionStart or trigger the subagent Stop bypass.
 - [ ] Paths with spaces and non-ASCII characters work in shell, Python, JSON,
@@ -364,6 +370,7 @@ exercise them.
 | Current Codex Bash PostToolUse supplies an empty `tool_response` before its outer command event completes | The analysis execution is retained, exit status and wall time stay null, and no success value is fabricated. |
 | Claude Code cross-discovers the plugin's Codex `hooks/hooks.json` adapter | The Codex dispatcher exits silently under Claude while the native project hooks produce one lifecycle effect. |
 | Multiple SessionStart hooks race, or today's log numbers contain a gap | One primary log and one atomic two-line marker are created; no occupied log number is reused. |
+| SessionStart runs before the repository's first commit, including on a YAML-looking branch name | The prospective branch is stored as one YAML string, injected as one summary value, and decoded without quotes during Stop finalization. |
 | A read-only nested child starts and stops while its primary is active | The primary marker, owner token, log, baselines, and raw lineage remain active and byte-identical; the child performs no Stop-side mutation. |
 | A recent lifecycle lock records an owner PID that has terminated | The next caller recovers it before the acquisition timeout; a recent ownerless lock is not mistaken for dead-owner proof. |
 | Jupyter receives `--show-config`, `--show-config-json`, or `--generate-config` before or after an apparent notebook | No execution or lineage is attributed; terminal-looking text inside an ordinary option value and an actual neighboring Jupyter command remain scoped correctly. |

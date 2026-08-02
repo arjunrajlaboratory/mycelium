@@ -152,6 +152,7 @@ def test_development_skills_encode_cross_host_regression_workflow():
         "manual hook test",
         "Option values are mistaken for positional inputs",
         "Terminal-only mode is treated as execution",
+        "A fallback is appended to partial stdout",
         "Compatibility cleanup deletes user state",
     ):
         assert required in patterns
@@ -1130,6 +1131,66 @@ def test_subagent_stop_cannot_finalize_primary_session(tmp_path):
     assert not marker.exists()
     assert not log_path.exists()
     assert not (state / "active-session-owner-id.tmp").exists()
+
+
+@pytest.mark.parametrize("branch_name", [None, "{yaml-like-branch}"])
+def test_session_start_records_one_branch_scalar_for_unborn_head(
+    tmp_path, branch_name
+):
+    """A failing Git query must not concatenate partial output and fallback."""
+    repo = _repo(tmp_path)
+    if branch_name is not None:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "symbolic-ref",
+                "HEAD",
+                f"refs/heads/{branch_name}",
+            ],
+            check=True,
+        )
+    expected_branch = subprocess.run(
+        ["git", "-C", str(repo), "symbolic-ref", "--short", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    host_session_id = "unborn-session"
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "source": "startup",
+            "session_id": host_session_id,
+        },
+    )
+
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    log_path = Path((state / "active-session-log.tmp").read_text().splitlines()[0])
+    frontmatter = yaml.safe_load(log_path.read_text().split("---", 2)[1])
+    assert frontmatter["branch"] == expected_branch
+    assert f"Branch: `{expected_branch}`" in log_path.read_text()
+
+    (repo / "work.txt").write_text("session work\n")
+    learnings = repo / ".living" / "learnings.md"
+    learnings.write_text(learnings.read_text() + "\nBranch scalar verified.\n")
+    stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "stop_hook_active": False,
+            "session_id": host_session_id,
+        },
+    )
+    assert stop.returncode == 0, stop.stderr
+    registry = (repo / ".living" / "log" / "LOG_REGISTRY.md").read_text()
+    assert f"| {expected_branch} |" in registry
 
 
 @pytest.mark.parametrize("owner_id", ["corrupt/owner", ""])

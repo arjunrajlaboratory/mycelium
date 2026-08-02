@@ -287,7 +287,19 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
       # Append to LOG_REGISTRY.md
       PROJECT_SLUG=$({ grep '^project:' "$LOG_PATH" || echo "project: unknown"; } | sed 's/^project: *//')
       SESSION_ID=$({ grep '^session_id:' "$LOG_PATH" || echo "session_id: unknown"; } | sed 's/^session_id: *//')
-      BRANCH=$({ grep '^branch:' "$LOG_PATH" || echo "branch: unknown"; } | sed 's/^branch: *//')
+      BRANCH=$({ grep '^branch:' "$LOG_PATH" || echo "branch: unknown"; } \
+        | sed 's/^branch: *//' \
+        | python3 -c '
+import json
+import sys
+
+raw = sys.stdin.read().strip()
+try:
+    value = json.loads(raw)
+except (TypeError, ValueError):
+    value = raw
+print(value if isinstance(value, str) and "\n" not in value else "unknown")
+')
       if [[ ! "$SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
         mycelium_emit_stop_block \
           "STOP BLOCKED — session registry finalization failed because the session ID is invalid. Active state was preserved for repair and retry."

@@ -250,7 +250,18 @@ REGISTRY_EOF
     LOG_PATH="$LOG_DIR/$LOG_FILENAME"
 
     # Detect project and branch
-    BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    # rev-parse prints "HEAD" but exits nonzero for an unborn branch. Do not
+    # combine partial stdout with a fallback inside one substitution.
+    if ! BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null); then
+      BRANCH=$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    fi
+    if [[ -z "$BRANCH" || "$BRANCH" == *$'\n'* ]]; then
+      BRANCH="unknown"
+    fi
+    # JSON strings are valid YAML scalars and protect unusual but valid Git
+    # branch names (for example, names beginning with a brace).
+    BRANCH_YAML=$(printf '%s' "$BRANCH" | python3 -c \
+      'import json,sys; print(json.dumps(sys.stdin.read()))')
     STARTED=$(date +%Y-%m-%dT%H:%M:%S%z)
     TIME_SHORT=$(date +%H:%M)
 
@@ -270,7 +281,7 @@ REGISTRY_EOF
 ---
 session_id: ${SESSION_ID}
 project: ${PROJECT_NAME}
-branch: ${BRANCH}
+branch: ${BRANCH_YAML}
 started: ${STARTED}
 ended:
 duration_minutes:
