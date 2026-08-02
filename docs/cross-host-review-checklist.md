@@ -130,6 +130,9 @@ hook, filesystem, or lifecycle boundaries.
       archives active state.
 - [ ] Stop continuation messages identify the unmet requirement precisely and
       do not enter an infinite retry loop.
+- [ ] Stop preserves a fresh, complete five-section handoff authored by the
+      agent; an absent, stale, or partial handoff is replaced atomically with a
+      deterministic fallback containing all five required sections.
 - [ ] Cleanup and retention policies distinguish active, accepted, stale, and
       corrupt state.
 
@@ -141,6 +144,12 @@ hook, filesystem, or lifecycle boundaries.
       whitespace.
 - [ ] Interpreter flags, `-m` modules, and inline execution forms are handled
       according to the documented policy.
+- [ ] Interpreter help/version options that terminate before a later payload
+      are rejected, including short-option clusters and equivalent Python, R,
+      Rscript, and Jupyter forms.
+- [ ] Python `-c` and R `-e` source is parsed as one complete shell word, then
+      decoded with shell semantics; escaped quotes and adjacent quoted
+      components cannot truncate the source before a data reference.
 - [ ] Common environment/package wrappers such as `uv`, `conda`, `poetry`, and
       `/usr/bin/env`, plus execution wrappers such as `time`, `exec`, `nice`,
       and `timeout`, are detected (including nested forms) without confusing
@@ -159,6 +168,10 @@ hook, filesystem, or lifecycle boundaries.
       based on the executed program/module/script rather than substrings in
       ordinary quoted or unquoted arguments.
 - [ ] Exit evidence is associated with the command that actually executed.
+- [ ] Codex model-facing `tool_response` forms are covered, including code-mode
+      `input_text` arrays whose text contains a serialized structured result;
+      nonzero exit status is retained in lineage and failed edits do not count
+      as successful activity.
 - [ ] Failed commands that are provably reached through a known-success AND
       prefix, or started as a pipeline component, still produce lineage; shell
       operators appearing only inside an unquoted comment produce nothing.
@@ -228,6 +241,9 @@ hook, filesystem, or lifecycle boundaries.
       row, and one lineage archive.
 - [ ] Concurrent SessionStart and PostToolUse writes cannot truncate or
       interleave state.
+- [ ] Concurrent SessionStart and Stop share lifecycle serialization; one
+      primary log owns the active marker, and numbering uses the next unused
+      value rather than the number of existing files.
 - [ ] Log, registry, manifest, marker, and sentinel replacements are atomic.
 - [ ] A log's acceptance marker, duration/file-count frontmatter, and matching
       completion footer are published as one atomic replacement; an injected
@@ -315,7 +331,12 @@ exercise them.
 | `env -S 'echo prefix' python a.py` or another argv-rewriting wrapper precedes an interpreter-looking argument | The parser rejects the ambiguous execution unless it fully models the wrapper expansion. |
 | `env -C sub`, `conda run --cwd sub`, or `uv run --directory sub` wraps an analysis command | Scripts and data paths resolve relative to the wrapper-selected directory; missing or dynamic directories are rejected. |
 | `time`, `exec`, `nice`, and `timeout` wrap or nest around an interpreter | Real executions are captured, while malformed options and an unrelated wrapped command containing interpreter text are rejected. |
+| Python/R inline source contains escaped quotes or adjacent quoted components | The complete shell word is decoded and later data references remain visible. |
+| `--help`/`--version` or `-h`/`-V` precedes an apparent interpreter payload | No execution or lineage is attributed, including terminal short-option clusters and adjacent R/Jupyter forms. |
 | Atomic session-log replacement fails after registry/context preparation | Stop blocks, frontmatter remains unaccepted with no footer, active state survives resume/compact, and one retry produces one footer. |
+| The agent writes a fresh five-section `last-session.md` before Stop | Stop preserves it byte-for-byte; a missing, stale, or partial handoff receives an atomic five-section fallback instead. |
+| A code-mode local tool returns model-facing `input_text` blocks containing serialized result JSON | Exit status is recovered recursively for lineage, conditional execution, and failed-edit activity classification. |
+| Multiple SessionStart hooks race, or today's log numbers contain a gap | One primary log and one atomic two-line marker are created; no occupied log number is reused. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |
 

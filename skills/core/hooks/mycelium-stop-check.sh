@@ -314,35 +314,93 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
 
       # Auto-write last-session.md for next session context
       _SESSION_FILE="$STATE_DIR/last-session.md"
-      _WORK_LINES=""
-      # Try recent commit messages first
-      if [ -n "${START_TS:-}" ]; then
+      _SESSION_COMPLETE=true
+      _SESSION_FRESH=false
+      _SESSION_MTIME=0
+      if [ -f "$_SESSION_FILE" ] && [ ! -L "$_SESSION_FILE" ]; then
+        _SESSION_MTIME=$(mycelium_file_mtime "$_SESSION_FILE" 2>/dev/null || echo "0")
+        for _REQUIRED_HEADING in \
+          "## What was worked on" \
+          "## Key decisions made" \
+          "## Blockers & surprises" \
+          "## Current state" \
+          "## Next steps"; do
+          if ! grep -Fqx "$_REQUIRED_HEADING" "$_SESSION_FILE" 2>/dev/null; then
+            _SESSION_COMPLETE=false
+            break
+          fi
+        done
+        if [[ "$START_TS" =~ ^[0-9]+$ \
+          && "$_SESSION_MTIME" =~ ^[0-9]+$ \
+          && "$_SESSION_MTIME" -ge "$START_TS" ]]; then
+          _SESSION_FRESH=true
+        fi
+      else
+        _SESSION_COMPLETE=false
+      fi
+
+      # Preserve a complete handoff authored during this session. If it is
+      # absent, stale, or partial, publish a complete deterministic fallback
+      # atomically instead of replacing a rich handoff with two headings.
+      if [[ "$_SESSION_COMPLETE" != true || "$_SESSION_FRESH" != true ]]; then
+        _WORK_LINES=""
+        # Try recent commit messages first
+        if [ -n "${START_TS:-}" ]; then
           _WORK_LINES=$(
             { git -C "$REPO_ROOT" log --since="@${START_TS}" --pretty=format:"- %s" 2>/dev/null || true; } \
               | head -10
           )
-      fi
-      # Fall back to the de-duplicated modified file list.
-      if [ -z "$_WORK_LINES" ] && [ -n "$SESSION_CHANGED_FILES" ]; then
+        fi
+        # Fall back to the de-duplicated modified file list.
+        if [ -z "$_WORK_LINES" ] && [ -n "$SESSION_CHANGED_FILES" ]; then
           _WORK_LINES=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -10 | while IFS= read -r _f; do echo "- Modified \`$(basename "$_f")\`"; done)
-      fi
-      if [ -z "$_WORK_LINES" ] && [ "$LINEAGE_EVENT_COUNT" -gt 0 ]; then
+        fi
+        if [ -z "$_WORK_LINES" ] && [ "$LINEAGE_EVENT_COUNT" -gt 0 ]; then
           _WORK_LINES="- Captured data-lineage provenance"
-      fi
-      # Last resort: generic summary
-      if [ -z "$_WORK_LINES" ]; then
+        fi
+        # Last resort: generic summary
+        if [ -z "$_WORK_LINES" ]; then
           _WORK_LINES="- Session: ${FILES_CHANGED} files changed over ${DURATION_MIN}m"
-      fi
-      _UNCOMMITTED_COUNT=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-      _BRANCH_NOTE="Branch: \`${BRANCH}\`"
-      [ "$_UNCOMMITTED_COUNT" -gt 0 ] && _BRANCH_NOTE="${_BRANCH_NOTE}, ${_UNCOMMITTED_COUNT} uncommitted changes"
-      cat > "$_SESSION_FILE" << LAST_SESSION_EOF
+        fi
+        _UNCOMMITTED_COUNT=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+        _BRANCH_NOTE="Branch: \`${BRANCH}\`"
+        [ "$_UNCOMMITTED_COUNT" -gt 0 ] && _BRANCH_NOTE="${_BRANCH_NOTE}, ${_UNCOMMITTED_COUNT} uncommitted changes"
+        _SESSION_TMP=$(mktemp "$STATE_DIR/.last-session.tmp.XXXXXX") || {
+          mycelium_emit_stop_block \
+            "STOP BLOCKED — session handoff finalization failed. Active state was preserved for retry."
+          exit 0
+        }
+        if ! cat > "$_SESSION_TMP" << LAST_SESSION_EOF
+SESSION RESUME — Last session ($(date '+%Y-%m-%d %H:%M')):
+
 ## What was worked on
 ${_WORK_LINES}
 
+## Key decisions made
+- See \`.living/decisions.md\` for decisions recorded during this session.
+
+## Blockers & surprises
+- See the finalized session log and \`.living/learnings.md\` for recorded issues.
+
 ## Current state
 - ${_BRANCH_NOTE}
+
+## Next steps
+- Review the finalized session log and continue from the current branch state.
 LAST_SESSION_EOF
+        then
+          rm -f "$_SESSION_TMP"
+          mycelium_emit_stop_block \
+            "STOP BLOCKED — session handoff finalization failed. Active state was preserved for retry."
+          exit 0
+        fi
+        if ! mv -f "$_SESSION_TMP" "$_SESSION_FILE"; then
+          rm -f "$_SESSION_TMP"
+          mycelium_emit_stop_block \
+            "STOP BLOCKED — session handoff finalization failed. Active state was preserved for retry."
+          exit 0
+        fi
+      fi
 
       # All other transaction participants have accepted the session. Publish
       # the completed frontmatter and matching footer with one atomic replace,
