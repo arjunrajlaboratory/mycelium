@@ -124,17 +124,23 @@ mycelium_read_active_log_marker() {
   local marker_file="$2"
   local raw_path=""
   local owner_ts=""
-  local extra_line=""
+  local ownership_format=""
   local line_count=""
   local safe_path=""
 
   [[ -f "$marker_file" && ! -L "$marker_file" ]] || return 1
   raw_path=$(sed -n '1p' "$marker_file" 2>/dev/null || true)
   owner_ts=$(sed -n '2p' "$marker_file" 2>/dev/null || true)
-  extra_line=$(sed -n '3p' "$marker_file" 2>/dev/null || true)
-  line_count=$(wc -l < "$marker_file" 2>/dev/null | tr -d '[:space:]' || true)
-  [[ "$line_count" == 2 && -n "$raw_path" \
-    && "$owner_ts" =~ ^[0-9]{1,18}$ && -z "$extra_line" ]] || return 1
+  ownership_format=$(sed -n '3p' "$marker_file" 2>/dev/null || true)
+  line_count=$(awk 'END { print NR }' "$marker_file" 2>/dev/null || true)
+  [[ -n "$raw_path" && "$owner_ts" =~ ^[0-9]{1,18}$ ]] || return 1
+  if [[ "$line_count" == 2 ]]; then
+    [[ -z "$ownership_format" ]] || return 1
+  elif [[ "$line_count" == 3 ]]; then
+    [[ "$ownership_format" == "owner-id-v1" ]] || return 1
+  else
+    return 1
+  fi
 
   safe_path=$(python3 - "$repo_root" "$raw_path" <<'PY'
 import os
@@ -168,19 +174,22 @@ PY
   ) || return 1
   [[ -n "$safe_path" ]] || return 1
   printf '%s\n%s\n' "$safe_path" "$owner_ts"
+  if [[ -n "$ownership_format" ]]; then
+    printf '%s\n' "$ownership_format"
+  fi
 }
 
 mycelium_read_session_owner_id() {
   local owner_file="$1"
   local owner_id=""
-  local extra_line=""
+  local line_count=""
 
   [[ -f "$owner_file" && ! -L "$owner_file" ]] || return 1
   owner_id=$(sed -n '1p' "$owner_file" 2>/dev/null || true)
-  extra_line=$(sed -n '2p' "$owner_file" 2>/dev/null || true)
+  line_count=$(awk 'END { print NR }' "$owner_file" 2>/dev/null || true)
   [[ "$owner_id" =~ ^[A-Za-z0-9._-]+$ \
     && ${#owner_id} -le 200 \
-    && -z "$extra_line" ]] || return 1
+    && "$line_count" == 1 ]] || return 1
   printf '%s\n' "$owner_id"
 }
 

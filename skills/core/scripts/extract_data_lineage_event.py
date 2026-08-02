@@ -489,6 +489,20 @@ _JUPYTER_TERMINAL_OPTIONS = {
     "--version",
 }
 
+_SHELL_REDIRECTION_OPERATORS = {
+    "<",
+    "<<",
+    "<<<",
+    "<>",
+    "<&",
+    ">",
+    ">>",
+    ">&",
+    ">|",
+    "&>",
+    "&>>",
+}
+
 
 def _simple_command_suffix(command: str, offset: int) -> str | None:
     """Return one simple command from offset, respecting shell quoting."""
@@ -504,8 +518,22 @@ def _simple_command_suffix(command: str, offset: int) -> str | None:
                 continue
             if char in {"'", '"'}:
                 quote = char
-            elif char in ";&|()<>\n":
+            elif char in ";\n)":
                 break
+            elif char == "(":
+                # Process substitutions and other nested shell structures can
+                # rejoin the same simple command after their closing paren.
+                # Treat unsupported structure as terminal rather than missing
+                # a later option that prevents notebook execution.
+                return None
+            elif char == "&":
+                previous = command[index - 1] if index > offset else ""
+                following = command[index + 1] if index + 1 < len(command) else ""
+                if previous not in "<>" and following != ">":
+                    break
+            elif char == "|":
+                if index == offset or command[index - 1] != ">":
+                    break
         elif quote == "'":
             if char == "'":
                 quote = None
@@ -519,12 +547,45 @@ def _simple_command_suffix(command: str, offset: int) -> str | None:
     return None if quote is not None else command[offset:index]
 
 
+def _simple_command_argv(fragment: str) -> list[str] | None:
+    """Tokenize argv while consuming shell redirection operators and targets."""
+    try:
+        lexer = shlex.shlex(
+            fragment,
+            posix=True,
+            punctuation_chars=";&|()<>\n",
+        )
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return None
+
+    argv: list[str] = []
+    consume_redirection_target = False
+    punctuation = set(";&|()<>\n")
+    for token in tokens:
+        if consume_redirection_target:
+            consume_redirection_target = False
+        elif token in _SHELL_REDIRECTION_OPERATORS:
+            consume_redirection_target = True
+        elif token and set(token) <= punctuation:
+            # The suffix scanner should already have bounded one simple
+            # command. Any other control operator is unsupported structure.
+            return None
+        else:
+            argv.append(token)
+    if consume_redirection_target:
+        return None
+    return argv
+
+
 def _jupyter_match_has_terminal_option(command: str, offset: int) -> bool:
     """Whether this Jupyter simple command exits before notebook execution."""
     fragment = _simple_command_suffix(command, offset)
     if fragment is None:
         return True
-    tokens = _shell_tokens(fragment)
+    tokens = _simple_command_argv(fragment)
     if tokens is None:
         return True
     return any(

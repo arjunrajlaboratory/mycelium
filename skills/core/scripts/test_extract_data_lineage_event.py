@@ -698,6 +698,11 @@ def test_main_rejects_unproven_shell_text_matches(
         "jupyter nbconvert --show-config=true a.ipynb",
         "jupyter nbconvert --debug --show-config a.ipynb",
         "jupyter nbconvert a.ipynb --show-config",
+        "jupyter nbconvert a.ipynb >/dev/null --show-config",
+        "jupyter nbconvert a.ipynb 2>&1 --show-config-json",
+        "jupyter nbconvert a.ipynb &>/dev/null --generate-config",
+        "jupyter nbconvert a.ipynb <input --show-config",
+        "jupyter nbconvert a.ipynb >|output --show-config",
         "jupyter execute a.ipynb --generate-config",
     ],
 )
@@ -746,6 +751,32 @@ def test_jupyter_terminal_option_text_in_a_value_is_not_a_terminal_mode(
 
     detected, inline = detect_script(
         "jupyter nbconvert --output 'prefix --show-config' a.ipynb",
+        tmp_path,
+    )
+
+    assert detected == script
+    assert inline is None
+
+
+@pytest.mark.parametrize(
+    "redirection",
+    [
+        "> --show-config",
+        "2> --show-config-json",
+        "< --generate-config",
+        "&> --show-config",
+        ">| --show-config",
+    ],
+)
+def test_jupyter_terminal_option_used_as_redirection_target_is_not_argv(
+    tmp_path: Path, redirection: str
+) -> None:
+    """A redirection filename is shell syntax, not an option passed to Jupyter."""
+    script = tmp_path / "a.ipynb"
+    script.write_text("{}\n")
+
+    detected, inline = detect_script(
+        f"jupyter nbconvert a.ipynb {redirection}",
         tmp_path,
     )
 

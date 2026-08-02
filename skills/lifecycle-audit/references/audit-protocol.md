@@ -113,7 +113,8 @@ Report each row as Pass, Fail, or Inconclusive.
 
 Inspect, when present:
 
-- `.mycelium/active-session-log.tmp` (line 1 path, line 2 owner timestamp);
+- `.mycelium/active-session-log.tmp` (line 1 path, line 2 owner timestamp, and
+  optional line 3 `owner-id-v1` ownership-format discriminator);
 - `.mycelium/active-session-owner-id.tmp` (one validated host-session token);
 - `.mycelium/session-start-ts.tmp` and activity/reminder markers;
 - `.mycelium/mycelium-data-events.tmp` and lineage status/session markers;

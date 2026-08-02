@@ -1077,7 +1077,9 @@ def test_subagent_stop_cannot_finalize_primary_session(tmp_path):
 
     state = repo / ".mycelium"
     marker = state / "active-session-log.tmp"
-    log_path = Path(marker.read_text().splitlines()[0])
+    marker_lines = marker.read_text().splitlines()
+    log_path = Path(marker_lines[0])
+    assert marker_lines[2] == "owner-id-v1"
 
     child_start = _run_hook(
         "mycelium-health.sh",
@@ -1193,8 +1195,82 @@ def test_session_start_records_one_branch_scalar_for_unborn_head(
     assert f"| {expected_branch} |" in registry
 
 
-@pytest.mark.parametrize("owner_id", ["corrupt/owner", ""])
-def test_corrupt_session_owner_token_fails_closed(tmp_path, owner_id):
+def test_missing_session_owner_token_fails_closed(tmp_path):
+    """A new-format marker must not silently downgrade when its owner is lost."""
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "source": "startup",
+            "session_id": "primary-session",
+        },
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    marker = state / "active-session-log.tmp"
+    log_path = Path(marker.read_text().splitlines()[0])
+    (state / "active-session-owner-id.tmp").unlink()
+
+    stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "stop_hook_active": False,
+            "session_id": "child-session",
+        },
+    )
+
+    assert stop.returncode == 0, stop.stderr
+    assert json.loads(stop.stdout)["decision"] == "block"
+    assert marker.is_file()
+    assert log_path.is_file()
+
+
+def test_pre_discriminator_owner_token_remains_upgrade_compatible(tmp_path):
+    """An already-active two-line marker still honors its existing owner token."""
+    repo = _repo(tmp_path)
+    primary_id = "primary-session"
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "source": "startup",
+            "session_id": primary_id,
+        },
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    marker = state / "active-session-log.tmp"
+    marker_lines = marker.read_text().splitlines()
+    marker.write_text("\n".join(marker_lines[:2]) + "\n")
+    log_path = Path(marker_lines[0])
+
+    child_stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "stop_hook_active": False,
+            "session_id": "child-session",
+        },
+    )
+
+    assert child_stop.returncode == 0, child_stop.stderr
+    assert child_stop.stdout == ""
+    assert marker.is_file()
+    assert log_path.is_file()
+    assert (state / "active-session-owner-id.tmp").read_text().strip() == primary_id
+
+
+@pytest.mark.parametrize(
+    "owner_content",
+    ["corrupt/owner\n", "\n", "primary-session\n\ntrailing\n"],
+)
+def test_corrupt_session_owner_token_fails_closed(tmp_path, owner_content):
     """Invalid new-format ownership must not fall back to shared timestamps."""
     repo = _repo(tmp_path)
     start = _run_hook(
@@ -1210,7 +1286,7 @@ def test_corrupt_session_owner_token_fails_closed(tmp_path, owner_id):
     state = repo / ".mycelium"
     marker = state / "active-session-log.tmp"
     log_path = Path(marker.read_text().splitlines()[0])
-    (state / "active-session-owner-id.tmp").write_text(f"{owner_id}\n")
+    (state / "active-session-owner-id.tmp").write_text(owner_content)
 
     stop = _run_hook(
         "mycelium-stop-check.sh",
