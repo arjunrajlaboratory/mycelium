@@ -55,18 +55,25 @@ before use.
 **Regression evidence:** Exercise every consumer with valid, stale, truncated,
 extra-line, escaping, and symlinked state.
 
-## 4. Host output is decoded at the wrong layer
+## 4. Host wire data is encoded or decoded at the wrong layer
 
 **Failure:** Codex model-facing tool responses contain nested or serialized
 result JSON, so exit status is lost; a failed command becomes `null`, or a failed
-edit counts as activity.
+edit counts as activity. In the opposite direction, a context-bearing hook emits
+`additionalContext` at the top level even though the current host requires the
+event-specific output envelope, so dispatch succeeds but the model never sees
+the context.
 
-**Invariant:** Normalize host wire formats at the dispatcher boundary. Prefer
-structured exit evidence over prose and propagate success/failure explicitly to
-shared hooks.
+**Invariant:** Normalize host wire formats at the dispatcher boundary. Emit the
+current event-specific envelope with its matching event name, keep universal or
+decision fields at their documented level, prefer structured exit evidence over
+prose, and propagate success/failure explicitly to shared hooks.
 
 **Regression evidence:** Cover canonical host payloads plus nested `input_text`,
 serialized JSON, missing status, conflicting prose, and nonzero exit cases.
+Exercise real SessionStart and PostToolUse hooks for both hosts and assert the
+exact context-output schema, then confirm context reaches each model in a fresh
+CLI task.
 
 ## 5. Shell text is mistaken for executed argv
 

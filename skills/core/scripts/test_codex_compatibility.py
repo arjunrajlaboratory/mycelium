@@ -60,6 +60,27 @@ def _run_hook(
     )
 
 
+def _run_claude_hook(
+    name: str,
+    repo: Path,
+    payload: dict,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env["MYCELIUM_HOOK_HOST"] = "claude"
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        [str(HOOKS_DIR / name)],
+        cwd=repo,
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+
 def _run_plugin_hook(
     name: str,
     repo: Path,
@@ -299,6 +320,14 @@ def test_readme_documents_codex_install_update_and_migration():
     assert "trust all five Mycelium command hooks" in normalized
     assert "not a Codex desktop-app slash command" in normalized
     assert "codex update" in readme
+
+
+def test_readme_documents_claude_update_and_restart():
+    readme = (PLUGIN_ROOT / "README.md").read_text()
+    normalized = " ".join(readme.split())
+
+    assert "claude plugin update mycelium@mycelium" in readme
+    assert "restart Claude Code" in normalized
 
 
 def test_hook_mtime_helper_returns_numeric_epoch(tmp_path):
@@ -1018,6 +1047,52 @@ def test_codex_post_tool_use_uses_nested_context(tmp_path):
     assert hook_output["hookEventName"] == "PostToolUse"
     assert "MYCELIUM POST-ACTION PROTOCOL" in hook_output["additionalContext"]
     assert (repo / ".mycelium" / "mycelium-reminded.tmp").is_file()
+
+
+def test_claude_session_start_uses_nested_context(tmp_path):
+    repo = _repo(tmp_path, living=False)
+    result = _run_claude_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "session_id": "claude-session"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    hook_output = payload["hookSpecificOutput"]
+    assert hook_output["hookEventName"] == "SessionStart"
+    assert "no .living/ directory" in hook_output["additionalContext"]
+    assert "additionalContext" not in payload
+
+
+def test_claude_post_tool_use_uses_nested_context(tmp_path):
+    repo = _repo(tmp_path)
+    session_id = "claude-session"
+    session_start = _run_claude_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "session_id": session_id},
+    )
+    assert session_start.returncode == 0, session_start.stderr
+
+    result = _run_claude_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": "python analysis.py"},
+            "tool_response": {"exit_code": 0},
+            "session_id": session_id,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    hook_output = payload["hookSpecificOutput"]
+    assert hook_output["hookEventName"] == "PostToolUse"
+    assert "MYCELIUM POST-ACTION PROTOCOL" in hook_output["additionalContext"]
+    assert "additionalContext" not in payload
 
 
 def test_codex_post_action_rejects_outside_active_log_marker(tmp_path):

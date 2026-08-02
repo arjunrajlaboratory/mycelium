@@ -8,7 +8,7 @@
 # Install: Add to .claude/settings.local.json under "PostToolUse" hooks
 #   with matcher "Bash"
 # Input: JSON on stdin with {tool_name, tool_input: {command}, ...}
-# Output: JSON with additionalContext directive when triggered
+# Output: JSON with structured additionalContext directive when triggered
 
 set -euo pipefail
 

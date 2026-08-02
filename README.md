@@ -130,6 +130,15 @@ Mycelium's hooks enforce the post-action protocol automatically after every sign
 - Recurring patterns crystallize into conventions
 - Transferable knowledge is promoted to global domain files
 
+## Updating Mycelium in Claude Code
+
+Update the installed marketplace plugin, then restart Claude Code so the new
+skills and hooks are loaded:
+
+```bash
+claude plugin update mycelium@mycelium
+```
+
 ## Updating Mycelium in Codex
 
 Refresh the marketplace snapshot and install the version it now advertises:
