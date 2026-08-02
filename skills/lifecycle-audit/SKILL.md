@@ -67,11 +67,13 @@ observe state and satisfy the expected Stop-compliance retry.
 Exercise:
 
 1. SessionStart injection and active-state creation.
-2. A known-positive harmless analysis command.
-3. A near-neighbor negative command that must remain silent.
-4. One disposable successful edit using the host's normal edit tool, followed
+2. When the host exposes a native subagent/task mechanism, one read-only child
+   start and Stop while the primary remains active.
+3. A known-positive harmless analysis command.
+4. A near-neighbor negative command that must remain silent.
+5. One disposable successful edit using the host's normal edit tool, followed
    by removal.
-5. Natural Stop, including the expected enforcement block, compliant retry,
+6. Natural Stop, including the expected enforcement block, compliant retry,
    and a complete five-section handoff using Mycelium's exact headings.
 
 Use `python3` unless the target explicitly provides another interpreter; do not

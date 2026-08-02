@@ -13,6 +13,7 @@ source "$HERE/mycelium-hook-lib.sh"
 
 # Read stdin JSON
 INPUT=$(cat)
+HOST_SESSION_ID=$(printf '%s' "$INPUT" | mycelium_json_get 'session_id')
 
 # Initialize message accumulator
 MESSAGES=""
@@ -56,6 +57,7 @@ trap mycelium_release_stop_lock EXIT
 # either is a strong liveness signal. We only clean when owner_ts is old
 # AND those signals are also quiet.
 ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
+ACTIVE_OWNER_FILE="$STATE_DIR/active-session-owner-id.tmp"
 if [ -f "$ACTIVE_LOG_FILE" ]; then
   _SHOULD_CLEAN=false
   _STALE_LOG=""
@@ -112,6 +114,7 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
       MESSAGES="${MESSAGES}INCOMPLETE SESSION LOG: Previous session log at ${_STALE_LOG} was never finalized (likely a crashed session). Add a '## Session Summary' section and append a row to the registry, or delete it.\n\n"
     fi
     rm -f "$ACTIVE_LOG_FILE"
+    rm -f "$ACTIVE_OWNER_FILE"
     rm -f "$STATE_DIR/session-start-ts.tmp"
   fi
 fi
@@ -122,6 +125,10 @@ fi
 FRESH_PRIMARY_SESSION=false
 if [ ! -f "$ACTIVE_LOG_FILE" ]; then
     date +%s > "$STATE_DIR/session-start-ts.tmp"
+    # A host session ID is the only per-invocation identity shared by its
+    # SessionStart and Stop processes. Clear any orphaned prior owner before
+    # reserving this fresh primary transaction.
+    rm -f "$ACTIVE_OWNER_FILE"
     FRESH_PRIMARY_SESSION=true
 fi
 
@@ -277,11 +284,27 @@ files_changed:
 - Resuming from: ${PREV_LINK}
 LOG_EOF
 
-    # Store log path + owner timestamp (for subagent detection in stop hook).
+    # Publish the host's per-invocation identity before the active marker. A
+    # concurrent child cannot observe the marker until its primary owner token
+    # is complete. Older hosts without session_id retain the timestamp fallback.
+    if [[ "$HOST_SESSION_ID" =~ ^[A-Za-z0-9._-]+$ \
+      && ${#HOST_SESSION_ID} -le 200 ]]; then
+      _ACTIVE_OWNER_TMP=$(mktemp "$STATE_DIR/.active-session-owner-id.tmp.XXXXXX") || {
+        rm -f "$LOG_PATH"
+        exit 0
+      }
+      if ! printf '%s\n' "$HOST_SESSION_ID" > "$_ACTIVE_OWNER_TMP" \
+        || ! mv -f "$_ACTIVE_OWNER_TMP" "$ACTIVE_OWNER_FILE"; then
+        rm -f "$_ACTIVE_OWNER_TMP" "$LOG_PATH"
+        exit 0
+      fi
+    fi
+
+    # Store log path + owner timestamp (legacy subagent fallback).
     # Publish both lines atomically so PostToolUse can never observe a partial
     # marker while SessionStart is still writing it.
     _ACTIVE_MARKER_TMP=$(mktemp "$STATE_DIR/.active-session-log.tmp.XXXXXX") || {
-      rm -f "$LOG_PATH"
+      rm -f "$ACTIVE_OWNER_FILE" "$LOG_PATH"
       exit 0
     }
     if ! printf "%s\n%s\n" \
@@ -289,7 +312,7 @@ LOG_EOF
       "$(cat "$STATE_DIR/session-start-ts.tmp" 2>/dev/null || date +%s)" \
       > "$_ACTIVE_MARKER_TMP" \
       || ! mv -f "$_ACTIVE_MARKER_TMP" "$ACTIVE_LOG_FILE"; then
-      rm -f "$_ACTIVE_MARKER_TMP" "$LOG_PATH"
+      rm -f "$_ACTIVE_MARKER_TMP" "$ACTIVE_OWNER_FILE" "$LOG_PATH"
       exit 0
     fi
     # Data-lineage consolidation may run concurrently with stop finalization,

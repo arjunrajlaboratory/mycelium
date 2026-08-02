@@ -170,6 +170,20 @@ PY
   printf '%s\n%s\n' "$safe_path" "$owner_ts"
 }
 
+mycelium_read_session_owner_id() {
+  local owner_file="$1"
+  local owner_id=""
+  local extra_line=""
+
+  [[ -f "$owner_file" && ! -L "$owner_file" ]] || return 1
+  owner_id=$(sed -n '1p' "$owner_file" 2>/dev/null || true)
+  extra_line=$(sed -n '2p' "$owner_file" 2>/dev/null || true)
+  [[ "$owner_id" =~ ^[A-Za-z0-9._-]+$ \
+    && ${#owner_id} -le 200 \
+    && -z "$extra_line" ]] || return 1
+  printf '%s\n' "$owner_id"
+}
+
 mycelium_registry_cell() {
   python3 -c '
 import html

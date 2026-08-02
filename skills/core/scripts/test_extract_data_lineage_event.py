@@ -692,6 +692,13 @@ def test_main_rejects_unproven_shell_text_matches(
         "jupyter execute --help a.ipynb",
         "jupyter execute --help-all a.ipynb",
         "jupyter execute --version a.ipynb",
+        "jupyter nbconvert --generate-config a.ipynb",
+        "jupyter nbconvert --show-config a.ipynb",
+        "jupyter nbconvert --show-config-json a.ipynb",
+        "jupyter nbconvert --show-config=true a.ipynb",
+        "jupyter nbconvert --debug --show-config a.ipynb",
+        "jupyter nbconvert a.ipynb --show-config",
+        "jupyter execute a.ipynb --generate-config",
     ],
 )
 def test_main_rejects_terminal_interpreter_options_before_analysis_payload(
@@ -728,6 +735,38 @@ def test_main_rejects_terminal_interpreter_options_before_analysis_payload(
 
     assert result.returncode == 0, result.stderr
     assert not target.exists()
+
+
+def test_jupyter_terminal_option_text_in_a_value_is_not_a_terminal_mode(
+    tmp_path: Path,
+) -> None:
+    """Only complete argv options terminate; text within a value does not."""
+    script = tmp_path / "a.ipynb"
+    script.write_text("{}\n")
+
+    detected, inline = detect_script(
+        "jupyter nbconvert --output 'prefix --show-config' a.ipynb",
+        tmp_path,
+    )
+
+    assert detected == script
+    assert inline is None
+
+
+def test_jupyter_terminal_option_in_later_command_does_not_hide_execution(
+    tmp_path: Path,
+) -> None:
+    """Terminal-mode checks are scoped to the matched simple command."""
+    script = tmp_path / "a.ipynb"
+    script.write_text("{}\n")
+
+    detected, inline = detect_script(
+        "jupyter execute a.ipynb; jupyter nbconvert --show-config",
+        tmp_path,
+    )
+
+    assert detected == script
+    assert inline is None
 
 
 @pytest.mark.parametrize(

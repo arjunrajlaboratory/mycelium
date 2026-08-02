@@ -148,8 +148,10 @@ def test_development_skills_encode_cross_host_regression_workflow():
         "Cross-host hook discovery invokes the wrong adapter",
         "Host payload omits result metadata",
         "Lock recovery waits longer than acquisition",
+        "Repository state is mistaken for invocation identity",
         "manual hook test",
         "Option values are mistaken for positional inputs",
+        "Terminal-only mode is treated as execution",
         "Compatibility cleanup deletes user state",
     ):
         assert required in patterns
@@ -170,6 +172,7 @@ def test_development_skills_encode_cross_host_regression_workflow():
         "Do not change the source or installed artifact while the host task is running",
         "Keep ordinary file-reading and editing tools available",
         "first Stop",
+        "Nested-session isolation",
         "## What was worked on",
         "## Key decisions made",
         "## Blockers & surprises",
@@ -1052,6 +1055,145 @@ def test_concurrent_session_start_creates_one_primary_log_and_marker(tmp_path):
     assert len(marker_lines) == 2
     assert marker_lines[0] == str(logs[0])
     assert marker_lines[1].isdigit()
+
+
+def test_subagent_stop_cannot_finalize_primary_session(tmp_path):
+    """A child lifecycle must not consume its primary's shared transaction."""
+    repo = _repo(tmp_path)
+    primary_id = "primary-session"
+    child_id = "child-session"
+
+    primary_start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "source": "startup",
+            "session_id": primary_id,
+        },
+    )
+    assert primary_start.returncode == 0, primary_start.stderr
+
+    state = repo / ".mycelium"
+    marker = state / "active-session-log.tmp"
+    log_path = Path(marker.read_text().splitlines()[0])
+
+    child_start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "source": "startup",
+            "session_id": child_id,
+        },
+    )
+    assert child_start.returncode == 0, child_start.stderr
+
+    events = state / "mycelium-data-events.tmp"
+    raw_event = json.dumps(
+        {
+            "ts": "2026-08-02T12:00:00Z",
+            "script": "analysis/child-must-not-consolidate.py",
+            "inputs": [],
+            "outputs": [],
+        }
+    ) + "\n"
+    events.write_text(raw_event)
+
+    child_stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "stop_hook_active": False,
+            "session_id": child_id,
+        },
+    )
+    assert child_stop.returncode == 0, child_stop.stderr
+    assert marker.is_file()
+    assert log_path.is_file()
+    assert (state / "active-session-owner-id.tmp").read_text().strip() == primary_id
+    assert events.read_text() == raw_event
+    assert not (repo / ".living" / "log" / "data-lineage").exists()
+
+    events.unlink()
+    primary_stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "stop_hook_active": False,
+            "session_id": primary_id,
+        },
+    )
+    assert primary_stop.returncode == 0, primary_stop.stderr
+    assert not marker.exists()
+    assert not log_path.exists()
+    assert not (state / "active-session-owner-id.tmp").exists()
+
+
+@pytest.mark.parametrize("owner_id", ["corrupt/owner", ""])
+def test_corrupt_session_owner_token_fails_closed(tmp_path, owner_id):
+    """Invalid new-format ownership must not fall back to shared timestamps."""
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "source": "startup",
+            "session_id": "primary-session",
+        },
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    marker = state / "active-session-log.tmp"
+    log_path = Path(marker.read_text().splitlines()[0])
+    (state / "active-session-owner-id.tmp").write_text(f"{owner_id}\n")
+
+    stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "stop_hook_active": False,
+            "session_id": "child-session",
+        },
+    )
+
+    assert stop.returncode == 0, stop.stderr
+    assert json.loads(stop.stdout)["decision"] == "block"
+    assert marker.is_file()
+    assert log_path.is_file()
+
+
+def test_owned_session_stop_fails_closed_without_host_identity(tmp_path):
+    """A new-format owner cannot be authorized through the legacy fallback."""
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "source": "startup",
+            "session_id": "primary-session",
+        },
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    marker = state / "active-session-log.tmp"
+    log_path = Path(marker.read_text().splitlines()[0])
+
+    stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False},
+    )
+
+    assert stop.returncode == 0, stop.stderr
+    assert json.loads(stop.stdout)["decision"] == "block"
+    assert marker.is_file()
+    assert log_path.is_file()
 
 
 def test_session_start_does_not_reuse_noncontiguous_session_number(tmp_path):

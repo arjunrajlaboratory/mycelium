@@ -71,21 +71,25 @@ The fresh agent should:
    and lineage evidence.
 3. Print `pwd` and stop if it differs from the exact target.
 4. Report the exact automatic SessionStart context already visible to it.
-5. Run the positive command literally and report exit plus exact automatic
+5. If the host provides a native subagent/task tool, record the active marker,
+   owner token, and active log identity; launch one read-only child that only
+   reports `pwd`; wait for its natural Stop; then verify the primary identities
+   are unchanged. Do not ask the child to edit or invoke a skill.
+6. Run the positive command literally and report exit plus exact automatic
    PostToolUse context.
-6. Run the negative command literally and report whether any automatic context
+7. Run the negative command literally and report whether any automatic context
    appeared.
-7. Create and remove the disposable file with its normal edit tool.
-8. Before the first Stop, write no living knowledge merely to satisfy the
+8. Create and remove the disposable file with its normal edit tool.
+9. Before the first Stop, write no living knowledge merely to satisfy the
    audit. Let activity enforcement block that Stop and preserve the exact
    automatic reason.
-9. After that expected block, only in the fresh disposable repository, append
+10. After that expected block, only in the fresh disposable repository, append
    one clearly labeled lifecycle-audit observation to `.living/learnings.md`.
    Do not modify scientific code, data, outputs, reports, or pre-existing
    living content.
-10. Never invoke a Mycelium hook directly and never repair any result other than
+11. Never invoke a Mycelium hook directly and never repair any result other than
    the expected Stop-compliance step above.
-11. Produce a genuine five-section handoff before the accepted retry, using
+12. Produce a genuine five-section handoff before the accepted retry, using
    these exact headings: `## What was worked on`, `## Key decisions made`,
    `## Blockers & surprises`, `## Current state`, and `## Next steps`.
 
@@ -97,6 +101,7 @@ Report each row as Pass, Fail, or Inconclusive.
 | --- | --- |
 | Artifact identity | Source commit, installed version/root, and matching hashes for exercised files. |
 | SessionStart | Exact injected context, one active log, valid marker path plus owner timestamp, and session baseline. |
+| Nested-session isolation | When supported, the child starts and stops naturally while the primary marker, owner token, active log, baselines, and raw lineage remain unchanged. Otherwise mark N/A. |
 | Positive PostToolUse | Exact context, reminder/activity as applicable, script path resolved from effective cwd, the real exit from the host stream, and either matching lineage status or explicit evidence that the hook payload omitted it. |
 | Negative PostToolUse | No reminder, activity misclassification, or lineage from interpreter-looking echo arguments. |
 | Edit tracking | Successful host edit recorded; failed edits are not; disposable file is absent at end. |
@@ -109,6 +114,7 @@ Report each row as Pass, Fail, or Inconclusive.
 Inspect, when present:
 
 - `.mycelium/active-session-log.tmp` (line 1 path, line 2 owner timestamp);
+- `.mycelium/active-session-owner-id.tmp` (one validated host-session token);
 - `.mycelium/session-start-ts.tmp` and activity/reminder markers;
 - `.mycelium/mycelium-data-events.tmp` and lineage status/session markers;
 - `.living/log/LOG_REGISTRY.md` and the new session log;
