@@ -122,8 +122,7 @@ _JUPYTER_VALUE_OPTION = (
 _JUPYTER_FLAG_OPTION = (
     r"(?:-y|--(?:allow-chromium-download|allow-errors|clear-output|"
     r"coalesce-streams|debug|disable-chromium-sandbox|embed-images|execute|"
-    r"generate-config|inplace|no-input|no-prompt|sanitize-html|show-config|"
-    r"show-config-json|show-input|stdin|stdout|yes))"
+    r"inplace|no-input|no-prompt|sanitize-html|show-input|stdin|stdout|yes))"
 )
 # Traitlets accepts arbitrary configurable options in --Class.name=value form.
 # Unknown separated-value options are rejected conservatively because their
@@ -479,6 +478,58 @@ def _shell_tokens(fragment: str) -> list[str] | None:
         else:
             tokens.append(token)
     return tokens
+
+
+_JUPYTER_TERMINAL_OPTIONS = {
+    "--generate-config",
+    "--help",
+    "--help-all",
+    "--show-config",
+    "--show-config-json",
+    "--version",
+}
+
+
+def _simple_command_suffix(command: str, offset: int) -> str | None:
+    """Return one simple command from offset, respecting shell quoting."""
+    quote: str | None = None
+    index = offset
+    while index < len(command):
+        char = command[index]
+        if quote is None:
+            if char == "\\":
+                if index + 1 >= len(command):
+                    return None
+                index += 2
+                continue
+            if char in {"'", '"'}:
+                quote = char
+            elif char in ";&|()<>\n":
+                break
+        elif quote == "'":
+            if char == "'":
+                quote = None
+        else:
+            if char == "\\" and index + 1 < len(command):
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+        index += 1
+    return None if quote is not None else command[offset:index]
+
+
+def _jupyter_match_has_terminal_option(command: str, offset: int) -> bool:
+    """Whether this Jupyter simple command exits before notebook execution."""
+    fragment = _simple_command_suffix(command, offset)
+    if fragment is None:
+        return True
+    tokens = _shell_tokens(fragment)
+    if tokens is None:
+        return True
+    return any(
+        token.split("=", 1)[0] in _JUPYTER_TERMINAL_OPTIONS for token in tokens
+    )
 
 
 def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
@@ -1146,6 +1197,11 @@ def _detect_scripts_with_cwd(
     ):
         for m in pattern.finditer(bash_cmd):
             if not _match_has_expected_executable(m, pattern):
+                continue
+            if (
+                pattern is RX_JUPYTER_SCRIPT_PATH
+                and _jupyter_match_has_terminal_option(bash_cmd, m.start())
+            ):
                 continue
             effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
             if effective_cwd is None:

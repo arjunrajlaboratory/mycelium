@@ -192,3 +192,34 @@ element, and reject unknown separated-value options conservatively.
 input-looking value such as `--output converted.ipynb`, plus assignment and
 unknown-option neighbors. Require the true positional input or no attribution;
 never accept the option value.
+
+## 14. Repository state is mistaken for invocation identity
+
+**Failure:** A primary and nested child share a repository timestamp or marker,
+so the child's Stop appears to own the primary transaction and finalizes or
+deletes its state.
+
+**Invariant:** Persist an identity that the host supplies separately to each
+invocation and compare it before any Stop-side mutation. Publish identity before
+the active marker, fail closed when new-format identity is corrupt or missing,
+and retain shared timestamps only as an upgrade fallback for legacy sessions.
+
+**Regression evidence:** Start primary and child sessions in the same second,
+then stop the read-only child. Require the primary marker, log, owner token, raw
+lineage events, and baselines to remain byte-identical; only the primary Stop may
+consume them.
+
+## 15. Terminal-only mode is treated as execution
+
+**Failure:** A parser accepts a flag that prints or generates configuration and
+exits, then attributes a later script-looking argument as executed. Checking
+only options before the positional path misses terminal flags placed afterward.
+
+**Invariant:** Classify terminal modes separately from ordinary flags and scan
+the complete parsed simple-command argv, not raw text or only the prefix before
+the apparent input. Scope the decision to that command so a later command or
+terminal-looking text inside an option value cannot hide real execution.
+
+**Regression evidence:** Cover each terminal flag before and after an apparent
+input, with ordinary flags, assignment forms, quoted values containing similar
+text, and a neighboring command that really executes.

@@ -117,6 +117,11 @@ hook, filesystem, or lifecycle boundaries.
       sessions.
 - [ ] Session identifiers and log names are unique under rapid or concurrent
       starts.
+- [ ] A primary session publishes a per-host invocation owner token before its
+      active marker; a nested child Stop validates that token before lineage,
+      finalization, enforcement, or cleanup and cannot consume primary state.
+- [ ] Missing or corrupt new-format ownership fails closed. Timestamp matching
+      is used only for active legacy sessions that have no owner-token file.
 - [ ] The active-log marker has one documented format, and every reader parses
       that format rather than treating the whole file as a path.
 - [ ] Every active-log reader validates the marker path as a regular file under
@@ -152,6 +157,10 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Interpreter help/version options that terminate before a later payload
       are rejected, including short-option clusters and equivalent Python, R,
       Rscript, and Jupyter forms.
+- [ ] Jupyter configuration-only modes such as `--show-config`,
+      `--show-config-json`, and `--generate-config` are rejected before or
+      after an apparent notebook, without suppressing a neighboring command or
+      option value that merely contains similar text.
 - [ ] Python `-c` and R `-e` source is parsed as one complete shell word, then
       decoded with shell semantics; escaped quotes and adjacent quoted
       components cannot truncate the source before a data reference.
@@ -255,6 +264,8 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Concurrent SessionStart and Stop share lifecycle serialization; one
       primary log owns the active marker, and numbering uses the next unused
       value rather than the number of existing files.
+- [ ] A nested session receives a distinct owner identity and exits before any
+      mutation of its primary's log, lineage events, baselines, or sentinels.
 - [ ] Log, registry, manifest, marker, and sentinel replacements are atomic.
 - [ ] A log's acceptance marker, duration/file-count frontmatter, and matching
       completion footer are published as one atomic replacement; an injected
@@ -353,7 +364,9 @@ exercise them.
 | Current Codex Bash PostToolUse supplies an empty `tool_response` before its outer command event completes | The analysis execution is retained, exit status and wall time stay null, and no success value is fabricated. |
 | Claude Code cross-discovers the plugin's Codex `hooks/hooks.json` adapter | The Codex dispatcher exits silently under Claude while the native project hooks produce one lifecycle effect. |
 | Multiple SessionStart hooks race, or today's log numbers contain a gap | One primary log and one atomic two-line marker are created; no occupied log number is reused. |
+| A read-only nested child starts and stops while its primary is active | The primary marker, owner token, log, baselines, and raw lineage remain active and byte-identical; the child performs no Stop-side mutation. |
 | A recent lifecycle lock records an owner PID that has terminated | The next caller recovers it before the acquisition timeout; a recent ownerless lock is not mistaken for dead-owner proof. |
+| Jupyter receives `--show-config`, `--show-config-json`, or `--generate-config` before or after an apparent notebook | No execution or lineage is attributed; terminal-looking text inside an ordinary option value and an actual neighboring Jupyter command remain scoped correctly. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | A Claude or Codex hook config is valid JSON but has malformed event, group, handler, or command types | Initialization and migration reject it before changing guidance, runtime state, hooks, todo files, or the knowledge index. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |

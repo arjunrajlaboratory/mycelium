@@ -46,6 +46,44 @@ if ! mycelium_acquire_stop_lock "$STATE_DIR"; then
 fi
 trap mycelium_release_stop_lock EXIT
 
+# Resolve and validate the active transaction before any Stop-side mutation.
+# The host session ID is per invocation; repository timestamps are shared and
+# therefore cannot distinguish a primary from a concurrently running child.
+ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
+ACTIVE_OWNER_FILE="$STATE_DIR/active-session-owner-id.tmp"
+ACTIVE_MARKER_VALID=false
+SESSION_OWNERSHIP="legacy"
+LOG_PATH=""
+OWNER_TS=""
+if [ -f "$ACTIVE_LOG_FILE" ]; then
+  if _ACTIVE_MARKER=$(mycelium_read_active_log_marker "$REPO_ROOT" "$ACTIVE_LOG_FILE"); then
+    ACTIVE_MARKER_VALID=true
+    LOG_PATH=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '1p')
+    OWNER_TS=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '2p')
+  else
+    # Never trust a separate owner token when the marker it supposedly owns is
+    # invalid. Remove both and continue to independent lifecycle enforcement.
+    rm -f "$ACTIVE_LOG_FILE" "$ACTIVE_OWNER_FILE"
+  fi
+fi
+
+if [[ "$ACTIVE_MARKER_VALID" == true \
+  && ( -e "$ACTIVE_OWNER_FILE" || -L "$ACTIVE_OWNER_FILE" ) ]]; then
+  if ! OWNER_SESSION_ID=$(mycelium_read_session_owner_id "$ACTIVE_OWNER_FILE") \
+    || [[ ! "$HOST_SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]] \
+    || (( ${#HOST_SESSION_ID} > 200 )); then
+    mycelium_emit_stop_block \
+      "STOP BLOCKED — active session ownership could not be validated. The primary lifecycle state was preserved; repair the owner marker or retry from its host session."
+    exit 0
+  elif [[ "$OWNER_SESSION_ID" != "$HOST_SESSION_ID" ]]; then
+    # Child session: do not consolidate lineage, finalize/delete the primary
+    # log, or consume any of the primary's shared enforcement state.
+    exit 0
+  else
+    SESSION_OWNERSHIP="host-id"
+  fi
+fi
+
 # Consolidate lineage in-process before lifecycle enforcement. Hook runtimes
 # launch sibling command hooks concurrently, so registering consolidation as a
 # separate Stop handler would race the accepted-Stop cleanup below.
@@ -97,24 +135,13 @@ UPSERT_SCRIPT="${MYCELIUM_REGISTRY_UPSERT_HELPER:-$SCRIPT_DIR/scripts/upsert_reg
 FINALIZE_LOG_SCRIPT="${MYCELIUM_LOG_FINALIZER_HELPER:-$SCRIPT_DIR/scripts/finalize_session_log.py}"
 
 # --- Session log finalization ---
-ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
-if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
-  ACTIVE_MARKER_VALID=true
-  if _ACTIVE_MARKER=$(mycelium_read_active_log_marker "$REPO_ROOT" "$ACTIVE_LOG_FILE"); then
-    LOG_PATH=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '1p')
-    OWNER_TS=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '2p')
-  else
-    # Remove only the invalid marker, then continue to independent lifecycle
-    # enforcement. Never follow or quote the untrusted path it contained.
-    ACTIVE_MARKER_VALID=false
-    LOG_PATH=""
-    OWNER_TS=""
-    rm -f "$ACTIVE_LOG_FILE"
-  fi
+if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
   OUR_TS=$(cat "$STATE_DIR/session-start-ts.tmp" 2>/dev/null || echo "")
 
-  # Subagent detection: if owner timestamp exists and doesn't match ours, we're a subagent
-  if [[ "$OWNER_TS" =~ ^[0-9]{1,18}$ \
+  # Backward compatibility for an active session created before owner IDs were
+  # introduced. New sessions use the per-host identity gate above.
+  if [[ "$SESSION_OWNERSHIP" == "legacy" \
+    && "$OWNER_TS" =~ ^[0-9]{1,18}$ \
     && "$OUR_TS" =~ ^[0-9]{1,18}$ \
     && "$OWNER_TS" != "$OUR_TS" ]]; then
       # Subagent: skip all finalization and .living/ checks
@@ -244,6 +271,7 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       && [ "$LINEAGE_EVENT_COUNT" -eq 0 ]; then
       rm -f "$LOG_PATH"
       rm -f "$ACTIVE_LOG_FILE"
+      rm -f "$ACTIVE_OWNER_FILE"
       rm -f "$STATE_DIR/session-start-ts.tmp"
       rm -f "$SESSION_BASELINE_FILE"
       rm -f "$STATE_DIR/living-reminder-baseline.json"
@@ -443,11 +471,13 @@ LAST_SESSION_EOF
 
       # Clean up sentinels
       rm -f "$ACTIVE_LOG_FILE"
+      rm -f "$ACTIVE_OWNER_FILE"
       rm -f "$SESSION_BASELINE_FILE"
     fi
   else
     # Log file doesn't exist (was deleted?) — clean up sentinels
     rm -f "$ACTIVE_LOG_FILE"
+    rm -f "$ACTIVE_OWNER_FILE"
     if [[ "${ACTIVE_MARKER_VALID:-false}" == true ]]; then
       rm -f "$STATE_DIR/session-file-baseline.json"
     fi
@@ -462,6 +492,7 @@ fi
 # If no .living/ directory, skip (SessionStart hook handles scaffolding)
 LIVING_DIR="$REPO_ROOT/.living"
 if [ ! -d "$LIVING_DIR" ]; then
+  rm -f "$ACTIVE_OWNER_FILE"
   rm -f "$STATE_DIR/living-reminder-baseline.json"
   mycelium_accept_lineage_session
   exit 0
@@ -472,6 +503,7 @@ fi
 REMINDER_FILE="$STATE_DIR/mycelium-reminded.tmp"
 ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
 if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
+  rm -f "$ACTIVE_OWNER_FILE"
   rm -f "$STATE_DIR/session-start-ts.tmp"
   rm -f "$STATE_DIR/session-file-baseline.json"
   rm -f "$STATE_DIR/living-reminder-baseline.json"
@@ -518,6 +550,7 @@ if [ "$LIVING_UPDATED" = true ]; then
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
+  rm -f "$ACTIVE_OWNER_FILE"
   rm -f "$STATE_DIR/session-start-ts.tmp"
   rm -f "$STATE_DIR/session-file-baseline.json"
   rm -f "$STATE_DIR/living-reminder-baseline.json"
