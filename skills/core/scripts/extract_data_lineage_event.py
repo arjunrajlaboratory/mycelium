@@ -1371,21 +1371,6 @@ _DATA_FILE_SUFFIXES = {
     ".svg",
     ".pdf",
 }
-_INPUT_DIRECTORY_NAMES = {"data", "input", "inputs", "raw", "source"}
-_OUTPUT_DIRECTORY_NAMES = {
-    "figure",
-    "figures",
-    "output",
-    "outputs",
-    "processed",
-    "report",
-    "reports",
-    "result",
-    "results",
-    "table",
-    "tables",
-    "validation",
-}
 _REPOSITORY_SCAN_EXCLUDES = {
     ".git",
     ".mycelium",
@@ -1393,6 +1378,62 @@ _REPOSITORY_SCAN_EXCLUDES = {
     ".venv",
     "node_modules",
     "__pycache__",
+}
+_REPOSITORY_SCAN_ENTRY_LIMIT = 50_000
+
+_INPUT_CALL_LEAVES = {
+    "open_dataarray",
+    "open_dataset",
+    "open_mfdataset",
+    "open_zarr",
+    "read_10x_h5",
+    "read_10x_mtx",
+    "read_csv",
+    "read_excel",
+    "read_feather",
+    "read_h5",
+    "read_h5ad",
+    "read_hdf",
+    "read_json",
+    "read_loom",
+    "read_mtx",
+    "read_orc",
+    "read_parquet",
+    "read_pickle",
+    "read_sas",
+    "read_stata",
+    "read_table",
+    "read_tsv",
+}
+_OUTPUT_CALL_LEAVES = {
+    "savefig",
+    "to_csv",
+    "to_excel",
+    "to_feather",
+    "to_h5",
+    "to_hdf",
+    "to_json",
+    "to_netcdf",
+    "to_orc",
+    "to_parquet",
+    "to_pickle",
+    "to_sas",
+    "to_stata",
+    "to_table",
+    "to_tsv",
+    "write_csv",
+    "write_h5ad",
+    "write_json",
+    "write_parquet",
+}
+_PATH_KEYWORDS = {
+    "file",
+    "filename",
+    "filepath_or_buffer",
+    "fname",
+    "path",
+    "path_or_buf",
+    "store",
 }
 
 
@@ -1410,68 +1451,183 @@ def _repository_root(cwd: Path) -> Path | None:
     return Path(root) if result.returncode == 0 and root else None
 
 
-def _literal_data_filenames(source: str) -> set[str]:
-    """Collect concrete data-like string literals without executing source."""
+def _call_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _call_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return None
+
+
+def _io_call_direction(node: ast.Call) -> str | None:
+    name = _call_name(node.func)
+    if not name:
+        return None
+    leaf = name.rsplit(".", 1)[-1]
+    if leaf in _OUTPUT_CALL_LEAVES or name in {
+        "np.save",
+        "np.savez",
+        "np.savez_compressed",
+    }:
+        return "output"
+    if leaf in _INPUT_CALL_LEAVES or name in {
+        "ad.read",
+        "anndata.read",
+        "np.load",
+        "sc.read",
+        "scanpy.read",
+    }:
+        return "input"
+    return None
+
+
+def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
+    """Collect data-like literals reachable from actual I/O call arguments."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return set()
-    values: set[str] = set()
+        return set(), set()
+
+    assignments: dict[str, list[ast.AST]] = {}
+    shadowed_names = {
+        node.arg for node in ast.walk(tree) if isinstance(node, ast.arg)
+    }
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and value is not None:
+                    assignments.setdefault(target.id, []).append(value)
+
+    def collect(expression: ast.AST, resolving: frozenset[str] = frozenset()) -> set[str]:
+        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+            return {expression.value}
+        if isinstance(expression, ast.Name):
+            if expression.id in shadowed_names:
+                return set()
+            definitions = assignments.get(expression.id, [])
+            if len(definitions) != 1 or expression.id in resolving:
+                return set()
+            return collect(definitions[0], resolving | {expression.id})
+        if isinstance(expression, ast.Call):
+            children = list(expression.args) + [
+                keyword.value for keyword in expression.keywords
+            ]
+        else:
+            children = list(ast.iter_child_nodes(expression))
+        values: set[str] = set()
+        for child in children:
+            values.update(collect(child, resolving))
+        return values
+
+    inputs: set[str] = set()
+    outputs: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
             continue
-        value = node.value.strip()
+        direction = _io_call_direction(node)
+        if direction is None:
+            continue
+        path_expressions = list(node.args[:1])
+        path_expressions.extend(
+            keyword.value
+            for keyword in node.keywords
+            if keyword.arg in _PATH_KEYWORDS
+        )
+        values: set[str] = set()
+        for expression in path_expressions:
+            values.update(collect(expression))
+        destination = inputs if direction == "input" else outputs
+        destination.update(values)
+
+    def eligible(value: str) -> bool:
+        value = value.strip()
         if not value or "\x00" in value or "$" in value:
-            continue
+            return False
         if Path(value).is_absolute() or re.match(
             r"^[A-Za-z][A-Za-z0-9+.-]*://", value
         ):
-            continue
-        if Path(value).suffix.lower() in _DATA_FILE_SUFFIXES:
-            values.add(value)
-    return values
+            return False
+        return Path(value).suffix.lower() in _DATA_FILE_SUFFIXES
+
+    return (
+        {value.strip() for value in inputs if eligible(value)},
+        {value.strip() for value in outputs if eligible(value)},
+    )
 
 
-def _repository_literal_io(source: str, cwd: Path) -> tuple[list[str], list[str]]:
+def _repository_literal_io(
+    source: str,
+    cwd: Path,
+    static_inputs: list[str],
+    static_outputs: list[str],
+) -> tuple[list[str], list[str]]:
     """Recover unique existing paths named by dynamic Path expressions.
 
     This is a conservative post-execution fallback. It never guesses when a
-    basename occurs more than once in the repository, and it classifies only
-    conventional input/output directory names. The literal regex scanner
-    remains authoritative for direct reader/writer calls.
+    basename occurs more than once in the repository. Direction comes from the
+    reader/writer call, never from a directory name. The literal regex scanner
+    remains authoritative for direct reader/writer calls, which are removed
+    before repository discovery so resolved I/O never pays for a tree scan.
     """
-    literals = _literal_data_filenames(source)
+    input_literals, output_literals = _io_literal_filenames(source)
+
+    def identity(value: str) -> str:
+        path = Path(value)
+        if not path.is_absolute():
+            path = cwd / path
+        return os.path.normpath(os.path.abspath(path))
+
+    known_inputs = {identity(value) for value in static_inputs}
+    known_outputs = {identity(value) for value in static_outputs}
+    input_literals = {
+        value for value in input_literals if identity(value) not in known_inputs
+    }
+    output_literals = {
+        value for value in output_literals if identity(value) not in known_outputs
+    }
+    literals = input_literals | output_literals
+    if not literals:
+        return [], []
     root = _repository_root(cwd)
-    if not literals or root is None:
+    if root is None:
         return [], []
 
     wanted_basenames = {Path(value).name for value in literals}
     matches: dict[str, list[Path]] = {name: [] for name in wanted_basenames}
-    for directory, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = [
-            name
-            for name in dirnames
-            if name not in _REPOSITORY_SCAN_EXCLUDES
-            and not (Path(directory) / name).is_symlink()
-        ]
-        for filename in filenames:
-            if filename in matches:
-                candidate = Path(directory) / filename
-                if not candidate.is_symlink():
-                    matches[filename].append(candidate)
+    directories = [root]
+    entries_seen = 0
+    while directories:
+        directory = directories.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    entries_seen += 1
+                    if entries_seen > _REPOSITORY_SCAN_ENTRY_LIMIT:
+                        return [], []
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name not in _REPOSITORY_SCAN_EXCLUDES:
+                            directories.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False) and entry.name in matches:
+                        matches[entry.name].append(Path(entry.path))
+        except OSError:
+            # An incomplete walk cannot prove basename uniqueness.
+            return [], []
 
     inputs: list[str] = []
     outputs: list[str] = []
-    for value in sorted(literals):
+    for value in sorted(input_literals):
         candidates = matches.get(Path(value).name, [])
-        if len(candidates) != 1:
-            continue
-        candidate = candidates[0]
-        lowered_parts = {part.lower() for part in candidate.relative_to(root).parts}
-        if lowered_parts & _OUTPUT_DIRECTORY_NAMES:
-            outputs.append(str(candidate))
-        elif lowered_parts & _INPUT_DIRECTORY_NAMES:
-            inputs.append(str(candidate))
+        if len(candidates) == 1:
+            inputs.append(str(candidates[0]))
+    for value in sorted(output_literals):
+        candidates = matches.get(Path(value).name, [])
+        if len(candidates) == 1:
+            outputs.append(str(candidates[0]))
     return _dedupe(inputs), _dedupe(outputs)
 
 
@@ -1561,7 +1717,9 @@ def build_event_for_detection(
         return None
 
     inputs, outputs, filters, seeds = scan_source(source)
-    recovered_inputs, recovered_outputs = _repository_literal_io(source, cwd)
+    recovered_inputs, recovered_outputs = _repository_literal_io(
+        source, cwd, inputs, outputs
+    )
     inputs, added_inputs = _merge_recovered_paths(inputs, recovered_inputs, cwd)
     outputs, added_outputs = _merge_recovered_paths(outputs, recovered_outputs, cwd)
     if added_inputs or added_outputs:

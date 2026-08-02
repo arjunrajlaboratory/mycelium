@@ -97,11 +97,20 @@ script). Inline `-c` scripts emit one event each; their `script` field is
 `null`, with the source embedded under `script_source` and identified by
 `script_sha256`.
 
-When paths are dynamic or I/O is delegated through imports, the event instead
-uses `"io_detection": "unresolved"`, leaves `inputs` and `outputs` empty, and
-adds a `lineage_warnings` entry. Stop-time consolidation promotes that warning
-to the manifest's `extraction_warnings` list. This preserves evidence that the
-script ran without implying that its lineage was fully captured.
+For dynamic `Path`/dictionary composition, a conservative repository fallback
+may recover a uniquely named existing file. Candidates must data-flow into the
+path argument of a recognized reader or writer, and direction comes from that
+call rather than the file's directory. Directly resolved paths bypass the
+fallback entirely. Dynamic searches exclude runtime/vendor trees and stop at a
+fixed entry bound; ambiguity or a bound hit remains unresolved rather than
+guessing.
+
+When I/O is delegated through imports or no safe candidate can be recovered,
+the event uses `"io_detection": "unresolved"`, leaves `inputs` and `outputs`
+empty, and adds a `lineage_warnings` entry. Stop-time consolidation promotes
+that warning to the manifest's `extraction_warnings` list. This preserves
+evidence that the script ran without implying that its lineage was fully
+captured.
 
 ## Manifest schema (consolidated at Stop)
 

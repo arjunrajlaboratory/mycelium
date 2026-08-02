@@ -155,6 +155,8 @@ def test_development_skills_encode_cross_host_regression_workflow():
         "Terminal-only mode is treated as execution",
         "A fallback is appended to partial stdout",
         "Compatibility cleanup deletes user state",
+        "Unrelated literals are fabricated as data lineage",
+        "Resolved I/O triggers repository traversal",
     ):
         assert required in patterns
     for required in (
@@ -1124,8 +1126,8 @@ def test_concurrent_session_start_creates_one_primary_log_and_marker(tmp_path):
     assert marker_lines[1].isdigit()
 
 
-def test_new_root_session_supersedes_an_unfinalized_owned_session(tmp_path):
-    """A fresh root task must not inherit another root task's transaction."""
+def test_new_root_session_supersedes_an_abandoned_owned_session(tmp_path):
+    """A fresh root task may replace an old owner with no live signals."""
     repo = _repo(tmp_path)
     primary_id = "primary-session"
     replacement_id = "replacement-session"
@@ -1149,8 +1151,14 @@ def test_new_root_session_supersedes_an_unfinalized_owned_session(tmp_path):
 
     events = state / "mycelium-data-events.tmp"
     events.write_text('{"script":"analysis/old.py"}\n')
-    (state / "mycelium-session-activity.tmp").write_text("analysis/old.py\n")
-    (state / "mycelium-reminded.tmp").write_text(f"{int(time.time())}\n")
+    activity = state / "mycelium-session-activity.tmp"
+    reminder = state / "mycelium-reminded.tmp"
+    activity.write_text("analysis/old.py\n")
+    reminder.write_text(f"{int(time.time())}\n")
+    abandoned_ts = int(time.time()) - 7300
+    marker.write_text(f"{log_path}\n{abandoned_ts}\nowner-id-v1\n")
+    os.utime(activity, (abandoned_ts, abandoned_ts))
+    os.utime(reminder, (abandoned_ts, abandoned_ts))
 
     replacement_start = _run_hook(
         "mycelium-health.sh",
@@ -1205,6 +1213,53 @@ def test_new_root_session_supersedes_an_unfinalized_owned_session(tmp_path):
     assert not (state / "active-session-owner-id.tmp").exists()
 
 
+def test_new_root_session_preserves_a_live_owned_session(tmp_path):
+    """A concurrent root must not seize a transaction with fresh liveness."""
+    repo = _repo(tmp_path)
+    primary_id = "primary-session"
+    primary_start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "session_id": primary_id},
+    )
+    assert primary_start.returncode == 0, primary_start.stderr
+
+    state = repo / ".mycelium"
+    marker = state / "active-session-log.tmp"
+    owner = state / "active-session-owner-id.tmp"
+    events = state / "mycelium-data-events.tmp"
+    activity = state / "mycelium-session-activity.tmp"
+    reminder = state / "mycelium-reminded.tmp"
+    events.write_text('{"script":"analysis/live.py"}\n')
+    activity.write_text("analysis/live.py\n")
+    reminder.write_text(f"{int(time.time())}\n")
+    marker_lines = marker.read_text().splitlines()
+    marker.write_text(
+        f"{marker_lines[0]}\n{int(time.time()) - 7300}\nowner-id-v1\n"
+    )
+    before = {
+        path: path.read_bytes()
+        for path in (marker, owner, events, activity, reminder)
+    }
+    logs_before = sorted((repo / ".living" / "log").glob("*.md"))
+
+    competing_start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "source": "startup",
+            "session_id": "competing-session",
+        },
+    )
+
+    assert competing_start.returncode == 0, competing_start.stderr
+    assert "ACTIVE SESSION PRESERVED" in competing_start.stdout
+    assert {path: path.read_bytes() for path in before} == before
+    assert sorted((repo / ".living" / "log").glob("*.md")) == logs_before
+    assert not (state / "mycelium-data-events-abandoned").exists()
+
+
 def test_new_root_does_not_move_nonregular_abandoned_event_state(tmp_path):
     repo = _repo(tmp_path)
     primary_start = _run_hook(
@@ -1215,6 +1270,10 @@ def test_new_root_does_not_move_nonregular_abandoned_event_state(tmp_path):
     assert primary_start.returncode == 0, primary_start.stderr
     state = repo / ".mycelium"
     marker = state / "active-session-log.tmp"
+    marker_lines = marker.read_text().splitlines()
+    marker.write_text(
+        f"{marker_lines[0]}\n{int(time.time()) - 7300}\nowner-id-v1\n"
+    )
     original_marker = marker.read_text()
     events = state / "mycelium-data-events.tmp"
     events.mkdir()
@@ -1292,6 +1351,76 @@ def test_superseded_root_post_tool_use_cannot_mutate_new_owner_state(
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
     assert not (state / unexpected_state).exists()
+
+
+@pytest.mark.parametrize(
+    "hook_name,payload,unexpected_state",
+    [
+        (
+            "mycelium-post-action.sh",
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "python analysis.py"},
+                "tool_response": {"exit_code": 0},
+            },
+            "mycelium-reminded.tmp",
+        ),
+        (
+            "mycelium-data-tracker.sh",
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "python analysis.py"},
+                "tool_response": {"exit_code": 0},
+            },
+            "mycelium-data-events.tmp",
+        ),
+        (
+            "mycelium-activity-tracker.sh",
+            {
+                "tool_name": "apply_patch",
+                "tool_input": {
+                    "command": "*** Begin Patch\n*** Add File: late.py\n+x\n*** End Patch"
+                },
+                "tool_response": {"exit_code": 0},
+            },
+            "mycelium-session-activity.tmp",
+        ),
+        (
+            "mycelium-read-tracker.sh",
+            {
+                "tool_name": "Read",
+                "tool_input": {"file_path": ""},
+                "tool_response": {"exit_code": 0},
+            },
+            "mycelium-read-access.log",
+        ),
+    ],
+)
+@pytest.mark.parametrize("state_preexisting", [False, True])
+def test_late_host_post_tool_use_cannot_mutate_without_an_active_transaction(
+    tmp_path, hook_name, payload, unexpected_state, state_preexisting
+):
+    repo = _repo(tmp_path)
+    (repo / "analysis.py").write_text("pd.read_csv('input.csv')\n")
+    state = repo / ".mycelium"
+    anchor = state / "last-session.md"
+    if state_preexisting:
+        state.mkdir()
+        anchor.write_text("accepted handoff\n")
+    if hook_name == "mycelium-read-tracker.sh":
+        payload["tool_input"]["file_path"] = str(repo / ".living" / "INDEX.md")
+    payload.update({"cwd": str(repo), "session_id": "completed-session"})
+
+    result = _run_hook(hook_name, repo, payload)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    if state_preexisting:
+        assert anchor.read_text() == "accepted handoff\n"
+        assert sorted(path.name for path in state.iterdir()) == ["last-session.md"]
+        assert not (state / unexpected_state).exists()
+    else:
+        assert not state.exists()
 
 
 @pytest.mark.parametrize("branch_name", [None, "{yaml-like-branch}"])
@@ -2077,12 +2206,19 @@ def test_codex_data_tracker_preserves_unknown_exit_from_native_empty_response(
     repo = _repo(tmp_path)
     script = repo / "run.py"
     script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    session_id = "codex-native-payload"
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "session_id": session_id},
+    )
+    assert start.returncode == 0, start.stderr
 
     result = _run_hook(
         "mycelium-data-tracker.sh",
         repo,
         {
-            "session_id": "codex-native-payload",
+            "session_id": session_id,
             "turn_id": "turn-native-empty-response",
             "cwd": str(repo),
             "hook_event_name": "PostToolUse",

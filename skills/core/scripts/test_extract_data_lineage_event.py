@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
+import extract_data_lineage_event as lineage_event  # noqa: E402
 from extract_data_lineage_event import (  # noqa: E402
     build_event_for_detection,
     detect_script,
@@ -529,6 +530,155 @@ def test_dynamic_literal_recovery_rejects_ambiguous_basenames(tmp_path: Path) ->
         (directory / "sample.csv").write_text("x\n")
     script = tmp_path / "run.py"
     script.write_text("pd.read_csv(root / 'sample.csv')\n")
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+    assert event["outputs"] == []
+
+
+def test_repository_recovery_ignores_unrelated_data_like_literals(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    ghost = tmp_path / "data" / "ghost.csv"
+    ghost.parent.mkdir()
+    ghost.write_text("x\n")
+    script = tmp_path / "run.py"
+    script.write_text('"""ghost.csv"""\nprint("no data I/O")\n')
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+    assert event["outputs"] == []
+
+
+def test_repository_recovery_does_not_follow_a_shadowed_global_assignment(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    ghost = tmp_path / "data" / "ghost.csv"
+    ghost.parent.mkdir()
+    ghost.write_text("x\n")
+    script = tmp_path / "run.py"
+    script.write_text(
+        "path = 'ghost.csv'\n"
+        "def load(path):\n"
+        "    return pd.read_csv(path)\n"
+        "load(runtime_path)\n"
+    )
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+
+
+@pytest.mark.parametrize(
+    "source,relative_path,expected_key",
+    [
+        (
+            "frame = pd.read_csv(ROOT / 'summary.csv')\n",
+            "analysis/demo/results/summary.csv",
+            "inputs",
+        ),
+        (
+            "frame.to_csv(ROOT / 'seed.csv')\n",
+            "data/processed/seed.csv",
+            "outputs",
+        ),
+    ],
+)
+def test_repository_recovery_takes_direction_from_io_expression(
+    tmp_path: Path, source: str, relative_path: str, expected_key: str
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    recovered = tmp_path / relative_path
+    recovered.parent.mkdir(parents=True)
+    recovered.write_text("x\n")
+    script = tmp_path / "run.py"
+    script.write_text(source)
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "static+repository"
+    other_key = "outputs" if expected_key == "inputs" else "inputs"
+    assert [item["path"] for item in event[expected_key]] == [str(recovered)]
+    assert event[other_key] == []
+
+
+def test_resolved_literal_io_does_not_search_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = tmp_path / "data" / "raw" / "sample.csv"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("x\n")
+    script = tmp_path / "run.py"
+    script.write_text("pd.read_csv('data/raw/sample.csv')\n")
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    def unexpected_repository_query(*_args, **_kwargs):
+        raise AssertionError("resolved I/O must not query repository paths")
+
+    monkeypatch.setattr(lineage_event.subprocess, "run", unexpected_repository_query)
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "static"
+    assert [item["path"] for item in event["inputs"]] == [str(raw)]
+
+
+def test_dynamic_repository_recovery_fails_safe_at_scan_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    raw = tmp_path / "data" / "raw" / "sample.csv"
+    raw.parent.mkdir(parents=True)
+    raw.write_text("x\n")
+    script = tmp_path / "run.py"
+    script.write_text("pd.read_csv(ROOT / 'sample.csv')\n")
+    monkeypatch.setattr(lineage_event, "_REPOSITORY_SCAN_ENTRY_LIMIT", 1)
     args = argparse.Namespace(
         ts="2026-08-02T12:00:00Z",
         agent_id="",

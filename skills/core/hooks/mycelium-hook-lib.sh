@@ -4,6 +4,7 @@
 
 mycelium_prepare_state_dir() {
   local repo_root="$1"
+  local mode="${2:-write}"
   local requested_state=""
   local living_dir=""
   local legacy_dir=""
@@ -69,7 +70,11 @@ except (OSError, RuntimeError, ValueError):
 print(candidate)
 PY
   ) || return 1
-  mkdir -p "$requested_state" || return 1
+  if [[ "$mode" == "read-only" ]]; then
+    [[ -d "$requested_state" ]] || return 1
+  else
+    mkdir -p "$requested_state" || return 1
+  fi
   STATE_DIR=$(cd "$requested_state" 2>/dev/null && pwd -P) || return 1
   case "$STATE_DIR" in
     "$repo_root"/*) ;;
@@ -78,6 +83,12 @@ PY
   unsafe_link=$(find "$STATE_DIR" -type l -print -quit 2>/dev/null || true)
   if [[ -n "$unsafe_link" ]]; then
     return 1
+  fi
+
+  # Ownership preflight for host-identified PostToolUse events must happen
+  # before state initialization, plugin-pointer refresh, or legacy migration.
+  if [[ "$mode" == "read-only" ]]; then
+    return 0
   fi
 
   if [[ ! -f "$STATE_DIR/.gitignore" ]]; then
@@ -202,15 +213,29 @@ mycelium_payload_owns_active_session() {
   local owner_format=""
   local owner_id=""
   local host_session_id=""
+  local host_identified=false
 
-  # Legacy/no-session state stays compatible. New-format state is gated by the
-  # host identity before any shared PostToolUse file can be mutated.
-  [[ -f "$marker_file" ]] || return 0
+  host_session_id=$(printf '%s' "$input" | mycelium_json_get 'session_id')
+  if [[ -n "$host_session_id" ]]; then
+    [[ "$host_session_id" =~ ^[A-Za-z0-9._-]+$ \
+      && ${#host_session_id} -le 200 ]] || return 1
+    host_identified=true
+  fi
+
+  # A host-identified event with no active transaction is a delayed event from
+  # a completed/superseded task. Only payloads from legacy hosts that omit a
+  # session identity may retain the pre-owner compatibility behavior.
+  if [[ ! -f "$marker_file" ]]; then
+    [[ "$host_identified" != true \
+      && ! -e "$owner_file" && ! -L "$owner_file" ]]
+    return
+  fi
   if ! marker=$(mycelium_read_active_log_marker "$repo_root" "$marker_file"); then
     # A legacy/corrupt marker with no owner token cannot authorize a log write,
     # but it also must not disable independent activity enforcement. A claimed
     # host-owned transaction remains fail-closed.
-    [[ ! -e "$owner_file" && ! -L "$owner_file" ]]
+    [[ "$host_identified" != true \
+      && ! -e "$owner_file" && ! -L "$owner_file" ]]
     return
   fi
   owner_format=$(printf '%s\n' "$marker" | sed -n '3p')
@@ -219,10 +244,29 @@ mycelium_payload_owns_active_session() {
     return 0
   fi
   owner_id=$(mycelium_read_session_owner_id "$owner_file") || return 1
+  [[ "$host_identified" == true && "$host_session_id" == "$owner_id" ]]
+}
+
+mycelium_prepare_post_tool_state() {
+  local repo_root="$1"
+  local input="$2"
+  local host_session_id=""
+
   host_session_id=$(printf '%s' "$input" | mycelium_json_get 'session_id')
-  [[ "$host_session_id" =~ ^[A-Za-z0-9._-]+$ \
-    && ${#host_session_id} -le 200 \
-    && "$host_session_id" == "$owner_id" ]]
+  if [[ -n "$host_session_id" ]]; then
+    # An identified payload cannot create markerless state. Validate the
+    # existing transaction without mutation, perform normal preparation only
+    # for its owner, then revalidate to close the preparation race.
+    mycelium_prepare_state_dir "$repo_root" read-only || return 1
+    mycelium_payload_owns_active_session "$repo_root" "$input" || return 1
+    mycelium_prepare_state_dir "$repo_root" || return 1
+    mycelium_payload_owns_active_session "$repo_root" "$input" || return 1
+  else
+    # Identity-free payloads retain compatibility with hosts predating session
+    # IDs, including their markerless activity enforcement.
+    mycelium_prepare_state_dir "$repo_root" || return 1
+    mycelium_payload_owns_active_session "$repo_root" "$input" || return 1
+  fi
 }
 
 mycelium_registry_cell() {

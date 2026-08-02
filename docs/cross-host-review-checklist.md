@@ -123,11 +123,14 @@ hook, filesystem, or lifecycle boundaries.
       concatenated with fallback text.
 - [ ] A root session publishes a per-host invocation owner token before its
       active marker. Dedicated subagent lifecycle events retain the parent's
-      session ID; a fresh root startup with a different valid ID supersedes the
-      old transaction without consuming its audit evidence.
+      session ID. A different root ID preserves a transaction with current
+      liveness signals and supersedes only an inactive owner, without consuming
+      its audit evidence.
 - [ ] Every shared PostToolUse writer validates the active owner before mutation,
       so late Bash/edit/read events from a superseded root task cannot pollute
       the current transaction.
+- [ ] A host-identified PostToolUse event with no active transaction is rejected
+      as late; only identity-free legacy payloads retain markerless behavior.
 - [ ] Missing or corrupt new-format ownership fails closed. Timestamp matching
       is used only for active legacy sessions that have no owner-token file;
       the active marker identifies new-format ownership so a missing companion
@@ -264,6 +267,9 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Repository-assisted lineage recovery never duplicates a direct relative
       path, never aliases an absolute or URL input by basename, and reports
       fallback detection only when it contributes a new unambiguous path.
+- [ ] Recovery candidates data-flow into recognized reader/writer path
+      arguments, derive direction from that call, bypass repository discovery
+      when static I/O is complete, and fail unresolved at a fixed entry bound.
 - [ ] Event append, extraction, manifest writing, and status-sentinel updates
       are locked or atomic as appropriate.
 - [ ] Concurrent events and Stop attempts do not lose, duplicate, or split a
@@ -390,6 +396,10 @@ exercise them.
 | Runtime state is malformed or partially written | The hook fails visibly without destructive cleanup or out-of-project writes. |
 | The abandoned raw-lineage event path is a nonempty directory or other non-regular object | SessionStart leaves the object, active marker, and owner intact and performs no archive mutation. |
 | A script names a direct relative input, or an absolute external input shares a basename with repository data | Lineage records the authoritative static path exactly once and does not claim repository recovery. |
+| A completed host task delivers Bash/edit/read PostToolUse after its marker was removed | Every shared writer exits silently without recreating reminders, activity, read telemetry, or raw lineage. |
+| A second root SessionStart arrives while the first owner's transaction has fresh liveness | The original marker, owner, raw events, baselines, reminders, and activity remain byte-identical; the competing task is warned and cannot seize the transaction. |
+| A module docstring or non-I/O call contains `ghost.csv`, or a reader consumes a file under `results/` | The unrelated literal is ignored, and the actual reader path is classified as input regardless of directory name. |
+| A script's direct reader/writer literals are already resolved | Repository fallback is not invoked; dynamic discovery has a fixed fail-safe entry bound. |
 | Active-log marker points outside `.living/log` | PostToolUse omits the unsafe log directive; Stop still enforces outstanding work and never reveals or follows the path. |
 | A dirty or untracked file is rewritten with the same size and restored mtime | Session accounting detects the content change. |
 | `true && python failed.py` exits nonzero, or Python is a pipeline component | The provably executed analysis is recorded; an unknown failed AND prefix remains omitted. |
@@ -415,11 +425,11 @@ exercise them.
 | Multiple SessionStart hooks race, or today's log numbers contain a gap | One primary log and one atomic versioned marker are created; no occupied log number is reused. |
 | SessionStart runs before the repository's first commit, including on a YAML-looking branch name | The prospective branch is stored as one YAML string, injected as one summary value, and decoded without quotes during Stop finalization. |
 | A subagent uses the host's dedicated subagent lifecycle while its root task is active | It retains the parent session ID, may contribute Tier 1 activity, and cannot create or finalize a second root transaction. A missing, multiline, or corrupt owner token for a marker declaring host-ID ownership blocks Stop without falling back to timestamps. |
-| A fresh root SessionStart arrives with a different valid host session ID while another root transaction remains active | The prior log and raw lineage evidence are preserved as abandoned, all transient work-cycle state is cleared, and a fresh owner/log/baseline is created. Later PostToolUse or Stop events from the superseded owner are silent and cannot mutate the new transaction. |
+| A fresh root SessionStart arrives with a different valid host session ID after the prior transaction is old and has no fresh liveness signal | The prior log and raw lineage evidence are preserved as abandoned, transient work-cycle state is cleared, and a fresh owner/log/baseline is created. Later PostToolUse or Stop events from the superseded owner are silent and cannot mutate the new transaction. |
 | Mycelium runs `generate_index.py`, registry/log/handoff finalizers, session accounting, or review validation | These control-plane utilities do not open or refresh an analysis bookkeeping cycle; a same-named user script outside the managed path remains eligible. |
 | Stop finalizes a registry row already enriched by the agent | Date, branch, duration, file count, status, and log link become factual final values while Summary, Key Outputs, and Tags remain authored and byte-equivalent at the cell level. |
 | A review report is rendered from multiple specialist outputs | Same-root findings are deduplicated, IDs are globally consecutive, per-category/global tallies match the rendered headings, and cross-input schema/feature/label comparability was checked. |
-| An analysis composes existing data paths dynamically from `Path`, dictionaries, or loop variables | Unique literal filenames are recovered conservatively from conventional repository input/output directories after execution; ambiguous basenames remain unresolved with an explicit warning. |
+| An analysis composes existing data paths dynamically from `Path`, dictionaries, or loop variables | Unique filenames reachable from recognized I/O path arguments are recovered conservatively after execution; direction follows the call, while ambiguous or over-bound searches remain unresolved with an explicit warning. |
 | A recent lifecycle lock records an owner PID that has terminated | The next caller recovers it before the acquisition timeout; a recent ownerless lock is not mistaken for dead-owner proof. |
 | Jupyter receives `--show-config`, `--show-config-json`, or `--generate-config` before or after an apparent notebook, including after a shell redirection | No execution or lineage is attributed; terminal-looking text inside an ordinary option value, a redirection target, and an actual neighboring Jupyter command remain scoped correctly. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |

@@ -59,8 +59,7 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 if [[ -z "$REPO_ROOT" ]]; then
   exit 0
 fi
-mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
-mycelium_payload_owns_active_session "$REPO_ROOT" "$INPUT" || exit 0
+mycelium_prepare_post_tool_state "$REPO_ROOT" "$INPUT" || exit 0
 
 LIVING_DIR="$REPO_ROOT/.living"
 if [[ ! -d "$LIVING_DIR" ]]; then
