@@ -270,11 +270,17 @@ mycelium_refresh_work_cycle() {
 mycelium_acquire_stop_lock() {
   local state_dir="$1"
   local attempts=0
+  local max_attempts="${MYCELIUM_STOP_LOCK_MAX_ATTEMPTS:-600}"
   local owner_pid=""
   local owner_ts=""
   local now_ts=""
   local lock_mtime=0
   local owner_is_live=false
+  local owner_is_dead=false
+
+  if [[ ! "$max_attempts" =~ ^[1-9][0-9]*$ ]]; then
+    max_attempts=600
+  fi
 
   MYCELIUM_STOP_LOCK_DIR="$state_dir/mycelium-stop.lock"
   while ! mkdir "$MYCELIUM_STOP_LOCK_DIR" 2>/dev/null; do
@@ -282,21 +288,30 @@ mycelium_acquire_stop_lock() {
     owner_pid=""
     owner_ts=""
     owner_is_live=false
+    owner_is_dead=false
     if [[ -f "$MYCELIUM_STOP_LOCK_DIR/owner" ]]; then
       read -r owner_pid owner_ts < "$MYCELIUM_STOP_LOCK_DIR/owner" || true
-      if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
-        owner_is_live=true
+      if [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
+        if kill -0 "$owner_pid" 2>/dev/null; then
+          owner_is_live=true
+        else
+          owner_is_dead=true
+        fi
       fi
     fi
     now_ts=$(date +%s)
     lock_mtime=$(mycelium_file_mtime "$MYCELIUM_STOP_LOCK_DIR")
-    if [[ "$owner_is_live" != true && "$lock_mtime" =~ ^[0-9]+$ ]] \
-      && (( now_ts - lock_mtime > 300 )); then
+    # A recorded dead owner cannot still be in its critical section, so recover
+    # immediately. Missing or malformed owner state may instead be the narrow
+    # mkdir-to-owner publication window; retain the age guard for that case.
+    if [[ "$owner_is_dead" == true ]] \
+      || { [[ "$owner_is_live" != true && "$lock_mtime" =~ ^[0-9]+$ ]] \
+        && (( now_ts - lock_mtime > 300 )); }; then
       rm -f "$MYCELIUM_STOP_LOCK_DIR/owner"
       rmdir "$MYCELIUM_STOP_LOCK_DIR" 2>/dev/null || true
       continue
     fi
-    if (( attempts >= 600 )); then
+    if (( attempts >= max_attempts )); then
       return 1
     fi
     sleep 0.05

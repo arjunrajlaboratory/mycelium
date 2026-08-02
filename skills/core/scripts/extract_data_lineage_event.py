@@ -112,6 +112,29 @@ _JUPYTER_SCRIPT_PATH = _shell_path_pattern(r"\.ipynb")
 # support while excluding terminal forms and their value/help-all variants.
 _NONTERMINAL_LONG_OPTION = r"--(?!(?:help(?:-all)?|version)(?:=|\s|$))\S+"
 _NONTERMINAL_LONG_OPTIONS = rf"(?:{_NONTERMINAL_LONG_OPTION}\s+)*"
+_JUPYTER_VALUE_OPTION_NAME = (
+    r"(?:-o|--(?:config|format|log-level|nbformat|output|output-dir|post|"
+    r"reveal-prefix|template|template-file|theme|to|writer))"
+)
+_JUPYTER_VALUE_OPTION = (
+    rf"{_JUPYTER_VALUE_OPTION_NAME}(?:={_SHELL_WORD}|\s+{_SHELL_WORD})"
+)
+_JUPYTER_FLAG_OPTION = (
+    r"(?:-y|--(?:allow-chromium-download|allow-errors|clear-output|"
+    r"coalesce-streams|debug|disable-chromium-sandbox|embed-images|execute|"
+    r"generate-config|inplace|no-input|no-prompt|sanitize-html|show-config|"
+    r"show-config-json|show-input|stdin|stdout|yes))"
+)
+# Traitlets accepts arbitrary configurable options in --Class.name=value form.
+# Unknown separated-value options are rejected conservatively because their
+# arity is unknowable here and an .ipynb-looking value is not the input file.
+_JUPYTER_ASSIGNED_OPTION = (
+    rf"--(?!(?:help(?:-all)?|version)=)[^=\s]+={_SHELL_WORD}"
+)
+_JUPYTER_OPTIONS = (
+    rf"(?:(?:{_JUPYTER_VALUE_OPTION}|{_JUPYTER_FLAG_OPTION}|"
+    rf"{_JUPYTER_ASSIGNED_OPTION})\s+)*"
+)
 _INLINE_SOURCE_WORD = rf"(?P<source_word>{_SHELL_WORD})(?=$|[\s|&;()<>])"
 
 RX_PYTHON_C = re.compile(
@@ -135,7 +158,7 @@ RX_R_SCRIPT_PATH = re.compile(
 )
 RX_JUPYTER_SCRIPT_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<jupyter_exe>{_JUPYTER_EXE})\s+"
-    rf"(?:nbconvert|execute)\s+{_NONTERMINAL_LONG_OPTIONS}"
+    rf"(?:nbconvert|execute)\s+{_JUPYTER_OPTIONS}"
     rf"(?P<path>{_JUPYTER_SCRIPT_PATH})"
 )
 IGNORED_PYTHON_MODULES = {

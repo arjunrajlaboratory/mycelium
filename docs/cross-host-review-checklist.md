@@ -57,8 +57,13 @@ hook, filesystem, or lifecycle boundaries.
       unexpected names, and unsafe roots.
 - [ ] A globally dispatched hook performs no project write before the shared
       `.living`/`.mycelium` containment and symlink checks have succeeded.
+- [ ] Loading the plugin through Claude Code does not execute the Codex adapter
+      that Claude also discovers at `hooks/hooks.json`; native Claude hooks
+      still produce one, not duplicated, lifecycle effect.
 - [ ] Installation works from the packaged plugin, not only from a source
       checkout.
+- [ ] Real-host processes exercise one immutable candidate: no source edit,
+      reinstall, or cache replacement occurs between SessionStart and Stop.
 
 ### Claude Code
 
@@ -157,6 +162,9 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Wrapper options that rewrite argv, such as `env -S`/`--split-string`, are
       either modeled completely or rejected conservatively; a later
       interpreter-looking argument is never treated as the executed program.
+- [ ] Analysis CLI option arity is parsed before positional inputs are selected;
+      separated and assignment-form option values that resemble scripts or
+      notebooks cannot be attributed as executed inputs.
 - [ ] Wrapper options that change cwd, including `env -C`/`--chdir`,
       `conda run --cwd`, and `uv run --directory`, are applied in nesting order
       before script, input, and output paths are resolved.
@@ -172,6 +180,9 @@ hook, filesystem, or lifecycle boundaries.
       `input_text` arrays whose text contains a serialized structured result;
       nonzero exit status is retained in lineage and failed edits do not count
       as successful activity.
+- [ ] The canonical current Codex Bash PostToolUse payload with an empty
+      `tool_response` is covered; analysis is still attributed, but unknown
+      exit status and wall time remain null rather than being fabricated.
 - [ ] Failed commands that are provably reached through a known-success AND
       prefix, or started as a pipeline component, still produce lineage; shell
       operators appearing only inside an unquoted comment produce nothing.
@@ -249,7 +260,9 @@ hook, filesystem, or lifecycle boundaries.
       completion footer are published as one atomic replacement; an injected
       write/replace failure leaves the original unfinalized log and active
       retry markers intact.
-- [ ] Lock acquisition has bounded failure behavior and stale-lock handling.
+- [ ] Lock acquisition has bounded failure behavior; a recorded dead owner is
+      recoverable before that bound, while a recent ownerless lock retains a
+      publication-race grace period.
 - [ ] `.mycelium`, `.living`, marker files, and output parents cannot redirect
       writes outside the project through symlinks.
 - [ ] Machine-local pointer refreshes reject existing links and use atomic
@@ -331,12 +344,16 @@ exercise them.
 | `env -S 'echo prefix' python a.py` or another argv-rewriting wrapper precedes an interpreter-looking argument | The parser rejects the ambiguous execution unless it fully models the wrapper expansion. |
 | `env -C sub`, `conda run --cwd sub`, or `uv run --directory sub` wraps an analysis command | Scripts and data paths resolve relative to the wrapper-selected directory; missing or dynamic directories are rejected. |
 | `time`, `exec`, `nice`, and `timeout` wrap or nest around an interpreter | Real executions are captured, while malformed options and an unrelated wrapped command containing interpreter text are rejected. |
+| Jupyter uses `--to notebook input.ipynb` or `--output converted.ipynb input.ipynb` | Option arity is honored and only `input.ipynb` is attributed; an unknown separated-value option fails conservatively. |
 | Python/R inline source contains escaped quotes or adjacent quoted components | The complete shell word is decoded and later data references remain visible. |
 | `--help`/`--version` or `-h`/`-V` precedes an apparent interpreter payload | No execution or lineage is attributed, including terminal short-option clusters and adjacent R/Jupyter forms. |
 | Atomic session-log replacement fails after registry/context preparation | Stop blocks, frontmatter remains unaccepted with no footer, active state survives resume/compact, and one retry produces one footer. |
 | The agent writes a fresh five-section `last-session.md` before Stop | Stop preserves it byte-for-byte; a missing, stale, or partial handoff receives an atomic five-section fallback instead. |
 | A code-mode local tool returns model-facing `input_text` blocks containing serialized result JSON | Exit status is recovered recursively for lineage, conditional execution, and failed-edit activity classification. |
+| Current Codex Bash PostToolUse supplies an empty `tool_response` before its outer command event completes | The analysis execution is retained, exit status and wall time stay null, and no success value is fabricated. |
+| Claude Code cross-discovers the plugin's Codex `hooks/hooks.json` adapter | The Codex dispatcher exits silently under Claude while the native project hooks produce one lifecycle effect. |
 | Multiple SessionStart hooks race, or today's log numbers contain a gap | One primary log and one atomic two-line marker are created; no occupied log number is reused. |
+| A recent lifecycle lock records an owner PID that has terminated | The next caller recovers it before the acquisition timeout; a recent ownerless lock is not mistaken for dead-owner proof. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | A Claude or Codex hook config is valid JSON but has malformed event, group, handler, or command types | Initialization and migration reject it before changing guidance, runtime state, hooks, todo files, or the knowledge index. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |
@@ -369,6 +386,12 @@ Also perform:
       supported hosts.
 - [ ] A lifecycle smoke test that lets hooks dispatch naturally; do not invoke
       the hook scripts manually as a substitute.
+- [ ] The child task retains ordinary read/edit capabilities required for the
+      expected Stop-compliance retry, even if recursive skill loading is
+      disabled.
+- [ ] Real-host conclusions come from the automatic event stream and filesystem
+      effects; the agent's self-report is checked against, not substituted for,
+      those primary observations.
 - [ ] CI verification against the exact final head commit.
 - [ ] Codex review against the exact final head, with no unresolved P1 or P2
       findings.
