@@ -339,26 +339,26 @@ def _unquoted_shell_text(command: str) -> str | None:
 # --- Data I/O source-scanning regexes ---
 INPUT_REGEXES = [
     re.compile(
-        r"""pd\.read_(?:parquet|csv|tsv|feather|hdf|h5|json|excel|stata|sas|orc|pickle|table)\s*\(\s*["']([^"']+)["']"""
+        r"""pd\.read_(?:parquet|csv|tsv|feather|hdf|h5|json|excel|stata|sas|orc|pickle|table)\s*\(\s*["']([^"']+)["']\s*(?=[,)])"""
     ),
-    re.compile(r"""ad\.read_h5ad\s*\(\s*["']([^"']+)["']"""),
-    re.compile(r"""ad\.read_csv\s*\(\s*["']([^"']+)["']"""),
-    re.compile(r"""np\.load\s*\(\s*["']([^"']+)["']"""),
+    re.compile(r"""ad\.read_h5ad\s*\(\s*["']([^"']+)["']\s*(?=[,)])"""),
+    re.compile(r"""ad\.read_csv\s*\(\s*["']([^"']+)["']\s*(?=[,)])"""),
+    re.compile(r"""np\.load\s*\(\s*["']([^"']+)["']\s*(?=[,)])"""),
     re.compile(
-        r"""xr\.open_(?:dataset|dataarray|zarr|mfdataset)\s*\(\s*["']([^"']+)["']"""
+        r"""xr\.open_(?:dataset|dataarray|zarr|mfdataset)\s*\(\s*["']([^"']+)["']\s*(?=[,)])"""
     ),
     re.compile(
-        r"""sc\.read(?:_h5ad|_csv|_mtx|_10x_h5|_10x_mtx)?\s*\(\s*["']([^"']+)["']"""
+        r"""sc\.read(?:_h5ad|_csv|_mtx|_10x_h5|_10x_mtx)?\s*\(\s*["']([^"']+)["']\s*(?=[,)])"""
     ),
 ]
 OUTPUT_REGEXES = [
     re.compile(
-        r"""\.to_(?:parquet|csv|tsv|feather|hdf|h5|json|excel|stata|sas|orc|pickle|table)\s*\(\s*["']([^"']+)["']"""
+        r"""\.to_(?:parquet|csv|tsv|feather|hdf|h5|json|excel|stata|sas|orc|pickle|table)\s*\(\s*["']([^"']+)["']\s*(?=[,)])"""
     ),
-    re.compile(r"""\.write_(?:csv|parquet|json|h5ad)\s*\(\s*["']([^"']+)["']"""),
-    re.compile(r"""np\.save(?:_compressed|z)?\s*\(\s*["']([^"']+)["']"""),
-    re.compile(r"""(?:plt|fig|ax)\.savefig\s*\(\s*["']([^"']+)["']"""),
-    re.compile(r"""\.to_netcdf\s*\(\s*["']([^"']+)["']"""),
+    re.compile(r"""\.write_(?:csv|parquet|json|h5ad)\s*\(\s*["']([^"']+)["']\s*(?=[,)])"""),
+    re.compile(r"""np\.save(?:_compressed|z)?\s*\(\s*["']([^"']+)["']\s*(?=[,)])"""),
+    re.compile(r"""(?:plt|fig|ax)\.savefig\s*\(\s*["']([^"']+)["']\s*(?=[,)])"""),
+    re.compile(r"""\.to_netcdf\s*\(\s*["']([^"']+)["']\s*(?=[,)])"""),
 ]
 FILTER_REGEXES = [
     re.compile(r"""(\.query\s*\(\s*["'][^"']*["']\s*\))"""),
@@ -1436,24 +1436,15 @@ _PATH_KEYWORDS = {
     "store",
 }
 _KNOWN_IO_MODULE_ROOTS = {
-    "ad",
     "anndata",
     "dask",
-    "dd",
     "geopandas",
-    "gpd",
     "matplotlib",
-    "np",
     "numpy",
-    "pa",
     "pandas",
-    "pd",
-    "pl",
     "polars",
     "pyarrow",
-    "sc",
     "scanpy",
-    "xr",
     "xarray",
 }
 _DETERMINISTIC_PATH_CALLS = {
@@ -1519,11 +1510,12 @@ def _io_call_direction(
         "scanpy.read",
     }:
         # Readers are module functions, not arbitrary object methods. Require
-        # a conventional package/alias or an import that canonicalizes to one;
-        # a user-defined ``read_csv`` must never fabricate provenance.
+        # an actual supported import and reject any alias rebound elsewhere in
+        # the source; familiar spellings alone do not prove data I/O.
         raw_root = raw_name.split(".", 1)[0]
         if (
-            raw_root not in locally_bound_roots
+            raw_root in import_aliases
+            and raw_root not in locally_bound_roots
             and "." in name
             and parts[0] in _KNOWN_IO_MODULE_ROOTS
         ):
@@ -1562,12 +1554,27 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
             for target in targets:
                 if isinstance(target, ast.Name) and value is not None:
                     assignments.setdefault(target.id, []).append(value)
-    locally_bound_roots = set(assignments) | shadowed_names
+    locally_bound_roots = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+    locally_bound_roots.update(shadowed_names)
     locally_bound_roots.update(
         node.name
         for node in ast.walk(tree)
         if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef))
     )
+    locally_bound_roots.update(
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ExceptHandler) and node.name
+    )
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            locally_bound_roots.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            locally_bound_roots.add(node.rest)
 
     unresolved = object()
 
@@ -1606,6 +1613,12 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
                 return container[index]
             except (IndexError, KeyError, TypeError):
                 return unresolved
+        if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+            left = static_value(expression.left, resolving)
+            right = static_value(expression.right, resolving)
+            if isinstance(left, str) and isinstance(right, str):
+                return left + right
+            return unresolved
         return unresolved
 
     def collect(
@@ -1652,7 +1665,10 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
                     return None
             return set()
         if isinstance(expression, ast.BinOp):
-            if not isinstance(expression.op, (ast.Add, ast.Div)):
+            if isinstance(expression.op, ast.Add):
+                value = static_value(expression, resolving)
+                return {value} if isinstance(value, str) else None
+            if not isinstance(expression.op, ast.Div):
                 return None
             left = collect(expression.left, resolving)
             right = collect(expression.right, resolving)
