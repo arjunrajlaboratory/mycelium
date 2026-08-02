@@ -136,8 +136,9 @@ def topup_hooks(repo_path: Path, dry_run: bool = False) -> bool:
     ir.ensure_safe_regular_file(settings_path)
     before_signature = ""
     if settings_path.exists():
+        existing = ir.load_hook_config(settings_path)
         before_signature = json.dumps(
-            json.loads(settings_path.read_text()).get("hooks", {}),
+            existing.get("hooks", {}),
             sort_keys=True,
         )
 
@@ -146,7 +147,7 @@ def topup_hooks(repo_path: Path, dry_run: bool = False) -> bool:
         # whether the bundle is incomplete by inspecting what's there.
         if not settings_path.exists():
             return True
-        existing = json.loads(settings_path.read_text())
+        existing = ir.load_hook_config(settings_path)
         hooks = existing.get("hooks", {})
         for event, matcher, basename in ir.CLAUDE_HOOK_SPECS:
             matches = [
@@ -271,7 +272,7 @@ def topup_codex_hooks(repo_path: Path, dry_run: bool = False) -> bool:
     if dry_run:
         if before is None:
             return False
-        config = json.loads(before) if before is not None else {}
+        config = ir.validate_hook_config(json.loads(before), hooks_path)
         expected = json.loads(json.dumps(config))
         return ir._remove_codex_hooks_config(expected)
     ir.install_codex_hooks(repo_path)
@@ -376,6 +377,7 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
     )
     for relative in managed_files:
         ir.ensure_safe_regular_file(repo_path / relative)
+    ir.preflight_hook_config_files(repo_path)
 
     claude_md_applied = reanchor_claude_md(repo_path, dry_run=dry_run)
     guidance_applied = ensure_cross_agent_guidance(repo_path, dry_run=dry_run)

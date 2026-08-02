@@ -190,6 +190,71 @@ def ensure_directory_tree_has_no_symlinks(directory: Path) -> None:
                 raise ValueError(f"Refusing symlinked Mycelium path: {candidate}")
 
 
+def validate_hook_config(config: object, source: str | Path) -> dict:
+    """Validate the hook structures traversed by the installers.
+
+    Unknown top-level, group, and handler fields remain valid so user-authored
+    configuration is preserved. Only the container and command types that the
+    Mycelium installers inspect are constrained here.
+    """
+    label = str(source)
+    if not isinstance(config, dict):
+        raise ValueError(f"{label}: hook configuration must be an object")
+
+    if "hooks" not in config:
+        return config
+    hooks = config["hooks"]
+    if not isinstance(hooks, dict):
+        raise ValueError(f"{label}: hooks must be an object")
+
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            raise ValueError(f"{label}: hook event {event!r} must be a list")
+        for group_index, group in enumerate(groups):
+            if not isinstance(group, dict):
+                raise ValueError(
+                    f"{label}: hook group must be an object "
+                    f"({event!r}[{group_index}])"
+                )
+            if "hooks" not in group:
+                continue
+            handlers = group["hooks"]
+            if not isinstance(handlers, list):
+                raise ValueError(
+                    f"{label}: hook handlers must be a list "
+                    f"({event!r}[{group_index}])"
+                )
+            for handler_index, handler in enumerate(handlers):
+                if not isinstance(handler, dict):
+                    raise ValueError(
+                        f"{label}: hook handler must be an object "
+                        f"({event!r}[{group_index}].hooks[{handler_index}])"
+                    )
+                command = handler.get("command", "")
+                if not isinstance(command, str):
+                    raise ValueError(
+                        f"{label}: hook command must be a string "
+                        f"({event!r}[{group_index}].hooks[{handler_index}])"
+                    )
+    return config
+
+
+def load_hook_config(config_path: Path) -> dict:
+    """Parse and validate an existing Claude or Codex hook config."""
+    parsed = json.loads(config_path.read_text(encoding="utf-8"))
+    return validate_hook_config(parsed, config_path)
+
+
+def preflight_hook_config_files(target_dir: Path) -> None:
+    """Validate all existing host hook configs before any managed write."""
+    for config_path in (
+        target_dir / ".claude" / "settings.local.json",
+        target_dir / ".codex" / "hooks.json",
+    ):
+        if config_path.exists():
+            load_hook_config(config_path)
+
+
 def preflight_initialization(target_dir: Path) -> None:
     """Validate every repository-controlled initialization output before writes."""
     target_dir.resolve(strict=True)
@@ -198,12 +263,7 @@ def preflight_initialization(target_dir: Path) -> None:
     for relative_path in MANAGED_INIT_FILES:
         ensure_safe_regular_file(target_dir / relative_path)
 
-    for config_path in (
-        target_dir / ".claude" / "settings.local.json",
-        target_dir / ".codex" / "hooks.json",
-    ):
-        if config_path.exists():
-            json.loads(config_path.read_text(encoding="utf-8"))
+    preflight_hook_config_files(target_dir)
 
     network_dir = find_network_conventions_dir()
     if network_dir:
@@ -878,7 +938,7 @@ def install_claude_hooks(target_dir: Path):
     # Load existing settings if present
     if settings_path.exists():
         original_content = settings_path.read_text()
-        settings = json.loads(original_content)
+        settings = validate_hook_config(json.loads(original_content), settings_path)
     else:
         settings = {}
 
@@ -1021,8 +1081,9 @@ def _remove_codex_hooks_config(config: dict) -> bool:
     unrelated user hook and remove only handlers whose command resolves to a
     known Mycelium hook basename.
     """
+    validate_hook_config(config, "Codex hook configuration")
     hooks = config.get("hooks")
-    if not isinstance(hooks, dict):
+    if hooks is None:
         return False
 
     changed = False
@@ -1067,7 +1128,7 @@ def install_codex_hooks(target_dir: Path):
     ensure_safe_regular_file(gitignore)
     changed = False
     if hooks_path.exists():
-        config = json.loads(hooks_path.read_text())
+        config = load_hook_config(hooks_path)
         changed = _remove_codex_hooks_config(config)
         if changed:
             if config:
