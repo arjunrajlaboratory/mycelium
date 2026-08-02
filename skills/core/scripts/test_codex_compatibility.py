@@ -356,6 +356,86 @@ def test_fresh_init_preflights_malformed_hook_config_before_mutation(tmp_path):
     assert sorted(path.name for path in repo.iterdir()) == [".claude", ".git"]
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    [".claude/settings.local.json", ".codex/hooks.json"],
+)
+def test_fresh_init_preflights_malformed_hook_schema_before_mutation(
+    tmp_path, relative_path
+):
+    repo = _repo(tmp_path, living=False)
+    config_path = repo / relative_path
+    config_path.parent.mkdir()
+    malformed = {"hooks": {"PostToolUse": ["not-a-hook-group"]}}
+    config_path.write_text(json.dumps(malformed) + "\n")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(init_repo.__file__).resolve()),
+            "--target-dir",
+            str(repo),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "hook group must be an object" in result.stderr
+    assert config_path.read_text() == json.dumps(malformed) + "\n"
+    assert sorted(path.name for path in repo.iterdir()) == [
+        config_path.parent.name,
+        ".git",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ([], "hook configuration must be an object"),
+        ({"hooks": []}, "hooks must be an object"),
+        ({"hooks": {"Stop": {}}}, "hook event 'Stop' must be a list"),
+        (
+            {"hooks": {"Stop": [{"hooks": {}}]}},
+            "hook handlers must be a list",
+        ),
+        (
+            {"hooks": {"Stop": [{"hooks": ["not-a-handler"]}]}},
+            "hook handler must be an object",
+        ),
+        (
+            {"hooks": {"Stop": [{"hooks": [{"command": 7}]}]}},
+            "hook command must be a string",
+        ),
+    ],
+)
+def test_hook_config_validator_rejects_every_traversed_malformed_type(
+    config, message
+):
+    with pytest.raises(ValueError, match=message):
+        init_repo.validate_hook_config(config, "test config")
+
+
+def test_hook_config_validator_preserves_unknown_and_commandless_handlers():
+    config = {
+        "permissions": {"allow": ["Read"]},
+        "hooks": {
+            "Notification": [
+                {
+                    "matcher": "permission_prompt",
+                    "hooks": [
+                        {"type": "prompt", "prompt": "Summarize the request."}
+                    ],
+                    "host_extension": True,
+                }
+            ]
+        },
+    }
+
+    assert init_repo.validate_hook_config(config, "test config") is config
+
+
 def test_agent_guidance_atomic_update_preserves_existing_permissions(tmp_path):
     repo = _repo(tmp_path, living=False)
     claude = repo / "CLAUDE.md"

@@ -338,6 +338,7 @@ exercise them.
 | A code-mode local tool returns model-facing `input_text` blocks containing serialized result JSON | Exit status is recovered recursively for lineage, conditional execution, and failed-edit activity classification. |
 | Multiple SessionStart hooks race, or today's log numbers contain a gap | One primary log and one atomic two-line marker are created; no occupied log number is reused. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
+| A Claude or Codex hook config is valid JSON but has malformed event, group, handler, or command types | Initialization and migration reject it before changing guidance, runtime state, hooks, todo files, or the knowledge index. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |
 
 ## Validation Gate

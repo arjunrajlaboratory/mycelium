@@ -422,6 +422,30 @@ class TestMigrateOne:
         assert (fake_repo / "CLAUDE.md").read_text() == original_claude
         assert not (fake_repo / ".mycelium").exists()
 
+    @pytest.mark.parametrize(
+        "relative_path",
+        [".claude/settings.local.json", ".codex/hooks.json"],
+    )
+    def test_preflights_malformed_hook_schema_before_any_migration_write(
+        self, fake_repo: Path, relative_path: str
+    ) -> None:
+        config_path = fake_repo / relative_path
+        config_path.parent.mkdir(exist_ok=True)
+        malformed = {"hooks": {"PostToolUse": ["not-a-hook-group"]}}
+        config_path.write_text(json.dumps(malformed) + "\n", encoding="utf-8")
+        original_claude = (fake_repo / "CLAUDE.md").read_text(encoding="utf-8")
+
+        with pytest.raises(ValueError, match="hook group must be an object"):
+            mig.migrate_one(fake_repo)
+
+        assert config_path.read_text(encoding="utf-8") == (
+            json.dumps(malformed) + "\n"
+        )
+        assert (fake_repo / "CLAUDE.md").read_text(encoding="utf-8") == original_claude
+        assert not (fake_repo / "MYCELIUM.md").exists()
+        assert not (fake_repo / "AGENTS.md").exists()
+        assert not (fake_repo / ".mycelium").exists()
+
     def test_repairs_guidance_and_removes_legacy_project_codex_hooks(
         self, fake_repo: Path
     ) -> None:
