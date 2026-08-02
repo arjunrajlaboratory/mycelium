@@ -205,12 +205,14 @@ dedicated lifecycle and retain that root ID. Publish identity before the active
 marker, encode the ownership format in that marker, and fail closed when a
 required companion identity is corrupt, multiline, or missing. Retain shared
 timestamps only as an upgrade fallback for markers that identify legacy
-sessions.
+sessions. Once an identified transaction's marker is gone, later identified
+PostToolUse payloads are stale and must not fall back to markerless legacy mode.
 
 **Regression evidence:** Start a new root owner while the prior task remains
-unfinalized, then deliver late tool and Stop events from the old owner. Require
-the new marker, log, owner token, raw lineage events, and baselines to remain
-byte-identical; only the new root Stop may consume them.
+unfinalized, then deliver late tool and Stop events from the old owner. Also
+deliver Bash/edit/read events after an accepted Stop removed the marker. Require
+the current state to remain byte-identical and no transaction state to be
+recreated; only identity-free legacy payloads may use markerless behavior.
 
 ## 15. Terminal-only mode is treated as execution
 
@@ -248,19 +250,21 @@ names.
 
 ## 17. A new root task is mistaken for a nested child
 
-**Failure:** SessionStart sees a recent repository-global marker and reuses it,
-so a fresh host task writes into an older task's log. Its Stop cannot finalize
-because the owner IDs differ, leaving both tasks stranded.
+**Failure:** SessionStart treats every different root identity as proof that the
+current owner is abandoned, so a concurrent live task loses its marker,
+baselines, reminders, activity, and raw lineage to the newcomer.
 
 **Invariant:** Use the host lifecycle contract: root SessionStart and
 SubagentStart are distinct, and subagents retain their parent's session ID. A
-fresh root startup with a different valid ID supersedes the old repository
-transaction while preserving its audit evidence. Every shared PostToolUse
-writer checks ownership before mutation.
+different root startup may supersede an old repository transaction only after
+the same owner-age and activity/reminder liveness checks prove it inactive.
+Live owners remain intact and the competing task receives an explicit warning.
+Every shared PostToolUse writer checks ownership before mutation.
 
-**Regression evidence:** Supersede a live owner, then send late Bash/edit/Stop
-events from it. Require a fresh log/baseline for the new owner, archived old raw
-lineage, an intact old log, and byte-stable new state after every late event.
+**Regression evidence:** First attempt to supersede a live owner and require its
+marker, owner, log, raw lineage, reminder, activity, and baselines to remain
+byte-identical. Then age both the owner and its liveness signals beyond the
+threshold, retry, and require a fresh log/baseline plus archived old evidence.
 
 ## 18. Control-plane work is classified as analysis work
 
@@ -374,3 +378,36 @@ authoritative; fallback status is reported only when it adds a new path.
 **Regression evidence:** Cover a direct relative input that exists in the repo
 and an absolute external input whose basename also exists locally. Require one
 static record in each case and no `static+repository` claim.
+
+## 26. Unrelated literals are fabricated as data lineage
+
+**Failure:** Repository recovery treats every data-looking string constant as
+provenance, so a docstring or display label such as `ghost.csv` fabricates an
+input. It also guesses direction from directory names, misclassifying a read
+from `results/` as an output.
+
+**Invariant:** Recovery candidates must data-flow into the path argument of a
+recognized reader or writer expression. Direction is semantic evidence from
+that call, never a directory-name heuristic. Ambiguous assignment flow is left
+unresolved rather than guessed.
+
+**Regression evidence:** Place a uniquely named `ghost.csv` in the repository
+and mention it only in a module docstring; require no lineage. Read a dynamic
+path under `results/` and write one under `data/`; require input/output direction
+to follow the calls.
+
+## 27. Resolved I/O triggers repository traversal
+
+**Failure:** Every script containing a data-like literal recursively walks the
+repository even when ordinary static extraction already resolved all I/O. Large
+scientific data trees then delay or time out a synchronous PostToolUse hook.
+
+**Invariant:** Remove statically resolved call-path candidates before repository
+discovery and skip discovery when none remain. Dynamic discovery excludes
+runtime/vendor trees and has a fixed entry bound; hitting the bound yields
+unresolved lineage instead of an unbounded delay or partial guess.
+
+**Regression evidence:** Replace the repository-query primitive with a failing
+spy and process a direct `read_csv('data/raw/sample.csv')`; require the static
+event to succeed without invoking the spy. Exercise the bound separately and
+require an unresolved result.

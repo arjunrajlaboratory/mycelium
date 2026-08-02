@@ -35,8 +35,7 @@ source "$HERE/mycelium-hook-lib.sh"
   # other trackers). Bail unless the repo has .living/ (mycelium-enabled).
   REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo "")
   if [[ -z "$REPO_ROOT" ]] || [[ ! -d "$REPO_ROOT/.living" ]]; then exit 0; fi
-  mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
-  mycelium_payload_owns_active_session "$REPO_ROOT" "$INPUT" || exit 0
+  mycelium_prepare_post_tool_state "$REPO_ROOT" "$INPUT" || exit 0
 
   AGENT_ID=$(printf '%s' "$INPUT" | mycelium_json_get 'agent_id')
   AGENT_TYPE=$(printf '%s' "$INPUT" | mycelium_json_get 'agent_type')

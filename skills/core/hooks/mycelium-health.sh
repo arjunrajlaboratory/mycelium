@@ -99,39 +99,32 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
   _SHOULD_CLEAN=false
   _STALE_LOG=""
   _STALE_OWNER_TS=""
+  _STALE_OWNER_FORMAT=""
+  _STALE_OWNER_ID=""
+  _DIFFERENT_ROOT_OWNER=false
+  _SUPERSEDED_OWNER=false
   if _ACTIVE_MARKER=$(mycelium_read_active_log_marker "$REPO_ROOT" "$ACTIVE_LOG_FILE"); then
     _STALE_LOG=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '1p')
     _STALE_OWNER_TS=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '2p')
+    _STALE_OWNER_FORMAT=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '3p')
   else
     _SHOULD_CLEAN=true
     MESSAGES="${MESSAGES}CORRUPT SESSION MARKER: Removed an invalid active-session marker without following its path. Session lifecycle state will be rebuilt safely.\n\n"
   fi
   # SessionStart represents a root host task; current Claude and Codex
   # subagents use their dedicated lifecycle events and retain the parent's
-  # session_id. A startup carrying a different valid host ID is therefore a
-  # new root task, not a child. Supersede the stale repository transaction so
-  # the new task cannot inherit or append to it.
-  _SUPERSEDED_OWNER=false
+  # session_id. A startup carrying a different valid host ID is therefore an
+  # independent root task. Record the identity mismatch here, but do not let it
+  # supersede a transaction until the ordinary liveness checks below prove the
+  # prior owner abandoned.
   if [[ "$_SHOULD_CLEAN" != true \
     && "$SOURCE" == "startup" \
-    && "$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '3p')" == "owner-id-v1" \
+    && "$_STALE_OWNER_FORMAT" == "owner-id-v1" \
     && "$HOST_SESSION_ID" =~ ^[A-Za-z0-9._-]+$ \
     && ${#HOST_SESSION_ID} -le 200 ]]; then
     if _STALE_OWNER_ID=$(mycelium_read_session_owner_id "$ACTIVE_OWNER_FILE") \
       && [[ "$_STALE_OWNER_ID" != "$HOST_SESSION_ID" ]]; then
-      _SUPERSEDED_OWNER=true
-      _SHOULD_CLEAN=true
-      if ! mycelium_archive_abandoned_events "$_STALE_OWNER_ID"; then
-        exit 0
-      fi
-      rm -f \
-        "$STATE_DIR/data-lineage-session-id.tmp" \
-        "$STATE_DIR/handoff-finalization-pending.tmp" \
-        "$STATE_DIR/mycelium-reminded.tmp" \
-        "$STATE_DIR/mycelium-session-activity.tmp" \
-        "$STATE_DIR/living-reminder-baseline.json" \
-        "$STATE_DIR/session-file-baseline.json"
-      MESSAGES="${MESSAGES}ABANDONED PRIOR SESSION: A new root host task superseded the unfinalized transaction owned by ${_STALE_OWNER_ID}. Its log and archived raw lineage were preserved for audit; this task has a fresh lifecycle transaction.\n\n"
+      _DIFFERENT_ROOT_OWNER=true
     fi
   fi
   # Definitive signals — clean regardless of activity:
@@ -171,6 +164,14 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
       _SHOULD_CLEAN=true
     fi
   fi
+  if [[ "$_DIFFERENT_ROOT_OWNER" == true ]]; then
+    if [[ "$_SHOULD_CLEAN" == true ]]; then
+      _SUPERSEDED_OWNER=true
+      MESSAGES="${MESSAGES}ABANDONED PRIOR SESSION: A new root host task superseded the inactive transaction owned by ${_STALE_OWNER_ID}. Its log and archived raw lineage were preserved for audit; this task has a fresh lifecycle transaction.\n\n"
+    else
+      MESSAGES="${MESSAGES}ACTIVE SESSION PRESERVED: Another root task (${_STALE_OWNER_ID}) still owns this repository's live Mycelium transaction. This task will not replace or mutate that lifecycle state.\n\n"
+    fi
+  fi
   if [ "$_SHOULD_CLEAN" = true ]; then
     # If the orphaned log was never finalized, surface a warning so the new
     # session knows about it. Archive raw lineage before dropping every
@@ -179,10 +180,12 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
     if [ -n "$_STALE_LOG" ] && [ -f "$_STALE_LOG" ] && ! grep -q "## Session Summary" "$_STALE_LOG"; then
       MESSAGES="${MESSAGES}INCOMPLETE SESSION LOG: Previous session log at ${_STALE_LOG} was never finalized (likely a crashed session). Add a '## Session Summary' section and append a row to the registry, or delete it.\n\n"
     fi
-    if [ "${_SUPERSEDED_OWNER:-false}" != true ]; then
-      if ! mycelium_archive_abandoned_events "abandoned-$(date +%s)"; then
-        exit 0
-      fi
+    _ARCHIVE_FALLBACK="abandoned-$(date +%s)"
+    if [ "${_SUPERSEDED_OWNER:-false}" = true ]; then
+      _ARCHIVE_FALLBACK="$_STALE_OWNER_ID"
+    fi
+    if ! mycelium_archive_abandoned_events "$_ARCHIVE_FALLBACK"; then
+      exit 0
     fi
     rm -f "$ACTIVE_LOG_FILE"
     rm -f "$ACTIVE_OWNER_FILE"
@@ -301,8 +304,9 @@ if [ -d "$LIVING_DIR" ]; then
 REGISTRY_EOF
   fi
 
-  # Create new log file only if no active session log exists (fresh process start)
-  # If active-session-log.tmp exists, we're a subagent — skip log creation
+  # Create a log only when no active transaction exists. A retained marker may
+  # belong to a subagent's parent or another live root task; neither caller may
+  # reserve a competing repository-global transaction.
   if [ ! -f "$ACTIVE_LOG_FILE" ]; then
     TODAY=$(date +%Y-%m-%d)
     # Pick one greater than the highest number already used today. Counting
