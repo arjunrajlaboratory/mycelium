@@ -183,6 +183,31 @@ def test_detect_script_jupyter() -> None:
     assert script == Path("/tmp/nb.ipynb")
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "jupyter nbconvert --to notebook input.ipynb",
+        "jupyter nbconvert --output converted.ipynb input.ipynb",
+        "jupyter nbconvert --output=converted.ipynb input.ipynb",
+    ],
+)
+def test_detect_script_jupyter_skips_option_values(command: str) -> None:
+    script, inline = detect_script(command, Path("/tmp"))
+
+    assert script == Path("/tmp/input.ipynb")
+    assert inline is None
+
+
+def test_detect_script_jupyter_rejects_unknown_separated_option_arity() -> None:
+    script, inline = detect_script(
+        "jupyter nbconvert --Unknown.option converted.ipynb input.ipynb",
+        Path("/tmp"),
+    )
+
+    assert script is None
+    assert inline is None
+
+
 # ---------- scan_source: inputs ----------
 
 

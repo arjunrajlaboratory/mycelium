@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Lifecycle Audit"
+  short_description: "Black-box audit Mycelium lifecycle hooks"
+  default_prompt: "Use $mycelium:lifecycle-audit to run a real-host lifecycle smoke test and classify any failures."

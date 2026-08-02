@@ -44,7 +44,10 @@ claude plugin marketplace add arjunrajlaboratory/mycelium
 claude plugin install mycelium@mycelium
 ```
 
-This permanently registers the mycelium plugin with your Claude Code installation. The slash commands (`/mycelium:core`, `/mycelium:analyze`, `/mycelium:report`, `/mycelium:ideas`, `/mycelium:ingest`, `/mycelium:review`, `/mycelium:codex-review`, `/mycelium:transfer`) become available in all sessions.
+This permanently registers the mycelium plugin with your Claude Code
+installation. Its shared skills—including the analysis, reporting, review,
+development, and lifecycle-audit workflows—become available as namespaced slash
+commands in all sessions.
 
 **Codex:**
 
@@ -114,6 +117,8 @@ under the plugin name:
 - `/mycelium:review` or `$mycelium:review` — analysis-aware code review for PRs, commits, or working-tree changes
 - `/mycelium:codex-review` or `$mycelium:codex-review` — address Codex review comments and audit the whole branch for the same error pattern in one pass
 - `/mycelium:transfer` or `$mycelium:transfer` — cross-pollinate learnings across sibling projects
+- `/mycelium:develop` or `$mycelium:develop` — change the Mycelium plugin itself with cross-host TDD, pattern sweeps, and the release checklist
+- `/mycelium:lifecycle-audit` or `$mycelium:lifecycle-audit` — black-box SessionStart/PostToolUse/Stop behavior through a real Claude Code or Codex task
 
 Mycelium's hooks enforce the post-action protocol automatically after every significant action:
 

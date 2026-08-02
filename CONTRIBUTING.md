@@ -92,6 +92,9 @@ The shared skills (`skills/*/SKILL.md`), hooks (`skills/core/hooks/`), scripts, 
    migration, session accounting, or data lineage must use the
    [cross-host compatibility review checklist](docs/cross-host-review-checklist.md)
    before merge
+7. Maintainers can invoke `/mycelium:develop` or `$mycelium:develop` to apply
+   the cross-host TDD workflow, and `/mycelium:lifecycle-audit` or
+   `$mycelium:lifecycle-audit` for a natural-dispatch real-host smoke test
 
 ## Code of Conduct
 

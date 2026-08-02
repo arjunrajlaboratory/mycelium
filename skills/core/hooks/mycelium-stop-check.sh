@@ -14,6 +14,16 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/mycelium-hook-lib.sh"
 
+mycelium_handoff_has_headings() {
+  local file="$1"
+  local heading=""
+  shift
+  for heading in "$@"; do
+    grep -Fqx "$heading" "$file" 2>/dev/null || return 1
+  done
+  return 0
+}
+
 # Consume the hook payload. Claude Code and Codex set stop_hook_active=true
 # after a Stop hook asks the model to continue. That flag must not bypass an
 # outstanding Mycelium reminder: the state checks below naturally stop
@@ -28,8 +38,10 @@ if [ -z "$REPO_ROOT" ]; then
 fi
 mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
 if ! mycelium_acquire_stop_lock "$STATE_DIR"; then
-  # Another Stop invocation owns the transaction and will produce the single
-  # authoritative decision/finalization.
+  # A concurrent owner may still fail or be interrupted, so accepting this Stop
+  # would bypass lifecycle enforcement. Preserve state and ask the host to retry.
+  mycelium_emit_stop_block \
+    "STOP BLOCKED — the lifecycle transaction lock remained busy. Active state was preserved; wait for the other lifecycle hook to finish, then retry Stop."
   exit 0
 fi
 trap mycelium_release_stop_lock EXIT
@@ -179,14 +191,16 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
     fi
     FILES_CHANGED=0
     if [ -n "$SESSION_CHANGED_FILES" ]; then
-      FILES_CHANGED=$(printf '%s\n' "$SESSION_CHANGED_FILES" | grep -c . || echo "0")
+      FILES_CHANGED=$(printf '%s\n' "$SESSION_CHANGED_FILES" | grep -c . || true)
+      FILES_CHANGED=${FILES_CHANGED:-0}
     fi
 
     # Explicit Edit/Write activity is an independent work signal. The helper's
     # file set already includes committed and Bash-mutated paths.
     ACTIVITY_COUNT=0
     if [ -f "$ACTIVITY_FILE_CHECK" ]; then
-      ACTIVITY_COUNT=$(sort -u "$ACTIVITY_FILE_CHECK" | grep -c . 2>/dev/null || echo "0")
+      ACTIVITY_COUNT=$(sort -u "$ACTIVITY_FILE_CHECK" | grep -c . 2>/dev/null || true)
+      ACTIVITY_COUNT=${ACTIVITY_COUNT:-0}
     fi
     REMINDER_COUNT=0
     if [ -f "$STATE_DIR/mycelium-reminded.tmp" ]; then
@@ -319,17 +333,22 @@ if [ -n "$REPO_ROOT" ] && [ -f "$ACTIVE_LOG_FILE" ]; then
       _SESSION_MTIME=0
       if [ -f "$_SESSION_FILE" ] && [ ! -L "$_SESSION_FILE" ]; then
         _SESSION_MTIME=$(mycelium_file_mtime "$_SESSION_FILE" 2>/dev/null || echo "0")
-        for _REQUIRED_HEADING in \
+        if mycelium_handoff_has_headings "$_SESSION_FILE" \
           "## What was worked on" \
           "## Key decisions made" \
           "## Blockers & surprises" \
           "## Current state" \
-          "## Next steps"; do
-          if ! grep -Fqx "$_REQUIRED_HEADING" "$_SESSION_FILE" 2>/dev/null; then
-            _SESSION_COMPLETE=false
-            break
-          fi
-        done
+          "## Next steps" \
+          || mycelium_handoff_has_headings "$_SESSION_FILE" \
+          "## Current State" \
+          "## What Was Done" \
+          "## Key Decisions" \
+          "## Next Steps" \
+          "## Relevant Files"; then
+          _SESSION_COMPLETE=true
+        else
+          _SESSION_COMPLETE=false
+        fi
         if [[ "$START_TS" =~ ^[0-9]+$ \
           && "$_SESSION_MTIME" =~ ^[0-9]+$ \
           && "$_SESSION_MTIME" -ge "$START_TS" ]]; then
@@ -487,7 +506,8 @@ fi
 FILE_COUNT=0
 FILE_NAMES=""
 if [ -f "$ACTIVITY_FILE" ]; then
-  FILE_COUNT=$(sort -u "$ACTIVITY_FILE" | grep -c . || echo "0")
+  FILE_COUNT=$(sort -u "$ACTIVITY_FILE" | grep -c . || true)
+  FILE_COUNT=${FILE_COUNT:-0}
   FILE_NAMES=$(sort -u "$ACTIVITY_FILE" | head -15 | xargs -I {} basename {} 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
 fi
 

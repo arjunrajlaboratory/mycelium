@@ -8,6 +8,15 @@
 
 set -euo pipefail
 
+# Claude Code discovers the same conventional hooks/hooks.json path as Codex.
+# Initialized Mycelium projects already register the native Claude hooks in
+# .claude/settings.local.json, so decline this Codex adapter when Claude
+# cross-loads it. Claude Code documents and exports CLAUDE_PROJECT_DIR to every
+# hook process; Codex does not.
+if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
+  exit 0
+fi
+
 HOOK_NAME="${1:-}"
 case "$HOOK_NAME" in
   mycelium-health.sh|mycelium-post-action.sh|mycelium-data-tracker.sh|mycelium-activity-tracker.sh|mycelium-data-lineage-stop.sh|mycelium-stop-check.sh)

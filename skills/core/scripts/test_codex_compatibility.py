@@ -87,8 +87,10 @@ def test_all_skills_have_codex_metadata():
         "analyze",
         "codex-review",
         "core",
+        "develop",
         "ideas",
         "ingest",
+        "lifecycle-audit",
         "report",
         "review",
         "transfer",
@@ -103,6 +105,81 @@ def test_all_skills_have_codex_metadata():
             "default_prompt"
         ]
         assert f"$mycelium:{skill_dir.name}" in default_prompt
+
+
+def test_development_skills_encode_cross_host_regression_workflow():
+    develop = " ".join(
+        (PLUGIN_ROOT / "skills" / "develop" / "SKILL.md").read_text().split()
+    )
+    patterns_path = (
+        PLUGIN_ROOT
+        / "skills"
+        / "develop"
+        / "references"
+        / "regression-patterns.md"
+    )
+    patterns = " ".join(patterns_path.read_text().split())
+    audit = " ".join(
+        (PLUGIN_ROOT / "skills" / "lifecycle-audit" / "SKILL.md")
+        .read_text()
+        .split()
+    )
+    protocol_path = (
+        PLUGIN_ROOT
+        / "skills"
+        / "lifecycle-audit"
+        / "references"
+        / "audit-protocol.md"
+    )
+    protocol = " ".join(protocol_path.read_text().split())
+
+    for required in (
+        "base...head",
+        "Reproduce with a red test",
+        "Generalize the defect pattern",
+        "Preflight every source and destination",
+        "$mycelium:lifecycle-audit",
+    ):
+        assert required in develop
+    for required in (
+        "Source checkout is not the installed artifact",
+        "Host process observes a changing artifact",
+        "Validation occurs after mutation begins",
+        "Cross-host hook discovery invokes the wrong adapter",
+        "Host payload omits result metadata",
+        "Lock recovery waits longer than acquisition",
+        "manual hook test",
+        "Option values are mistaken for positional inputs",
+        "Compatibility cleanup deletes user state",
+    ):
+        assert required in patterns
+    for required in (
+        "Do not invoke any Mycelium hook script",
+        "Artifact identity",
+        "Host dispatch",
+        "Agent compliance",
+        "$mycelium:develop",
+    ):
+        assert required in audit
+    for required in (
+        "env -C analysis/example python3 run.py --help",
+        "env -S 'echo prefix' python3 run.py --help",
+        "MYCELIUM_HOOK_AUDIT_DISPOSABLE.tmp",
+        "Do not invoke or read any skill",
+        "Do not inspect plugin identity",
+        "Do not change the source or installed artifact while the host task is running",
+        "Keep ordinary file-reading and editing tools available",
+        "first Stop",
+        "## What was worked on",
+        "## Key decisions made",
+        "## Blockers & surprises",
+        "## Current state",
+        "## Next steps",
+        "observable host stream and filesystem state outrank",
+        "empty `tool_response`",
+        "Scientific isolation",
+    ):
+        assert required in protocol
 
 
 def test_codex_plugin_manifest_points_to_shared_skills():
@@ -603,6 +680,23 @@ def test_plugin_dispatcher_refreshes_pointer_and_runs_hook(tmp_path):
     assert (state_dir / "active-session-log.tmp").is_file()
 
 
+def test_empty_session_start_counts_are_single_numeric_values(tmp_path):
+    repo = _repo(tmp_path)
+
+    result = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "empty-counts"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    context = json.loads(result.stdout)["hookSpecificOutput"][
+        "additionalContext"
+    ]
+    assert "MYCELIUM SUMMARY: 0 learnings, 0 decisions, 0 conventions" in context
+    assert "0\n0" not in context
+
+
 def test_plugin_dispatcher_refuses_symlinked_state_before_pointer_refresh(tmp_path):
     repo = _repo(tmp_path)
     victim = tmp_path / "outside-state"
@@ -621,6 +715,22 @@ def test_plugin_dispatcher_refuses_symlinked_state_before_pointer_refresh(tmp_pa
     assert result.stdout == ""
     assert pointer.read_text() == "do-not-overwrite\n"
     assert sorted(path.name for path in victim.iterdir()) == ["plugin-root"]
+
+
+def test_plugin_dispatcher_declines_hooks_cross_loaded_by_claude(tmp_path):
+    repo = _repo(tmp_path)
+
+    result = _run_plugin_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "session_id": "claude-host"},
+        extra_env={"CLAUDE_PROJECT_DIR": str(repo)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert not (repo / ".mycelium").exists()
+    assert not list((repo / ".living" / "log").glob("20*.md"))
 
 
 def test_plugin_dispatcher_refuses_symlinked_pointer_without_clobbering_target(
@@ -1454,6 +1564,38 @@ def test_codex_data_tracker_reads_exit_from_code_mode_model_output(tmp_path):
     assert event["bash_exit"] == 1
 
 
+def test_codex_data_tracker_preserves_unknown_exit_from_native_empty_response(
+    tmp_path,
+):
+    """Current Codex PostToolUse runs before the outer CLI exit event exists."""
+    repo = _repo(tmp_path)
+    script = repo / "run.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+
+    result = _run_hook(
+        "mycelium-data-tracker.sh",
+        repo,
+        {
+            "session_id": "codex-native-payload",
+            "turn_id": "turn-native-empty-response",
+            "cwd": str(repo),
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "python3 run.py"},
+            "tool_response": "",
+            "tool_use_id": "exec-native-empty-response",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(
+        (repo / ".mycelium" / "mycelium-data-events.tmp").read_text()
+    )
+    assert event["script"] == str(script)
+    assert event["bash_exit"] is None
+    assert event["bash_wall_s"] is None
+
+
 def test_codex_data_tracker_prefers_structured_exit_over_earlier_output_text(tmp_path):
     repo = _repo(tmp_path)
     script = repo / "run.py"
@@ -1953,6 +2095,48 @@ def test_stop_preserves_fresh_complete_five_section_handoff(tmp_path):
     assert handoff.read_text() == complete
 
 
+def test_stop_preserves_fresh_complete_alternate_five_section_handoff(
+    tmp_path,
+):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "alt-handoff-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    (repo / "work.py").write_text("print('work')\n")
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\nA complete alternate handoff must survive Stop.\n"
+    )
+    handoff = state / "last-session.md"
+    complete = (
+        "## Current State\n- Tests passed.\n\n"
+        "## What Was Done\n- Lifecycle smoke audit.\n\n"
+        "## Key Decisions\n- Preserve the authored handoff.\n\n"
+        "## Next Steps\n- Continue review.\n\n"
+        "## Relevant Files\n- `.living/learnings.md`.\n"
+    )
+    handoff.write_text(complete)
+    future = time.time() + 2
+    os.utime(handoff, (future, future))
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "stop_hook_active": False,
+            "turn_id": "alt-handoff-stop",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"decision": "block"' not in result.stdout
+    assert handoff.read_text() == complete
+
+
 def test_stop_fallback_handoff_contains_all_five_sections(tmp_path):
     repo = _repo(tmp_path)
     start = _run_hook(
@@ -2307,6 +2491,75 @@ def test_stop_lock_recovers_empty_stale_lock_directory(tmp_path):
     assert result.returncode == 0, result.stderr
     assert result.stdout == "acquired\n"
     assert not lock.exists()
+
+
+def test_stop_lock_recovers_recent_lock_owned_by_dead_process(tmp_path):
+    state = tmp_path / ".mycelium"
+    lock = state / "mycelium-stop.lock"
+    lock.mkdir(parents=True)
+    (lock / "owner").write_text(f"999999999 {int(time.time())}\n")
+    hook_lib = HOOKS_DIR / "mycelium-hook-lib.sh"
+    command = (
+        f'source "{hook_lib}"\n'
+        f'mycelium_acquire_stop_lock "{state}"\n'
+        'printf "acquired\\n"\n'
+        "mycelium_release_stop_lock\n"
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "acquired\n"
+    assert not lock.exists()
+
+
+def test_stop_lock_does_not_steal_recent_ownerless_publication(tmp_path):
+    state = tmp_path / ".mycelium"
+    lock = state / "mycelium-stop.lock"
+    lock.mkdir(parents=True)
+    hook_lib = HOOKS_DIR / "mycelium-hook-lib.sh"
+    command = (
+        f'source "{hook_lib}"\n'
+        f'mycelium_acquire_stop_lock "{state}"\n'
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True,
+            text=True,
+            timeout=0.2,
+            check=False,
+        )
+
+    assert lock.is_dir()
+    assert not (lock / "owner").exists()
+
+
+def test_stop_fails_closed_when_live_lock_outlasts_retry_budget(tmp_path):
+    repo = _repo(tmp_path)
+    state = repo / ".mycelium"
+    lock = state / "mycelium-stop.lock"
+    lock.mkdir(parents=True)
+    (lock / "owner").write_text(f"{os.getpid()} {int(time.time())}\n")
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "busy-lock"},
+        extra_env={"MYCELIUM_STOP_LOCK_MAX_ATTEMPTS": "2"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"decision": "block"' in result.stdout
+    assert "lifecycle transaction lock" in result.stdout
+    assert lock.is_dir()
 
 
 def test_ci_runs_integration_stress_suite():

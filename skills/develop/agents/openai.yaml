@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mycelium Development"
+  short_description: "Develop and verify Mycelium across hosts"
+  default_prompt: "Use $mycelium:develop to change Mycelium safely with cross-host TDD and regression review."

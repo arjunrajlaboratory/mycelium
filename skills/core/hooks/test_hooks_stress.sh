@@ -143,7 +143,8 @@ echo "TEST 3: Multiple reads accumulate"
   done
   LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if [ -f "$LOG" ]; then
-    LINES=$(grep -c '' "$LOG" 2>/dev/null || echo 0)
+    LINES=$(grep -c '' "$LOG" 2>/dev/null || true)
+    LINES=${LINES:-0}
     if [ "$LINES" -eq 3 ] \
       && grep -q "\.living/INDEX\.md" "$LOG" \
       && grep -q "\.living/learnings\.md" "$LOG" \
@@ -307,7 +308,8 @@ echo "TEST 11: Concurrent writes (10 parallel reads)"
   done
   LOG="$TEST_DIR/.mycelium/mycelium-read-access.log"
   if [ -f "$LOG" ]; then
-    LINES=$(grep -c '' "$LOG" 2>/dev/null || echo 0)
+    LINES=$(grep -c '' "$LOG" 2>/dev/null || true)
+    LINES=${LINES:-0}
     if [ "$LINES" -eq 10 ]; then
       pass "10 concurrent reads → exactly 10 log lines (no corruption)"
     else

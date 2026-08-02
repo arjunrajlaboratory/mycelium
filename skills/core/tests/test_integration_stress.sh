@@ -414,8 +414,10 @@ echo "TEST 7: Concurrent --counts-only runs don't corrupt INDEX.md"
   CONTENT=$(cat "$REPO/.living/INDEX.md")
 
   # Must have exactly one BEGIN/END pair for QUICK_REFERENCE
-  QR_BEGIN_COUNT=$(echo "$CONTENT" | grep -c "<!-- BEGIN QUICK REFERENCE -->" || echo 0)
-  QR_END_COUNT=$(echo "$CONTENT" | grep -c "<!-- END QUICK REFERENCE -->" || echo 0)
+  QR_BEGIN_COUNT=$(echo "$CONTENT" | grep -c "<!-- BEGIN QUICK REFERENCE -->" || true)
+  QR_END_COUNT=$(echo "$CONTENT" | grep -c "<!-- END QUICK REFERENCE -->" || true)
+  QR_BEGIN_COUNT=${QR_BEGIN_COUNT:-0}
+  QR_END_COUNT=${QR_END_COUNT:-0}
 
   if [ "$QR_BEGIN_COUNT" -eq 1 ] && [ "$QR_END_COUNT" -eq 1 ] && \
      echo "$CONTENT" | grep -q "8 entries"; then

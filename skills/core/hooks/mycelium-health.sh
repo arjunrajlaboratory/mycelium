@@ -394,7 +394,8 @@ if [ -d "$LIVING_DIR/findings" ]; then
         TOPIC_COUNT=$((TOPIC_COUNT + 1))
       fi
     done
-    REGISTRY_ROWS=$(grep -c "^| F-" "$FINDINGS_REGISTRY" 2>/dev/null || echo "0")
+    REGISTRY_ROWS=$(grep -c "^| F-" "$FINDINGS_REGISTRY" 2>/dev/null || true)
+    REGISTRY_ROWS=${REGISTRY_ROWS:-0}
     MESSAGES="${MESSAGES}FINDINGS REGISTRY: .living/findings/FINDINGS_REGISTRY.md exists (${REGISTRY_ROWS} findings across ${TOPIC_COUNT} topics). Read it for a quick scan of all findings in this project.\n\n"
   fi
 fi
@@ -424,9 +425,12 @@ if [ -d "$LIVING_DIR" ]; then
   LEARNINGS_COUNT=0
   DECISIONS_COUNT=0
   CONVENTIONS_COUNT=0
-  [ -f "$LIVING_DIR/learnings.md" ]   && LEARNINGS_COUNT=$(grep -c '^### ' "$LIVING_DIR/learnings.md" 2>/dev/null || echo 0)
-  [ -f "$LIVING_DIR/decisions.md" ]   && DECISIONS_COUNT=$(grep -c '^### ' "$LIVING_DIR/decisions.md" 2>/dev/null || echo 0)
-  [ -f "$LIVING_DIR/conventions.md" ] && CONVENTIONS_COUNT=$(grep -c '^## ' "$LIVING_DIR/conventions.md" 2>/dev/null || echo 0)
+  [ -f "$LIVING_DIR/learnings.md" ]   && LEARNINGS_COUNT=$(grep -c '^### ' "$LIVING_DIR/learnings.md" 2>/dev/null || true)
+  [ -f "$LIVING_DIR/decisions.md" ]   && DECISIONS_COUNT=$(grep -c '^### ' "$LIVING_DIR/decisions.md" 2>/dev/null || true)
+  [ -f "$LIVING_DIR/conventions.md" ] && CONVENTIONS_COUNT=$(grep -c '^## ' "$LIVING_DIR/conventions.md" 2>/dev/null || true)
+  LEARNINGS_COUNT=${LEARNINGS_COUNT:-0}
+  DECISIONS_COUNT=${DECISIONS_COUNT:-0}
+  CONVENTIONS_COUNT=${CONVENTIONS_COUNT:-0}
 
   # Count session logs (exclude registry files)
   SESSION_LOG_COUNT=0
