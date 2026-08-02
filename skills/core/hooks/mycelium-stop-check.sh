@@ -55,11 +55,13 @@ ACTIVE_MARKER_VALID=false
 SESSION_OWNERSHIP="legacy"
 LOG_PATH=""
 OWNER_TS=""
+OWNER_FORMAT=""
 if [ -f "$ACTIVE_LOG_FILE" ]; then
   if _ACTIVE_MARKER=$(mycelium_read_active_log_marker "$REPO_ROOT" "$ACTIVE_LOG_FILE"); then
     ACTIVE_MARKER_VALID=true
     LOG_PATH=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '1p')
     OWNER_TS=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '2p')
+    OWNER_FORMAT=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '3p')
   else
     # Never trust a separate owner token when the marker it supposedly owns is
     # invalid. Remove both and continue to independent lifecycle enforcement.
@@ -68,7 +70,8 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
 fi
 
 if [[ "$ACTIVE_MARKER_VALID" == true \
-  && ( -e "$ACTIVE_OWNER_FILE" || -L "$ACTIVE_OWNER_FILE" ) ]]; then
+  && ( "$OWNER_FORMAT" == "owner-id-v1" \
+    || -e "$ACTIVE_OWNER_FILE" || -L "$ACTIVE_OWNER_FILE" ) ]]; then
   if ! OWNER_SESSION_ID=$(mycelium_read_session_owner_id "$ACTIVE_OWNER_FILE") \
     || [[ ! "$HOST_SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]] \
     || (( ${#HOST_SESSION_ID} > 200 )); then

@@ -124,9 +124,13 @@ hook, filesystem, or lifecycle boundaries.
       active marker; a nested child Stop validates that token before lineage,
       finalization, enforcement, or cleanup and cannot consume primary state.
 - [ ] Missing or corrupt new-format ownership fails closed. Timestamp matching
-      is used only for active legacy sessions that have no owner-token file.
-- [ ] The active-log marker has one documented format, and every reader parses
-      that format rather than treating the whole file as a path.
+      is used only for active legacy sessions that have no owner-token file;
+      the active marker identifies new-format ownership so a missing companion
+      token cannot silently downgrade the transaction.
+- [ ] The active-log marker has a documented, versioned format, and every
+      reader parses that format rather than treating the whole file as a path.
+- [ ] Ownership-token readers require exactly one validated line; blank lines
+      or trailing content cannot be hidden beyond the first value.
 - [ ] Every active-log reader validates the marker path as a regular file under
       `.living/log`, validates the owner timestamp, and never emits, follows, or
       trusts a corrupt marker supplied by repository state.
@@ -163,7 +167,9 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Jupyter configuration-only modes such as `--show-config`,
       `--show-config-json`, and `--generate-config` are rejected before or
       after an apparent notebook, without suppressing a neighboring command or
-      option value that merely contains similar text.
+      option value that merely contains similar text. Scanning continues across
+      shell redirections, while option-looking redirection targets are excluded
+      from Jupyter's argv.
 - [ ] Python `-c` and R `-e` source is parsed as one complete shell word, then
       decoded with shell semantics; escaped quotes and adjacent quoted
       components cannot truncate the source before a data reference.
@@ -369,11 +375,11 @@ exercise them.
 | A code-mode local tool returns model-facing `input_text` blocks containing serialized result JSON | Exit status is recovered recursively for lineage, conditional execution, and failed-edit activity classification. |
 | Current Codex Bash PostToolUse supplies an empty `tool_response` before its outer command event completes | The analysis execution is retained, exit status and wall time stay null, and no success value is fabricated. |
 | Claude Code cross-discovers the plugin's Codex `hooks/hooks.json` adapter | The Codex dispatcher exits silently under Claude while the native project hooks produce one lifecycle effect. |
-| Multiple SessionStart hooks race, or today's log numbers contain a gap | One primary log and one atomic two-line marker are created; no occupied log number is reused. |
+| Multiple SessionStart hooks race, or today's log numbers contain a gap | One primary log and one atomic versioned marker are created; no occupied log number is reused. |
 | SessionStart runs before the repository's first commit, including on a YAML-looking branch name | The prospective branch is stored as one YAML string, injected as one summary value, and decoded without quotes during Stop finalization. |
-| A read-only nested child starts and stops while its primary is active | The primary marker, owner token, log, baselines, and raw lineage remain active and byte-identical; the child performs no Stop-side mutation. |
+| A read-only nested child starts and stops while its primary is active | The primary marker, owner token, log, baselines, and raw lineage remain active and byte-identical; the child performs no Stop-side mutation. A missing, multiline, or corrupt owner token for a marker declaring host-ID ownership blocks Stop without falling back to timestamps. |
 | A recent lifecycle lock records an owner PID that has terminated | The next caller recovers it before the acquisition timeout; a recent ownerless lock is not mistaken for dead-owner proof. |
-| Jupyter receives `--show-config`, `--show-config-json`, or `--generate-config` before or after an apparent notebook | No execution or lineage is attributed; terminal-looking text inside an ordinary option value and an actual neighboring Jupyter command remain scoped correctly. |
+| Jupyter receives `--show-config`, `--show-config-json`, or `--generate-config` before or after an apparent notebook, including after a shell redirection | No execution or lineage is attributed; terminal-looking text inside an ordinary option value, a redirection target, and an actual neighboring Jupyter command remain scoped correctly. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | A Claude or Codex hook config is valid JSON but has malformed event, group, handler, or command types | Initialization and migration reject it before changing guidance, runtime state, hooks, todo files, or the knowledge index. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |

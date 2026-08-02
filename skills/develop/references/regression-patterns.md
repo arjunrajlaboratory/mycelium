@@ -201,8 +201,10 @@ deletes its state.
 
 **Invariant:** Persist an identity that the host supplies separately to each
 invocation and compare it before any Stop-side mutation. Publish identity before
-the active marker, fail closed when new-format identity is corrupt or missing,
-and retain shared timestamps only as an upgrade fallback for legacy sessions.
+the active marker, encode the ownership format in that marker, and fail closed
+when a required companion identity is corrupt, multiline, or missing. Retain
+shared timestamps only as an upgrade fallback for markers that identify legacy
+sessions.
 
 **Regression evidence:** Start primary and child sessions in the same second,
 then stop the read-only child. Require the primary marker, log, owner token, raw
@@ -217,12 +219,15 @@ only options before the positional path misses terminal flags placed afterward.
 
 **Invariant:** Classify terminal modes separately from ordinary flags and scan
 the complete parsed simple-command argv, not raw text or only the prefix before
-the apparent input. Scope the decision to that command so a later command or
-terminal-looking text inside an option value cannot hide real execution.
+the apparent input. Continue across redirections in that simple command, but
+consume redirection targets as shell syntax rather than interpreter argv. Scope
+the decision to that command so a later command or terminal-looking text inside
+an option value cannot hide real execution.
 
 **Regression evidence:** Cover each terminal flag before and after an apparent
 input, with ordinary flags, assignment forms, quoted values containing similar
-text, and a neighboring command that really executes.
+text, redirections before the terminal option, option-looking redirection
+targets, and a neighboring command that really executes.
 
 ## 16. A fallback is appended to partial stdout
 

@@ -298,6 +298,7 @@ LOG_EOF
     # Publish the host's per-invocation identity before the active marker. A
     # concurrent child cannot observe the marker until its primary owner token
     # is complete. Older hosts without session_id retain the timestamp fallback.
+    _ACTIVE_MARKER_FORMAT=""
     if [[ "$HOST_SESSION_ID" =~ ^[A-Za-z0-9._-]+$ \
       && ${#HOST_SESSION_ID} -le 200 ]]; then
       _ACTIVE_OWNER_TMP=$(mktemp "$STATE_DIR/.active-session-owner-id.tmp.XXXXXX") || {
@@ -309,19 +310,26 @@ LOG_EOF
         rm -f "$_ACTIVE_OWNER_TMP" "$LOG_PATH"
         exit 0
       fi
+      _ACTIVE_MARKER_FORMAT="owner-id-v1"
     fi
 
-    # Store log path + owner timestamp (legacy subagent fallback).
-    # Publish both lines atomically so PostToolUse can never observe a partial
-    # marker while SessionStart is still writing it.
+    # Store log path + owner timestamp, plus an ownership-format discriminator
+    # when this host supplied a per-invocation identity. The third line makes a
+    # missing companion owner token distinguishable from a legacy transaction.
+    # Publish the complete marker atomically so PostToolUse can never observe a
+    # partial transaction while SessionStart is still writing it.
     _ACTIVE_MARKER_TMP=$(mktemp "$STATE_DIR/.active-session-log.tmp.XXXXXX") || {
       rm -f "$ACTIVE_OWNER_FILE" "$LOG_PATH"
       exit 0
     }
-    if ! printf "%s\n%s\n" \
-      "$LOG_PATH" \
-      "$(cat "$STATE_DIR/session-start-ts.tmp" 2>/dev/null || date +%s)" \
-      > "$_ACTIVE_MARKER_TMP" \
+    if ! {
+      printf "%s\n%s\n" \
+        "$LOG_PATH" \
+        "$(cat "$STATE_DIR/session-start-ts.tmp" 2>/dev/null || date +%s)"
+      if [[ -n "$_ACTIVE_MARKER_FORMAT" ]]; then
+        printf '%s\n' "$_ACTIVE_MARKER_FORMAT"
+      fi
+    } > "$_ACTIVE_MARKER_TMP" \
       || ! mv -f "$_ACTIVE_MARKER_TMP" "$ACTIVE_LOG_FILE"; then
       rm -f "$_ACTIVE_MARKER_TMP" "$ACTIVE_OWNER_FILE" "$LOG_PATH"
       exit 0
