@@ -87,7 +87,10 @@ _PYTHON_EXE_NAME = r"python(?:\d+(?:\.\d+)*)?"
 _PYTHON_EXE = _shell_executable_pattern(_PYTHON_EXE_NAME)
 _PYTHON_COMMAND = rf"(?<![A-Za-z0-9_.-])(?P<python_exe>{_PYTHON_EXE})"
 _PYTHON_FLAG = (
-    r"(?:-[bBdEhiIOPqRsStuUvVx]+"
+    # -h/-V and --help/--version terminate startup without executing a later
+    # payload. Excluding them also rejects short-option clusters containing a
+    # terminal option (for example -uV and -Vu).
+    r"(?:-[bBdEiIOPqRsStuUvx]+"
     rf"|-W\s+{_SHELL_WORD}"
     rf"|-W{_SHELL_WORD}"
     rf"|-X\s+{_SHELL_WORD}"
@@ -95,7 +98,7 @@ _PYTHON_FLAG = (
     r"|--"
     rf"|--check-hash-based-pycs(?:=|\s+){_SHELL_WORD}"
     r"|--(?:debug|inspect|interactive|isolated|optimize|dont-write-bytecode"
-    r"|no-user-site|no-site|unbuffered|verbose|version|help))"
+    r"|no-user-site|no-site|unbuffered|verbose))"
 )
 _PYTHON_FLAGS = rf"(?:{_PYTHON_FLAG}\s+)*"
 _PYTHON_SCRIPT_PATH = _shell_path_pattern(r"\.py")
@@ -104,9 +107,15 @@ _R_SCRIPT_EXE = _shell_executable_pattern("Rscript")
 _R_SCRIPT_PATH = _shell_path_pattern(r"\.(?:R|r)")
 _JUPYTER_EXE = _shell_executable_pattern("jupyter")
 _JUPYTER_SCRIPT_PATH = _shell_path_pattern(r"\.ipynb")
+# These interpreters accept many long startup options, but help/version forms
+# stop before any later source path or expression. Keep the generic option
+# support while excluding terminal forms and their value/help-all variants.
+_NONTERMINAL_LONG_OPTION = r"--(?!(?:help(?:-all)?|version)(?:=|\s|$))\S+"
+_NONTERMINAL_LONG_OPTIONS = rf"(?:{_NONTERMINAL_LONG_OPTION}\s+)*"
+_INLINE_SOURCE_WORD = rf"(?P<source_word>{_SHELL_WORD})(?=$|[\s|&;()<>])"
 
 RX_PYTHON_C = re.compile(
-    rf"{_PYTHON_COMMAND}\s+{_PYTHON_FLAGS}-c\s+(?P<quote>['\"])(?P<source>.+?)(?P=quote)",
+    rf"{_PYTHON_COMMAND}\s+{_PYTHON_FLAGS}-c\s+{_INLINE_SOURCE_WORD}",
     re.DOTALL,
 )
 RX_PYTHON_M = re.compile(
@@ -117,16 +126,17 @@ RX_PYTHON_SCRIPT_PATH = re.compile(
 )
 RX_R_E = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+"
-    rf"(?:--\S+\s+)*-e\s+(?P<quote>['\"])(?P<source>.+?)(?P=quote)",
+    rf"{_NONTERMINAL_LONG_OPTIONS}-e\s+{_INLINE_SOURCE_WORD}",
     re.DOTALL,
 )
 RX_R_SCRIPT_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<rscript_exe>{_R_SCRIPT_EXE})\s+"
-    rf"(?:--\S+\s+)*(?P<path>{_R_SCRIPT_PATH})"
+    rf"{_NONTERMINAL_LONG_OPTIONS}(?P<path>{_R_SCRIPT_PATH})"
 )
 RX_JUPYTER_SCRIPT_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<jupyter_exe>{_JUPYTER_EXE})\s+"
-    rf"(?:nbconvert|execute)\s+(?:--\S+\s+)*(?P<path>{_JUPYTER_SCRIPT_PATH})"
+    rf"(?:nbconvert|execute)\s+{_NONTERMINAL_LONG_OPTIONS}"
+    rf"(?P<path>{_JUPYTER_SCRIPT_PATH})"
 )
 IGNORED_PYTHON_MODULES = {
     "black",
@@ -175,14 +185,20 @@ _PATTERN_EXECUTABLES = {
 }
 
 
+def _decode_shell_word(raw: str) -> str | None:
+    """Decode exactly one POSIX shell word, failing closed on malformed input."""
+    try:
+        words = shlex.split(raw, comments=False, posix=True)
+    except ValueError:
+        return None
+    return words[0] if len(words) == 1 else None
+
+
 def _match_has_expected_executable(match: re.Match[str], pattern: re.Pattern) -> bool:
     """Validate a permissive raw shell-word candidate after quote decoding."""
     group, basename_pattern = _PATTERN_EXECUTABLES[pattern]
-    try:
-        words = shlex.split(match.group(group), comments=False, posix=True)
-    except ValueError:
-        return False
-    return len(words) == 1 and basename_pattern.fullmatch(Path(words[0]).name) is not None
+    word = _decode_shell_word(match.group(group))
+    return word is not None and basename_pattern.fullmatch(Path(word).name) is not None
 
 # The hook receives a shell command string and one overall exit status, not an
 # execution trace. AND/OR lists can be reasoned about conservatively, but shell
@@ -1058,7 +1074,9 @@ def _detect_scripts_with_cwd(
             bash_cmd, m.start(), bash_exit, cwd
         ):
             continue
-        src = m.group("source")
+        src = _decode_shell_word(m.group("source_word"))
+        if src is None:
+            continue
         identity = (src, effective_cwd)
         if identity not in seen_inline:
             out.append((None, src, effective_cwd))
@@ -1073,7 +1091,9 @@ def _detect_scripts_with_cwd(
             bash_cmd, m.start(), bash_exit, cwd
         ):
             continue
-        src = m.group("source")
+        src = _decode_shell_word(m.group("source_word"))
+        if src is None:
+            continue
         identity = (src, effective_cwd)
         if identity not in seen_inline:
             out.append((None, src, effective_cwd))

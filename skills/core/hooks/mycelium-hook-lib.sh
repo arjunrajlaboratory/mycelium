@@ -407,8 +407,6 @@ def find_structured(value):
             if isinstance(candidate, int) and not isinstance(candidate, bool):
                 return candidate
         for candidate in value.values():
-            if not isinstance(candidate, (dict, list)):
-                continue
             found = find_structured(candidate)
             if found is not None:
                 return found
@@ -417,18 +415,53 @@ def find_structured(value):
             found = find_structured(candidate)
             if found is not None:
                 return found
+    elif isinstance(value, str):
+        # Code-mode local tools expose model-facing output as input_text blocks.
+        # Their text can itself be the JSON serialization of the structured
+        # command result, so recurse through that serialization.
+        try:
+            decoded = json.loads(value)
+        except Exception:
+            decoded = None
+        if decoded is not None and decoded != value:
+            found = find_structured(decoded)
+            if found is not None:
+                return found
+    return None
+
+def find_textual(value):
+    if isinstance(value, dict):
+        for candidate in value.values():
+            found = find_textual(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = find_textual(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except Exception:
+            decoded = None
+        if decoded is not None and decoded != value:
+            found = find_textual(decoded)
+            if found is not None:
+                return found
+        match = re.search(
+            r"(?:exit(?:ed)?(?:[ _-]with)?(?:[ _-]code)?|return(?:[ _-]code)?)"
+            r"[\":= ]+(-?\d+)",
+            value,
+            re.IGNORECASE,
+        )
+        if match:
+            return int(match.group(1))
     return None
 
 result = find_structured(response)
-if result is None and isinstance(response, str):
-    match = re.search(
-        r"(?:exit(?:ed)?(?:[ _-]with)?(?:[ _-]code)?|return(?:[ _-]code)?)"
-        r"[\":= ]+(-?\d+)",
-        response,
-        re.IGNORECASE,
-    )
-    if match:
-        result = int(match.group(1))
+if result is None:
+    result = find_textual(response)
 if result is not None:
     print(result)
 '

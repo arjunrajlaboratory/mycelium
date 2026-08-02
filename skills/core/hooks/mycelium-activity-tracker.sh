@@ -30,15 +30,8 @@ except Exception:
     print("unknown")
     raise SystemExit
 response = payload.get("tool_response")
-if isinstance(response, str) and re.match(
-    r"^\s*(?:error|failed|patch failed|invalid (?:context|patch))\b",
-    response,
-    re.IGNORECASE,
-):
-    print("false")
-    raise SystemExit
 
-def exit_code(value):
+def structured_exit_code(value):
     if isinstance(value, dict):
         if value.get("isError") is True or value.get("success") is False:
             return 1
@@ -47,17 +40,64 @@ def exit_code(value):
             if isinstance(candidate, int) and not isinstance(candidate, bool):
                 return candidate
         for candidate in value.values():
-            found = exit_code(candidate)
+            found = structured_exit_code(candidate)
             if found is not None:
                 return found
     elif isinstance(value, list):
         for candidate in value:
-            found = exit_code(candidate)
+            found = structured_exit_code(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except Exception:
+            decoded = None
+        if decoded is not None and decoded != value:
+            found = structured_exit_code(decoded)
             if found is not None:
                 return found
     return None
 
-status = exit_code(response)
+def textual_exit_code(value):
+    if isinstance(value, dict):
+        for candidate in value.values():
+            found = textual_exit_code(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = textual_exit_code(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except Exception:
+            decoded = None
+        if decoded is not None and decoded != value:
+            found = textual_exit_code(decoded)
+            if found is not None:
+                return found
+        if re.match(
+            r"^\s*(?:error|failed|patch failed|invalid (?:context|patch))\b",
+            value,
+            re.IGNORECASE,
+        ):
+            return 1
+        match = re.search(
+            r"(?:exit(?:ed)?(?:[ _-]with)?(?:[ _-]code)?|return(?:[ _-]code)?)"
+            r"[\":= ]+(-?\d+)",
+            value,
+            re.IGNORECASE,
+        )
+        if match:
+            return int(match.group(1))
+    return None
+
+status = structured_exit_code(response)
+if status is None:
+    status = textual_exit_code(response)
 print("unknown" if status is None else ("true" if status == 0 else "false"))
 ')
 if [[ "$TOOL_SUCCEEDED" == false ]]; then

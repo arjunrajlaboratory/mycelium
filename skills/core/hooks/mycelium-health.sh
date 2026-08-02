@@ -33,6 +33,15 @@ fi
 
 mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
 
+# SessionStart and Stop both mutate the active-log ownership transaction.
+# Serialize them with the same repository-local lock so concurrent primary and
+# subagent starts cannot reserve separate logs or overwrite one another's
+# marker while Stop is finalizing the prior session.
+if ! mycelium_acquire_stop_lock "$STATE_DIR"; then
+  exit 0
+fi
+trap mycelium_release_stop_lock EXIT
+
 # Clean up stale sentinels from a crashed previous session BEFORE the
 # session-start-ts guard below — otherwise the guard mistakes the orphaned
 # active-session-log.tmp for an in-progress session, skips refreshing the
@@ -211,12 +220,21 @@ REGISTRY_EOF
   # If active-session-log.tmp exists, we're a subagent — skip log creation
   if [ ! -f "$ACTIVE_LOG_FILE" ]; then
     TODAY=$(date +%Y-%m-%d)
-    # Determine session counter for today
-    EXISTING_COUNT=0
+    # Pick one greater than the highest number already used today. Counting
+    # files can reuse an occupied number when the sequence has a gap (for
+    # example 001 and 003), which would overwrite that existing log.
+    MAX_SESSION_NUM=0
     for _f in "$LOG_DIR"/${TODAY}-*.md; do
-      [ -f "$_f" ] && [ "$(basename "$_f")" != "LOG_REGISTRY.md" ] && EXISTING_COUNT=$((EXISTING_COUNT + 1))
+      [ -f "$_f" ] || continue
+      _SESSION_BASENAME=$(basename "$_f")
+      if [[ "$_SESSION_BASENAME" =~ ^${TODAY}-([0-9]+)-.*\.md$ ]]; then
+        _SESSION_NUM_VALUE=$((10#${BASH_REMATCH[1]}))
+        if (( _SESSION_NUM_VALUE > MAX_SESSION_NUM )); then
+          MAX_SESSION_NUM=$_SESSION_NUM_VALUE
+        fi
+      fi
     done
-    SESSION_NUM=$(printf "%03d" $((EXISTING_COUNT + 1)))
+    SESSION_NUM=$(printf "%03d" $((MAX_SESSION_NUM + 1)))
 
     # Derive slug from project directory name
     PROJECT_NAME=$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]' | tr ' _' '--' | tr -cd '[:alnum:]-')
@@ -259,8 +277,21 @@ files_changed:
 - Resuming from: ${PREV_LINK}
 LOG_EOF
 
-    # Store log path + owner timestamp (for subagent detection in stop hook)
-    printf "%s\n%s\n" "$LOG_PATH" "$(cat "$STATE_DIR/session-start-ts.tmp" 2>/dev/null || date +%s)" > "$ACTIVE_LOG_FILE"
+    # Store log path + owner timestamp (for subagent detection in stop hook).
+    # Publish both lines atomically so PostToolUse can never observe a partial
+    # marker while SessionStart is still writing it.
+    _ACTIVE_MARKER_TMP=$(mktemp "$STATE_DIR/.active-session-log.tmp.XXXXXX") || {
+      rm -f "$LOG_PATH"
+      exit 0
+    }
+    if ! printf "%s\n%s\n" \
+      "$LOG_PATH" \
+      "$(cat "$STATE_DIR/session-start-ts.tmp" 2>/dev/null || date +%s)" \
+      > "$_ACTIVE_MARKER_TMP" \
+      || ! mv -f "$_ACTIVE_MARKER_TMP" "$ACTIVE_LOG_FILE"; then
+      rm -f "$_ACTIVE_MARKER_TMP" "$LOG_PATH"
+      exit 0
+    fi
     # Data-lineage consolidation may run concurrently with stop finalization,
     # so keep its canonical session ID in an independent sentinel.
     printf '%s\n' "$SESSION_ID" > "$STATE_DIR/data-lineage-session-id.tmp"

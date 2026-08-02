@@ -833,6 +833,61 @@ def test_session_start_recovers_malformed_runtime_timestamps(tmp_path):
     assert "KNOWLEDGE AUDIT DUE" in result.stdout
 
 
+def test_concurrent_session_start_creates_one_primary_log_and_marker(tmp_path):
+    """Concurrent primary/subagent starts must serialize log ownership."""
+    repo = _repo(tmp_path)
+    payloads = [
+        {"cwd": str(repo), "source": "startup", "turn_id": f"start-race-{i}"}
+        for i in range(12)
+    ]
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        results = list(
+            pool.map(
+                lambda payload: _run_hook("mycelium-health.sh", repo, payload),
+                payloads,
+            )
+        )
+
+    assert all(result.returncode == 0 for result in results)
+    logs = sorted(
+        path
+        for path in (repo / ".living" / "log").glob("*.md")
+        if path.name != "LOG_REGISTRY.md"
+    )
+    assert len(logs) == 1
+    marker_lines = (
+        repo / ".mycelium" / "active-session-log.tmp"
+    ).read_text().splitlines()
+    assert len(marker_lines) == 2
+    assert marker_lines[0] == str(logs[0])
+    assert marker_lines[1].isdigit()
+
+
+def test_session_start_does_not_reuse_noncontiguous_session_number(tmp_path):
+    repo = _repo(tmp_path)
+    log_dir = repo / ".living" / "log"
+    log_dir.mkdir()
+    today = time.strftime("%Y-%m-%d")
+    (log_dir / "LOG_REGISTRY.md").write_text("# Registry\n")
+    (log_dir / f"{today}-001-repo.md").write_text("first\n")
+    occupied = log_dir / f"{today}-003-repo.md"
+    occupied.write_text("must survive\n")
+
+    result = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "number-gap"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    marker_path = Path(
+        (repo / ".mycelium" / "active-session-log.tmp").read_text().splitlines()[0]
+    )
+    assert marker_path.name == f"{today}-004-repo.md"
+    assert occupied.read_text() == "must survive\n"
+
+
 def test_codex_post_action_rejects_unproven_shell_text_matches(tmp_path):
     repo = _repo(tmp_path)
     reminder = repo / ".mycelium" / "mycelium-reminded.tmp"
@@ -1277,6 +1332,83 @@ def test_codex_data_tracker_records_proven_successful_and_chain(tmp_path):
     assert event["bash_exit"] == 0
 
 
+def test_codex_data_tracker_reads_exit_from_code_mode_model_output(tmp_path):
+    repo = _repo(tmp_path)
+    script = repo / "run.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    model_output = [
+        {
+            "type": "input_text",
+            "text": "Script completed\nWall time 0.5 seconds\nOutput:\n",
+        },
+        {
+            "type": "input_text",
+            "text": json.dumps(
+                {
+                    "chunk_id": "abc123",
+                    "wall_time_seconds": 0.5,
+                    "exit_code": 1,
+                    "output": "ModuleNotFoundError: No module named 'h5py'\n",
+                }
+            ),
+        },
+    ]
+
+    result = _run_hook(
+        "mycelium-data-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": "python run.py"},
+            "tool_response": model_output,
+            "turn_id": "turn-code-mode-exit",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(
+        (repo / ".mycelium" / "mycelium-data-events.tmp").read_text()
+    )
+    assert event["script"] == str(script)
+    assert event["bash_exit"] == 1
+
+
+def test_codex_data_tracker_prefers_structured_exit_over_earlier_output_text(tmp_path):
+    repo = _repo(tmp_path)
+    script = repo / "run.py"
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    model_output = [
+        {
+            "type": "input_text",
+            "text": "Script completed\nOutput:\nexample text: exit code 99\n",
+        },
+        {
+            "type": "input_text",
+            "text": json.dumps({"exit_code": 0, "output": "exit code 99\n"}),
+        },
+    ]
+
+    result = _run_hook(
+        "mycelium-data-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": "python run.py"},
+            "tool_response": model_output,
+            "turn_id": "turn-structured-exit-precedence",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(
+        (repo / ".mycelium" / "mycelium-data-events.tmp").read_text()
+    )
+    assert event["script"] == str(script)
+    assert event["bash_exit"] == 0
+
+
 def test_codex_apply_patch_activity_tracks_each_file(tmp_path):
     repo = _repo(tmp_path)
     patch = """*** Begin Patch
@@ -1355,6 +1487,75 @@ def test_codex_apply_patch_activity_ignores_failed_tool_result(tmp_path):
     assert result.returncode == 0, result.stderr
     assert not (repo / ".mycelium" / "mycelium-session-activity.tmp").exists()
     assert not (repo / ".mycelium" / "mycelium-reminded.tmp").exists()
+
+
+def test_codex_apply_patch_activity_ignores_failed_code_mode_output(tmp_path):
+    repo = _repo(tmp_path)
+    patch = """*** Begin Patch
+*** Add File: should-not-count.py
++content
+*** End Patch"""
+    model_output = [
+        {"type": "input_text", "text": "Script completed\nOutput:\n"},
+        {
+            "type": "input_text",
+            "text": json.dumps(
+                {"exit_code": 1, "output": "Invalid Context 0:\n-old\n"}
+            ),
+        },
+    ]
+
+    result = _run_hook(
+        "mycelium-activity-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "apply_patch",
+            "tool_input": {"command": patch},
+            "tool_response": model_output,
+            "turn_id": "turn-failed-code-mode-patch",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (repo / ".mycelium" / "mycelium-session-activity.tmp").exists()
+    assert not (repo / ".mycelium" / "mycelium-reminded.tmp").exists()
+
+
+def test_codex_apply_patch_activity_prefers_structured_success_over_output_text(
+    tmp_path,
+):
+    repo = _repo(tmp_path)
+    patch = """*** Begin Patch
+*** Add File: should-count.py
++content
+*** End Patch"""
+    model_output = [
+        {
+            "type": "input_text",
+            "text": "Script completed\nOutput:\nexample text: exit code 99\n",
+        },
+        {
+            "type": "input_text",
+            "text": json.dumps({"exit_code": 0, "output": "exit code 99\n"}),
+        },
+    ]
+
+    result = _run_hook(
+        "mycelium-activity-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "apply_patch",
+            "tool_input": {"command": patch},
+            "tool_response": model_output,
+            "turn_id": "turn-structured-success-precedence",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    activity = repo / ".mycelium" / "mycelium-session-activity.tmp"
+    assert activity.read_text().splitlines() == ["should-count.py"]
 
 
 def test_codex_apply_patch_activity_ignores_failed_string_response(tmp_path):
@@ -1633,6 +1834,80 @@ def test_stop_preserves_transaction_when_atomic_log_finalization_fails(tmp_path)
     assert "ended:\n" not in finalized
     assert finalized.count("Session ended") == 1
     assert not active_marker.exists()
+
+
+def test_stop_preserves_fresh_complete_five_section_handoff(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "handoff-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    (repo / "work.py").write_text("print('work')\n")
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\nA complete handoff must survive Stop.\n"
+    )
+    handoff = state / "last-session.md"
+    complete = (
+        "SESSION RESUME — Last session (2026-08-01 20:15):\n\n"
+        "## What was worked on\n- Lifecycle smoke audit.\n\n"
+        "## Key decisions made\n- Preserve the authored handoff.\n\n"
+        "## Blockers & surprises\n- None.\n\n"
+        "## Current state\n- Tests passed.\n\n"
+        "## Next steps\n- Continue review.\n"
+    )
+    handoff.write_text(complete)
+    future = time.time() + 2
+    os.utime(handoff, (future, future))
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "handoff-stop"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"decision": "block"' not in result.stdout
+    assert handoff.read_text() == complete
+
+
+def test_stop_fallback_handoff_contains_all_five_sections(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "fallback-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    (repo / "work.py").write_text("print('work')\n")
+    (repo / ".living" / "decisions.md").write_text(
+        "# Decisions\n\nGenerate a complete deterministic fallback.\n"
+    )
+    handoff = state / "last-session.md"
+    handoff.unlink(missing_ok=True)
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "fallback-stop"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"decision": "block"' not in result.stdout
+    fallback = handoff.read_text()
+    for heading in (
+        "## What was worked on",
+        "## Key decisions made",
+        "## Blockers & surprises",
+        "## Current state",
+        "## Next steps",
+    ):
+        assert fallback.count(heading) == 1
+    assert "`.living/decisions.md`" in fallback
+    assert "`.living/learnings.md`" in fallback
 
 
 def test_stop_preserves_lineage_state_when_consolidation_fails(tmp_path):

@@ -149,6 +149,35 @@ def test_detect_script_inline_r_e() -> None:
     assert inline == "read.csv('x.csv')"
 
 
+@pytest.mark.parametrize(
+    "command,expected_source",
+    [
+        (
+            r'python -c "pd.read_csv(\"data.csv\")"',
+            'pd.read_csv("data.csv")',
+        ),
+        (
+            r'R -e "read.csv(\"data.csv\")"',
+            'read.csv("data.csv")',
+        ),
+        (
+            '''python -c "pd.read_"'csv("data.csv")' ''',
+            'pd.read_csv("data.csv")',
+        ),
+    ],
+)
+def test_detect_script_decodes_complete_inline_shell_word(
+    command: str, expected_source: str
+) -> None:
+    """Inline source must obey shell quoting, escaping, and concatenation."""
+    script, inline = detect_script(command, Path("/tmp"))
+
+    assert script is None
+    assert inline == expected_source
+    if command.startswith("python"):
+        assert scan_source(inline)[0] == ["data.csv"]
+
+
 def test_detect_script_jupyter() -> None:
     script, inline = detect_script("jupyter execute nb.ipynb", Path("/tmp"))
     assert script == Path("/tmp/nb.ipynb")
@@ -595,6 +624,60 @@ def test_main_rejects_unproven_shell_text_matches(
     sub = tmp_path / "sub"
     sub.mkdir()
     (sub / "a.py").write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-08-01T12:00:00Z",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            "0",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python --help a.py",
+        "python --version a.py",
+        "python -h a.py",
+        "python -V a.py",
+        "python -uV a.py",
+        "python -Vu a.py",
+        "R --help -e \"read.csv('input.csv')\"",
+        "R --version -e \"read.csv('input.csv')\"",
+        "Rscript --help a.R",
+        "Rscript --version a.R",
+        "jupyter execute --help a.ipynb",
+        "jupyter execute --help-all a.ipynb",
+        "jupyter execute --version a.ipynb",
+    ],
+)
+def test_main_rejects_terminal_interpreter_options_before_analysis_payload(
+    tmp_path: Path, command: str
+) -> None:
+    """Help/version options terminate the interpreter instead of running payload."""
+    import subprocess
+
+    (tmp_path / "a.py").write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    (tmp_path / "a.R").write_text("read.csv('input.csv')\n")
+    (tmp_path / "a.ipynb").write_text("{}\n")
     extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
     target = tmp_path / "events.tmp"
 
