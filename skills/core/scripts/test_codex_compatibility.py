@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -186,11 +187,76 @@ def test_development_skills_encode_cross_host_regression_workflow():
         assert required in protocol
 
 
+def test_review_skill_respects_host_subagent_capacity_and_retries():
+    review = " ".join(
+        (PLUGIN_ROOT / "skills" / "review" / "SKILL.md").read_text().split()
+    )
+
+    for required in (
+        "host capacity",
+        "waves",
+        "agent thread limit reached",
+        "retry",
+        "in-line",
+    ):
+        assert required in review
+    assert "single message with six concurrent" not in review
+
+
+def test_review_skill_enforces_comparability_deduplication_and_exact_tallies():
+    review = " ".join((PLUGIN_ROOT / "skills" / "review" / "SKILL.md").read_text().split())
+    synthesis = " ".join(
+        (PLUGIN_ROOT / "skills" / "core" / "references" / "review" / "synthesis.md")
+        .read_text()
+        .split()
+    )
+    pipeline = " ".join(
+        (
+            PLUGIN_ROOT
+            / "skills"
+            / "core"
+            / "references"
+            / "review"
+            / "data-pipeline-leakage.md"
+        )
+        .read_text()
+        .split()
+    )
+    biology = " ".join(
+        (
+            PLUGIN_ROOT
+            / "skills"
+            / "core"
+            / "references"
+            / "review"
+            / "bioinformatics.md"
+        )
+        .read_text()
+        .split()
+    )
+
+    assert "One root cause gets one finding ID" in review
+    assert "validate_review_report.py" in review
+    assert "## Finding tally" in review
+    assert "Finding IDs count distinct remediations" in synthesis
+    assert "Cross-input comparability" in pipeline
+    assert "compare `var_names`" in biology
+    assert (PLUGIN_ROOT / "skills" / "core" / "scripts" / "validate_review_report.py").is_file()
+
+
 def test_codex_plugin_manifest_points_to_shared_skills():
     manifest = json.loads((PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text())
+    claude_manifest = json.loads(
+        (PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text()
+    )
     assert manifest["name"] == "mycelium"
     assert manifest["skills"] == "./skills/"
-    assert manifest["version"] == "0.6.0"
+    base_version, separator, cachebuster = manifest["version"].partition("+")
+    assert base_version == claude_manifest["version"]
+    if separator:
+        assert re.fullmatch(
+            r"codex\.[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*", cachebuster
+        )
 
 
 def test_codex_plugin_bundles_stable_dynamic_hooks():
@@ -1058,11 +1124,11 @@ def test_concurrent_session_start_creates_one_primary_log_and_marker(tmp_path):
     assert marker_lines[1].isdigit()
 
 
-def test_subagent_stop_cannot_finalize_primary_session(tmp_path):
-    """A child lifecycle must not consume its primary's shared transaction."""
+def test_new_root_session_supersedes_an_unfinalized_owned_session(tmp_path):
+    """A fresh root task must not inherit another root task's transaction."""
     repo = _repo(tmp_path)
     primary_id = "primary-session"
-    child_id = "child-session"
+    replacement_id = "replacement-session"
 
     primary_start = _run_hook(
         "mycelium-health.sh",
@@ -1081,46 +1147,35 @@ def test_subagent_stop_cannot_finalize_primary_session(tmp_path):
     log_path = Path(marker_lines[0])
     assert marker_lines[2] == "owner-id-v1"
 
-    child_start = _run_hook(
+    events = state / "mycelium-data-events.tmp"
+    events.write_text('{"script":"analysis/old.py"}\n')
+    (state / "mycelium-session-activity.tmp").write_text("analysis/old.py\n")
+    (state / "mycelium-reminded.tmp").write_text(f"{int(time.time())}\n")
+
+    replacement_start = _run_hook(
         "mycelium-health.sh",
         repo,
         {
             "cwd": str(repo),
             "source": "startup",
-            "session_id": child_id,
+            "session_id": replacement_id,
         },
     )
-    assert child_start.returncode == 0, child_start.stderr
-
-    events = state / "mycelium-data-events.tmp"
-    raw_event = json.dumps(
-        {
-            "ts": "2026-08-02T12:00:00Z",
-            "script": "analysis/child-must-not-consolidate.py",
-            "inputs": [],
-            "outputs": [],
-        }
-    ) + "\n"
-    events.write_text(raw_event)
-
-    child_stop = _run_hook(
-        "mycelium-stop-check.sh",
-        repo,
-        {
-            "cwd": str(repo),
-            "stop_hook_active": False,
-            "session_id": child_id,
-        },
-    )
-    assert child_stop.returncode == 0, child_stop.stderr
-    assert marker.is_file()
+    assert replacement_start.returncode == 0, replacement_start.stderr
+    assert "ABANDONED PRIOR SESSION" in replacement_start.stdout
+    replacement_marker = marker.read_text().splitlines()
+    replacement_log = Path(replacement_marker[0])
+    assert replacement_log != log_path
     assert log_path.is_file()
-    assert (state / "active-session-owner-id.tmp").read_text().strip() == primary_id
-    assert events.read_text() == raw_event
-    assert not (repo / ".living" / "log" / "data-lineage").exists()
+    assert (state / "active-session-owner-id.tmp").read_text().strip() == replacement_id
+    assert not events.exists()
+    assert not (state / "mycelium-session-activity.tmp").exists()
+    assert not (state / "mycelium-reminded.tmp").exists()
+    archives = list((state / "mycelium-data-events-abandoned").glob("*.tmp"))
+    assert len(archives) == 1
+    assert archives[0].read_text() == '{"script":"analysis/old.py"}\n'
 
-    events.unlink()
-    primary_stop = _run_hook(
+    old_stop = _run_hook(
         "mycelium-stop-check.sh",
         repo,
         {
@@ -1129,10 +1184,114 @@ def test_subagent_stop_cannot_finalize_primary_session(tmp_path):
             "session_id": primary_id,
         },
     )
-    assert primary_stop.returncode == 0, primary_stop.stderr
+    assert old_stop.returncode == 0, old_stop.stderr
+    assert old_stop.stdout == ""
+    assert marker.is_file()
+    assert Path(marker.read_text().splitlines()[0]) == replacement_log
+
+    replacement_stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "stop_hook_active": False,
+            "session_id": replacement_id,
+        },
+    )
+    assert replacement_stop.returncode == 0, replacement_stop.stderr
     assert not marker.exists()
-    assert not log_path.exists()
+    assert not replacement_log.exists()
+    assert log_path.exists()
     assert not (state / "active-session-owner-id.tmp").exists()
+
+
+def test_new_root_does_not_move_nonregular_abandoned_event_state(tmp_path):
+    repo = _repo(tmp_path)
+    primary_start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "session_id": "primary-session"},
+    )
+    assert primary_start.returncode == 0, primary_start.stderr
+    state = repo / ".mycelium"
+    marker = state / "active-session-log.tmp"
+    original_marker = marker.read_text()
+    events = state / "mycelium-data-events.tmp"
+    events.mkdir()
+    (events / "user-owned.txt").write_text("keep\n")
+
+    replacement_start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "source": "startup",
+            "session_id": "replacement-session",
+        },
+    )
+
+    assert replacement_start.returncode == 0, replacement_start.stderr
+    assert events.is_dir()
+    assert (events / "user-owned.txt").read_text() == "keep\n"
+    assert marker.read_text() == original_marker
+    assert (
+        state / "active-session-owner-id.tmp"
+    ).read_text().strip() == "primary-session"
+
+
+@pytest.mark.parametrize(
+    "hook_name,payload,unexpected_state",
+    [
+        (
+            "mycelium-post-action.sh",
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "python analysis.py"},
+                "tool_response": {"exit_code": 0},
+            },
+            "mycelium-reminded.tmp",
+        ),
+        (
+            "mycelium-data-tracker.sh",
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "python analysis.py"},
+                "tool_response": {"exit_code": 0},
+            },
+            "mycelium-data-events.tmp",
+        ),
+        (
+            "mycelium-activity-tracker.sh",
+            {
+                "tool_name": "apply_patch",
+                "tool_input": {
+                    "command": "*** Begin Patch\n*** Add File: stale.py\n+x\n*** End Patch"
+                },
+                "tool_response": {"exit_code": 0},
+            },
+            "mycelium-session-activity.tmp",
+        ),
+    ],
+)
+def test_superseded_root_post_tool_use_cannot_mutate_new_owner_state(
+    tmp_path, hook_name, payload, unexpected_state
+):
+    repo = _repo(tmp_path)
+    (repo / "analysis.py").write_text("pd.read_csv('input.csv')\n")
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "session_id": "new-owner"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    payload.update({"cwd": str(repo), "session_id": "old-owner"})
+
+    result = _run_hook(hook_name, repo, payload)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert not (state / unexpected_state).exists()
 
 
 @pytest.mark.parametrize("branch_name", [None, "{yaml-like-branch}"])
@@ -1518,6 +1677,74 @@ def test_codex_post_tool_use_ignores_mycelium_structure_validator(tmp_path):
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
     assert not (repo / ".mycelium" / "mycelium-reminded.tmp").exists()
+
+
+@pytest.mark.parametrize(
+    "utility",
+    [
+        "generate_index.py",
+        "upsert_registry_row.py",
+        "finalize_handoff.py",
+        "finalize_session_log.py",
+        "session_file_changes.py",
+        "validate_review_report.py",
+    ],
+)
+def test_codex_post_tool_use_ignores_mycelium_control_plane_utilities(
+    tmp_path, utility
+):
+    repo = _repo(tmp_path)
+    utility_path = repo / "plugin" / "skills" / "core" / "scripts" / utility
+    utility_path.parent.mkdir(parents=True)
+    utility_path.write_text("print('managed')\n")
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": f'python3 "{utility_path}" --help'},
+            "tool_response": {"exit_code": 0},
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert not (repo / ".mycelium" / "mycelium-reminded.tmp").exists()
+    lineage = _run_hook(
+        "mycelium-data-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": f'python3 "{utility_path}" --help'},
+            "tool_response": {"exit_code": 0},
+        },
+    )
+    assert lineage.returncode == 0, lineage.stderr
+    assert not (repo / ".mycelium" / "mycelium-data-events.tmp").exists()
+
+
+def test_user_script_named_generate_index_is_still_analysis(tmp_path):
+    repo = _repo(tmp_path)
+    script = repo / "analysis" / "generate_index.py"
+    script.parent.mkdir()
+    script.write_text("pd.read_csv('input.csv')\n")
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": "python3 analysis/generate_index.py"},
+            "tool_response": {"exit_code": 0},
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "MYCELIUM POST-ACTION PROTOCOL" in result.stdout
 
 
 def test_codex_post_tool_use_reads_only_log_path_marker_line(tmp_path):
@@ -2223,6 +2450,46 @@ def test_stop_sanitizes_registry_cells_with_pipe_characters(tmp_path):
     assert not (repo / ".living" / "log" / ".upsert_registry_row.err").exists()
 
 
+def test_stop_preserves_agent_authored_registry_metadata(tmp_path):
+    repo = _repo(tmp_path)
+    host_id = "registry-owner"
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "session_id": host_id},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    log_path = Path((state / "active-session-log.tmp").read_text().splitlines()[0])
+    session_id = log_path.name[:14]
+    registry = repo / ".living" / "log" / "LOG_REGISTRY.md"
+    with registry.open("a") as handle:
+        handle.write(
+            f"| 2026-08-02 | {session_id} | repo | draft | 1m | 1 | "
+            "Compared ROI-level cell-type proportions | tables/counts.csv; "
+            f"figures/overview.png | active | gastruloid; review | [log]({log_path.name}) |\n"
+        )
+    (repo / "work.py").write_text("print('work')\n")
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\n### Registry metadata\nStop preserves authored semantics.\n"
+    )
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "session_id": host_id},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"decision": "block"' not in result.stdout
+    content = registry.read_text()
+    assert content.count(f"| {session_id} |") == 1
+    assert "Compared ROI-level cell-type proportions" in content
+    assert "tables/counts.csv; figures/overview.png" in content
+    assert "gastruloid; review" in content
+    assert "| complete |" in content
+
+
 def test_stop_preserves_transaction_when_registry_upsert_fails(tmp_path):
     repo = _repo(tmp_path)
     start = _run_hook(
@@ -2314,6 +2581,7 @@ def test_stop_preserves_transaction_when_atomic_log_finalization_fails(tmp_path)
     assert active_marker.is_file()
     assert "ended:\n" in log_path.read_text()
     assert "Session ended" not in log_path.read_text()
+    assert "accepted by Stop" not in (state / "last-session.md").read_text()
 
     resumed = _run_hook(
         "mycelium-health.sh",
@@ -2337,6 +2605,63 @@ def test_stop_preserves_transaction_when_atomic_log_finalization_fails(tmp_path)
     assert not active_marker.exists()
 
 
+def test_stop_retries_ended_log_when_handoff_finalization_fails(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "handoff-fail-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    active_marker = state / "active-session-log.tmp"
+    log_path = Path(active_marker.read_text().splitlines()[0])
+    (repo / "work.py").write_text("print('work')\n")
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\n### Retry handoff\nHandoff publication is retryable.\n"
+    )
+    failing_helper = tmp_path / "failing-handoff-finalizer.py"
+    failing_helper.write_text("raise SystemExit(41)\n")
+
+    failed = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False},
+        {"MYCELIUM_HANDOFF_FINALIZER_HELPER": str(failing_helper)},
+    )
+
+    assert failed.returncode == 0, failed.stderr
+    assert json.loads(failed.stdout)["decision"] == "block"
+    assert active_marker.is_file()
+    assert log_path.read_text().count("Session ended") == 1
+    pending = state / "handoff-finalization-pending.tmp"
+    assert pending.is_file()
+    accepted_at = pending.read_text().splitlines()[0]
+    assert "accepted by Stop" not in (state / "last-session.md").read_text()
+
+    resumed = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "compact", "turn_id": "handoff-fail-resume"},
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert active_marker.is_file()
+    assert pending.is_file()
+
+    retried = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": True},
+    )
+
+    assert retried.returncode == 0, retried.stderr
+    assert '"decision": "block"' not in retried.stdout
+    assert log_path.read_text().count("Session ended") == 1
+    assert accepted_at in (state / "last-session.md").read_text()
+    assert not active_marker.exists()
+    assert not pending.exists()
+
+
 def test_stop_preserves_fresh_complete_five_section_handoff(tmp_path):
     repo = _repo(tmp_path)
     start = _run_hook(
@@ -2357,7 +2682,8 @@ def test_stop_preserves_fresh_complete_five_section_handoff(tmp_path):
         "## Key decisions made\n- Preserve the authored handoff.\n\n"
         "## Blockers & surprises\n- None.\n\n"
         "## Current state\n- Tests passed.\n\n"
-        "## Next steps\n- Continue review.\n"
+        "## Next steps\n- Natural Stop finalization remains pending.\n"
+        "- Attempt natural Stop now.\n"
     )
     handoff.write_text(complete)
     future = time.time() + 2
@@ -2371,7 +2697,12 @@ def test_stop_preserves_fresh_complete_five_section_handoff(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert '"decision": "block"' not in result.stdout
-    assert handoff.read_text() == complete
+    finalized = handoff.read_text()
+    assert "Lifecycle status: accepted by Stop" in finalized
+    assert "remains pending" not in finalized
+    assert "Attempt natural Stop" not in finalized
+    assert "Lifecycle smoke audit." in finalized
+    assert "Preserve the authored handoff." in finalized
 
 
 def test_stop_preserves_fresh_complete_alternate_five_section_handoff(
@@ -2413,7 +2744,9 @@ def test_stop_preserves_fresh_complete_alternate_five_section_handoff(
 
     assert result.returncode == 0, result.stderr
     assert '"decision": "block"' not in result.stdout
-    assert handoff.read_text() == complete
+    finalized = handoff.read_text()
+    assert "Lifecycle status: accepted by Stop" in finalized
+    assert complete in finalized
 
 
 def test_stop_fallback_handoff_contains_all_five_sections(tmp_path):

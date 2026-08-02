@@ -193,6 +193,38 @@ mycelium_read_session_owner_id() {
   printf '%s\n' "$owner_id"
 }
 
+mycelium_payload_owns_active_session() {
+  local repo_root="$1"
+  local input="$2"
+  local marker_file="$STATE_DIR/active-session-log.tmp"
+  local owner_file="$STATE_DIR/active-session-owner-id.tmp"
+  local marker=""
+  local owner_format=""
+  local owner_id=""
+  local host_session_id=""
+
+  # Legacy/no-session state stays compatible. New-format state is gated by the
+  # host identity before any shared PostToolUse file can be mutated.
+  [[ -f "$marker_file" ]] || return 0
+  if ! marker=$(mycelium_read_active_log_marker "$repo_root" "$marker_file"); then
+    # A legacy/corrupt marker with no owner token cannot authorize a log write,
+    # but it also must not disable independent activity enforcement. A claimed
+    # host-owned transaction remains fail-closed.
+    [[ ! -e "$owner_file" && ! -L "$owner_file" ]]
+    return
+  fi
+  owner_format=$(printf '%s\n' "$marker" | sed -n '3p')
+  if [[ "$owner_format" != "owner-id-v1" \
+    && ! -e "$owner_file" && ! -L "$owner_file" ]]; then
+    return 0
+  fi
+  owner_id=$(mycelium_read_session_owner_id "$owner_file") || return 1
+  host_session_id=$(printf '%s' "$input" | mycelium_json_get 'session_id')
+  [[ "$host_session_id" =~ ^[A-Za-z0-9._-]+$ \
+    && ${#host_session_id} -le 200 \
+    && "$host_session_id" == "$owner_id" ]]
+}
+
 mycelium_registry_cell() {
   python3 -c '
 import html

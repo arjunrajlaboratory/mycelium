@@ -195,21 +195,22 @@ never accept the option value.
 
 ## 14. Repository state is mistaken for invocation identity
 
-**Failure:** A primary and nested child share a repository timestamp or marker,
-so the child's Stop appears to own the primary transaction and finalizes or
-deletes its state.
+**Failure:** Repository timestamps are treated as proof that a host event owns
+the active transaction, so a late event from a superseded root task finalizes,
+deletes, or appends to the current root task's state.
 
-**Invariant:** Persist an identity that the host supplies separately to each
-invocation and compare it before any Stop-side mutation. Publish identity before
-the active marker, encode the ownership format in that marker, and fail closed
-when a required companion identity is corrupt, multiline, or missing. Retain
-shared timestamps only as an upgrade fallback for markers that identify legacy
+**Invariant:** Persist the root session identity supplied by the host and compare
+it before any shared PostToolUse or Stop-side mutation. Current subagents use a
+dedicated lifecycle and retain that root ID. Publish identity before the active
+marker, encode the ownership format in that marker, and fail closed when a
+required companion identity is corrupt, multiline, or missing. Retain shared
+timestamps only as an upgrade fallback for markers that identify legacy
 sessions.
 
-**Regression evidence:** Start primary and child sessions in the same second,
-then stop the read-only child. Require the primary marker, log, owner token, raw
-lineage events, and baselines to remain byte-identical; only the primary Stop may
-consume them.
+**Regression evidence:** Start a new root owner while the prior task remains
+unfinalized, then deliver late tool and Stop events from the old owner. Require
+the new marker, log, owner token, raw lineage events, and baselines to remain
+byte-identical; only the new root Stop may consume them.
 
 ## 15. Terminal-only mode is treated as execution
 
@@ -244,3 +245,132 @@ value's shape before embedding it, and encode it for the destination format.
 one typed scalar in the generated artifact, then round-trip it through every
 consumer. Include destination-sensitive values such as YAML-looking Git branch
 names.
+
+## 17. A new root task is mistaken for a nested child
+
+**Failure:** SessionStart sees a recent repository-global marker and reuses it,
+so a fresh host task writes into an older task's log. Its Stop cannot finalize
+because the owner IDs differ, leaving both tasks stranded.
+
+**Invariant:** Use the host lifecycle contract: root SessionStart and
+SubagentStart are distinct, and subagents retain their parent's session ID. A
+fresh root startup with a different valid ID supersedes the old repository
+transaction while preserving its audit evidence. Every shared PostToolUse
+writer checks ownership before mutation.
+
+**Regression evidence:** Supersede a live owner, then send late Bash/edit/Stop
+events from it. Require a fresh log/baseline for the new owner, archived old raw
+lineage, an intact old log, and byte-stable new state after every late event.
+
+## 18. Control-plane work is classified as analysis work
+
+**Failure:** Index, registry, handoff, validation, or session-accounting helpers
+open a new analysis reminder after the agent has already completed reflection,
+creating a Stop loop that the lifecycle itself continually refreshes.
+
+**Invariant:** Classify the executed script path, not its basename or argument
+text. Mycelium-managed utility paths are silent; same-named user analysis
+scripts elsewhere remain eligible.
+
+**Regression evidence:** Exercise every managed helper through both source and
+versioned installed paths, plus user-script near neighbors. Require no reminder
+or lineage event for the former and normal detection for the latter.
+
+## 19. Machine finalization overwrites authored semantics
+
+**Failure:** Stop replaces a rich registry summary, outputs, tags, or handoff
+with filenames and blank cells, or preserves a durable "Stop pending" statement
+after Stop was accepted.
+
+**Invariant:** Machine finalizers own factual lifecycle fields and an explicit
+accepted-status block. Authored semantic fields and handoff body content remain
+intact; obsolete lifecycle-status prose is removed atomically.
+
+**Regression evidence:** Seed rich metadata and a complete handoff containing a
+pending-Stop line, finalize twice, and require one row, one status block, no
+pending contradiction, and unchanged authored semantic content.
+
+## 20. Multi-agent review counts prose instead of root causes
+
+**Failure:** The same defect is split across categories, draft counts survive
+synthesis, or chat/handoff totals disagree with the rendered report.
+
+**Invariant:** One remediation root gets one global finding ID. Derive category
+and global tallies from the final headings and validate them mechanically before
+reporting. Cross-input comparability is an explicit review axis.
+
+**Regression evidence:** Reject duplicate/nonconsecutive IDs and mismatched
+tallies; require an exact validator pass for a clean report fixture.
+
+## 21. A Markdown validator parses example code as report structure
+
+**Failure:** Headings, finding IDs, or table rows inside a fenced evidence
+sample are treated as live report structure. A valid report then fails because
+an illustrative `###` heading resets the category or a sample `##### F99`
+becomes a real finding.
+
+**Invariant:** Structural validation operates on Markdown outside fenced code
+blocks. Section-local tables stop at the next peer heading, required categories
+are checked even when they contain zero findings, and unexpected finding or
+tally categories are rejected.
+
+**Regression evidence:** Put category, finding, tally-heading, and table-shaped
+examples inside both ordinary report prose and fenced blocks. Require fenced
+content and later appendix tables to be ignored while wrong zero tallies and
+unexpected live categories fail.
+
+## 22. Review orchestration assumes unlimited subagent capacity
+
+**Failure:** A review dispatches all specialist agents concurrently even when
+the host exposes fewer slots. Some calls fail with `agent thread limit reached`,
+and the final synthesis silently omits those review axes.
+
+**Invariant:** Parallelism is bounded by observed host capacity. Specialists
+run in waves, undispatched work is retried after a slot opens, and persistent
+capacity failures fall back to the same checklist in-line. Every applicable
+review axis runs exactly once.
+
+**Regression evidence:** Exercise a host with fewer slots than specialists and
+inject a capacity error. Require later waves or in-line completion and a final
+report containing every applicable category without duplicate passes.
+
+## 23. A development cachebuster is treated as a release-version mismatch
+
+**Failure:** Codex appends its documented `+codex.<token>` cachebuster during a
+local reinstall, but cross-host validation compares manifest strings byte for
+byte and rejects the otherwise compatible plugin.
+
+**Invariant:** Claude and Codex manifests share the same semantic base version.
+Codex may carry one nonempty, correctly namespaced build-metadata cachebuster;
+arbitrary suffixes and divergent base versions remain invalid.
+
+**Regression evidence:** Validate the base version with and without a Codex
+cachebuster, then reject an empty token, another namespace, or a changed base.
+
+## 24. Archive cleanup assumes runtime state is a regular file
+
+**Failure:** Crash recovery checks only whether an event path has content, so a
+repository-controlled directory, device, or FIFO at that path can be moved,
+read, or blocked on as though it were a lineage log.
+
+**Invariant:** Every archive source and optional identity file is a non-symlink
+regular file, and every archive parent is a non-symlink directory, before
+recovery mutates anything. Unsafe state leaves the prior transaction intact.
+
+**Regression evidence:** Replace the raw-event file with a nonempty directory,
+attempt root supersession, and require a quiet refusal with the directory,
+owner, and active marker byte-stable.
+
+## 25. Repository fallback duplicates or aliases literal lineage paths
+
+**Failure:** A fallback searches by basename after static extraction, adds an
+absolute copy of an already-recorded relative path, or maps an explicitly
+external absolute literal onto a same-named in-repository file.
+
+**Invariant:** Repository recovery handles only eligible relative literals and
+merges by normalized path identity. Direct static attribution remains
+authoritative; fallback status is reported only when it adds a new path.
+
+**Regression evidence:** Cover a direct relative input that exists in the repo
+and an absolute external input whose basename also exists locally. Require one
+static record in each case and no `static+repository` claim.

@@ -88,6 +88,9 @@ exist:
   (e.g. pseudoreplication is both stats-causal and bioinformatics),
   place it under the category that matters most for *this* analysis
   and add a one-line "see also" cross-reference to the other category
+- If one root cause affects several files or creates several downstream
+  consequences, keep one finding ID and list those locations/consequences
+  inside it. Finding IDs count distinct remediations, not prose framings.
 
 ### Step 3 — Recalibrate severity
 
@@ -172,6 +175,20 @@ without findings. This builds trust by making absent findings legible.
 Use the template in the next section. Read the per-finding rendering
 rules carefully — every finding must include a code snippet, not just
 a `file:line` reference.
+
+### Step 8 — Verify IDs and counts
+
+Count the rendered `##### F<n>.` headings, not the pre-synthesis agent lists.
+Require unique consecutive IDs beginning at F1. Add a final `## Finding tally`
+table with one row per category and a bold Total row, and derive both row and
+global counts from those headings. Run:
+
+```bash
+python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/validate_review_report.py" <report>
+```
+
+Repair the report until it exits zero. Chat summaries and session handoffs must
+reuse this validated tally; never maintain a second hand-count.
 
 ## Report template
 
@@ -260,6 +277,18 @@ analysis>.
 - **LLM coding antipatterns**: ...
 - **Documentation & schema fidelity**: ...
 - **Code quality**: ...
+
+## Finding tally
+
+| Category | Major | Minor | Total |
+| --- | ---: | ---: | ---: |
+| Statistics & causal inference | N | N | N |
+| Data pipeline & leakage | N | N | N |
+| Bioinformatics | N | N | N |
+| LLM coding antipatterns | N | N | N |
+| Documentation & schema fidelity | N | N | N |
+| Code quality | N | N | N |
+| **Total** | **N** | **N** | **N** |
 
 ## Notes
 

@@ -40,8 +40,9 @@ hook, filesystem, or lifecycle boundaries.
 
 - [ ] `.codex-plugin/plugin.json` parses and contains the expected identity,
       skill path, interface metadata, and release version.
-- [ ] The Codex and Claude plugin manifests use the same package name, version,
-      and shared skill directory.
+- [ ] The Codex and Claude plugin manifests use the same package name, base
+      version, and shared skill directory; an optional Codex-only cachebuster
+      is a single nonempty `+codex.<token>` suffix.
 - [ ] Every `skills/*/SKILL.md` has valid `name` and `description` frontmatter,
       and the name matches its directory.
 - [ ] Every shared skill has valid `agents/openai.yaml` metadata.
@@ -120,9 +121,13 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Fresh initialization on an unborn Git branch records one valid branch
       scalar; a failing command's partial stdout is replaced rather than
       concatenated with fallback text.
-- [ ] A primary session publishes a per-host invocation owner token before its
-      active marker; a nested child Stop validates that token before lineage,
-      finalization, enforcement, or cleanup and cannot consume primary state.
+- [ ] A root session publishes a per-host invocation owner token before its
+      active marker. Dedicated subagent lifecycle events retain the parent's
+      session ID; a fresh root startup with a different valid ID supersedes the
+      old transaction without consuming its audit evidence.
+- [ ] Every shared PostToolUse writer validates the active owner before mutation,
+      so late Bash/edit/read events from a superseded root task cannot pollute
+      the current transaction.
 - [ ] Missing or corrupt new-format ownership fails closed. Timestamp matching
       is used only for active legacy sessions that have no owner-token file;
       the active marker identifies new-format ownership so a missing companion
@@ -147,9 +152,12 @@ hook, filesystem, or lifecycle boundaries.
       archives active state.
 - [ ] Stop continuation messages identify the unmet requirement precisely and
       do not enter an infinite retry loop.
-- [ ] Stop preserves a fresh, complete five-section handoff authored by the
-      agent; an absent, stale, or partial handoff is replaced atomically with a
-      deterministic fallback containing all five required sections.
+- [ ] Stop preserves the authored content of a fresh, complete five-section
+      handoff, atomically publishes an authoritative accepted-status block, and
+      removes obsolete standalone "Stop pending" lines; an absent, stale, or
+      partial handoff is replaced atomically with a complete fallback.
+- [ ] Stop updates factual registry fields without overwriting an agent-authored
+      Summary, Key Outputs, or Tags for the same session.
 - [ ] Cleanup and retention policies distinguish active, accepted, stale, and
       corrupt state.
 
@@ -253,6 +261,9 @@ hook, filesystem, or lifecycle boundaries.
       only final-state content is available.
 - [ ] Missing or unresolved scripts remain visible with warnings rather than
       being silently omitted.
+- [ ] Repository-assisted lineage recovery never duplicates a direct relative
+      path, never aliases an absolute or URL input by basename, and reports
+      fallback detection only when it contributes a new unambiguous path.
 - [ ] Event append, extraction, manifest writing, and status-sentinel updates
       are locked or atomic as appropriate.
 - [ ] Concurrent events and Stop attempts do not lose, duplicate, or split a
@@ -273,8 +284,9 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Concurrent SessionStart and Stop share lifecycle serialization; one
       primary log owns the active marker, and numbering uses the next unused
       value rather than the number of existing files.
-- [ ] A nested session receives a distinct owner identity and exits before any
-      mutation of its primary's log, lineage events, baselines, or sentinels.
+- [ ] Subagents retain the root session identity and cannot reserve or finalize
+      a second root transaction; superseded root tasks fail the owner gate
+      before mutating the current log, lineage, baselines, or sentinels.
 - [ ] Log, registry, manifest, marker, and sentinel replacements are atomic.
 - [ ] A log's acceptance marker, duration/file-count frontmatter, and matching
       completion footer are published as one atomic replacement; an injected
@@ -293,6 +305,9 @@ hook, filesystem, or lifecycle boundaries.
       prefix collisions, and nonexistent-parent tricks.
 - [ ] Cleanup cannot delete a path outside the project, even when state files
       are corrupt or attacker-controlled.
+- [ ] Crash-recovery archive sources and identity files must be non-symlink
+      regular files, archive parents must be non-symlink directories, and an
+      unsafe runtime object cannot be moved or consumed as lineage state.
 - [ ] Same-second writes and coarse filesystem timestamps cannot cause false
       enforcement failures.
 - [ ] Updating an existing finding or learning is detected; directory mtime is
@@ -314,7 +329,7 @@ hook, filesystem, or lifecycle boundaries.
       emit stdout before failing; captured values are single-line and encoded
       for their JSON, YAML, Markdown, or path destination.
 - [ ] Malformed reminder, audit, owner, and session-start timestamps cannot
-      abort SessionStart or trigger the subagent Stop bypass.
+      abort SessionStart or trigger an ownership/legacy Stop bypass.
 - [ ] Paths with spaces and non-ASCII characters work in shell, Python, JSON,
       and Markdown output.
 - [ ] Hook failures do not silently erase evidence or leave the repository in a
@@ -338,6 +353,23 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Architecture and troubleshooting documentation contains no stale command
       names, paths, or assumptions from a previous host integration.
 
+## 11. Review Orchestration and Report Validation
+
+- [ ] Specialist reviews are parallelized only up to the host's available
+      subagent capacity; remaining specialists run in later waves.
+- [ ] An `agent thread limit reached` dispatch failure is retried after a slot
+      opens or completed in-line, and every applicable checklist runs exactly
+      once before synthesis.
+- [ ] Finding IDs are unique and consecutive, each remediation root has one
+      global ID, and per-category plus global tallies are derived from the
+      final report rather than draft prose.
+- [ ] The review-report validator ignores headings, finding-like text, and
+      tables inside fenced Markdown code blocks.
+- [ ] Tally parsing is bounded to the `## Finding tally` section and ignores
+      unrelated tables in later appendices.
+- [ ] All required category rows are validated, including zero-finding
+      categories, and unexpected finding or tally categories are rejected.
+
 ## Required Adversarial Regression Matrix
 
 These cases are mandatory because ordinary happy-path tests are unlikely to
@@ -356,12 +388,17 @@ exercise them.
 | Python runs as `python3 -u`, `python3 -W`, an absolute or venv interpreter, `/usr/bin/env python3`, or `python -m` | Execution reminders and lineage events are emitted according to policy. |
 | Project path contains spaces or Unicode | Hooks, state, logs, and lineage remain correct. |
 | Runtime state is malformed or partially written | The hook fails visibly without destructive cleanup or out-of-project writes. |
+| The abandoned raw-lineage event path is a nonempty directory or other non-regular object | SessionStart leaves the object, active marker, and owner intact and performs no archive mutation. |
+| A script names a direct relative input, or an absolute external input shares a basename with repository data | Lineage records the authoritative static path exactly once and does not claim repository recovery. |
 | Active-log marker points outside `.living/log` | PostToolUse omits the unsafe log directive; Stop still enforces outstanding work and never reveals or follows the path. |
 | A dirty or untracked file is rewritten with the same size and restored mtime | Session accounting detects the content change. |
 | `true && python failed.py` exits nonzero, or Python is a pipeline component | The provably executed analysis is recorded; an unknown failed AND prefix remains omitted. |
 | Shell operators and Python text occur only after an unquoted `#` comment marker | No reminder or lineage event is created; quoted and escaped hashes remain valid arguments. |
 | Registry summary contains `|`, or the registry/lineage helper fails | Table cells remain valid; helper failure blocks Stop and preserves retry state without duplicate finalization. |
 | Registry finalization fails, then SessionStart resumes or compacts before Stop retries | The same unfinalized log and session ID remain active; the retry produces one final log and registry row. |
+| A review report contains category headings, `F99`, or tally rows inside a fenced evidence block | Fenced examples are ignored; live finding IDs and tallies still validate exactly. |
+| A required review category has no findings but claims a nonzero tally, or a later appendix has another four-column table | The false zero-category tally is rejected and the appendix table is ignored. |
+| The host has fewer subagent slots than review specialists | Specialists run in waves; capacity errors are retried or completed in-line, and all applicable axes appear exactly once. |
 | Interpreter or script paths concatenate quoted, bare, and escaped shell-word components | Python, R, and Jupyter reminders and lineage use the single decoded argv value. |
 | A quoted interpreter/script suffix is followed by more characters in the same shell word, such as `python "a.py".bak` | The longer argv value is evaluated as a whole; no event is attributed to `a.py`. |
 | `env -S 'echo prefix' python a.py` or another argv-rewriting wrapper precedes an interpreter-looking argument | The parser rejects the ambiguous execution unless it fully models the wrapper expansion. |
@@ -371,13 +408,18 @@ exercise them.
 | Python/R inline source contains escaped quotes or adjacent quoted components | The complete shell word is decoded and later data references remain visible. |
 | `--help`/`--version` or `-h`/`-V` precedes an apparent interpreter payload | No execution or lineage is attributed, including terminal short-option clusters and adjacent R/Jupyter forms. |
 | Atomic session-log replacement fails after registry/context preparation | Stop blocks, frontmatter remains unaccepted with no footer, active state survives resume/compact, and one retry produces one footer. |
-| The agent writes a fresh five-section `last-session.md` before Stop | Stop preserves it byte-for-byte; a missing, stale, or partial handoff receives an atomic five-section fallback instead. |
+| The agent writes a fresh five-section `last-session.md` before Stop | Stop preserves authored content, adds/updates its authoritative accepted-status block, and removes stale standalone "Stop pending" lines; a missing, stale, or partial handoff receives an atomic five-section fallback instead. |
 | A code-mode local tool returns model-facing `input_text` blocks containing serialized result JSON | Exit status is recovered recursively for lineage, conditional execution, and failed-edit activity classification. |
 | Current Codex Bash PostToolUse supplies an empty `tool_response` before its outer command event completes | The analysis execution is retained, exit status and wall time stay null, and no success value is fabricated. |
 | Claude Code cross-discovers the plugin's Codex `hooks/hooks.json` adapter | The Codex dispatcher exits silently under Claude while the native project hooks produce one lifecycle effect. |
 | Multiple SessionStart hooks race, or today's log numbers contain a gap | One primary log and one atomic versioned marker are created; no occupied log number is reused. |
 | SessionStart runs before the repository's first commit, including on a YAML-looking branch name | The prospective branch is stored as one YAML string, injected as one summary value, and decoded without quotes during Stop finalization. |
-| A read-only nested child starts and stops while its primary is active | The primary marker, owner token, log, baselines, and raw lineage remain active and byte-identical; the child performs no Stop-side mutation. A missing, multiline, or corrupt owner token for a marker declaring host-ID ownership blocks Stop without falling back to timestamps. |
+| A subagent uses the host's dedicated subagent lifecycle while its root task is active | It retains the parent session ID, may contribute Tier 1 activity, and cannot create or finalize a second root transaction. A missing, multiline, or corrupt owner token for a marker declaring host-ID ownership blocks Stop without falling back to timestamps. |
+| A fresh root SessionStart arrives with a different valid host session ID while another root transaction remains active | The prior log and raw lineage evidence are preserved as abandoned, all transient work-cycle state is cleared, and a fresh owner/log/baseline is created. Later PostToolUse or Stop events from the superseded owner are silent and cannot mutate the new transaction. |
+| Mycelium runs `generate_index.py`, registry/log/handoff finalizers, session accounting, or review validation | These control-plane utilities do not open or refresh an analysis bookkeeping cycle; a same-named user script outside the managed path remains eligible. |
+| Stop finalizes a registry row already enriched by the agent | Date, branch, duration, file count, status, and log link become factual final values while Summary, Key Outputs, and Tags remain authored and byte-equivalent at the cell level. |
+| A review report is rendered from multiple specialist outputs | Same-root findings are deduplicated, IDs are globally consecutive, per-category/global tallies match the rendered headings, and cross-input schema/feature/label comparability was checked. |
+| An analysis composes existing data paths dynamically from `Path`, dictionaries, or loop variables | Unique literal filenames are recovered conservatively from conventional repository input/output directories after execution; ambiguous basenames remain unresolved with an explicit warning. |
 | A recent lifecycle lock records an owner PID that has terminated | The next caller recovers it before the acquisition timeout; a recent ownerless lock is not mistaken for dead-owner proof. |
 | Jupyter receives `--show-config`, `--show-config-json`, or `--generate-config` before or after an apparent notebook, including after a shell redirection | No execution or lineage is attributed; terminal-looking text inside an ordinary option value, a redirection target, and an actual neighboring Jupyter command remain scoped correctly. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |

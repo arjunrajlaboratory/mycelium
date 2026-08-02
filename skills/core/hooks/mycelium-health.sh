@@ -25,6 +25,7 @@ CWD=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).ge
 if [ -z "$CWD" ]; then
   CWD=$(pwd)
 fi
+SOURCE=$(printf '%s' "$INPUT" | mycelium_json_get 'source')
 
 # Find git repo root
 REPO_ROOT=$(cd "$CWD" && git rev-parse --show-toplevel 2>/dev/null || echo "")
@@ -58,6 +59,42 @@ trap mycelium_release_stop_lock EXIT
 # AND those signals are also quiet.
 ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
 ACTIVE_OWNER_FILE="$STATE_DIR/active-session-owner-id.tmp"
+mycelium_archive_abandoned_events() {
+  local fallback_id="$1"
+  local events_file="$STATE_DIR/mycelium-data-events.tmp"
+  local lineage_id=""
+  local archive_dir="$STATE_DIR/mycelium-data-events-abandoned"
+  local destination=""
+
+  if [[ -e "$events_file" || -L "$events_file" ]]; then
+    [[ -f "$events_file" && ! -L "$events_file" ]] || return 1
+  else
+    return 0
+  fi
+  [[ -s "$events_file" ]] || return 0
+  if [[ -e "$STATE_DIR/data-lineage-session-id.tmp" \
+    || -L "$STATE_DIR/data-lineage-session-id.tmp" ]]; then
+    [[ -f "$STATE_DIR/data-lineage-session-id.tmp" \
+      && ! -L "$STATE_DIR/data-lineage-session-id.tmp" ]] || return 1
+    lineage_id=$(head -1 "$STATE_DIR/data-lineage-session-id.tmp" 2>/dev/null || true)
+  fi
+  if [[ ! "$lineage_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    lineage_id="$fallback_id"
+  fi
+  if [[ ! "$lineage_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    lineage_id="abandoned-$(date +%s)"
+  fi
+  if [[ -e "$archive_dir" || -L "$archive_dir" ]]; then
+    [[ -d "$archive_dir" && ! -L "$archive_dir" ]] || return 1
+  else
+    mkdir "$archive_dir" || return 1
+  fi
+  destination="$archive_dir/${lineage_id}.tmp"
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    destination="$archive_dir/${lineage_id}-$(date +%s)-$$.tmp"
+  fi
+  mv "$events_file" "$destination" || return 1
+}
 if [ -f "$ACTIVE_LOG_FILE" ]; then
   _SHOULD_CLEAN=false
   _STALE_LOG=""
@@ -69,13 +106,44 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
     _SHOULD_CLEAN=true
     MESSAGES="${MESSAGES}CORRUPT SESSION MARKER: Removed an invalid active-session marker without following its path. Session lifecycle state will be rebuilt safely.\n\n"
   fi
+  # SessionStart represents a root host task; current Claude and Codex
+  # subagents use their dedicated lifecycle events and retain the parent's
+  # session_id. A startup carrying a different valid host ID is therefore a
+  # new root task, not a child. Supersede the stale repository transaction so
+  # the new task cannot inherit or append to it.
+  _SUPERSEDED_OWNER=false
+  if [[ "$_SHOULD_CLEAN" != true \
+    && "$SOURCE" == "startup" \
+    && "$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '3p')" == "owner-id-v1" \
+    && "$HOST_SESSION_ID" =~ ^[A-Za-z0-9._-]+$ \
+    && ${#HOST_SESSION_ID} -le 200 ]]; then
+    if _STALE_OWNER_ID=$(mycelium_read_session_owner_id "$ACTIVE_OWNER_FILE") \
+      && [[ "$_STALE_OWNER_ID" != "$HOST_SESSION_ID" ]]; then
+      _SUPERSEDED_OWNER=true
+      _SHOULD_CLEAN=true
+      if ! mycelium_archive_abandoned_events "$_STALE_OWNER_ID"; then
+        exit 0
+      fi
+      rm -f \
+        "$STATE_DIR/data-lineage-session-id.tmp" \
+        "$STATE_DIR/handoff-finalization-pending.tmp" \
+        "$STATE_DIR/mycelium-reminded.tmp" \
+        "$STATE_DIR/mycelium-session-activity.tmp" \
+        "$STATE_DIR/living-reminder-baseline.json" \
+        "$STATE_DIR/session-file-baseline.json"
+      MESSAGES="${MESSAGES}ABANDONED PRIOR SESSION: A new root host task superseded the unfinalized transaction owned by ${_STALE_OWNER_ID}. Its log and archived raw lineage were preserved for audit; this task has a fresh lifecycle transaction.\n\n"
+    fi
+  fi
   # Definitive signals — clean regardless of activity:
   if [ "$_SHOULD_CLEAN" = true ]; then
     :
   elif [ -z "$_STALE_OWNER_TS" ]; then
     # Old format (no owner TS) — clean up for format upgrade
     _SHOULD_CLEAN=true
-  elif [ -n "$_STALE_LOG" ] && [ -f "$_STALE_LOG" ] && grep -q "^ended: [0-9]" "$_STALE_LOG"; then
+  elif [ -n "$_STALE_LOG" ] && [ -f "$_STALE_LOG" ] \
+    && grep -q "^ended: [0-9]" "$_STALE_LOG" \
+    && [ ! -e "$STATE_DIR/handoff-finalization-pending.tmp" ] \
+    && [ ! -L "$STATE_DIR/handoff-finalization-pending.tmp" ]; then
     # Log already finalized but sentinel wasn't cleaned
     _SHOULD_CLEAN=true
   elif [ -n "$_STALE_LOG" ] && [ ! -f "$_STALE_LOG" ]; then
@@ -105,17 +173,26 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
   fi
   if [ "$_SHOULD_CLEAN" = true ]; then
     # If the orphaned log was never finalized, surface a warning so the new
-    # session knows about it. Drop the active-session-log + session-start-ts
-    # sentinels so this process starts clean. Deliberately do NOT touch
-    # mycelium-session-activity.tmp / mycelium-reminded.tmp here — those
-    # have their own dedicated staleness cleanup further down, and wiping
-    # them would erase legitimate work signal in any rare misclassification.
+    # session knows about it. Archive raw lineage before dropping every
+    # transaction-scoped sentinel so the fresh root cannot mix old evidence or
+    # inherit a completed work cycle.
     if [ -n "$_STALE_LOG" ] && [ -f "$_STALE_LOG" ] && ! grep -q "## Session Summary" "$_STALE_LOG"; then
       MESSAGES="${MESSAGES}INCOMPLETE SESSION LOG: Previous session log at ${_STALE_LOG} was never finalized (likely a crashed session). Add a '## Session Summary' section and append a row to the registry, or delete it.\n\n"
+    fi
+    if [ "${_SUPERSEDED_OWNER:-false}" != true ]; then
+      if ! mycelium_archive_abandoned_events "abandoned-$(date +%s)"; then
+        exit 0
+      fi
     fi
     rm -f "$ACTIVE_LOG_FILE"
     rm -f "$ACTIVE_OWNER_FILE"
     rm -f "$STATE_DIR/session-start-ts.tmp"
+    rm -f "$STATE_DIR/handoff-finalization-pending.tmp"
+    rm -f "$STATE_DIR/data-lineage-session-id.tmp"
+    rm -f "$STATE_DIR/mycelium-reminded.tmp"
+    rm -f "$STATE_DIR/mycelium-session-activity.tmp"
+    rm -f "$STATE_DIR/living-reminder-baseline.json"
+    rm -f "$STATE_DIR/session-file-baseline.json"
   fi
 fi
 
@@ -129,6 +206,7 @@ if [ ! -f "$ACTIVE_LOG_FILE" ]; then
     # SessionStart and Stop processes. Clear any orphaned prior owner before
     # reserving this fresh primary transaction.
     rm -f "$ACTIVE_OWNER_FILE"
+    rm -f "$STATE_DIR/handoff-finalization-pending.tmp"
     FRESH_PRIMARY_SESSION=true
 fi
 
@@ -364,7 +442,6 @@ LOG_EOF
 fi
 
 # Only run .living/ health checks on fresh session starts
-SOURCE=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('source', ''))" 2>/dev/null || echo "")
 if [ "$SOURCE" != "startup" ]; then
   # Emit any accumulated messages (e.g. knowledge audit) and exit
   if [ -n "$MESSAGES" ]; then
