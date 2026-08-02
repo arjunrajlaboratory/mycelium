@@ -645,11 +645,52 @@ def test_repository_recovery_rejects_runtime_path_branches(
             "read_csv(ROOT / 'ghost.csv')\n"
         ),
         (
+            "import pandas as pd\n"
             "class Reader:\n"
             "    def read_csv(self, path):\n"
             "        print(path)\n"
             "pd = Reader()\n"
             "pd.read_csv(ROOT / 'ghost.csv')\n"
+        ),
+        (
+            "import pandas as pd\n"
+            "class Reader:\n"
+            "    def read_csv(self, path):\n"
+            "        print(path)\n"
+            "for pd in [Reader()]:\n"
+            "    pd.read_csv(ROOT / 'ghost.csv')\n"
+        ),
+        (
+            "import pandas as pd\n"
+            "with reader_context() as pd:\n"
+            "    pd.read_csv(ROOT / 'ghost.csv')\n"
+        ),
+        (
+            "import pandas as pd\n"
+            "pd, other = Reader(), None\n"
+            "pd.read_csv(ROOT / 'ghost.csv')\n"
+        ),
+        (
+            "import pandas as pd\n"
+            "try:\n"
+            "    operation()\n"
+            "except Exception as pd:\n"
+            "    pd.read_csv(ROOT / 'ghost.csv')\n"
+        ),
+        (
+            "import pandas as pd\n"
+            "if (pd := reader_factory()):\n"
+            "    pd.read_csv(ROOT / 'ghost.csv')\n"
+        ),
+        (
+            "import pandas as pd\n"
+            "[pd.read_csv(ROOT / 'ghost.csv') for pd in readers]\n"
+        ),
+        (
+            "import pandas as pd\n"
+            "match value:\n"
+            "    case {'reader': pd}:\n"
+            "        pd.read_csv(ROOT / 'ghost.csv')\n"
         ),
     ],
 )
@@ -704,10 +745,77 @@ def test_repository_recovery_accepts_imported_unqualified_reader(
     assert [item["path"] for item in event["inputs"]] == [str(sample)]
 
 
+def test_repository_recovery_rejects_runtime_filename_concatenation(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    decoy = tmp_path / "data" / "sample.csv"
+    actual = tmp_path / "data" / "actual_sample.csv"
+    decoy.parent.mkdir()
+    decoy.write_text("decoy\n")
+    actual.write_text("actual\n")
+    script = tmp_path / "run.py"
+    script.write_text(
+        "import sys\n"
+        "import pandas as pd\n"
+        "prefix = sys.argv[1]\n"
+        "pd.read_csv(prefix + 'sample.csv')\n"
+    )
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py actual_",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+
+
+@pytest.mark.parametrize(
+    "source,expected_key",
+    [
+        (
+            "import pandas as pd\n"
+            "pd.read_csv('sample' + '.csv')\n",
+            "inputs",
+        ),
+        ("frame.to_csv('sample' + '.csv')\n", "outputs"),
+    ],
+)
+def test_repository_recovery_accepts_static_filename_concatenation(
+    tmp_path: Path, source: str, expected_key: str
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    sample = tmp_path / "data" / "sample.csv"
+    sample.parent.mkdir()
+    sample.write_text("x\n")
+    script = tmp_path / "run.py"
+    script.write_text(source)
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "static+repository"
+    assert [item["path"] for item in event[expected_key]] == [str(sample)]
+
+
 @pytest.mark.parametrize(
     "source,relative_path,expected_key",
     [
         (
+            "import pandas as pd\n"
             "frame = pd.read_csv(ROOT / 'summary.csv')\n",
             "analysis/demo/results/summary.csv",
             "inputs",

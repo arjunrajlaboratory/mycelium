@@ -389,20 +389,26 @@ provenance, so a docstring or display label such as `ghost.csv` fabricates an
 input. It also guesses direction from directory names, misclassifying a read
 from `results/` as an output. Recursively collecting a conditional path records
 both branches, while leaf-name matching treats a user-defined `read_csv` helper
-as real data I/O.
+as real data I/O. Trusting a familiar alias after any rebinding has the same
+effect, and retaining the literal half of runtime string concatenation can hash
+a decoy whose basename was never read.
 
 **Invariant:** Recovery candidates must data-flow into the path argument of a
 recognized reader or writer expression. Direction is semantic evidence from
 that call, never a directory-name heuristic. Runtime branch selection and
-ambiguous assignment flow are left unresolved rather than guessed. Bare reader
-names require a supported import; arbitrary functions with familiar names do
-not prove I/O.
+ambiguous assignment flow are left unresolved rather than guessed. Reader
+aliases require an actual supported import and remain invalid after every AST
+binding form. String concatenation contributes only when the entire expression
+resolves statically; arbitrary functions and partial literals do not prove I/O.
 
 **Regression evidence:** Place a uniquely named `ghost.csv` in the repository
 and mention it only in a module docstring; require no lineage. Read a dynamic
 path under `results/` and write one under `data/`; require input/output direction
 to follow the calls. Pass a conditional path and a custom `read_csv` helper;
-require unresolved lineage, while retaining a supported imported reader.
+require unresolved lineage, while retaining a supported imported reader. Rebind
+its conventional alias through assignment, loop, context manager, unpacking,
+exception handling, walrus, comprehension, and pattern matching, and combine a
+runtime prefix with a literal suffix; require every case to stay unresolved.
 
 ## 27. Resolved I/O triggers repository traversal
 

@@ -273,7 +273,9 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Recovery candidates data-flow into recognized reader/writer path
       arguments, derive direction from that call, bypass repository discovery
       when static I/O is complete, reject runtime branch selection and
-      unproven bare reader names, and fail unresolved at a fixed entry bound.
+      partially resolved concatenation, require an actual supported import for
+      reader aliases, reject every locally rebound alias form, and fail
+      unresolved at a fixed entry bound.
 - [ ] Event append, extraction, manifest writing, and status-sentinel updates
       are locked or atomic as appropriate.
 - [ ] Concurrent events and Stop attempts do not lose, duplicate, or split a
@@ -404,6 +406,7 @@ exercise them.
 | A second root SessionStart arrives while the first owner's transaction has fresh activity but an old reminder | The original marker, owner, raw events, baselines, reminders, and activity remain byte-identical; the competing task is warned and cannot seize the transaction or erase its liveness evidence. |
 | A module docstring or non-I/O call contains `ghost.csv`, or a reader consumes a file under `results/` | The unrelated literal is ignored, and the actual reader path is classified as input regardless of directory name. |
 | A dynamic I/O path uses a conditional expression, or a user helper is named `read_csv` | Recovery remains unresolved instead of recording both runtime branches or treating the unproven helper as data I/O; an explicitly imported supported reader remains eligible. |
+| A supported-looking reader alias is rebound by assignment, loop, context manager, unpacking, exception handling, walrus, comprehension, or pattern matching; or a runtime prefix is concatenated with a literal filename | Recovery remains unresolved; only an unshadowed supported import and a fully static `+` expression can contribute lineage. |
 | A script's direct reader/writer literals are already resolved | Repository fallback is not invoked; dynamic discovery has a fixed fail-safe entry bound. |
 | Active-log marker points outside `.living/log` | PostToolUse omits the unsafe log directive; Stop still enforces outstanding work and never reveals or follows the path. |
 | A dirty or untracked file is rewritten with the same size and restored mtime | Session accounting detects the content change. |
