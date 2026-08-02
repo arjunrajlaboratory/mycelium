@@ -99,11 +99,12 @@ script). Inline `-c` scripts emit one event each; their `script` field is
 
 For dynamic `Path`/dictionary composition, a conservative repository fallback
 may recover a uniquely named existing file. Candidates must data-flow into the
-path argument of a recognized reader or writer, and direction comes from that
-call rather than the file's directory. Directly resolved paths bypass the
-fallback entirely. Dynamic searches exclude runtime/vendor trees and stop at a
-fixed entry bound; ambiguity or a bound hit remains unresolved rather than
-guessing.
+path argument of a recognized reader or writer, reader names must be qualified
+by a known package or supported import, and direction comes from that call
+rather than the file's directory. Expressions that choose among runtime
+branches remain unresolved. Directly resolved paths bypass the fallback
+entirely. Dynamic searches exclude runtime/vendor trees and stop at a fixed
+entry bound; ambiguity or a bound hit remains unresolved rather than guessing.
 
 When I/O is delegated through imports or no safe candidate can be recovered,
 the event uses `"io_detection": "unresolved"`, leaves `inputs` and `outputs`

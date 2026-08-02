@@ -213,20 +213,14 @@ if [ ! -f "$ACTIVE_LOG_FILE" ]; then
     FRESH_PRIMARY_SESSION=true
 fi
 
-# Clean up stale sentinels from crashed sessions
-# These are per-repo, so safe to clean on fresh session start
-if [ -f "$STATE_DIR/mycelium-reminded.tmp" ]; then
-  # With no active owner log, any reminder/activity pair belongs to the
-  # previous task—even if it ended less than an hour ago. Keeping it would
-  # suppress the new task's PostToolUse directive and pollute its file list.
-  STALE_TS=$(cat "$STATE_DIR/mycelium-reminded.tmp" 2>/dev/null || echo "0")
-  [[ "$STALE_TS" =~ ^[0-9]{1,18}$ ]] || STALE_TS=0
-  NOW_TS=$(date +%s)
-  STALE_AGE=$(( NOW_TS - STALE_TS ))
-  if [ "$FRESH_PRIMARY_SESSION" = true ] || [ "$STALE_AGE" -gt 3600 ]; then
-    rm -f "$STATE_DIR/mycelium-reminded.tmp"
-    rm -f "$STATE_DIR/mycelium-session-activity.tmp"
-  fi
+# Clean up transaction sentinels only after the prior marker was removed and
+# this invocation reserved a fresh primary transaction. A retained marker may
+# belong to another live root whose reminder is old but activity is current;
+# deleting the pair would erase the evidence that prevents false supersession.
+if [ "$FRESH_PRIMARY_SESSION" = true ] \
+  && [ -f "$STATE_DIR/mycelium-reminded.tmp" ]; then
+  rm -f "$STATE_DIR/mycelium-reminded.tmp"
+  rm -f "$STATE_DIR/mycelium-session-activity.tmp"
 fi
 
 # --- Knowledge audit check (runs regardless of SOURCE) ---

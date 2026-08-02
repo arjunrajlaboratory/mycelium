@@ -1435,6 +1435,34 @@ _PATH_KEYWORDS = {
     "path_or_buf",
     "store",
 }
+_KNOWN_IO_MODULE_ROOTS = {
+    "ad",
+    "anndata",
+    "dask",
+    "dd",
+    "geopandas",
+    "gpd",
+    "matplotlib",
+    "np",
+    "numpy",
+    "pa",
+    "pandas",
+    "pd",
+    "pl",
+    "polars",
+    "pyarrow",
+    "sc",
+    "scanpy",
+    "xr",
+    "xarray",
+}
+_DETERMINISTIC_PATH_CALLS = {
+    "Path",
+    "PurePath",
+    "os.path.join",
+    "pathlib.Path",
+    "pathlib.PurePath",
+}
 
 
 def _repository_root(cwd: Path) -> Path | None:
@@ -1460,17 +1488,29 @@ def _call_name(node: ast.AST) -> str | None:
     return None
 
 
-def _io_call_direction(node: ast.Call) -> str | None:
-    name = _call_name(node.func)
-    if not name:
+def _io_call_direction(
+    node: ast.Call,
+    import_aliases: dict[str, str],
+    locally_bound_roots: set[str],
+) -> str | None:
+    raw_name = _call_name(node.func)
+    if not raw_name:
         return None
+    parts = raw_name.split(".")
+    if parts[0] in import_aliases:
+        parts = import_aliases[parts[0]].split(".") + parts[1:]
+    name = ".".join(parts)
     leaf = name.rsplit(".", 1)[-1]
     if leaf in _OUTPUT_CALL_LEAVES or name in {
         "np.save",
         "np.savez",
         "np.savez_compressed",
     }:
-        return "output"
+        # Object methods such as ``frame.to_csv`` are conventional writers.
+        # A bare writer name, however, is evidence only when an import maps it
+        # to a known data-I/O package.
+        if "." in raw_name or parts[0] in _KNOWN_IO_MODULE_ROOTS:
+            return "output"
     if leaf in _INPUT_CALL_LEAVES or name in {
         "ad.read",
         "anndata.read",
@@ -1478,7 +1518,16 @@ def _io_call_direction(node: ast.Call) -> str | None:
         "sc.read",
         "scanpy.read",
     }:
-        return "input"
+        # Readers are module functions, not arbitrary object methods. Require
+        # a conventional package/alias or an import that canonicalizes to one;
+        # a user-defined ``read_csv`` must never fabricate provenance.
+        raw_root = raw_name.split(".", 1)[0]
+        if (
+            raw_root not in locally_bound_roots
+            and "." in name
+            and parts[0] in _KNOWN_IO_MODULE_ROOTS
+        ):
+            return "input"
     return None
 
 
@@ -1488,6 +1537,19 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
         tree = ast.parse(source)
     except SyntaxError:
         return set(), set()
+
+    import_aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local_name = alias.asname or alias.name.split(".", 1)[0]
+                import_aliases[local_name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                local_name = alias.asname or alias.name
+                import_aliases[local_name] = f"{node.module}.{alias.name}"
 
     assignments: dict[str, list[ast.AST]] = {}
     shadowed_names = {
@@ -1500,8 +1562,55 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
             for target in targets:
                 if isinstance(target, ast.Name) and value is not None:
                     assignments.setdefault(target.id, []).append(value)
+    locally_bound_roots = set(assignments) | shadowed_names
+    locally_bound_roots.update(
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef))
+    )
 
-    def collect(expression: ast.AST, resolving: frozenset[str] = frozenset()) -> set[str]:
+    unresolved = object()
+
+    def static_value(
+        expression: ast.AST, resolving: frozenset[str] = frozenset()
+    ) -> object:
+        if isinstance(expression, ast.Constant):
+            return expression.value
+        if isinstance(expression, ast.Name):
+            if expression.id in shadowed_names or expression.id in resolving:
+                return unresolved
+            definitions = assignments.get(expression.id, [])
+            if len(definitions) != 1:
+                return unresolved
+            return static_value(definitions[0], resolving | {expression.id})
+        if isinstance(expression, (ast.List, ast.Tuple)):
+            values = [static_value(item, resolving) for item in expression.elts]
+            if any(value is unresolved for value in values):
+                return unresolved
+            return values if isinstance(expression, ast.List) else tuple(values)
+        if isinstance(expression, ast.Dict):
+            keys = [static_value(key, resolving) for key in expression.keys]
+            values = [static_value(value, resolving) for value in expression.values]
+            if any(value is unresolved for value in keys + values):
+                return unresolved
+            try:
+                return dict(zip(keys, values, strict=True))
+            except (TypeError, ValueError):
+                return unresolved
+        if isinstance(expression, ast.Subscript):
+            container = static_value(expression.value, resolving)
+            index = static_value(expression.slice, resolving)
+            if container is unresolved or index is unresolved:
+                return unresolved
+            try:
+                return container[index]
+            except (IndexError, KeyError, TypeError):
+                return unresolved
+        return unresolved
+
+    def collect(
+        expression: ast.AST, resolving: frozenset[str] = frozenset()
+    ) -> set[str] | None:
         if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
             return {expression.value}
         if isinstance(expression, ast.Name):
@@ -1511,23 +1620,72 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
             if len(definitions) != 1 or expression.id in resolving:
                 return set()
             return collect(definitions[0], resolving | {expression.id})
+        if isinstance(
+            expression,
+            (
+                ast.BoolOp,
+                ast.DictComp,
+                ast.GeneratorExp,
+                ast.IfExp,
+                ast.Lambda,
+                ast.ListComp,
+                ast.SetComp,
+            ),
+        ):
+            return None
+        if isinstance(expression, ast.Subscript):
+            value = static_value(expression, resolving)
+            if isinstance(value, str):
+                return {value}
+            if value is not unresolved:
+                return set()
+            # Dynamic selection from a literal container can choose among
+            # multiple paths at runtime. Treat it as ambiguous rather than
+            # collecting every branch from the container.
+            if isinstance(expression.value, (ast.List, ast.Tuple, ast.Dict)):
+                return None
+            if isinstance(expression.value, ast.Name):
+                definitions = assignments.get(expression.value.id, [])
+                if len(definitions) == 1 and isinstance(
+                    definitions[0], (ast.List, ast.Tuple, ast.Dict)
+                ):
+                    return None
+            return set()
+        if isinstance(expression, ast.BinOp):
+            if not isinstance(expression.op, (ast.Add, ast.Div)):
+                return None
+            left = collect(expression.left, resolving)
+            right = collect(expression.right, resolving)
+            if left is None or right is None:
+                return None
+            return left | right
         if isinstance(expression, ast.Call):
+            call_name = _call_name(expression.func)
+            deterministic = call_name in _DETERMINISTIC_PATH_CALLS or (
+                call_name is not None and call_name.endswith(".joinpath")
+            )
             children = list(expression.args) + [
                 keyword.value for keyword in expression.keywords
             ]
-        else:
-            children = list(ast.iter_child_nodes(expression))
-        values: set[str] = set()
-        for child in children:
-            values.update(collect(child, resolving))
-        return values
+            if not deterministic:
+                return set() if not children else None
+            values: set[str] = set()
+            for child in children:
+                child_values = collect(child, resolving)
+                if child_values is None:
+                    return None
+                values.update(child_values)
+            return values
+        if isinstance(expression, ast.Attribute):
+            return collect(expression.value, resolving)
+        return set()
 
     inputs: set[str] = set()
     outputs: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        direction = _io_call_direction(node)
+        direction = _io_call_direction(node, import_aliases, locally_bound_roots)
         if direction is None:
             continue
         path_expressions = list(node.args[:1])
@@ -1538,7 +1696,11 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
         )
         values: set[str] = set()
         for expression in path_expressions:
-            values.update(collect(expression))
+            expression_values = collect(expression)
+            if expression_values is None:
+                values.clear()
+                break
+            values.update(expression_values)
         destination = inputs if direction == "input" else outputs
         destination.update(values)
 

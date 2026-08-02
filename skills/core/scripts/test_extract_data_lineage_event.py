@@ -499,11 +499,12 @@ def test_dynamic_literal_filenames_are_recovered_from_repository(tmp_path: Path)
     script = tmp_path / "analysis" / "demo" / "run.py"
     script.write_text(
         "from pathlib import Path\n"
+        "import anndata as ad\n"
         "RAW = Path(__file__).parents[2] / 'data' / 'raw'\n"
         "OUT = Path(__file__).parent / 'outputs'\n"
         "SPECS = [{'filename': 'sample.h5ad'}]\n"
         "path = RAW / SPECS[0]['filename']\n"
-        "adata = read_h5ad(path)\n"
+        "adata = ad.read_h5ad(path)\n"
         "table.to_csv(OUT / 'summary.csv')\n"
     )
     args = argparse.Namespace(
@@ -598,6 +599,109 @@ def test_repository_recovery_does_not_follow_a_shadowed_global_assignment(
     assert event is not None
     assert event["io_detection"] == "unresolved"
     assert event["inputs"] == []
+
+
+@pytest.mark.parametrize(
+    "path_expression",
+    [
+        "ROOT / ('train.csv' if use_train else 'test.csv')",
+        "ROOT / ['train.csv', 'test.csv'][selected_index]",
+    ],
+)
+def test_repository_recovery_rejects_runtime_path_branches(
+    tmp_path: Path, path_expression: str
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    for filename in ("train.csv", "test.csv"):
+        candidate = tmp_path / "data" / filename
+        candidate.parent.mkdir(exist_ok=True)
+        candidate.write_text("x\n")
+    script = tmp_path / "run.py"
+    script.write_text(
+        "import pandas as pd\n"
+        f"pd.read_csv({path_expression})\n"
+    )
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "def read_csv(path):\n"
+            "    print(path)\n"
+            "read_csv(ROOT / 'ghost.csv')\n"
+        ),
+        (
+            "class Reader:\n"
+            "    def read_csv(self, path):\n"
+            "        print(path)\n"
+            "pd = Reader()\n"
+            "pd.read_csv(ROOT / 'ghost.csv')\n"
+        ),
+    ],
+)
+def test_repository_recovery_rejects_unproven_custom_reader(
+    tmp_path: Path, source: str
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    ghost = tmp_path / "data" / "ghost.csv"
+    ghost.parent.mkdir()
+    ghost.write_text("x\n")
+    script = tmp_path / "run.py"
+    script.write_text(source)
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+
+
+def test_repository_recovery_accepts_imported_unqualified_reader(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    sample = tmp_path / "data" / "sample.csv"
+    sample.parent.mkdir()
+    sample.write_text("x\n")
+    script = tmp_path / "run.py"
+    script.write_text(
+        "from pandas import read_csv\n"
+        "read_csv(ROOT / 'sample.csv')\n"
+    )
+    args = argparse.Namespace(
+        ts="2026-08-02T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "static+repository"
+    assert [item["path"] for item in event["inputs"]] == [str(sample)]
 
 
 @pytest.mark.parametrize(

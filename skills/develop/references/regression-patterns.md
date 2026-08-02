@@ -259,12 +259,15 @@ SubagentStart are distinct, and subagents retain their parent's session ID. A
 different root startup may supersede an old repository transaction only after
 the same owner-age and activity/reminder liveness checks prove it inactive.
 Live owners remain intact and the competing task receives an explicit warning.
+Cleanup must also preserve both liveness sentinels while that owner remains
+active; an old reminder cannot authorize deleting a fresh activity signal.
 Every shared PostToolUse writer checks ownership before mutation.
 
 **Regression evidence:** First attempt to supersede a live owner and require its
 marker, owner, log, raw lineage, reminder, activity, and baselines to remain
-byte-identical. Then age both the owner and its liveness signals beyond the
-threshold, retry, and require a fresh log/baseline plus archived old evidence.
+byte-identical, including when the reminder is old but activity is fresh. Then
+age both the owner and its liveness signals beyond the threshold, retry, and
+require a fresh log/baseline plus archived old evidence.
 
 ## 18. Control-plane work is classified as analysis work
 
@@ -384,17 +387,22 @@ static record in each case and no `static+repository` claim.
 **Failure:** Repository recovery treats every data-looking string constant as
 provenance, so a docstring or display label such as `ghost.csv` fabricates an
 input. It also guesses direction from directory names, misclassifying a read
-from `results/` as an output.
+from `results/` as an output. Recursively collecting a conditional path records
+both branches, while leaf-name matching treats a user-defined `read_csv` helper
+as real data I/O.
 
 **Invariant:** Recovery candidates must data-flow into the path argument of a
 recognized reader or writer expression. Direction is semantic evidence from
-that call, never a directory-name heuristic. Ambiguous assignment flow is left
-unresolved rather than guessed.
+that call, never a directory-name heuristic. Runtime branch selection and
+ambiguous assignment flow are left unresolved rather than guessed. Bare reader
+names require a supported import; arbitrary functions with familiar names do
+not prove I/O.
 
 **Regression evidence:** Place a uniquely named `ghost.csv` in the repository
 and mention it only in a module docstring; require no lineage. Read a dynamic
 path under `results/` and write one under `data/`; require input/output direction
-to follow the calls.
+to follow the calls. Pass a conditional path and a custom `read_csv` helper;
+require unresolved lineage, while retaining a supported imported reader.
 
 ## 27. Resolved I/O triggers repository traversal
 
