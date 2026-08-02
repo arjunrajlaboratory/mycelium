@@ -18,10 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PostToolUse events can no longer recreate lifecycle state after their active
   transaction ends, while a concurrent root SessionStart preserves a live
   owner's transaction and only supersedes owners proven inactive by the normal
-  liveness checks. Repository-assisted lineage now follows literals through
-  recognized I/O expressions, derives direction from the reader/writer call,
-  skips discovery for already-resolved static I/O, and fails safely at a fixed
-  scan bound instead of fabricating provenance or walking indefinitely.
+  liveness checks without deleting the retained owner's activity evidence.
+  Repository-assisted lineage now follows unambiguous literals through proven
+  I/O expressions, derives direction from the reader/writer call, skips
+  discovery for already-resolved static I/O, and fails safely at a fixed scan
+  bound instead of fabricating provenance or walking indefinitely.
 
 - **Lifecycle smoke hardening.** Fresh root SessionStart events now supersede
   abandoned owners while preserving their logs and raw lineage, and all shared

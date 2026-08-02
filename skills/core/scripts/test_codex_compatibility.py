@@ -1232,7 +1232,9 @@ def test_new_root_session_preserves_a_live_owned_session(tmp_path):
     reminder = state / "mycelium-reminded.tmp"
     events.write_text('{"script":"analysis/live.py"}\n')
     activity.write_text("analysis/live.py\n")
-    reminder.write_text(f"{int(time.time())}\n")
+    stale_signal_ts = int(time.time()) - 3700
+    reminder.write_text(f"{stale_signal_ts}\n")
+    os.utime(reminder, (stale_signal_ts, stale_signal_ts))
     marker_lines = marker.read_text().splitlines()
     marker.write_text(
         f"{marker_lines[0]}\n{int(time.time()) - 7300}\nowner-id-v1\n"
