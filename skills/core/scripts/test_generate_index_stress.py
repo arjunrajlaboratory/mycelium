@@ -214,8 +214,10 @@ class TestCountsOnlyEdgeCases:
         assert gi.QUICK_REF_END in content
         assert "1 entry" in content
 
-    def test_readonly_index_raises_permission_error(self, tmp_path: Path) -> None:
-        """Read-only INDEX.md → PermissionError raised when trying to update."""
+    def test_readonly_index_is_atomically_updated_without_mode_drift(
+        self, tmp_path: Path
+    ) -> None:
+        """Atomic replacement can update a managed index and retain its mode."""
         living_dir = tmp_path / ".living"
         living_dir.mkdir()
         _write_learnings(living_dir, 1)
@@ -224,12 +226,10 @@ class TestCountsOnlyEdgeCases:
         index_path.write_text("# existing\n", encoding="utf-8")
         os.chmod(index_path, 0o444)  # read-only
 
-        try:
-            with pytest.raises(PermissionError):
-                gi.update_index_counts_only(living_dir)
-        finally:
-            # Restore permissions so tmp_path cleanup works
-            os.chmod(index_path, 0o644)
+        gi.update_index_counts_only(living_dir)
+
+        assert "1 entry" in index_path.read_text(encoding="utf-8")
+        assert index_path.stat().st_mode & 0o777 == 0o444
 
 
 # ---------------------------------------------------------------------------

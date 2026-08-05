@@ -13,7 +13,12 @@ source "$HERE/mycelium-hook-lib.sh"
 
 # Read stdin JSON
 INPUT=$(cat)
-HOST_SESSION_ID=$(printf '%s' "$INPUT" | mycelium_json_get 'session_id')
+HOST_SESSION_ID=$(printf '%s' "$INPUT" \
+  | mycelium_json_get_optional_string 'session_id') || exit 0
+if [[ -n "$HOST_SESSION_ID" ]] \
+  && ! mycelium_valid_session_id "$HOST_SESSION_ID"; then
+  exit 0
+fi
 
 # Initialize message accumulator
 MESSAGES=""
@@ -33,16 +38,32 @@ if [ -z "$REPO_ROOT" ]; then
   exit 0  # Not in a git repo
 fi
 
-mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
+mycelium_prepare_state_dir "$REPO_ROOT" bootstrap || exit 0
 
 # SessionStart and Stop both mutate the active-log ownership transaction.
 # Serialize them with the same repository-local lock so concurrent primary and
 # subagent starts cannot reserve separate logs or overwrite one another's
 # marker while Stop is finalizing the prior session.
-if ! mycelium_acquire_stop_lock "$STATE_DIR"; then
+if ! mycelium_acquire_stop_lock "$MYCELIUM_SHARED_STATE_DIR"; then
   exit 0
 fi
-trap mycelium_release_stop_lock EXIT
+if ! mycelium_prepare_state_dir "$REPO_ROOT"; then
+  mycelium_release_stop_lock
+  exit 0
+fi
+if ! mycelium_select_session_state "$REPO_ROOT" "$INPUT" create; then
+  mycelium_release_stop_lock
+  exit 0
+fi
+if ! mycelium_acquire_session_lock "$STATE_DIR"; then
+  mycelium_release_stop_lock
+  exit 0
+fi
+trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT
+
+if [[ "${MYCELIUM_SESSION_SCOPED:-false}" == true ]]; then
+  MESSAGES="${MESSAGES}SESSION HANDOFF PATH: Write the complete five-section handoff for this root task to ${STATE_DIR}/last-session.md. Accepted Stop will publish it to the shared resume pointer.\n\n"
+fi
 
 # Clean up stale sentinels from a crashed previous session BEFORE the
 # session-start-ts guard below — otherwise the guard mistakes the orphaned
@@ -63,7 +84,7 @@ mycelium_archive_abandoned_events() {
   local fallback_id="$1"
   local events_file="$STATE_DIR/mycelium-data-events.tmp"
   local lineage_id=""
-  local archive_dir="$STATE_DIR/mycelium-data-events-abandoned"
+  local archive_dir="$MYCELIUM_SHARED_STATE_DIR/mycelium-data-events-abandoned"
   local destination=""
 
   if [[ -e "$events_file" || -L "$events_file" ]]; then
@@ -119,9 +140,8 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
   # prior owner abandoned.
   if [[ "$_SHOULD_CLEAN" != true \
     && "$SOURCE" == "startup" \
-    && "$_STALE_OWNER_FORMAT" == "owner-id-v1" \
-    && "$HOST_SESSION_ID" =~ ^[A-Za-z0-9._-]+$ \
-    && ${#HOST_SESSION_ID} -le 200 ]]; then
+    && "$_STALE_OWNER_FORMAT" == "owner-id-v1" ]] \
+    && mycelium_valid_session_id "$HOST_SESSION_ID"; then
     if _STALE_OWNER_ID=$(mycelium_read_session_owner_id "$ACTIVE_OWNER_FILE") \
       && [[ "$_STALE_OWNER_ID" != "$HOST_SESSION_ID" ]]; then
       _DIFFERENT_ROOT_OWNER=true
@@ -375,8 +395,7 @@ LOG_EOF
     # concurrent child cannot observe the marker until its primary owner token
     # is complete. Older hosts without session_id retain the timestamp fallback.
     _ACTIVE_MARKER_FORMAT=""
-    if [[ "$HOST_SESSION_ID" =~ ^[A-Za-z0-9._-]+$ \
-      && ${#HOST_SESSION_ID} -le 200 ]]; then
+    if mycelium_valid_session_id "$HOST_SESSION_ID"; then
       _ACTIVE_OWNER_TMP=$(mktemp "$STATE_DIR/.active-session-owner-id.tmp.XXXXXX") || {
         rm -f "$LOG_PATH"
         exit 0
@@ -450,6 +469,9 @@ fi
 
 # --- Session resume: load last-session.md if recent ---
 SESSION_FILE="$STATE_DIR/last-session.md"
+if [[ ! -f "$SESSION_FILE" && "$STATE_DIR" != "$MYCELIUM_SHARED_STATE_DIR" ]]; then
+  SESSION_FILE="$MYCELIUM_SHARED_STATE_DIR/last-session.md"
+fi
 if [ -f "$SESSION_FILE" ]; then
   SESSION_MTIME=$(mycelium_file_mtime "$SESSION_FILE")
   NOW_TS=$(date +%s)

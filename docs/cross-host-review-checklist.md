@@ -89,6 +89,10 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Re-running initialization is idempotent.
 - [ ] Dry-run migration performs no writes.
 - [ ] Actual migration is idempotent and validates successfully afterward.
+- [ ] Migration dry-run detects, and actual migration narrowly refreshes, a
+      generated `MYCELIUM.md` session-summary rule that still directs all roots
+      to shared `.mycelium/last-session.md`; nearby project guidance is
+      preserved and a second migration is a no-op.
 - [ ] A migration action reported as skipped does not rewrite byte-identical
       managed configuration or churn its timestamp; deliberate data refreshes
       such as INDEX regeneration are identified separately.
@@ -126,17 +130,21 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Fresh initialization on an unborn Git branch records one valid branch
       scalar; a failing command's partial stdout is replaced rather than
       concatenated with fallback text.
-- [ ] A root session publishes a per-host invocation owner token before its
-      active marker. Dedicated subagent lifecycle events retain the parent's
-      session ID. A different root ID preserves a transaction with current
-      liveness signals and supersedes only an inactive owner, without consuming
-      its audit evidence.
-- [ ] Retaining a live owner also retains its reminder and activity sentinels;
-      stale-sentinel cleanup runs only after the prior active marker is gone
-      and a fresh transaction has been reserved.
-- [ ] Every shared PostToolUse writer validates the active owner before mutation,
-      so late Bash/edit/read events from a superseded root task cannot pollute
-      the current transaction.
+- [ ] Every identified root publishes its owner token and active marker inside
+      `.mycelium/run/<host>/<session-id>/`. A distinct root ID or host receives
+      an independent transaction and log without reading, superseding, or
+      cleaning another root's state. Dedicated subagent lifecycle events retain
+      the parent's session ID.
+- [ ] A present host session ID must be a JSON string, match the documented
+      character/length policy, and not equal the special path components `.` or
+      `..`. Wrongly typed or path-aliasing IDs fail before shared preparation and
+      never downgrade to identity-free legacy state.
+- [ ] Resuming a live root retains its reminder, activity, lineage, retry, and
+      baseline sentinels; stale recovery is confined to that exact root's run
+      directory and preserves abandoned audit evidence.
+- [ ] Every PostToolUse writer resolves an existing private transaction,
+      acquires its per-session lock, then revalidates owner and marker before
+      mutation, so an event queued before accepted Stop cannot write afterward.
 - [ ] A host-identified PostToolUse event with no active transaction is rejected
       as late; only identity-free legacy payloads retain markerless behavior.
 - [ ] Missing or corrupt new-format ownership fails closed. Timestamp matching
@@ -164,9 +172,14 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Stop continuation messages identify the unmet requirement precisely and
       do not enter an infinite retry loop.
 - [ ] Stop preserves the authored content of a fresh, complete five-section
-      handoff, atomically publishes an authoritative accepted-status block, and
-      removes obsolete standalone "Stop pending" lines; an absent, stale, or
-      partial handoff is replaced atomically with a complete fallback.
+      handoff, where every required heading occurs exactly once in order and
+      every section has a nonblank body after obsolete lifecycle prose is
+      removed. Cleanup and completeness validation share one implementation,
+      and the finalizer enforces that post-cleanup contract before writing. It
+      atomically publishes an authoritative accepted-status block; an absent,
+      stale, malformed, partial, or cleanup-emptied handoff is replaced
+      atomically with a complete fallback. Only an accepted Stop publishes the
+      private handoff to shared `.mycelium/last-session.md`.
 - [ ] Stop updates factual registry fields without overwriting an agent-authored
       Summary, Key Outputs, or Tags for the same session.
 - [ ] Cleanup and retention policies distinguish active, accepted, stale, and
@@ -292,18 +305,24 @@ hook, filesystem, or lifecycle boundaries.
 
 ## 8. Concurrency, Atomicity, and Filesystem Safety
 
-- [ ] The entire Stop transaction is serialized, including decision, final log,
-      registry update, lineage extraction, and cleanup.
+- [ ] Stop acquires the repository lifecycle lock and then its target session
+      lock; the decision, final log, registry update, lineage extraction,
+      handoff publication, and cleanup are one serialized transaction.
 - [ ] Concurrent Stop attempts produce exactly one finalization, one registry
       row, and one lineage archive.
 - [ ] Concurrent SessionStart and PostToolUse writes cannot truncate or
-      interleave state.
-- [ ] Concurrent SessionStart and Stop share lifecycle serialization; one
-      primary log owns the active marker, and numbering uses the next unused
-      value rather than the number of existing files.
+      interleave one root's state, while PostToolUse for distinct roots remains
+      independent.
+- [ ] Concurrent SessionStart and Stop share repository lifecycle
+      serialization; distinct identified roots own distinct markers and logs,
+      and numbering uses the next unused value rather than the number of
+      existing files.
 - [ ] Subagents retain the root session identity and cannot reserve or finalize
       a second root transaction; superseded root tasks fail the owner gate
       before mutating the current log, lineage, baselines, or sentinels.
+- [ ] Shared registry/index/graph writers hold stable durable-file locks across
+      their complete read/derive/write operations; atomic replacement alone is
+      not treated as lost-update protection.
 - [ ] Log, registry, manifest, marker, and sentinel replacements are atomic.
 - [ ] A log's acceptance marker, duration/file-count frontmatter, and matching
       completion footer are published as one atomic replacement; an injected
@@ -312,6 +331,9 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Lock acquisition has bounded failure behavior; a recorded dead owner is
       recoverable before that bound, while a recent ownerless lock retains a
       publication-race grace period.
+- [ ] A stale-lock reaper claims and revalidates the observed directory
+      generation plus owner before deletion; it cannot remove a replacement
+      owner's lock during the mkdir-to-owner publication window.
 - [ ] `.mycelium`, `.living`, marker files, and output parents cannot redirect
       writes outside the project through symlinks.
 - [ ] Machine-local pointer refreshes reject existing links and use atomic
@@ -408,7 +430,8 @@ exercise them.
 | The abandoned raw-lineage event path is a nonempty directory or other non-regular object | SessionStart leaves the object, active marker, and owner intact and performs no archive mutation. |
 | A script names a direct relative input, or an absolute external input shares a basename with repository data | Lineage records the authoritative static path exactly once and does not claim repository recovery. |
 | A completed host task delivers Bash/edit/read PostToolUse after its marker was removed | Every shared writer exits silently without recreating reminders, activity, read telemetry, or raw lineage. |
-| A second root SessionStart arrives while the first owner's transaction has fresh activity but an old reminder | The original marker, owner, raw events, baselines, reminders, and activity remain byte-identical; the competing task is warned and cannot seize the transaction or erase its liveness evidence. |
+| A second identified root SessionStart arrives while the first root is live | Both roots receive distinct host-scoped run directories, markers, logs, baselines, lineage, and Stop enforcement; neither can mutate or clean the other's state. |
+| A session ID is numeric, Boolean, object/list-valued, `.`, or `..` | SessionStart creates no runtime directory, log, or shared file; a present invalid value never aliases another namespace or downgrades to legacy state. |
 | A module docstring or non-I/O call contains `ghost.csv`, or a reader consumes a file under `results/` | The unrelated literal is ignored, and the actual reader path is classified as input regardless of directory name. |
 | A dynamic I/O path uses a conditional expression, or a user helper is named `read_csv` | Recovery remains unresolved instead of recording both runtime branches or treating the unproven helper as data I/O; an explicitly imported supported reader remains eligible. |
 | A supported-looking reader alias is rebound by assignment, loop, context manager, unpacking, exception handling, walrus, comprehension, or pattern matching; or a runtime prefix is concatenated with a literal filename | Recovery remains unresolved; only an unshadowed supported import and a fully static `+` expression can contribute lineage. |
@@ -431,20 +454,21 @@ exercise them.
 | Python/R inline source contains escaped quotes or adjacent quoted components | The complete shell word is decoded and later data references remain visible. |
 | `--help`/`--version` or `-h`/`-V` precedes an apparent interpreter payload | No execution or lineage is attributed, including terminal short-option clusters and adjacent R/Jupyter forms. |
 | Atomic session-log replacement fails after registry/context preparation | Stop blocks, frontmatter remains unaccepted with no footer, active state survives resume/compact, and one retry produces one footer. |
-| The agent writes a fresh five-section `last-session.md` before Stop | Stop preserves authored content, adds/updates its authoritative accepted-status block, and removes stale standalone "Stop pending" lines; a missing, stale, or partial handoff receives an atomic five-section fallback instead. |
+| The agent writes a fresh five-section private `last-session.md` before Stop | Stop validates the post-cleanup body, preserves authored content, adds/updates its authoritative accepted-status block, and removes stale standalone "Stop pending" lines. A missing, stale, partial, or cleanup-emptied handoff receives an atomic five-section fallback instead; direct finalizer rejection leaves both source and destination unchanged. Accepted Stop atomically publishes the complete file to shared `.mycelium/last-session.md`; blocked Stop does not. |
 | A code-mode local tool returns model-facing `input_text` blocks containing serialized result JSON | Exit status is recovered recursively for lineage, conditional execution, and failed-edit activity classification. |
 | Current Codex Bash PostToolUse supplies an empty `tool_response` before its outer command event completes | The analysis execution is retained, exit status and wall time stay null, and no success value is fabricated. |
 | Current Claude SessionStart or PostToolUse returns context | The raw hook response uses `hookSpecificOutput` with the matching event name, and a fresh Claude task receives the context in its model-visible system reminder. |
 | Claude Code cross-discovers the plugin's Codex `hooks/hooks.json` adapter | The Codex dispatcher exits silently under Claude while the native project hooks produce one lifecycle effect. |
-| Multiple SessionStart hooks race, or today's log numbers contain a gap | One primary log and one atomic versioned marker are created; no occupied log number is reused. |
+| Multiple SessionStart hooks race, or today's log numbers contain a gap | Repeated starts for one identity reuse one transaction; distinct identities receive distinct markers/logs; no occupied log number is reused. |
 | SessionStart runs before the repository's first commit, including on a YAML-looking branch name | The prospective branch is stored as one YAML string, injected as one summary value, and decoded without quotes during Stop finalization. |
 | A subagent uses the host's dedicated subagent lifecycle while its root task is active | It retains the parent session ID, may contribute Tier 1 activity, and cannot create or finalize a second root transaction. A missing, multiline, or corrupt owner token for a marker declaring host-ID ownership blocks Stop without falling back to timestamps. |
-| A fresh root SessionStart arrives with a different valid host session ID after the prior transaction is old and has no fresh liveness signal | The prior log and raw lineage evidence are preserved as abandoned, transient work-cycle state is cleared, and a fresh owner/log/baseline is created. Later PostToolUse or Stop events from the superseded owner are silent and cannot mutate the new transaction. |
+| A pre-upgrade flat transaction exists when a fresh identified root starts | An exact flat owner match continues in place; a nonmatching identity receives a new scoped transaction without touching the flat marker, owner, lineage, or retry evidence. |
+| Two registry/index writers read the same initial bytes and finish in the opposite order | A stable durable-file lock covers each complete derivation, every distinct row survives, output remains structurally valid, and the existing target mode is preserved. |
 | Mycelium runs `generate_index.py`, registry/log/handoff finalizers, session accounting, or review validation | These control-plane utilities do not open or refresh an analysis bookkeeping cycle; a same-named user script outside the managed path remains eligible. |
 | Stop finalizes a registry row already enriched by the agent | Date, branch, duration, file count, status, and log link become factual final values while Summary, Key Outputs, and Tags remain authored and byte-equivalent at the cell level. |
 | A review report is rendered from multiple specialist outputs | Same-root findings are deduplicated, IDs are globally consecutive, per-category/global tallies match the rendered headings, and cross-input schema/feature/label comparability was checked. |
 | An analysis composes existing data paths dynamically from `Path`, dictionaries, or loop variables | Unique filenames reachable from recognized I/O path arguments are recovered conservatively after execution; direction follows the call, while ambiguous or over-bound searches remain unresolved with an explicit warning. |
-| A recent lifecycle lock records an owner PID that has terminated | The next caller recovers it before the acquisition timeout; a recent ownerless lock is not mistaken for dead-owner proof. |
+| A recent lifecycle lock records an owner PID that has terminated | The next caller claims and revalidates that exact generation before recovering it; a recent ownerless lock is not mistaken for dead-owner proof, and a replacement owner's lock survives competing delayed reapers. |
 | Jupyter receives `--show-config`, `--show-config-json`, or `--generate-config` before or after an apparent notebook, including after a shell redirection | No execution or lineage is attributed; terminal-looking text inside an ordinary option value, a redirection target, and an actual neighboring Jupyter command remain scoped correctly. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | A Claude or Codex hook config is valid JSON but has malformed event, group, handler, or command types | Initialization and migration reject it before changing guidance, runtime state, hooks, todo files, or the knowledge index. |

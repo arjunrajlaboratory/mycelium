@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
+from pathlib import Path
+
+from mycelium_locks import LockError, atomic_write_text, durable_path_lock
 
 
 def _row_cells(line: str) -> list[str] | None:
@@ -81,7 +83,8 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    registry_path, session_id, new_row = positional
+    registry_path_raw, session_id, new_row = positional
+    registry_path = Path(os.path.abspath(registry_path_raw))
 
     pipe_count = new_row.count("|")
     if pipe_count != 12:
@@ -91,47 +94,43 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    if not os.path.exists(registry_path):
-        print(f"error: registry not found: {registry_path}", file=sys.stderr)
-        return 1
-
     if not new_row.endswith("\n"):
         new_row = new_row + "\n"
 
-    with open(registry_path, encoding="utf-8") as f:
-        lines = f.readlines()
-
-    replaced = False
-    out_lines: list[str] = []
-    for line in lines:
-        sid = _row_session_id(line)
-        if not replaced and sid == session_id and not _is_header_or_separator(sid):
-            out_lines.append(
-                _preserve_authored_cells(line, new_row)
-                if preserve_authored
-                else new_row
-            )
-            replaced = True
-        else:
-            out_lines.append(line)
-
-    if not replaced:
-        if out_lines and not out_lines[-1].endswith("\n"):
-            out_lines[-1] = out_lines[-1] + "\n"
-        out_lines.append(new_row)
-
-    target_dir = os.path.dirname(os.path.abspath(registry_path)) or "."
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=".log_registry.", suffix=".tmp", dir=target_dir
-    )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-            tmp.writelines(out_lines)
-        os.replace(tmp_path, registry_path)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
+        with durable_path_lock(registry_path):
+            if not registry_path.exists():
+                print(f"error: registry not found: {registry_path}", file=sys.stderr)
+                return 1
+            lines = registry_path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+            replaced = False
+            out_lines: list[str] = []
+            for line in lines:
+                sid = _row_session_id(line)
+                if (
+                    not replaced
+                    and sid == session_id
+                    and not _is_header_or_separator(sid)
+                ):
+                    out_lines.append(
+                        _preserve_authored_cells(line, new_row)
+                        if preserve_authored
+                        else new_row
+                    )
+                    replaced = True
+                else:
+                    out_lines.append(line)
+
+            if not replaced:
+                if out_lines and not out_lines[-1].endswith("\n"):
+                    out_lines[-1] = out_lines[-1] + "\n"
+                out_lines.append(new_row)
+
+            atomic_write_text(registry_path, "".join(out_lines))
+    except (LockError, OSError) as exc:
+        print(f"error: registry update failed: {exc}", file=sys.stderr)
+        return 1
 
     print("upserted" if replaced else "appended")
     return 0

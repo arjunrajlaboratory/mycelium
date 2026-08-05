@@ -50,15 +50,26 @@ env -S 'echo prefix' python3 run.py --help
 This executes `echo` with interpreter-looking arguments. It must not produce an
 analysis reminder or lineage event.
 
-For activity, create and remove a uniquely named root-level disposable file
-through the host's normal edit tool:
+For activity, create a uniquely named root-level disposable file through the
+host's normal edit tool:
 
 ```text
 MYCELIUM_HOOK_AUDIT_DISPOSABLE.tmp
 ```
 
-Codex should use `apply_patch`; Claude Code should use `Write` or `Edit`. Do not
-create the file with Bash because that would conflate edit and Bash tracking.
+Codex should use `apply_patch`; Claude Code should use `Write` or `Edit`. You
+must never use Bash to create it because that would conflate edit and Bash
+tracking. Use the same edit tool to delete the file when the host supports
+deletion. Claude Code's `Write` and `Edit` tools cannot unlink a file, so after
+capturing successful edit-tracking evidence it may perform exactly this cleanup:
+
+```bash
+rm -- MYCELIUM_HOOK_AUDIT_DISPOSABLE.tmp
+```
+
+This narrow cleanup exception applies only after the successful edit is
+recorded. Report it separately and still require the disposable file to be
+absent at the end.
 
 ## Host task instructions
 
@@ -79,7 +90,9 @@ The fresh agent should:
    PostToolUse context.
 7. Run the negative command literally and report whether any automatic context
    appeared.
-8. Create and remove the disposable file with its normal edit tool.
+8. Create the disposable file with its normal edit tool. Remove it with that
+   tool if deletion is supported; otherwise, only after confirming the edit was
+   tracked, use the exact shell cleanup above.
 9. Before the first Stop, write no living knowledge merely to satisfy the
    audit. Let activity enforcement block that Stop and preserve the exact
    automatic reason.
@@ -90,7 +103,8 @@ The fresh agent should:
 11. Never invoke a Mycelium hook directly and never repair any result other than
    the expected Stop-compliance step above.
 12. Produce a genuine five-section handoff before the accepted retry, using
-   these exact headings: `## What was worked on`, `## Key decisions made`,
+   these exact headings once each, in the listed order, with a nonblank body in
+   every section: `## What was worked on`, `## Key decisions made`,
    `## Blockers & surprises`, `## Current state`, and `## Next steps`.
 
 ## Evidence table
@@ -106,7 +120,7 @@ Report each row as Pass, Fail, or Inconclusive.
 | Negative PostToolUse | No reminder, activity misclassification, or lineage from interpreter-looking echo arguments. |
 | Edit tracking | Successful host edit recorded; failed edits are not; disposable file is absent at end. |
 | Stop | The first Stop blocks for untriaged activity; one compliant retry produces one finalized log, one completion footer, one registry row, one lineage consolidation when applicable, and accepted cleanup. |
-| Handoff | All five required headings exist in the durable handoff after Stop. |
+| Handoff | All five required headings occur exactly once and in order in the durable handoff after accepted-status and stale-lifecycle cleanup, and every section body remains nonblank. |
 | Scientific isolation | No scientific code, data, output, report, or pre-existing living knowledge changed; any audit-only living entry exists solely in the fresh disposable repository. |
 
 ## State inspection

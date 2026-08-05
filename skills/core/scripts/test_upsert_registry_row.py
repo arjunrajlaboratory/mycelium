@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -163,6 +166,35 @@ def test_preserve_authored_keeps_rich_summary_outputs_and_tags(tmp_path: Path) -
     assert "| main | 8m | 7 |" in content
     assert "| complete |" in content
     assert "[log](new.md)" in content
+
+
+def test_atomic_upsert_preserves_existing_permissions(tmp_path: Path) -> None:
+    registry = tmp_path / "LOG_REGISTRY.md"
+    registry.write_text(HEADER)
+    os.chmod(registry, 0o640)
+
+    result = _run(registry, "2026-08-02-001", _row("2026-08-02-001"))
+
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(registry.stat().st_mode) == 0o640
+
+
+def test_concurrent_distinct_upserts_do_not_lose_rows(tmp_path: Path) -> None:
+    registry = tmp_path / "LOG_REGISTRY.md"
+    registry.write_text(HEADER)
+    session_ids = [f"2026-08-02-{index:03d}" for index in range(1, 41)]
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(
+            pool.map(
+                lambda session_id: _run(registry, session_id, _row(session_id)),
+                session_ids,
+            )
+        )
+
+    assert all(result.returncode == 0 for result in results)
+    content = registry.read_text()
+    assert all(content.count(f"| {session_id} |") == 1 for session_id in session_ids)
 
 
 if __name__ == "__main__":

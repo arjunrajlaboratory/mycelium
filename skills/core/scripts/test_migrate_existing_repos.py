@@ -519,6 +519,34 @@ class TestMigrateOne:
         assert ".codex/hooks.json` contains their registrations" not in repaired
         assert "Existing transfer guidance." in repaired
 
+    def test_repairs_legacy_shared_handoff_guidance(
+        self, fake_repo: Path
+    ) -> None:
+        mig.migrate_one(fake_repo)
+        guidance_path = fake_repo / "MYCELIUM.md"
+        canonical = guidance_path.read_text(encoding="utf-8")
+        canonical_line = next(
+            line
+            for line in canonical.splitlines()
+            if line.startswith("10. **Session summary**:")
+        )
+        legacy_line = (
+            "10. **Session summary**: Write `.mycelium/last-session.md` with a "
+            "brief summary of what was done, decisions made, and next steps"
+        )
+        stale = canonical.replace(canonical_line, legacy_line, 1)
+        guidance_path.write_text(stale, encoding="utf-8")
+
+        assert mig.ensure_cross_agent_guidance(fake_repo, dry_run=True) is True
+        assert guidance_path.read_text(encoding="utf-8") == stale
+        assert mig.ensure_cross_agent_guidance(fake_repo) is True
+
+        repaired = guidance_path.read_text(encoding="utf-8")
+        assert canonical_line in repaired
+        assert legacy_line not in repaired
+        assert repaired.count("10. **Session summary**:") == 1
+        assert mig.ensure_cross_agent_guidance(fake_repo) is False
+
     def test_skips_when_no_living_dir(self, tmp_path: Path) -> None:
         no_living = tmp_path / "not-mycelium"
         no_living.mkdir()

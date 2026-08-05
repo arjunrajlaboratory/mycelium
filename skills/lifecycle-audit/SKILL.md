@@ -71,10 +71,12 @@ Exercise:
    start and Stop while the primary remains active.
 3. A known-positive harmless analysis command.
 4. A near-neighbor negative command that must remain silent.
-5. One disposable successful edit using the host's normal edit tool, followed
-   by removal.
+5. One disposable successful edit using the host's normal edit tool. Remove it
+   with that tool when deletion is supported; otherwise, after edit-tracking
+   evidence is captured, use the protocol's single explicit shell cleanup.
 6. Natural Stop, including the expected enforcement block, compliant retry,
-   and a complete five-section handoff using Mycelium's exact headings.
+   and a complete five-section handoff using Mycelium's exact headings once
+   each, in order, with nonblank section bodies.
 
 Use `python3` unless the target explicitly provides another interpreter; do not
 assume `python` exists. Preserve the real command exit status—an optional

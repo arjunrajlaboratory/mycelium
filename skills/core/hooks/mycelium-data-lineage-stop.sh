@@ -25,12 +25,15 @@ exec 2>/dev/null
 INPUT=$(cat)
 
 SESSION_CWD=$(printf '%s' "$INPUT" | mycelium_json_get 'cwd')
-HOST_SESSION_ID=$(printf '%s' "$INPUT" | mycelium_json_get 'session_id')
+HOST_SESSION_ID=$(printf '%s' "$INPUT" \
+  | mycelium_json_get_optional_string 'session_id') || exit 0
 if [[ -z "$SESSION_CWD" ]] || [[ ! -d "$SESSION_CWD" ]]; then exit 0; fi
 
 REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo "")
 if [[ -z "$REPO_ROOT" ]] || [[ ! -d "$REPO_ROOT/.living" ]]; then exit 0; fi
-mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
+mycelium_prepare_state_dir "$REPO_ROOT" read-only || exit 0
+mycelium_select_session_state "$REPO_ROOT" "$INPUT" read-only || exit 0
+mycelium_payload_owns_active_session "$REPO_ROOT" "$INPUT" || exit 0
 
 SESSION_MARKER="$STATE_DIR/data-lineage-session-id.tmp"
 

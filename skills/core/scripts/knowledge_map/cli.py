@@ -12,8 +12,16 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
+import stat
 import sys
 from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from mycelium_locks import LockError, durable_lock, preflight_lock_root
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +44,31 @@ def _warn(msg: str) -> None:
 
 def _err(msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
+
+
+def _preflight_build_root(portfolio: Path) -> None:
+    preflight_lock_root(portfolio)
+    living = portfolio / ".living"
+    metadata = living.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise LockError(f"unsafe portfolio .living directory: {living}")
+    graph = living / "graph"
+    try:
+        graph_metadata = graph.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(graph_metadata.st_mode) or stat.S_ISLNK(graph_metadata.st_mode):
+        raise LockError(f"unsafe knowledge-map output directory: {graph}")
+    for current_dir, directory_names, file_names in os.walk(graph, followlinks=False):
+        current = Path(current_dir)
+        for name in (*directory_names, *file_names):
+            candidate = current / name
+            candidate_metadata = candidate.lstat()
+            if stat.S_ISLNK(candidate_metadata.st_mode) or not (
+                stat.S_ISDIR(candidate_metadata.st_mode)
+                or stat.S_ISREG(candidate_metadata.st_mode)
+            ):
+                raise LockError(f"unsafe knowledge-map managed path: {candidate}")
 
 
 # ---------------------------------------------------------------------------
@@ -655,7 +688,18 @@ def main(argv: list[str] | None = None) -> None:
 
     parser = _build_parser()
     args = parser.parse_args(argv)
-    sys.exit(args.func(args))
+    if args.command == "build":
+        portfolio = Path(os.path.abspath(Path(args.portfolio).expanduser()))
+        try:
+            _preflight_build_root(portfolio)
+            with durable_lock(portfolio, "knowledge-map-build.lock"):
+                result = args.func(args)
+        except (LockError, OSError) as exc:
+            _err(f"Knowledge-map build failed safely: {exc}")
+            result = 1
+    else:
+        result = args.func(args)
+    sys.exit(result)
 
 
 if __name__ == "__main__":

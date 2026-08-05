@@ -11,8 +11,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Codex plugin support and shared Agent Skills.** The Claude-only `commands/` workflows now live in the cross-platform `skills/<name>/SKILL.md` format with Codex UI metadata and a `.codex-plugin/plugin.json` manifest. Project initialization creates canonical `MYCELIUM.md` guidance, thin `CLAUDE.md` and `AGENTS.md` adapters, provider-neutral `.mycelium/` state, and hook configurations for both hosts. Hooks emit each host's wire format, parse Codex `apply_patch` activity, retain Stop enforcement and data lineage, and no longer launch a provider-specific background CLI. New compatibility tests cover packaging, initialization, SessionStart, PostToolUse, apply-patch tracking, and Stop behavior.
 - **Cross-host maintainer skills.** New shared `develop` and `lifecycle-audit` skills turn the recurring compatibility-review lessons into reusable workflows: branch-wide error-pattern sweeps, observed red/green TDD, whole-operation safety checks, exact installed-artifact verification, and black-box Claude Code/Codex lifecycle audits that never substitute manual hook calls for host dispatch.
+- **Concurrent root lifecycle transactions.** Identified Claude Code and Codex
+  tasks now keep independent state under `.mycelium/run/<host>/<session-id>/`,
+  while identity-free and exactly owned pre-upgrade tasks remain compatible with
+  the flat layout. Repository and per-session locks provide exact-once Start,
+  PostToolUse, Stop, lineage, and handoff behavior without excluding a second
+  live root task from lifecycle tracking.
 
 ### Fixed
+
+- **Shared writer lost updates.** Log and Markdown-table upserts, knowledge
+  index generation, findings crystallization, and destructive knowledge-map
+  builds now hold stable POSIX locks for their complete read/derive/write
+  transactions. Atomic replacements preserve existing permissions and reject
+  linked managed paths; an accepted private handoff is published atomically to
+  the shared resume pointer only while Stop holds the lifecycle lock. Directory
+  lock recovery claims and revalidates the observed generation before deleting
+  it, preventing a delayed stale-owner reaper from removing a replacement
+  owner's newly acquired lock and silently dropping concurrent child events.
+- **Path-safe task identity and handoff guidance.** Host session IDs are decoded
+  as typed JSON strings and reject `.`/`..` path aliases before shared state is
+  touched. SessionStart, PostToolUse guidance, Stop retries, the core skill, and
+  newly generated project guidance now identify the exact private handoff path.
+  Idempotent migration also refreshes the legacy shared-path session-summary
+  rule in previously generated `MYCELIUM.md` files without replacing nearby
+  project customizations. Stop now treats a five-section handoff as complete
+  only when its headings are unique and ordered and every section body is
+  nonblank after obsolete lifecycle prose is removed, replacing malformed,
+  empty-section, or cleanup-emptied handoffs with the deterministic fallback
+  before publication. The finalizer independently enforces that same normalized
+  contract before writing either the private or shared handoff.
 
 - **Current Claude Code hook context delivery.** SessionStart and PostToolUse
   responses now place `additionalContext` inside the event-specific

@@ -81,6 +81,10 @@ def _run_claude_hook(
     )
 
 
+def _host_state(repo: Path, session_id: str, host: str = "codex") -> Path:
+    return repo / ".mycelium" / "run" / host / session_id
+
+
 def _run_plugin_hook(
     name: str,
     repo: Path,
@@ -178,6 +182,8 @@ def test_development_skills_encode_cross_host_regression_workflow():
         "Compatibility cleanup deletes user state",
         "Unrelated literals are fabricated as data lineage",
         "Resolved I/O triggers repository traversal",
+        "Handoff headings are mistaken for complete handoff sections",
+        "exact normalized body that finalization will publish",
     ):
         assert required in patterns
     for required in (
@@ -192,6 +198,8 @@ def test_development_skills_encode_cross_host_regression_workflow():
         "env -C analysis/example python3 run.py --help",
         "env -S 'echo prefix' python3 run.py --help",
         "MYCELIUM_HOOK_AUDIT_DISPOSABLE.tmp",
+        "never use Bash to create it",
+        "rm -- MYCELIUM_HOOK_AUDIT_DISPOSABLE.tmp",
         "Do not invoke or read any skill",
         "Do not inspect plugin identity",
         "Do not change the source or installed artifact while the host task is running",
@@ -1201,11 +1209,10 @@ def test_concurrent_session_start_creates_one_primary_log_and_marker(tmp_path):
     assert marker_lines[1].isdigit()
 
 
-def test_new_root_session_supersedes_an_abandoned_owned_session(tmp_path):
-    """A fresh root task may replace an old owner with no live signals."""
+def test_same_root_session_recovers_an_abandoned_owned_transaction(tmp_path):
+    """A restarted root may recover only its own inactive transaction."""
     repo = _repo(tmp_path)
     primary_id = "primary-session"
-    replacement_id = "replacement-session"
 
     primary_start = _run_hook(
         "mycelium-health.sh",
@@ -1218,7 +1225,7 @@ def test_new_root_session_supersedes_an_abandoned_owned_session(tmp_path):
     )
     assert primary_start.returncode == 0, primary_start.stderr
 
-    state = repo / ".mycelium"
+    state = _host_state(repo, primary_id)
     marker = state / "active-session-log.tmp"
     marker_lines = marker.read_text().splitlines()
     log_path = Path(marker_lines[0])
@@ -1241,36 +1248,24 @@ def test_new_root_session_supersedes_an_abandoned_owned_session(tmp_path):
         {
             "cwd": str(repo),
             "source": "startup",
-            "session_id": replacement_id,
+            "session_id": primary_id,
         },
     )
     assert replacement_start.returncode == 0, replacement_start.stderr
-    assert "ABANDONED PRIOR SESSION" in replacement_start.stdout
+    assert "INCOMPLETE SESSION LOG" in replacement_start.stdout
     replacement_marker = marker.read_text().splitlines()
     replacement_log = Path(replacement_marker[0])
     assert replacement_log != log_path
     assert log_path.is_file()
-    assert (state / "active-session-owner-id.tmp").read_text().strip() == replacement_id
+    assert (state / "active-session-owner-id.tmp").read_text().strip() == primary_id
     assert not events.exists()
     assert not (state / "mycelium-session-activity.tmp").exists()
     assert not (state / "mycelium-reminded.tmp").exists()
-    archives = list((state / "mycelium-data-events-abandoned").glob("*.tmp"))
+    archives = list(
+        (repo / ".mycelium" / "mycelium-data-events-abandoned").glob("*.tmp")
+    )
     assert len(archives) == 1
     assert archives[0].read_text() == '{"script":"analysis/old.py"}\n'
-
-    old_stop = _run_hook(
-        "mycelium-stop-check.sh",
-        repo,
-        {
-            "cwd": str(repo),
-            "stop_hook_active": False,
-            "session_id": primary_id,
-        },
-    )
-    assert old_stop.returncode == 0, old_stop.stderr
-    assert old_stop.stdout == ""
-    assert marker.is_file()
-    assert Path(marker.read_text().splitlines()[0]) == replacement_log
 
     replacement_stop = _run_hook(
         "mycelium-stop-check.sh",
@@ -1278,7 +1273,7 @@ def test_new_root_session_supersedes_an_abandoned_owned_session(tmp_path):
         {
             "cwd": str(repo),
             "stop_hook_active": False,
-            "session_id": replacement_id,
+            "session_id": primary_id,
         },
     )
     assert replacement_stop.returncode == 0, replacement_stop.stderr
@@ -1288,8 +1283,8 @@ def test_new_root_session_supersedes_an_abandoned_owned_session(tmp_path):
     assert not (state / "active-session-owner-id.tmp").exists()
 
 
-def test_new_root_session_preserves_a_live_owned_session(tmp_path):
-    """A concurrent root must not seize a transaction with fresh liveness."""
+def test_distinct_root_session_leaves_a_live_owned_transaction_untouched(tmp_path):
+    """A concurrent root gets its own state and cannot seize a live transaction."""
     repo = _repo(tmp_path)
     primary_id = "primary-session"
     primary_start = _run_hook(
@@ -1299,7 +1294,7 @@ def test_new_root_session_preserves_a_live_owned_session(tmp_path):
     )
     assert primary_start.returncode == 0, primary_start.stderr
 
-    state = repo / ".mycelium"
+    state = _host_state(repo, primary_id)
     marker = state / "active-session-log.tmp"
     owner = state / "active-session-owner-id.tmp"
     events = state / "mycelium-data-events.tmp"
@@ -1331,10 +1326,15 @@ def test_new_root_session_preserves_a_live_owned_session(tmp_path):
     )
 
     assert competing_start.returncode == 0, competing_start.stderr
-    assert "ACTIVE SESSION PRESERVED" in competing_start.stdout
+    assert "ACTIVE SESSION PRESERVED" not in competing_start.stdout
     assert {path: path.read_bytes() for path in before} == before
-    assert sorted((repo / ".living" / "log").glob("*.md")) == logs_before
-    assert not (state / "mycelium-data-events-abandoned").exists()
+    assert len(sorted((repo / ".living" / "log").glob("*.md"))) == len(logs_before) + 1
+    assert (
+        _host_state(repo, "competing-session") / "active-session-log.tmp"
+    ).is_file()
+    assert not (
+        repo / ".mycelium" / "mycelium-data-events-abandoned"
+    ).exists()
 
 
 def test_new_root_does_not_move_nonregular_abandoned_event_state(tmp_path):
@@ -1345,7 +1345,7 @@ def test_new_root_does_not_move_nonregular_abandoned_event_state(tmp_path):
         {"cwd": str(repo), "source": "startup", "session_id": "primary-session"},
     )
     assert primary_start.returncode == 0, primary_start.stderr
-    state = repo / ".mycelium"
+    state = _host_state(repo, "primary-session")
     marker = state / "active-session-log.tmp"
     marker_lines = marker.read_text().splitlines()
     marker.write_text(
@@ -1362,7 +1362,7 @@ def test_new_root_does_not_move_nonregular_abandoned_event_state(tmp_path):
         {
             "cwd": str(repo),
             "source": "startup",
-            "session_id": "replacement-session",
+            "session_id": "primary-session",
         },
     )
 
@@ -1420,7 +1420,7 @@ def test_superseded_root_post_tool_use_cannot_mutate_new_owner_state(
         {"cwd": str(repo), "source": "startup", "session_id": "new-owner"},
     )
     assert start.returncode == 0, start.stderr
-    state = repo / ".mycelium"
+    state = _host_state(repo, "new-owner")
     payload.update({"cwd": str(repo), "session_id": "old-owner"})
 
     result = _run_hook(hook_name, repo, payload)
@@ -1537,7 +1537,7 @@ def test_session_start_records_one_branch_scalar_for_unborn_head(
     )
 
     assert start.returncode == 0, start.stderr
-    state = repo / ".mycelium"
+    state = _host_state(repo, host_session_id)
     log_path = Path((state / "active-session-log.tmp").read_text().splitlines()[0])
     frontmatter = yaml.safe_load(log_path.read_text().split("---", 2)[1])
     assert frontmatter["branch"] == expected_branch
@@ -1573,7 +1573,7 @@ def test_missing_session_owner_token_fails_closed(tmp_path):
         },
     )
     assert start.returncode == 0, start.stderr
-    state = repo / ".mycelium"
+    state = _host_state(repo, "primary-session")
     marker = state / "active-session-log.tmp"
     log_path = Path(marker.read_text().splitlines()[0])
     (state / "active-session-owner-id.tmp").unlink()
@@ -1584,7 +1584,7 @@ def test_missing_session_owner_token_fails_closed(tmp_path):
         {
             "cwd": str(repo),
             "stop_hook_active": False,
-            "session_id": "child-session",
+            "session_id": "primary-session",
         },
     )
 
@@ -1608,7 +1608,7 @@ def test_pre_discriminator_owner_token_remains_upgrade_compatible(tmp_path):
         },
     )
     assert start.returncode == 0, start.stderr
-    state = repo / ".mycelium"
+    state = _host_state(repo, primary_id)
     marker = state / "active-session-log.tmp"
     marker_lines = marker.read_text().splitlines()
     marker.write_text("\n".join(marker_lines[:2]) + "\n")
@@ -1648,7 +1648,7 @@ def test_corrupt_session_owner_token_fails_closed(tmp_path, owner_content):
         },
     )
     assert start.returncode == 0, start.stderr
-    state = repo / ".mycelium"
+    state = _host_state(repo, "primary-session")
     marker = state / "active-session-log.tmp"
     log_path = Path(marker.read_text().splitlines()[0])
     (state / "active-session-owner-id.tmp").write_text(owner_content)
@@ -1659,7 +1659,7 @@ def test_corrupt_session_owner_token_fails_closed(tmp_path, owner_content):
         {
             "cwd": str(repo),
             "stop_hook_active": False,
-            "session_id": "child-session",
+            "session_id": "primary-session",
         },
     )
 
@@ -1669,8 +1669,8 @@ def test_corrupt_session_owner_token_fails_closed(tmp_path, owner_content):
     assert log_path.is_file()
 
 
-def test_owned_session_stop_fails_closed_without_host_identity(tmp_path):
-    """A new-format owner cannot be authorized through the legacy fallback."""
+def test_identity_free_stop_cannot_reach_scoped_owned_session(tmp_path):
+    """A legacy Stop cannot be authorized against a host-scoped transaction."""
     repo = _repo(tmp_path)
     start = _run_hook(
         "mycelium-health.sh",
@@ -1682,7 +1682,7 @@ def test_owned_session_stop_fails_closed_without_host_identity(tmp_path):
         },
     )
     assert start.returncode == 0, start.stderr
-    state = repo / ".mycelium"
+    state = _host_state(repo, "primary-session")
     marker = state / "active-session-log.tmp"
     log_path = Path(marker.read_text().splitlines()[0])
 
@@ -1693,7 +1693,7 @@ def test_owned_session_stop_fails_closed_without_host_identity(tmp_path):
     )
 
     assert stop.returncode == 0, stop.stderr
-    assert json.loads(stop.stdout)["decision"] == "block"
+    assert stop.stdout == ""
     assert marker.is_file()
     assert log_path.is_file()
 
@@ -2308,7 +2308,7 @@ def test_codex_data_tracker_preserves_unknown_exit_from_native_empty_response(
 
     assert result.returncode == 0, result.stderr
     event = json.loads(
-        (repo / ".mycelium" / "mycelium-data-events.tmp").read_text()
+        (_host_state(repo, session_id) / "mycelium-data-events.tmp").read_text()
     )
     assert event["script"] == str(script)
     assert event["bash_exit"] is None
@@ -2672,7 +2672,7 @@ def test_stop_preserves_agent_authored_registry_metadata(tmp_path):
         {"cwd": str(repo), "source": "startup", "session_id": host_id},
     )
     assert start.returncode == 0, start.stderr
-    state = repo / ".mycelium"
+    state = _host_state(repo, host_id)
     log_path = Path((state / "active-session-log.tmp").read_text().splitlines()[0])
     session_id = log_path.name[:14]
     registry = repo / ".living" / "log" / "LOG_REGISTRY.md"
@@ -2897,6 +2897,7 @@ def test_stop_preserves_fresh_complete_five_section_handoff(tmp_path):
         "## Current state\n- Tests passed.\n\n"
         "## Next steps\n- Natural Stop finalization remains pending.\n"
         "- Attempt natural Stop now.\n"
+        "- Continue from the accepted handoff.\n"
     )
     handoff.write_text(complete)
     future = time.time() + 2
@@ -2916,6 +2917,135 @@ def test_stop_preserves_fresh_complete_five_section_handoff(tmp_path):
     assert "Attempt natural Stop" not in finalized
     assert "Lifecycle smoke audit." in finalized
     assert "Preserve the authored handoff." in finalized
+    assert "Continue from the accepted handoff." in finalized
+
+
+def test_stop_falls_back_when_cleanup_empties_required_handoff_sections(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "cleanup-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    (repo / "work.py").write_text("print('work')\n")
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\nHandoff cleanup must preserve the completeness contract.\n"
+    )
+    handoff = state / "last-session.md"
+    handoff.write_text(
+        "## What was worked on\n- Lifecycle cleanup regression.\n\n"
+        "## Key decisions made\n- Fall back if cleanup empties a section.\n\n"
+        "## Blockers & surprises\n- None.\n\n"
+        "## Current state\n- Natural Stop finalization remains pending.\n\n"
+        "## Next steps\n- Attempt natural Stop now.\n"
+    )
+    future = time.time() + 2
+    os.utime(handoff, (future, future))
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "cleanup-stop"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"decision": "block"' not in result.stdout
+    finalized = handoff.read_text()
+    headings = (
+        "## What was worked on",
+        "## Key decisions made",
+        "## Blockers & surprises",
+        "## Current state",
+        "## Next steps",
+    )
+    offsets = [finalized.index(heading) for heading in headings]
+    assert offsets == sorted(offsets)
+    for index, offset in enumerate(offsets):
+        assert finalized.count(headings[index]) == 1
+        body_start = offset + len(headings[index])
+        body_end = offsets[index + 1] if index + 1 < len(offsets) else len(finalized)
+        assert finalized[body_start:body_end].strip()
+    assert "Natural Stop finalization remains pending." not in finalized
+    assert "Attempt natural Stop now." not in finalized
+    assert "Review the finalized session log" in finalized
+
+
+@pytest.mark.parametrize(
+    "handoff_body",
+    (
+        (
+            "SESSION RESUME — Last session (2026-08-01 20:15):\n\n"
+            "## What was worked on\n- Lifecycle smoke audit.\n\n"
+            "## Key decisions made\n- Preserve authored handoffs only when complete.\n\n"
+            "## Blockers & surprises\n\n"
+            "## Current state\n- Tests passed.\n\n"
+            "## Next steps\n- Attempt natural Stop.\n"
+        ),
+        (
+            "## What was worked on\n- Lifecycle smoke audit.\n\n"
+            "## Key decisions made\n- Preserve authored handoffs only when complete.\n\n"
+            "## Current state\n- Tests passed.\n\n"
+            "## Blockers & surprises\n- None.\n\n"
+            "## Next steps\n- Attempt natural Stop.\n"
+        ),
+        (
+            "## What was worked on\n- Lifecycle smoke audit.\n\n"
+            "## Key decisions made\n- Preserve authored handoffs only when complete.\n\n"
+            "## Blockers & surprises\n- None.\n\n"
+            "## Current state\n- Tests passed.\n\n"
+            "## Next steps\n- Attempt natural Stop.\n\n"
+            "## Blockers & surprises\n- Duplicate heading.\n"
+        ),
+    ),
+    ids=("empty-section", "misordered-sections", "duplicate-heading"),
+)
+def test_stop_replaces_fresh_incomplete_handoff(tmp_path, handoff_body):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "empty-handoff-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    (repo / "work.py").write_text("print('work')\n")
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\nEvery handoff section needs substantive content.\n"
+    )
+    handoff = state / "last-session.md"
+    handoff.write_text(handoff_body)
+    future = time.time() + 2
+    os.utime(handoff, (future, future))
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "stop_hook_active": False,
+            "turn_id": "empty-handoff-stop",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"decision": "block"' not in result.stdout
+    finalized = handoff.read_text()
+    headings = (
+        "## What was worked on",
+        "## Key decisions made",
+        "## Blockers & surprises",
+        "## Current state",
+        "## Next steps",
+    )
+    offsets = [finalized.index(heading) for heading in headings]
+    assert offsets == sorted(offsets)
+    for index, offset in enumerate(offsets):
+        assert finalized.count(headings[index]) == 1
+        body_start = offset + len(headings[index])
+        body_end = offsets[index + 1] if index + 1 < len(offsets) else len(finalized)
+        assert finalized[body_start:body_end].strip()
 
 
 def test_stop_preserves_fresh_complete_alternate_five_section_handoff(
@@ -3001,13 +3131,19 @@ def test_stop_fallback_handoff_contains_all_five_sections(tmp_path):
 
 def test_stop_preserves_lineage_state_when_consolidation_fails(tmp_path):
     repo = _repo(tmp_path)
+    host_session_id = "host-lineage-failure"
     start = _run_hook(
         "mycelium-health.sh",
         repo,
-        {"cwd": str(repo), "source": "startup", "turn_id": "lineage-fail-start"},
+        {
+            "cwd": str(repo),
+            "source": "startup",
+            "session_id": host_session_id,
+            "turn_id": "lineage-fail-start",
+        },
     )
     assert start.returncode == 0, start.stderr
-    state = repo / ".mycelium"
+    state = _host_state(repo, host_session_id)
     active_marker = state / "active-session-log.tmp"
     events = state / "mycelium-data-events.tmp"
     events.write_text(
@@ -3029,7 +3165,7 @@ def test_stop_preserves_lineage_state_when_consolidation_fails(tmp_path):
         repo,
         {
             "cwd": str(repo),
-            "session_id": "host-lineage-failure",
+            "session_id": host_session_id,
             "stop_hook_active": False,
             "turn_id": "lineage-fail-stop",
         },
@@ -3074,8 +3210,9 @@ def test_stop_rejects_unsafe_host_lineage_session_id(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["decision"] == "block"
+    assert result.stdout == ""
     assert events.is_file()
+    assert not (state / "run").exists()
     assert not (repo / ".living" / "outside-lineage.json").exists()
 
 
@@ -3522,7 +3659,6 @@ def test_data_lineage_state_survives_blocked_stop_until_acceptance(tmp_path):
         repo,
         {
             "cwd": str(repo),
-            "session_id": "host-uuid",
             "stop_hook_active": False,
             "turn_id": "turn-5",
         },
@@ -3554,7 +3690,6 @@ def test_data_lineage_state_survives_blocked_stop_until_acceptance(tmp_path):
         repo,
         {
             "cwd": str(repo),
-            "session_id": "host-uuid",
             "stop_hook_active": True,
             "turn_id": "turn-7",
         },
@@ -3599,7 +3734,6 @@ def test_lineage_only_session_preserves_log_and_reserves_session_id(tmp_path):
         repo,
         {
             "cwd": str(repo),
-            "session_id": "host-lineage-only",
             "stop_hook_active": False,
             "turn_id": "lineage-stop-1",
         },
