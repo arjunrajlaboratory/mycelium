@@ -157,7 +157,10 @@ codex plugin list --json
 ```
 
 Existing Claude-backed Mycelium repositories continue to work without an
-immediate migration. Repositories created with the early Codex preview may
+immediate migration because SessionStart and Stop supply the authoritative
+private handoff path. Re-running migration after this update is nevertheless
+recommended so static `MYCELIUM.md` guidance is refreshed from the legacy
+shared handoff path. Repositories created with the early Codex preview may
 contain `.codex/hooks.json` entries with a versioned cache path; run the
 idempotent migration once after this update to remove those obsolete entries
 in favor of the plugin-bundled hooks. To migrate, open a new task in that
@@ -184,7 +187,11 @@ project-root/
 │   └── [item].md                 # Detailed writeup per item
 ├── .mycelium/                    # Provider-neutral local session state
 │   ├── plugin-root               # Machine-local bundled-resource pointer
-│   └── last-session.md           # Cross-session resume context
+│   ├── last-session.md           # Most recently accepted resume context
+│   ├── locks/                    # Durable shared-writer locks
+│   └── run/                      # Independent live root transactions
+│       ├── claude/[session-id]/
+│       └── codex/[session-id]/
 ├── .claude/settings.local.json   # Claude hook registrations
 ├── .living/                      # The memory layer
 │   ├── INDEX.md                  # Knowledge summary with cluster routing
@@ -225,6 +232,11 @@ Mycelium ships seven hook scripts and registers the supported subset for each ho
 | `mycelium-stop-check.sh` | Stop | Serializes data-lineage consolidation, auto-finalizes session logs, blocks session end if `.living/` wasn't updated after significant work, reminds about session summary |
 | `mycelium-data-tracker.sh` | PostToolUse (shell) | Captures analysis data-lineage events |
 | `mycelium-data-lineage-stop.sh` | Internal Stop phase | Consolidates session data-lineage events synchronously inside `mycelium-stop-check.sh`; it is not registered as a sibling command hook |
+
+Each identified Claude Code or Codex root receives a private runtime directory
+and an exact handoff path in lifecycle context. Concurrent roots share durable
+knowledge and registries through locked writers; accepted Stop publishes only
+that root's completed handoff to `.mycelium/last-session.md`.
 
 Claude hooks are registered per repository by `init_repo.py`. Codex hooks are
 bundled once with the plugin in `hooks/hooks.json`; a small dispatcher no-ops

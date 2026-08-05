@@ -114,7 +114,8 @@ REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo 
 if [[ -z "$REPO_ROOT" ]]; then
   exit 0
 fi
-mycelium_prepare_post_tool_state "$REPO_ROOT" "$INPUT" || exit 0
+mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT" || exit 0
+trap mycelium_release_session_lock EXIT
 
 # Only enforce in mycelium-enabled repos
 if [[ ! -d "$REPO_ROOT/.living" ]]; then

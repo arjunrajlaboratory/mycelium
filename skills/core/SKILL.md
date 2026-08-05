@@ -145,7 +145,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
    - **Existing topic match** → append to `{project}/.living/findings/{topic-slug}.md` using the entry template from `skills/core/templates/findings-entry.md`.
    - **No match** → create new `{project}/.living/findings/{topic-slug}.md` using the topic template from `skills/core/templates/findings-topic.md`.
 6. **Topic naming principle**: Prefer broad scientific questions. No project names, organ names, species names, or method names in slugs. Test: "Would a researcher in a different system recognize this as relevant?"
-7. **After writing each finding**, upsert a row in `.living/findings/FINDINGS_REGISTRY.md`. If the file doesn't exist, create it from `skills/core/templates/findings-registry.md`. Match on finding ID (F-NNN) — update the existing row if the ID is already present, or append a new row. Columns: ID, Claim, Status, Topic (link to topic file), Implications, Tags, Last Updated.
+7. **After writing each finding**, upsert a row in `.living/findings/FINDINGS_REGISTRY.md`. If the file doesn't exist, create it from `skills/core/templates/findings-registry.md`, then run `python3 skills/core/scripts/upsert_table_row.py .living/findings/FINDINGS_REGISTRY.md F-NNN '| F-NNN | ... |'`. This locked helper matches the finding ID exactly and preserves concurrent rows. Columns: ID, Claim, Status, Topic (link to topic file), Implications, Tags, Last Updated.
 8. Run `python3 skills/core/scripts/crystallize_findings.py` to rebuild the cross-project INDEX.md and regenerate all per-project FINDINGS_REGISTRY.md files from the topic file source of truth.
 9. **Consolidation pass** (if invoked explicitly): Scan all topics across all projects, flag potential duplicates (overlapping tags or similar descriptions), and suggest merges to the user.
 10. Return single-line summary: "Added N findings to M topics (N new topics created)."
@@ -281,7 +281,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
    - **Motivation**: Why is this worth doing?
 2. Generate a kebab-case filename from the title (e.g., "Compare Public Data" -> `compare-public-data.md`).
 3. Create `todo/[filename].md` using the template at `todo/TODO_ITEM_TEMPLATE.md`. Fill in all fields from user input. Set status to `open`. Set date to today. Set author to the user's name (ask if unknown).
-4. Add a row to the registry table in `todo/TODO_REGISTRY.md` with: item title, priority, status, category, date, author, and a link to the file.
+4. Add or update the registry row with `python3 skills/core/scripts/upsert_table_row.py todo/TODO_REGISTRY.md '<item title>' '| <item title> | ... |'`. The title is the exact first-column key. Include priority, status, category, date, author, and a link to the file in the remaining cells.
 5. Confirm the item was added and show the user the registry entry.
 
 **Notes**:
@@ -323,12 +323,12 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder with current status, key findings, open questions.
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md` using the decision log template.
 4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template. **Required field**: set `mitigation_type` to one of `structural | convention | ambient-awareness` (see template comments for definitions). Also fill `structural_mitigation_candidate` — if you can name a concrete test or invariant, upgrade the entry to `structural`. **Knowledge promotion**: If the learning is transferable (would help in any project), also append to the matching global domain file in `~/.mycelium/knowledge/{domain}.md` with `status: unreviewed`. Use the structured entry template with a `when_useful` trigger condition.
-5. **Log todos**: If future work is identified during the action, add items to `todo/TODO_REGISTRY.md` (and create detailed `todo/[item].md` files for complex items).
+5. **Log todos**: If future work is identified during the action, create detailed `todo/[item].md` files as needed and mutate `todo/TODO_REGISTRY.md` only through `skills/core/scripts/upsert_table_row.py` so concurrent rows are preserved.
 6. **Validate**: Run `skills/core/scripts/validate_structure.py` to confirm repo still conforms.
 7. **Crystallize conventions**: Review `.living/learnings.md` for recurring patterns (3+ related entries on the same topic). If found, check whether an equivalent convention already exists in `.living/conventions.md` — if so, append new `Source:` citations and refine the text only if materially improved. If no equivalent exists, add a new convention with `Source:` citations linking to the originating learnings. Do not create near-duplicate conventions.
-8. **Update LOG_REGISTRY**: Update the LOG_REGISTRY.md row matching the current session ID. Replace the filename-stub Summary with a 1-sentence past-tense description of what was accomplished (no filenames unless the artifact is the primary output). Fill Key Outputs with semicolon-separated concrete artifacts, metrics, or decisions. Summary and Key Outputs must not duplicate each other.
+8. **Update LOG_REGISTRY**: Use `skills/core/scripts/upsert_registry_row.py` to update the LOG_REGISTRY.md row matching the current session ID. Replace the filename-stub Summary with a 1-sentence past-tense description of what was accomplished (no filenames unless the artifact is the primary output). Fill Key Outputs with semicolon-separated concrete artifacts, metrics, or decisions. Summary and Key Outputs must not duplicate each other.
 9. **Convention feedback**: If any convention pack practices were relevant, note whether they were helpful or had gaps.
-10. **Write session summary**: Write or update `.mycelium/last-session.md` with a 5-section summary covering ALL work since session start. Use the session summary template:
+10. **Write session summary**: Write or update the exact handoff path supplied by the lifecycle hook (`.mycelium/run/<host>/<session-id>/last-session.md` for identified roots; `.mycelium/last-session.md` for legacy hosts) with a 5-section summary covering ALL work since session start. Use the session summary template:
 
    ```markdown
    SESSION RESUME — Last session (YYYY-MM-DD HH:MM):
@@ -391,7 +391,7 @@ When work is dispatched to subagents (main context = coordination only):
 2. **After all subagent batches complete**, the main context dispatches a crystallization subagent that:
    - Reviews the summary of what was accomplished
    - Appends entries to `.living/learnings.md` and `.living/decisions.md`
-   - Writes `.mycelium/last-session.md` using the 5-section session summary template (covering ALL work since session start, not just the latest batch — run `git log --since=<session-start-ts>` and `git diff --stat` to ground the summary in facts)
+   - Writes the exact handoff path supplied by the current lifecycle context using the 5-section session summary template (covering ALL work since session start, not just the latest batch — run `git log --since=<session-start-ts>` and `git diff --stat` to ground the summary in facts)
    - Checks cross-project relevance (if applicable)
 3. **The Stop hook enforces this** — it blocks session end if `.living/` wasn't updated after significant work, catching sessions where the crystallization step was forgotten.
 

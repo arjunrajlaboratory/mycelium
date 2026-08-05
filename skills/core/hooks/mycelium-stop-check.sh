@@ -14,30 +14,33 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/mycelium-hook-lib.sh"
 
-mycelium_handoff_has_headings() {
-  local file="$1"
-  local heading=""
-  shift
-  for heading in "$@"; do
-    grep -Fqx "$heading" "$file" 2>/dev/null || return 1
-  done
-  return 0
-}
-
 # Consume the hook payload. Claude Code and Codex set stop_hook_active=true
 # after a Stop hook asks the model to continue. That flag must not bypass an
 # outstanding Mycelium reminder: the state checks below naturally stop
 # blocking once .living/ has been updated, which is the recursion guard.
 INPUT=$(cat)
-HOST_SESSION_ID=$(printf '%s' "$INPUT" | mycelium_json_get 'session_id')
+HOST_SESSION_ID=$(printf '%s' "$INPUT" \
+  | mycelium_json_get_optional_string 'session_id') || exit 0
 
 # Determine repo root early (used by both log finalization and .living/ checks)
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 if [ -z "$REPO_ROOT" ]; then
   exit 0
 fi
-mycelium_prepare_state_dir "$REPO_ROOT" || exit 0
-if ! mycelium_acquire_stop_lock "$STATE_DIR"; then
+if [[ -n "$HOST_SESSION_ID" ]]; then
+  # An identified late Stop must not recreate a completed transaction. Resolve
+  # only an already-existing private run before doing normal shared setup.
+  mycelium_prepare_state_dir "$REPO_ROOT" read-only || exit 0
+  mycelium_select_session_state "$REPO_ROOT" "$INPUT" read-only || exit 0
+  if [[ ! -e "$STATE_DIR/active-session-log.tmp" \
+    && ! -L "$STATE_DIR/active-session-log.tmp" ]]; then
+    exit 0
+  fi
+else
+  mycelium_prepare_state_dir "$REPO_ROOT" bootstrap || exit 0
+  mycelium_select_session_state "$REPO_ROOT" "$INPUT" read-only || exit 0
+fi
+if ! mycelium_acquire_stop_lock "$MYCELIUM_SHARED_STATE_DIR"; then
   # A concurrent owner may still fail or be interrupted, so accepting this Stop
   # would bypass lifecycle enforcement. Preserve state and ask the host to retry.
   mycelium_emit_stop_block \
@@ -45,6 +48,43 @@ if ! mycelium_acquire_stop_lock "$STATE_DIR"; then
   exit 0
 fi
 trap mycelium_release_stop_lock EXIT
+
+if ! mycelium_prepare_state_dir "$REPO_ROOT"; then
+  mycelium_emit_stop_block \
+    "STOP BLOCKED — shared lifecycle state preparation failed. Active state was preserved; repair the unsafe state and retry Stop."
+  exit 0
+fi
+
+# Another Stop for this same root may have completed while this process waited
+# for the repository-global lifecycle lock. Re-resolve without creating state;
+# a missing marker now means this is a harmless duplicate/late delivery.
+if [[ -n "$HOST_SESSION_ID" ]]; then
+  mycelium_prepare_state_dir "$REPO_ROOT" read-only || exit 0
+  mycelium_select_session_state "$REPO_ROOT" "$INPUT" read-only || exit 0
+  if [[ ! -e "$STATE_DIR/active-session-log.tmp" \
+    && ! -L "$STATE_DIR/active-session-log.tmp" ]]; then
+    exit 0
+  fi
+fi
+if ! mycelium_acquire_session_lock "$STATE_DIR"; then
+  mycelium_emit_stop_block \
+    "STOP BLOCKED — the session event lock remained busy. Active state was preserved; wait for the in-flight hook to finish, then retry Stop."
+  exit 0
+fi
+trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT
+
+# Close the final selection-to-lock race as well. A duplicate Stop that won the
+# session lock first is accepted already and leaves this delivery with no work.
+if [[ -n "$HOST_SESSION_ID" ]]; then
+  mycelium_prepare_state_dir "$REPO_ROOT" read-only || exit 0
+  mycelium_select_session_state "$REPO_ROOT" "$INPUT" read-only || exit 0
+  if [[ ! -e "$STATE_DIR/active-session-log.tmp" \
+    && ! -L "$STATE_DIR/active-session-log.tmp" ]]; then
+    exit 0
+  fi
+fi
+
+HANDOFF_PATH="$STATE_DIR/last-session.md"
 
 # Resolve and validate the active transaction before any Stop-side mutation.
 # The host session ID is per invocation; repository timestamps are shared and
@@ -73,8 +113,7 @@ if [[ "$ACTIVE_MARKER_VALID" == true \
   && ( "$OWNER_FORMAT" == "owner-id-v1" \
     || -e "$ACTIVE_OWNER_FILE" || -L "$ACTIVE_OWNER_FILE" ) ]]; then
   if ! OWNER_SESSION_ID=$(mycelium_read_session_owner_id "$ACTIVE_OWNER_FILE") \
-    || [[ ! "$HOST_SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]] \
-    || (( ${#HOST_SESSION_ID} > 200 )); then
+    || ! mycelium_valid_session_id "$HOST_SESSION_ID"; then
     mycelium_emit_stop_block \
       "STOP BLOCKED — active session ownership could not be validated. The primary lifecycle state was preserved; repair the owner marker or retry from its host session."
     exit 0
@@ -119,13 +158,27 @@ mycelium_accept_lineage_session() {
   fi
 
   if [[ -f "$events_file" ]]; then
-    local prev_dir="$STATE_DIR/mycelium-data-events-prev"
+    local prev_dir="$MYCELIUM_SHARED_STATE_DIR/mycelium-data-events-prev"
     mkdir -p "$prev_dir"
     mv "$events_file" "$prev_dir/${session_id}.tmp"
     # Keep only the 20 most recent raw-event archives.
     ls -t "$prev_dir"/*.tmp 2>/dev/null | tail -n +21 | xargs rm -f 2>/dev/null || true
   fi
   rm -f "$session_marker"
+}
+
+mycelium_cleanup_accepted_scoped_state() {
+  if [[ "${MYCELIUM_SESSION_SCOPED:-false}" != true \
+    || "$STATE_DIR" == "$MYCELIUM_SHARED_STATE_DIR" ]]; then
+    return 0
+  fi
+  # These are accepted-session artifacts only; retry-bearing state is retained
+  # on every earlier failure/block path. Never recurse into an identity-derived
+  # directory.
+  rm -f "$STATE_DIR/last-session.md"
+  rm -f "$STATE_DIR/mycelium-read-access.log"
+  mycelium_release_session_lock
+  rmdir "$STATE_DIR" 2>/dev/null || true
 }
 
 # Resolve this hook's mycelium-core dir once, in absolute form. Used to locate
@@ -200,6 +253,9 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
       fi
       _CHANGE_ARGS+=(--exclude ".living/log/LOG_REGISTRY.md")
       _CHANGE_ARGS+=(--exclude-prefix ".living/log/")
+      # SessionStart regenerates this shared derived index. A second root's
+      # startup must not make an otherwise idle transaction look like user work.
+      _CHANGE_ARGS+=(--exclude ".living/INDEX.md")
       SESSION_CHANGED_FILES=$(python3 "$SESSION_CHANGES_SCRIPT" "${_CHANGE_ARGS[@]}" 2>/dev/null || true)
     else
       # Compatibility fallback for an incomplete/older installation.
@@ -260,7 +316,7 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
         FILE_NAMES=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -15 \
           | while IFS= read -r changed_path; do basename "$changed_path"; done \
           | tr '\n' ',' | sed 's/,$//; s/,/, /g')
-        REASON="STOP BLOCKED — ${FILES_CHANGED} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update last-session.md."
+        REASON="STOP BLOCKED — ${FILES_CHANGED} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update ${HANDOFF_PATH}."
         ESCAPED_REASON=$(printf '%s' "$REASON" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
         printf '{"decision": "block", "reason": %s}\n' "$ESCAPED_REASON"
         exit 0
@@ -366,18 +422,14 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
       _SESSION_MTIME=0
       if [ -f "$_SESSION_FILE" ] && [ ! -L "$_SESSION_FILE" ]; then
         _SESSION_MTIME=$(mycelium_file_mtime "$_SESSION_FILE" 2>/dev/null || echo "0")
-        if mycelium_handoff_has_headings "$_SESSION_FILE" \
-          "## What was worked on" \
-          "## Key decisions made" \
-          "## Blockers & surprises" \
-          "## Current state" \
-          "## Next steps" \
-          || mycelium_handoff_has_headings "$_SESSION_FILE" \
-          "## Current State" \
-          "## What Was Done" \
-          "## Key Decisions" \
-          "## Next Steps" \
-          "## Relevant Files"; then
+        # Ask the finalizer to validate the exact body it would publish after
+        # removing obsolete lifecycle prose. A pre-cleanup check can accept a
+        # section whose only content is then deleted during finalization.
+        if [ -f "$FINALIZE_HANDOFF_SCRIPT" ] \
+          && python3 "$FINALIZE_HANDOFF_SCRIPT" \
+            --handoff "$_SESSION_FILE" \
+            --check-complete \
+            >/dev/null 2>/dev/null; then
           _SESSION_COMPLETE=true
         else
           _SESSION_COMPLETE=false
@@ -426,6 +478,7 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
 SESSION RESUME — Last session ($(date '+%Y-%m-%d %H:%M')):
 
 ## What was worked on
+- Completed the session work recorded in the finalized session log.
 ${_WORK_LINES}
 
 ## Key decisions made
@@ -518,9 +571,17 @@ LAST_SESSION_EOF
       # Only now is it truthful to publish an authoritative accepted state in
       # the rich handoff. If this atomic write fails, the pending sentinel keeps
       # SessionStart and Stop on the same retryable transaction.
+      _FINALIZE_HANDOFF_ARGS=(
+        --handoff "$_SESSION_FILE"
+        --accepted-at "$ENDED"
+      )
+      if [[ "$STATE_DIR" != "$MYCELIUM_SHARED_STATE_DIR" ]]; then
+        _FINALIZE_HANDOFF_ARGS+=(
+          --publish-to "$MYCELIUM_SHARED_STATE_DIR/last-session.md"
+        )
+      fi
       if ! python3 "$FINALIZE_HANDOFF_SCRIPT" \
-        --handoff "$_SESSION_FILE" \
-        --accepted-at "$ENDED" \
+        "${_FINALIZE_HANDOFF_ARGS[@]}" \
         >/dev/null 2>"$LOG_DIR/.finalize_handoff.err"; then
         mycelium_emit_stop_block \
           "STOP BLOCKED — session handoff finalization failed. Active state was preserved for retry."
@@ -554,6 +615,7 @@ if [ ! -d "$LIVING_DIR" ]; then
   rm -f "$STATE_DIR/session-file-baseline.json"
   rm -f "$STATE_DIR/living-reminder-baseline.json"
   mycelium_accept_lineage_session
+  mycelium_cleanup_accepted_scoped_state
   exit 0
 fi
 
@@ -569,6 +631,7 @@ if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
   rm -f "$STATE_DIR/session-file-baseline.json"
   rm -f "$STATE_DIR/living-reminder-baseline.json"
   mycelium_accept_lineage_session
+  mycelium_cleanup_accepted_scoped_state
   exit 0
 fi
 
@@ -618,14 +681,15 @@ if [ "$LIVING_UPDATED" = true ]; then
   rm -f "$STATE_DIR/session-file-baseline.json"
   rm -f "$STATE_DIR/living-reminder-baseline.json"
 
-  ENHANCE_MSG=".living/ updated. Enhance .mycelium/last-session.md with work, decisions, blockers, current state, and next steps. The deterministic LOG_REGISTRY summary is already in place."
+  ENHANCE_MSG=".living/ updated. The accepted handoff was published to ${MYCELIUM_SHARED_STATE_DIR}/last-session.md, and the deterministic LOG_REGISTRY summary is in place."
   mycelium_emit_context "Stop" "$ENHANCE_MSG"
   mycelium_accept_lineage_session
+  mycelium_cleanup_accepted_scoped_state
   exit 0
 fi
 
 # Block: work happened but .living/ was never updated
-REASON="STOP BLOCKED — ${FILE_COUNT} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update last-session.md."
+REASON="STOP BLOCKED — ${FILE_COUNT} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update ${HANDOFF_PATH}."
 
 ESCAPED_REASON=$(printf '%s' "$REASON" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
 printf '{"decision": "block", "reason": %s}\n' "$ESCAPED_REASON"

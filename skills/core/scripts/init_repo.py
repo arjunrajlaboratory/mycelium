@@ -319,17 +319,37 @@ def write_plugin_root_pointer(target_dir: Path) -> bool:
 
 
 def refresh_generated_guidance(content: str, canonical: str) -> str:
-    """Refresh Mycelium's managed enforcement section in existing guidance."""
+    """Refresh narrowly managed generated guidance without replacing custom text."""
     heading = "### Automated Enforcement"
     next_heading = "### Knowledge Transfer (Cross-Project)"
     current_start = content.find(heading)
     current_end = content.find(next_heading, current_start + len(heading))
     canonical_start = canonical.find(heading)
     canonical_end = canonical.find(next_heading, canonical_start + len(heading))
-    if min(current_start, current_end, canonical_start, canonical_end) < 0:
-        return content
-    replacement = canonical[canonical_start:canonical_end]
-    return content[:current_start] + replacement + content[current_end:]
+    refreshed = content
+    if min(current_start, current_end, canonical_start, canonical_end) >= 0:
+        replacement = canonical[canonical_start:canonical_end]
+        refreshed = content[:current_start] + replacement + content[current_end:]
+
+    # This generated rule lives immediately before Automated Enforcement, so it
+    # was outside the managed section above. Refresh only its exact numbered
+    # line: replacing the whole post-action section would overwrite repository
+    # customizations, while leaving the legacy shared path contradicts the
+    # session-scoped path injected by SessionStart.
+    session_summary_prefix = "10. **Session summary**:"
+    canonical_lines = canonical.splitlines(keepends=True)
+    replacement_lines = [
+        line for line in canonical_lines if line.startswith(session_summary_prefix)
+    ]
+    if len(replacement_lines) != 1:
+        return refreshed
+
+    current_lines = refreshed.splitlines(keepends=True)
+    for index, line in enumerate(current_lines):
+        if line.startswith(session_summary_prefix):
+            current_lines[index] = replacement_lines[0]
+            return "".join(current_lines)
+    return refreshed
 
 
 def create_agent_guidance(target_dir: Path):

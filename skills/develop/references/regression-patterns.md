@@ -432,3 +432,85 @@ unresolved lineage instead of an unbounded delay or partial guess.
 spy and process a direct `read_csv('data/raw/sample.csv')`; require the static
 event to succeed without invoking the spy. Exercise the bound separately and
 require an unresolved result.
+
+## 28. Global safety serialization is mistaken for multi-session support
+
+**Failure:** One repository-global owner and marker prevent cross-task
+corruption, but a second live root is excluded from logging, activity,
+lineage, Stop enforcement, and handoff. Replacing writes atomically avoids torn
+bytes yet still loses updates when two shared writers derive from the same old
+content.
+
+**Invariant:** Every identified host root owns an exact, validated transaction
+namespace. Repository lifecycle locking coordinates only shared allocation and
+publication; a per-session lock protects private event state; stable durable
+file locks cover the complete read/derive/write transaction for shared files.
+Lock order is broad to narrow, and a queued event revalidates after acquiring
+its lock. Identity-free and exact-owner pre-upgrade flat transactions remain
+compatible without becoming a fallback for malformed identities.
+
+**Regression evidence:** Start distinct Claude/Codex root IDs concurrently and
+require distinct run directories, markers, and logs; start one ID twice and
+require reuse. Race PostToolUse with accepted Stop and require no late state
+write. Race distinct registry upserts and require every row plus the original
+mode. Exercise exact matching and nonmatching pre-upgrade flat owners, invalid
+and linked IDs, two independent accepted Stops, and one blocked root beside a
+live sibling.
+
+## 29. A syntactic identifier whitelist is mistaken for a safe path segment
+
+**Failure:** A JSON number or Boolean is stringified into a host identity, while
+an object or list disappears and silently selects legacy state. Even a value
+that matches `[A-Za-z0-9._-]+` may be the special component `.` or `..`, which
+collapses a supposedly private directory onto its parent.
+
+**Invariant:** Decode filesystem identities as typed JSON strings at the hook
+boundary. A missing or null optional identity may use documented compatibility
+behavior; a present non-string value is invalid. In addition to the character
+and length policy, reject `.` and `..` before any state preparation, and repeat
+the path-component check at the filesystem boundary.
+
+**Regression evidence:** Exercise numeric, Boolean, object, list, `.`, and `..`
+session IDs. Require no runtime directory, log, shared pointer refresh, or
+legacy fallback. Keep ordinary missing-ID compatibility as a paired positive.
+
+## 30. A stale-lock reaper deletes a replacement owner's lock
+
+**Failure:** Two contenders observe owner A as dead. One removes A's directory
+and owner B acquires the same path; the delayed contender then removes that path
+using only its stale observation. B loses its lock during the mkdir-to-owner
+publication window, so a fail-silent hook drops an otherwise successful event.
+
+**Invariant:** A reaper must atomically claim the observed lock generation and
+revalidate both directory identity and owner while that claim excludes other
+reapers. It may delete only the same dead or aged generation it inspected.
+Ownerless recent directories remain protected as potential publication windows.
+
+**Regression evidence:** Drive many concurrent child events through one parent
+transaction and require every path exactly once with no hook stderr. Repeat the
+contention test enough times to expose replacement-owner races, alongside dead-
+owner recovery, recent-ownerless protection, and live-owner timeout cases.
+
+## 31. Handoff headings are mistaken for complete handoff sections
+
+**Failure:** Stop accepts a fresh handoff merely because all required heading
+lines and bodies exist before finalization. An agent can leave a body empty,
+duplicate or reorder headings, or use obsolete pending-Stop prose as a section's
+only content; semantic cleanup then erases that content after validation and the
+durable resume pointer advertises an incomplete handoff as accepted.
+
+**Invariant:** Validate the exact normalized body that finalization will
+publish, using one shared cleanup-and-validation implementation. A preserved
+authored handoff contains every heading in one supported five-section schema
+exactly once, in that schema's order, with at least one nonblank body line per
+section after obsolete lifecycle prose is removed. Any absent, stale, empty,
+duplicated, misordered, or cleanup-emptied structure receives the deterministic
+complete fallback before accepted publication; the finalizer enforces the same
+contract before its first write.
+
+**Regression evidence:** Exercise canonical and legacy complete handoffs as
+preservation positives. Exercise an empty body, reordered headings, a duplicate
+heading, and a section whose only body line is removed by lifecycle cleanup as
+negatives; require one ordered, nonempty canonical set in the accepted durable
+handoff. Invoke finalization directly on the cleanup-emptied case and require
+the private source and shared destination to remain byte-identical.

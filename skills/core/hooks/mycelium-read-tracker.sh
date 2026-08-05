@@ -35,7 +35,8 @@ source "$HERE/mycelium-hook-lib.sh"
   if [[ -z "$REPO_ROOT" ]]; then
     exit 0
   fi
-  mycelium_prepare_post_tool_state "$REPO_ROOT" "$INPUT" || exit 0
+  mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT" || exit 0
+  trap mycelium_release_session_lock EXIT
 
   # Extract the relative .living/... portion of the path
   # e.g. /Users/mst36/repo/.living/INDEX.md → .living/INDEX.md

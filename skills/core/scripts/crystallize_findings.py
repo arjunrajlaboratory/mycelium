@@ -14,10 +14,33 @@ with .living/ to discover the meta-project root.
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import stat
 import sys
 from datetime import datetime
 from pathlib import Path
+
+from mycelium_locks import (
+    LockError,
+    atomic_write_text,
+    durable_lock,
+    durable_path_lock,
+    preflight_lock_root,
+    preflight_target,
+)
+
+
+def _require_regular_file(path: Path) -> None:
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise LockError(f"unsafe findings source: {path}")
+
+
+def _require_real_directory(path: Path) -> None:
+    metadata = path.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise LockError(f"unsafe findings directory: {path}")
 
 
 def find_meta_root(start: Path) -> Path | None:
@@ -49,6 +72,7 @@ def find_repo_root(start: Path) -> Path | None:
 
 def parse_topic_file(path: Path) -> dict:
     """Parse a topic file and extract metadata."""
+    _require_regular_file(path)
     content = path.read_text(encoding="utf-8", errors="replace")
     lines = content.splitlines()
 
@@ -130,6 +154,10 @@ def _find_subproject_findings_dirs(meta_root: Path) -> list[tuple[Path, str]]:
             continue
         # Filter hidden directories and known irrelevant paths
         relative = findings_dir.relative_to(meta_root)
+        current = meta_root
+        for part in relative.parts:
+            current /= part
+            _require_real_directory(current)
         if any(part.startswith(".") and part != ".living" for part in relative.parts):
             continue
         if any(
@@ -246,6 +274,7 @@ def rebuild_project_registry(findings_dir: Path) -> None:
         if topic_file.name in {"INDEX.md", "FINDINGS_REGISTRY.md"}:
             continue
 
+        _require_regular_file(topic_file)
         topic_slug = topic_file.stem
         content = topic_file.read_text(encoding="utf-8", errors="replace")
         lines = content.splitlines()
@@ -341,11 +370,31 @@ def rebuild_project_registry(findings_dir: Path) -> None:
             f" | {r['implications']} | {r['tags']} | {r['last_updated']} |"
         )
 
-    registry_path = findings_dir / "FINDINGS_REGISTRY.md"
-    registry_path.write_text(
+    atomic_write_text(
+        findings_dir / "FINDINGS_REGISTRY.md",
         template_header + "\n" + "\n".join(table_rows) + "\n",
-        encoding="utf-8",
+        root=findings_dir.parent.parent,
     )
+
+
+def preflight_crystallization(meta_root: Path) -> None:
+    meta_root = Path(os.path.abspath(meta_root))
+    _require_real_directory(meta_root)
+    living_dir = meta_root / ".living"
+    _require_real_directory(living_dir)
+    preflight_lock_root(meta_root)
+    meta_findings = living_dir / "findings"
+    if meta_findings.exists() or meta_findings.is_symlink():
+        _require_real_directory(meta_findings)
+        preflight_target(meta_findings / "INDEX.md", meta_root)
+
+    for findings_dir, _project_name in _find_subproject_findings_dirs(meta_root):
+        project_root = findings_dir.parent.parent
+        preflight_lock_root(project_root)
+        preflight_target(findings_dir / "FINDINGS_REGISTRY.md", project_root)
+        for topic_file in findings_dir.glob("*.md"):
+            if topic_file.name not in {"INDEX.md", "FINDINGS_REGISTRY.md"}:
+                _require_regular_file(topic_file)
 
 
 def main() -> int:
@@ -373,25 +422,38 @@ def main() -> int:
         print("No meta-project found. Cross-project index not generated.")
         return 0
 
-    # Ensure meta-project findings directory exists
-    findings_dir = meta_root / ".living" / "findings"
-    findings_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        preflight_crystallization(meta_root)
+        with durable_lock(meta_root, "crystallize-findings.lock"):
+            # The lock covers the complete source scan and every derived write.
+            living_dir = meta_root / ".living"
+            if living_dir.is_symlink() or not living_dir.is_dir():
+                raise LockError(f"unsafe meta-project .living directory: {living_dir}")
+            findings_dir = living_dir / "findings"
+            if findings_dir.is_symlink():
+                raise LockError(f"unsafe findings directory: {findings_dir}")
+            findings_dir.mkdir(exist_ok=True)
 
-    # Build and write index
-    content = build_cross_project_index(meta_root)
-    if not content:
-        print("No findings found across subprojects.")
-        return 0
+            index_path = findings_dir / "INDEX.md"
+            with durable_path_lock(index_path, root=meta_root):
+                content = build_cross_project_index(meta_root)
+                if not content:
+                    print("No findings found across subprojects.")
+                    return 0
+                atomic_write_text(index_path, content, root=meta_root)
+                print(f"INDEX.md written to {index_path}")
 
-    index_path = findings_dir / "INDEX.md"
-    index_path.write_text(content, encoding="utf-8")
-    print(f"INDEX.md written to {index_path}")
-
-    # Rebuild per-project FINDINGS_REGISTRY.md for each subproject
-    subproject_dirs = _find_subproject_findings_dirs(meta_root)
-    for subproject_findings_dir, project_name in subproject_dirs:
-        rebuild_project_registry(subproject_findings_dir)
-        print(f"FINDINGS_REGISTRY.md rebuilt for {project_name}")
+            subproject_dirs = _find_subproject_findings_dirs(meta_root)
+            for subproject_findings_dir, project_name in subproject_dirs:
+                registry_path = subproject_findings_dir / "FINDINGS_REGISTRY.md"
+                with durable_path_lock(
+                    registry_path, root=subproject_findings_dir.parent.parent
+                ):
+                    rebuild_project_registry(subproject_findings_dir)
+                print(f"FINDINGS_REGISTRY.md rebuilt for {project_name}")
+    except (LockError, OSError) as exc:
+        print(f"Crystallization failed safely: {exc}", file=sys.stderr)
+        return 1
 
     return 0
 

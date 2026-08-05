@@ -15,6 +15,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from mycelium_locks import atomic_write_text, durable_path_lock
+
 # ---------------------------------------------------------------------------
 # Sentinel constants for structured INDEX.md blocks
 # ---------------------------------------------------------------------------
@@ -22,6 +24,10 @@ SUMMARY_BEGIN = "<!-- BEGIN KNOWLEDGE SUMMARY -->"
 SUMMARY_END = "<!-- END KNOWLEDGE SUMMARY -->"
 QUICK_REF_BEGIN = "<!-- BEGIN QUICK REFERENCE -->"
 QUICK_REF_END = "<!-- END QUICK REFERENCE -->"
+
+
+def _write_index(living_dir: Path, content: str) -> None:
+    atomic_write_text(living_dir / "INDEX.md", content, root=living_dir.parent)
 
 
 def count_headers_and_topics(path: Path, file_type: str) -> tuple[int, list[str]]:
@@ -392,7 +398,7 @@ def build_quick_reference(living_dir: Path) -> str:
     return "\n".join(lines)
 
 
-def update_index_counts_only(living_dir: Path) -> None:
+def _update_index_counts_only_unlocked(living_dir: Path) -> None:
     """Update INDEX.md with fresh counts, preserving any existing summary block.
 
     - Fresh directory: creates minimal INDEX.md with QUICK_REFERENCE block only.
@@ -406,7 +412,7 @@ def update_index_counts_only(living_dir: Path) -> None:
     quick_ref = build_quick_reference(living_dir)
 
     if not index_path.exists():
-        index_path.write_text(quick_ref + "\n", encoding="utf-8")
+        _write_index(living_dir, quick_ref + "\n")
         print(f"Written: {index_path}")
         return
 
@@ -417,7 +423,7 @@ def update_index_counts_only(living_dir: Path) -> None:
         before = existing[: existing.index(QUICK_REF_BEGIN)]
         after = existing[existing.index(QUICK_REF_END) + len(QUICK_REF_END) :]
         new_content = before + quick_ref + after
-        index_path.write_text(new_content, encoding="utf-8")
+        _write_index(living_dir, new_content)
     else:
         # Legacy migration: INDEX.md without QUICK_REF sentinels is treated as
         # fully machine-managed and replaced entirely. All existing INDEX.md
@@ -430,9 +436,15 @@ def update_index_counts_only(living_dir: Path) -> None:
         # sentinel pairs. If a future code path creates SUMMARY-only files,
         # this branch should be updated to preserve the summary block.
         new_content = quick_ref + "\n"
-        index_path.write_text(new_content, encoding="utf-8")
+        _write_index(living_dir, new_content)
 
     print(f"Written: {index_path}")
+
+
+def update_index_counts_only(living_dir: Path) -> None:
+    index_path = living_dir / "INDEX.md"
+    with durable_path_lock(index_path, root=living_dir.parent):
+        _update_index_counts_only_unlocked(living_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -628,7 +640,7 @@ def build_heuristic_summary(living_dir: Path, top_n: int = 6, recent_n: int = 10
     return "\n".join(lines)
 
 
-def update_index_summary_heuristic(living_dir: Path) -> None:
+def _update_index_summary_heuristic_unlocked(living_dir: Path) -> None:
     """Write the heuristic SUMMARY block into INDEX.md, preserving QUICK_REFERENCE.
 
     - Fresh INDEX.md: writes both QUICK_REFERENCE and SUMMARY blocks.
@@ -641,7 +653,7 @@ def update_index_summary_heuristic(living_dir: Path) -> None:
     quick_ref = build_quick_reference(living_dir)
 
     if not index_path.exists():
-        index_path.write_text(quick_ref + "\n\n" + summary_block + "\n", encoding="utf-8")
+        _write_index(living_dir, quick_ref + "\n\n" + summary_block + "\n")
         print(f"Written: {index_path}")
         return
 
@@ -653,9 +665,7 @@ def update_index_summary_heuristic(living_dir: Path) -> None:
     # legacy behavior and avoids stranding a stale pre-sentinel table at
     # the bottom of the file. Migrator targets this case specifically.
     if QUICK_REF_BEGIN not in existing or QUICK_REF_END not in existing:
-        index_path.write_text(
-            quick_ref + "\n\n" + summary_block + "\n", encoding="utf-8"
-        )
+        _write_index(living_dir, quick_ref + "\n\n" + summary_block + "\n")
         print(f"Written: {index_path}")
         return
 
@@ -680,8 +690,14 @@ def update_index_summary_heuristic(living_dir: Path) -> None:
 
     if not existing.endswith("\n"):
         existing += "\n"
-    index_path.write_text(existing, encoding="utf-8")
+    _write_index(living_dir, existing)
     print(f"Written: {index_path}")
+
+
+def update_index_summary_heuristic(living_dir: Path) -> None:
+    index_path = living_dir / "INDEX.md"
+    with durable_path_lock(index_path, root=living_dir.parent):
+        _update_index_summary_heuristic_unlocked(living_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -948,7 +964,7 @@ def parse_llm_clusters(llm_output: str) -> str | None:
     return result_text
 
 
-def update_index_summarize(living_dir: Path) -> None:
+def _update_index_summarize_unlocked(living_dir: Path) -> None:
     """Full LLM summarization mode.
 
     On success: generates both KNOWLEDGE_SUMMARY and QUICK_REFERENCE blocks,
@@ -1041,8 +1057,14 @@ def update_index_summarize(living_dir: Path) -> None:
         parts.append(summary_block)
 
     new_content = "\n".join(parts) + "\n"
-    index_path.write_text(new_content, encoding="utf-8")
+    _write_index(living_dir, new_content)
     print(f"Written: {index_path}")
+
+
+def update_index_summarize(living_dir: Path) -> None:
+    index_path = living_dir / "INDEX.md"
+    with durable_path_lock(index_path, root=living_dir.parent):
+        _update_index_summarize_unlocked(living_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1106,24 +1128,26 @@ def main() -> None:
         if args.dry_run:
             # For summarize dry-run, show what would be written without saving
             # We still call the LLM but print instead of write
-            index_path = living_dir / "INDEX.md"
-            _original_write = index_path.write_text
+            original_writer = globals()["_write_index"]
 
-            def _dry_write(text: str, **_kwargs: object) -> None:
+            def _dry_write(_living_dir: Path, text: str) -> None:
                 print(text)
 
-            index_path.write_text = _dry_write  # type: ignore[method-assign]
-            update_index_summarize(living_dir)
-            index_path.write_text = _original_write  # type: ignore[method-assign]
+            globals()["_write_index"] = _dry_write
+            try:
+                _update_index_summarize_unlocked(living_dir)
+            finally:
+                globals()["_write_index"] = original_writer
         else:
             update_index_summarize(living_dir)
     else:
-        content = generate_index(living_dir)
         if args.dry_run:
-            print(content)
+            print(generate_index(living_dir))
         else:
             index_path = living_dir / "INDEX.md"
-            index_path.write_text(content, encoding="utf-8")
+            with durable_path_lock(index_path, root=living_dir.parent):
+                content = generate_index(living_dir)
+                _write_index(living_dir, content)
             print(f"Written: {index_path}")
 
 

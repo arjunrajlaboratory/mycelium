@@ -91,12 +91,12 @@ No domain conventions installed yet. Install with mycelium's `install-convention
 2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md`
 4. **Log learnings**: If something unexpected happened, append to `.living/learnings.md` (consider promoting to conventions if the pattern recurs 3+ times)
-5. **Log findings**: If the work produced a scientific finding (empirical observation, validated/invalidated hypothesis, quantitative result, or domain discovery), crystallize it to `.living/findings/{topic}.md`. Check existing topics first for consistency. Prefer broad topic names. Resolve the bundled `skills/core/templates/findings-entry.md` template through `.mycelium/plugin-root`.
-6. **Log todos**: If future work is identified, add items to `todo/TODO_REGISTRY.md` (create a detailed `todo/[item].md` writeup for complex items)
+5. **Log findings**: If the work produced a scientific finding (empirical observation, validated/invalidated hypothesis, quantitative result, or domain discovery), crystallize it to `.living/findings/{topic}.md`. Check existing topics first for consistency. Prefer broad topic names. Resolve the bundled `skills/core/templates/findings-entry.md` template through `.mycelium/plugin-root`, then update `.living/findings/FINDINGS_REGISTRY.md` with `python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/upsert_table_row.py"`.
+6. **Log todos**: If future work is identified, create a detailed `todo/[item].md` writeup as needed, then update `todo/TODO_REGISTRY.md` with `python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/upsert_table_row.py" todo/TODO_REGISTRY.md '<item title>' '| <item title> | ... |'`
 7. **Validate structure**: Run `python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/validate_structure.py" --target-dir .`
 8. **Crystallize conventions**: Review recent learnings — if 3+ entries share a pattern, promote to `.living/conventions.md` or a named convention pack
 9. **Convention feedback**: Note whether convention pack practices were helpful or had gaps
-10. **Session summary**: Write `.mycelium/last-session.md` with a brief summary of what was done, decisions made, and next steps
+10. **Session summary**: Write the complete five-section handoff to the exact path supplied by the current lifecycle context. Identified roots use `.mycelium/run/<host>/<session-id>/last-session.md`; legacy identity-free hosts use `.mycelium/last-session.md`
 
 ### Automated Enforcement
 

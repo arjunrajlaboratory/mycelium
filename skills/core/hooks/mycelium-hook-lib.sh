@@ -12,6 +12,11 @@ mycelium_prepare_state_dir() {
   local unsafe_link=""
   local plugin_pointer=""
   local pointer_tmp=""
+  local managed_target=""
+
+  [[ "$mode" == "write" \
+    || "$mode" == "read-only" \
+    || "$mode" == "bootstrap" ]] || return 1
 
   repo_root=$(cd "$repo_root" 2>/dev/null && pwd -P) || return 1
   living_dir="$repo_root/.living"
@@ -80,6 +85,10 @@ PY
     "$repo_root"/*) ;;
     *) return 1 ;;
   esac
+  # STATE_DIR historically named the repository-global runtime directory.
+  # Keep that value as the shared coordination root even after an identified
+  # host task selects its private run directory below.
+  MYCELIUM_SHARED_STATE_DIR="$STATE_DIR"
   unsafe_link=$(find "$STATE_DIR" -type l -print -quit 2>/dev/null || true)
   if [[ -n "$unsafe_link" ]]; then
     return 1
@@ -87,8 +96,25 @@ PY
 
   # Ownership preflight for host-identified PostToolUse events must happen
   # before state initialization, plugin-pointer refresh, or legacy migration.
-  if [[ "$mode" == "read-only" ]]; then
+  if [[ "$mode" == "read-only" || "$mode" == "bootstrap" ]]; then
     return 0
+  fi
+
+  plugin_pointer="$STATE_DIR/plugin-root"
+  legacy_dir="$repo_root/.claude"
+  legacy_session="$legacy_dir/last-session.md"
+  for managed_target in \
+    "$STATE_DIR/.gitignore" \
+    "$STATE_DIR/last-session.md"; do
+    if [[ ( -e "$managed_target" || -L "$managed_target" ) \
+      && ( ! -f "$managed_target" || -L "$managed_target" ) ]]; then
+      return 1
+    fi
+  done
+  if [[ -n "${MYCELIUM_PLUGIN_ROOT:-}" \
+    && ( -e "$plugin_pointer" || -L "$plugin_pointer" ) \
+    && ( ! -f "$plugin_pointer" || -L "$plugin_pointer" ) ]]; then
+    return 1
   fi
 
   if [[ ! -f "$STATE_DIR/.gitignore" ]]; then
@@ -100,11 +126,6 @@ PY
   # checks above, and replace it atomically rather than following an existing
   # path with shell redirection.
   if [[ -n "${MYCELIUM_PLUGIN_ROOT:-}" ]]; then
-    plugin_pointer="$STATE_DIR/plugin-root"
-    if [[ -L "$plugin_pointer" \
-      || ( -e "$plugin_pointer" && ! -f "$plugin_pointer" ) ]]; then
-      return 1
-    fi
     if [[ ! -f "$plugin_pointer" \
       || "$(cat "$plugin_pointer" 2>/dev/null || true)" != "$MYCELIUM_PLUGIN_ROOT" ]]; then
       pointer_tmp=$(mktemp "$STATE_DIR/.plugin-root.tmp.XXXXXX") || return 1
@@ -117,8 +138,6 @@ PY
   fi
 
   # Preserve cross-session context from projects initialized before v0.4.
-  legacy_dir="$repo_root/.claude"
-  legacy_session="$legacy_dir/last-session.md"
   if [[ ! -f "$STATE_DIR/last-session.md" \
     && -d "$legacy_dir" \
     && ! -L "$legacy_dir" \
@@ -190,6 +209,16 @@ PY
   fi
 }
 
+mycelium_valid_session_id() {
+  local session_id="${1:-}"
+
+  [[ -n "$session_id" \
+    && "$session_id" != "." \
+    && "$session_id" != ".." \
+    && "$session_id" =~ ^[A-Za-z0-9._-]+$ \
+    && ${#session_id} -le 200 ]]
+}
+
 mycelium_read_session_owner_id() {
   local owner_file="$1"
   local owner_id=""
@@ -198,10 +227,116 @@ mycelium_read_session_owner_id() {
   [[ -f "$owner_file" && ! -L "$owner_file" ]] || return 1
   owner_id=$(sed -n '1p' "$owner_file" 2>/dev/null || true)
   line_count=$(awk 'END { print NR }' "$owner_file" 2>/dev/null || true)
-  [[ "$owner_id" =~ ^[A-Za-z0-9._-]+$ \
-    && ${#owner_id} -le 200 \
-    && "$line_count" == 1 ]] || return 1
+  mycelium_valid_session_id "$owner_id" || return 1
+  [[ "$line_count" == 1 ]] || return 1
   printf '%s\n' "$owner_id"
+}
+
+mycelium_select_session_state() {
+  local repo_root="$1"
+  local input="$2"
+  local mode="${3:-read-only}"
+  local shared_state="${MYCELIUM_SHARED_STATE_DIR:-${STATE_DIR:-}}"
+  local host_session_id=""
+  local host=""
+  local run_state=""
+  local flat_owner=""
+  local flat_marker=""
+
+  [[ -n "$shared_state" && -d "$shared_state" && ! -L "$shared_state" ]] \
+    || return 1
+  repo_root=$(cd "$repo_root" 2>/dev/null && pwd -P) || return 1
+  host_session_id=$(printf '%s' "$input" \
+    | mycelium_json_get_optional_string 'session_id') || return 1
+
+  # Identity-free hosts retain the pre-0.7 flat transaction layout. Never map
+  # an invalid nonempty identity onto that compatibility path.
+  if [[ -z "$host_session_id" ]]; then
+    STATE_DIR="$shared_state"
+    MYCELIUM_SESSION_SCOPED=false
+    MYCELIUM_SESSION_HOST="legacy"
+    MYCELIUM_HOST_SESSION_ID=""
+    MYCELIUM_ACTIVE_FLAT_FALLBACK=false
+    return 0
+  fi
+  mycelium_valid_session_id "$host_session_id" || return 1
+  host=$(mycelium_hook_host)
+  [[ "$host" == "claude" || "$host" == "codex" ]] || return 1
+
+  run_state="$shared_state/run/$host/$host_session_id"
+
+  # Rolling-upgrade compatibility: a task started by the prior build may still
+  # own the flat transaction. Route only an exact owner match there; another
+  # root gets a new scoped transaction and cannot consume the old evidence.
+  if [[ ! -e "$run_state" && ! -L "$run_state" \
+    && -f "$shared_state/active-session-log.tmp" \
+    && ! -L "$shared_state/active-session-log.tmp" ]]; then
+    flat_owner=$(mycelium_read_session_owner_id \
+      "$shared_state/active-session-owner-id.tmp" 2>/dev/null || true)
+    flat_marker=$(mycelium_read_active_log_marker \
+      "$repo_root" "$shared_state/active-session-log.tmp" 2>/dev/null || true)
+    if [[ -n "$flat_marker" && "$flat_owner" == "$host_session_id" ]]; then
+      STATE_DIR="$shared_state"
+      MYCELIUM_SESSION_SCOPED=false
+      MYCELIUM_SESSION_HOST="$host"
+      MYCELIUM_HOST_SESSION_ID="$host_session_id"
+      MYCELIUM_ACTIVE_FLAT_FALLBACK=true
+      return 0
+    fi
+  fi
+
+  run_state=$(python3 - "$shared_state" "$host" "$host_session_id" "$mode" <<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+shared = Path(sys.argv[1]).resolve(strict=True)
+host, session_id, mode = sys.argv[2:]
+if host not in {"claude", "codex"}:
+    raise SystemExit(1)
+if not session_id or len(session_id) > 200 or session_id in {".", ".."}:
+    raise SystemExit(1)
+if any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" for ch in session_id):
+    raise SystemExit(1)
+if mode not in {"create", "read-only"}:
+    raise SystemExit(1)
+
+current = shared
+for part in ("run", host, session_id):
+    current = current / part
+    try:
+        metadata = current.lstat()
+    except FileNotFoundError:
+        if mode != "create":
+            raise SystemExit(1)
+        try:
+            current.mkdir(mode=0o700)
+        except FileExistsError:
+            metadata = current.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise SystemExit(1)
+    except OSError:
+        raise SystemExit(1)
+    else:
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise SystemExit(1)
+
+candidate = current.resolve(strict=True)
+try:
+    candidate.relative_to(shared)
+except ValueError:
+    raise SystemExit(1)
+print(candidate)
+PY
+  ) || return 1
+  [[ -n "$run_state" ]] || return 1
+  STATE_DIR="$run_state"
+  MYCELIUM_SESSION_SCOPED=true
+  MYCELIUM_SESSION_HOST="$host"
+  MYCELIUM_HOST_SESSION_ID="$host_session_id"
+  MYCELIUM_ACTIVE_FLAT_FALLBACK=false
+  return 0
 }
 
 mycelium_payload_owns_active_session() {
@@ -215,10 +350,10 @@ mycelium_payload_owns_active_session() {
   local host_session_id=""
   local host_identified=false
 
-  host_session_id=$(printf '%s' "$input" | mycelium_json_get 'session_id')
+  host_session_id=$(printf '%s' "$input" \
+    | mycelium_json_get_optional_string 'session_id') || return 1
   if [[ -n "$host_session_id" ]]; then
-    [[ "$host_session_id" =~ ^[A-Za-z0-9._-]+$ \
-      && ${#host_session_id} -le 200 ]] || return 1
+    mycelium_valid_session_id "$host_session_id" || return 1
     host_identified=true
   fi
 
@@ -252,21 +387,41 @@ mycelium_prepare_post_tool_state() {
   local input="$2"
   local host_session_id=""
 
-  host_session_id=$(printf '%s' "$input" | mycelium_json_get 'session_id')
+  host_session_id=$(printf '%s' "$input" \
+    | mycelium_json_get_optional_string 'session_id') || return 1
   if [[ -n "$host_session_id" ]]; then
     # An identified payload cannot create markerless state. Validate the
-    # existing transaction without mutation, perform normal preparation only
-    # for its owner, then revalidate to close the preparation race.
+    # existing transaction without mutating shared preparation state. The
+    # locked wrapper below revalidates after the event-lock wait.
     mycelium_prepare_state_dir "$repo_root" read-only || return 1
-    mycelium_payload_owns_active_session "$repo_root" "$input" || return 1
-    mycelium_prepare_state_dir "$repo_root" || return 1
+    mycelium_select_session_state "$repo_root" "$input" read-only || return 1
     mycelium_payload_owns_active_session "$repo_root" "$input" || return 1
   else
     # Identity-free payloads retain compatibility with hosts predating session
     # IDs, including their markerless activity enforcement.
     mycelium_prepare_state_dir "$repo_root" || return 1
+    mycelium_select_session_state "$repo_root" "$input" read-only || return 1
     mycelium_payload_owns_active_session "$repo_root" "$input" || return 1
   fi
+}
+
+mycelium_prepare_locked_post_tool_state() {
+  local repo_root="$1"
+  local input="$2"
+
+  mycelium_prepare_post_tool_state "$repo_root" "$input" || return 1
+  mycelium_acquire_session_lock "$STATE_DIR" || return 1
+
+  # Stop may have accepted this transaction while the event waited. Resolve
+  # and authorize the payload again inside the private session critical section
+  # before allowing any state mutation.
+  if ! mycelium_prepare_state_dir "$repo_root" read-only \
+    || ! mycelium_select_session_state "$repo_root" "$input" read-only \
+    || ! mycelium_payload_owns_active_session "$repo_root" "$input"; then
+    mycelium_release_session_lock
+    return 1
+  fi
+  return 0
 }
 
 mycelium_registry_cell() {
@@ -366,14 +521,23 @@ mycelium_refresh_work_cycle() {
   return 0
 }
 
-mycelium_acquire_stop_lock() {
+mycelium_acquire_directory_lock() {
   local state_dir="$1"
+  local lock_name="$2"
+  local result_variable="$3"
+  local configured_attempts="$4"
   local attempts=0
-  local max_attempts="${MYCELIUM_STOP_LOCK_MAX_ATTEMPTS:-600}"
+  local max_attempts="$configured_attempts"
   local owner_pid=""
   local owner_ts=""
+  local owner_record=""
+  local current_owner_record=""
   local now_ts=""
   local lock_mtime=0
+  local lock_inode_before=""
+  local lock_inode_after=""
+  local reap_claim=""
+  local reap_allowed=false
   local owner_is_live=false
   local owner_is_dead=false
 
@@ -381,15 +545,24 @@ mycelium_acquire_stop_lock() {
     max_attempts=600
   fi
 
-  MYCELIUM_STOP_LOCK_DIR="$state_dir/mycelium-stop.lock"
-  while ! mkdir "$MYCELIUM_STOP_LOCK_DIR" 2>/dev/null; do
+  [[ -d "$state_dir" && ! -L "$state_dir" ]] || return 1
+  [[ "$lock_name" != "." \
+    && "$lock_name" != ".." \
+    && "$lock_name" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+  local lock_dir="$state_dir/$lock_name"
+  while ! mkdir "$lock_dir" 2>/dev/null; do
     attempts=$((attempts + 1))
     owner_pid=""
     owner_ts=""
+    owner_record=""
     owner_is_live=false
     owner_is_dead=false
-    if [[ -f "$MYCELIUM_STOP_LOCK_DIR/owner" ]]; then
-      read -r owner_pid owner_ts < "$MYCELIUM_STOP_LOCK_DIR/owner" || true
+    if [[ -L "$lock_dir" || ( -e "$lock_dir" && ! -d "$lock_dir" ) ]]; then
+      return 1
+    fi
+    if [[ -f "$lock_dir/owner" && ! -L "$lock_dir/owner" ]]; then
+      owner_record=$(cat "$lock_dir/owner" 2>/dev/null || true)
+      read -r owner_pid owner_ts <<< "$owner_record" || true
       if [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
         if kill -0 "$owner_pid" 2>/dev/null; then
           owner_is_live=true
@@ -399,31 +572,97 @@ mycelium_acquire_stop_lock() {
       fi
     fi
     now_ts=$(date +%s)
-    lock_mtime=$(mycelium_file_mtime "$MYCELIUM_STOP_LOCK_DIR")
+    lock_mtime=$(mycelium_file_mtime "$lock_dir")
     # A recorded dead owner cannot still be in its critical section, so recover
     # immediately. Missing or malformed owner state may instead be the narrow
     # mkdir-to-owner publication window; retain the age guard for that case.
+    # Claim reaping inside the directory and revalidate its inode plus owner
+    # before deletion. Without that claim, two reapers can observe owner A as
+    # dead, one can remove A's directory and let owner B acquire it, and the
+    # delayed reaper can then delete B's newly created lock (an ABA race).
     if [[ "$owner_is_dead" == true ]] \
       || { [[ "$owner_is_live" != true && "$lock_mtime" =~ ^[0-9]+$ ]] \
         && (( now_ts - lock_mtime > 300 )); }; then
-      rm -f "$MYCELIUM_STOP_LOCK_DIR/owner"
-      rmdir "$MYCELIUM_STOP_LOCK_DIR" 2>/dev/null || true
-      continue
+      lock_inode_before=$(mycelium_file_inode "$lock_dir" 2>/dev/null || true)
+      reap_claim="$lock_dir/.mycelium-reap.claim"
+      reap_allowed=false
+      if [[ -n "$lock_inode_before" ]] \
+        && mkdir "$reap_claim" 2>/dev/null; then
+        lock_inode_after=$(mycelium_file_inode "$lock_dir" 2>/dev/null || true)
+        current_owner_record=""
+        if [[ -f "$lock_dir/owner" && ! -L "$lock_dir/owner" ]]; then
+          current_owner_record=$(cat "$lock_dir/owner" 2>/dev/null || true)
+        fi
+        if [[ "$lock_inode_after" == "$lock_inode_before" ]]; then
+          if [[ "$owner_is_dead" == true \
+            && "$current_owner_record" == "$owner_record" \
+            && "$owner_pid" =~ ^[0-9]+$ ]] \
+            && ! kill -0 "$owner_pid" 2>/dev/null; then
+            reap_allowed=true
+          elif [[ "$owner_is_dead" != true \
+            && "$current_owner_record" == "$owner_record" ]]; then
+            if [[ -n "$owner_record" \
+              || ( ! -e "$lock_dir/owner" && ! -L "$lock_dir/owner" ) ]]; then
+              reap_allowed=true
+            fi
+          fi
+        fi
+        if [[ "$reap_allowed" == true ]]; then
+          rm -f "$lock_dir/owner"
+          rmdir "$reap_claim" 2>/dev/null || true
+          if rmdir "$lock_dir" 2>/dev/null; then
+            continue
+          fi
+        else
+          rmdir "$reap_claim" 2>/dev/null || true
+        fi
+      fi
     fi
     if (( attempts >= max_attempts )); then
       return 1
     fi
     sleep 0.05
   done
-  printf '%s %s\n' "$$" "$(date +%s)" > "$MYCELIUM_STOP_LOCK_DIR/owner"
+  if ! printf '%s %s\n' "$$" "$(date +%s)" > "$lock_dir/owner"; then
+    rmdir "$lock_dir" 2>/dev/null || true
+    return 1
+  fi
+  printf -v "$result_variable" '%s' "$lock_dir"
   return 0
 }
 
-mycelium_release_stop_lock() {
-  if [[ -n "${MYCELIUM_STOP_LOCK_DIR:-}" ]]; then
-    rm -f "$MYCELIUM_STOP_LOCK_DIR/owner"
-    rmdir "$MYCELIUM_STOP_LOCK_DIR" 2>/dev/null || true
+mycelium_release_directory_lock() {
+  local lock_dir="$1"
+  if [[ -n "$lock_dir" && -d "$lock_dir" && ! -L "$lock_dir" ]]; then
+    rm -f "$lock_dir/owner"
+    rmdir "$lock_dir" 2>/dev/null || true
   fi
+}
+
+mycelium_acquire_stop_lock() {
+  mycelium_acquire_directory_lock \
+    "$1" \
+    "mycelium-stop.lock" \
+    MYCELIUM_STOP_LOCK_DIR \
+    "${MYCELIUM_STOP_LOCK_MAX_ATTEMPTS:-600}"
+}
+
+mycelium_release_stop_lock() {
+  mycelium_release_directory_lock "${MYCELIUM_STOP_LOCK_DIR:-}"
+  MYCELIUM_STOP_LOCK_DIR=""
+}
+
+mycelium_acquire_session_lock() {
+  mycelium_acquire_directory_lock \
+    "$1" \
+    "mycelium-session.lock" \
+    MYCELIUM_SESSION_LOCK_DIR \
+    "${MYCELIUM_SESSION_LOCK_MAX_ATTEMPTS:-600}"
+}
+
+mycelium_release_session_lock() {
+  mycelium_release_directory_lock "${MYCELIUM_SESSION_LOCK_DIR:-}"
+  MYCELIUM_SESSION_LOCK_DIR=""
 }
 
 mycelium_knowledge_dir() {
@@ -454,6 +693,29 @@ mycelium_file_mtime() {
   fi
 
   printf '0\n'
+}
+
+mycelium_file_inode() {
+  local path="${1:-}"
+  local value=""
+
+  if [[ -z "$path" || ! -e "$path" ]]; then
+    return 1
+  fi
+
+  value=$(stat -c "%d:%i" "$path" 2>/dev/null || true)
+  if [[ "$value" =~ ^[0-9]+:[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+
+  value=$(stat -f "%d:%i" "$path" 2>/dev/null || true)
+  if [[ "$value" =~ ^[0-9]+:[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+
+  return 1
 }
 
 mycelium_file_size() {
@@ -501,6 +763,29 @@ try:
         print(value)
 except Exception:
     pass
+' "$dotted_path"
+}
+
+mycelium_json_get_optional_string() {
+  local dotted_path="$1"
+  python3 -c '
+import json, sys
+
+missing = object()
+try:
+    value = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+for key in sys.argv[1].split("."):
+    if not isinstance(value, dict) or key not in value:
+        value = missing
+        break
+    value = value[key]
+if value is missing or value is None:
+    raise SystemExit(0)
+if not isinstance(value, str):
+    raise SystemExit(1)
+sys.stdout.write(value)
 ' "$dotted_path"
 }
 
