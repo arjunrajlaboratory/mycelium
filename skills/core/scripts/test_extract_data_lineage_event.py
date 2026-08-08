@@ -899,6 +899,16 @@ def test_flags_after_the_cd_operand_are_not_options(tmp_path: Path) -> None:
         "time X=1 cd nested",
         "time -p X=1 cd nested",
         "time -- X=1 Y=2 cd nested",
+        # Leading redirections leave the builtin running in the parent shell
+        # (PR #72 round-5 P1) — for time, launchers, and plain segments.
+        "time >timing.log cd nested",
+        "time -p 2>/dev/null cd nested",
+        "time > timing.log cd nested",
+        "time X=1 >log 2>&1 cd nested",
+        ">log cd nested",
+        "2>&1 cd nested",
+        "command >log cd nested",
+        "builtin -- >log cd nested",
     ],
 )
 def test_unmodeled_cwd_change_fails_closed_for_accessor_trust(

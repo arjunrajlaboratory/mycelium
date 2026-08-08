@@ -889,6 +889,51 @@ def _jupyter_match_has_terminal_option(command: str, offset: int) -> bool:
 
 _CWD_AFFECTING_BUILTINS = {"pushd", "popd", "source", ".", "eval"}
 _BUILTIN_LAUNCHER_PREFIXES = {"command", "builtin", "time"}
+_REDIRECTION_TOKEN_RE = re.compile(r"^(?:\d+|&)?(?:>>|>\||<>|>|<)")
+
+
+def _strip_redirection_prefix(
+    tokens: list[str],
+) -> tuple[list[str] | None, bool]:
+    """Consume leading redirection words and their separated targets.
+
+    A leading redirection leaves the following builtin running in the
+    parent shell (`>log cd nested` still changes the cwd), so callers must
+    classify what remains — and know that a redirection was present. A
+    dangling operator with no target in this segment (the tokenizer splits
+    `2>&1` at the `&`) makes the tail unknowable: None is returned and the
+    caller must treat the segment as unmodeled.
+    """
+    index = 0
+    stripped_any = False
+    while index < len(tokens):
+        match = _REDIRECTION_TOKEN_RE.match(tokens[index])
+        if match is None:
+            break
+        stripped_any = True
+        if len(tokens[index]) > match.end():
+            index += 1  # target or fd attached to the operator word
+        elif index + 1 < len(tokens):
+            index += 2  # separated target word
+        else:
+            return None, True
+    return tokens[index:], stripped_any
+
+
+def _strip_command_prefix_words(
+    tokens: list[str],
+) -> tuple[list[str] | None, bool]:
+    """Strip interleaved assignment and redirection words to a fixpoint."""
+    stripped_any = False
+    while True:
+        before = tokens
+        tokens = _strip_assignments(tokens)
+        tokens, had_redirection = _strip_redirection_prefix(tokens)
+        if tokens is None:
+            return None, True
+        stripped_any = stripped_any or had_redirection or tokens != before
+        if tokens == before:
+            return tokens, stripped_any
 
 
 def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
@@ -901,7 +946,18 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
     stripped = _strip_assignments(segment)
     if not stripped:
         return True
+    stripped, had_redirection = _strip_redirection_prefix(stripped)
+    if stripped is None:
+        return False
+    if not stripped:
+        return True
     name = stripped[0]
+    if had_redirection and name in (
+        {"cd"} | _CWD_AFFECTING_BUILTINS | _BUILTIN_LAUNCHER_PREFIXES
+    ):
+        # `>log cd nested` still changes the cwd, but the cwd walker's
+        # _apply_cd never tracks redirection-prefixed segments — unmodeled.
+        return False
     if name in _CWD_AFFECTING_BUILTINS:
         return False
     if name in _BUILTIN_LAUNCHER_PREFIXES:
@@ -918,9 +974,12 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
                 rest = rest[1:]
             if rest[:1] == ["--"]:
                 rest = rest[1:]
-            # time's operand is a pipeline, so assignment prefixes still
-            # reach the timed builtin: `time X=1 cd nested` changes the cwd.
-            rest = _strip_assignments(rest)
+            # time's operand is a pipeline, so assignment prefixes and
+            # leading redirections still reach the timed builtin:
+            # `time X=1 >log cd nested` changes the cwd.
+            rest, _ = _strip_command_prefix_words(rest)
+            if rest is None:
+                return False
         else:
             while rest and rest[0].startswith("-") and rest[0] not in {"-", "--"}:
                 flags = set(rest[0][1:])
@@ -931,6 +990,9 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
                 rest = rest[1:]
             if rest[:1] == ["--"]:
                 rest = rest[1:]
+            rest, _ = _strip_command_prefix_words(rest)
+            if rest is None:
+                return False
         follower = rest[0] if rest else ""
         return follower not in (
             {"cd"} | _CWD_AFFECTING_BUILTINS | _BUILTIN_LAUNCHER_PREFIXES

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -57,9 +58,15 @@ class GateFailure(Exception):
     """A release-gate check failed; the message is actionable."""
 
 
+_BYTECODE_PREFIX = tempfile.mkdtemp(prefix="mycelium-release-gate-pycache-")
+
+
 def default_runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    # Compilation byproducts must never land inside the candidate the gate
+    # certifies immutable: redirect all bytecode to a temp cache prefix.
+    env = dict(os.environ, PYTHONPYCACHEPREFIX=_BYTECODE_PREFIX)
     return subprocess.run(
-        command, cwd=cwd, capture_output=True, text=True, check=False
+        command, cwd=cwd, capture_output=True, text=True, check=False, env=env
     )
 
 
@@ -142,17 +149,21 @@ def check_changelog(repo: Path, version: str) -> str:
 
 
 def ladder_commands(repo: Path, skip_knowledge_map: bool) -> list[list[str]]:
+    # pytest's cache provider is disabled so .pytest_cache is never created
+    # inside the candidate; bytecode goes to the runner's temp cache prefix.
     commands = [
-        [sys.executable, "-m", "pytest", "-q", "skills/core/scripts",
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "skills/core/scripts",
          "--ignore=skills/core/scripts/knowledge_map"],
     ]
     if not skip_knowledge_map:
         commands.append(
-            [sys.executable, "-m", "pytest", "-q",
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
              "skills/core/scripts/knowledge_map"]
         )
     commands += [
-        [sys.executable, "-m", "pytest", "-q", "tools"],
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "tools"],
         ["bash", "skills/core/hooks/test_stop_hook.sh"],
         ["bash", "skills/core/hooks/test_hooks_stress.sh"],
         ["bash", "skills/core/tests/test_integration_stress.sh"],
@@ -224,10 +235,19 @@ def compare_installed(repo: Path, installed_root: Path,
             source_files.add(relative)
             installed_file = installed_root / relative
             compared += 1
-            if not installed_file.is_file():
+            if installed_file.is_symlink():
+                mismatches.append(f"symlink in install: {relative}")
+            elif not installed_file.is_file():
                 mismatches.append(f"missing in install: {relative}")
             elif _file_digest(source_file) != _file_digest(installed_file):
                 mismatches.append(f"hash mismatch: {relative}")
+            elif (
+                source_file.stat().st_mode & 0o111
+                != installed_file.stat().st_mode & 0o111
+            ):
+                # Same bytes with a lost executable bit still breaks every
+                # direct hook dispatch with permission denied.
+                mismatches.append(f"mode mismatch (exec bits): {relative}")
     # The reverse direction matters too: a reused install may carry packaged
     # files the candidate no longer ships, and a host smoke could discover
     # or execute that obsolete content. Only generated artifacts are exempt.
@@ -351,6 +371,12 @@ def run_gate(args: argparse.Namespace, repo: Path, runner) -> GateReport:
             "SKIPPED — pass --installed-root to prove the installed plugin "
             "matches this candidate before host smokes",
         )
+
+    # The gate certifies the candidate immutable, so prove it: after every
+    # ladder command and smoke, the tree must be exactly as clean as it
+    # started.
+    check_clean_tree(repo, runner)
+    report.record("immutability", "PASS working tree unchanged after the ladder")
 
     resolve_host_audits(args, report)
     return report

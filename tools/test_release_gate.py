@@ -179,10 +179,14 @@ def _packaged_repo(tmp_path: Path) -> tuple[Path, Path]:
     (repo / "skills" / "core" / "SKILL.md").write_text("skill\n")
     (repo / "hooks").mkdir()
     (repo / "hooks" / "hooks.json").write_text("{}\n")
+    dispatcher = repo / "hooks" / "dispatch.sh"
+    dispatcher.write_text("#!/bin/bash\n")
+    dispatcher.chmod(0o755)
     install = tmp_path / "install"
     for relative in (
         "skills/core/SKILL.md",
         "hooks/hooks.json",
+        "hooks/dispatch.sh",
         ".claude-plugin/plugin.json",
         ".claude-plugin/marketplace.json",
         ".codex-plugin/plugin.json",
@@ -190,7 +194,26 @@ def _packaged_repo(tmp_path: Path) -> tuple[Path, Path]:
         target = install / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((repo / relative).read_bytes())
+        target.chmod((repo / relative).stat().st_mode & 0o777)
     return repo, install
+
+
+def test_lost_executable_bit_in_install_fails(tmp_path: Path) -> None:
+    """PR #72 round-5 P1: same bytes but a lost exec bit means every hook
+    dispatch fails with permission denied — the gate must catch it."""
+    repo, install = _packaged_repo(tmp_path)
+    (install / "hooks" / "dispatch.sh").chmod(0o644)
+    with pytest.raises(gate.GateFailure, match="mode mismatch"):
+        gate.compare_installed(repo, install, gate.GateReport(version="0.7.0"))
+
+
+def test_symlinked_installed_file_fails(tmp_path: Path) -> None:
+    repo, install = _packaged_repo(tmp_path)
+    real = install / "hooks" / "hooks.real"
+    (install / "hooks" / "hooks.json").rename(real)
+    (install / "hooks" / "hooks.json").symlink_to(real)
+    with pytest.raises(gate.GateFailure, match="symlink in install"):
+        gate.compare_installed(repo, install, gate.GateReport(version="0.7.0"))
 
 
 def test_matching_installed_artifact_passes(tmp_path: Path) -> None:
@@ -284,6 +307,47 @@ def test_empty_audit_evidence_fails(tmp_path: Path) -> None:
             ),
             gate.GateReport(version="0.7.0"),
         )
+
+
+def test_ladder_pytest_commands_disable_the_cache_provider(
+    tmp_path: Path,
+) -> None:
+    """PR #72 round-5 P2: no ladder command may write caches into the tree."""
+    for command in gate.ladder_commands(_repo(tmp_path), skip_knowledge_map=False):
+        if "pytest" in " ".join(command):
+            assert "no:cacheprovider" in command
+
+
+def test_bytecode_prefix_is_outside_any_candidate() -> None:
+    prefix = Path(gate._BYTECODE_PREFIX)
+    assert prefix.is_dir()
+    assert Path(__file__).resolve().parent.parent not in prefix.resolve().parents
+
+
+def test_run_gate_reproves_cleanliness_after_the_ladder(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def runner(command, cwd):
+        calls.append(list(command))
+        if command[:2] == ["git", "rev-parse"]:
+            return _result(stdout="abc1234\n")
+        return _result()
+
+    args = SimpleNamespace(
+        version="0.7.0",
+        installed_root=None,
+        claude_audit_evidence=None,
+        codex_audit_evidence=None,
+        waive_host_audits="unit test",
+        skip_knowledge_map=True,
+        output=None,
+    )
+    report = gate.run_gate(args, repo, runner)
+    names = [name for name, _ in report.checks]
+    assert "immutability" in names
+    status_calls = [c for c in calls if c[:3] == ["git", "status", "--porcelain"]]
+    assert len(status_calls) == 2
 
 
 def test_ladder_never_embeds_the_interpreter_in_shell_strings(
