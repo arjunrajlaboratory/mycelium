@@ -813,6 +813,22 @@ def test_cd_dash_p_fails_on_missing_intermediate_component(
     assert len(detect_scripts(cmd, tmp_path)) == 1
 
 
+def test_cd_dash_p_fails_on_file_component_before_dotdot(tmp_path: Path) -> None:
+    """PR #72 round-4 P1: `cd -P nested/file/..` is ENOTDIR in bash; the
+    lexical `file/..` collapse must not turn it into a success at nested."""
+    nested = tmp_path / "nested"
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    _seed_plugin_pointer(nested, _seed_verified_install(tmp_path))
+    _seed_plugin_pointer(tmp_path, user_tree)
+    (nested / "file").write_text("just a file\n")
+    cmd = (
+        "cd -P nested/file/..; "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
 def test_cd_dash_p_with_existing_intermediate_component_succeeds(
     tmp_path: Path,
 ) -> None:
@@ -878,6 +894,11 @@ def test_flags_after_the_cd_operand_are_not_options(tmp_path: Path) -> None:
         # (PR #72 round-3 P1).
         "time -- cd nested",
         "time -p -- cd nested",
+        # time's operand is a pipeline, so assignment prefixes still reach
+        # the builtin (PR #72 round-4 P1).
+        "time X=1 cd nested",
+        "time -p X=1 cd nested",
+        "time -- X=1 Y=2 cd nested",
     ],
 )
 def test_unmodeled_cwd_change_fails_closed_for_accessor_trust(

@@ -286,6 +286,18 @@ def test_empty_audit_evidence_fails(tmp_path: Path) -> None:
         )
 
 
+def test_ladder_never_embeds_the_interpreter_in_shell_strings(
+    tmp_path: Path,
+) -> None:
+    """PR #72 round-4 P2: a spaced interpreter path must survive — pass it
+    as an argv element, never inside a `bash -c` string."""
+    import sys as _sys
+
+    for command in gate.ladder_commands(_repo(tmp_path), skip_knowledge_map=True):
+        if command[:2] == ["bash", "-c"]:
+            assert _sys.executable not in command[2]
+
+
 # ---------- output location ----------
 
 

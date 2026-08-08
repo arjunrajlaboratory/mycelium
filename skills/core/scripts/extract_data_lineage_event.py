@@ -694,13 +694,10 @@ def _simple_cd_status(segment: list[str], cwd: Path) -> tuple[bool | None, Path]
     if not target.is_absolute():
         target = cwd / target
     if physical:
-        # Physical resolution walks every component before `..` is applied,
-        # so a missing intermediate makes bash's `cd -P` fail; strict
-        # resolution reproduces that instead of collapsing it lexically.
-        try:
-            target = Path(os.path.realpath(target, strict=True))
-        except OSError:
+        resolved = _physical_cd_target(target)
+        if resolved is None:
             return False, cwd
+        target = resolved
     else:
         target = Path(os.path.abspath(target))
     # The hook sees the command only after the shell ran. Do not propagate a
@@ -709,6 +706,31 @@ def _simple_cd_status(segment: list[str], cwd: Path) -> tuple[bool | None, Path]
     if not target.is_dir() or not os.access(target, os.X_OK):
         return False, cwd
     return True, target
+
+
+def _physical_cd_target(target: Path) -> Path | None:
+    """Emulate bash `cd -P`: resolve each component physically, in order.
+
+    Every component is resolved (symlinks included) before a following
+    `..` is applied, so a missing intermediate or a regular file followed
+    by `..` is a cd failure — never a lexical collapse. Implemented as an
+    explicit walk because `os.path.realpath(strict=True)` only rejects the
+    non-directory-before-`..` case on newer Python versions.
+    """
+    resolved = Path(target.anchor or "/")
+    for part in target.parts[1:]:
+        if part == ".":
+            continue
+        if part == "..":
+            if not resolved.is_dir():
+                return None
+            resolved = resolved.parent
+            continue
+        try:
+            resolved = Path(os.path.realpath(resolved / part, strict=True))
+        except OSError:
+            return None
+    return resolved
 
 
 def _apply_cd(segment: list[str], cwd: Path) -> Path:
@@ -896,6 +918,9 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
                 rest = rest[1:]
             if rest[:1] == ["--"]:
                 rest = rest[1:]
+            # time's operand is a pipeline, so assignment prefixes still
+            # reach the timed builtin: `time X=1 cd nested` changes the cwd.
+            rest = _strip_assignments(rest)
         else:
             while rest and rest[0].startswith("-") and rest[0] not in {"-", "--"}:
                 flags = set(rest[0][1:])

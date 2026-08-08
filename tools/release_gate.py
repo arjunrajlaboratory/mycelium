@@ -159,12 +159,9 @@ def ladder_commands(repo: Path, skip_knowledge_map: bool) -> list[list[str]]:
         ["bash", "-c",
          "find hooks skills -type f -name '*.sh' -exec bash -n {} +"],
         [sys.executable, "-m", "compileall", "-q", "skills/core/scripts"],
-        ["bash", "-c",
-         f"{sys.executable} -m json.tool .claude-plugin/plugin.json >/dev/null"],
-        ["bash", "-c",
-         f"{sys.executable} -m json.tool .codex-plugin/plugin.json >/dev/null"],
-        ["bash", "-c",
-         f"{sys.executable} -m json.tool hooks/hooks.json >/dev/null"],
+        [sys.executable, "-m", "json.tool", ".claude-plugin/plugin.json"],
+        [sys.executable, "-m", "json.tool", ".codex-plugin/plugin.json"],
+        [sys.executable, "-m", "json.tool", "hooks/hooks.json"],
         ["git", "diff", "--check"],
     ]
     return commands
