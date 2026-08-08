@@ -162,11 +162,18 @@ a later patch invents zero and mislabels failed analysis as successful.
 **Invariant:** Capture the automatic hook stdin from the current host before
 defining its wire contract. Preserve unknown fields as unknown. An exit event
 visible later in a CLI stream cannot be attributed by a hook that ran earlier.
+Unknownness must survive aggregation: a consolidated summary sums only known
+values, reports null (or omits the total) when nothing was measured, and
+publishes explicit coverage counts instead of letting missing telemetry read
+as a measured zero or an implicit success.
 
 **Regression evidence:** Retain a sanitized canonical payload fixture. Current
 Codex Bash PostToolUse supplies an empty `tool_response`; require lineage to
 record the execution with `bash_exit` and `bash_wall_s` as null, while retaining
-decoders for richer structured payloads a host may provide later.
+decoders for richer structured payloads a host may provide later. Consolidate
+events whose telemetry is entirely null and require a null total with zero
+coverage; consolidate mixed events and require both the partial sum and its
+coverage counts.
 
 ## 12. Lock recovery waits longer than acquisition
 
@@ -284,11 +291,57 @@ creating a Stop loop that the lifecycle itself continually refreshes.
 
 **Invariant:** Classify the executed script path, not its basename or argument
 text. Mycelium-managed utility paths are silent; same-named user analysis
-scripts elsewhere remain eligible.
+scripts elsewhere remain eligible. A hand-enumerated exclusion list goes stale
+the moment a helper is added (issue #69 shipped with `recall_lessons.py`,
+`detect_recurrence.py`, `upsert_table_row.py`, `crystallize_findings.py`, and
+`extract_data_lineage.py` missing), so the registry must be derived from the
+shipped scripts tree — or a regression test must walk that tree and fail when
+a bundled helper is not excluded. The inverse trap is treating path shape as
+identity: a registry suffix match must begin at a path-component boundary and
+its candidate root must prove it is a real Mycelium plugin tree (the running
+extractor's own install, a root with a Mycelium plugin manifest, or the
+documented `.mycelium/plugin-root` accessor), or a user project that mimics
+the conventional layout silently loses lineage and bookkeeping.
 
 **Regression evidence:** Exercise every managed helper through both source and
 versioned installed paths, plus user-script near neighbors. Require no reminder
-or lineage event for the former and normal detection for the latter.
+or lineage event for the former and normal detection for the latter. Include a
+sweep that enumerates every `.py` shipped under the managed scripts directory
+so a newly added helper cannot reintroduce the gap. Require detection for a
+colliding filename under an unverified `skills/core/scripts/` layout, for a
+`myskills/`-style component-boundary neighbor, and for a non-Mycelium
+manifest; require exclusion for verified installs and both documented
+plugin-root accessor spellings. The accessor exception trusts only commands
+that actually read this project's pointer: substitutions that merely mention
+it (`basename`, `echo`, `dirname`) or read a nested repository's pointer
+must remain untrusted. The accessor must also anchor the entire shell word
+and be followed by a registry-normalizable helper path: a user component
+before a genuine pointer read (`foo/$(cat .mycelium/plugin-root)/…`)
+resolves under the cwd, and traversal after the accessor escapes the managed
+tree, so both stay eligible analysis. Finally, the pointer itself is
+repository-controlled state: the accessor is trusted only after
+dereferencing `.mycelium/plugin-root` under the command's effective working
+directory (non-symlink regular file, absolute-path value) and verifying
+that its target is a real Mycelium plugin root — a nested repo's pointer
+aimed at an unverified user tree stays eligible analysis. Verification must
+emulate the exact substitution semantics of the matched reader with no
+normalization: `cat` strips only trailing newlines and fails closed on
+embedded ones, `sed -n '1p'` yields the exact first line, so a
+trailing-space pointer verifies the space-suffixed directory the shell
+actually executes from, never a stripped variant of it — read pointer bytes
+without universal-newline decoding, since a CRLF pointer leaves a CR in the
+executed path. Quoting context gates expansion: a word-initial `$(` is
+expanded when the authored word is bare, fully double-quoted, or quoted
+only around the accessor component; single-quoted or escaped spellings are
+literal paths. The robust structure is one trust gate: resolve the accessor
+to the exact executed path, then let the same managed-path verification
+that judges directly written paths make the only suppression decision — and
+that gate must judge the canonical filesystem path of the uncollapsed word,
+because lexical `abspath` folds `symlink/..` differently than the shell
+resolves it. Bash also removes NUL bytes from substitution output, so the
+emulation must strip them too — and no decoding artifact may raise out of
+the detector, because an unhandled exception silently kills the hook and
+costs both the reminder and the lineage event.
 
 ## 19. Machine finalization overwrites authored semantics
 
@@ -514,3 +567,58 @@ heading, and a section whose only body line is removed by lifecycle cleanup as
 negatives; require one ordered, nonempty canonical set in the accepted durable
 handoff. Invoke finalization directly on the cleanup-emptied case and require
 the private source and shared destination to remain byte-identical.
+
+## 32. A retry refreshes one representation of a finalized fact but not its siblings
+
+**Failure:** A Stop retry recomputes duration and changed files, rewrites the
+session frontmatter and registry row with the new values, but skips the
+existing human-readable `Session ended` footer and `Files Modified` list to
+avoid duplicating them. The finalized log then disagrees with itself: three
+representations of the same facts, two current and one stale.
+
+**Invariant:** When one artifact stores the same fact in multiple
+representations, every finalization attempt derives all of them from the same
+canonical arguments in the same atomic replacement. Skipping a representation
+because it already exists is only sound when its values are proven equal;
+otherwise replace the machine-owned block wholesale. Deduplication is achieved
+by removing prior machine-owned blocks, not by refusing to write current ones.
+
+**Regression evidence:** Finalize a log once, retry with different duration,
+file count, and file list, and require frontmatter, footer, `Modified`
+summary, file list, and registry row to agree exactly with the retry values,
+with exactly one footer. Also require duplicated legacy footers to collapse
+and body content appended between attempts to survive. Machine-block removal
+must match only the exact emitted syntax (HH:MM time, numeric duration and
+file count) outside Markdown code fences: an authored heading that merely
+resembles the footer, and a machine-shaped example inside a fence, must
+survive finalization byte-identical.
+
+## 33. An emulated interpreter diverges from the real one
+
+**Failure:** A hook decides trust or ownership by predicting how another
+interpreter will treat text — bash expanding a command substitution, or
+Markdown structuring a session log — but the emulation is approximate. Each
+approximation is a defect: stripping whitespace the shell preserves, keeping
+NUL bytes bash removes, universal-newline decoding that hides a CR, honoring
+a `$(` that quoting disabled, trusting an unquoted substitution that field
+splitting will rewrite, toggling fences on any delimiter line, or consuming
+authored lines because they match a generated shape. PR #70 accumulated
+seven review rounds of exactly these gaps.
+
+**Invariant:** When a decision depends on another interpreter's semantics,
+either reproduce those semantics byte-exactly (quoting context, expansion
+rules, byte filtering, delimiter matching, generator-recorded counts) or
+refuse conservatively. Every residual divergence must fail toward detection
+and preservation — a wrong guess may cost a redundant reminder or a stale
+example, never a suppressed lineage event, a silently killed hook, or
+deleted authored content. Prefer resolving text to the exact value the real
+interpreter would produce and passing it through the one shared trust gate,
+over predicting the interpreter inside the gate.
+
+**Regression evidence:** For each emulated rule, pin both directions with a
+matched pair: the divergent input stays detected/preserved, and the
+canonical input still verifies/collapses. Cover quoting variants, trailing
+and embedded whitespace, CRLF and NUL bytes, field-splitting inputs,
+mismatched fence delimiters, and authored content adjacent to generated
+blocks, and require unparseable words to be skipped without raising out of
+the hook.

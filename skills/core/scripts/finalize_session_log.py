@@ -17,7 +17,94 @@ import sys
 import tempfile
 
 
-_END_FOOTER_RE = re.compile(r"^### .* — Session ended \(", re.MULTILINE)
+# Only the machine-emitted footer syntax is machine-owned: an HH:MM time and
+# numeric duration/file-count exactly as this module writes them. Authored
+# headings that merely resemble the footer, and examples inside Markdown code
+# fences, belong to the agent and must survive finalization untouched.
+_END_FOOTER_HEADING_RE = re.compile(
+    r"^### \d{2}:\d{2} — Session ended \(\d+m, (?P<files>\d+) files\)$"
+)
+_FENCE_RE = re.compile(r"^ {0,3}(?P<marker>```+|~~~+)(?P<info>.*)$")
+
+
+def _fence_open_marker(line: str) -> str | None:
+    """Return the opening fence marker of a line, or None (CommonMark 4.5).
+
+    A backtick fence's info string may not contain backticks; such a line is
+    ordinary content, not a fence.
+    """
+    match = _FENCE_RE.match(line)
+    if match is None:
+        return None
+    marker = match.group("marker")
+    if marker[0] == "`" and "`" in match.group("info"):
+        return None
+    return marker
+
+
+def _fence_closes(line: str, open_marker: str) -> bool:
+    """True when a line closes the active fence: same character, at least the
+    opening length, and nothing but whitespace after (CommonMark 4.5)."""
+    match = _FENCE_RE.match(line)
+    if match is None:
+        return False
+    marker = match.group("marker")
+    return (
+        marker[0] == open_marker[0]
+        and len(marker) >= len(open_marker)
+        and not match.group("info").strip()
+    )
+
+
+def _strip_machine_footers(body: str) -> str:
+    """Remove every machine-emitted end-footer block outside code fences."""
+    lines = body.split("\n")
+    kept: list[str] = []
+    open_marker: str | None = None
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if open_marker is not None:
+            if _fence_closes(line, open_marker):
+                open_marker = None
+            kept.append(line)
+            index += 1
+            continue
+        candidate = _fence_open_marker(line)
+        if candidate is not None:
+            open_marker = candidate
+            kept.append(line)
+            index += 1
+            continue
+        heading = _END_FOOTER_HEADING_RE.match(line)
+        if heading is None:
+            kept.append(line)
+            index += 1
+            continue
+        # Consume only what the generator emitted for this footer: the
+        # summary and file list exist only when files were changed, and the
+        # list holds exactly the recorded number of entries. Anything beyond
+        # that shape is authored content and stays.
+        generated_files = int(heading.group("files"))
+        index += 1
+        if generated_files > 0:
+            if index < len(lines) and lines[index].startswith("- Modified:"):
+                index += 1
+            if (
+                index + 1 < len(lines)
+                and lines[index] == ""
+                and lines[index + 1] == "### Files Modified"
+            ):
+                index += 2
+                consumed = 0
+                while (
+                    index < len(lines)
+                    and consumed < generated_files
+                    and lines[index].startswith("- `")
+                ):
+                    index += 1
+                    consumed += 1
+    return "\n".join(kept)
 
 
 def _replace_frontmatter_field(frontmatter: str, field: str, value: str) -> str:
@@ -57,11 +144,15 @@ def _completed_log(
         frontmatter, "files_changed", str(files_changed)
     )
 
-    # A retry against a legacy partially finalized log repairs its frontmatter
-    # without creating a second footer. New finalizations publish both pieces
-    # together and therefore never expose that partial state.
-    if _END_FOOTER_RE.search(body):
-        return frontmatter + body
+    # A Stop retry recomputes duration and changed files, so an end footer
+    # published by an earlier attempt must be rebuilt from the same canonical
+    # values now going into the frontmatter and registry — never left stale.
+    # Removing every existing block also collapses duplicated legacy footers.
+    body = _strip_machine_footers(body)
+    if body.strip():
+        body = body.rstrip("\n") + "\n"
+    else:
+        body = ""
 
     footer = (
         f"\n### {end_time} — Session ended "

@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Stop retries can no longer publish self-contradicting session logs.** A
+  retry that recomputes duration or changed files now rebuilds the
+  human-readable `Session ended` footer and `Files Modified` list from the
+  same canonical values written to the frontmatter and `LOG_REGISTRY.md`,
+  and collapses duplicated legacy footers, so the three representations of a
+  finalized session always agree ([#69]).
+- **Bundled Mycelium helpers no longer self-trigger bookkeeping or pollute
+  scientific lineage.** The managed-utility exclusion registry now covers
+  every script shipped under `skills/core/scripts/` (including
+  `recall_lessons.py`, `detect_recurrence.py`, `upsert_table_row.py`,
+  `crystallize_findings.py`, `extract_data_lineage.py`, and the
+  knowledge-map tools), is derived from the shipped tree so future helpers
+  are excluded automatically, and matches the resolved absolute script path
+  so source, installed, and relative invocations are all silent while
+  same-named user scripts elsewhere remain eligible analysis. A registry
+  match must also start at a path-component boundary and verify its candidate
+  root as a real Mycelium plugin tree — the extractor's own install, a root
+  carrying a Mycelium plugin manifest, or the documented
+  `.mycelium/plugin-root` accessor — so a user project that merely mimics the
+  `skills/core/scripts/` layout keeps full lineage and bookkeeping ([#69]).
+- **Missing runtime telemetry is reported as unknown, not zero.** When a host
+  supplies no per-action wall time (the current Codex Bash PostToolUse
+  payload), the lineage manifest now reports `total_wall_seconds: null`
+  together with new `timed_action_count`, `total_action_count`,
+  `known_exit_count`, and `failed_action_count` coverage fields; unknown
+  exit codes count as neither success nor failure ([#69]).
+
+- **Managed-utility suppression and log finalization emulate exact
+  interpreter semantics.** Review hardening on the issue-69 branch: the
+  plugin-root accessor is honored only in double-quoted, word-anchored
+  spellings whose pointer dereference (safe read, bash-exact expansion
+  including NUL removal and CR preservation) resolves — via filesystem
+  canonicalization — to a manifest-verified plugin root, with every
+  divergent form staying in normal detection; and session-log footer
+  rebuilding matches only the exact machine-emitted syntax outside
+  CommonMark-tracked code fences, consuming no more lines than the
+  generator recorded, so authored content survives Stop retries
+  byte-identical ([#70]).
+
+[#69]: https://github.com/arjunrajlaboratory/mycelium/issues/69
+[#70]: https://github.com/arjunrajlaboratory/mycelium/pull/70
+
 ## [0.6.0] - 2026-08-02
 
 ### Added

@@ -1864,6 +1864,13 @@ def test_codex_post_action_retains_analysis_after_tooling_prefix(tmp_path, prefi
 
 def test_codex_post_tool_use_ignores_mycelium_structure_validator(tmp_path):
     repo = _repo(tmp_path)
+    plugin_root = tmp_path / "plugin"
+    manifest = plugin_root / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "mycelium", "version": "9.9.9"}\n')
+    state = repo / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_text(f"{plugin_root}\n")
     command = (
         "python3 \"$(sed -n '1p' .mycelium/plugin-root)/skills/core/"
         "scripts/validate_structure.py\" --target-dir ."
@@ -1894,13 +1901,25 @@ def test_codex_post_tool_use_ignores_mycelium_structure_validator(tmp_path):
         "finalize_session_log.py",
         "session_file_changes.py",
         "validate_review_report.py",
+        # Helpers omitted from the registry before issue #69: they opened a
+        # post-action cycle and appeared in scientific lineage manifests.
+        "recall_lessons.py",
+        "detect_recurrence.py",
+        "upsert_table_row.py",
+        "crystallize_findings.py",
+        "extract_data_lineage.py",
+        "knowledge_map/cli.py",
     ],
 )
 def test_codex_post_tool_use_ignores_mycelium_control_plane_utilities(
     tmp_path, utility
 ):
     repo = _repo(tmp_path)
-    utility_path = repo / "plugin" / "skills" / "core" / "scripts" / utility
+    plugin_root = repo / "plugin"
+    manifest = plugin_root / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "mycelium", "version": "9.9.9"}\n')
+    utility_path = plugin_root / "skills" / "core" / "scripts" / utility
     utility_path.parent.mkdir(parents=True)
     utility_path.write_text("print('managed')\n")
 
@@ -1930,6 +1949,36 @@ def test_codex_post_tool_use_ignores_mycelium_control_plane_utilities(
     )
     assert lineage.returncode == 0, lineage.stderr
     assert not (repo / ".mycelium" / "mycelium-data-events.tmp").exists()
+
+
+def test_conventional_layout_user_script_is_still_analysis(tmp_path):
+    """Codex P2 on PR #70: a path shape alone must not suppress bookkeeping.
+
+    A user project may contain `skills/core/scripts/<colliding-name>.py`
+    without being a Mycelium plugin tree; only a verified plugin root (or the
+    documented plugin-root accessor) silences lineage and post-action work.
+    """
+    repo = _repo(tmp_path)
+    script = repo / "skills" / "core" / "scripts" / "crystallize_findings.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "python3 skills/core/scripts/crystallize_findings.py"
+            },
+            "tool_response": {"exit_code": 0},
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "MYCELIUM POST-ACTION PROTOCOL" in result.stdout
+    assert (repo / ".mycelium" / "mycelium-reminded.tmp").is_file()
 
 
 def test_user_script_named_generate_index_is_still_analysis(tmp_path):

@@ -438,6 +438,446 @@ def test_detect_scripts_empty_for_non_analysis(tmp_path: Path) -> None:
     assert detect_scripts("ls -la", tmp_path) == []
 
 
+# ---------- managed-utility exclusion (control-plane scripts) ----------
+
+_SHIPPED_SCRIPTS_DIR = Path(__file__).parent
+
+
+def _shipped_helper_relpaths() -> list[str]:
+    return sorted(
+        path.relative_to(_SHIPPED_SCRIPTS_DIR).as_posix()
+        for path in _SHIPPED_SCRIPTS_DIR.rglob("*.py")
+        if "__pycache__" not in path.parts
+    )
+
+
+_SOURCE_PLUGIN_ROOT = _SHIPPED_SCRIPTS_DIR.parent.parent.parent
+
+
+def test_every_bundled_core_helper_is_excluded_from_detection(tmp_path: Path) -> None:
+    """No bundled helper may create lineage or post-action work — issue #69."""
+    install = tmp_path / "cache" / "mycelium" / "mycelium" / "9.9.9"
+    _write_mycelium_manifest(install)
+    missing: list[str] = []
+    for rel in _shipped_helper_relpaths():
+        installed = f"{install}/skills/core/scripts/{rel}"
+        source = f"{_SOURCE_PLUGIN_ROOT}/skills/core/scripts/{rel}"
+        relative = f"skills/core/scripts/{rel}"
+        for form, cwd in ((installed, tmp_path), (source, tmp_path), (relative, _SOURCE_PLUGIN_ROOT)):
+            if detect_scripts(f'python3 "{form}" --help', cwd):
+                missing.append(form)
+    assert missing == []
+
+
+@pytest.mark.parametrize(
+    "helper",
+    [
+        "recall_lessons.py",
+        "detect_recurrence.py",
+        "upsert_table_row.py",
+        "crystallize_findings.py",
+        "extract_data_lineage.py",
+        "extract_data_lineage_event.py",
+        "knowledge_map/cli.py",
+    ],
+)
+def test_issue_69_omitted_helpers_are_excluded(tmp_path: Path, helper: str) -> None:
+    install = tmp_path / "cache" / "mycelium" / "mycelium" / "0.6.0"
+    _write_mycelium_manifest(install)
+    cmd = f"python3 {install}/skills/core/scripts/{helper} --living-dir .living"
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_relative_managed_helper_after_cd_is_excluded(tmp_path: Path) -> None:
+    # A source-checkout-shaped repo: conventional layout plus the manifest
+    # that proves the root really is Mycelium.
+    _write_mycelium_manifest(tmp_path)
+    (tmp_path / "skills" / "core" / "scripts").mkdir(parents=True)
+    cmd = "cd skills/core && python3 scripts/recall_lessons.py --id L-6"
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "user_script",
+    [
+        "analysis/recall_lessons.py",
+        "recall_lessons.py",
+        "analysis/crystallize_findings.py",
+        "my/skills/detect_recurrence.py",
+        # Conventional layout AND a colliding filename, but no Mycelium plugin
+        # manifest proves the root — must stay eligible analysis (Codex P2 on
+        # PR #70): a path shape alone is not trusted identity.
+        "skills/core/scripts/crystallize_findings.py",
+        "skills/core/scripts/recall_lessons.py",
+        "skills/core/scripts/knowledge_map/cli.py",
+    ],
+)
+def test_same_named_user_script_elsewhere_is_still_analysis(
+    tmp_path: Path, user_script: str
+) -> None:
+    out = detect_scripts(f"python3 {user_script}", tmp_path)
+    assert out == [(tmp_path / user_script, None)]
+
+
+def _write_mycelium_manifest(root: Path) -> None:
+    manifest = root / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text('{"name": "mycelium", "version": "9.9.9"}\n')
+
+
+def test_suffix_match_requires_a_path_component_boundary(tmp_path: Path) -> None:
+    # "myskills/..." must not satisfy a registry suffix that starts at the
+    # "skills/" component, even when the root an unguarded match would derive
+    # ("<tmp>/my") carries a verifying manifest.
+    _write_mycelium_manifest(tmp_path / "my")
+    script = "myskills/core/scripts/recall_lessons.py"
+    out = detect_scripts(f"python3 {script}", tmp_path)
+    assert out == [(tmp_path / script, None)]
+
+
+def test_verified_install_root_is_excluded(tmp_path: Path) -> None:
+    install = tmp_path / "cache" / "mycelium" / "mycelium" / "9.9.9"
+    _write_mycelium_manifest(install)
+    cmd = f'python3 "{install}/skills/core/scripts/recall_lessons.py" --id L-6'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_codex_manifest_also_verifies_the_root(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest = install / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "mycelium", "version": "9.9.9"}\n')
+    cmd = f'python3 "{install}/skills/core/scripts/recall_lessons.py"'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def _seed_plugin_pointer(repo: Path, target: Path | str) -> None:
+    state = repo / ".mycelium"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "plugin-root").write_text(f"{target}\n")
+
+
+def _seed_verified_install(tmp_path: Path) -> Path:
+    install = tmp_path / "verified-install"
+    _write_mycelium_manifest(install)
+    return install
+
+
+@pytest.mark.parametrize(
+    "accessor",
+    [
+        "$(sed -n '1p' .mycelium/plugin-root)",
+        "$(cat .mycelium/plugin-root)",
+    ],
+)
+def test_documented_plugin_root_accessor_is_trusted(
+    tmp_path: Path, accessor: str
+) -> None:
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    cmd = f'python3 "{accessor}/skills/core/scripts/recall_lessons.py" --id L-6'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_accessor_with_unverified_pointer_target_is_not_trusted(
+    tmp_path: Path,
+) -> None:
+    """Codex P2, round 4 on PR #70: the pointer is repository-controlled.
+
+    A pointer aimed at a user tree (no Mycelium manifest) must not let the
+    accessor suppress lineage for a same-named script under that tree.
+    """
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    _seed_plugin_pointer(tmp_path, user_tree)
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_accessor_without_pointer_file_is_not_trusted(tmp_path: Path) -> None:
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_accessor_resolves_pointer_under_the_effective_cwd(tmp_path: Path) -> None:
+    # `cd nested && …` must dereference nested/.mycelium/plugin-root, and an
+    # unverified nested pointer must not be trusted.
+    nested = tmp_path / "nested"
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    _seed_plugin_pointer(nested, user_tree)
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    cmd = (
+        "cd nested && "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+    _seed_plugin_pointer(nested, _seed_verified_install(tmp_path))
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "accessor",
+    ["$(cat .mycelium/plugin-root)", "$(sed -n '1p' .mycelium/plugin-root)"],
+)
+def test_pointer_with_trailing_space_verifies_the_executed_path(
+    tmp_path: Path, accessor: str
+) -> None:
+    """Codex P2, round 5 on PR #70: verify the exact expanded value.
+
+    The shell preserves a trailing space in the pointer line, so execution
+    happens under the space-suffixed directory — verifying the stripped path
+    would suppress lineage for an unverified tree.
+    """
+    install = _seed_verified_install(tmp_path)
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_text(f"{install} \n")
+    cmd = f'python3 "{accessor}/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_genuinely_space_suffixed_verified_root_is_trusted(tmp_path: Path) -> None:
+    install = tmp_path / "install "
+    _write_mycelium_manifest(install)
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_text(f"{install}\n")
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_multiline_pointer_diverges_between_cat_and_sed(tmp_path: Path) -> None:
+    install = _seed_verified_install(tmp_path)
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_text(f"{install}\nsecond line\n")
+    # `$(cat …)` preserves the embedded newline, so the executed word is not
+    # the verified root — must stay eligible analysis.
+    cat_cmd = (
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert len(detect_scripts(cat_cmd, tmp_path)) == 1
+    # `$(sed -n '1p' …)` reads exactly the first line — the verified root.
+    sed_cmd = (
+        "python3 \"$(sed -n '1p' .mycelium/plugin-root)"
+        '/skills/core/scripts/recall_lessons.py"'
+    )
+    assert detect_scripts(sed_cmd, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "quoted_word",
+    [
+        # Single quotes disable expansion: the shell executes the LITERAL
+        # path "$(cat .mycelium/plugin-root)/…" (Codex P2, round 6 on PR #70).
+        "'$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py'",
+        "'$(cat .mycelium/plugin-root)'/skills/core/scripts/recall_lessons.py",
+    ],
+)
+def test_expansion_disabled_accessor_word_is_not_trusted(
+    tmp_path: Path, quoted_word: str
+) -> None:
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    out = detect_scripts(f"python3 {quoted_word}", tmp_path)
+    assert len(out) == 1
+
+
+def test_accessor_component_quoting_is_expansion_enabled(tmp_path: Path) -> None:
+    """Codex P2, round 7: `"$(cat …)"/rest` expands even though only the
+    accessor component is quoted — it must be treated like the full form."""
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    cmd = (
+        'python3 "$(cat .mycelium/plugin-root)"'
+        "/skills/core/scripts/recall_lessons.py"
+    )
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "accessor",
+    ["$(cat .mycelium/plugin-root)", "$(sed -n '1p' .mycelium/plugin-root)"],
+)
+def test_crlf_pointer_preserves_cr_in_executed_path(
+    tmp_path: Path, accessor: str
+) -> None:
+    """Codex P2, round 7: the shell keeps the \\r of a CRLF pointer; the
+    verified path must match the executed CR-suffixed one, not a stripped one."""
+    install = _seed_verified_install(tmp_path)
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_bytes(f"{install}\r\n".encode())
+    cmd = f'python3 "{accessor}/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_nul_byte_pointer_is_stripped_like_bash_and_stays_detected(
+    tmp_path: Path,
+) -> None:
+    """Codex P2, round 8: bash removes NUL bytes from substitution output,
+    so "/tmp/user\\0\\n" executes under /tmp/user — an unverified tree. The
+    decoder must neither keep the NUL (crashing realpath and silently
+    killing the hook) nor suppress the event."""
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_bytes(f"{user_tree}\x00\n".encode())
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_nul_byte_pointer_to_verified_root_is_excluded(tmp_path: Path) -> None:
+    install = _seed_verified_install(tmp_path)
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_bytes(f"{install}\x00\n".encode())
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_symlink_dotdot_traversal_is_resolved_before_the_trust_gate(
+    tmp_path: Path,
+) -> None:
+    """Codex P2, round 7: `link/../x` resolves through the symlink target on
+    the filesystem, not lexically — the gate must judge the real path."""
+    install = _seed_verified_install(tmp_path)
+    scripts = install / "skills" / "core" / "scripts"
+    scripts.mkdir(parents=True)
+    outside_deep = tmp_path / "outside" / "deep"
+    outside_deep.mkdir(parents=True)
+    (scripts / "link").symlink_to(outside_deep)
+    word = f"{scripts}/link/../recall_lessons.py"
+    assert len(detect_scripts(f'python3 "{word}"', tmp_path)) == 1
+
+
+def test_symlinked_alias_of_verified_root_is_still_excluded(tmp_path: Path) -> None:
+    install = _seed_verified_install(tmp_path)
+    alias = tmp_path / "alias"
+    alias.symlink_to(install)
+    cmd = f'python3 "{alias}/skills/core/scripts/recall_lessons.py"'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_bare_accessor_is_never_attributed_or_suppressed(tmp_path: Path) -> None:
+    """Codex P2, round 11 on PR #70: an unquoted substitution field-splits,
+    so its executed argv is statically unknowable. It must be rejected
+    conservatively — no suppression, and no guessed attribution either —
+    even when the pointer names a verified root containing a space."""
+    install = tmp_path / "analysis.py plugin"
+    _write_mycelium_manifest(install)
+    _seed_plugin_pointer(tmp_path, install)
+    bare = (
+        "python3 $(cat .mycelium/plugin-root)"
+        "/skills/core/scripts/recall_lessons.py"
+    )
+    assert detect_scripts(bare, tmp_path) == []
+
+
+def test_backslash_escaped_accessor_is_never_suppressed_or_fabricated(
+    tmp_path: Path,
+) -> None:
+    # Unquoted "\$(" is a bash syntax error mid-word — the command can never
+    # execute, so recording nothing (rather than trusting anything) is right.
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    word = "\\$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"
+    assert detect_scripts(f"python3 {word}", tmp_path) == []
+
+
+def test_pointer_with_only_trailing_newlines_is_trusted(tmp_path: Path) -> None:
+    install = _seed_verified_install(tmp_path)
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_text(f"{install}\n\n\n")
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_accessor_with_relative_pointer_target_is_not_trusted(
+    tmp_path: Path,
+) -> None:
+    install = _seed_verified_install(tmp_path)
+    _seed_plugin_pointer(tmp_path, install.relative_to(tmp_path))
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_accessor_with_symlinked_pointer_file_is_not_trusted(
+    tmp_path: Path,
+) -> None:
+    install = _seed_verified_install(tmp_path)
+    real = tmp_path / "elsewhere.txt"
+    real.write_text(f"{install}\n")
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").symlink_to(real)
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+@pytest.mark.parametrize(
+    "substitution",
+    [
+        "$(cat some/other/pointer)",
+        # Mentions the pointer file without reading it — `basename` expands to
+        # "plugin-root", a plain user directory (Codex P2, round 2 on PR #70).
+        "$(basename .mycelium/plugin-root)",
+        "$(echo .mycelium/plugin-root)",
+        "$(dirname .mycelium/plugin-root)",
+        # Reads a different repository's pointer, not this project's.
+        "$(cat other/.mycelium/plugin-root)",
+        "$(sed -n '1p' nested/.mycelium/plugin-root)",
+    ],
+)
+def test_non_reader_command_substitution_prefix_is_not_trusted(
+    tmp_path: Path, substitution: str
+) -> None:
+    # Even with a valid pointer to a verified install, non-reader forms and
+    # foreign pointers stay untrusted.
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    cmd = f'python3 "{substitution}/skills/core/scripts/recall_lessons.py"'
+    out = detect_scripts(cmd, tmp_path)
+    assert len(out) == 1
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        # User-controlled components before a real pointer read resolve under
+        # the cwd, not the managed install (Codex P2, round 3 on PR #70).
+        'foo/$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py',
+        './$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py',
+        "sub/$(sed -n '1p' .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py",
+        # Traversal after the accessor escapes the managed tree.
+        '$(cat .mycelium/plugin-root)/skills/core/scripts/../../../evil_analysis.py',
+    ],
+)
+def test_accessor_not_anchoring_the_word_is_not_trusted(
+    tmp_path: Path, word: str
+) -> None:
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    out = detect_scripts(f'python3 "{word}"', tmp_path)
+    assert len(out) == 1
+
+
+def test_accessor_with_normalizable_inner_dot_components_is_trusted(
+    tmp_path: Path,
+) -> None:
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    word = "$(cat .mycelium/plugin-root)/skills/core/./scripts/recall_lessons.py"
+    assert detect_scripts(f'python3 "{word}"', tmp_path) == []
+
+
+def test_non_mycelium_manifest_does_not_verify_the_root(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest = install / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "other-plugin"}\n')
+    script = install / "skills" / "core" / "scripts" / "recall_lessons.py"
+    out = detect_scripts(f'python3 "{script}"', tmp_path)
+    assert out == [(script, None)]
+
+
 # ---------- write_events (atomic append) ----------
 
 

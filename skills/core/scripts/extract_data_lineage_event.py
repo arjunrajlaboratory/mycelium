@@ -185,15 +185,240 @@ IGNORED_PYTHON_MODULES = {
     "venv",
     "zipfile",
 }
-IGNORED_SCRIPT_SUFFIXES = {
-    "skills/core/scripts/finalize_handoff.py",
-    "skills/core/scripts/finalize_session_log.py",
-    "skills/core/scripts/generate_index.py",
-    "skills/core/scripts/session_file_changes.py",
-    "skills/core/scripts/upsert_registry_row.py",
-    "skills/core/scripts/validate_review_report.py",
-    "skills/core/scripts/validate_structure.py",
-}
+# Mycelium control-plane helpers must never be classified as analysis: they
+# would contaminate scientific lineage and re-open the post-action cycle that
+# the lifecycle itself asked the agent to complete (issue #69). The registry
+# is the union of a static inventory (kept complete by a regression test that
+# walks the shipped tree) and an import-time scan of this module's own
+# directory, so a future helper is excluded even if the inventory lags.
+_MANAGED_SCRIPTS_DIR_SUFFIX = "skills/core/scripts/"
+_STATIC_MANAGED_SCRIPT_RELPATHS = frozenset(
+    {
+        "crystallize_findings.py",
+        "detect_recurrence.py",
+        "extract_data_lineage.py",
+        "extract_data_lineage_event.py",
+        "finalize_handoff.py",
+        "finalize_session_log.py",
+        "generate_index.py",
+        "init_knowledge.py",
+        "init_repo.py",
+        "install_convention.py",
+        "migrate_existing_repos.py",
+        "mycelium_locks.py",
+        "recall_lessons.py",
+        "register_value.py",
+        "render_report_values_tex.py",
+        "session_file_changes.py",
+        "upsert_registry_row.py",
+        "upsert_table_row.py",
+        "validate_review_report.py",
+        "validate_structure.py",
+        "knowledge_map/__main__.py",
+        "knowledge_map/build_graph.py",
+        "knowledge_map/build_vault.py",
+        "knowledge_map/cli.py",
+        "knowledge_map/concept_labeler.py",
+        "knowledge_map/concept_registry.py",
+        "knowledge_map/extract_entries.py",
+        "knowledge_map/extract_logs.py",
+        "knowledge_map/graph_model.py",
+        "knowledge_map/link_entries.py",
+        "knowledge_map/link_logs.py",
+        "knowledge_map/propose_concepts.py",
+        "knowledge_map/propose_model.py",
+        "knowledge_map/render_views.py",
+    }
+)
+
+
+def _shipped_managed_script_relpaths() -> frozenset[str]:
+    """Every .py file shipped beside this module, as scripts-dir relpaths."""
+    scripts_dir = Path(__file__).resolve().parent
+    found: set[str] = set()
+    try:
+        for path in scripts_dir.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            found.add(path.relative_to(scripts_dir).as_posix())
+    except OSError:
+        pass
+    return frozenset(found)
+
+
+IGNORED_SCRIPT_SUFFIXES = frozenset(
+    _MANAGED_SCRIPTS_DIR_SUFFIX + relpath
+    for relpath in _STATIC_MANAGED_SCRIPT_RELPATHS | _shipped_managed_script_relpaths()
+)
+
+
+# Path shape alone is not trusted identity: a user project may legitimately
+# contain `skills/core/scripts/<colliding-name>.py`. A registry suffix match
+# only suppresses bookkeeping when the derived candidate root proves it is a
+# real Mycelium plugin tree — the root this extractor itself ships in, or a
+# root carrying a Mycelium plugin manifest (versioned installs and source
+# checkouts both ship these manifests).
+_EXECUTING_PLUGIN_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_PLUGIN_MANIFEST_RELPATHS = (
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+)
+_PLUGIN_MANIFEST_SIZE_LIMIT_BYTES = 64 * 1024
+# Project guidance instructs agents to reach bundled helpers through the
+# Mycelium-written pointer file, e.g. "$(sed -n '1p' .mycelium/plugin-root)" or
+# "$(cat .mycelium/plugin-root)". The substitution cannot be resolved
+# statically, but a command that actually READS this project's pointer is by
+# construction invoking the managed install. Only the documented reader forms
+# with the exact pointer argument are trusted: a substitution that merely
+# mentions the pointer path ("$(basename .mycelium/plugin-root)" expands to
+# the plain directory name "plugin-root") proves nothing. The accessor must
+# also anchor the ENTIRE shell word: with any preceding component
+# ("foo/$(cat .mycelium/plugin-root)/…") the expansion resolves under the
+# cwd as a user-controlled relative path, not under the managed install.
+# Finally, the pointer itself is repository-controlled state, so the accessor
+# is trusted only after dereferencing `<effective cwd>/.mycelium/plugin-root`
+# and verifying that its target is a real Mycelium plugin root.
+_PLUGIN_ROOT_ACCESSOR_WORD_RE = re.compile(
+    r"^(?P<accessor>\$\((?P<reader>cat|sed[ \t]+-n[ \t]+['\"]?1p['\"]?)"
+    r"[ \t]+\.mycelium/plugin-root\))/(?P<rel>.+)$"
+)
+_PLUGIN_ROOT_POINTER_SIZE_LIMIT_BYTES = 4096
+
+
+def _pointer_expansion_value(effective_cwd: Path, reader: str) -> str | None:
+    """Return the exact value a pointer-read substitution would produce.
+
+    The pointer must be a non-symlink regular file inside a non-symlink
+    `.mycelium` directory. Expansion is emulated exactly — no normalization,
+    because the shell performs none: `cat` yields the whole content minus
+    trailing newlines (embedded newlines mean the executed word is not a
+    plain root, so fail closed), while `sed -n '1p'` yields exactly the
+    first line, trailing spaces included. Only a nonblank absolute-path
+    value is returned; anything else yields None.
+    """
+    state_dir = effective_cwd / ".mycelium"
+    pointer = state_dir / "plugin-root"
+    try:
+        if state_dir.is_symlink() or not state_dir.is_dir():
+            return None
+        if pointer.is_symlink() or not pointer.is_file():
+            return None
+        if pointer.lstat().st_size > _PLUGIN_ROOT_POINTER_SIZE_LIMIT_BYTES:
+            return None
+        # read_bytes, not read_text: universal-newline decoding would hide a
+        # CR that the shell preserves in the expanded value.
+        content = pointer.read_bytes().decode("utf-8")
+    except (OSError, ValueError):
+        return None
+    # Bash removes NUL bytes from command-substitution output (with a
+    # warning), so the executed value never contains them; keeping one here
+    # would instead crash path resolution and silently kill the hook.
+    content = content.replace("\x00", "")
+    if reader == "cat":
+        value = content
+        while value.endswith("\n"):
+            value = value[:-1]
+        if "\n" in value:
+            return None
+    else:
+        value = content.split("\n", 1)[0]
+    if not value or not value.startswith("/"):
+        return None
+    return value
+
+
+def _accessor_expanded_script_path(
+    raw_text: str, decoded_word: str, effective_cwd: Path
+) -> Path | None:
+    """Resolve a word-initial plugin-root accessor to its executed path.
+
+    Returns the absolute path the shell would actually execute, or None when
+    the word is not a well-formed, expansion-enabled accessor invocation.
+    Only double-quoted spellings resolve: fully quoted, or quoted around the
+    accessor component. Double quotes make the substitution expand without
+    field splitting or pathname expansion, so the joined path below is
+    byte-identical to the argv word bash builds. A bare (unquoted) accessor
+    would field-split on IFS and glob — its executed argv is statically
+    unknowable, so it is rejected here and, because the unquoted spaces also
+    break the single-word shape upstream, never attributed at all. Single
+    quotes and escapes make `$(` a literal path and likewise fall back to
+    normal detection. Wrong-quoting fallbacks at worst cost a redundant
+    bookkeeping reminder, never a suppression. This function only RESOLVES
+    the path — whether the result is a managed utility is decided by the
+    same `_is_managed_utility_path` gate as every directly written path, so
+    there is exactly one trust decision.
+    """
+    match = _PLUGIN_ROOT_ACCESSOR_WORD_RE.match(decoded_word)
+    if not match:
+        return None
+    accessor = match.group("accessor")
+    expansion_enabled_spellings = (
+        f'"{decoded_word}"',
+        f'"{accessor}"{decoded_word[len(accessor):]}',
+    )
+    if raw_text not in expansion_enabled_spellings:
+        return None
+    reader = "cat" if match.group("reader") == "cat" else "sed"
+    value = _pointer_expansion_value(effective_cwd, reader)
+    if value is None:
+        return None
+    # Returned unnormalized: the caller derives both the recorded lexical
+    # identity and the canonical (symlink-resolved) path judged by the gate.
+    return Path(value) / match.group("rel")
+_verified_plugin_roots: dict[str, bool] = {}
+
+
+def _is_mycelium_plugin_root(root: Path) -> bool:
+    key = root.as_posix()
+    cached = _verified_plugin_roots.get(key)
+    if cached is not None:
+        return cached
+    verdict = False
+    try:
+        if root.resolve() == _EXECUTING_PLUGIN_ROOT:
+            verdict = True
+    except OSError:
+        pass
+    if not verdict:
+        for relpath in _PLUGIN_MANIFEST_RELPATHS:
+            manifest = root / relpath
+            try:
+                if not manifest.is_file():
+                    continue
+                if manifest.stat().st_size > _PLUGIN_MANIFEST_SIZE_LIMIT_BYTES:
+                    continue
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and data.get("name") == "mycelium":
+                verdict = True
+                break
+    _verified_plugin_roots[key] = verdict
+    return verdict
+
+
+def _is_managed_utility_path(resolved: Path) -> bool:
+    """True when an absolute script path is a verified bundled Mycelium helper.
+
+    The `skills/core/scripts/<relpath>` suffix must start at a path-component
+    boundary of the normalized absolute path, and the remaining prefix must be
+    a verified Mycelium plugin root. Source checkouts, versioned plugin-cache
+    installs, and relative invocations all verify; a same-named user script in
+    a conventionally shaped project directory remains eligible analysis.
+    """
+    posix = resolved.as_posix()
+    for suffix in IGNORED_SCRIPT_SUFFIXES:
+        if not posix.endswith(suffix):
+            continue
+        prefix = posix[: -len(suffix)]
+        if prefix and not prefix.endswith("/"):
+            continue
+        root = Path(prefix.rstrip("/") or "/")
+        if _is_mycelium_plugin_root(root):
+            return True
+    return False
+
+
 IGNORED_SCRIPT_BASENAMES = {"setup.py"}
 ANALYSIS_PATTERNS = (
     RX_PYTHON_C,
@@ -1288,14 +1513,31 @@ def _detect_scripts_with_cwd(
             if len(path_words) != 1:
                 continue
             raw_path = path_words[0]
-            if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES or any(
-                raw_path.endswith(suffix) for suffix in IGNORED_SCRIPT_SUFFIXES
-            ):
+            if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES:
                 continue
-            path = Path(raw_path)
-            if not path.is_absolute():
-                path = effective_cwd / path
-            path = Path(os.path.abspath(path))
+            expanded = _accessor_expanded_script_path(
+                m.group("path"), raw_path, effective_cwd
+            )
+            if expanded is not None:
+                unresolved = expanded
+            else:
+                unresolved = Path(raw_path)
+                if not unresolved.is_absolute():
+                    unresolved = effective_cwd / unresolved
+            # Judge trust on the canonical filesystem path of the UNCOLLAPSED
+            # word: lexical abspath folds "symlink/.." differently than the
+            # shell resolves it, so a link inside a verified tree must not
+            # smuggle a user script past the gate (while a symlinked alias of
+            # a verified root still verifies). A word no shell could execute
+            # (e.g. an embedded NUL from a corrupt payload) is skipped rather
+            # than allowed to crash the surrounding hook.
+            try:
+                path = Path(os.path.abspath(unresolved))
+                canonical = Path(os.path.realpath(unresolved))
+            except ValueError:
+                continue
+            if _is_managed_utility_path(canonical):
+                continue
             if path not in seen_paths:
                 out.append((path, None, effective_cwd))
                 seen_paths.add(path)
