@@ -212,6 +212,75 @@ def test_machine_shaped_footer_inside_code_fence_survives(tmp_path):
     assert content.count("### 18:42 — Session ended (7m, 2 files)") == 1
 
 
+def test_inner_fence_lines_do_not_close_a_longer_fence(tmp_path):
+    """Codex P2, round 10 on PR #70: a three-backtick or tilde line inside a
+    four-backtick fence is content, not a closing delimiter."""
+    path = tmp_path / "session.md"
+    _log(path)
+    fenced = (
+        "\n````text\n"
+        "```\n"
+        "### 12:34 — Session ended (5m, 4 files)\n"
+        "~~~\n"
+        "### 12:35 — Session ended (6m, 5 files)\n"
+        "````\n"
+    )
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(fenced)
+
+    _finalize(path)
+    _finalize(path)
+
+    content = path.read_text()
+    assert "### 12:34 — Session ended (5m, 4 files)" in content
+    assert "### 12:35 — Session ended (6m, 5 files)" in content
+    assert content.count("### 18:42 — Session ended (7m, 2 files)") == 1
+
+
+def test_stale_footer_after_properly_closed_long_fence_is_rebuilt(tmp_path):
+    path = tmp_path / "session.md"
+    _log(path)
+    fenced = "\n````text\n```\n````\n"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(fenced)
+    _finalize(path)
+
+    MODULE.finalize_session_log(
+        path,
+        ended="2026-08-01T18:44:00-0400",
+        duration_minutes=9,
+        files_changed=2,
+        end_time="18:44",
+        changed_paths=["src/a.py", "data/input.csv"],
+    )
+
+    content = path.read_text()
+    assert content.count("Session ended") == 1
+    assert "(9m, 2 files)" in content
+    assert "(7m, 2 files)" not in content
+
+
+def test_backtick_info_string_with_backtick_is_not_a_fence(tmp_path):
+    path = tmp_path / "session.md"
+    _log(path)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n```python`not-a-fence\n")
+    _finalize(path)
+
+    MODULE.finalize_session_log(
+        path,
+        ended="2026-08-01T18:44:00-0400",
+        duration_minutes=9,
+        files_changed=2,
+        end_time="18:44",
+        changed_paths=["src/a.py", "data/input.csv"],
+    )
+
+    content = path.read_text()
+    assert content.count("Session ended") == 1
+    assert "(9m, 2 files)" in content
+
+
 def test_retry_collapses_duplicate_legacy_footers(tmp_path):
     path = tmp_path / "session.md"
     _log(path)

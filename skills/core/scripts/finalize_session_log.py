@@ -24,23 +24,59 @@ import tempfile
 _END_FOOTER_HEADING_RE = re.compile(
     r"^### \d{2}:\d{2} — Session ended \(\d+m, \d+ files\)$"
 )
-_FENCE_RE = re.compile(r"^ {0,3}(?:```|~~~)")
+_FENCE_RE = re.compile(r"^ {0,3}(?P<marker>```+|~~~+)(?P<info>.*)$")
+
+
+def _fence_open_marker(line: str) -> str | None:
+    """Return the opening fence marker of a line, or None (CommonMark 4.5).
+
+    A backtick fence's info string may not contain backticks; such a line is
+    ordinary content, not a fence.
+    """
+    match = _FENCE_RE.match(line)
+    if match is None:
+        return None
+    marker = match.group("marker")
+    if marker[0] == "`" and "`" in match.group("info"):
+        return None
+    return marker
+
+
+def _fence_closes(line: str, open_marker: str) -> bool:
+    """True when a line closes the active fence: same character, at least the
+    opening length, and nothing but whitespace after (CommonMark 4.5)."""
+    match = _FENCE_RE.match(line)
+    if match is None:
+        return False
+    marker = match.group("marker")
+    return (
+        marker[0] == open_marker[0]
+        and len(marker) >= len(open_marker)
+        and not match.group("info").strip()
+    )
 
 
 def _strip_machine_footers(body: str) -> str:
     """Remove every machine-emitted end-footer block outside code fences."""
     lines = body.split("\n")
     kept: list[str] = []
-    in_fence = False
+    open_marker: str | None = None
     index = 0
     while index < len(lines):
         line = lines[index]
-        if _FENCE_RE.match(line):
-            in_fence = not in_fence
+        if open_marker is not None:
+            if _fence_closes(line, open_marker):
+                open_marker = None
             kept.append(line)
             index += 1
             continue
-        if in_fence or not _END_FOOTER_HEADING_RE.match(line):
+        candidate = _fence_open_marker(line)
+        if candidate is not None:
+            open_marker = candidate
+            kept.append(line)
+            index += 1
+            continue
+        if not _END_FOOTER_HEADING_RE.match(line):
             kept.append(line)
             index += 1
             continue
