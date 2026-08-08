@@ -806,6 +806,21 @@ def test_cd_dash_p_resolves_symlinks_physically(tmp_path: Path) -> None:
     assert detect_scripts(cmd, tmp_path) == []
 
 
+def test_flags_after_the_cd_operand_are_not_options(tmp_path: Path) -> None:
+    """PR #72 P1: `cd nested -P` is an error (or version-dependent) in bash —
+    the hook must not follow `nested` while bash stays in the outer dir."""
+    nested = tmp_path / "nested"
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    _seed_plugin_pointer(nested, _seed_verified_install(tmp_path))
+    _seed_plugin_pointer(tmp_path, user_tree)
+    cmd = (
+        "cd nested -P; "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
 @pytest.mark.parametrize(
     "prefix",
     [
@@ -814,6 +829,14 @@ def test_cd_dash_p_resolves_symlinks_physically(tmp_path: Path) -> None:
         "source setup.sh",
         ". setup.sh",
         "eval 'cd nested'",
+        # Launcher-prefixed builtins still change the parent shell's cwd
+        # (PR #72 P1): `builtin cd`, `command cd`, and the `time` keyword.
+        "builtin cd nested",
+        "command cd nested",
+        "time cd nested",
+        "time -p cd nested",
+        "builtin source setup.sh",
+        "command builtin cd nested",
     ],
 )
 def test_unmodeled_cwd_change_fails_closed_for_accessor_trust(

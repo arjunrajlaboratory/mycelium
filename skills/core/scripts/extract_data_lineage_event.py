@@ -684,6 +684,10 @@ def _simple_cd_status(segment: list[str], cwd: Path) -> tuple[bool | None, Path]
                     physical = False
             continue
         arguments.append(value)
+        # Options end at the first operand: bash treats a later dash word as
+        # another operand (`cd nested -P` is "too many arguments" on current
+        # bash), so it must land in `arguments` and force the unknown path.
+        options_done = True
     if len(arguments) != 1 or arguments[0] == "-" or "$" in arguments[0]:
         return None, cwd
     target = Path(os.path.expanduser(arguments[0]))
@@ -856,6 +860,7 @@ def _jupyter_match_has_terminal_option(command: str, offset: int) -> bool:
 
 
 _CWD_AFFECTING_BUILTINS = {"pushd", "popd", "source", ".", "eval"}
+_BUILTIN_LAUNCHER_PREFIXES = {"command", "builtin", "time"}
 
 
 def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
@@ -871,12 +876,18 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
     name = stripped[0]
     if name in _CWD_AFFECTING_BUILTINS:
         return False
-    if (
-        name == "command"
-        and stripped[1:2]
-        and stripped[1] in ({"cd"} | _CWD_AFFECTING_BUILTINS)
-    ):
-        return False
+    if name in _BUILTIN_LAUNCHER_PREFIXES:
+        # `command cd`, `builtin cd`, `builtin source`, and the `time`
+        # keyword all still run the builtin in the parent shell, so any
+        # cwd-affecting continuation (including a nested launcher) leaves
+        # the working directory unmodeled.
+        rest = stripped[1:]
+        if name == "time" and rest[:1] == ["-p"]:
+            rest = rest[1:]
+        follower = rest[0] if rest else ""
+        return follower not in (
+            {"cd"} | _CWD_AFFECTING_BUILTINS | _BUILTIN_LAUNCHER_PREFIXES
+        )
     if name == "cd":
         status, _ = _simple_cd_status(segment, cwd)
         return status is not None

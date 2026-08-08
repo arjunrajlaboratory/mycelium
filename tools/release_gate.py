@@ -200,18 +200,37 @@ def compare_installed(repo: Path, installed_root: Path,
         )
     mismatches: list[str] = []
     compared = 0
+    source_files: set[Path] = set()
     for packaged in PACKAGED_DIRS:
         source_dir = repo / packaged
         for source_file in sorted(source_dir.rglob("*")):
             if not source_file.is_file() or "__pycache__" in source_file.parts:
                 continue
             relative = source_file.relative_to(repo)
+            source_files.add(relative)
             installed_file = installed_root / relative
             compared += 1
             if not installed_file.is_file():
                 mismatches.append(f"missing in install: {relative}")
             elif _file_digest(source_file) != _file_digest(installed_file):
                 mismatches.append(f"hash mismatch: {relative}")
+    # The reverse direction matters too: a reused install may carry packaged
+    # files the candidate no longer ships, and a host smoke could discover
+    # or execute that obsolete content. Only generated artifacts are exempt.
+    for packaged in PACKAGED_DIRS:
+        installed_dir = installed_root / packaged
+        if not installed_dir.is_dir():
+            continue
+        for installed_file in sorted(installed_dir.rglob("*")):
+            if not installed_file.is_file():
+                continue
+            if "__pycache__" in installed_file.parts:
+                continue
+            if installed_file.suffix == ".pyc":
+                continue
+            relative = installed_file.relative_to(installed_root)
+            if relative not in source_files:
+                mismatches.append(f"stale extra in install: {relative}")
     if mismatches:
         raise GateFailure(
             "installed artifact does not match the candidate — reinstall "

@@ -214,6 +214,25 @@ def test_missing_installed_file_fails(tmp_path: Path) -> None:
         gate.compare_installed(repo, install, gate.GateReport(version="0.7.0"))
 
 
+def test_stale_extra_installed_file_fails(tmp_path: Path) -> None:
+    """PR #72 P2: a reused install carrying a file removed from the
+    candidate must fail — host smokes could execute the obsolete content."""
+    repo, install = _packaged_repo(tmp_path)
+    (install / "skills" / "core" / "obsolete_helper.py").write_text("old\n")
+    with pytest.raises(gate.GateFailure, match="stale extra"):
+        gate.compare_installed(repo, install, gate.GateReport(version="0.7.0"))
+
+
+def test_pycache_in_install_is_tolerated(tmp_path: Path) -> None:
+    repo, install = _packaged_repo(tmp_path)
+    pycache = install / "skills" / "core" / "__pycache__"
+    pycache.mkdir()
+    (pycache / "mod.cpython-311.pyc").write_bytes(b"\x00")
+    report = gate.GateReport(version="0.7.0")
+    gate.compare_installed(repo, install, report)
+    assert any("installed-artifact" in name for name, _ in report.checks)
+
+
 # ---------- host audits ----------
 
 
