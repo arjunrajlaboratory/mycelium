@@ -279,8 +279,8 @@ _PLUGIN_MANIFEST_SIZE_LIMIT_BYTES = 64 * 1024
 # is trusted only after dereferencing `<effective cwd>/.mycelium/plugin-root`
 # and verifying that its target is a real Mycelium plugin root.
 _PLUGIN_ROOT_ACCESSOR_WORD_RE = re.compile(
-    r"^\$\((?P<reader>cat|sed[ \t]+-n[ \t]+['\"]?1p['\"]?)"
-    r"[ \t]+\.mycelium/plugin-root\)/(?P<rel>.+)$"
+    r"^(?P<accessor>\$\((?P<reader>cat|sed[ \t]+-n[ \t]+['\"]?1p['\"]?)"
+    r"[ \t]+\.mycelium/plugin-root\))/(?P<rel>.+)$"
 )
 _PLUGIN_ROOT_POINTER_SIZE_LIMIT_BYTES = 4096
 
@@ -305,7 +305,9 @@ def _pointer_expansion_value(effective_cwd: Path, reader: str) -> str | None:
             return None
         if pointer.lstat().st_size > _PLUGIN_ROOT_POINTER_SIZE_LIMIT_BYTES:
             return None
-        content = pointer.read_text(encoding="utf-8")
+        # read_bytes, not read_text: universal-newline decoding would hide a
+        # CR that the shell preserves in the expanded value.
+        content = pointer.read_bytes().decode("utf-8")
     except (OSError, ValueError):
         return None
     if reader == "cat":
@@ -330,22 +332,33 @@ def _accessor_expanded_script_path(
     the word is not a well-formed, expansion-enabled accessor invocation.
     The shell expands a word-initial `$(` only when it is unquoted or inside
     double quotes; single quotes and backslash escapes make it a literal
-    path, so the authored text must be the decoded word either bare or fully
-    double-quoted. This function only RESOLVES the path — whether the result
-    is a managed utility is decided by the same `_is_managed_utility_path`
-    gate as every directly written path, so there is exactly one trust
-    decision.
+    path. The authored text must therefore be one of the expansion-enabled
+    spellings of the decoded word: bare, fully double-quoted, or with only
+    the accessor component double-quoted. Any other quoting falls back to
+    normal detection, which at worst costs a redundant bookkeeping reminder,
+    never a suppression. This function only RESOLVES the path — whether the
+    result is a managed utility is decided by the same
+    `_is_managed_utility_path` gate as every directly written path, so there
+    is exactly one trust decision.
     """
-    if raw_text != decoded_word and raw_text != f'"{decoded_word}"':
-        return None
     match = _PLUGIN_ROOT_ACCESSOR_WORD_RE.match(decoded_word)
     if not match:
+        return None
+    accessor = match.group("accessor")
+    expansion_enabled_spellings = (
+        decoded_word,
+        f'"{decoded_word}"',
+        f'"{accessor}"{decoded_word[len(accessor):]}',
+    )
+    if raw_text not in expansion_enabled_spellings:
         return None
     reader = "cat" if match.group("reader") == "cat" else "sed"
     value = _pointer_expansion_value(effective_cwd, reader)
     if value is None:
         return None
-    return Path(os.path.abspath(Path(value) / match.group("rel")))
+    # Returned unnormalized: the caller derives both the recorded lexical
+    # identity and the canonical (symlink-resolved) path judged by the gate.
+    return Path(value) / match.group("rel")
 _verified_plugin_roots: dict[str, bool] = {}
 
 
@@ -1500,13 +1513,18 @@ def _detect_scripts_with_cwd(
                 m.group("path"), raw_path, effective_cwd
             )
             if expanded is not None:
-                path = expanded
+                unresolved = expanded
             else:
-                path = Path(raw_path)
-                if not path.is_absolute():
-                    path = effective_cwd / path
-                path = Path(os.path.abspath(path))
-            if _is_managed_utility_path(path):
+                unresolved = Path(raw_path)
+                if not unresolved.is_absolute():
+                    unresolved = effective_cwd / unresolved
+            path = Path(os.path.abspath(unresolved))
+            # Judge trust on the canonical filesystem path of the UNCOLLAPSED
+            # word: lexical abspath folds "symlink/.." differently than the
+            # shell resolves it, so a link inside a verified tree must not
+            # smuggle a user script past the gate (while a symlinked alias of
+            # a verified root still verifies).
+            if _is_managed_utility_path(Path(os.path.realpath(unresolved))):
                 continue
             if path not in seen_paths:
                 out.append((path, None, effective_cwd))

@@ -683,6 +683,57 @@ def test_expansion_disabled_accessor_word_is_not_trusted(
     assert len(out) == 1
 
 
+def test_accessor_component_quoting_is_expansion_enabled(tmp_path: Path) -> None:
+    """Codex P2, round 7: `"$(cat …)"/rest` expands even though only the
+    accessor component is quoted — it must be treated like the full form."""
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    cmd = (
+        'python3 "$(cat .mycelium/plugin-root)"'
+        "/skills/core/scripts/recall_lessons.py"
+    )
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "accessor",
+    ["$(cat .mycelium/plugin-root)", "$(sed -n '1p' .mycelium/plugin-root)"],
+)
+def test_crlf_pointer_preserves_cr_in_executed_path(
+    tmp_path: Path, accessor: str
+) -> None:
+    """Codex P2, round 7: the shell keeps the \\r of a CRLF pointer; the
+    verified path must match the executed CR-suffixed one, not a stripped one."""
+    install = _seed_verified_install(tmp_path)
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_bytes(f"{install}\r\n".encode())
+    cmd = f'python3 "{accessor}/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_symlink_dotdot_traversal_is_resolved_before_the_trust_gate(
+    tmp_path: Path,
+) -> None:
+    """Codex P2, round 7: `link/../x` resolves through the symlink target on
+    the filesystem, not lexically — the gate must judge the real path."""
+    install = _seed_verified_install(tmp_path)
+    scripts = install / "skills" / "core" / "scripts"
+    scripts.mkdir(parents=True)
+    outside_deep = tmp_path / "outside" / "deep"
+    outside_deep.mkdir(parents=True)
+    (scripts / "link").symlink_to(outside_deep)
+    word = f"{scripts}/link/../recall_lessons.py"
+    assert len(detect_scripts(f'python3 "{word}"', tmp_path)) == 1
+
+
+def test_symlinked_alias_of_verified_root_is_still_excluded(tmp_path: Path) -> None:
+    install = _seed_verified_install(tmp_path)
+    alias = tmp_path / "alias"
+    alias.symlink_to(install)
+    cmd = f'python3 "{alias}/skills/core/scripts/recall_lessons.py"'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
 def test_backslash_escaped_accessor_is_never_suppressed_or_fabricated(
     tmp_path: Path,
 ) -> None:
