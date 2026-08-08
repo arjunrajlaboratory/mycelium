@@ -17,16 +17,45 @@ import sys
 import tempfile
 
 
-# The complete machine-owned end-of-session block: the "Session ended"
-# heading, its optional "- Modified:" summary line, and the optional
-# "### Files Modified" list. Authored prose never uses this exact shape, so
-# a retry can replace the whole block with canonical values.
-_END_FOOTER_BLOCK_RE = re.compile(
-    r"^### [^\n]* — Session ended \([^\n]*\)\n"
-    r"(?:- Modified:[^\n]*\n)?"
-    r"(?:\n### Files Modified\n(?:- `[^\n]*`\n?)*)?",
-    re.MULTILINE,
+# Only the machine-emitted footer syntax is machine-owned: an HH:MM time and
+# numeric duration/file-count exactly as this module writes them. Authored
+# headings that merely resemble the footer, and examples inside Markdown code
+# fences, belong to the agent and must survive finalization untouched.
+_END_FOOTER_HEADING_RE = re.compile(
+    r"^### \d{2}:\d{2} — Session ended \(\d+m, \d+ files\)$"
 )
+_FENCE_RE = re.compile(r"^ {0,3}(?:```|~~~)")
+
+
+def _strip_machine_footers(body: str) -> str:
+    """Remove every machine-emitted end-footer block outside code fences."""
+    lines = body.split("\n")
+    kept: list[str] = []
+    in_fence = False
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            kept.append(line)
+            index += 1
+            continue
+        if in_fence or not _END_FOOTER_HEADING_RE.match(line):
+            kept.append(line)
+            index += 1
+            continue
+        index += 1
+        if index < len(lines) and lines[index].startswith("- Modified:"):
+            index += 1
+        if (
+            index + 1 < len(lines)
+            and lines[index] == ""
+            and lines[index + 1] == "### Files Modified"
+        ):
+            index += 2
+            while index < len(lines) and lines[index].startswith("- `"):
+                index += 1
+    return "\n".join(kept)
 
 
 def _replace_frontmatter_field(frontmatter: str, field: str, value: str) -> str:
@@ -70,7 +99,7 @@ def _completed_log(
     # published by an earlier attempt must be rebuilt from the same canonical
     # values now going into the frontmatter and registry — never left stale.
     # Removing every existing block also collapses duplicated legacy footers.
-    body = _END_FOOTER_BLOCK_RE.sub("", body)
+    body = _strip_machine_footers(body)
     if body.strip():
         body = body.rstrip("\n") + "\n"
     else:

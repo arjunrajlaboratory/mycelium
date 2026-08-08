@@ -164,6 +164,54 @@ def test_retry_preserves_body_written_after_first_footer(tmp_path):
     assert content.index("Continued work") < content.index("Session ended")
 
 
+def test_authored_session_ended_heading_survives_finalization(tmp_path):
+    """Codex P2, round 9 on PR #70: only the machine-emitted footer syntax
+    (HH:MM time, numeric duration and file count) is machine-owned."""
+    path = tmp_path / "session.md"
+    _log(path)
+    authored = (
+        "\n### Retrospective — Session ended (unexpectedly)\n"
+        "- Modified: my authored note about what changed\n"
+        "\n### Files Modified\n"
+        "- `authored-observation.md`\n"
+    )
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(authored)
+
+    _finalize(path)
+    _finalize(path)
+
+    content = path.read_text()
+    assert "### Retrospective — Session ended (unexpectedly)" in content
+    assert "- Modified: my authored note about what changed" in content
+    assert "- `authored-observation.md`" in content
+    assert content.count("### 18:42 — Session ended (7m, 2 files)") == 1
+
+
+def test_machine_shaped_footer_inside_code_fence_survives(tmp_path):
+    path = tmp_path / "session.md"
+    _log(path)
+    fenced = (
+        "\nExample of the finalization format:\n"
+        "```markdown\n"
+        "### 12:34 — Session ended (5m, 4 files)\n"
+        "- Modified: example.py\n"
+        "\n### Files Modified\n"
+        "- `example.py`\n"
+        "```\n"
+    )
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(fenced)
+
+    _finalize(path)
+    _finalize(path)
+
+    content = path.read_text()
+    assert "### 12:34 — Session ended (5m, 4 files)" in content
+    assert "- `example.py`" in content
+    assert content.count("### 18:42 — Session ended (7m, 2 files)") == 1
+
+
 def test_retry_collapses_duplicate_legacy_footers(tmp_path):
     path = tmp_path / "session.md"
     _log(path)

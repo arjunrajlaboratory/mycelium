@@ -587,4 +587,8 @@ by removing prior machine-owned blocks, not by refusing to write current ones.
 file count, and file list, and require frontmatter, footer, `Modified`
 summary, file list, and registry row to agree exactly with the retry values,
 with exactly one footer. Also require duplicated legacy footers to collapse
-and body content appended between attempts to survive.
+and body content appended between attempts to survive. Machine-block removal
+must match only the exact emitted syntax (HH:MM time, numeric duration and
+file count) outside Markdown code fences: an authored heading that merely
+resembles the footer, and a machine-shaped example inside a fence, must
+survive finalization byte-identical.
