@@ -280,19 +280,24 @@ _PLUGIN_MANIFEST_SIZE_LIMIT_BYTES = 64 * 1024
 # is trusted only after dereferencing `<effective cwd>/.mycelium/plugin-root`
 # and verifying that its target is a real Mycelium plugin root.
 _PLUGIN_ROOT_ACCESSOR_WORD_RE = re.compile(
-    r"^\$\((?:cat|sed[ \t]+-n[ \t]+['\"]?1p['\"]?)"
+    r"^\$\((?P<reader>cat|sed[ \t]+-n[ \t]+['\"]?1p['\"]?)"
     r"[ \t]+\.mycelium/plugin-root\)/(?P<rel>.+)$"
 )
 _PLUGIN_ROOT_POINTER_SIZE_LIMIT_BYTES = 4096
 
 
-def _pointer_verified_plugin_root(effective_cwd: Path) -> bool:
+def _pointer_verified_plugin_root(effective_cwd: Path, reader: str) -> bool:
     """Dereference the project's plugin-root pointer and verify its target.
 
     The pointer must be a non-symlink regular file inside a non-symlink
-    `.mycelium` directory; its first line (the value the documented `sed -n
-    '1p'` accessor reads) must be a nonblank absolute path to a verified
-    Mycelium plugin root. Anything else fails closed toward normal detection.
+    `.mycelium` directory. Verification emulates the exact value the shell
+    substitution produces — no normalization, because the shell performs
+    none: `cat` yields the whole content minus trailing newlines (embedded
+    newlines mean the executed word is not a plain root, so fail closed),
+    while `sed -n '1p'` yields exactly the first line, trailing spaces
+    included. That exact value must be an absolute path to a verified
+    Mycelium plugin root; the verified path is then byte-identical to the
+    directory the shell actually executes from.
     """
     state_dir = effective_cwd / ".mycelium"
     pointer = state_dir / "plugin-root"
@@ -306,10 +311,17 @@ def _pointer_verified_plugin_root(effective_cwd: Path) -> bool:
         content = pointer.read_text(encoding="utf-8")
     except (OSError, ValueError):
         return False
-    first_line = content.splitlines()[0].strip() if content.splitlines() else ""
-    if not first_line or not first_line.startswith("/"):
+    if reader == "cat":
+        value = content
+        while value.endswith("\n"):
+            value = value[:-1]
+        if "\n" in value:
+            return False
+    else:
+        value = content.split("\n", 1)[0]
+    if not value or not value.startswith("/"):
         return False
-    return _is_mycelium_plugin_root(Path(first_line))
+    return _is_mycelium_plugin_root(Path(value))
 
 
 def _is_plugin_root_accessor_invocation(raw_word: str, effective_cwd: Path) -> bool:
@@ -317,8 +329,9 @@ def _is_plugin_root_accessor_invocation(raw_word: str, effective_cwd: Path) -> b
 
     The remainder after the accessor must normalize to a registry entry, so
     traversal that escapes the managed tree stays eligible analysis, and the
-    pointer under the effective working directory must resolve to a verified
-    Mycelium plugin root.
+    pointer under the effective working directory must expand — under the
+    matched reader's exact substitution semantics — to a verified Mycelium
+    plugin root.
     """
     match = _PLUGIN_ROOT_ACCESSOR_WORD_RE.match(raw_word)
     if not match:
@@ -326,7 +339,8 @@ def _is_plugin_root_accessor_invocation(raw_word: str, effective_cwd: Path) -> b
     relpath = posixpath.normpath(match.group("rel"))
     if relpath not in IGNORED_SCRIPT_SUFFIXES:
         return False
-    return _pointer_verified_plugin_root(effective_cwd)
+    reader = "cat" if match.group("reader") == "cat" else "sed"
+    return _pointer_verified_plugin_root(effective_cwd, reader)
 _verified_plugin_roots: dict[str, bool] = {}
 
 

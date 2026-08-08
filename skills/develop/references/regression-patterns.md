@@ -321,9 +321,14 @@ resolves under the cwd, and traversal after the accessor escapes the managed
 tree, so both stay eligible analysis. Finally, the pointer itself is
 repository-controlled state: the accessor is trusted only after
 dereferencing `.mycelium/plugin-root` under the command's effective working
-directory (non-symlink regular file, first line an absolute path) and
-verifying that its target is a real Mycelium plugin root — a nested repo's
-pointer aimed at an unverified user tree stays eligible analysis.
+directory (non-symlink regular file, absolute-path value) and verifying
+that its target is a real Mycelium plugin root — a nested repo's pointer
+aimed at an unverified user tree stays eligible analysis. Verification must
+emulate the exact substitution semantics of the matched reader with no
+normalization: `cat` strips only trailing newlines and fails closed on
+embedded ones, `sed -n '1p'` yields the exact first line, so a
+trailing-space pointer verifies the space-suffixed directory the shell
+actually executes from, never a stripped variant of it.
 
 ## 19. Machine finalization overwrites authored semantics
 

@@ -616,6 +616,65 @@ def test_accessor_resolves_pointer_under_the_effective_cwd(tmp_path: Path) -> No
     assert detect_scripts(cmd, tmp_path) == []
 
 
+@pytest.mark.parametrize(
+    "accessor",
+    ["$(cat .mycelium/plugin-root)", "$(sed -n '1p' .mycelium/plugin-root)"],
+)
+def test_pointer_with_trailing_space_verifies_the_executed_path(
+    tmp_path: Path, accessor: str
+) -> None:
+    """Codex P2, round 5 on PR #70: verify the exact expanded value.
+
+    The shell preserves a trailing space in the pointer line, so execution
+    happens under the space-suffixed directory — verifying the stripped path
+    would suppress lineage for an unverified tree.
+    """
+    install = _seed_verified_install(tmp_path)
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_text(f"{install} \n")
+    cmd = f'python3 "{accessor}/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_genuinely_space_suffixed_verified_root_is_trusted(tmp_path: Path) -> None:
+    install = tmp_path / "install "
+    _write_mycelium_manifest(install)
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_text(f"{install}\n")
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_multiline_pointer_diverges_between_cat_and_sed(tmp_path: Path) -> None:
+    install = _seed_verified_install(tmp_path)
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_text(f"{install}\nsecond line\n")
+    # `$(cat …)` preserves the embedded newline, so the executed word is not
+    # the verified root — must stay eligible analysis.
+    cat_cmd = (
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert len(detect_scripts(cat_cmd, tmp_path)) == 1
+    # `$(sed -n '1p' …)` reads exactly the first line — the verified root.
+    sed_cmd = (
+        "python3 \"$(sed -n '1p' .mycelium/plugin-root)"
+        '/skills/core/scripts/recall_lessons.py"'
+    )
+    assert detect_scripts(sed_cmd, tmp_path) == []
+
+
+def test_pointer_with_only_trailing_newlines_is_trusted(tmp_path: Path) -> None:
+    install = _seed_verified_install(tmp_path)
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_text(f"{install}\n\n\n")
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
 def test_accessor_with_relative_pointer_target_is_not_trusted(
     tmp_path: Path,
 ) -> None:
