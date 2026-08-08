@@ -286,6 +286,24 @@ def test_empty_audit_evidence_fails(tmp_path: Path) -> None:
         )
 
 
+# ---------- output location ----------
+
+
+def test_output_inside_the_candidate_is_rejected(tmp_path: Path) -> None:
+    """PR #72 round-2 P2: the gate must never dirty the tree it certified."""
+    repo = _repo(tmp_path)
+    with pytest.raises(gate.GateFailure, match="outside the candidate"):
+        gate.check_output_location(repo, repo / "release-evidence.md")
+    with pytest.raises(gate.GateFailure, match="outside the candidate"):
+        gate.check_output_location(repo, repo / "docs" / "evidence.md")
+
+
+def test_output_outside_the_candidate_is_accepted(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    gate.check_output_location(repo, tmp_path / "release-evidence.md")
+    gate.check_output_location(repo, None)
+
+
 # ---------- summary ----------
 
 

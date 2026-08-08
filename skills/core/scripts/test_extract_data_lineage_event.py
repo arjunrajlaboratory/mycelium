@@ -837,6 +837,12 @@ def test_flags_after_the_cd_operand_are_not_options(tmp_path: Path) -> None:
         "time -p cd nested",
         "builtin source setup.sh",
         "command builtin cd nested",
+        # Launcher options must be consumed before classifying the follower
+        # (PR #72 round-2 P1): these still run cd in the parent shell.
+        "command -p cd nested",
+        "command -- cd nested",
+        "command -p -- cd nested",
+        "builtin -- cd nested",
     ],
 )
 def test_unmodeled_cwd_change_fails_closed_for_accessor_trust(
@@ -853,6 +859,21 @@ def test_unmodeled_cwd_change_fails_closed_for_accessor_trust(
         'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
     )
     assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_command_describe_mode_does_not_block_accessor_trust(
+    tmp_path: Path,
+) -> None:
+    # `command -v cd nested` only PRINTS; nothing changes the cwd, so the
+    # verified outer pointer remains trustworthy.
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    cmd = (
+        "command -v cd nested && "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert detect_scripts(cmd, tmp_path) == []
 
 
 def test_bare_accessor_is_never_attributed_or_suppressed(tmp_path: Path) -> None:

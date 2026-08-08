@@ -15,7 +15,10 @@ Usage:
         [--installed-root ~/.claude/plugins/cache/mycelium/mycelium/0.7.0] \
         [--claude-audit-evidence PATH --codex-audit-evidence PATH \
          | --waive-host-audits REASON] \
-        [--skip-knowledge-map] [--output SUMMARY.md]
+        [--skip-knowledge-map] [--output ../release-evidence.md]
+
+The evidence summary must be written outside the candidate tree; an
+in-repository --output path is rejected before any check runs.
 
 See docs/release-process.md for the maintainer workflow.
 """
@@ -58,6 +61,20 @@ def default_runner(command: list[str], cwd: Path) -> subprocess.CompletedProcess
     return subprocess.run(
         command, cwd=cwd, capture_output=True, text=True, check=False
     )
+
+
+def check_output_location(repo: Path, output: Path | None) -> None:
+    """Refuse to write evidence into the tree the gate certifies immutable."""
+    if output is None:
+        return
+    resolved = output.expanduser().resolve()
+    repo_resolved = repo.resolve()
+    if resolved == repo_resolved or repo_resolved in resolved.parents:
+        raise GateFailure(
+            f"--output {output} is inside the release candidate; the gate "
+            "never mutates the tree it validates — write the evidence "
+            "summary outside the candidate (e.g. ../release-evidence.md)"
+        )
 
 
 def check_clean_tree(repo: Path, runner) -> None:
@@ -308,6 +325,7 @@ def run_gate(args: argparse.Namespace, repo: Path, runner) -> GateReport:
     report = GateReport(version=args.version)
     report.tag = f"mycelium--v{args.version}"
 
+    check_output_location(repo, args.output)
     check_clean_tree(repo, runner)
     report.record("clean-tree", "PASS working tree clean")
 

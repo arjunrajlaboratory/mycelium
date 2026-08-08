@@ -10,10 +10,14 @@ from a clean disposable clone or worktree.
 ```bash
 python3 tools/release_gate.py --version X.Y.Z \
   --installed-root ~/.claude/plugins/cache/mycelium/mycelium/X.Y.Z \
-  --claude-audit-evidence audits/claude-lifecycle.md \
-  --codex-audit-evidence audits/codex-lifecycle.md \
-  --output release-evidence.md
+  --claude-audit-evidence ../audits/claude-lifecycle.md \
+  --codex-audit-evidence ../audits/codex-lifecycle.md \
+  --output ../release-evidence.md
 ```
+
+The evidence summary (and audit evidence you collect) live outside the
+candidate tree: an in-repository `--output` path is rejected up front, since
+the gate certifies the tree immutable and must not dirty it.
 
 What it enforces, in order (fail-fast):
 

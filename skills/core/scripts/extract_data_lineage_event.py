@@ -880,10 +880,24 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
         # `command cd`, `builtin cd`, `builtin source`, and the `time`
         # keyword all still run the builtin in the parent shell, so any
         # cwd-affecting continuation (including a nested launcher) leaves
-        # the working directory unmodeled.
+        # the working directory unmodeled. Each launcher's own options are
+        # consumed first: `command [-pVv] [--]` (where -v/-V only describe —
+        # nothing executes), `builtin [--]`, `time [-p]`. An invalid option
+        # makes bash error without running anything, which keeps the cwd.
         rest = stripped[1:]
-        if name == "time" and rest[:1] == ["-p"]:
-            rest = rest[1:]
+        if name == "time":
+            if rest[:1] == ["-p"]:
+                rest = rest[1:]
+        else:
+            while rest and rest[0].startswith("-") and rest[0] not in {"-", "--"}:
+                flags = set(rest[0][1:])
+                if name != "command" or not flags or flags - {"p", "V", "v"}:
+                    break
+                if flags & {"V", "v"}:
+                    return True
+                rest = rest[1:]
+            if rest[:1] == ["--"]:
+                rest = rest[1:]
         follower = rest[0] if rest else ""
         return follower not in (
             {"cd"} | _CWD_AFFECTING_BUILTINS | _BUILTIN_LAUNCHER_PREFIXES
