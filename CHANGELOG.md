@@ -5,9 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.1] - 2026-08-08
+
+### Added
+
+- **macOS CI coverage for lifecycle hooks.** The validation workflow now runs
+  the platform-sensitive subset — the three lifecycle shell suites, the
+  Python compatibility tests, and the fresh-init smoke — on `macos-latest`
+  alongside the required Ubuntu job, with the platform toolchain reported in
+  the job output and the CI baseline documented ([#66]).
+- **Scripted cross-host release gate.** `tools/release_gate.py` validates a
+  release candidate from one immutable clean tree: three-way version
+  agreement with Codex cachebuster validation, a dated changelog section,
+  the full fail-fast validation ladder with a fresh-init smoke,
+  source-versus-installed artifact hashing, required-or-explicitly-waived
+  host lifecycle audits, and a release-evidence summary naming the exact
+  commit and intended tag. Documented in `docs/release-process.md` ([#67]).
 
 ### Fixed
+
+- **Flagged `cd` forms no longer misdirect accessor trust.** `cd -L`,
+  `cd -P` (with physical symlink resolution), `-e`, combined clusters, and
+  `--` are modeled when inferring the working directory, and any unmodeled
+  cwd-affecting builtin (`pushd`, `popd`, `source`, `.`, `eval`, `cd -@`)
+  before a plugin-root accessor makes the trust decision fail closed to
+  normal detection instead of silently dereferencing the outer repository's
+  pointer ([#71]).
 
 - **Stop retries can no longer publish self-contradicting session logs.** A
   retry that recomputes duration or changed files now rebuilds the
@@ -48,8 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generator recorded, so authored content survives Stop retries
   byte-identical ([#70]).
 
+[#66]: https://github.com/arjunrajlaboratory/mycelium/issues/66
+[#67]: https://github.com/arjunrajlaboratory/mycelium/issues/67
 [#69]: https://github.com/arjunrajlaboratory/mycelium/issues/69
 [#70]: https://github.com/arjunrajlaboratory/mycelium/pull/70
+[#71]: https://github.com/arjunrajlaboratory/mycelium/issues/71
 
 ## [0.6.0] - 2026-08-02
 

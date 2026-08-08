@@ -655,23 +655,82 @@ def _strip_assignments(segment: list[str]) -> list[str]:
 
 
 def _simple_cd_status(segment: list[str], cwd: Path) -> tuple[bool | None, Path]:
-    """Return a simple cd's known status and resulting cwd without executing it."""
+    """Return a simple cd's known status and resulting cwd without executing it.
+
+    Documented flags are modeled (`cd [-L|[-P [-e]]] [--] dir`): ``-P``
+    resolves the target physically through symlinks, ``-L`` (the default)
+    resolves lexically, later flags override earlier ones, and ``-e`` only
+    affects exit status in cases a known-good directory cannot hit. Any
+    other option (``-@``, ``cd -``) stays unknown.
+    """
     segment = _strip_assignments(segment)
     if not segment or segment[0] != "cd":
         return None, cwd
-    arguments = [value for value in segment[1:] if value != "--"]
+    physical = False
+    options_done = False
+    arguments: list[str] = []
+    for value in segment[1:]:
+        if not options_done and value == "--":
+            options_done = True
+            continue
+        if not options_done and value.startswith("-") and value != "-":
+            flags = value[1:]
+            if not flags or set(flags) - {"L", "P", "e"}:
+                return None, cwd
+            for flag in flags:
+                if flag == "P":
+                    physical = True
+                elif flag == "L":
+                    physical = False
+            continue
+        arguments.append(value)
+        # Options end at the first operand: bash treats a later dash word as
+        # another operand (`cd nested -P` is "too many arguments" on current
+        # bash), so it must land in `arguments` and force the unknown path.
+        options_done = True
     if len(arguments) != 1 or arguments[0] == "-" or "$" in arguments[0]:
         return None, cwd
     target = Path(os.path.expanduser(arguments[0]))
     if not target.is_absolute():
         target = cwd / target
-    target = Path(os.path.abspath(target))
+    if physical:
+        resolved = _physical_cd_target(target)
+        if resolved is None:
+            return False, cwd
+        target = resolved
+    else:
+        target = Path(os.path.abspath(target))
     # The hook sees the command only after the shell ran. Do not propagate a
     # directory change that the shell could not have made: in
     # ``cd missing || python a.py`` the Python command runs from the old cwd.
     if not target.is_dir() or not os.access(target, os.X_OK):
         return False, cwd
     return True, target
+
+
+def _physical_cd_target(target: Path) -> Path | None:
+    """Emulate bash `cd -P`: resolve each component physically, in order.
+
+    Every component is resolved (symlinks included) before a following
+    `..` is applied, so a missing intermediate or a regular file followed
+    by `..` is a cd failure — never a lexical collapse. Implemented as an
+    explicit walk because `os.path.realpath(strict=True)` only rejects the
+    non-directory-before-`..` case on newer Python versions.
+    """
+    resolved = Path(target.anchor or "/")
+    for part in target.parts[1:]:
+        if part == ".":
+            continue
+        if part == "..":
+            if not resolved.is_dir():
+                return None
+            resolved = resolved.parent
+            continue
+        try:
+            resolved = Path(os.path.realpath(resolved / part, strict=True))
+        except OSError:
+            return None
+    return resolved
 
 
 def _apply_cd(segment: list[str], cwd: Path) -> Path:
@@ -828,19 +887,153 @@ def _jupyter_match_has_terminal_option(command: str, offset: int) -> bool:
     )
 
 
-def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
-    """Resolve preceding top-level ``cd`` commands for a command match."""
+_CWD_AFFECTING_BUILTINS = {"pushd", "popd", "source", ".", "eval"}
+_BUILTIN_LAUNCHER_PREFIXES = {"command", "builtin", "time"}
+_REDIRECTION_TOKEN_RE = re.compile(r"^(?:\d+|&)?(?:>>|>\||<>|>|<)")
+
+
+def _strip_redirection_prefix(
+    tokens: list[str],
+) -> tuple[list[str] | None, bool]:
+    """Consume leading redirection words and their separated targets.
+
+    A leading redirection leaves the following builtin running in the
+    parent shell (`>log cd nested` still changes the cwd), so callers must
+    classify what remains — and know that a redirection was present. A
+    dangling operator with no target in this segment (the tokenizer splits
+    `2>&1` at the `&`) makes the tail unknowable: None is returned and the
+    caller must treat the segment as unmodeled.
+    """
+    index = 0
+    stripped_any = False
+    while index < len(tokens):
+        match = _REDIRECTION_TOKEN_RE.match(tokens[index])
+        if match is None:
+            break
+        stripped_any = True
+        if len(tokens[index]) > match.end():
+            index += 1  # target or fd attached to the operator word
+        elif index + 1 < len(tokens):
+            index += 2  # separated target word
+        else:
+            return None, True
+    return tokens[index:], stripped_any
+
+
+def _strip_command_prefix_words(
+    tokens: list[str],
+) -> tuple[list[str] | None, bool]:
+    """Strip interleaved assignment and redirection words to a fixpoint."""
+    stripped_any = False
+    while True:
+        before = tokens
+        tokens = _strip_assignments(tokens)
+        tokens, had_redirection = _strip_redirection_prefix(tokens)
+        if tokens is None:
+            return None, True
+        stripped_any = stripped_any or had_redirection or tokens != before
+        if tokens == before:
+            return tokens, stripped_any
+
+
+def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
+    """True when a completed segment cannot change the cwd in unmodeled ways.
+
+    ``cd`` with a statically known status is modeled; other cwd-affecting
+    builtins (and ``command``-prefixed forms of them) are not — a following
+    trust decision must not assume the working directory it computed.
+    """
+    stripped = _strip_assignments(segment)
+    if not stripped:
+        return True
+    stripped, had_redirection = _strip_redirection_prefix(stripped)
+    if stripped is None:
+        return False
+    if not stripped:
+        return True
+    name = stripped[0]
+    if had_redirection and name in (
+        {"cd"} | _CWD_AFFECTING_BUILTINS | _BUILTIN_LAUNCHER_PREFIXES
+    ):
+        # `>log cd nested` still changes the cwd, but the cwd walker's
+        # _apply_cd never tracks redirection-prefixed segments — unmodeled.
+        return False
+    if name in _CWD_AFFECTING_BUILTINS:
+        return False
+    if name in _BUILTIN_LAUNCHER_PREFIXES:
+        # `command cd`, `builtin cd`, `builtin source`, and the `time`
+        # keyword all still run the builtin in the parent shell, so any
+        # cwd-affecting continuation (including a nested launcher) leaves
+        # the working directory unmodeled. Each launcher's own options are
+        # consumed first: `command [-pVv] [--]` (where -v/-V only describe —
+        # nothing executes), `builtin [--]`, `time [-p]`. An invalid option
+        # makes bash error without running anything, which keeps the cwd.
+        rest = stripped[1:]
+        if name == "time":
+            if rest[:1] == ["-p"]:
+                rest = rest[1:]
+            if rest[:1] == ["--"]:
+                rest = rest[1:]
+            # time's operand is a pipeline, so assignment prefixes and
+            # leading redirections still reach the timed builtin:
+            # `time X=1 >log cd nested` changes the cwd.
+            rest, _ = _strip_command_prefix_words(rest)
+            if rest is None:
+                return False
+        else:
+            while rest and rest[0].startswith("-") and rest[0] not in {"-", "--"}:
+                flags = set(rest[0][1:])
+                if name != "command" or not flags or flags - {"p", "V", "v"}:
+                    break
+                if flags & {"V", "v"}:
+                    return True
+                rest = rest[1:]
+            if rest[:1] == ["--"]:
+                rest = rest[1:]
+            rest, _ = _strip_command_prefix_words(rest)
+            if rest is None:
+                return False
+        follower = rest[0] if rest else ""
+        return follower not in (
+            {"cd"} | _CWD_AFFECTING_BUILTINS | _BUILTIN_LAUNCHER_PREFIXES
+        )
+    if name == "cd":
+        status, _ = _simple_cd_status(segment, cwd)
+        return status is not None
+    return True
+
+
+def _effective_cwd_state(
+    bash_cmd: str, offset: int, initial_cwd: Path
+) -> tuple[Path, bool]:
+    """Resolve preceding ``cd`` commands and report cwd-provenance fidelity.
+
+    Returns the inferred cwd plus a flag that is True only when every
+    completed segment in the prefix was fully modeled. The flag is
+    deliberately conservative — an unmodeled builtin inside an already
+    closed subshell also clears it — because its only consumer is the
+    accessor trust decision, where a false negative merely costs a
+    redundant reminder.
+    """
     tokens = _shell_tokens(bash_cmd[:offset])
     if tokens is None:
-        return initial_cwd
+        return initial_cwd, False
 
     cwd = initial_cwd
+    fully_modeled = True
     subshell_states: list[tuple[Path, bool, bool]] = []
     segment: list[str] = []
     segment_is_conditional = False
     chain_has_or = False
+
+    def complete_segment() -> None:
+        nonlocal fully_modeled
+        if not _segment_cwd_is_modeled(segment, cwd):
+            fully_modeled = False
+
     for token in tokens:
         if token in {"&&", "||"}:
+            complete_segment()
             if not segment_is_conditional:
                 # The first segment in an AND-OR list always executes.
                 cwd = _apply_cd(segment, cwd)
@@ -856,6 +1049,7 @@ def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
             if token == "||":
                 chain_has_or = True
         elif token in {";", "\n"}:
+            complete_segment()
             if not segment_is_conditional:
                 cwd = _apply_cd(segment, cwd)
             segment = []
@@ -863,16 +1057,25 @@ def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
             chain_has_or = False
         elif token in {"|", "&"}:
             # A cd in a pipeline/subshell does not reliably affect the parent.
+            complete_segment()
             segment = []
         elif token == "(":
+            complete_segment()
             segment = []
             subshell_states.append((cwd, segment_is_conditional, chain_has_or))
         elif token == ")":
+            complete_segment()
             segment = []
             if subshell_states:
                 cwd, segment_is_conditional, chain_has_or = subshell_states.pop()
         else:
             segment.append(token)
+    return cwd, fully_modeled
+
+
+def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
+    """Resolve preceding top-level ``cd`` commands for a command match."""
+    cwd, _ = _effective_cwd_state(bash_cmd, offset, initial_cwd)
     return cwd
 
 
@@ -1515,9 +1718,16 @@ def _detect_scripts_with_cwd(
             raw_path = path_words[0]
             if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES:
                 continue
-            expanded = _accessor_expanded_script_path(
-                m.group("path"), raw_path, effective_cwd
-            )
+            # The accessor dereferences a pointer relative to the effective
+            # cwd, so it may resolve only when every cwd change in the prefix
+            # was fully modeled; an unmodeled `pushd`/`source`/flagged-cd
+            # form means the pointer's directory is unknown (issue #71).
+            expanded = None
+            _, prefix_cwd_modeled = _effective_cwd_state(bash_cmd, m.start(), cwd)
+            if prefix_cwd_modeled:
+                expanded = _accessor_expanded_script_path(
+                    m.group("path"), raw_path, effective_cwd
+                )
             if expanded is not None:
                 unresolved = expanded
             else:

@@ -759,6 +759,189 @@ def test_symlinked_alias_of_verified_root_is_still_excluded(tmp_path: Path) -> N
     assert detect_scripts(cmd, tmp_path) == []
 
 
+def test_flagged_cd_resolves_pointer_against_the_real_directory(
+    tmp_path: Path,
+) -> None:
+    """Issue #71: `cd -P nested` must resolve the pointer under nested/, not
+    silently retain the outer cwd whose pointer is verified."""
+    nested = tmp_path / "nested"
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    _seed_plugin_pointer(nested, user_tree)
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    cmd = (
+        "cd -P nested && "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+    _seed_plugin_pointer(nested, _seed_verified_install(tmp_path))
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "cd_form",
+    ["cd -L nested", "cd -- nested", "cd -P -e nested", "cd -LP nested"],
+)
+def test_modeled_cd_flag_forms_follow_the_directory(
+    tmp_path: Path, cd_form: str
+) -> None:
+    nested = tmp_path / "nested"
+    _seed_plugin_pointer(nested, _seed_verified_install(tmp_path))
+    cmd = (
+        f"{cd_form} && "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_cd_dash_p_fails_on_missing_intermediate_component(
+    tmp_path: Path,
+) -> None:
+    """PR #72 round-3 P1: bash `cd -P nested/missing/..` fails because the
+    physical walk hits the missing component before `..`; non-strict
+    realpath must not collapse it into a successful cd at `nested`."""
+    nested = tmp_path / "nested"
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    _seed_plugin_pointer(nested, _seed_verified_install(tmp_path))
+    _seed_plugin_pointer(tmp_path, user_tree)
+    cmd = (
+        "cd -P nested/missing/..; "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_cd_dash_p_fails_on_file_component_before_dotdot(tmp_path: Path) -> None:
+    """PR #72 round-4 P1: `cd -P nested/file/..` is ENOTDIR in bash; the
+    lexical `file/..` collapse must not turn it into a success at nested."""
+    nested = tmp_path / "nested"
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    _seed_plugin_pointer(nested, _seed_verified_install(tmp_path))
+    _seed_plugin_pointer(tmp_path, user_tree)
+    (nested / "file").write_text("just a file\n")
+    cmd = (
+        "cd -P nested/file/..; "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_cd_dash_p_with_existing_intermediate_component_succeeds(
+    tmp_path: Path,
+) -> None:
+    nested = tmp_path / "nested"
+    (nested / "sub").mkdir(parents=True)
+    _seed_plugin_pointer(nested, _seed_verified_install(tmp_path))
+    cmd = (
+        "cd -P nested/sub/.. && "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_cd_dash_p_resolves_symlinks_physically(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    _seed_plugin_pointer(real, _seed_verified_install(tmp_path))
+    (tmp_path / "linkdir").symlink_to(real)
+    cmd = (
+        "cd -P linkdir && "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_flags_after_the_cd_operand_are_not_options(tmp_path: Path) -> None:
+    """PR #72 P1: `cd nested -P` is an error (or version-dependent) in bash —
+    the hook must not follow `nested` while bash stays in the outer dir."""
+    nested = tmp_path / "nested"
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    _seed_plugin_pointer(nested, _seed_verified_install(tmp_path))
+    _seed_plugin_pointer(tmp_path, user_tree)
+    cmd = (
+        "cd nested -P; "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "pushd nested",
+        "cd -@ nested",
+        "source setup.sh",
+        ". setup.sh",
+        "eval 'cd nested'",
+        # Launcher-prefixed builtins still change the parent shell's cwd
+        # (PR #72 P1): `builtin cd`, `command cd`, and the `time` keyword.
+        "builtin cd nested",
+        "command cd nested",
+        "time cd nested",
+        "time -p cd nested",
+        "builtin source setup.sh",
+        "command builtin cd nested",
+        # Launcher options must be consumed before classifying the follower
+        # (PR #72 round-2 P1): these still run cd in the parent shell.
+        "command -p cd nested",
+        "command -- cd nested",
+        "command -p -- cd nested",
+        "builtin -- cd nested",
+        # `--` is a valid option terminator for the time keyword too
+        # (PR #72 round-3 P1).
+        "time -- cd nested",
+        "time -p -- cd nested",
+        # time's operand is a pipeline, so assignment prefixes still reach
+        # the builtin (PR #72 round-4 P1).
+        "time X=1 cd nested",
+        "time -p X=1 cd nested",
+        "time -- X=1 Y=2 cd nested",
+        # Leading redirections leave the builtin running in the parent shell
+        # (PR #72 round-5 P1) — for time, launchers, and plain segments.
+        "time >timing.log cd nested",
+        "time -p 2>/dev/null cd nested",
+        "time > timing.log cd nested",
+        "time X=1 >log 2>&1 cd nested",
+        ">log cd nested",
+        "2>&1 cd nested",
+        "command >log cd nested",
+        "builtin -- >log cd nested",
+    ],
+)
+def test_unmodeled_cwd_change_fails_closed_for_accessor_trust(
+    tmp_path: Path, prefix: str
+) -> None:
+    """Issue #71: an unmodeled cwd-affecting builtin before the accessor
+    means the pointer's directory is unknown — never trust the outer one."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (tmp_path / "setup.sh").write_text("cd nested\n")
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    cmd = (
+        f"{prefix} && "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_command_describe_mode_does_not_block_accessor_trust(
+    tmp_path: Path,
+) -> None:
+    # `command -v cd nested` only PRINTS; nothing changes the cwd, so the
+    # verified outer pointer remains trustworthy.
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    cmd = (
+        "command -v cd nested && "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert detect_scripts(cmd, tmp_path) == []
+
+
 def test_bare_accessor_is_never_attributed_or_suppressed(tmp_path: Path) -> None:
     """Codex P2, round 11 on PR #70: an unquoted substitution field-splits,
     so its executed argv is statically unknowable. It must be rejected
