@@ -259,11 +259,83 @@ def test_build_manifest_orders_chronologically_and_dedupes() -> None:
     assert m["git_sha"] == "deadbeef"
     assert sorted(m["agents_seen"]) == ["abc", "main"]
     assert m["summary"]["total_wall_seconds"] == 4  # round(1.0 + 3.0) == 4
+    assert m["summary"]["timed_action_count"] == 2
+    assert m["summary"]["total_action_count"] == 2
+    assert m["summary"]["known_exit_count"] == 2
+    assert m["summary"]["failed_action_count"] == 0
     inputs = {r["path"] for r in m["summary"]["unique_inputs"]}
     outputs = {r["path"] for r in m["summary"]["unique_outputs"]}
     assert inputs == {"data/x.parquet"}  # deduped
     assert outputs == {"out/y.parquet", "out/z.parquet"}
     assert m["summary"]["scripts_executed"] == ["a.py", "b.py"]
+
+
+def _minimal_event(ts: str, **overrides) -> dict:
+    event = {
+        "ts": ts,
+        "agent_id": None,
+        "agent_type": None,
+        "bash_cmd": "python a.py",
+        "bash_exit": None,
+        "bash_wall_s": None,
+        "script": "a.py",
+        "script_sha256": None,
+        "script_source": None,
+        "git_sha": None,
+        "inputs": [],
+        "outputs": [],
+        "filters_detected": [],
+        "seeds_detected": [],
+    }
+    event.update(overrides)
+    return event
+
+
+def test_all_unknown_wall_times_report_null_total_not_zero() -> None:
+    """Issue #69: missing host telemetry must not masquerade as a measured 0."""
+    events = [
+        _minimal_event("2026-08-07T12:00:00Z"),
+        _minimal_event("2026-08-07T12:00:01Z"),
+    ]
+    m = build_manifest(events, "sid", "/repo", [])
+    assert m["summary"]["total_wall_seconds"] is None
+    assert m["summary"]["timed_action_count"] == 0
+    assert m["summary"]["total_action_count"] == 2
+    assert m["summary"]["known_exit_count"] == 0
+    assert m["summary"]["failed_action_count"] == 0
+
+
+def test_partial_wall_time_coverage_is_explicit() -> None:
+    events = [
+        _minimal_event("2026-08-07T12:00:00Z", bash_wall_s=2.4, bash_exit=0),
+        _minimal_event("2026-08-07T12:00:01Z"),
+        _minimal_event("2026-08-07T12:00:02Z", bash_wall_s=1.4, bash_exit=1),
+    ]
+    m = build_manifest(events, "sid", "/repo", [])
+    assert m["summary"]["total_wall_seconds"] == 4  # round(2.4 + 1.4)
+    assert m["summary"]["timed_action_count"] == 2
+    assert m["summary"]["total_action_count"] == 3
+    assert m["summary"]["known_exit_count"] == 2
+    assert m["summary"]["failed_action_count"] == 1
+
+
+def test_unknown_exit_is_not_interpreted_as_success_or_failure() -> None:
+    events = [
+        _minimal_event("2026-08-07T12:00:00Z", bash_exit=True),
+        _minimal_event("2026-08-07T12:00:01Z", bash_wall_s=True),
+    ]
+    m = build_manifest(events, "sid", "/repo", [])
+    assert m["summary"]["known_exit_count"] == 0
+    assert m["summary"]["failed_action_count"] == 0
+    assert m["summary"]["timed_action_count"] == 0
+    assert m["summary"]["total_wall_seconds"] is None
+
+
+def test_empty_manifest_reports_no_fabricated_telemetry() -> None:
+    m = build_manifest([], "sid", "/repo", [])
+    assert m["summary"]["total_wall_seconds"] is None
+    assert m["summary"]["timed_action_count"] == 0
+    assert m["summary"]["total_action_count"] == 0
 
 
 # ---------- extract (end-to-end) ----------

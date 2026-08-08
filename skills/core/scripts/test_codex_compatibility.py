@@ -1894,6 +1894,14 @@ def test_codex_post_tool_use_ignores_mycelium_structure_validator(tmp_path):
         "finalize_session_log.py",
         "session_file_changes.py",
         "validate_review_report.py",
+        # Helpers omitted from the registry before issue #69: they opened a
+        # post-action cycle and appeared in scientific lineage manifests.
+        "recall_lessons.py",
+        "detect_recurrence.py",
+        "upsert_table_row.py",
+        "crystallize_findings.py",
+        "extract_data_lineage.py",
+        "knowledge_map/cli.py",
     ],
 )
 def test_codex_post_tool_use_ignores_mycelium_control_plane_utilities(

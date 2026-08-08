@@ -185,15 +185,85 @@ IGNORED_PYTHON_MODULES = {
     "venv",
     "zipfile",
 }
-IGNORED_SCRIPT_SUFFIXES = {
-    "skills/core/scripts/finalize_handoff.py",
-    "skills/core/scripts/finalize_session_log.py",
-    "skills/core/scripts/generate_index.py",
-    "skills/core/scripts/session_file_changes.py",
-    "skills/core/scripts/upsert_registry_row.py",
-    "skills/core/scripts/validate_review_report.py",
-    "skills/core/scripts/validate_structure.py",
-}
+# Mycelium control-plane helpers must never be classified as analysis: they
+# would contaminate scientific lineage and re-open the post-action cycle that
+# the lifecycle itself asked the agent to complete (issue #69). The registry
+# is the union of a static inventory (kept complete by a regression test that
+# walks the shipped tree) and an import-time scan of this module's own
+# directory, so a future helper is excluded even if the inventory lags.
+_MANAGED_SCRIPTS_DIR_SUFFIX = "skills/core/scripts/"
+_STATIC_MANAGED_SCRIPT_RELPATHS = frozenset(
+    {
+        "crystallize_findings.py",
+        "detect_recurrence.py",
+        "extract_data_lineage.py",
+        "extract_data_lineage_event.py",
+        "finalize_handoff.py",
+        "finalize_session_log.py",
+        "generate_index.py",
+        "init_knowledge.py",
+        "init_repo.py",
+        "install_convention.py",
+        "migrate_existing_repos.py",
+        "mycelium_locks.py",
+        "recall_lessons.py",
+        "register_value.py",
+        "render_report_values_tex.py",
+        "session_file_changes.py",
+        "upsert_registry_row.py",
+        "upsert_table_row.py",
+        "validate_review_report.py",
+        "validate_structure.py",
+        "knowledge_map/__main__.py",
+        "knowledge_map/build_graph.py",
+        "knowledge_map/build_vault.py",
+        "knowledge_map/cli.py",
+        "knowledge_map/concept_labeler.py",
+        "knowledge_map/concept_registry.py",
+        "knowledge_map/extract_entries.py",
+        "knowledge_map/extract_logs.py",
+        "knowledge_map/graph_model.py",
+        "knowledge_map/link_entries.py",
+        "knowledge_map/link_logs.py",
+        "knowledge_map/propose_concepts.py",
+        "knowledge_map/propose_model.py",
+        "knowledge_map/render_views.py",
+    }
+)
+
+
+def _shipped_managed_script_relpaths() -> frozenset[str]:
+    """Every .py file shipped beside this module, as scripts-dir relpaths."""
+    scripts_dir = Path(__file__).resolve().parent
+    found: set[str] = set()
+    try:
+        for path in scripts_dir.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            found.add(path.relative_to(scripts_dir).as_posix())
+    except OSError:
+        pass
+    return frozenset(found)
+
+
+IGNORED_SCRIPT_SUFFIXES = frozenset(
+    _MANAGED_SCRIPTS_DIR_SUFFIX + relpath
+    for relpath in _STATIC_MANAGED_SCRIPT_RELPATHS | _shipped_managed_script_relpaths()
+)
+
+
+def _is_managed_utility_path(resolved: Path) -> bool:
+    """True when an absolute script path is a bundled Mycelium helper.
+
+    Matching the `skills/core/scripts/<relpath>` suffix of the normalized
+    absolute path covers the versioned plugin cache, a source checkout, and
+    relative invocations, while a same-named user script anywhere else in a
+    project remains eligible as real analysis.
+    """
+    posix = resolved.as_posix()
+    return any(posix.endswith(suffix) for suffix in IGNORED_SCRIPT_SUFFIXES)
+
+
 IGNORED_SCRIPT_BASENAMES = {"setup.py"}
 ANALYSIS_PATTERNS = (
     RX_PYTHON_C,
@@ -1288,14 +1358,14 @@ def _detect_scripts_with_cwd(
             if len(path_words) != 1:
                 continue
             raw_path = path_words[0]
-            if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES or any(
-                raw_path.endswith(suffix) for suffix in IGNORED_SCRIPT_SUFFIXES
-            ):
+            if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES:
                 continue
             path = Path(raw_path)
             if not path.is_absolute():
                 path = effective_cwd / path
             path = Path(os.path.abspath(path))
+            if _is_managed_utility_path(path):
+                continue
             if path not in seen_paths:
                 out.append((path, None, effective_cwd))
                 seen_paths.add(path)

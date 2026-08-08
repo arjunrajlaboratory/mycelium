@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,119 @@ def test_finalizer_is_idempotent(tmp_path):
     _log(path)
 
     _finalize(path)
+    first = path.read_text()
+    _finalize(path)
+
+    assert path.read_text() == first
+    assert path.read_text().count("Session ended") == 1
+
+
+def _finalization_views(content: str) -> tuple[tuple, tuple, list[str]]:
+    """Parse (frontmatter, footer, file list) finalization values from a log."""
+    front = re.search(
+        r"ended: (?P<ended>[^\n]+)\n.*?"
+        r"duration_minutes: (?P<duration>\d+)\n"
+        r"files_changed: (?P<files>\d+)\n",
+        content,
+        re.DOTALL,
+    )
+    assert front is not None, content
+    footer = re.search(
+        r"^### (?P<time>[^\n]+) — Session ended "
+        r"\((?P<duration>\d+)m, (?P<files>\d+) files\)$",
+        content,
+        re.MULTILINE,
+    )
+    assert footer is not None, content
+    listed = re.findall(r"^- `([^\n`]+)`$", content, re.MULTILINE)
+    return (
+        (front.group("duration"), front.group("files")),
+        (footer.group("duration"), footer.group("files")),
+        listed,
+    )
+
+
+def test_retry_with_new_values_rewrites_footer_and_file_list(tmp_path):
+    path = tmp_path / "session.md"
+    _log(path)
+    _finalize(path)
+
+    MODULE.finalize_session_log(
+        path,
+        ended="2026-08-01T18:44:00-0400",
+        duration_minutes=9,
+        files_changed=3,
+        end_time="18:44",
+        changed_paths=["src/a.py", "data/input.csv", "results/out.csv"],
+    )
+
+    content = path.read_text()
+    assert content.count("Session ended") == 1
+    assert content.count("### Files Modified") == 1
+    frontmatter, footer, listed = _finalization_views(content)
+    assert frontmatter == ("9", "3")
+    assert footer == frontmatter
+    assert listed == ["src/a.py", "data/input.csv", "results/out.csv"]
+    assert "ended: 2026-08-01T18:44:00-0400" in content
+    assert "### 18:44 — Session ended" in content
+    assert "7m" not in content
+    assert "18:42" not in content
+
+
+def test_retry_with_fewer_files_shrinks_file_list(tmp_path):
+    path = tmp_path / "session.md"
+    _log(path)
+    _finalize(path)
+
+    MODULE.finalize_session_log(
+        path,
+        ended="2026-08-01T18:44:00-0400",
+        duration_minutes=9,
+        files_changed=0,
+        end_time="18:44",
+        changed_paths=[],
+    )
+
+    content = path.read_text()
+    assert content.count("Session ended") == 1
+    assert "(9m, 0 files)" in content
+    assert "Files Modified" not in content
+    assert "- `src/a.py`" not in content
+
+
+def test_retry_preserves_body_written_after_first_footer(tmp_path):
+    path = tmp_path / "session.md"
+    _log(path)
+    _finalize(path)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n### 18:43 — Continued work after blocked Stop\n- more\n")
+
+    MODULE.finalize_session_log(
+        path,
+        ended="2026-08-01T18:50:00-0400",
+        duration_minutes=15,
+        files_changed=3,
+        end_time="18:50",
+        changed_paths=["src/a.py", "data/input.csv", "results/out.csv"],
+    )
+
+    content = path.read_text()
+    assert "Continued work after blocked Stop" in content
+    assert content.count("Session ended") == 1
+    frontmatter, footer, _ = _finalization_views(content)
+    assert frontmatter == footer == ("15", "3")
+    assert content.index("Continued work") < content.index("Session ended")
+
+
+def test_retry_collapses_duplicate_legacy_footers(tmp_path):
+    path = tmp_path / "session.md"
+    _log(path)
+    _finalize(path)
+    duplicated = path.read_text()
+    footer_start = duplicated.index("\n### 18:42 — Session ended")
+    path.write_text(duplicated + duplicated[footer_start:])
+    assert path.read_text().count("Session ended") == 2
+
     _finalize(path)
 
     assert path.read_text().count("Session ended") == 1

@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Stop retries can no longer publish self-contradicting session logs.** A
+  retry that recomputes duration or changed files now rebuilds the
+  human-readable `Session ended` footer and `Files Modified` list from the
+  same canonical values written to the frontmatter and `LOG_REGISTRY.md`,
+  and collapses duplicated legacy footers, so the three representations of a
+  finalized session always agree ([#69]).
+- **Bundled Mycelium helpers no longer self-trigger bookkeeping or pollute
+  scientific lineage.** The managed-utility exclusion registry now covers
+  every script shipped under `skills/core/scripts/` (including
+  `recall_lessons.py`, `detect_recurrence.py`, `upsert_table_row.py`,
+  `crystallize_findings.py`, `extract_data_lineage.py`, and the
+  knowledge-map tools), is derived from the shipped tree so future helpers
+  are excluded automatically, and matches the resolved absolute script path
+  so source, installed, and relative invocations are all silent while
+  same-named user scripts elsewhere remain eligible analysis ([#69]).
+- **Missing runtime telemetry is reported as unknown, not zero.** When a host
+  supplies no per-action wall time (the current Codex Bash PostToolUse
+  payload), the lineage manifest now reports `total_wall_seconds: null`
+  together with new `timed_action_count`, `total_action_count`,
+  `known_exit_count`, and `failed_action_count` coverage fields; unknown
+  exit codes count as neither success nor failure ([#69]).
+
+[#69]: https://github.com/arjunrajlaboratory/mycelium/issues/69
+
 ## [0.6.0] - 2026-08-02
 
 ### Added

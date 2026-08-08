@@ -233,6 +233,10 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] The canonical current Codex Bash PostToolUse payload with an empty
       `tool_response` is covered; analysis is still attributed, but unknown
       exit status and wall time remain null rather than being fabricated.
+- [ ] Unknown telemetry stays unknown through consolidation: manifest summaries
+      report a null total when no action carried a wall time, expose
+      timed/total and known-exit/failed coverage counts, and never interpret
+      an unknown exit as success or failure.
 - [ ] Failed commands that are provably reached through a known-success AND
       prefix, or started as a pipeline component, still produce lineage; shell
       operators appearing only inside an unquoted comment produce nothing.
@@ -328,6 +332,11 @@ hook, filesystem, or lifecycle boundaries.
       completion footer are published as one atomic replacement; an injected
       write/replace failure leaves the original unfinalized log and active
       retry markers intact.
+- [ ] A Stop retry that recomputes duration or changed files rebuilds the end
+      footer, `Modified` summary, and `Files Modified` list from the same
+      canonical values written to frontmatter and the registry, collapses
+      duplicated legacy footers to one, and preserves body content appended
+      between attempts.
 - [ ] Lock acquisition has bounded failure behavior; a recorded dead owner is
       recoverable before that bound, while a recent ownerless lock retains a
       publication-race grace period.
@@ -465,6 +474,9 @@ exercise them.
 | A pre-upgrade flat transaction exists when a fresh identified root starts | An exact flat owner match continues in place; a nonmatching identity receives a new scoped transaction without touching the flat marker, owner, lineage, or retry evidence. |
 | Two registry/index writers read the same initial bytes and finish in the opposite order | A stable durable-file lock covers each complete derivation, every distinct row survives, output remains structurally valid, and the existing target mode is preserved. |
 | Mycelium runs `generate_index.py`, registry/log/handoff finalizers, session accounting, or review validation | These control-plane utilities do not open or refresh an analysis bookkeeping cycle; a same-named user script outside the managed path remains eligible. |
+| Any script shipped under `skills/core/scripts/` (including `recall_lessons.py`, `detect_recurrence.py`, `upsert_table_row.py`, `crystallize_findings.py`, `extract_data_lineage.py`, and knowledge-map tools) runs via source, installed-cache, or relative path | No post-action reminder and no lineage event is produced; a sweep enumerating every bundled `.py` proves the exclusion registry is complete. |
+| Stop finalizes a log, then a retry supplies a different duration, file count, and file list | Frontmatter, footer, `Modified` summary, file list, and registry row all report the retry values with exactly one footer; body content appended between attempts survives. |
+| Every action in a session has `bash_wall_s` and `bash_exit` null | The manifest reports `total_wall_seconds: null` with zero timed/known-exit coverage and full `total_action_count`; nothing reads as a measured zero or an implicit success. |
 | Stop finalizes a registry row already enriched by the agent | Date, branch, duration, file count, status, and log link become factual final values while Summary, Key Outputs, and Tags remain authored and byte-equivalent at the cell level. |
 | A review report is rendered from multiple specialist outputs | Same-root findings are deduplicated, IDs are globally consecutive, per-category/global tallies match the rendered headings, and cross-input schema/feature/label comparability was checked. |
 | An analysis composes existing data paths dynamically from `Path`, dictionaries, or loop variables | Unique filenames reachable from recognized I/O path arguments are recovered conservatively after execution; direction follows the call, while ambiguous or over-bound searches remain unresolved with an explicit warning. |

@@ -17,7 +17,16 @@ import sys
 import tempfile
 
 
-_END_FOOTER_RE = re.compile(r"^### .* — Session ended \(", re.MULTILINE)
+# The complete machine-owned end-of-session block: the "Session ended"
+# heading, its optional "- Modified:" summary line, and the optional
+# "### Files Modified" list. Authored prose never uses this exact shape, so
+# a retry can replace the whole block with canonical values.
+_END_FOOTER_BLOCK_RE = re.compile(
+    r"^### [^\n]* — Session ended \([^\n]*\)\n"
+    r"(?:- Modified:[^\n]*\n)?"
+    r"(?:\n### Files Modified\n(?:- `[^\n]*`\n?)*)?",
+    re.MULTILINE,
+)
 
 
 def _replace_frontmatter_field(frontmatter: str, field: str, value: str) -> str:
@@ -57,11 +66,15 @@ def _completed_log(
         frontmatter, "files_changed", str(files_changed)
     )
 
-    # A retry against a legacy partially finalized log repairs its frontmatter
-    # without creating a second footer. New finalizations publish both pieces
-    # together and therefore never expose that partial state.
-    if _END_FOOTER_RE.search(body):
-        return frontmatter + body
+    # A Stop retry recomputes duration and changed files, so an end footer
+    # published by an earlier attempt must be rebuilt from the same canonical
+    # values now going into the frontmatter and registry — never left stale.
+    # Removing every existing block also collapses duplicated legacy footers.
+    body = _END_FOOTER_BLOCK_RE.sub("", body)
+    if body.strip():
+        body = body.rstrip("\n") + "\n"
+    else:
+        body = ""
 
     footer = (
         f"\n### {end_time} — Session ended "

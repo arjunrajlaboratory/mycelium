@@ -130,12 +130,23 @@ captured.
   "summary": {
     "unique_inputs":  [{"path", "sha256"}, ...],
     "unique_outputs": [{"path", "sha256"}, ...],
-    "total_wall_seconds": 0,
+    "total_wall_seconds": 12,
+    "timed_action_count": 5,
+    "total_action_count": 7,
+    "known_exit_count": 5,
+    "failed_action_count": 0,
     "scripts_executed": ["analysis/foo.py", "(inline ab12cd34ef56)", ...]
   },
   "extraction_warnings": [...]
 }
 ```
+
+`total_wall_seconds` sums only actions whose host payload carried a wall
+time and is `null` when none did (some hosts, including current Codex Bash
+PostToolUse, omit per-action timing). The `timed_action_count` /
+`total_action_count` pair makes partial timing coverage explicit, and
+`known_exit_count` / `failed_action_count` apply the same rule to exit
+codes: an unknown exit is neither a success nor a failure.
 
 `scripts_executed` uses the script path when present, falling back to
 `(inline <sha-prefix>)` so inline-only sessions still produce a populated

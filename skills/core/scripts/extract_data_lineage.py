@@ -24,7 +24,11 @@ Output:
           "summary": {
             "unique_inputs": [{"path", "sha256"}, ...],
             "unique_outputs": [{"path", "sha256"}, ...],
-            "total_wall_seconds": N,
+            "total_wall_seconds": N | null,   # null when no action was timed
+            "timed_action_count": N,
+            "total_action_count": N,
+            "known_exit_count": N,
+            "failed_action_count": N,
             "scripts_executed": [...]
           },
           "extraction_warnings": [...]
@@ -211,7 +215,14 @@ def build_manifest(
     unique_inputs: dict[str, dict[str, Any]] = {}
     unique_outputs: dict[str, dict[str, Any]] = {}
     scripts_executed: list[str] = []
+    # Hosts may legitimately omit wall time and exit status (the current Codex
+    # Bash PostToolUse payload carries neither). Unknown telemetry must stay
+    # unknown: totals cover only timed actions, coverage counters make partial
+    # telemetry explicit, and an unknown exit is neither success nor failure.
     total_wall = 0.0
+    timed_action_count = 0
+    known_exit_count = 0
+    failed_action_count = 0
     for e in sorted_events:
         # Prefer the script path; fall back to a label for inline `-c` / `-e`
         # invocations so the summary records every action, not just file-backed
@@ -224,8 +235,15 @@ def build_manifest(
         )
         if entry and entry not in scripts_executed:
             scripts_executed.append(entry)
-        if isinstance(e.get("bash_wall_s"), (int, float)):
-            total_wall += float(e["bash_wall_s"])
+        wall = e.get("bash_wall_s")
+        if isinstance(wall, (int, float)) and not isinstance(wall, bool):
+            total_wall += float(wall)
+            timed_action_count += 1
+        exit_code = e.get("bash_exit")
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+            known_exit_count += 1
+            if exit_code != 0:
+                failed_action_count += 1
         for warning in e.get("lineage_warnings", []):
             label = e.get("script") or e.get("bash_cmd") or f"event at {e['ts']}"
             rendered = f"{label}: {warning}"
@@ -254,7 +272,13 @@ def build_manifest(
         "summary": {
             "unique_inputs": list(unique_inputs.values()),
             "unique_outputs": list(unique_outputs.values()),
-            "total_wall_seconds": int(round(total_wall)),
+            "total_wall_seconds": (
+                int(round(total_wall)) if timed_action_count else None
+            ),
+            "timed_action_count": timed_action_count,
+            "total_action_count": len(sorted_events),
+            "known_exit_count": known_exit_count,
+            "failed_action_count": failed_action_count,
             "scripts_executed": scripts_executed,
         },
         "extraction_warnings": warnings,

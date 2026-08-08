@@ -162,11 +162,18 @@ a later patch invents zero and mislabels failed analysis as successful.
 **Invariant:** Capture the automatic hook stdin from the current host before
 defining its wire contract. Preserve unknown fields as unknown. An exit event
 visible later in a CLI stream cannot be attributed by a hook that ran earlier.
+Unknownness must survive aggregation: a consolidated summary sums only known
+values, reports null (or omits the total) when nothing was measured, and
+publishes explicit coverage counts instead of letting missing telemetry read
+as a measured zero or an implicit success.
 
 **Regression evidence:** Retain a sanitized canonical payload fixture. Current
 Codex Bash PostToolUse supplies an empty `tool_response`; require lineage to
 record the execution with `bash_exit` and `bash_wall_s` as null, while retaining
-decoders for richer structured payloads a host may provide later.
+decoders for richer structured payloads a host may provide later. Consolidate
+events whose telemetry is entirely null and require a null total with zero
+coverage; consolidate mixed events and require both the partial sum and its
+coverage counts.
 
 ## 12. Lock recovery waits longer than acquisition
 
@@ -284,11 +291,18 @@ creating a Stop loop that the lifecycle itself continually refreshes.
 
 **Invariant:** Classify the executed script path, not its basename or argument
 text. Mycelium-managed utility paths are silent; same-named user analysis
-scripts elsewhere remain eligible.
+scripts elsewhere remain eligible. A hand-enumerated exclusion list goes stale
+the moment a helper is added (issue #69 shipped with `recall_lessons.py`,
+`detect_recurrence.py`, `upsert_table_row.py`, `crystallize_findings.py`, and
+`extract_data_lineage.py` missing), so the registry must be derived from the
+shipped scripts tree — or a regression test must walk that tree and fail when
+a bundled helper is not excluded.
 
 **Regression evidence:** Exercise every managed helper through both source and
 versioned installed paths, plus user-script near neighbors. Require no reminder
-or lineage event for the former and normal detection for the latter.
+or lineage event for the former and normal detection for the latter. Include a
+sweep that enumerates every `.py` shipped under the managed scripts directory
+so a newly added helper cannot reintroduce the gap.
 
 ## 19. Machine finalization overwrites authored semantics
 
@@ -514,3 +528,24 @@ heading, and a section whose only body line is removed by lifecycle cleanup as
 negatives; require one ordered, nonempty canonical set in the accepted durable
 handoff. Invoke finalization directly on the cleanup-emptied case and require
 the private source and shared destination to remain byte-identical.
+
+## 32. A retry refreshes one representation of a finalized fact but not its siblings
+
+**Failure:** A Stop retry recomputes duration and changed files, rewrites the
+session frontmatter and registry row with the new values, but skips the
+existing human-readable `Session ended` footer and `Files Modified` list to
+avoid duplicating them. The finalized log then disagrees with itself: three
+representations of the same facts, two current and one stale.
+
+**Invariant:** When one artifact stores the same fact in multiple
+representations, every finalization attempt derives all of them from the same
+canonical arguments in the same atomic replacement. Skipping a representation
+because it already exists is only sound when its values are proven equal;
+otherwise replace the machine-owned block wholesale. Deduplication is achieved
+by removing prior machine-owned blocks, not by refusing to write current ones.
+
+**Regression evidence:** Finalize a log once, retry with different duration,
+file count, and file list, and require frontmatter, footer, `Modified`
+summary, file list, and registry row to agree exactly with the retry values,
+with exactly one footer. Also require duplicated legacy footers to collapse
+and body content appended between attempts to survive.

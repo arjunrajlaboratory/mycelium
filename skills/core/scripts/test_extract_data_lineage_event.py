@@ -438,6 +438,77 @@ def test_detect_scripts_empty_for_non_analysis(tmp_path: Path) -> None:
     assert detect_scripts("ls -la", tmp_path) == []
 
 
+# ---------- managed-utility exclusion (control-plane scripts) ----------
+
+_SHIPPED_SCRIPTS_DIR = Path(__file__).parent
+
+
+def _shipped_helper_relpaths() -> list[str]:
+    return sorted(
+        path.relative_to(_SHIPPED_SCRIPTS_DIR).as_posix()
+        for path in _SHIPPED_SCRIPTS_DIR.rglob("*.py")
+        if "__pycache__" not in path.parts
+    )
+
+
+def test_every_bundled_core_helper_is_excluded_from_detection(tmp_path: Path) -> None:
+    """No bundled helper may create lineage or post-action work — issue #69."""
+    missing: list[str] = []
+    for rel in _shipped_helper_relpaths():
+        installed = (
+            "/home/user/.claude/plugins/cache/mycelium/mycelium/9.9.9/"
+            f"skills/core/scripts/{rel}"
+        )
+        source = f"/home/user/code/mycelium/skills/core/scripts/{rel}"
+        relative = f"skills/core/scripts/{rel}"
+        for form in (installed, source, relative):
+            if detect_scripts(f'python3 "{form}" --help', tmp_path):
+                missing.append(form)
+    assert missing == []
+
+
+@pytest.mark.parametrize(
+    "helper",
+    [
+        "recall_lessons.py",
+        "detect_recurrence.py",
+        "upsert_table_row.py",
+        "crystallize_findings.py",
+        "extract_data_lineage.py",
+        "extract_data_lineage_event.py",
+        "knowledge_map/cli.py",
+    ],
+)
+def test_issue_69_omitted_helpers_are_excluded(tmp_path: Path, helper: str) -> None:
+    cmd = (
+        "python3 /home/user/.claude/plugins/cache/mycelium/mycelium/0.6.0/"
+        f"skills/core/scripts/{helper} --living-dir .living"
+    )
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_relative_managed_helper_after_cd_is_excluded(tmp_path: Path) -> None:
+    (tmp_path / "skills" / "core" / "scripts").mkdir(parents=True)
+    cmd = "cd skills/core && python3 scripts/recall_lessons.py --id L-6"
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "user_script",
+    [
+        "analysis/recall_lessons.py",
+        "recall_lessons.py",
+        "analysis/crystallize_findings.py",
+        "my/skills/detect_recurrence.py",
+    ],
+)
+def test_same_named_user_script_elsewhere_is_still_analysis(
+    tmp_path: Path, user_script: str
+) -> None:
+    out = detect_scripts(f"python3 {user_script}", tmp_path)
+    assert out == [(tmp_path / user_script, None)]
+
+
 # ---------- write_events (atomic append) ----------
 
 
