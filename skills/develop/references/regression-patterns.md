@@ -619,6 +619,8 @@ over predicting the interpreter inside the gate.
 matched pair: the divergent input stays detected/preserved, and the
 canonical input still verifies/collapses. Cover quoting variants, trailing
 and embedded whitespace, CRLF and NUL bytes, field-splitting inputs,
-mismatched fence delimiters, and authored content adjacent to generated
+mismatched fence delimiters, flagged builtin forms (`cd -P` resolves
+physically; unmodeled `pushd`/`source`/`eval` prefixes make a dependent
+trust decision fail closed), and authored content adjacent to generated
 blocks, and require unparseable words to be skipped without raising out of
 the hook.

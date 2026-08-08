@@ -501,6 +501,11 @@ exercise them.
 
 ## Validation Gate
 
+For releases, `python3 tools/release_gate.py` (see `docs/release-process.md`)
+runs this gate fail-fast from one immutable candidate and records the
+evidence summary; CI runs the platform-sensitive subset on both
+`ubuntu-latest` and `macos-latest`.
+
 Adapt individual commands when the repository layout changes, but preserve the
 coverage represented by every line.
 

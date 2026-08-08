@@ -1,5 +1,14 @@
 name: Validate Skills and Conventions
 
+# CI platform baseline (issue #66): the full validation runs on ubuntu-latest
+# (required check "validate"); the platform-sensitive subset — lifecycle shell
+# suites, Python compatibility tests, and the fresh-init smoke — also runs on
+# macos-latest ("validate-macos") because Mycelium supports both hosts on
+# macOS and Linux, and BSD/GNU differences in date, stat, sed, mktemp, and
+# shell behavior have produced real regressions. Baseline: Python 3.11,
+# Bash >= 4 (Homebrew bash on the macOS runners; verified by the suites'
+# own version checks), GNU coreutils on Linux and BSD userland on macOS.
+
 on:
   pull_request:
     branches: [main]
@@ -113,6 +122,10 @@ jobs:
           bash skills/core/hooks/test_hooks_stress.sh
           bash skills/core/tests/test_integration_stress.sh
 
+      - name: Run release-gate tool tests
+        run: |
+          pytest -q tools
+
       - name: Lint markdown files
         uses: DavidAnson/markdownlint-cli2-action@v19
         with:
@@ -120,3 +133,48 @@ jobs:
             **/*.md
             !node_modules
         continue-on-error: true
+
+  validate-macos:
+    # Platform-sensitive subset only; metadata validation and Markdown lint
+    # are platform-neutral and stay in the Ubuntu job (issue #66).
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Report platform toolchain
+        run: |
+          sw_vers
+          bash --version | head -1
+          python3 --version
+
+      - name: Install dependencies
+        run: |
+          pip install pytest pyyaml
+
+      - name: Test init and validate scripts (macOS)
+        run: |
+          tmpdir=$(mktemp -d)
+          python skills/core/scripts/init_repo.py --target-dir "$tmpdir"
+          python skills/core/scripts/validate_structure.py --target-dir "$tmpdir"
+          test -f "$tmpdir/MYCELIUM.md"
+          test -f "$tmpdir/AGENTS.md"
+          test ! -f "$tmpdir/.codex/hooks.json"
+          test -f hooks/hooks.json
+          test -x hooks/mycelium-codex-dispatch.sh
+
+      - name: Run Python compatibility tests (macOS)
+        run: |
+          pytest -q skills/core/scripts --ignore=skills/core/scripts/knowledge_map
+
+      - name: Run hook compatibility tests (macOS)
+        run: |
+          bash skills/core/hooks/test_stop_hook.sh
+          bash skills/core/hooks/test_hooks_stress.sh
+          bash skills/core/tests/test_integration_stress.sh

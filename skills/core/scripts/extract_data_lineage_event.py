@@ -655,17 +655,44 @@ def _strip_assignments(segment: list[str]) -> list[str]:
 
 
 def _simple_cd_status(segment: list[str], cwd: Path) -> tuple[bool | None, Path]:
-    """Return a simple cd's known status and resulting cwd without executing it."""
+    """Return a simple cd's known status and resulting cwd without executing it.
+
+    Documented flags are modeled (`cd [-L|[-P [-e]]] [--] dir`): ``-P``
+    resolves the target physically through symlinks, ``-L`` (the default)
+    resolves lexically, later flags override earlier ones, and ``-e`` only
+    affects exit status in cases a known-good directory cannot hit. Any
+    other option (``-@``, ``cd -``) stays unknown.
+    """
     segment = _strip_assignments(segment)
     if not segment or segment[0] != "cd":
         return None, cwd
-    arguments = [value for value in segment[1:] if value != "--"]
+    physical = False
+    options_done = False
+    arguments: list[str] = []
+    for value in segment[1:]:
+        if not options_done and value == "--":
+            options_done = True
+            continue
+        if not options_done and value.startswith("-") and value != "-":
+            flags = value[1:]
+            if not flags or set(flags) - {"L", "P", "e"}:
+                return None, cwd
+            for flag in flags:
+                if flag == "P":
+                    physical = True
+                elif flag == "L":
+                    physical = False
+            continue
+        arguments.append(value)
     if len(arguments) != 1 or arguments[0] == "-" or "$" in arguments[0]:
         return None, cwd
     target = Path(os.path.expanduser(arguments[0]))
     if not target.is_absolute():
         target = cwd / target
-    target = Path(os.path.abspath(target))
+    if physical:
+        target = Path(os.path.realpath(target))
+    else:
+        target = Path(os.path.abspath(target))
     # The hook sees the command only after the shell ran. Do not propagate a
     # directory change that the shell could not have made: in
     # ``cd missing || python a.py`` the Python command runs from the old cwd.
@@ -828,19 +855,65 @@ def _jupyter_match_has_terminal_option(command: str, offset: int) -> bool:
     )
 
 
-def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
-    """Resolve preceding top-level ``cd`` commands for a command match."""
+_CWD_AFFECTING_BUILTINS = {"pushd", "popd", "source", ".", "eval"}
+
+
+def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
+    """True when a completed segment cannot change the cwd in unmodeled ways.
+
+    ``cd`` with a statically known status is modeled; other cwd-affecting
+    builtins (and ``command``-prefixed forms of them) are not — a following
+    trust decision must not assume the working directory it computed.
+    """
+    stripped = _strip_assignments(segment)
+    if not stripped:
+        return True
+    name = stripped[0]
+    if name in _CWD_AFFECTING_BUILTINS:
+        return False
+    if (
+        name == "command"
+        and stripped[1:2]
+        and stripped[1] in ({"cd"} | _CWD_AFFECTING_BUILTINS)
+    ):
+        return False
+    if name == "cd":
+        status, _ = _simple_cd_status(segment, cwd)
+        return status is not None
+    return True
+
+
+def _effective_cwd_state(
+    bash_cmd: str, offset: int, initial_cwd: Path
+) -> tuple[Path, bool]:
+    """Resolve preceding ``cd`` commands and report cwd-provenance fidelity.
+
+    Returns the inferred cwd plus a flag that is True only when every
+    completed segment in the prefix was fully modeled. The flag is
+    deliberately conservative — an unmodeled builtin inside an already
+    closed subshell also clears it — because its only consumer is the
+    accessor trust decision, where a false negative merely costs a
+    redundant reminder.
+    """
     tokens = _shell_tokens(bash_cmd[:offset])
     if tokens is None:
-        return initial_cwd
+        return initial_cwd, False
 
     cwd = initial_cwd
+    fully_modeled = True
     subshell_states: list[tuple[Path, bool, bool]] = []
     segment: list[str] = []
     segment_is_conditional = False
     chain_has_or = False
+
+    def complete_segment() -> None:
+        nonlocal fully_modeled
+        if not _segment_cwd_is_modeled(segment, cwd):
+            fully_modeled = False
+
     for token in tokens:
         if token in {"&&", "||"}:
+            complete_segment()
             if not segment_is_conditional:
                 # The first segment in an AND-OR list always executes.
                 cwd = _apply_cd(segment, cwd)
@@ -856,6 +929,7 @@ def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
             if token == "||":
                 chain_has_or = True
         elif token in {";", "\n"}:
+            complete_segment()
             if not segment_is_conditional:
                 cwd = _apply_cd(segment, cwd)
             segment = []
@@ -863,16 +937,25 @@ def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
             chain_has_or = False
         elif token in {"|", "&"}:
             # A cd in a pipeline/subshell does not reliably affect the parent.
+            complete_segment()
             segment = []
         elif token == "(":
+            complete_segment()
             segment = []
             subshell_states.append((cwd, segment_is_conditional, chain_has_or))
         elif token == ")":
+            complete_segment()
             segment = []
             if subshell_states:
                 cwd, segment_is_conditional, chain_has_or = subshell_states.pop()
         else:
             segment.append(token)
+    return cwd, fully_modeled
+
+
+def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
+    """Resolve preceding top-level ``cd`` commands for a command match."""
+    cwd, _ = _effective_cwd_state(bash_cmd, offset, initial_cwd)
     return cwd
 
 
@@ -1515,9 +1598,16 @@ def _detect_scripts_with_cwd(
             raw_path = path_words[0]
             if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES:
                 continue
-            expanded = _accessor_expanded_script_path(
-                m.group("path"), raw_path, effective_cwd
-            )
+            # The accessor dereferences a pointer relative to the effective
+            # cwd, so it may resolve only when every cwd change in the prefix
+            # was fully modeled; an unmodeled `pushd`/`source`/flagged-cd
+            # form means the pointer's directory is unknown (issue #71).
+            expanded = None
+            _, prefix_cwd_modeled = _effective_cwd_state(bash_cmd, m.start(), cwd)
+            if prefix_cwd_modeled:
+                expanded = _accessor_expanded_script_path(
+                    m.group("path"), raw_path, effective_cwd
+                )
             if expanded is not None:
                 unresolved = expanded
             else:
