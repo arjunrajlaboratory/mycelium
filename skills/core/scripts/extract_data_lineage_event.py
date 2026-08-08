@@ -252,16 +252,80 @@ IGNORED_SCRIPT_SUFFIXES = frozenset(
 )
 
 
-def _is_managed_utility_path(resolved: Path) -> bool:
-    """True when an absolute script path is a bundled Mycelium helper.
+# Path shape alone is not trusted identity: a user project may legitimately
+# contain `skills/core/scripts/<colliding-name>.py`. A registry suffix match
+# only suppresses bookkeeping when the derived candidate root proves it is a
+# real Mycelium plugin tree — the root this extractor itself ships in, or a
+# root carrying a Mycelium plugin manifest (versioned installs and source
+# checkouts both ship these manifests).
+_EXECUTING_PLUGIN_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_PLUGIN_MANIFEST_RELPATHS = (
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+)
+_PLUGIN_MANIFEST_SIZE_LIMIT_BYTES = 64 * 1024
+# Project guidance instructs agents to reach bundled helpers through the
+# Mycelium-written pointer file, e.g. "$(sed -n '1p' .mycelium/plugin-root)" or
+# "$(cat .mycelium/plugin-root)". The substitution cannot be resolved
+# statically, but a command dereferencing that pointer is by construction
+# invoking the managed install, so the accessor itself is trusted.
+_PLUGIN_ROOT_SUBSTITUTION_RE = re.compile(
+    r"(?:^|/)\$\([^()]*\.mycelium/plugin-root\)/$"
+)
+_verified_plugin_roots: dict[str, bool] = {}
 
-    Matching the `skills/core/scripts/<relpath>` suffix of the normalized
-    absolute path covers the versioned plugin cache, a source checkout, and
-    relative invocations, while a same-named user script anywhere else in a
-    project remains eligible as real analysis.
+
+def _is_mycelium_plugin_root(root: Path) -> bool:
+    key = root.as_posix()
+    cached = _verified_plugin_roots.get(key)
+    if cached is not None:
+        return cached
+    verdict = False
+    try:
+        if root.resolve() == _EXECUTING_PLUGIN_ROOT:
+            verdict = True
+    except OSError:
+        pass
+    if not verdict:
+        for relpath in _PLUGIN_MANIFEST_RELPATHS:
+            manifest = root / relpath
+            try:
+                if not manifest.is_file():
+                    continue
+                if manifest.stat().st_size > _PLUGIN_MANIFEST_SIZE_LIMIT_BYTES:
+                    continue
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and data.get("name") == "mycelium":
+                verdict = True
+                break
+    _verified_plugin_roots[key] = verdict
+    return verdict
+
+
+def _is_managed_utility_path(resolved: Path) -> bool:
+    """True when an absolute script path is a verified bundled Mycelium helper.
+
+    The `skills/core/scripts/<relpath>` suffix must start at a path-component
+    boundary of the normalized absolute path, and the remaining prefix must be
+    a verified Mycelium plugin root. Source checkouts, versioned plugin-cache
+    installs, and relative invocations all verify; a same-named user script in
+    a conventionally shaped project directory remains eligible analysis.
     """
     posix = resolved.as_posix()
-    return any(posix.endswith(suffix) for suffix in IGNORED_SCRIPT_SUFFIXES)
+    for suffix in IGNORED_SCRIPT_SUFFIXES:
+        if not posix.endswith(suffix):
+            continue
+        prefix = posix[: -len(suffix)]
+        if prefix and not prefix.endswith("/"):
+            continue
+        if _PLUGIN_ROOT_SUBSTITUTION_RE.search(prefix):
+            return True
+        root = Path(prefix.rstrip("/") or "/")
+        if _is_mycelium_plugin_root(root):
+            return True
+    return False
 
 
 IGNORED_SCRIPT_BASENAMES = {"setup.py"}

@@ -451,18 +451,20 @@ def _shipped_helper_relpaths() -> list[str]:
     )
 
 
+_SOURCE_PLUGIN_ROOT = _SHIPPED_SCRIPTS_DIR.parent.parent.parent
+
+
 def test_every_bundled_core_helper_is_excluded_from_detection(tmp_path: Path) -> None:
     """No bundled helper may create lineage or post-action work — issue #69."""
+    install = tmp_path / "cache" / "mycelium" / "mycelium" / "9.9.9"
+    _write_mycelium_manifest(install)
     missing: list[str] = []
     for rel in _shipped_helper_relpaths():
-        installed = (
-            "/home/user/.claude/plugins/cache/mycelium/mycelium/9.9.9/"
-            f"skills/core/scripts/{rel}"
-        )
-        source = f"/home/user/code/mycelium/skills/core/scripts/{rel}"
+        installed = f"{install}/skills/core/scripts/{rel}"
+        source = f"{_SOURCE_PLUGIN_ROOT}/skills/core/scripts/{rel}"
         relative = f"skills/core/scripts/{rel}"
-        for form in (installed, source, relative):
-            if detect_scripts(f'python3 "{form}" --help', tmp_path):
+        for form, cwd in ((installed, tmp_path), (source, tmp_path), (relative, _SOURCE_PLUGIN_ROOT)):
+            if detect_scripts(f'python3 "{form}" --help', cwd):
                 missing.append(form)
     assert missing == []
 
@@ -480,14 +482,16 @@ def test_every_bundled_core_helper_is_excluded_from_detection(tmp_path: Path) ->
     ],
 )
 def test_issue_69_omitted_helpers_are_excluded(tmp_path: Path, helper: str) -> None:
-    cmd = (
-        "python3 /home/user/.claude/plugins/cache/mycelium/mycelium/0.6.0/"
-        f"skills/core/scripts/{helper} --living-dir .living"
-    )
+    install = tmp_path / "cache" / "mycelium" / "mycelium" / "0.6.0"
+    _write_mycelium_manifest(install)
+    cmd = f"python3 {install}/skills/core/scripts/{helper} --living-dir .living"
     assert detect_scripts(cmd, tmp_path) == []
 
 
 def test_relative_managed_helper_after_cd_is_excluded(tmp_path: Path) -> None:
+    # A source-checkout-shaped repo: conventional layout plus the manifest
+    # that proves the root really is Mycelium.
+    _write_mycelium_manifest(tmp_path)
     (tmp_path / "skills" / "core" / "scripts").mkdir(parents=True)
     cmd = "cd skills/core && python3 scripts/recall_lessons.py --id L-6"
     assert detect_scripts(cmd, tmp_path) == []
@@ -500,6 +504,12 @@ def test_relative_managed_helper_after_cd_is_excluded(tmp_path: Path) -> None:
         "recall_lessons.py",
         "analysis/crystallize_findings.py",
         "my/skills/detect_recurrence.py",
+        # Conventional layout AND a colliding filename, but no Mycelium plugin
+        # manifest proves the root — must stay eligible analysis (Codex P2 on
+        # PR #70): a path shape alone is not trusted identity.
+        "skills/core/scripts/crystallize_findings.py",
+        "skills/core/scripts/recall_lessons.py",
+        "skills/core/scripts/knowledge_map/cli.py",
     ],
 )
 def test_same_named_user_script_elsewhere_is_still_analysis(
@@ -507,6 +517,68 @@ def test_same_named_user_script_elsewhere_is_still_analysis(
 ) -> None:
     out = detect_scripts(f"python3 {user_script}", tmp_path)
     assert out == [(tmp_path / user_script, None)]
+
+
+def _write_mycelium_manifest(root: Path) -> None:
+    manifest = root / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text('{"name": "mycelium", "version": "9.9.9"}\n')
+
+
+def test_suffix_match_requires_a_path_component_boundary(tmp_path: Path) -> None:
+    # "myskills/..." must not satisfy a registry suffix that starts at the
+    # "skills/" component, even when the root an unguarded match would derive
+    # ("<tmp>/my") carries a verifying manifest.
+    _write_mycelium_manifest(tmp_path / "my")
+    script = "myskills/core/scripts/recall_lessons.py"
+    out = detect_scripts(f"python3 {script}", tmp_path)
+    assert out == [(tmp_path / script, None)]
+
+
+def test_verified_install_root_is_excluded(tmp_path: Path) -> None:
+    install = tmp_path / "cache" / "mycelium" / "mycelium" / "9.9.9"
+    _write_mycelium_manifest(install)
+    cmd = f'python3 "{install}/skills/core/scripts/recall_lessons.py" --id L-6'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_codex_manifest_also_verifies_the_root(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest = install / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "mycelium", "version": "9.9.9"}\n')
+    cmd = f'python3 "{install}/skills/core/scripts/recall_lessons.py"'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "accessor",
+    [
+        "$(sed -n '1p' .mycelium/plugin-root)",
+        "$(cat .mycelium/plugin-root)",
+    ],
+)
+def test_documented_plugin_root_accessor_is_trusted(
+    tmp_path: Path, accessor: str
+) -> None:
+    cmd = f'python3 "{accessor}/skills/core/scripts/recall_lessons.py" --id L-6'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_other_command_substitution_prefix_is_not_trusted(tmp_path: Path) -> None:
+    cmd = 'python3 "$(cat some/other/pointer)/skills/core/scripts/recall_lessons.py"'
+    out = detect_scripts(cmd, tmp_path)
+    assert len(out) == 1
+
+
+def test_non_mycelium_manifest_does_not_verify_the_root(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    manifest = install / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "other-plugin"}\n')
+    script = install / "skills" / "core" / "scripts" / "recall_lessons.py"
+    out = detect_scripts(f'python3 "{script}"', tmp_path)
+    assert out == [(script, None)]
 
 
 # ---------- write_events (atomic append) ----------

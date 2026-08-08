@@ -23,7 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   knowledge-map tools), is derived from the shipped tree so future helpers
   are excluded automatically, and matches the resolved absolute script path
   so source, installed, and relative invocations are all silent while
-  same-named user scripts elsewhere remain eligible analysis ([#69]).
+  same-named user scripts elsewhere remain eligible analysis. A registry
+  match must also start at a path-component boundary and verify its candidate
+  root as a real Mycelium plugin tree — the extractor's own install, a root
+  carrying a Mycelium plugin manifest, or the documented
+  `.mycelium/plugin-root` accessor — so a user project that merely mimics the
+  `skills/core/scripts/` layout keeps full lineage and bookkeeping ([#69]).
 - **Missing runtime telemetry is reported as unknown, not zero.** When a host
   supplies no per-action wall time (the current Codex Bash PostToolUse
   payload), the lineage manifest now reports `total_wall_seconds: null`

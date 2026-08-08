@@ -296,13 +296,22 @@ the moment a helper is added (issue #69 shipped with `recall_lessons.py`,
 `detect_recurrence.py`, `upsert_table_row.py`, `crystallize_findings.py`, and
 `extract_data_lineage.py` missing), so the registry must be derived from the
 shipped scripts tree — or a regression test must walk that tree and fail when
-a bundled helper is not excluded.
+a bundled helper is not excluded. The inverse trap is treating path shape as
+identity: a registry suffix match must begin at a path-component boundary and
+its candidate root must prove it is a real Mycelium plugin tree (the running
+extractor's own install, a root with a Mycelium plugin manifest, or the
+documented `.mycelium/plugin-root` accessor), or a user project that mimics
+the conventional layout silently loses lineage and bookkeeping.
 
 **Regression evidence:** Exercise every managed helper through both source and
 versioned installed paths, plus user-script near neighbors. Require no reminder
 or lineage event for the former and normal detection for the latter. Include a
 sweep that enumerates every `.py` shipped under the managed scripts directory
-so a newly added helper cannot reintroduce the gap.
+so a newly added helper cannot reintroduce the gap. Require detection for a
+colliding filename under an unverified `skills/core/scripts/` layout, for a
+`myskills/`-style component-boundary neighbor, and for a non-Mycelium
+manifest; require exclusion for verified installs and both documented
+plugin-root accessor spellings.
 
 ## 19. Machine finalization overwrites authored semantics
 
