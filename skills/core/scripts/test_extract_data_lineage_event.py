@@ -666,6 +666,33 @@ def test_multiline_pointer_diverges_between_cat_and_sed(tmp_path: Path) -> None:
     assert detect_scripts(sed_cmd, tmp_path) == []
 
 
+@pytest.mark.parametrize(
+    "quoted_word",
+    [
+        # Single quotes disable expansion: the shell executes the LITERAL
+        # path "$(cat .mycelium/plugin-root)/…" (Codex P2, round 6 on PR #70).
+        "'$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py'",
+        "'$(cat .mycelium/plugin-root)'/skills/core/scripts/recall_lessons.py",
+    ],
+)
+def test_expansion_disabled_accessor_word_is_not_trusted(
+    tmp_path: Path, quoted_word: str
+) -> None:
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    out = detect_scripts(f"python3 {quoted_word}", tmp_path)
+    assert len(out) == 1
+
+
+def test_backslash_escaped_accessor_is_never_suppressed_or_fabricated(
+    tmp_path: Path,
+) -> None:
+    # Unquoted "\$(" is a bash syntax error mid-word — the command can never
+    # execute, so recording nothing (rather than trusting anything) is right.
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    word = "\\$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"
+    assert detect_scripts(f"python3 {word}", tmp_path) == []
+
+
 def test_pointer_with_only_trailing_newlines_is_trusted(tmp_path: Path) -> None:
     install = _seed_verified_install(tmp_path)
     state = tmp_path / ".mycelium"

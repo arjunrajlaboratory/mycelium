@@ -33,7 +33,6 @@ import fcntl
 import hashlib
 import json
 import os
-import posixpath
 import re
 import shlex
 import subprocess
@@ -286,61 +285,67 @@ _PLUGIN_ROOT_ACCESSOR_WORD_RE = re.compile(
 _PLUGIN_ROOT_POINTER_SIZE_LIMIT_BYTES = 4096
 
 
-def _pointer_verified_plugin_root(effective_cwd: Path, reader: str) -> bool:
-    """Dereference the project's plugin-root pointer and verify its target.
+def _pointer_expansion_value(effective_cwd: Path, reader: str) -> str | None:
+    """Return the exact value a pointer-read substitution would produce.
 
     The pointer must be a non-symlink regular file inside a non-symlink
-    `.mycelium` directory. Verification emulates the exact value the shell
-    substitution produces — no normalization, because the shell performs
-    none: `cat` yields the whole content minus trailing newlines (embedded
-    newlines mean the executed word is not a plain root, so fail closed),
-    while `sed -n '1p'` yields exactly the first line, trailing spaces
-    included. That exact value must be an absolute path to a verified
-    Mycelium plugin root; the verified path is then byte-identical to the
-    directory the shell actually executes from.
+    `.mycelium` directory. Expansion is emulated exactly — no normalization,
+    because the shell performs none: `cat` yields the whole content minus
+    trailing newlines (embedded newlines mean the executed word is not a
+    plain root, so fail closed), while `sed -n '1p'` yields exactly the
+    first line, trailing spaces included. Only a nonblank absolute-path
+    value is returned; anything else yields None.
     """
     state_dir = effective_cwd / ".mycelium"
     pointer = state_dir / "plugin-root"
     try:
         if state_dir.is_symlink() or not state_dir.is_dir():
-            return False
+            return None
         if pointer.is_symlink() or not pointer.is_file():
-            return False
+            return None
         if pointer.lstat().st_size > _PLUGIN_ROOT_POINTER_SIZE_LIMIT_BYTES:
-            return False
+            return None
         content = pointer.read_text(encoding="utf-8")
     except (OSError, ValueError):
-        return False
+        return None
     if reader == "cat":
         value = content
         while value.endswith("\n"):
             value = value[:-1]
         if "\n" in value:
-            return False
+            return None
     else:
         value = content.split("\n", 1)[0]
     if not value or not value.startswith("/"):
-        return False
-    return _is_mycelium_plugin_root(Path(value))
+        return None
+    return value
 
 
-def _is_plugin_root_accessor_invocation(raw_word: str, effective_cwd: Path) -> bool:
-    """True when a decoded shell word is `<pointer-read>/<bundled helper>`.
+def _accessor_expanded_script_path(
+    raw_text: str, decoded_word: str, effective_cwd: Path
+) -> Path | None:
+    """Resolve a word-initial plugin-root accessor to its executed path.
 
-    The remainder after the accessor must normalize to a registry entry, so
-    traversal that escapes the managed tree stays eligible analysis, and the
-    pointer under the effective working directory must expand — under the
-    matched reader's exact substitution semantics — to a verified Mycelium
-    plugin root.
+    Returns the absolute path the shell would actually execute, or None when
+    the word is not a well-formed, expansion-enabled accessor invocation.
+    The shell expands a word-initial `$(` only when it is unquoted or inside
+    double quotes; single quotes and backslash escapes make it a literal
+    path, so the authored text must be the decoded word either bare or fully
+    double-quoted. This function only RESOLVES the path — whether the result
+    is a managed utility is decided by the same `_is_managed_utility_path`
+    gate as every directly written path, so there is exactly one trust
+    decision.
     """
-    match = _PLUGIN_ROOT_ACCESSOR_WORD_RE.match(raw_word)
+    if raw_text != decoded_word and raw_text != f'"{decoded_word}"':
+        return None
+    match = _PLUGIN_ROOT_ACCESSOR_WORD_RE.match(decoded_word)
     if not match:
-        return False
-    relpath = posixpath.normpath(match.group("rel"))
-    if relpath not in IGNORED_SCRIPT_SUFFIXES:
-        return False
+        return None
     reader = "cat" if match.group("reader") == "cat" else "sed"
-    return _pointer_verified_plugin_root(effective_cwd, reader)
+    value = _pointer_expansion_value(effective_cwd, reader)
+    if value is None:
+        return None
+    return Path(os.path.abspath(Path(value) / match.group("rel")))
 _verified_plugin_roots: dict[str, bool] = {}
 
 
@@ -1491,12 +1496,16 @@ def _detect_scripts_with_cwd(
             raw_path = path_words[0]
             if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES:
                 continue
-            if _is_plugin_root_accessor_invocation(raw_path, effective_cwd):
-                continue
-            path = Path(raw_path)
-            if not path.is_absolute():
-                path = effective_cwd / path
-            path = Path(os.path.abspath(path))
+            expanded = _accessor_expanded_script_path(
+                m.group("path"), raw_path, effective_cwd
+            )
+            if expanded is not None:
+                path = expanded
+            else:
+                path = Path(raw_path)
+                if not path.is_absolute():
+                    path = effective_cwd / path
+                path = Path(os.path.abspath(path))
             if _is_managed_utility_path(path):
                 continue
             if path not in seen_paths:

@@ -328,7 +328,12 @@ emulate the exact substitution semantics of the matched reader with no
 normalization: `cat` strips only trailing newlines and fails closed on
 embedded ones, `sed -n '1p'` yields the exact first line, so a
 trailing-space pointer verifies the space-suffixed directory the shell
-actually executes from, never a stripped variant of it.
+actually executes from, never a stripped variant of it. Quoting context
+gates expansion: a word-initial `$(` is expanded only when the authored word
+is bare or fully double-quoted, so single-quoted or escaped spellings are
+literal paths. The robust structure is one trust gate: resolve the accessor
+to the exact executed path, then let the same managed-path verification
+that judges directly written paths make the only suppression decision.
 
 ## 19. Machine finalization overwrites authored semantics
 
