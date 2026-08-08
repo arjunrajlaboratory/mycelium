@@ -148,11 +148,22 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install modern Bash
+        # The runner image ships only the system Bash 3.2; the lifecycle
+        # hooks (#!/usr/bin/env bash) require Bash >= 4, resolved through
+        # the Homebrew prefix on PATH.
+        run: |
+          brew install bash
+
       - name: Report platform toolchain
         run: |
           sw_vers
           bash --version | head -1
           python3 --version
+          bash -c '[[ "${BASH_VERSINFO[0]}" -ge 4 ]]' || {
+            echo "Bash >= 4 is required for lifecycle hooks" >&2
+            exit 1
+          }
 
       - name: Install dependencies
         run: |
