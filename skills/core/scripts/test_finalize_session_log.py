@@ -281,6 +281,66 @@ def test_backtick_info_string_with_backtick_is_not_a_fence(tmp_path):
     assert "(9m, 2 files)" in content
 
 
+def test_authored_bullet_after_generated_list_survives_retry(tmp_path):
+    """Codex P2, round 11 on PR #70: consumption is bounded by the count the
+    machine heading records, not by line shape."""
+    path = tmp_path / "session.md"
+    _log(path)
+    _finalize(path)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("- `follow-up.md`\n")
+
+    MODULE.finalize_session_log(
+        path,
+        ended="2026-08-01T18:44:00-0400",
+        duration_minutes=9,
+        files_changed=2,
+        end_time="18:44",
+        changed_paths=["src/a.py", "data/input.csv"],
+    )
+
+    content = path.read_text()
+    assert "- `follow-up.md`" in content
+    assert content.count("Session ended") == 1
+    assert content.count("- `src/a.py`") == 1
+
+
+def test_authored_lines_after_zero_file_footer_survive_retry(tmp_path):
+    path = tmp_path / "session.md"
+    _log(path)
+    MODULE.finalize_session_log(
+        path,
+        ended="2026-08-01T18:42:00-0400",
+        duration_minutes=7,
+        files_changed=0,
+        end_time="18:42",
+        changed_paths=[],
+    )
+    authored = (
+        "- Modified: my authored recap line\n"
+        "\n### Files Modified\n"
+        "- `authored-note.md`\n"
+    )
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(authored)
+
+    MODULE.finalize_session_log(
+        path,
+        ended="2026-08-01T18:44:00-0400",
+        duration_minutes=9,
+        files_changed=0,
+        end_time="18:44",
+        changed_paths=[],
+    )
+
+    content = path.read_text()
+    assert "- Modified: my authored recap line" in content
+    assert "- `authored-note.md`" in content
+    assert "### Files Modified" in content
+    assert content.count("Session ended") == 1
+    assert "(9m, 0 files)" in content
+
+
 def test_retry_collapses_duplicate_legacy_footers(tmp_path):
     path = tmp_path / "session.md"
     _log(path)

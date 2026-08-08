@@ -759,6 +759,21 @@ def test_symlinked_alias_of_verified_root_is_still_excluded(tmp_path: Path) -> N
     assert detect_scripts(cmd, tmp_path) == []
 
 
+def test_bare_accessor_is_never_attributed_or_suppressed(tmp_path: Path) -> None:
+    """Codex P2, round 11 on PR #70: an unquoted substitution field-splits,
+    so its executed argv is statically unknowable. It must be rejected
+    conservatively — no suppression, and no guessed attribution either —
+    even when the pointer names a verified root containing a space."""
+    install = tmp_path / "analysis.py plugin"
+    _write_mycelium_manifest(install)
+    _seed_plugin_pointer(tmp_path, install)
+    bare = (
+        "python3 $(cat .mycelium/plugin-root)"
+        "/skills/core/scripts/recall_lessons.py"
+    )
+    assert detect_scripts(bare, tmp_path) == []
+
+
 def test_backslash_escaped_accessor_is_never_suppressed_or_fabricated(
     tmp_path: Path,
 ) -> None:

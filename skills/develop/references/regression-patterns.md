@@ -592,3 +592,33 @@ must match only the exact emitted syntax (HH:MM time, numeric duration and
 file count) outside Markdown code fences: an authored heading that merely
 resembles the footer, and a machine-shaped example inside a fence, must
 survive finalization byte-identical.
+
+## 33. An emulated interpreter diverges from the real one
+
+**Failure:** A hook decides trust or ownership by predicting how another
+interpreter will treat text — bash expanding a command substitution, or
+Markdown structuring a session log — but the emulation is approximate. Each
+approximation is a defect: stripping whitespace the shell preserves, keeping
+NUL bytes bash removes, universal-newline decoding that hides a CR, honoring
+a `$(` that quoting disabled, trusting an unquoted substitution that field
+splitting will rewrite, toggling fences on any delimiter line, or consuming
+authored lines because they match a generated shape. PR #70 accumulated
+seven review rounds of exactly these gaps.
+
+**Invariant:** When a decision depends on another interpreter's semantics,
+either reproduce those semantics byte-exactly (quoting context, expansion
+rules, byte filtering, delimiter matching, generator-recorded counts) or
+refuse conservatively. Every residual divergence must fail toward detection
+and preservation — a wrong guess may cost a redundant reminder or a stale
+example, never a suppressed lineage event, a silently killed hook, or
+deleted authored content. Prefer resolving text to the exact value the real
+interpreter would produce and passing it through the one shared trust gate,
+over predicting the interpreter inside the gate.
+
+**Regression evidence:** For each emulated rule, pin both directions with a
+matched pair: the divergent input stays detected/preserved, and the
+canonical input still verifies/collapses. Cover quoting variants, trailing
+and embedded whitespace, CRLF and NUL bytes, field-splitting inputs,
+mismatched fence delimiters, and authored content adjacent to generated
+blocks, and require unparseable words to be skipped without raising out of
+the hook.

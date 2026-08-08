@@ -22,7 +22,7 @@ import tempfile
 # headings that merely resemble the footer, and examples inside Markdown code
 # fences, belong to the agent and must survive finalization untouched.
 _END_FOOTER_HEADING_RE = re.compile(
-    r"^### \d{2}:\d{2} — Session ended \(\d+m, \d+ files\)$"
+    r"^### \d{2}:\d{2} — Session ended \(\d+m, (?P<files>\d+) files\)$"
 )
 _FENCE_RE = re.compile(r"^ {0,3}(?P<marker>```+|~~~+)(?P<info>.*)$")
 
@@ -76,21 +76,34 @@ def _strip_machine_footers(body: str) -> str:
             kept.append(line)
             index += 1
             continue
-        if not _END_FOOTER_HEADING_RE.match(line):
+        heading = _END_FOOTER_HEADING_RE.match(line)
+        if heading is None:
             kept.append(line)
             index += 1
             continue
+        # Consume only what the generator emitted for this footer: the
+        # summary and file list exist only when files were changed, and the
+        # list holds exactly the recorded number of entries. Anything beyond
+        # that shape is authored content and stays.
+        generated_files = int(heading.group("files"))
         index += 1
-        if index < len(lines) and lines[index].startswith("- Modified:"):
-            index += 1
-        if (
-            index + 1 < len(lines)
-            and lines[index] == ""
-            and lines[index + 1] == "### Files Modified"
-        ):
-            index += 2
-            while index < len(lines) and lines[index].startswith("- `"):
+        if generated_files > 0:
+            if index < len(lines) and lines[index].startswith("- Modified:"):
                 index += 1
+            if (
+                index + 1 < len(lines)
+                and lines[index] == ""
+                and lines[index + 1] == "### Files Modified"
+            ):
+                index += 2
+                consumed = 0
+                while (
+                    index < len(lines)
+                    and consumed < generated_files
+                    and lines[index].startswith("- `")
+                ):
+                    index += 1
+                    consumed += 1
     return "\n".join(kept)
 
 

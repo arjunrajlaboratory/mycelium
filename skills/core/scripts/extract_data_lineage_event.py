@@ -334,23 +334,25 @@ def _accessor_expanded_script_path(
 
     Returns the absolute path the shell would actually execute, or None when
     the word is not a well-formed, expansion-enabled accessor invocation.
-    The shell expands a word-initial `$(` only when it is unquoted or inside
-    double quotes; single quotes and backslash escapes make it a literal
-    path. The authored text must therefore be one of the expansion-enabled
-    spellings of the decoded word: bare, fully double-quoted, or with only
-    the accessor component double-quoted. Any other quoting falls back to
-    normal detection, which at worst costs a redundant bookkeeping reminder,
-    never a suppression. This function only RESOLVES the path — whether the
-    result is a managed utility is decided by the same
-    `_is_managed_utility_path` gate as every directly written path, so there
-    is exactly one trust decision.
+    Only double-quoted spellings resolve: fully quoted, or quoted around the
+    accessor component. Double quotes make the substitution expand without
+    field splitting or pathname expansion, so the joined path below is
+    byte-identical to the argv word bash builds. A bare (unquoted) accessor
+    would field-split on IFS and glob — its executed argv is statically
+    unknowable, so it is rejected here and, because the unquoted spaces also
+    break the single-word shape upstream, never attributed at all. Single
+    quotes and escapes make `$(` a literal path and likewise fall back to
+    normal detection. Wrong-quoting fallbacks at worst cost a redundant
+    bookkeeping reminder, never a suppression. This function only RESOLVES
+    the path — whether the result is a managed utility is decided by the
+    same `_is_managed_utility_path` gate as every directly written path, so
+    there is exactly one trust decision.
     """
     match = _PLUGIN_ROOT_ACCESSOR_WORD_RE.match(decoded_word)
     if not match:
         return None
     accessor = match.group("accessor")
     expansion_enabled_spellings = (
-        decoded_word,
         f'"{decoded_word}"',
         f'"{accessor}"{decoded_word[len(accessor):]}',
     )

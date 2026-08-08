@@ -36,7 +36,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `known_exit_count`, and `failed_action_count` coverage fields; unknown
   exit codes count as neither success nor failure ([#69]).
 
+- **Managed-utility suppression and log finalization emulate exact
+  interpreter semantics.** Review hardening on the issue-69 branch: the
+  plugin-root accessor is honored only in double-quoted, word-anchored
+  spellings whose pointer dereference (safe read, bash-exact expansion
+  including NUL removal and CR preservation) resolves — via filesystem
+  canonicalization — to a manifest-verified plugin root, with every
+  divergent form staying in normal detection; and session-log footer
+  rebuilding matches only the exact machine-emitted syntax outside
+  CommonMark-tracked code fences, consuming no more lines than the
+  generator recorded, so authored content survives Stop retries
+  byte-identical ([#70]).
+
 [#69]: https://github.com/arjunrajlaboratory/mycelium/issues/69
+[#70]: https://github.com/arjunrajlaboratory/mycelium/pull/70
 
 ## [0.6.0] - 2026-08-02
 

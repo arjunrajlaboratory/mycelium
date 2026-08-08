@@ -337,6 +337,16 @@ hook, filesystem, or lifecycle boundaries.
       canonical values written to frontmatter and the registry, collapses
       duplicated legacy footers to one, and preserves body content appended
       between attempts.
+- [ ] Machine-block removal in finalized logs matches only the exact emitted
+      syntax, tracks Markdown fence delimiters per CommonMark (marker
+      character, minimum close length, backtick info-string exclusion), and
+      consumes no more lines than the generator recorded, so authored
+      look-alike headings, fenced examples, and appended bullets survive.
+- [ ] Every emulation of another interpreter's semantics (bash quoting and
+      expansion, substitution byte filtering, Markdown structure) is either
+      byte-exact or refuses conservatively; a divergence can cost a redundant
+      reminder, never a suppressed event, deleted authored content, or a
+      crashed hook.
 - [ ] Lock acquisition has bounded failure behavior; a recorded dead owner is
       recoverable before that bound, while a recent ownerless lock retains a
       publication-race grace period.
@@ -478,6 +488,8 @@ exercise them.
 | A user project contains its own `skills/core/scripts/<colliding-name>.py` with no Mycelium plugin manifest, or a `myskills/core/scripts/` component-boundary neighbor | The script keeps full lineage and post-action bookkeeping; only a verified Mycelium plugin root (or the documented plugin-root accessor) suppresses it. |
 | Stop finalizes a log, then a retry supplies a different duration, file count, and file list | Frontmatter, footer, `Modified` summary, file list, and registry row all report the retry values with exactly one footer; body content appended between attempts survives. |
 | Every action in a session has `bash_wall_s` and `bash_exit` null | The manifest reports `total_wall_seconds: null` with zero timed/known-exit coverage and full `total_action_count`; nothing reads as a measured zero or an implicit success. |
+| The plugin-root pointer carries a trailing space, CRLF, NUL byte, or extra lines; or the accessor word is single-quoted, bare, prefixed with a user component, or followed by `..` traversal | Verification reproduces the exact bash expansion or refuses: only a double-quoted, word-anchored accessor whose expanded value verifies is suppressed; every divergent form keeps detection and no input can raise out of the hook. |
+| A finalized log contains an authored `— Session ended` look-alike heading, a machine-shaped example in a four-backtick fence with inner ``` lines, or an authored bullet directly after the generated file list | Finalization rebuilds only the machine footer; every authored line survives byte-identical across retries. |
 | Stop finalizes a registry row already enriched by the agent | Date, branch, duration, file count, status, and log link become factual final values while Summary, Key Outputs, and Tags remain authored and byte-equivalent at the cell level. |
 | A review report is rendered from multiple specialist outputs | Same-root findings are deduplicated, IDs are globally consecutive, per-category/global tallies match the rendered headings, and cross-input schema/feature/label comparability was checked. |
 | An analysis composes existing data paths dynamically from `Path`, dictionaries, or loop variables | Unique filenames reachable from recognized I/O path arguments are recovered conservatively after execution; direction follows the call, while ambiguous or over-bound searches remain unresolved with an explicit warning. |
