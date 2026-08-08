@@ -795,6 +795,37 @@ def test_modeled_cd_flag_forms_follow_the_directory(
     assert detect_scripts(cmd, tmp_path) == []
 
 
+def test_cd_dash_p_fails_on_missing_intermediate_component(
+    tmp_path: Path,
+) -> None:
+    """PR #72 round-3 P1: bash `cd -P nested/missing/..` fails because the
+    physical walk hits the missing component before `..`; non-strict
+    realpath must not collapse it into a successful cd at `nested`."""
+    nested = tmp_path / "nested"
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    _seed_plugin_pointer(nested, _seed_verified_install(tmp_path))
+    _seed_plugin_pointer(tmp_path, user_tree)
+    cmd = (
+        "cd -P nested/missing/..; "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_cd_dash_p_with_existing_intermediate_component_succeeds(
+    tmp_path: Path,
+) -> None:
+    nested = tmp_path / "nested"
+    (nested / "sub").mkdir(parents=True)
+    _seed_plugin_pointer(nested, _seed_verified_install(tmp_path))
+    cmd = (
+        "cd -P nested/sub/.. && "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert detect_scripts(cmd, tmp_path) == []
+
+
 def test_cd_dash_p_resolves_symlinks_physically(tmp_path: Path) -> None:
     real = tmp_path / "real"
     _seed_plugin_pointer(real, _seed_verified_install(tmp_path))
@@ -843,6 +874,10 @@ def test_flags_after_the_cd_operand_are_not_options(tmp_path: Path) -> None:
         "command -- cd nested",
         "command -p -- cd nested",
         "builtin -- cd nested",
+        # `--` is a valid option terminator for the time keyword too
+        # (PR #72 round-3 P1).
+        "time -- cd nested",
+        "time -p -- cd nested",
     ],
 )
 def test_unmodeled_cwd_change_fails_closed_for_accessor_trust(

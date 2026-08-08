@@ -694,7 +694,13 @@ def _simple_cd_status(segment: list[str], cwd: Path) -> tuple[bool | None, Path]
     if not target.is_absolute():
         target = cwd / target
     if physical:
-        target = Path(os.path.realpath(target))
+        # Physical resolution walks every component before `..` is applied,
+        # so a missing intermediate makes bash's `cd -P` fail; strict
+        # resolution reproduces that instead of collapsing it lexically.
+        try:
+            target = Path(os.path.realpath(target, strict=True))
+        except OSError:
+            return False, cwd
     else:
         target = Path(os.path.abspath(target))
     # The hook sees the command only after the shell ran. Do not propagate a
@@ -887,6 +893,8 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
         rest = stripped[1:]
         if name == "time":
             if rest[:1] == ["-p"]:
+                rest = rest[1:]
+            if rest[:1] == ["--"]:
                 rest = rest[1:]
         else:
             while rest and rest[0].startswith("-") and rest[0] not in {"-", "--"}:
