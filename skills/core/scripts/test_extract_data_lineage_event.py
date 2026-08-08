@@ -565,8 +565,24 @@ def test_documented_plugin_root_accessor_is_trusted(
     assert detect_scripts(cmd, tmp_path) == []
 
 
-def test_other_command_substitution_prefix_is_not_trusted(tmp_path: Path) -> None:
-    cmd = 'python3 "$(cat some/other/pointer)/skills/core/scripts/recall_lessons.py"'
+@pytest.mark.parametrize(
+    "substitution",
+    [
+        "$(cat some/other/pointer)",
+        # Mentions the pointer file without reading it — `basename` expands to
+        # "plugin-root", a plain user directory (Codex P2, round 2 on PR #70).
+        "$(basename .mycelium/plugin-root)",
+        "$(echo .mycelium/plugin-root)",
+        "$(dirname .mycelium/plugin-root)",
+        # Reads a different repository's pointer, not this project's.
+        "$(cat other/.mycelium/plugin-root)",
+        "$(sed -n '1p' nested/.mycelium/plugin-root)",
+    ],
+)
+def test_non_reader_command_substitution_prefix_is_not_trusted(
+    tmp_path: Path, substitution: str
+) -> None:
+    cmd = f'python3 "{substitution}/skills/core/scripts/recall_lessons.py"'
     out = detect_scripts(cmd, tmp_path)
     assert len(out) == 1
 

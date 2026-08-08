@@ -267,10 +267,14 @@ _PLUGIN_MANIFEST_SIZE_LIMIT_BYTES = 64 * 1024
 # Project guidance instructs agents to reach bundled helpers through the
 # Mycelium-written pointer file, e.g. "$(sed -n '1p' .mycelium/plugin-root)" or
 # "$(cat .mycelium/plugin-root)". The substitution cannot be resolved
-# statically, but a command dereferencing that pointer is by construction
-# invoking the managed install, so the accessor itself is trusted.
+# statically, but a command that actually READS this project's pointer is by
+# construction invoking the managed install. Only the documented reader forms
+# with the exact pointer argument are trusted: a substitution that merely
+# mentions the pointer path ("$(basename .mycelium/plugin-root)" expands to
+# the plain directory name "plugin-root") proves nothing.
 _PLUGIN_ROOT_SUBSTITUTION_RE = re.compile(
-    r"(?:^|/)\$\([^()]*\.mycelium/plugin-root\)/$"
+    r"(?:^|/)\$\((?:cat|sed[ \t]+-n[ \t]+['\"]?1p['\"]?)"
+    r"[ \t]+\.mycelium/plugin-root\)/$"
 )
 _verified_plugin_roots: dict[str, bool] = {}
 

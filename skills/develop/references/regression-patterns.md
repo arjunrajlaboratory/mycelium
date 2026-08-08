@@ -311,7 +311,10 @@ so a newly added helper cannot reintroduce the gap. Require detection for a
 colliding filename under an unverified `skills/core/scripts/` layout, for a
 `myskills/`-style component-boundary neighbor, and for a non-Mycelium
 manifest; require exclusion for verified installs and both documented
-plugin-root accessor spellings.
+plugin-root accessor spellings. The accessor exception trusts only commands
+that actually read this project's pointer: substitutions that merely mention
+it (`basename`, `echo`, `dirname`) or read a nested repository's pointer
+must remain untrusted.
 
 ## 19. Machine finalization overwrites authored semantics
 
