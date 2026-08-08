@@ -551,6 +551,18 @@ def test_codex_manifest_also_verifies_the_root(tmp_path: Path) -> None:
     assert detect_scripts(cmd, tmp_path) == []
 
 
+def _seed_plugin_pointer(repo: Path, target: Path | str) -> None:
+    state = repo / ".mycelium"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "plugin-root").write_text(f"{target}\n")
+
+
+def _seed_verified_install(tmp_path: Path) -> Path:
+    install = tmp_path / "verified-install"
+    _write_mycelium_manifest(install)
+    return install
+
+
 @pytest.mark.parametrize(
     "accessor",
     [
@@ -561,8 +573,69 @@ def test_codex_manifest_also_verifies_the_root(tmp_path: Path) -> None:
 def test_documented_plugin_root_accessor_is_trusted(
     tmp_path: Path, accessor: str
 ) -> None:
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
     cmd = f'python3 "{accessor}/skills/core/scripts/recall_lessons.py" --id L-6'
     assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_accessor_with_unverified_pointer_target_is_not_trusted(
+    tmp_path: Path,
+) -> None:
+    """Codex P2, round 4 on PR #70: the pointer is repository-controlled.
+
+    A pointer aimed at a user tree (no Mycelium manifest) must not let the
+    accessor suppress lineage for a same-named script under that tree.
+    """
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    _seed_plugin_pointer(tmp_path, user_tree)
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_accessor_without_pointer_file_is_not_trusted(tmp_path: Path) -> None:
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_accessor_resolves_pointer_under_the_effective_cwd(tmp_path: Path) -> None:
+    # `cd nested && …` must dereference nested/.mycelium/plugin-root, and an
+    # unverified nested pointer must not be trusted.
+    nested = tmp_path / "nested"
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    _seed_plugin_pointer(nested, user_tree)
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
+    cmd = (
+        "cd nested && "
+        'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    )
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+    _seed_plugin_pointer(nested, _seed_verified_install(tmp_path))
+    assert detect_scripts(cmd, tmp_path) == []
+
+
+def test_accessor_with_relative_pointer_target_is_not_trusted(
+    tmp_path: Path,
+) -> None:
+    install = _seed_verified_install(tmp_path)
+    _seed_plugin_pointer(tmp_path, install.relative_to(tmp_path))
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_accessor_with_symlinked_pointer_file_is_not_trusted(
+    tmp_path: Path,
+) -> None:
+    install = _seed_verified_install(tmp_path)
+    real = tmp_path / "elsewhere.txt"
+    real.write_text(f"{install}\n")
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").symlink_to(real)
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
 
 
 @pytest.mark.parametrize(
@@ -582,6 +655,9 @@ def test_documented_plugin_root_accessor_is_trusted(
 def test_non_reader_command_substitution_prefix_is_not_trusted(
     tmp_path: Path, substitution: str
 ) -> None:
+    # Even with a valid pointer to a verified install, non-reader forms and
+    # foreign pointers stay untrusted.
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
     cmd = f'python3 "{substitution}/skills/core/scripts/recall_lessons.py"'
     out = detect_scripts(cmd, tmp_path)
     assert len(out) == 1
@@ -602,6 +678,7 @@ def test_non_reader_command_substitution_prefix_is_not_trusted(
 def test_accessor_not_anchoring_the_word_is_not_trusted(
     tmp_path: Path, word: str
 ) -> None:
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
     out = detect_scripts(f'python3 "{word}"', tmp_path)
     assert len(out) == 1
 
@@ -609,6 +686,7 @@ def test_accessor_not_anchoring_the_word_is_not_trusted(
 def test_accessor_with_normalizable_inner_dot_components_is_trusted(
     tmp_path: Path,
 ) -> None:
+    _seed_plugin_pointer(tmp_path, _seed_verified_install(tmp_path))
     word = "$(cat .mycelium/plugin-root)/skills/core/./scripts/recall_lessons.py"
     assert detect_scripts(f'python3 "{word}"', tmp_path) == []
 

@@ -1864,6 +1864,13 @@ def test_codex_post_action_retains_analysis_after_tooling_prefix(tmp_path, prefi
 
 def test_codex_post_tool_use_ignores_mycelium_structure_validator(tmp_path):
     repo = _repo(tmp_path)
+    plugin_root = tmp_path / "plugin"
+    manifest = plugin_root / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "mycelium", "version": "9.9.9"}\n')
+    state = repo / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_text(f"{plugin_root}\n")
     command = (
         "python3 \"$(sed -n '1p' .mycelium/plugin-root)/skills/core/"
         "scripts/validate_structure.py\" --target-dir ."

@@ -318,7 +318,12 @@ must remain untrusted. The accessor must also anchor the entire shell word
 and be followed by a registry-normalizable helper path: a user component
 before a genuine pointer read (`foo/$(cat .mycelium/plugin-root)/…`)
 resolves under the cwd, and traversal after the accessor escapes the managed
-tree, so both stay eligible analysis.
+tree, so both stay eligible analysis. Finally, the pointer itself is
+repository-controlled state: the accessor is trusted only after
+dereferencing `.mycelium/plugin-root` under the command's effective working
+directory (non-symlink regular file, first line an absolute path) and
+verifying that its target is a real Mycelium plugin root — a nested repo's
+pointer aimed at an unverified user tree stays eligible analysis.
 
 ## 19. Machine finalization overwrites authored semantics
 

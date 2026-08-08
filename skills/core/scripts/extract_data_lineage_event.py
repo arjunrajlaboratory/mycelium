@@ -276,23 +276,57 @@ _PLUGIN_MANIFEST_SIZE_LIMIT_BYTES = 64 * 1024
 # also anchor the ENTIRE shell word: with any preceding component
 # ("foo/$(cat .mycelium/plugin-root)/…") the expansion resolves under the
 # cwd as a user-controlled relative path, not under the managed install.
+# Finally, the pointer itself is repository-controlled state, so the accessor
+# is trusted only after dereferencing `<effective cwd>/.mycelium/plugin-root`
+# and verifying that its target is a real Mycelium plugin root.
 _PLUGIN_ROOT_ACCESSOR_WORD_RE = re.compile(
     r"^\$\((?:cat|sed[ \t]+-n[ \t]+['\"]?1p['\"]?)"
     r"[ \t]+\.mycelium/plugin-root\)/(?P<rel>.+)$"
 )
+_PLUGIN_ROOT_POINTER_SIZE_LIMIT_BYTES = 4096
 
 
-def _is_plugin_root_accessor_invocation(raw_word: str) -> bool:
+def _pointer_verified_plugin_root(effective_cwd: Path) -> bool:
+    """Dereference the project's plugin-root pointer and verify its target.
+
+    The pointer must be a non-symlink regular file inside a non-symlink
+    `.mycelium` directory; its first line (the value the documented `sed -n
+    '1p'` accessor reads) must be a nonblank absolute path to a verified
+    Mycelium plugin root. Anything else fails closed toward normal detection.
+    """
+    state_dir = effective_cwd / ".mycelium"
+    pointer = state_dir / "plugin-root"
+    try:
+        if state_dir.is_symlink() or not state_dir.is_dir():
+            return False
+        if pointer.is_symlink() or not pointer.is_file():
+            return False
+        if pointer.lstat().st_size > _PLUGIN_ROOT_POINTER_SIZE_LIMIT_BYTES:
+            return False
+        content = pointer.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    first_line = content.splitlines()[0].strip() if content.splitlines() else ""
+    if not first_line or not first_line.startswith("/"):
+        return False
+    return _is_mycelium_plugin_root(Path(first_line))
+
+
+def _is_plugin_root_accessor_invocation(raw_word: str, effective_cwd: Path) -> bool:
     """True when a decoded shell word is `<pointer-read>/<bundled helper>`.
 
     The remainder after the accessor must normalize to a registry entry, so
-    traversal that escapes the managed tree stays eligible analysis.
+    traversal that escapes the managed tree stays eligible analysis, and the
+    pointer under the effective working directory must resolve to a verified
+    Mycelium plugin root.
     """
     match = _PLUGIN_ROOT_ACCESSOR_WORD_RE.match(raw_word)
     if not match:
         return False
     relpath = posixpath.normpath(match.group("rel"))
-    return relpath in IGNORED_SCRIPT_SUFFIXES
+    if relpath not in IGNORED_SCRIPT_SUFFIXES:
+        return False
+    return _pointer_verified_plugin_root(effective_cwd)
 _verified_plugin_roots: dict[str, bool] = {}
 
 
@@ -1443,7 +1477,7 @@ def _detect_scripts_with_cwd(
             raw_path = path_words[0]
             if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES:
                 continue
-            if _is_plugin_root_accessor_invocation(raw_path):
+            if _is_plugin_root_accessor_invocation(raw_path, effective_cwd):
                 continue
             path = Path(raw_path)
             if not path.is_absolute():
