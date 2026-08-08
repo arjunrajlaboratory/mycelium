@@ -338,7 +338,10 @@ to the exact executed path, then let the same managed-path verification
 that judges directly written paths make the only suppression decision — and
 that gate must judge the canonical filesystem path of the uncollapsed word,
 because lexical `abspath` folds `symlink/..` differently than the shell
-resolves it.
+resolves it. Bash also removes NUL bytes from substitution output, so the
+emulation must strip them too — and no decoding artifact may raise out of
+the detector, because an unhandled exception silently kills the hook and
+costs both the reminder and the lineage event.
 
 ## 19. Machine finalization overwrites authored semantics
 

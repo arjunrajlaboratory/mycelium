@@ -711,6 +711,31 @@ def test_crlf_pointer_preserves_cr_in_executed_path(
     assert len(detect_scripts(cmd, tmp_path)) == 1
 
 
+def test_nul_byte_pointer_is_stripped_like_bash_and_stays_detected(
+    tmp_path: Path,
+) -> None:
+    """Codex P2, round 8: bash removes NUL bytes from substitution output,
+    so "/tmp/user\\0\\n" executes under /tmp/user — an unverified tree. The
+    decoder must neither keep the NUL (crashing realpath and silently
+    killing the hook) nor suppress the event."""
+    user_tree = tmp_path / "user-tree"
+    user_tree.mkdir()
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_bytes(f"{user_tree}\x00\n".encode())
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert len(detect_scripts(cmd, tmp_path)) == 1
+
+
+def test_nul_byte_pointer_to_verified_root_is_excluded(tmp_path: Path) -> None:
+    install = _seed_verified_install(tmp_path)
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_bytes(f"{install}\x00\n".encode())
+    cmd = 'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+    assert detect_scripts(cmd, tmp_path) == []
+
+
 def test_symlink_dotdot_traversal_is_resolved_before_the_trust_gate(
     tmp_path: Path,
 ) -> None:

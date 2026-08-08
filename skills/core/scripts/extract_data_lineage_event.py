@@ -310,6 +310,10 @@ def _pointer_expansion_value(effective_cwd: Path, reader: str) -> str | None:
         content = pointer.read_bytes().decode("utf-8")
     except (OSError, ValueError):
         return None
+    # Bash removes NUL bytes from command-substitution output (with a
+    # warning), so the executed value never contains them; keeping one here
+    # would instead crash path resolution and silently kill the hook.
+    content = content.replace("\x00", "")
     if reader == "cat":
         value = content
         while value.endswith("\n"):
@@ -1518,13 +1522,19 @@ def _detect_scripts_with_cwd(
                 unresolved = Path(raw_path)
                 if not unresolved.is_absolute():
                     unresolved = effective_cwd / unresolved
-            path = Path(os.path.abspath(unresolved))
             # Judge trust on the canonical filesystem path of the UNCOLLAPSED
             # word: lexical abspath folds "symlink/.." differently than the
             # shell resolves it, so a link inside a verified tree must not
             # smuggle a user script past the gate (while a symlinked alias of
-            # a verified root still verifies).
-            if _is_managed_utility_path(Path(os.path.realpath(unresolved))):
+            # a verified root still verifies). A word no shell could execute
+            # (e.g. an embedded NUL from a corrupt payload) is skipped rather
+            # than allowed to crash the surrounding hook.
+            try:
+                path = Path(os.path.abspath(unresolved))
+                canonical = Path(os.path.realpath(unresolved))
+            except ValueError:
+                continue
+            if _is_managed_utility_path(canonical):
                 continue
             if path not in seen_paths:
                 out.append((path, None, effective_cwd))
