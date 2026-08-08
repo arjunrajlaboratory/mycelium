@@ -314,7 +314,11 @@ manifest; require exclusion for verified installs and both documented
 plugin-root accessor spellings. The accessor exception trusts only commands
 that actually read this project's pointer: substitutions that merely mention
 it (`basename`, `echo`, `dirname`) or read a nested repository's pointer
-must remain untrusted.
+must remain untrusted. The accessor must also anchor the entire shell word
+and be followed by a registry-normalizable helper path: a user component
+before a genuine pointer read (`foo/$(cat .mycelium/plugin-root)/…`)
+resolves under the cwd, and traversal after the accessor escapes the managed
+tree, so both stay eligible analysis.
 
 ## 19. Machine finalization overwrites authored semantics
 

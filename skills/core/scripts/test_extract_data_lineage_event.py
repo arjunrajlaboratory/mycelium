@@ -587,6 +587,32 @@ def test_non_reader_command_substitution_prefix_is_not_trusted(
     assert len(out) == 1
 
 
+@pytest.mark.parametrize(
+    "word",
+    [
+        # User-controlled components before a real pointer read resolve under
+        # the cwd, not the managed install (Codex P2, round 3 on PR #70).
+        'foo/$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py',
+        './$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py',
+        "sub/$(sed -n '1p' .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py",
+        # Traversal after the accessor escapes the managed tree.
+        '$(cat .mycelium/plugin-root)/skills/core/scripts/../../../evil_analysis.py',
+    ],
+)
+def test_accessor_not_anchoring_the_word_is_not_trusted(
+    tmp_path: Path, word: str
+) -> None:
+    out = detect_scripts(f'python3 "{word}"', tmp_path)
+    assert len(out) == 1
+
+
+def test_accessor_with_normalizable_inner_dot_components_is_trusted(
+    tmp_path: Path,
+) -> None:
+    word = "$(cat .mycelium/plugin-root)/skills/core/./scripts/recall_lessons.py"
+    assert detect_scripts(f'python3 "{word}"', tmp_path) == []
+
+
 def test_non_mycelium_manifest_does_not_verify_the_root(tmp_path: Path) -> None:
     install = tmp_path / "install"
     manifest = install / ".claude-plugin" / "plugin.json"

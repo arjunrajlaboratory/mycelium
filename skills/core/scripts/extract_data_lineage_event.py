@@ -33,6 +33,7 @@ import fcntl
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import subprocess
@@ -271,11 +272,27 @@ _PLUGIN_MANIFEST_SIZE_LIMIT_BYTES = 64 * 1024
 # construction invoking the managed install. Only the documented reader forms
 # with the exact pointer argument are trusted: a substitution that merely
 # mentions the pointer path ("$(basename .mycelium/plugin-root)" expands to
-# the plain directory name "plugin-root") proves nothing.
-_PLUGIN_ROOT_SUBSTITUTION_RE = re.compile(
-    r"(?:^|/)\$\((?:cat|sed[ \t]+-n[ \t]+['\"]?1p['\"]?)"
-    r"[ \t]+\.mycelium/plugin-root\)/$"
+# the plain directory name "plugin-root") proves nothing. The accessor must
+# also anchor the ENTIRE shell word: with any preceding component
+# ("foo/$(cat .mycelium/plugin-root)/…") the expansion resolves under the
+# cwd as a user-controlled relative path, not under the managed install.
+_PLUGIN_ROOT_ACCESSOR_WORD_RE = re.compile(
+    r"^\$\((?:cat|sed[ \t]+-n[ \t]+['\"]?1p['\"]?)"
+    r"[ \t]+\.mycelium/plugin-root\)/(?P<rel>.+)$"
 )
+
+
+def _is_plugin_root_accessor_invocation(raw_word: str) -> bool:
+    """True when a decoded shell word is `<pointer-read>/<bundled helper>`.
+
+    The remainder after the accessor must normalize to a registry entry, so
+    traversal that escapes the managed tree stays eligible analysis.
+    """
+    match = _PLUGIN_ROOT_ACCESSOR_WORD_RE.match(raw_word)
+    if not match:
+        return False
+    relpath = posixpath.normpath(match.group("rel"))
+    return relpath in IGNORED_SCRIPT_SUFFIXES
 _verified_plugin_roots: dict[str, bool] = {}
 
 
@@ -324,8 +341,6 @@ def _is_managed_utility_path(resolved: Path) -> bool:
         prefix = posix[: -len(suffix)]
         if prefix and not prefix.endswith("/"):
             continue
-        if _PLUGIN_ROOT_SUBSTITUTION_RE.search(prefix):
-            return True
         root = Path(prefix.rstrip("/") or "/")
         if _is_mycelium_plugin_root(root):
             return True
@@ -1427,6 +1442,8 @@ def _detect_scripts_with_cwd(
                 continue
             raw_path = path_words[0]
             if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES:
+                continue
+            if _is_plugin_root_accessor_invocation(raw_path):
                 continue
             path = Path(raw_path)
             if not path.is_absolute():
