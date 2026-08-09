@@ -17,8 +17,22 @@ Host substitutions:
   CLI build under test — if the build exposes none, record N/A with the CLI
   version as evidence.
 
+Probe substitutions — the launcher selects these per the protocol's "Probe
+selection" section and must ensure the positive entry point exists in the
+target's committed baseline before launch (a fresh initialized repository
+contains no analysis scripts, and `env -C` fails with 125 on a missing
+directory, so an unseeded clean-room target can never exercise the positive
+path):
+
+- `{POSITIVE_COMMAND}` — an existing harmless analysis entry point, nested
+  when possible, e.g. `env -C analysis/example python3 run.py --help` after
+  seeding `analysis/example/run.py` into the disposable repository's
+  baseline commit.
+- `{NEGATIVE_COMMAND}` — the argv-rewrite near-neighbor of the same entry
+  point, e.g. `env -S 'echo prefix' python3 run.py --help`.
+
 Prompt body (substitute `{EDIT_TOOL}`, `{DELETE_INSTRUCTION}`,
-`{SUBAGENT_TOOL}`):
+`{SUBAGENT_TOOL}`, `{POSITIVE_COMMAND}`, `{NEGATIVE_COMMAND}`):
 
 ```text
 You are performing a black-box lifecycle observation task. Follow these
@@ -44,13 +58,13 @@ in your own conversation, verbatim. If the host has no such tool, write N/A
 and the reason.
 
 STEP 4: Run exactly this shell command:
-env -C analysis/example python3 run.py --help
+{POSITIVE_COMMAND}
 Under a section "POSITIVE PROBE", report the command's exit status and then
 verbatim any automatic context that appeared after the tool result. If
 none, write NONE.
 
 STEP 5: Run exactly this shell command:
-env -S 'echo prefix' python3 run.py --help
+{NEGATIVE_COMMAND}
 Under a section "NEGATIVE PROBE", report the exit status and whether ANY
 automatic Mycelium context appeared after it. If none, write NONE.
 
