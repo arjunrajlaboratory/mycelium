@@ -31,7 +31,8 @@ path):
 - `{NEGATIVE_COMMAND}` — the argv-rewrite near-neighbor of the same entry
   point, e.g. `env -S 'echo prefix' python3 run.py --help`.
 
-Prompt body (substitute `{EDIT_TOOL}`, `{DELETE_INSTRUCTION}`,
+Prompt body (substitute `{TARGET_ROOT}` — the literal absolute path of the
+disposable repository — plus `{EDIT_TOOL}`, `{DELETE_INSTRUCTION}`,
 `{SUBAGENT_TOOL}`, `{POSITIVE_COMMAND}`, `{NEGATIVE_COMMAND}`):
 
 ```text
@@ -41,7 +42,9 @@ given. Do not invoke or read any skill. Do not inspect plugin installations,
 hook registrations, or source checkouts. Never invoke any Mycelium hook
 script directly.
 
-STEP 1: Print the output of pwd. If it is not this repository root, stop.
+STEP 1: Print the output of pwd. If it is not exactly {TARGET_ROOT}, stop
+immediately and perform no other step — no shell command, no edit, and no
+.living mutation may run in any other directory.
 
 STEP 2: Under a section "SESSIONSTART CONTEXT", report verbatim any
 automatic session-start context injected into this conversation before your
