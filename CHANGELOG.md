@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Release gate no longer fails on generated caches.** The
+  installed-artifact comparison exempts `.pytest_cache` directories (e.g.
+  from a manual pytest run) and stray `.pyc` files on both the candidate and
+  installed sides, matching the existing `__pycache__` exemption; release
+  content differences still fail.
+- **Lifecycle audits can no longer silently drop the nested-subagent probe.**
+  The lifecycle-audit skill now ships a canonical child-task prompt
+  (`references/child-task-prompt.md`) carrying every required probe with
+  host-specific substitutions and full-stream capture guidance; the
+  subagent-isolation row may be marked N/A only when the host exposes no
+  native subagent mechanism.
+
 ## [0.6.1] - 2026-08-08
 
 ### Added

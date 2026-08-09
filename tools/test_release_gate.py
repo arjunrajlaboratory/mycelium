@@ -246,6 +246,38 @@ def test_stale_extra_installed_file_fails(tmp_path: Path) -> None:
         gate.compare_installed(repo, install, gate.GateReport(version="0.7.0"))
 
 
+def test_generated_caches_are_exempt_on_both_sides(tmp_path: Path) -> None:
+    """A leftover .pytest_cache (from a manual pytest run) is generated
+    junk on either side of the comparison, like __pycache__ — it must not
+    fail an otherwise identical artifact."""
+    repo, install = _packaged_repo(tmp_path)
+    source_cache = repo / "skills" / "core" / ".pytest_cache" / "v" / "cache"
+    source_cache.mkdir(parents=True)
+    (source_cache / "nodeids").write_text("[]\n")
+    install_cache = install / "skills" / ".pytest_cache"
+    install_cache.mkdir(parents=True)
+    (install_cache / "CACHEDIR.TAG").write_text("tag\n")
+    (install / "skills" / "core" / "stale.pyc").write_bytes(b"\x00")
+    report = gate.GateReport(version="0.7.0")
+    gate.compare_installed(repo, install, report)
+    assert any("installed-artifact" in name for name, _ in report.checks)
+
+
+def test_install_root_under_cache_named_ancestor_still_compares(
+    tmp_path: Path,
+) -> None:
+    """PR #73 P2: cache membership must be computed from artifact-relative
+    paths — an installed root living under a `.pytest_cache`-named ancestor
+    must not exempt every installed file from the reverse comparison."""
+    repo, install = _packaged_repo(tmp_path)
+    nested_root = tmp_path / ".pytest_cache" / "install"
+    nested_root.parent.mkdir()
+    install.rename(nested_root)
+    (nested_root / "skills" / "core" / "obsolete_helper.py").write_text("old\n")
+    with pytest.raises(gate.GateFailure, match="stale extra"):
+        gate.compare_installed(repo, nested_root, gate.GateReport(version="0.7.0"))
+
+
 def test_pycache_in_install_is_tolerated(tmp_path: Path) -> None:
     repo, install = _packaged_repo(tmp_path)
     pycache = install / "skills" / "core" / "__pycache__"

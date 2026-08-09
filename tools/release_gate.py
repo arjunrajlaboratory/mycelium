@@ -37,6 +37,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 CACHEBUSTER_RE = re.compile(r"codex\.[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*")
+# Generated caches are exempt from the installed-artifact comparison on both
+# sides: a leftover .pytest_cache from a manual pytest run (the gate's own
+# ladder never creates one) or interpreter bytecode is not release content.
+# Membership is judged on the artifact-RELATIVE path: a cache-named ancestor
+# above the candidate or installed root must not exempt real content.
+_GENERATED_CACHE_DIRS = {"__pycache__", ".pytest_cache"}
+
+
+def _is_generated_cache_artifact(relative: Path) -> bool:
+    return (
+        bool(_GENERATED_CACHE_DIRS.intersection(relative.parts))
+        or relative.suffix == ".pyc"
+    )
 SEMVER_RE = re.compile(r"\d+\.\d+\.\d+")
 PACKAGED_DIRS = ("skills", "hooks", ".claude-plugin", ".codex-plugin")
 
@@ -229,7 +242,9 @@ def compare_installed(repo: Path, installed_root: Path,
     for packaged in PACKAGED_DIRS:
         source_dir = repo / packaged
         for source_file in sorted(source_dir.rglob("*")):
-            if not source_file.is_file() or "__pycache__" in source_file.parts:
+            if not source_file.is_file() or _is_generated_cache_artifact(
+                source_file.relative_to(repo)
+            ):
                 continue
             relative = source_file.relative_to(repo)
             source_files.add(relative)
@@ -258,9 +273,9 @@ def compare_installed(repo: Path, installed_root: Path,
         for installed_file in sorted(installed_dir.rglob("*")):
             if not installed_file.is_file():
                 continue
-            if "__pycache__" in installed_file.parts:
-                continue
-            if installed_file.suffix == ".pyc":
+            if _is_generated_cache_artifact(
+                installed_file.relative_to(installed_root)
+            ):
                 continue
             relative = installed_file.relative_to(installed_root)
             if relative not in source_files:
