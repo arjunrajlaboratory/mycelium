@@ -56,9 +56,12 @@ audit is needed, create a fresh disposable repository.
 ## 3. Launch one genuinely fresh host task
 
 Run the host CLI from the exact target root. Do not invoke any Mycelium hook
-script in the task or immediately afterward. Ask the agent to expose the exact
-automatic lifecycle context it receives and perform only the probes in the
-audit protocol. The launcher, not the child agent, owns artifact verification
+script in the task or immediately afterward. Use the canonical child-task
+prompt in `references/child-task-prompt.md` — every probe it carries is
+required, including the nested-subagent probe, which may be marked N/A only
+when the host exposes no native subagent mechanism. Ask the agent to expose
+the exact automatic lifecycle context it receives and perform only the probes
+in the audit protocol. The launcher, not the child agent, owns artifact verification
 and baseline capture. Where the CLI supports it, disable skills in the child
 task so the lifecycle-audit skill does not recursively launch or expand itself.
 Keep ordinary file-reading and editing tools available: the child needs them to

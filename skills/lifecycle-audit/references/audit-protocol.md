@@ -73,6 +73,13 @@ absent at the end.
 
 ## Host task instructions
 
+Use the canonical prompt in `child-task-prompt.md`, which encodes the steps
+below with host-specific substitutions. Do not hand-write a reduced prompt:
+the 0.6.1 post-release audits hand-wrote prompts and silently dropped the
+nested-subagent probe on both hosts. Capture the full event stream (Claude
+Code print mode returns only the final message; prefer
+`--output-format stream-json`).
+
 The fresh agent should:
 
 1. Do not invoke or read any skill. The parent audit orchestrator already read
