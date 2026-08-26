@@ -97,9 +97,13 @@ ENTRY_LOG_FILES = ("learnings.md", "decisions.md")
 # .living/INDEX.md — historically with no error raised anywhere.
 ENTRY_HEADING_PREFIX = "### "
 
-# A heading that carries a date is an entry, not a structural sub-heading.
-# Matches both the bracketed "[YYYY-MM-DD]" template form and the bare form.
-_DATED_HEADING_RE = re.compile(r"^#{1,6}\s+(?=\S).*?\d{4}-\d{2}-\d{2}")
+# An entry heading *leads* with its date, as both shipped templates do:
+# "### [YYYY-MM-DD] Title" or the bare "### YYYY-MM-DD Title". The date must
+# follow the hashes immediately -- a structural heading that merely mentions a
+# date somewhere ("## Archive (entries before 2025-01-01)") is not an entry, and
+# treating it as one both failed validation and let the repair mint a phantom
+# entry that renumbered every real one.
+_DATED_HEADING_RE = re.compile(r"^#{1,6}\s+\[?\d{4}-\d{2}-\d{2}\]?")
 
 # Fenced blocks are skipped so that an entry documenting the entry format does
 # not report itself.
@@ -108,8 +112,31 @@ _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _MAX_REPORTED_LINES = 5
 
 
-def _mislevelled_entry_lines(path: Path) -> list[int]:
+def split_log_lines(text: str) -> list[str]:
+    """Split a knowledge log the way the parsers read it: on newlines only.
+
+    ``str.splitlines`` additionally breaks on form feed, U+2028 and other
+    Unicode boundaries, which would number lines differently from the parsers
+    and from any repair keyed to those numbers. Callers that rewrite a log MUST
+    use this function so detection and rewriting index identically.
+    """
+    return text.split("\n")
+
+
+def mislevelled_entry_lines(path: Path) -> list[int]:
     """Return 1-based line numbers of dated headings the parsers will not read.
+
+    Read-only, so undecodable bytes are replaced rather than raising. Callers
+    that rewrite the file must decode strictly and pass the text to
+    `mislevelled_entry_lines_in_text` instead, so a replacement character is
+    never written back over real content.
+    """
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return mislevelled_entry_lines_in_text(text)
+
+
+def mislevelled_entry_lines_in_text(text: str) -> list[int]:
+    """Line numbers (1-based, per `split_log_lines`) of unparseable entries.
 
     Headings inside fenced code blocks are ignored: they are illustrative
     markdown, not entries.
@@ -117,30 +144,31 @@ def _mislevelled_entry_lines(path: Path) -> list[int]:
     mislevelled: list[int] = []
     fence_marker: str | None = None
 
-    with path.open(encoding="utf-8", errors="replace") as fh:
-        for lineno, raw in enumerate(fh, start=1):
-            line = raw.rstrip("\n")
+    for lineno, raw in enumerate(split_log_lines(text), start=1):
+        # Tolerate CRLF text even though every in-tree caller decodes with
+        # universal newlines: this is a public entry point.
+        line = raw.rstrip("\r")
 
-            fence = _FENCE_RE.match(line)
-            if fence:
-                marker = fence.group(1)
-                # Only the marker that opened a fence can close it, so a "~~~"
-                # inside a "```" block does not end the block.
-                if fence_marker is None:
-                    fence_marker = marker
-                elif marker == fence_marker:
-                    fence_marker = None
-                continue
-            if fence_marker is not None:
-                continue
+        fence = _FENCE_RE.match(line)
+        if fence:
+            marker = fence.group(1)
+            # Only the marker that opened a fence can close it, so a "~~~"
+            # inside a "```" block does not end the block.
+            if fence_marker is None:
+                fence_marker = marker
+            elif marker == fence_marker:
+                fence_marker = None
+            continue
+        if fence_marker is not None:
+            continue
 
-            # Anything the parsers accept is exempt; everything reaching the
-            # dated-heading test below is by definition unparseable.
-            if line.startswith(ENTRY_HEADING_PREFIX):
-                continue
+        # Anything the parsers accept is exempt; everything reaching the
+        # dated-heading test below is by definition unparseable.
+        if line.startswith(ENTRY_HEADING_PREFIX):
+            continue
 
-            if _DATED_HEADING_RE.match(line):
-                mislevelled.append(lineno)
+        if _DATED_HEADING_RE.match(line):
+            mislevelled.append(lineno)
 
     return mislevelled
 
@@ -148,9 +176,11 @@ def _mislevelled_entry_lines(path: Path) -> list[int]:
 def check_entry_heading_levels(target_dir: Path, result: ValidationResult):
     """Flag knowledge logs whose entries use a heading level no parser reads.
 
-    Without this check the failure is completely silent: the entries are on disk
-    and greppable, but `.living/INDEX.md` reports "0 entries" and the
-    SessionStart hook surfaces an empty knowledge log.
+    Reported as an error, not a warning: the entries are on disk and greppable,
+    but `.living/INDEX.md` reports "0 entries" and the SessionStart hook
+    surfaces an empty knowledge log, so agents are told to trust an index that
+    is missing real knowledge. `migrate_existing_repos.py` repairs the headings
+    in place and regenerates the index.
     """
     living_dir = target_dir / ".living"
     if not living_dir.is_dir():
@@ -161,7 +191,7 @@ def check_entry_heading_levels(target_dir: Path, result: ValidationResult):
         if not path.is_file():
             continue
 
-        mislevelled = _mislevelled_entry_lines(path)
+        mislevelled = mislevelled_entry_lines(path)
         if not mislevelled:
             continue
 
@@ -169,12 +199,13 @@ def check_entry_heading_levels(target_dir: Path, result: ValidationResult):
         if len(mislevelled) > _MAX_REPORTED_LINES:
             shown += f", and {len(mislevelled) - _MAX_REPORTED_LINES} more"
 
-        result.warning(
+        result.error(
             f".living/{filename} has {len(mislevelled)} dated "
             f"{'heading' if len(mislevelled) == 1 else 'headings'} that "
             f"generate_index.py cannot parse ({shown}); entries must use "
             f"'{ENTRY_HEADING_PREFIX.strip()}' or they are silently omitted "
-            f"from .living/INDEX.md"
+            f"from .living/INDEX.md. Fix with: "
+            f"migrate_existing_repos.py --repo <repo>"
         )
 
 

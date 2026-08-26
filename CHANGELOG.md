@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-08-26
 
 ### Fixed
 
@@ -21,20 +21,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`validate_structure.py` reports mislevelled knowledge entries.** A new
-  check flags dated headings in `.living/learnings.md` and
+- **`validate_structure.py` fails on mislevelled knowledge entries.** A new
+  check reports dated headings in `.living/learnings.md` and
   `.living/decisions.md` that `generate_index.py` cannot parse, naming the
   file, the count, and the offending line numbers. Mixed-level files are
   reported too — the case where a nonzero entry count masks silently dropped
-  entries. Headings inside fenced code blocks are ignored, so an entry that
-  documents the entry format does not report itself. Emitted as a warning:
-  affected repositories are structurally valid and recoverable by a
-  heading-level edit, and `--strict` escalates it for CI ([#76]).
+  entries. Only headings that *lead* with a date are treated as entries, as both
+  shipped templates do, so a structural heading that merely mentions one
+  (`## Archive (entries before 2025-01-01)`) is left alone; headings inside
+  fenced code blocks are ignored, so an entry documenting the entry format does
+  not report itself ([#76]).
+- **Migration for repositories holding mislevelled entries.**
+  `migrate_existing_repos.py` gained an idempotent `Entry heading levels`
+  action that raises `##` entries to `###` in place and runs before the
+  `INDEX.md` regen, so recovered entries land in the rebuilt index in the same
+  pass. Detection is delegated to `validate_structure.mislevelled_entry_lines`,
+  so the validator and the repair cannot disagree about what is broken; only
+  the heading lines it names are rewritten, leaving bodies, fenced examples,
+  and structural headings untouched. A log that is not valid UTF-8 is refused by
+  name rather than rewritten with replacement characters. Honors `--dry-run` and
+  preserves file permissions ([#76]).
 - **Drift protection between entry guidance and the parsers.**
   `test_entry_heading_consistency.py` round-trips both shipped templates
   through all three `generate_index.py` parsers and asserts the hook,
   transfer skill, and reference examples dictate the level the parsers
   actually read, so the two cannot diverge again unnoticed ([#76]).
+
+### Changed
+
+- **Mislevelled knowledge entries are an error, not a warning.**
+  `validate_structure.py` now exits non-zero for a repository whose
+  `.living/learnings.md` or `.living/decisions.md` entries are absent from
+  `INDEX.md`, because agents are instructed to trust that index. Repositories
+  that followed the shipped `###` templates are unaffected; any repository
+  that accumulated `##` entries should run
+  `migrate_existing_repos.py --repo <repo>`, which the error message names
+  ([#76]).
+
+[#76]: https://github.com/arjunrajlaboratory/mycelium/issues/76
 
 ## [0.6.2] - 2026-08-08
 

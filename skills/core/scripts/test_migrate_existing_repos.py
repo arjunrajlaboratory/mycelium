@@ -12,6 +12,8 @@ import pytest
 _SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
+import generate_index as gi  # noqa: E402
+import validate_structure as vs  # noqa: E402
 import migrate_existing_repos as mig  # noqa: E402
 
 
@@ -251,6 +253,266 @@ class TestRegenIndex:
         assert applied is False
 
 
+class TestMigrateEntryHeadings:
+    """Recovery for entries written at a heading level the parsers ignore.
+
+    Repos that followed the old decision template, the transfer skill, or the
+    post-action hook accumulated ``##`` entries that never reached INDEX.md
+    (issue #76). This step repairs them in place.
+    """
+
+    def _write_logs(self, repo: Path, learnings: str, decisions: str) -> None:
+        (repo / ".living" / "learnings.md").write_text(learnings, encoding="utf-8")
+        (repo / ".living" / "decisions.md").write_text(decisions, encoding="utf-8")
+
+    def test_rewrites_mislevelled_headings_in_both_logs(
+        self, fake_repo: Path
+    ) -> None:
+        self._write_logs(
+            fake_repo,
+            "# Learnings\n\n## [2026-04-01] A learning\n**Tags**: [t]\n",
+            "# Decisions\n\n## [2026-04-02] A decision\n**Tags**: [t]\n",
+        )
+        assert mig.migrate_entry_headings(fake_repo) is True
+
+        learnings = (fake_repo / ".living" / "learnings.md").read_text()
+        decisions = (fake_repo / ".living" / "decisions.md").read_text()
+        assert "### [2026-04-01] A learning" in learnings
+        assert "## [2026-04-01]" not in learnings.replace("### [2026-04-01]", "")
+        assert "### [2026-04-02] A decision" in decisions
+
+    def test_repaired_entries_become_parseable(self, fake_repo: Path) -> None:
+        """The point of the migration: zero entries becomes real entries."""
+        self._write_logs(
+            fake_repo,
+            "# Learnings\n\n## [2026-04-01] A learning\n**Tags**: [t]\n",
+            "# Decisions\n",
+        )
+        path = fake_repo / ".living" / "learnings.md"
+        before, _ = gi.count_headers_and_topics(path, "learnings")
+        assert before == 0
+
+        mig.migrate_entry_headings(fake_repo)
+        after, _ = gi.count_headers_and_topics(path, "learnings")
+        assert after == 1
+
+    def test_is_idempotent(self, fake_repo: Path) -> None:
+        self._write_logs(
+            fake_repo,
+            "# Learnings\n\n## [2026-04-01] A learning\n**Tags**: [t]\n",
+            "# Decisions\n",
+        )
+        assert mig.migrate_entry_headings(fake_repo) is True
+        repaired = (fake_repo / ".living" / "learnings.md").read_text()
+
+        assert mig.migrate_entry_headings(fake_repo) is False
+        assert (fake_repo / ".living" / "learnings.md").read_text() == repaired
+
+    def test_dry_run_reports_without_writing(self, fake_repo: Path) -> None:
+        original = "# Learnings\n\n## [2026-04-01] A learning\n**Tags**: [t]\n"
+        self._write_logs(fake_repo, original, "# Decisions\n")
+
+        assert mig.migrate_entry_headings(fake_repo, dry_run=True) is True
+        assert (fake_repo / ".living" / "learnings.md").read_text() == original
+
+    def test_skips_already_correct_repo(self, fake_repo: Path) -> None:
+        """The default fixture is already correctly levelled."""
+        assert mig.migrate_entry_headings(fake_repo) is False
+
+    def test_leaves_fenced_examples_and_structural_headings_alone(
+        self, fake_repo: Path
+    ) -> None:
+        original = (
+            "# Learnings\n\n"
+            "## Older entries\n\n"
+            "### [2026-04-01] Real entry\n\n"
+            "```markdown\n## [YYYY-MM-DD] Example only\n```\n"
+        )
+        self._write_logs(fake_repo, original, "# Decisions\n")
+        assert mig.migrate_entry_headings(fake_repo) is False
+        assert (fake_repo / ".living" / "learnings.md").read_text() == original
+
+    def test_preserves_body_content_and_file_mode(self, fake_repo: Path) -> None:
+        self._write_logs(
+            fake_repo,
+            "# Learnings\n\n"
+            "## [2026-04-01] A learning\n\n"
+            "**Category**: gotcha\n"
+            "**What happened**: something with ## hashes inline\n"
+            "**Tags**: [t]\n",
+            "# Decisions\n",
+        )
+        path = fake_repo / ".living" / "learnings.md"
+        path.chmod(0o640)
+
+        mig.migrate_entry_headings(fake_repo)
+        content = path.read_text()
+        assert "**What happened**: something with ## hashes inline" in content
+        assert "**Category**: gotcha" in content
+        assert path.stat().st_mode & 0o777 == 0o640
+
+    def test_does_not_corrupt_lines_around_exotic_line_boundaries(
+        self, fake_repo: Path
+    ) -> None:
+        """Detection and rewrite must index lines identically.
+
+        ``str.splitlines`` breaks on form feed, U+2028 and friends while file
+        iteration only breaks on newline. If the two disagree the repair edits
+        the wrong line — mangling body text and leaving the real heading broken.
+        """
+        self._write_logs(
+            fake_repo,
+            "# Learnings\nintro\x0cmore\n## [2026-04-01] Entry\n**Tags**: [t]\n",
+            "# Decisions\n",
+        )
+        path = fake_repo / ".living" / "learnings.md"
+        assert mig.migrate_entry_headings(fake_repo) is True
+
+        content = path.read_text()
+        assert "intro\x0cmore" in content, "body text was rewritten"
+        assert "### [2026-04-01] Entry" in content, "real heading was not repaired"
+
+    def test_normalizes_separator_so_repair_converges(
+        self, fake_repo: Path
+    ) -> None:
+        """A tab-separated heading must become parseable, not stay broken.
+
+        The parsers match the literal prefix ``"### "``, so rewriting the hashes
+        alone would leave the entry unreadable and the repo permanently failing
+        validation while migration reported success.
+        """
+        self._write_logs(
+            fake_repo,
+            "# Learnings\n\n###\t[2026-04-01] Tab separated\n**Tags**: [t]\n",
+            "# Decisions\n",
+        )
+        path = fake_repo / ".living" / "learnings.md"
+        assert mig.migrate_entry_headings(fake_repo) is True
+        assert "### [2026-04-01] Tab separated" in path.read_text()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "# L\n\n## [2026-04-01] Plain\n",
+            "# L\n\n####   [2026-04-01] Deep and padded\n",
+            "# L\n\n###\t[2026-04-01] Tab\n",
+            "# L\n\n## 2026-04-01 Bare date\n",
+            "# L\nintro\x0cmore\n## [2026-04-01] After form feed\n",
+            "# L\n\n## [2026-04-01] One\n\n#### [2026-04-02] Two\n",
+        ],
+    )
+    def test_migration_always_converges(self, fake_repo: Path, body: str) -> None:
+        """Post-condition: after repair the validator has nothing left to say."""
+        self._write_logs(fake_repo, body, "# Decisions\n")
+        path = fake_repo / ".living" / "learnings.md"
+
+        assert mig.migrate_entry_headings(fake_repo) is True
+        assert vs.mislevelled_entry_lines(path) == []
+        # And a second pass is a genuine no-op.
+        assert mig.migrate_entry_headings(fake_repo) is False
+
+    def test_does_not_rewrite_structural_headings_or_shift_entry_ids(
+        self, fake_repo: Path
+    ) -> None:
+        """A section heading that mentions a date must survive untouched.
+
+        Rewriting it minted a phantom entry, which renumbered every real entry
+        and invalidated existing `recall_lessons --id L-N` references.
+        """
+        original = (
+            "# Learnings\n\n"
+            "## Archive (entries before 2025-01-01)\n\n"
+            "### [2026-04-01] Real entry\n**Tags**: [t]\n"
+        )
+        self._write_logs(fake_repo, original, "# Decisions\n")
+        path = fake_repo / ".living" / "learnings.md"
+        ids_before = [e["id"] for e in gi.collect_entries(path, "learnings", "L")]
+
+        assert mig.migrate_entry_headings(fake_repo) is False
+        assert path.read_text() == original
+        assert [
+            e["id"] for e in gi.collect_entries(path, "learnings", "L")
+        ] == ids_before == ["L-1"]
+
+    def test_undecodable_log_fails_with_an_actionable_message(
+        self, fake_repo: Path
+    ) -> None:
+        """The validator flags such a file, so the remedy must not just crash.
+
+        A raw UnicodeDecodeError traceback gives the user nothing to act on, and
+        reading with ``errors="replace"`` would persist replacement characters
+        over real bytes. Refuse the file by name instead, and touch nothing.
+        """
+        path = fake_repo / ".living" / "learnings.md"
+        original = b"# Learnings\n\n## [2026-04-01] Caf\xe9 entry\n"
+        path.write_bytes(original)
+        (fake_repo / ".living" / "decisions.md").write_text(
+            "# Decisions\n", encoding="utf-8"
+        )
+
+        with pytest.raises(ValueError, match="not valid UTF-8"):
+            mig.migrate_entry_headings(fake_repo)
+
+        assert path.read_bytes() == original
+
+    def test_undecodable_log_does_not_block_repair_of_the_other_log(
+        self, fake_repo: Path
+    ) -> None:
+        """Preflight refuses before the first write, so nothing is half-done."""
+        learnings = fake_repo / ".living" / "learnings.md"
+        decisions = fake_repo / ".living" / "decisions.md"
+        learnings.write_bytes(b"## [2026-04-01] Caf\xe9\n")
+        decisions.write_text(
+            "# Decisions\n\n## [2026-04-02] Fixable\n", encoding="utf-8"
+        )
+        decisions_before = decisions.read_text()
+
+        with pytest.raises(ValueError, match="not valid UTF-8"):
+            mig.migrate_entry_headings(fake_repo)
+
+        assert decisions.read_text() == decisions_before
+
+    def test_crlf_log_is_repaired_and_normalized_to_lf(
+        self, fake_repo: Path
+    ) -> None:
+        """Documented consequence of matching the validator's read policy.
+
+        Both sides decode with universal newlines so detection and rewrite index
+        lines identically; the cost is that a CRLF log comes back as LF. Every
+        Mycelium writer (init_repo, the printf-based hooks) emits LF already.
+        """
+        path = fake_repo / ".living" / "learnings.md"
+        path.write_bytes(b"# Learnings\r\n\r\n## [2026-04-01] Entry\r\n")
+        (fake_repo / ".living" / "decisions.md").write_text(
+            "# Decisions\n", encoding="utf-8"
+        )
+
+        assert mig.migrate_entry_headings(fake_repo) is True
+        assert path.read_bytes() == b"# Learnings\n\n### [2026-04-01] Entry\n"
+        assert vs.mislevelled_entry_lines(path) == []
+
+    def test_returns_false_without_living_dir(self, tmp_path: Path) -> None:
+        no_living = tmp_path / "no-living"
+        no_living.mkdir()
+        assert mig.migrate_entry_headings(no_living) is False
+
+    def test_refuses_symlinked_living_before_writing(self, fake_repo: Path) -> None:
+        victim = fake_repo.parent / "outside-living"
+        victim.mkdir()
+        original = "# Learnings\n\n## [2026-04-01] Host-private\n"
+        (victim / "learnings.md").write_text(original, encoding="utf-8")
+
+        import shutil
+
+        shutil.rmtree(fake_repo / ".living")
+        (fake_repo / ".living").symlink_to(victim, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="symlink"):
+            mig.migrate_entry_headings(fake_repo)
+
+        assert (victim / "learnings.md").read_text() == original
+
+
 class TestMigrateRuntimeState:
     def test_refuses_symlinked_legacy_parent_before_writing(
         self, fake_repo: Path
@@ -285,6 +547,30 @@ class TestMigrateRuntimeState:
 
 
 class TestMigrateOne:
+    def test_repaired_entries_reach_the_regenerated_index(
+        self, fake_repo: Path
+    ) -> None:
+        """Heading repair must run before INDEX.md regen, not after.
+
+        If the order were reversed the index would be rebuilt from the still-
+        broken file and the recovered entries would stay invisible until the
+        next unrelated regeneration.
+        """
+        (fake_repo / ".living" / "learnings.md").write_text(
+            "# Learnings\n\n"
+            "## [2026-04-01] Recovered by migration\n"
+            "**Tags**: [recovered]\n\n"
+            "## [2026-04-02] Also recovered\n"
+            "**Tags**: [recovered]\n",
+            encoding="utf-8",
+        )
+        result = mig.migrate_one(fake_repo)
+        assert result["Entry heading levels"] == "applied"
+
+        index = (fake_repo / ".living" / "INDEX.md").read_text()
+        assert "Recovered by migration" in index
+        assert "**recovered** (2 entries)" in index
+
     def test_runs_all_actions_idempotently(self, fake_repo: Path) -> None:
         # First run applies guidance, state, Claude hooks, and INDEX refresh.
         # Codex hooks are plugin-bundled, so a repo with no legacy registrations

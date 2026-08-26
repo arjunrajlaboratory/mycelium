@@ -8,6 +8,8 @@ entries with no error anywhere (issue #76).
 
 from pathlib import Path
 
+import pytest
+
 import generate_index as gi
 from validate_structure import (
     ENTRY_HEADING_PREFIX,
@@ -25,11 +27,16 @@ def _living(tmp_path: Path, **files: str) -> Path:
     return tmp_path
 
 
-def _warnings(target_dir: Path) -> list[str]:
+def _errors(target_dir: Path) -> list[str]:
+    """Run the check and return its errors, asserting it emits no warnings.
+
+    The check reports at error severity: a repo whose knowledge is missing from
+    INDEX.md must fail validation, not merely mention it.
+    """
     result = ValidationResult()
     check_entry_heading_levels(target_dir, result)
-    assert result.errors == [], f"unexpected errors: {result.errors}"
-    return result.warnings
+    assert result.warnings == [], f"unexpected warnings: {result.warnings}"
+    return result.errors
 
 
 # ---------------------------------------------------------------------------
@@ -48,9 +55,9 @@ def test_dated_h2_entry_in_decisions_is_flagged(tmp_path: Path) -> None:
             "**Decision**: use the template's heading level\n"
         ),
     )
-    warnings = _warnings(target)
-    assert len(warnings) == 1
-    assert "decisions.md" in warnings[0]
+    errors = _errors(target)
+    assert len(errors) == 1
+    assert "decisions.md" in errors[0]
 
 
 def test_dated_h2_entry_in_learnings_is_flagged(tmp_path: Path) -> None:
@@ -59,22 +66,22 @@ def test_dated_h2_entry_in_learnings_is_flagged(tmp_path: Path) -> None:
         tmp_path,
         learnings_md="# Learnings\n\n## [2026-08-25] A learning\n\n**Category**: gotcha\n",
     )
-    warnings = _warnings(target)
-    assert len(warnings) == 1
-    assert "learnings.md" in warnings[0]
+    errors = _errors(target)
+    assert len(errors) == 1
+    assert "learnings.md" in errors[0]
 
 
-def test_warning_states_the_required_heading_level_and_line_numbers(
+def test_error_states_the_required_heading_level_and_line_numbers(
     tmp_path: Path,
 ) -> None:
-    """The warning has to be actionable without reading generate_index.py."""
+    """The message has to be actionable without reading generate_index.py."""
     target = _living(
         tmp_path,
         decisions_md="# Decisions\n\n## [2026-08-25] Example decision\n\nbody\n",
     )
-    (warning,) = _warnings(target)
-    assert ENTRY_HEADING_PREFIX.strip() in warning
-    assert "line 3" in warning
+    (error,) = _errors(target)
+    assert ENTRY_HEADING_PREFIX.strip() in error
+    assert "line 3" in error
 
 
 def test_mixed_levels_are_flagged_even_though_some_entries_parse(
@@ -89,9 +96,9 @@ def test_mixed_levels_are_flagged_even_though_some_entries_parse(
             "## [2026-08-25] Silently dropped\n\nbody\n"
         ),
     )
-    (warning,) = _warnings(target)
-    assert "learnings.md" in warning
-    assert "line 7" in warning
+    (error,) = _errors(target)
+    assert "learnings.md" in error
+    assert "line 7" in error
 
 
 def test_dated_h4_entry_is_flagged(tmp_path: Path) -> None:
@@ -100,7 +107,7 @@ def test_dated_h4_entry_is_flagged(tmp_path: Path) -> None:
         tmp_path,
         decisions_md="# Decisions\n\n#### [2026-08-25] Too deep\n\nbody\n",
     )
-    assert len(_warnings(target)) == 1
+    assert len(_errors(target)) == 1
 
 
 def test_bare_date_entry_without_brackets_is_flagged(tmp_path: Path) -> None:
@@ -109,7 +116,7 @@ def test_bare_date_entry_without_brackets_is_flagged(tmp_path: Path) -> None:
         tmp_path,
         learnings_md="# Learnings\n\n## 2026-08-25 Bare date entry\n\nbody\n",
     )
-    assert len(_warnings(target)) == 1
+    assert len(_errors(target)) == 1
 
 
 def test_tab_separated_h3_is_flagged_because_parsers_need_a_literal_space(
@@ -123,7 +130,7 @@ def test_tab_separated_h3_is_flagged_because_parsers_need_a_literal_space(
     path = tmp_path / ".living" / "learnings.md"
     count, _ = gi.count_headers_and_topics(path, "learnings")
     assert count == 0, "precondition: the parser does not read this heading"
-    assert len(_warnings(target)) == 1
+    assert len(_errors(target)) == 1
 
 
 def test_both_logs_are_reported_independently(tmp_path: Path) -> None:
@@ -132,9 +139,9 @@ def test_both_logs_are_reported_independently(tmp_path: Path) -> None:
         learnings_md="## [2026-08-25] One\n",
         decisions_md="## [2026-08-25] Two\n",
     )
-    warnings = _warnings(target)
-    assert len(warnings) == 2
-    assert {"learnings.md" in w for w in warnings} == {True, False}
+    errors = _errors(target)
+    assert len(errors) == 2
+    assert {"learnings.md" in e for e in errors} == {True, False}
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +155,7 @@ def test_correctly_levelled_entries_are_not_flagged(tmp_path: Path) -> None:
         learnings_md="# Learnings\n\n### [2026-08-25] Fine\n\n**Tags**: [a]\n",
         decisions_md="# Decisions\n\n### [2026-08-25] Fine\n\n**Tags**: [a]\n",
     )
-    assert _warnings(target) == []
+    assert _errors(target) == []
 
 
 def test_undated_h2_context_headings_are_not_flagged(tmp_path: Path) -> None:
@@ -162,7 +169,32 @@ def test_undated_h2_context_headings_are_not_flagged(tmp_path: Path) -> None:
             "#### Sub-detail\n\nbody\n"
         ),
     )
-    assert _warnings(target) == []
+    assert _errors(target) == []
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "## Archive (entries before 2025-01-01)",
+        "## Sprint 2026-04-01 retro",
+        "## Migrated from old repo on 2026-01-15",
+        "## Entries 2025-01-01 through 2025-12-31",
+    ],
+)
+def test_structural_headings_merely_mentioning_a_date_are_not_flagged(
+    tmp_path: Path, heading: str
+) -> None:
+    """An entry heading leads with its date; a prose heading merely contains one.
+
+    Treating any date-bearing heading as an entry made real section headings a
+    hard validation failure, and the migration then rewrote them into fake
+    entries that shifted every real entry's ID.
+    """
+    target = _living(
+        tmp_path,
+        learnings_md=f"# Learnings\n\n{heading}\n\n### [2026-04-01] Real\n",
+    )
+    assert _errors(target) == []
 
 
 def test_dated_headings_inside_fenced_code_blocks_are_ignored(
@@ -180,7 +212,7 @@ def test_dated_headings_inside_fenced_code_blocks_are_ignored(
             "```\n"
         ),
     )
-    assert _warnings(target) == []
+    assert _errors(target) == []
 
 
 def test_tilde_fenced_code_blocks_are_ignored(tmp_path: Path) -> None:
@@ -191,7 +223,7 @@ def test_tilde_fenced_code_blocks_are_ignored(tmp_path: Path) -> None:
             "~~~\n## [2026-01-01] Example inside a tilde fence\n~~~\n"
         ),
     )
-    assert _warnings(target) == []
+    assert _errors(target) == []
 
 
 def test_a_different_fence_marker_does_not_close_an_open_fence(
@@ -209,7 +241,7 @@ def test_a_different_fence_marker_does_not_close_an_open_fence(
             "```\n"
         ),
     )
-    assert _warnings(target) == []
+    assert _errors(target) == []
 
 
 def test_entries_after_a_closed_fence_are_still_checked(tmp_path: Path) -> None:
@@ -222,18 +254,18 @@ def test_entries_after_a_closed_fence_are_still_checked(tmp_path: Path) -> None:
             "## [2026-08-25] Real mislevelled entry\n"
         ),
     )
-    (warning,) = _warnings(target)
-    assert "line 7" in warning
+    (error,) = _errors(target)
+    assert "line 7" in error
 
 
 def test_empty_and_missing_logs_are_not_flagged(tmp_path: Path) -> None:
     target = _living(tmp_path, learnings_md="")
-    assert _warnings(target) == []
+    assert _errors(target) == []
 
 
 def test_absent_living_directory_is_not_flagged(tmp_path: Path) -> None:
     """This check owns heading levels only; a missing .living/ is another check."""
-    assert _warnings(tmp_path) == []
+    assert _errors(tmp_path) == []
 
 
 def test_other_living_files_are_not_subject_to_the_check(tmp_path: Path) -> None:
@@ -242,4 +274,4 @@ def test_other_living_files_are_not_subject_to_the_check(tmp_path: Path) -> None
         tmp_path,
         conventions_md="# Conventions\n\n## [2026-08-25] A convention\n\nbody\n",
     )
-    assert _warnings(target) == []
+    assert _errors(target) == []

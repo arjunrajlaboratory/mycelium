@@ -82,7 +82,7 @@ def test_validate_structure_pins_the_level_the_parsers_use(tmp_path: Path) -> No
     )
     result = ValidationResult()
     check_entry_heading_levels(tmp_path, result)
-    assert result.warnings == []
+    assert result.errors == [] and result.warnings == []
     assert gi.collect_entries(living / "learnings.md", "learnings", "L")
 
 
@@ -119,7 +119,7 @@ def test_shipped_templates_pass_the_heading_level_validator(tmp_path: Path) -> N
 
     result = ValidationResult()
     check_entry_heading_levels(tmp_path, result)
-    assert result.warnings == []
+    assert result.errors == [] and result.warnings == []
 
 
 def test_both_entry_templates_use_the_same_heading_level() -> None:
