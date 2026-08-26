@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -83,6 +84,98 @@ def check_living_directory(target_dir: Path, result: ValidationResult):
     generated_dir = living_dir / "generated-conventions"
     if not generated_dir.exists():
         result.warning(".living/generated-conventions/ directory does not exist")
+
+
+# Append-only knowledge logs whose entries generate_index.py parses off a
+# literal heading prefix. conventions.md is deliberately excluded: every parser
+# reads it at "## ".
+ENTRY_LOG_FILES = ("learnings.md", "decisions.md")
+
+# The heading level every generate_index.py parser requires for the files above
+# (count_headers_and_topics, collect_entries, extract_entry_snippets). An entry
+# at any other level is counted as zero entries and never reaches
+# .living/INDEX.md — historically with no error raised anywhere.
+ENTRY_HEADING_PREFIX = "### "
+
+# A heading that carries a date is an entry, not a structural sub-heading.
+# Matches both the bracketed "[YYYY-MM-DD]" template form and the bare form.
+_DATED_HEADING_RE = re.compile(r"^#{1,6}\s+(?=\S).*?\d{4}-\d{2}-\d{2}")
+
+# Fenced blocks are skipped so that an entry documenting the entry format does
+# not report itself.
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+_MAX_REPORTED_LINES = 5
+
+
+def _mislevelled_entry_lines(path: Path) -> list[int]:
+    """Return 1-based line numbers of dated headings the parsers will not read.
+
+    Headings inside fenced code blocks are ignored: they are illustrative
+    markdown, not entries.
+    """
+    mislevelled: list[int] = []
+    fence_marker: str | None = None
+
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for lineno, raw in enumerate(fh, start=1):
+            line = raw.rstrip("\n")
+
+            fence = _FENCE_RE.match(line)
+            if fence:
+                marker = fence.group(1)
+                # Only the marker that opened a fence can close it, so a "~~~"
+                # inside a "```" block does not end the block.
+                if fence_marker is None:
+                    fence_marker = marker
+                elif marker == fence_marker:
+                    fence_marker = None
+                continue
+            if fence_marker is not None:
+                continue
+
+            # Anything the parsers accept is exempt; everything reaching the
+            # dated-heading test below is by definition unparseable.
+            if line.startswith(ENTRY_HEADING_PREFIX):
+                continue
+
+            if _DATED_HEADING_RE.match(line):
+                mislevelled.append(lineno)
+
+    return mislevelled
+
+
+def check_entry_heading_levels(target_dir: Path, result: ValidationResult):
+    """Flag knowledge logs whose entries use a heading level no parser reads.
+
+    Without this check the failure is completely silent: the entries are on disk
+    and greppable, but `.living/INDEX.md` reports "0 entries" and the
+    SessionStart hook surfaces an empty knowledge log.
+    """
+    living_dir = target_dir / ".living"
+    if not living_dir.is_dir():
+        return
+
+    for filename in ENTRY_LOG_FILES:
+        path = living_dir / filename
+        if not path.is_file():
+            continue
+
+        mislevelled = _mislevelled_entry_lines(path)
+        if not mislevelled:
+            continue
+
+        shown = ", ".join(f"line {n}" for n in mislevelled[:_MAX_REPORTED_LINES])
+        if len(mislevelled) > _MAX_REPORTED_LINES:
+            shown += f", and {len(mislevelled) - _MAX_REPORTED_LINES} more"
+
+        result.warning(
+            f".living/{filename} has {len(mislevelled)} dated "
+            f"{'heading' if len(mislevelled) == 1 else 'headings'} that "
+            f"generate_index.py cannot parse ({shown}); entries must use "
+            f"'{ENTRY_HEADING_PREFIX.strip()}' or they are silently omitted "
+            f"from .living/INDEX.md"
+        )
 
 
 def check_top_level_directories(target_dir: Path, result: ValidationResult):
@@ -226,6 +319,9 @@ def main():
 
     print("\nChecking .living/ directory...")
     check_living_directory(target_dir, result)
+
+    print("Checking knowledge log entry heading levels...")
+    check_entry_heading_levels(target_dir, result)
 
     print("Checking top-level directories...")
     check_top_level_directories(target_dir, result)

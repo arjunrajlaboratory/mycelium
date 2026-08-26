@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Knowledge entries written at `##` no longer vanish from `INDEX.md`
+  silently.** Every parser in `generate_index.py` reads `learnings.md` and
+  `decisions.md` entries off a literal `###` prefix, but three shipped
+  guidance paths still dictated `##`, so conforming entries were indexed as
+  "0 entries" with no error raised anywhere: the post-action hook's LEARNINGS
+  directive (the primary capture path, firing after every analysis run), the
+  `transfer` skill's auto-append template, and the five worked examples in
+  `skill-generation-guide.md`. All now specify `###`, matching the entry
+  templates and the parsers ([#76]).
+
+### Added
+
+- **`validate_structure.py` reports mislevelled knowledge entries.** A new
+  check flags dated headings in `.living/learnings.md` and
+  `.living/decisions.md` that `generate_index.py` cannot parse, naming the
+  file, the count, and the offending line numbers. Mixed-level files are
+  reported too — the case where a nonzero entry count masks silently dropped
+  entries. Headings inside fenced code blocks are ignored, so an entry that
+  documents the entry format does not report itself. Emitted as a warning:
+  affected repositories are structurally valid and recoverable by a
+  heading-level edit, and `--strict` escalates it for CI ([#76]).
+- **Drift protection between entry guidance and the parsers.**
+  `test_entry_heading_consistency.py` round-trips both shipped templates
+  through all three `generate_index.py` parsers and asserts the hook,
+  transfer skill, and reference examples dictate the level the parsers
+  actually read, so the two cannot diverge again unnoticed ([#76]).
+
 ## [0.6.2] - 2026-08-08
 
 ### Fixed

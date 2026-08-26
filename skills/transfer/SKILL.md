@@ -70,7 +70,7 @@ IGNORE:
 For each identified transfer, **automatically append** the learning to the target project's `.living/learnings.md` using the learning entry template format:
 
 ```markdown
-## [YYYY-MM-DD] [Short Learning Title]
+### [YYYY-MM-DD] [Short Learning Title]
 
 **Category**: [gotcha|edge-case|insight|failure|tip]
 
