@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -83,6 +84,199 @@ def check_living_directory(target_dir: Path, result: ValidationResult):
     generated_dir = living_dir / "generated-conventions"
     if not generated_dir.exists():
         result.warning(".living/generated-conventions/ directory does not exist")
+
+
+# Append-only knowledge logs whose entries generate_index.py parses off a
+# literal heading prefix. conventions.md is deliberately excluded: every parser
+# reads it at "## ".
+ENTRY_LOG_FILES = ("learnings.md", "decisions.md")
+
+# The heading level every generate_index.py parser requires for the files above
+# (count_headers_and_topics, collect_entries, extract_entry_snippets). An entry
+# at any other level is counted as zero entries and never reaches
+# .living/INDEX.md — historically with no error raised anywhere.
+ENTRY_HEADING_PREFIX = "### "
+
+# An entry heading *leads* with its date, as both shipped templates do:
+# "### [YYYY-MM-DD] Title" or the bare "### YYYY-MM-DD Title". The date must
+# follow the hashes immediately -- a structural heading that merely mentions a
+# date somewhere ("## Archive (entries before 2025-01-01)") is not an entry, and
+# treating it as one both failed validation and let the repair mint a phantom
+# entry that renumbered every real one.
+# Up to three leading spaces is still an ATX heading (CommonMark 4.2); four is
+# an indented code block. The parsers match a column-1 prefix, so an indented
+# heading -- even at the canonical level -- is unreadable and must be reported.
+_DATED_HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+\[?\d{4}-\d{2}-\d{2}\]?")
+
+# Fenced blocks are skipped so that an entry documenting the entry format does
+# not report itself. CommonMark 4.5: the full marker run matters, so a ``` line
+# inside a ```` block is content rather than a close. `finalize_session_log.py`
+# implements the same rule; the two are pinned to agree by
+# test_fence_handling_agrees_with_the_session_log_implementation.
+#
+# Deliberately limited to top-level fences. A fence opened on a container's own
+# line ("- ```markdown", "> ```") is not recognized here; that case, along with
+# blockquote-depth and tab-stop handling, is the subject of a focused follow-up
+# that consolidates this logic and finalize_session_log's into one module. Until
+# then a missed opener cannot fail silently: `unclosed_fence_line` reports the
+# resulting open fence and `migrate_entry_headings` refuses to touch the log.
+_FENCE_RE = re.compile(r"^ {0,3}(?P<marker>```+|~~~+)(?P<info>.*)$")
+
+
+def _fence_open_marker(line: str) -> str | None:
+    """Return the opening fence marker of a line, or None (CommonMark 4.5).
+
+    A backtick fence's info string may not contain backticks; such a line is
+    ordinary content, not a fence.
+    """
+    match = _FENCE_RE.match(line)
+    if match is None:
+        return None
+    marker = match.group("marker")
+    if marker[0] == "`" and "`" in match.group("info"):
+        return None
+    return marker
+
+
+def _fence_closes(line: str, open_marker: str) -> bool:
+    """True when a line closes the active fence: same character, at least the
+    opening length, and nothing but whitespace after (CommonMark 4.5)."""
+    match = _FENCE_RE.match(line)
+    if match is None:
+        return False
+    marker = match.group("marker")
+    return (
+        marker[0] == open_marker[0]
+        and len(marker) >= len(open_marker)
+        and not match.group("info").strip()
+    )
+
+_MAX_REPORTED_LINES = 5
+
+
+def split_log_lines(text: str) -> list[str]:
+    """Split a knowledge log the way the parsers read it: on newlines only.
+
+    ``str.splitlines`` additionally breaks on form feed, U+2028 and other
+    Unicode boundaries, which would number lines differently from the parsers
+    and from any repair keyed to those numbers. Callers that rewrite a log MUST
+    use this function so detection and rewriting index identically.
+    """
+    return text.split("\n")
+
+
+def mislevelled_entry_lines(path: Path) -> list[int]:
+    """Return 1-based line numbers of dated headings the parsers will not read.
+
+    Read-only, so undecodable bytes are replaced rather than raising. Callers
+    that rewrite the file must decode strictly and pass the text to
+    `mislevelled_entry_lines_in_text` instead, so a replacement character is
+    never written back over real content.
+    """
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return mislevelled_entry_lines_in_text(text)
+
+
+def unclosed_fence_line(text: str) -> int | None:
+    """Line number of a code fence left open at end of input, if any.
+
+    Everything after such a fence went unchecked, so callers must report it
+    rather than treat a clean scan as proof the file is clean.
+    """
+    fence_marker: str | None = None
+    opened_at: int | None = None
+    for lineno, raw in enumerate(split_log_lines(text), start=1):
+        line = raw.rstrip("\r")
+        if fence_marker is not None:
+            if _fence_closes(line, fence_marker):
+                fence_marker, opened_at = None, None
+            continue
+        marker = _fence_open_marker(line)
+        if marker is not None:
+            fence_marker, opened_at = marker, lineno
+    return opened_at
+
+
+def mislevelled_entry_lines_in_text(text: str) -> list[int]:
+    """Line numbers (1-based, per `split_log_lines`) of unparseable entries.
+
+    Headings inside fenced code blocks are ignored: they are illustrative
+    markdown, not entries. A fence left open swallows the rest of the input --
+    `unclosed_fence_line` reports that separately.
+    """
+    mislevelled: list[int] = []
+    fence_marker: str | None = None
+
+    for lineno, raw in enumerate(split_log_lines(text), start=1):
+        # Tolerate CRLF text even though every in-tree caller decodes with
+        # universal newlines: this is a public entry point.
+        line = raw.rstrip("\r")
+
+        if fence_marker is not None:
+            # Everything inside a fence is illustrative content.
+            if _fence_closes(line, fence_marker):
+                fence_marker = None
+            continue
+        opener = _fence_open_marker(line)
+        if opener is not None:
+            fence_marker = opener
+            continue
+
+        # Anything the parsers accept is exempt; everything reaching the
+        # dated-heading test below is by definition unparseable.
+        if line.startswith(ENTRY_HEADING_PREFIX):
+            continue
+
+        if _DATED_HEADING_RE.match(line):
+            mislevelled.append(lineno)
+
+    return mislevelled
+
+
+def check_entry_heading_levels(target_dir: Path, result: ValidationResult):
+    """Flag knowledge logs whose entries use a heading level no parser reads.
+
+    Reported as an error, not a warning: the entries are on disk and greppable,
+    but `.living/INDEX.md` reports "0 entries" and the SessionStart hook
+    surfaces an empty knowledge log, so agents are told to trust an index that
+    is missing real knowledge. `migrate_existing_repos.py` repairs the headings
+    in place and regenerates the index.
+    """
+    living_dir = target_dir / ".living"
+    if not living_dir.is_dir():
+        return
+
+    for filename in ENTRY_LOG_FILES:
+        path = living_dir / filename
+        if not path.is_file():
+            continue
+
+        text = path.read_text(encoding="utf-8", errors="replace")
+
+        opened_at = unclosed_fence_line(text)
+        if opened_at is not None:
+            result.error(
+                f".living/{filename} has an unclosed code fence opened at "
+                f"line {opened_at}; every entry after it was skipped rather "
+                f"than checked. Close the fence and re-run."
+            )
+
+        mislevelled = mislevelled_entry_lines_in_text(text)
+        if not mislevelled:
+            continue
+
+        shown = ", ".join(f"line {n}" for n in mislevelled[:_MAX_REPORTED_LINES])
+        if len(mislevelled) > _MAX_REPORTED_LINES:
+            shown += f", and {len(mislevelled) - _MAX_REPORTED_LINES} more"
+
+        result.error(
+            f".living/{filename} has {len(mislevelled)} dated "
+            f"{'heading' if len(mislevelled) == 1 else 'headings'} that "
+            f"generate_index.py cannot parse ({shown}); entries must use "
+            f"'{ENTRY_HEADING_PREFIX.strip()}' or they are silently omitted "
+            f"from .living/INDEX.md. Fix with: "
+            f"migrate_existing_repos.py --repo <repo>"
+        )
 
 
 def check_top_level_directories(target_dir: Path, result: ValidationResult):
@@ -226,6 +420,9 @@ def main():
 
     print("\nChecking .living/ directory...")
     check_living_directory(target_dir, result)
+
+    print("Checking knowledge log entry heading levels...")
+    check_entry_heading_levels(target_dir, result)
 
     print("Checking top-level directories...")
     check_top_level_directories(target_dir, result)

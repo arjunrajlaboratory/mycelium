@@ -7,9 +7,12 @@ Performs the provider-neutral upgrade actions needed by current Mycelium repos:
    at `.living/INDEX.md` if no INDEX.md reference is present.
 2. **Hook top-up** — adds any of the 6-hook default bundle that the repo
    is missing, preserving existing hook entries (no duplicates).
-3. **INDEX.md regen** — runs `generate_index.py --summary-heuristic` so
+3. **Entry heading levels** — raises `##` entries in `.living/learnings.md`
+   and `.living/decisions.md` to the `###` level every `generate_index.py`
+   parser reads, recovering entries that were silently absent from INDEX.md.
+4. **INDEX.md regen** — runs `generate_index.py --summary-heuristic` so
    the freshly-anchored INDEX.md actually has cluster content.
-4. **MEMORY.md routing** — appends the Global Knowledge Domains routing
+5. **MEMORY.md routing** — appends the Global Knowledge Domains routing
    table to `~/.claude/projects/*/memory/MEMORY.md` files.
 
 All actions are idempotent: re-running on an already-migrated repo is a
@@ -31,8 +34,10 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
+import generate_index as gi  # noqa: E402
 import init_knowledge as ik  # noqa: E402
 import init_repo as ir  # noqa: E402
+import validate_structure as vs  # noqa: E402
 
 # The "Knowledge index" callout that gets inserted into CLAUDE.md if missing.
 # Single-block insertion is safer than rewriting Quick Orientation in
@@ -300,6 +305,154 @@ def ensure_todo_contract(repo_path: Path, dry_run: bool = False) -> bool:
     return missing
 
 
+# Entry IDs are positional: generate_index derives "{prefix}-{n}" from file
+# order at read time. Recovering a hidden entry therefore takes its slot in the
+# sequence and pushes later IDs along, which cannot be avoided without changing
+# the ID scheme -- but it must not be silent, because saved
+# `recall_lessons --id` references and index citations move.
+_ENTRY_LOG_ID_SCHEME = {
+    "learnings.md": ("learnings", "L"),
+    "decisions.md": ("decisions", "D"),
+}
+
+
+def _describe_id_shift(path: Path, repaired_lines: list[int]) -> str | None:
+    """Describe how recovering entries in `path` renumbered the ones after them.
+
+    Repair rewrites heading lines in place, so line numbers are stable and the
+    repaired lines identify exactly the entries that just became visible.
+    """
+    scheme = _ENTRY_LOG_ID_SCHEME.get(path.name)
+    if scheme is None:
+        return None
+    file_type, prefix = scheme
+    repaired = set(repaired_lines)
+    entries = gi.collect_entries(path, file_type, prefix)
+    recovered = [entry for entry in entries if entry["line_no"] in repaired]
+    if not recovered:
+        return None
+    ids = ", ".join(str(entry["id"]) for entry in recovered)
+    return (
+        f"{path.name}: recovered {len(recovered)} "
+        f"{'entry' if len(recovered) == 1 else 'entries'} as {ids}; IDs at and "
+        f"after {recovered[0]['id']} have shifted, so saved "
+        f"'recall_lessons --id' references and index citations may need updating"
+    )
+
+
+def _relevel_entry_heading(line: str) -> str:
+    """Rewrite one heading line to the exact prefix the parsers match.
+
+    The separator is normalized to a single space, not just the hashes: the
+    parsers test for the literal ``"### "``, so rewriting a tab-separated
+    heading's hashes alone would leave it unreadable and the repo failing
+    validation forever while migration reported success.
+
+    Leading indentation is normalized away as well: up to three spaces is still
+    a valid ATX heading, but the parsers match a column-1 prefix, so an indented
+    heading has to move to column 1 to become readable.
+
+    Callers pass text decoded with universal newlines, so no carriage return
+    survives into the line.
+    """
+    heading_text = line.lstrip(" ").lstrip("#").lstrip(" \t")
+    return vs.ENTRY_HEADING_PREFIX + heading_text
+
+
+def migrate_entry_headings(
+    repo_path: Path,
+    dry_run: bool = False,
+    notes: list[str] | None = None,
+) -> bool:
+    """Raise mislevelled knowledge-log entries to the level the parsers read.
+
+    Repos that followed the post-action hook's LEARNINGS directive, the transfer
+    skill's append template (both corrected in 0.7.0), or a pre-0.6.0 decision
+    template accumulated ``##`` entries in `.living/learnings.md` and
+    `.living/decisions.md`. Every parser in `generate_index.py` keys off a
+    literal ``"### "``, so those entries never reached `.living/INDEX.md` and
+    nothing reported it (issue #76).
+
+    Detection is delegated to
+    `validate_structure.mislevelled_entry_lines_in_text`, so the validator and
+    this repair can never disagree about what is broken, and both index lines
+    via `validate_structure.split_log_lines`. Only the heading lines it names
+    are rewritten; bodies, fenced examples, and undated structural headings are
+    left untouched.
+
+    Decoding uses universal newlines to match the validator, so a CRLF log is
+    rewritten with LF endings. Every Mycelium writer already emits LF.
+
+    Returns True if any heading was rewritten (or would be, under dry-run). When
+    `notes` is given, a line describing the resulting entry-ID shift is appended
+    to it for each repaired log.
+    """
+    living_dir = ir.ensure_safe_project_directory(
+        repo_path, ".living", create=False
+    )
+    if not living_dir.is_dir():
+        return False
+    ir.ensure_directory_tree_has_no_symlinks(living_dir)
+
+    # Preflight every target before the first write so a rejected path cannot
+    # leave one log repaired and another untouched. The text used for detection
+    # is the text that gets rewritten, so line numbers cannot drift in between.
+    targets: list[tuple[Path, str, list[int]]] = []
+    for filename in vs.ENTRY_LOG_FILES:
+        path = living_dir / filename
+        ir.ensure_safe_regular_file(path)
+        if not path.is_file():
+            continue
+        # Scan leniently, exactly as the validator does, so a log that needs no
+        # repair is never rejected for its encoding — otherwise a repo that
+        # passes the heading check could still abort the migration, after earlier
+        # actions had already written.
+        scan_text = path.read_text(encoding="utf-8", errors="replace")
+        opened_at = vs.unclosed_fence_line(scan_text)
+        if opened_at is not None:
+            # Detection stopped at the fence, so a repair here would report
+            # success while leaving whatever follows it broken.
+            raise ValueError(
+                f"Refusing to repair {path}: unclosed code fence opened at "
+                f"line {opened_at}, so entries after it cannot be identified. "
+                f"Close the fence, then re-run the migration."
+            )
+        if not vs.mislevelled_entry_lines_in_text(scan_text):
+            continue
+        # This log will be rewritten, so from here strict decoding is required:
+        # reading with errors="replace" would persist replacement characters over
+        # real bytes. Refuse it by name rather than surfacing a raw traceback.
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError(
+                f"Refusing to repair {path}: file is not valid UTF-8 "
+                f"({error.reason} at byte {error.start}). Fix the encoding, "
+                f"then re-run the migration."
+            ) from error
+        # Re-derive line numbers from the text that will actually be rewritten.
+        mislevelled = vs.mislevelled_entry_lines_in_text(text)
+        if mislevelled:
+            targets.append((path, text, mislevelled))
+
+    if not targets:
+        return False
+    if dry_run:
+        return True
+
+    for path, text, mislevelled in targets:
+        lines = vs.split_log_lines(text)
+        for lineno in mislevelled:
+            lines[lineno - 1] = _relevel_entry_heading(lines[lineno - 1])
+        ir._atomic_write_text(path, "\n".join(lines))
+        if notes is not None:
+            note = _describe_id_shift(path, mislevelled)
+            if note:
+                notes.append(note)
+
+    return True
+
+
 def regen_index(repo_path: Path, dry_run: bool = False) -> bool:
     """Run generate_index.py --summary-heuristic on .living/.
 
@@ -385,6 +538,11 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
     hooks_applied = topup_hooks(repo_path, dry_run=dry_run)
     codex_hooks_applied = topup_codex_hooks(repo_path, dry_run=dry_run)
     todo_applied = ensure_todo_contract(repo_path, dry_run=dry_run)
+    # Must precede regen_index: the rebuilt index has to see repaired entries.
+    heading_notes: list[str] = []
+    headings_applied = migrate_entry_headings(
+        repo_path, dry_run=dry_run, notes=heading_notes
+    )
     index_applied = regen_index(repo_path, dry_run=dry_run)
 
     return {
@@ -394,6 +552,10 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
         "Claude hooks top-up": _action_status(hooks_applied),
         "Legacy Codex hook cleanup": _action_status(codex_hooks_applied),
         "Todo contract": _action_status(todo_applied),
+        "Entry heading levels": (
+            _action_status(headings_applied)
+            + ("; " + "; ".join(heading_notes) if heading_notes else "")
+        ),
         "INDEX.md regen": _action_status(index_applied),
     }
 

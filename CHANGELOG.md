@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-26
+
+### Fixed
+
+- **Knowledge entries written at `##` no longer vanish from `INDEX.md`
+  silently.** Every parser in `generate_index.py` reads `learnings.md` and
+  `decisions.md` entries off a literal `###` prefix, but three shipped
+  guidance paths still dictated `##`, so conforming entries were indexed as
+  "0 entries" with no error raised anywhere: the post-action hook's LEARNINGS
+  directive (the primary capture path, firing after every analysis run), the
+  `transfer` skill's auto-append template, and the five worked examples in
+  `skill-generation-guide.md`. All now specify `###`, matching the entry
+  templates and the parsers ([#76]).
+
+### Added
+
+- **`validate_structure.py` fails on mislevelled knowledge entries.** A new
+  check reports dated headings in `.living/learnings.md` and
+  `.living/decisions.md` that `generate_index.py` cannot parse, naming the
+  file, the count, and the offending line numbers. Mixed-level files are
+  reported too — the case where a nonzero entry count masks silently dropped
+  entries. Indented headings are reported too: up to three leading spaces is
+  still a valid ATX heading but the parsers match a column-1 prefix, so an
+  indented entry — even at the canonical `###` level — was invisible to both the
+  index and the old check. Only headings that *lead* with a date are treated as
+  entries, as both shipped templates do, so a structural heading that merely
+  mentions one
+  (`## Archive (entries before 2025-01-01)`) is left alone; headings inside
+  top-level fenced code blocks are ignored per CommonMark 4.5 — marker length,
+  character, and info string all respected — so an entry documenting the entry
+  format, even a four-backtick fence wrapping a triple-backtick block, does not
+  report itself. A fence left unclosed is reported explicitly, since everything
+  after it went unchecked rather than clean, and the migration refuses such a
+  log rather than repairing only the part it could see. Fences opened on a
+  container's own line (`- ```markdown`) are not yet recognized; a focused
+  follow-up consolidates this logic with `finalize_session_log.py`'s and adds
+  container, blockquote-depth and tab-stop handling ([#76]).
+- **Migration for repositories holding mislevelled entries.**
+  `migrate_existing_repos.py` gained an idempotent `Entry heading levels`
+  action that raises `##` entries to `###` in place and runs before the
+  `INDEX.md` regen, so recovered entries land in the rebuilt index in the same
+  pass. Detection is delegated to `validate_structure.mislevelled_entry_lines`,
+  so the validator and the repair cannot disagree about what is broken; only
+  the heading lines it names are rewritten, leaving bodies, fenced examples,
+  and structural headings untouched; indentation on a repaired heading is
+  normalized away so the result is actually readable. Recovering a hidden entry
+  necessarily renumbers the positional IDs after it, so the migration reports the
+  shift — saved `recall_lessons --id` references and index citations may need
+  updating. A log that is not valid UTF-8 is refused by
+  name rather than rewritten with replacement characters. Honors `--dry-run` and
+  preserves file permissions ([#76]).
+- **Drift protection between entry guidance and the parsers.**
+  `test_entry_heading_consistency.py` round-trips both shipped templates
+  through all three `generate_index.py` parsers and asserts the hook,
+  transfer skill, and reference examples dictate the level the parsers
+  actually read, so the two cannot diverge again unnoticed ([#76]).
+
+### Changed
+
+- **Mislevelled knowledge entries are an error, not a warning.**
+  `validate_structure.py` now exits non-zero for a repository whose
+  `.living/learnings.md` or `.living/decisions.md` entries are absent from
+  `INDEX.md`, because agents are instructed to trust that index. Repositories
+  that followed the shipped `###` templates are unaffected; any repository
+  that accumulated `##` entries should run
+  `migrate_existing_repos.py --repo <repo>`, which the error message names
+  ([#76]).
+
+[#76]: https://github.com/arjunrajlaboratory/mycelium/issues/76
+
 ## [0.6.2] - 2026-08-08
 
 ### Fixed

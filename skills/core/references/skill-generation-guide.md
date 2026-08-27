@@ -152,28 +152,28 @@ An observational audit of 12 sampled learnings found a 33% recurrence rate overa
 ### Input: 4 learnings in `.living/learnings.md`
 
 ```markdown
-## [2024-03-15] CSV from Hospital X uses Windows-1252 despite claiming UTF-8
+### [2024-03-15] CSV from Hospital X uses Windows-1252 despite claiming UTF-8
 **Category**: gotcha
 **What happened**: Ingested a CSV delivered by Hospital X. The file header declared UTF-8 but chardet reported Windows-1252 with 99% confidence. Pandas silently mangled all accented characters.
 **Why it matters**: Silent data corruption — no error raised, wrong values written downstream.
 **Resolution**: Added `chardet` detection step before passing to `pd.read_csv`. Force `encoding=detected_encoding`.
 **Tags**: data-ingestion, encoding
 
-## [2024-03-22] Mixed encodings in same file from Hospital X
+### [2024-03-22] Mixed encodings in same file from Hospital X
 **Category**: edge-case
 **What happened**: A second batch from Hospital X had rows in two encodings within the same file. chardet reported the majority encoding; the minority rows still failed.
 **Why it matters**: Single-pass encoding detection is not sufficient for files from this source. Need row-level validation or a more robust detection strategy.
 **Resolution**: Switched to `ftfy.fix_text()` on each row after initial read with `errors='replace'`.
 **Tags**: data-ingestion, encoding
 
-## [2024-04-01] Export tool has known bug with special characters
+### [2024-04-01] Export tool has known bug with special characters
 **Category**: failure
 **What happened**: Traced encoding issues back to the vendor's export tool (version < 3.2.1). It declares UTF-8 in the header but writes Windows-1252 for any character outside ASCII.
 **Why it matters**: This is a vendor bug, not a one-off. Every file from this tool before v3.2.1 is suspect.
 **Resolution**: Filed bug with vendor. Added version check to ingestion script; if version unknown, treat as potentially mis-labeled.
 **Tags**: data-ingestion, encoding, vendor-bug
 
-## [2024-04-10] Lab Y data also had encoding issues — ISO-8859-1 mislabeled as UTF-8
+### [2024-04-10] Lab Y data also had encoding issues — ISO-8859-1 mislabeled as UTF-8
 **Category**: gotcha
 **What happened**: Lab Y delivered tabular data with the same symptom: declared UTF-8, actual ISO-8859-1. Caught it because the Hospital X incident was still fresh.
 **Why it matters**: This is now a second independent source with the same failure mode. Encoding mislabeling is a systematic problem with external data, not a Hospital X quirk.
@@ -276,7 +276,7 @@ Proposed from crystallization. Reviewer should confirm whether `chardet` or `ftf
 Learnings that arrive from other projects via the cross-project propagation flow carry a `source:` field in `.living/learnings.md`:
 
 ```markdown
-## [2024-04-15] Encoding issues with partner lab data
+### [2024-04-15] Encoding issues with partner lab data
 **Category**: gotcha
 **What happened**: ...
 **Tags**: data-ingestion, encoding
