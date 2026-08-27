@@ -409,18 +409,90 @@ def test_unclosed_fence_is_reported_rather_than_swallowing_entries(
     assert "line 3" in error
 
 
-def test_a_deeply_indented_closer_still_closes_its_fence(
-    tmp_path: Path,
+@pytest.mark.parametrize("closer_indent", [0, 2, 3, 5])
+def test_closer_within_three_spaces_of_its_opener_closes(
+    tmp_path: Path, closer_indent: int
 ) -> None:
-    """Closers are matched leniently on indentation, so nesting does not strand
-    a fence open and produce a spurious unclosed-fence report."""
+    """CommonMark 4.5: a closer may be indented up to three spaces past its
+    container, which for a ``- `` list item's fence means columns 2 through 5."""
     target = _living(
         tmp_path,
         learnings_md=(
             "### [2026-08-25] Real\n\n"
             "- ```markdown\n"
-            "      ## [2026-01-01] Example\n"
-            "      ```\n\n"
+            "  ## [2026-01-01] Example\n"
+            f"{' ' * closer_indent}```\n\n"
+            "### [2026-08-26] Fine\n"
+        ),
+    )
+    assert _errors(target) == []
+
+
+def test_closer_indented_past_its_container_is_content_not_a_close(
+    tmp_path: Path,
+) -> None:
+    """Four spaces past the opener is indented content, so the fence stays open.
+
+    Accepting arbitrary whitespace let a documented indented fence marker end
+    the block early, which then reported the illustrative headings after it as
+    real entries. Staying open is reported instead — visibly, and without ever
+    mistaking documentation for an entry.
+    """
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "### [2026-08-25] Real\n\n"
+            "- ```markdown\n"
+            "  ## [2026-01-01] Example\n"
+            "      ```\n"
+        ),
+    )
+    (error,) = _errors(target)
+    assert "unclosed" in error.lower() and "line 3" in error
+
+
+def test_indented_fence_marker_inside_a_top_level_block_is_content(
+    tmp_path: Path,
+) -> None:
+    """Documenting an indented fence must not end the block that documents it."""
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "### [2026-08-25] How to write an indented fence\n\n"
+            "```markdown\n"
+            "    ```\n"
+            "    ## [2026-01-01] Example inside the documented block\n"
+            "    ```\n"
+            "```\n\n"
+            "### [2026-08-26] Fine\n"
+        ),
+    )
+    assert _errors(target) == []
+
+
+@pytest.mark.parametrize(
+    "opener,closer",
+    [
+        ("> ```markdown", "> ```"),
+        ("> ```", ">```"),
+        ("> - ```markdown", "  > ```"),
+    ],
+)
+def test_blockquoted_fence_is_closed_by_a_blockquoted_closer(
+    tmp_path: Path, opener: str, closer: str
+) -> None:
+    """Openers accept a blockquote marker, so closers must too.
+
+    Otherwise every blockquoted example block reads as unclosed: genuine entries
+    after it go unchecked and the migrator refuses the whole log.
+    """
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "### [2026-08-25] Real\n\n"
+            f"{opener}\n"
+            "> ## [2026-01-01] Example\n"
+            f"{closer}\n\n"
             "### [2026-08-26] Fine\n"
         ),
     )
