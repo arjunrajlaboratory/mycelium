@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Entry titles no longer lose dates that belong to the title.** An entry
+  heading leads with its date, but `collect_entries` stripped *every* date in
+  the heading, so `### [2026-04-02] Cohort 2026-01-01 to 2026-02-01 mislabeled`
+  was indexed as `Cohort  to  mislabeled`. Those mangled titles went straight
+  into `.living/INDEX.md` and `recall_lessons` output. Only the leading date is
+  now treated as metadata, via a shared `split_entry_date_and_title` that
+  `detect_recurrence.py` uses too so the two cannot drift. An entry with no
+  leading date is reported as undated rather than borrowing a date from its own
+  prose, which `recall_lessons --since` and "Most recent" would otherwise have
+  trusted.
+- **"Most recent" no longer starves the smaller knowledge log.** The same-date
+  tie-break compared numeric ID suffixes across two independent per-file
+  counters, so the larger file won every tie and the newest decision of the day
+  could be pushed out of the list entirely by learnings written earlier that
+  day. Ranking is now by position within an entry's own append-only file, so
+  each file's newest entry outranks its own second-newest. This also drops the
+  undocumented requirement that every entry ID end in an integer, which
+  `detect_recurrence`'s `L-legacy-<line>` IDs did not satisfy.
+
 ## [0.7.0] - 2026-08-26
 
 ### Fixed

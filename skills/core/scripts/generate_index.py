@@ -456,7 +456,13 @@ def update_index_counts_only(living_dir: Path) -> None:
 _TAG_LINE_RE = re.compile(
     r"^[\s>]*\*?\*?Tags\*?\*?\s*:\s*(.+?)\s*$", re.IGNORECASE
 )
-_DATE_RE = re.compile(r"\[(\d{4}-\d{2}-\d{2})\]")
+# An entry heading leads with its date, in either the documented
+# ``[YYYY-MM-DD]`` form or the bare form used by older initialized repositories.
+# Only that leading occurrence is metadata: a date appearing later belongs to the
+# title ("Cohort 2026-01-01 to 2026-02-01 mislabeled"). Matching anywhere in the
+# heading both mangled real titles and let an undated entry inherit a date from
+# its own prose, which `recall_lessons --since` and "Most recent" then trusted.
+_LEADING_DATE_RE = re.compile(r"^\s*\[?(\d{4}-\d{2}-\d{2})\]?\s*")
 
 # Sentinel-wrapped advisory lines below the cluster table. Used to keep the
 # heuristic block self-explanatory without the agent needing to read SKILL.md.
@@ -523,9 +529,7 @@ def collect_entries(path: Path, file_type: str, prefix: str) -> list[dict]:
                 if current is not None:
                     entries.append(current)
                 title = line[len(header_prefix) :].strip()
-                m = _DATE_RE.search(title)
-                date = m.group(1) if m else ""
-                clean_title = _DATE_RE.sub("", title).strip(" :-–—")
+                date, clean_title = split_entry_date_and_title(title)
                 current = {
                     "id": f"{prefix}-{len(entries) + 1}",
                     "title": clean_title or title,
@@ -541,6 +545,52 @@ def collect_entries(path: Path, file_type: str, prefix: str) -> list[dict]:
     if current is not None:
         entries.append(current)
     return entries
+
+
+def split_entry_date_and_title(heading_text: str) -> tuple[str, str]:
+    """Split an entry heading into (date, title).
+
+    The date is the heading's leading date. A heading with no leading date is
+    undated -- ``("", heading_text)`` -- even if its title mentions a date, so
+    date-based filtering and ordering never act on borrowed metadata.
+    """
+    match = _LEADING_DATE_RE.match(heading_text)
+    if match is None:
+        return "", heading_text
+    title = heading_text[match.end() :].strip(" :-–—")
+    return match.group(1), title or heading_text
+
+
+def sort_entries_by_recency(entries: list[dict]) -> list[dict]:
+    """Order entries newest-first, by date then position within their own file.
+
+    Entry IDs come from independent per-file counters (``L-n``, ``D-n``, and
+    ``detect_recurrence``'s ``L-legacy-<line>``), so comparing their numeric
+    suffixes across files let the larger file win every same-date tie and could
+    push the newest decision of the day out of the list entirely. Position from
+    the end of an entry's own append-only file is the only real recency signal,
+    so rank on that: each file's newest entry outranks its own second-newest.
+    """
+    rank: dict[int, int] = {}
+    by_source: dict[str, list[dict]] = {}
+    for entry in entries:
+        # Group by ID prefix, which identifies the source file.
+        prefix = str(entry["id"]).rsplit("-", 1)[0]
+        by_source.setdefault(prefix, []).append(entry)
+    for group in by_source.values():
+        total = len(group)
+        for index, entry in enumerate(group):
+            rank[id(entry)] = total - index
+
+    return sorted(
+        entries,
+        key=lambda entry: (
+            entry["date"] or "0000-00-00",
+            -rank[id(entry)],
+            str(entry["id"]),
+        ),
+        reverse=True,
+    )
 
 
 def _cluster_by_tag(entries: list[dict], min_count: int = 2) -> list[tuple[str, list[dict]]]:
@@ -616,9 +666,7 @@ def build_heuristic_summary(living_dir: Path, top_n: int = 6, recent_n: int = 10
     lines.append("")
     lines.append(f"## Most recent ({recent_n})")
     lines.append("")
-    sorted_entries = sorted(
-        all_entries, key=lambda e: (e["date"] or "0000-00-00"), reverse=True
-    )
+    sorted_entries = sort_entries_by_recency(all_entries)
     recent = sorted_entries[:recent_n]
     for e in recent:
         date_label = e["date"] if e["date"] else "—"
