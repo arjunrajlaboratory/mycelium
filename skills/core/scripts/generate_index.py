@@ -456,16 +456,13 @@ def update_index_counts_only(living_dir: Path) -> None:
 _TAG_LINE_RE = re.compile(
     r"^[\s>]*\*?\*?Tags\*?\*?\s*:\s*(.+?)\s*$", re.IGNORECASE
 )
-# Accept both the documented ``[YYYY-MM-DD]`` form and the bare date form used
-# by older initialized repositories. Keeping one capture group preserves the
-# existing collector contract.
-_DATE_RE = re.compile(r"\[?(\d{4}-\d{2}-\d{2})\]?")
-
-# An entry heading leads with its date. Only that occurrence is metadata; any
-# other date in the heading is part of the title ("Cohort 2026-01-01 to
-# 2026-02-01 mislabeled"), so stripping every match mangles real titles on their
-# way into INDEX.md and recall_lessons output.
-_LEADING_DATE_RE = re.compile(r"^\s*\[?\d{4}-\d{2}-\d{2}\]?\s*")
+# An entry heading leads with its date, in either the documented
+# ``[YYYY-MM-DD]`` form or the bare form used by older initialized repositories.
+# Only that leading occurrence is metadata: a date appearing later belongs to the
+# title ("Cohort 2026-01-01 to 2026-02-01 mislabeled"). Matching anywhere in the
+# heading both mangled real titles and let an undated entry inherit a date from
+# its own prose, which `recall_lessons --since` and "Most recent" then trusted.
+_LEADING_DATE_RE = re.compile(r"^\s*\[?(\d{4}-\d{2}-\d{2})\]?\s*")
 
 # Sentinel-wrapped advisory lines below the cluster table. Used to keep the
 # heuristic block self-explanatory without the agent needing to read SKILL.md.
@@ -553,14 +550,15 @@ def collect_entries(path: Path, file_type: str, prefix: str) -> list[dict]:
 def split_entry_date_and_title(heading_text: str) -> tuple[str, str]:
     """Split an entry heading into (date, title).
 
-    The date is the heading's leading date when it has one; a date appearing
-    later in the heading is left in the title. Returns ``("", heading_text)``
-    when no date is present at all.
+    The date is the heading's leading date. A heading with no leading date is
+    undated -- ``("", heading_text)`` -- even if its title mentions a date, so
+    date-based filtering and ordering never act on borrowed metadata.
     """
-    match = _DATE_RE.search(heading_text)
-    date = match.group(1) if match else ""
-    title = _LEADING_DATE_RE.sub("", heading_text, count=1).strip(" :-–—")
-    return date, title or heading_text
+    match = _LEADING_DATE_RE.match(heading_text)
+    if match is None:
+        return "", heading_text
+    title = heading_text[match.end() :].strip(" :-–—")
+    return match.group(1), title or heading_text
 
 
 def sort_entries_by_recency(entries: list[dict]) -> list[dict]:

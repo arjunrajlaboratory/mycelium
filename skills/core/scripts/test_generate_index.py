@@ -640,6 +640,45 @@ class TestHeuristicSummary:
             == "Regression introduced on 2026-03-15 by the loader"
         )
 
+    def test_undated_heading_does_not_borrow_a_date_from_its_title(
+        self, living_dir: Path
+    ) -> None:
+        """An entry's date is the heading's *leading* date or nothing at all.
+
+        Searching the whole heading let an undated entry inherit a date written
+        in its prose, so `recall_lessons --since` and "Most recent" treated it as
+        dated. Widening the pattern to accept bare dates newly exposed this.
+        """
+        path = living_dir / "learnings.md"
+        path.write_text(
+            "# Learnings\n\n"
+            "### Regression introduced on 2026-03-15 by the loader\n"
+            "**Tags**: [x]\n",
+            encoding="utf-8",
+        )
+        (entry,) = gi.collect_entries(path, "learnings", "L")
+        assert entry["date"] == ""
+        assert entry["title"] == "Regression introduced on 2026-03-15 by the loader"
+
+    def test_undated_entries_sort_below_dated_ones(
+        self, living_dir: Path
+    ) -> None:
+        """A borrowed date would have mis-ranked the entry in "Most recent"."""
+        path = living_dir / "learnings.md"
+        path.write_text(
+            "# Learnings\n\n"
+            "### Regression introduced on 2026-03-15 by the loader\n"
+            "**Tags**: [x]\n\n"
+            "### [2026-01-01] Genuinely dated but older\n"
+            "**Tags**: [x]\n",
+            encoding="utf-8",
+        )
+        block = gi.build_heuristic_summary(living_dir)
+        recent = block.split("## Most recent")[1].split("## By tag")[0]
+        assert recent.index("Genuinely dated but older") < recent.index(
+            "Regression introduced on"
+        )
+
     def test_bare_leading_date_is_stripped_from_title(
         self, living_dir: Path
     ) -> None:

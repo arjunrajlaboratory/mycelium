@@ -15,7 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was indexed as `Cohort  to  mislabeled`. Those mangled titles went straight
   into `.living/INDEX.md` and `recall_lessons` output. Only the leading date is
   now treated as metadata, via a shared `split_entry_date_and_title` that
-  `detect_recurrence.py` uses too so the two cannot drift.
+  `detect_recurrence.py` uses too so the two cannot drift. An entry with no
+  leading date is reported as undated rather than borrowing a date from its own
+  prose, which `recall_lessons --since` and "Most recent" would otherwise have
+  trusted.
 - **"Most recent" no longer starves the smaller knowledge log.** The same-date
   tie-break compared numeric ID suffixes across two independent per-file
   counters, so the larger file won every tie and the newest decision of the day
