@@ -5,9 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-08-27
 
 ### Fixed
+
+- **Knowledge entries written at `##` no longer vanish from `INDEX.md`
+  silently.** Every parser in `generate_index.py` reads `learnings.md` and
+  `decisions.md` entries off a literal `###` prefix, but three shipped
+  guidance paths still dictated `##`, so conforming entries were indexed as
+  "0 entries" with no error raised anywhere: the post-action hook's LEARNINGS
+  directive (the primary capture path, firing after every analysis run), the
+  `transfer` skill's auto-append template, and the five worked examples in
+  `skill-generation-guide.md`. All now specify `###`, matching the entry
+  templates and the parsers ([#76]).
 
 - **Entry titles no longer lose dates that belong to the title.** An entry
   heading leads with its date, but `collect_entries` stripped *every* date in
@@ -28,35 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   undocumented requirement that every entry ID end in an integer, which
   `detect_recurrence`'s `L-legacy-<line>` IDs did not satisfy.
 
-### Changed
-
-- **One shared Markdown fence tracker.** `validate_structure.py` and
-  `finalize_session_log.py` each carried their own CommonMark 4.5 fence logic
-  and drifted apart, producing a run of defects: a four-backtick fence closed by
-  its own inner three-backtick line, a fence opened on a list marker's line going
-  unrecognized so its closer became a phantom opener, blockquoted fences that
-  could never close, and tab offsets measured in characters rather than columns.
-  Both now delegate to `markdown_fences.py`, which additionally handles
-  container-prefixed openers (`- ```markdown`, `> ```', `1. ```'),
-  blockquote-depth matching on closers, and column measurement with tabs
-  expanded to four-column stops. For `validate_structure` this removes a class
-  of false "entry" reports on documented examples; for `finalize_session_log` it
-  can only protect more authored content from footer stripping, never less.
-
-## [0.7.0] - 2026-08-26
-
-### Fixed
-
-- **Knowledge entries written at `##` no longer vanish from `INDEX.md`
-  silently.** Every parser in `generate_index.py` reads `learnings.md` and
-  `decisions.md` entries off a literal `###` prefix, but three shipped
-  guidance paths still dictated `##`, so conforming entries were indexed as
-  "0 entries" with no error raised anywhere: the post-action hook's LEARNINGS
-  directive (the primary capture path, firing after every analysis run), the
-  `transfer` skill's auto-append template, and the five worked examples in
-  `skill-generation-guide.md`. All now specify `###`, matching the entry
-  templates and the parsers ([#76]).
-
 ### Added
 
 - **`validate_structure.py` fails on mislevelled knowledge entries.** A new
@@ -71,10 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries, as both shipped templates do, so a structural heading that merely
   mentions one
   (`## Archive (entries before 2025-01-01)`) is left alone; headings inside
-  top-level fenced code blocks are ignored per CommonMark 4.5 — marker length,
-  character, and info string all respected — so an entry documenting the entry
-  format, even a four-backtick fence wrapping a triple-backtick block, does not
-  report itself. A fence left unclosed is reported explicitly, since everything
+  fenced code blocks are ignored per CommonMark 4.5 — marker length, character,
+  info string, container prefix and blockquote depth all respected — so an entry
+  documenting the entry format, even a four-backtick fence wrapping a
+  triple-backtick block or one opened on a list marker's line, does not report
+  itself. A fence left unclosed is reported explicitly, since everything
   after it went unchecked rather than clean, and the migration refuses such a
   log rather than repairing only the part it could see ([#76]).
 - **Migration for repositories holding mislevelled entries.**
@@ -107,6 +89,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that accumulated `##` entries should run
   `migrate_existing_repos.py --repo <repo>`, which the error message names
   ([#76]).
+- **One shared Markdown fence tracker.** `validate_structure.py` and
+  `finalize_session_log.py` each carried their own CommonMark 4.5 fence logic
+  and drifted apart, producing a run of defects: a four-backtick fence closed by
+  its own inner three-backtick line, a fence opened on a list marker's line going
+  unrecognized so its closer became a phantom opener, blockquoted fences that
+  could never close, and tab offsets measured in characters rather than columns.
+  Both now delegate to `markdown_fences.py`, which additionally handles
+  container-prefixed openers (`- ```markdown`, `> ```', `1. ```'),
+  blockquote-depth matching on closers, and column measurement with tabs
+  expanded to four-column stops. For `validate_structure` this removes a class
+  of false "entry" reports on documented examples; for `finalize_session_log` it
+  can only protect more authored content from footer stripping, never less.
 
 [#76]: https://github.com/arjunrajlaboratory/mycelium/issues/76
 
