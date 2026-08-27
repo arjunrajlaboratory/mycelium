@@ -434,6 +434,52 @@ class TestMigrateEntryHeadings:
             e["id"] for e in gi.collect_entries(path, "learnings", "L")
         ] == ids_before == ["L-1"]
 
+    def test_undecodable_log_needing_no_repair_is_left_alone(
+        self, fake_repo: Path
+    ) -> None:
+        """Strictness belongs at the point of rewrite, not during the scan.
+
+        The validator and generate_index both tolerate such a file with
+        replacement decoding, so a repo that passes the heading check must not
+        make migrate_one abort — especially since earlier migration actions may
+        already have written by then.
+        """
+        path = fake_repo / ".living" / "learnings.md"
+        original = b"# Learnings\n\n### [2026-04-01] Caf\xe9 entry\n"
+        path.write_bytes(original)
+        (fake_repo / ".living" / "decisions.md").write_text(
+            "# Decisions\n", encoding="utf-8"
+        )
+
+        assert mig.migrate_entry_headings(fake_repo) is False
+        assert path.read_bytes() == original
+
+    def test_undecodable_log_needing_no_repair_does_not_block_the_other_log(
+        self, fake_repo: Path
+    ) -> None:
+        learnings = fake_repo / ".living" / "learnings.md"
+        decisions = fake_repo / ".living" / "decisions.md"
+        untouched = b"### [2026-04-01] Caf\xe9 entry\n"
+        learnings.write_bytes(untouched)
+        decisions.write_text(
+            "# Decisions\n\n## [2026-04-02] Fixable\n", encoding="utf-8"
+        )
+
+        assert mig.migrate_entry_headings(fake_repo) is True
+        assert learnings.read_bytes() == untouched
+        assert "### [2026-04-02] Fixable" in decisions.read_text()
+
+    def test_migrate_one_completes_when_a_log_is_undecodable_but_clean(
+        self, fake_repo: Path
+    ) -> None:
+        """The whole migration must still reach INDEX.md regen."""
+        (fake_repo / ".living" / "learnings.md").write_bytes(
+            b"### [2026-04-01] Caf\xe9 entry\n**Tags**: [t]\n"
+        )
+        result = mig.migrate_one(fake_repo)
+        assert result["Entry heading levels"] == "skipped (already up-to-date)"
+        assert result["INDEX.md regen"] == "applied"
+
     def test_undecodable_log_fails_with_an_actionable_message(
         self, fake_repo: Path
     ) -> None:

@@ -106,8 +106,40 @@ ENTRY_HEADING_PREFIX = "### "
 _DATED_HEADING_RE = re.compile(r"^#{1,6}\s+\[?\d{4}-\d{2}-\d{2}\]?")
 
 # Fenced blocks are skipped so that an entry documenting the entry format does
-# not report itself.
-_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+# not report itself. CommonMark 4.5: the full marker run matters, so a ``` line
+# inside a ```` block is content rather than a close. `finalize_session_log.py`
+# already implements this rule; the two are pinned to agree by
+# test_fence_handling_agrees_with_the_session_log_implementation.
+_FENCE_RE = re.compile(r"^ {0,3}(?P<marker>```+|~~~+)(?P<info>.*)$")
+
+
+def _fence_open_marker(line: str) -> str | None:
+    """Return the opening fence marker of a line, or None (CommonMark 4.5).
+
+    A backtick fence's info string may not contain backticks; such a line is
+    ordinary content, not a fence.
+    """
+    match = _FENCE_RE.match(line)
+    if match is None:
+        return None
+    marker = match.group("marker")
+    if marker[0] == "`" and "`" in match.group("info"):
+        return None
+    return marker
+
+
+def _fence_closes(line: str, open_marker: str) -> bool:
+    """True when a line closes the active fence: same character, at least the
+    opening length, and nothing but whitespace after (CommonMark 4.5)."""
+    match = _FENCE_RE.match(line)
+    if match is None:
+        return False
+    marker = match.group("marker")
+    return (
+        marker[0] == open_marker[0]
+        and len(marker) >= len(open_marker)
+        and not match.group("info").strip()
+    )
 
 _MAX_REPORTED_LINES = 5
 
@@ -149,17 +181,14 @@ def mislevelled_entry_lines_in_text(text: str) -> list[int]:
         # universal newlines: this is a public entry point.
         line = raw.rstrip("\r")
 
-        fence = _FENCE_RE.match(line)
-        if fence:
-            marker = fence.group(1)
-            # Only the marker that opened a fence can close it, so a "~~~"
-            # inside a "```" block does not end the block.
-            if fence_marker is None:
-                fence_marker = marker
-            elif marker == fence_marker:
+        if fence_marker is not None:
+            # Everything inside a fence is illustrative content.
+            if _fence_closes(line, fence_marker):
                 fence_marker = None
             continue
-        if fence_marker is not None:
+        opener = _fence_open_marker(line)
+        if opener is not None:
+            fence_marker = opener
             continue
 
         # Anything the parsers accept is exempt; everything reaching the

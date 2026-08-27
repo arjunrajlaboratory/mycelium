@@ -226,6 +226,94 @@ def test_tilde_fenced_code_blocks_are_ignored(tmp_path: Path) -> None:
     assert _errors(target) == []
 
 
+def test_longer_fence_is_not_closed_by_a_shorter_inner_run(
+    tmp_path: Path,
+) -> None:
+    """CommonMark 4.5: a closing fence must be at least as long as the opener.
+
+    A four-backtick fence is the normal way to document a triple-backtick block.
+    Treating the inner ``` as a close made the example heading inside it a hard
+    validation failure, and the migrator then rewrote it.
+    """
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "### [2026-08-25] Documenting a fenced example\n\n"
+            "````markdown\n"
+            "```\n"
+            "## [2026-01-01] Example heading, not an entry\n"
+            "```\n"
+            "````\n"
+        ),
+    )
+    assert _errors(target) == []
+
+
+def test_shorter_opener_is_closed_by_a_longer_run(tmp_path: Path) -> None:
+    """A longer run does close a shorter opener, so the file keeps being checked."""
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "### [2026-08-25] Real\n\n"
+            "```\n## [2026-01-01] Example\n````\n\n"
+            "## [2026-08-26] Genuinely mislevelled\n"
+        ),
+    )
+    (error,) = _errors(target)
+    assert "line 7" in error
+
+
+def test_fence_line_carrying_an_info_string_does_not_close(
+    tmp_path: Path,
+) -> None:
+    """Only a bare run closes a fence; ```` ```python ```` inside one is content."""
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "### [2026-08-25] Real\n\n"
+            "````\n"
+            "```python\n"
+            "## [2026-01-01] Example\n"
+            "```\n"
+            "````\n"
+        ),
+    )
+    assert _errors(target) == []
+
+
+def test_fence_handling_agrees_with_the_session_log_implementation() -> None:
+    """Two hand-rolled fence trackers in one repo caused this bug; pin them.
+
+    `finalize_session_log.py` already implemented CommonMark 4.5 correctly. This
+    asserts the validator's copy agrees rather than drifting again.
+    """
+    import finalize_session_log as fsl
+    import validate_structure as vs_mod
+
+    lines = [
+        "```",
+        "````",
+        "~~~",
+        "~~~~",
+        "```markdown",
+        "```python",
+        "`````",
+        "   ```",
+        "not a fence",
+        "## [2026-01-01] heading",
+        "``` ",
+        "```` info",
+        "``` with `backtick` in info",
+    ]
+    for line in lines:
+        assert vs_mod._fence_open_marker(line) == fsl._fence_open_marker(line), line
+    for opener in ["```", "````", "~~~", "~~~~"]:
+        for line in lines:
+            assert vs_mod._fence_closes(line, opener) == fsl._fence_closes(
+                line, opener
+            ), (opener, line)
+
+
 def test_a_different_fence_marker_does_not_close_an_open_fence(
     tmp_path: Path,
 ) -> None:

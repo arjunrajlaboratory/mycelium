@@ -356,10 +356,15 @@ def migrate_entry_headings(repo_path: Path, dry_run: bool = False) -> bool:
         ir.ensure_safe_regular_file(path)
         if not path.is_file():
             continue
-        # Strict decoding: this is a write path, and reading with
-        # errors="replace" would persist replacement characters over real bytes.
-        # The validator reports such a file, so refusing it by name keeps the
-        # advertised remedy honest instead of surfacing a raw decode traceback.
+        # Scan leniently, exactly as the validator does, so a log that needs no
+        # repair is never rejected for its encoding — otherwise a repo that
+        # passes the heading check could still abort the migration, after earlier
+        # actions had already written.
+        if not vs.mislevelled_entry_lines(path):
+            continue
+        # This log will be rewritten, so from here strict decoding is required:
+        # reading with errors="replace" would persist replacement characters over
+        # real bytes. Refuse it by name rather than surfacing a raw traceback.
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError as error:
@@ -368,6 +373,7 @@ def migrate_entry_headings(repo_path: Path, dry_run: bool = False) -> bool:
                 f"({error.reason} at byte {error.start}). Fix the encoding, "
                 f"then re-run the migration."
             ) from error
+        # Re-derive line numbers from the text that will actually be rewritten.
         mislevelled = vs.mislevelled_entry_lines_in_text(text)
         if mislevelled:
             targets.append((path, text, mislevelled))
