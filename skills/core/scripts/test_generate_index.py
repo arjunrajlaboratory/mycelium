@@ -612,6 +612,47 @@ class TestHeuristicSummary:
         assert "`singleton-tag`" in by_tag_section
         assert "L-3" in by_tag_section
 
+    def test_entry_title_keeps_dates_that_are_not_the_entry_date(
+        self, living_dir: Path
+    ) -> None:
+        """Only the leading date is the entry's date; the rest is title text.
+
+        Stripping every date in the heading mangled real titles, and those
+        mangled strings go straight into INDEX.md and `recall_lessons` output.
+        """
+        path = living_dir / "learnings.md"
+        path.write_text(
+            "# Learnings\n\n"
+            "### [2026-04-02] Cohort 2026-01-01 to 2026-02-01 mislabeled\n"
+            "**Tags**: [x]\n\n"
+            "### [2026-04-01] Regression introduced on 2026-03-15 by the loader\n"
+            "**Tags**: [x]\n",
+            encoding="utf-8",
+        )
+        entries = gi.collect_entries(path, "learnings", "L")
+        assert entries[0]["date"] == "2026-04-02"
+        assert (
+            entries[0]["title"] == "Cohort 2026-01-01 to 2026-02-01 mislabeled"
+        )
+        assert entries[1]["date"] == "2026-04-01"
+        assert (
+            entries[1]["title"]
+            == "Regression introduced on 2026-03-15 by the loader"
+        )
+
+    def test_bare_leading_date_is_stripped_from_title(
+        self, living_dir: Path
+    ) -> None:
+        """Older repos wrote the date without brackets."""
+        path = living_dir / "learnings.md"
+        path.write_text(
+            "# Learnings\n\n### 2026-04-01 Bare date entry\n**Tags**: [x]\n",
+            encoding="utf-8",
+        )
+        (entry,) = gi.collect_entries(path, "learnings", "L")
+        assert entry["date"] == "2026-04-01"
+        assert entry["title"] == "Bare date entry"
+
     def test_recent_section_sorted_by_date(self, living_dir: Path) -> None:
         _write_tagged_learnings(
             living_dir,
@@ -626,6 +667,85 @@ class TestHeuristicSummary:
         # New entry should appear before Middle, before Old
         assert recent_section.index("New entry") < recent_section.index("Middle entry")
         assert recent_section.index("Middle entry") < recent_section.index("Old entry")
+
+    def test_recent_section_uses_reverse_append_order_for_same_date(
+        self, living_dir: Path
+    ) -> None:
+        """Later same-day entries are more recent than earlier file entries."""
+
+        _write_tagged_learnings(
+            living_dir,
+            [
+                ("2026-04-01", "First that day", ["x"]),
+                ("2026-04-01", "Second that day", ["x"]),
+                ("2026-04-01", "Last that day", ["x"]),
+            ],
+        )
+        block = gi.build_heuristic_summary(living_dir)
+        recent_section = block.split("## Most recent")[1].split("## By tag")[0]
+        assert recent_section.index("Last that day") < recent_section.index(
+            "Second that day"
+        )
+        assert recent_section.index("Second that day") < recent_section.index(
+            "First that day"
+        )
+
+    def test_recent_section_does_not_starve_the_smaller_source(
+        self, living_dir: Path
+    ) -> None:
+        """On a same-date tie, each file's newest entry ranks before its second.
+
+        Comparing raw ID suffixes across two independent counters let the larger
+        file win every tie, so the newest decision of the day could be pushed
+        out of "Most recent" entirely by learnings written earlier the same day.
+        Entry position within its own file is the only real recency signal, so
+        rank by that instead.
+        """
+        _write_tagged_learnings(
+            living_dir,
+            [("2026-04-01", f"Learning {index}", ["x"]) for index in range(12)],
+        )
+        decisions = living_dir / "decisions.md"
+        decisions.write_text(
+            "".join(
+                f"### 2026-04-01 Decision {index}\n\n**Tags**: [x]\n"
+                for index in range(9)
+            ),
+            encoding="utf-8",
+        )
+        block = gi.build_heuristic_summary(living_dir, recent_n=3)
+        recent_section = block.split("## Most recent")[1].split("## By tag")[0]
+        # Newest of each file (L-12, D-9) outranks the second-newest learning.
+        assert "L-12" in recent_section
+        assert "D-9" in recent_section, "newest decision was starved by learnings"
+        assert recent_section.index("L-12") < recent_section.index("D-9")
+        assert "L-10" not in recent_section
+
+    def test_recent_section_survives_non_numeric_entry_ids(
+        self, living_dir: Path
+    ) -> None:
+        """Ranking must not depend on parsing an integer out of the ID.
+
+        `detect_recurrence` mints `L-legacy-<line>` IDs, so keying the sort on
+        the ID's numeric tail coupled this code to one ID scheme.
+        """
+        _write_tagged_learnings(
+            living_dir, [("2026-04-01", "Real entry", ["x"])]
+        )
+        entries = gi.collect_entries(
+            living_dir / "learnings.md", "learnings", "L"
+        )
+        entries.append(
+            {
+                "id": "L-legacy-42",
+                "title": "Legacy entry",
+                "date": "2026-04-01",
+                "tags": ["x"],
+                "line_no": 42,
+            }
+        )
+        ranked = gi.sort_entries_by_recency(entries)
+        assert {e["id"] for e in ranked} == {"L-1", "L-legacy-42"}
 
     def test_inverted_index_lists_all_ids(self, living_dir: Path) -> None:
         """The 'By tag' section maps tag → all matching IDs (T2)."""

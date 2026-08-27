@@ -188,9 +188,7 @@ def _collect_with_fallback(path: Path) -> list[dict]:
                 continue  # Already captured by canonical scan
             import generate_index as _gi_local
 
-            m = _gi_local._DATE_RE.search(title_part)  # type: ignore[attr-defined]
-            date = m.group(1) if m else ""
-            clean_title = _gi_local._DATE_RE.sub("", title_part).strip(" :-–—")  # type: ignore[attr-defined]
+            date, clean_title = _gi_local.split_entry_date_and_title(title_part)
             entry: dict = {
                 "id": f"L-legacy-{line_no}",
                 "title": clean_title or title_part,
