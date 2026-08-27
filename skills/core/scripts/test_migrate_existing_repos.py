@@ -551,6 +551,28 @@ class TestMigrateEntryHeadings:
         assert mig.migrate_entry_headings(fake_repo) is False
         assert (fake_repo / ".living" / "learnings.md").read_text() == original
 
+    def test_refuses_a_log_whose_scan_was_truncated_by_an_open_fence(
+        self, fake_repo: Path
+    ) -> None:
+        """An unclosed fence means detection never saw the rest of the file.
+
+        Repairing only the visible part would report success while leaving real
+        entries broken, so refuse and name the file. The validator reports the
+        same condition, so the two agree on what is un-repairable.
+        """
+        original = (
+            "### [2026-04-01] Real\n\n"
+            "```markdown\n"
+            "## [2026-01-01] Example\n\n"
+            "## [2026-04-02] Never seen by the scan\n"
+        )
+        self._write_logs(fake_repo, original, "# Decisions\n")
+        path = fake_repo / ".living" / "learnings.md"
+
+        with pytest.raises(ValueError, match="unclosed code fence"):
+            mig.migrate_entry_headings(fake_repo)
+        assert path.read_text() == original
+
     def test_crlf_log_is_repaired_and_normalized_to_lf(
         self, fake_repo: Path
     ) -> None:

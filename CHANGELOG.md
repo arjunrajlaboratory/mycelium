@@ -34,9 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mentions one
   (`## Archive (entries before 2025-01-01)`) is left alone; headings inside
   fenced code blocks are ignored per CommonMark 4.5 — marker length, character,
-  and info string all respected — so an entry documenting the entry format,
-  including a four-backtick fence wrapping a triple-backtick block, does not
-  report itself ([#76]).
+  and info string all respected, including a fence opened on the same line as a
+  list or blockquote marker — so an entry documenting the entry format, even a
+  four-backtick fence wrapping a triple-backtick block, does not report itself.
+  A fence left unclosed is reported explicitly, since everything after it went
+  unchecked rather than clean ([#76]).
 - **Migration for repositories holding mislevelled entries.**
   `migrate_existing_repos.py` gained an idempotent `Entry heading levels`
   action that raises `##` entries to `###` in place and runs before the

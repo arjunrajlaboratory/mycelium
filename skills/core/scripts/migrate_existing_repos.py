@@ -365,7 +365,17 @@ def migrate_entry_headings(repo_path: Path, dry_run: bool = False) -> bool:
         # repair is never rejected for its encoding — otherwise a repo that
         # passes the heading check could still abort the migration, after earlier
         # actions had already written.
-        if not vs.mislevelled_entry_lines(path):
+        scan_text = path.read_text(encoding="utf-8", errors="replace")
+        opened_at = vs.unclosed_fence_line(scan_text)
+        if opened_at is not None:
+            # Detection stopped at the fence, so a repair here would report
+            # success while leaving whatever follows it broken.
+            raise ValueError(
+                f"Refusing to repair {path}: unclosed code fence opened at "
+                f"line {opened_at}, so entries after it cannot be identified. "
+                f"Close the fence, then re-run the migration."
+            )
+        if not vs.mislevelled_entry_lines_in_text(scan_text):
             continue
         # This log will be rewritten, so from here strict decoding is required:
         # reading with errors="replace" would persist replacement characters over

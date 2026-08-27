@@ -115,6 +115,22 @@ _DATED_HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+\[?\d{4}-\d{2}-\d{2}\]?")
 # test_fence_handling_agrees_with_the_session_log_implementation.
 _FENCE_RE = re.compile(r"^ {0,3}(?P<marker>```+|~~~+)(?P<info>.*)$")
 
+# A fence may also open on the same line as its container's marker
+# ("- ```markdown", "> ```", "1. ```"). Missing such an opener does double
+# damage: the illustrative heading inside gets reported and rewritten, and the
+# fence's own closer is then read as a fresh opener, silently swallowing every
+# genuine entry after it. Full container tracking is out of scope here, so
+# accept a run of list/blockquote markers ahead of the fence.
+_FENCE_OPEN_RE = re.compile(
+    r"^ {0,3}(?:(?:[-+*]|\d{1,9}[.)])[ \t]+|>[ \t]?)*"
+    r"(?P<marker>```+|~~~+)(?P<info>.*)$"
+)
+
+# Closers are matched at any indentation. Inside a container the closing fence
+# is indented with its content, and this code does not track container depth, so
+# being lenient here keeps nesting from stranding a fence open.
+_FENCE_CLOSE_RE = re.compile(r"^\s*(?P<marker>```+|~~~+)(?P<info>.*)$")
+
 
 def _fence_open_marker(line: str) -> str | None:
     """Return the opening fence marker of a line, or None (CommonMark 4.5).
@@ -122,7 +138,7 @@ def _fence_open_marker(line: str) -> str | None:
     A backtick fence's info string may not contain backticks; such a line is
     ordinary content, not a fence.
     """
-    match = _FENCE_RE.match(line)
+    match = _FENCE_OPEN_RE.match(line)
     if match is None:
         return None
     marker = match.group("marker")
@@ -134,7 +150,7 @@ def _fence_open_marker(line: str) -> str | None:
 def _fence_closes(line: str, open_marker: str) -> bool:
     """True when a line closes the active fence: same character, at least the
     opening length, and nothing but whitespace after (CommonMark 4.5)."""
-    match = _FENCE_RE.match(line)
+    match = _FENCE_CLOSE_RE.match(line)
     if match is None:
         return False
     marker = match.group("marker")
@@ -170,11 +186,32 @@ def mislevelled_entry_lines(path: Path) -> list[int]:
     return mislevelled_entry_lines_in_text(text)
 
 
+def unclosed_fence_line(text: str) -> int | None:
+    """Line number of a code fence left open at end of input, if any.
+
+    Everything after such a fence went unchecked, so callers must report it
+    rather than treat a clean scan as proof the file is clean.
+    """
+    fence_marker: str | None = None
+    opened_at: int | None = None
+    for lineno, raw in enumerate(split_log_lines(text), start=1):
+        line = raw.rstrip("\r")
+        if fence_marker is not None:
+            if _fence_closes(line, fence_marker):
+                fence_marker, opened_at = None, None
+            continue
+        marker = _fence_open_marker(line)
+        if marker is not None:
+            fence_marker, opened_at = marker, lineno
+    return opened_at
+
+
 def mislevelled_entry_lines_in_text(text: str) -> list[int]:
     """Line numbers (1-based, per `split_log_lines`) of unparseable entries.
 
     Headings inside fenced code blocks are ignored: they are illustrative
-    markdown, not entries.
+    markdown, not entries. A fence left open swallows the rest of the input --
+    `unclosed_fence_line` reports that separately.
     """
     mislevelled: list[int] = []
     fence_marker: str | None = None
@@ -223,7 +260,17 @@ def check_entry_heading_levels(target_dir: Path, result: ValidationResult):
         if not path.is_file():
             continue
 
-        mislevelled = mislevelled_entry_lines(path)
+        text = path.read_text(encoding="utf-8", errors="replace")
+
+        opened_at = unclosed_fence_line(text)
+        if opened_at is not None:
+            result.error(
+                f".living/{filename} has an unclosed code fence opened at "
+                f"line {opened_at}; every entry after it was skipped rather "
+                f"than checked. Close the fence and re-run."
+            )
+
+        mislevelled = mislevelled_entry_lines_in_text(text)
         if not mislevelled:
             continue
 

@@ -327,6 +327,10 @@ def test_fence_handling_agrees_with_the_session_log_implementation() -> None:
     import finalize_session_log as fsl
     import validate_structure as vs_mod
 
+    # Restricted to top-level, container-free lines: that is the shared core.
+    # validate_structure intentionally extends beyond it (it also opens a fence
+    # after a list/blockquote marker and closes one at any indentation), which
+    # the tests above cover.
     lines = [
         "```",
         "````",
@@ -335,7 +339,6 @@ def test_fence_handling_agrees_with_the_session_log_implementation() -> None:
         "```markdown",
         "```python",
         "`````",
-        "   ```",
         "not a fence",
         "## [2026-01-01] heading",
         "``` ",
@@ -349,6 +352,79 @@ def test_fence_handling_agrees_with_the_session_log_implementation() -> None:
             assert vs_mod._fence_closes(line, opener) == fsl._fence_closes(
                 line, opener
             ), (opener, line)
+
+
+@pytest.mark.parametrize(
+    "opener",
+    ["- ```markdown", "* ```", "+ ```markdown", "1. ```markdown", "> ```markdown"],
+)
+def test_fence_opened_after_a_container_marker_is_recognized(
+    tmp_path: Path, opener: str
+) -> None:
+    """A fence can open on the same line as a list or blockquote marker.
+
+    Missing that opener does double damage: the illustrative heading inside is
+    reported and rewritten, and the fence's own closer is then mistaken for a
+    new opener, silently swallowing every genuine entry after it.
+    """
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "### [2026-08-25] Real entry\n\n"
+            f"{opener}\n"
+            "  ## [2026-01-01] Example, not an entry\n"
+            "  ```\n\n"
+            "## [2026-08-26] Genuine legacy entry\n"
+            "**Tags**: [t]\n\n"
+            "## [2026-08-27] Another genuine legacy entry\n"
+        ),
+    )
+    (error,) = _errors(target)
+    # The two real entries are found; the example inside the fence is not.
+    assert "line 7" in error and "line 10" in error
+    assert "line 4" not in error
+
+
+def test_unclosed_fence_is_reported_rather_than_swallowing_entries(
+    tmp_path: Path,
+) -> None:
+    """A missed opener must never silently skip the rest of the file.
+
+    Container nesting this code does not model can still leave a fence open. If
+    that happens the remainder went unchecked, which is exactly the silent
+    failure this validator exists to surface — so say so.
+    """
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "### [2026-08-25] Real\n\n"
+            "```markdown\n"
+            "## [2026-01-01] Example\n"
+            "\n"
+            "## [2026-08-26] Never checked, fence never closed\n"
+        ),
+    )
+    (error,) = _errors(target)
+    assert "unclosed" in error.lower()
+    assert "line 3" in error
+
+
+def test_a_deeply_indented_closer_still_closes_its_fence(
+    tmp_path: Path,
+) -> None:
+    """Closers are matched leniently on indentation, so nesting does not strand
+    a fence open and produce a spurious unclosed-fence report."""
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "### [2026-08-25] Real\n\n"
+            "- ```markdown\n"
+            "      ## [2026-01-01] Example\n"
+            "      ```\n\n"
+            "### [2026-08-26] Fine\n"
+        ),
+    )
+    assert _errors(target) == []
 
 
 def test_a_different_fence_marker_does_not_close_an_open_fence(
