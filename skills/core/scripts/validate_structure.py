@@ -13,6 +13,8 @@ import re
 import sys
 from pathlib import Path
 
+import markdown_fences as fences
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -108,49 +110,6 @@ ENTRY_HEADING_PREFIX = "### "
 # heading -- even at the canonical level -- is unreadable and must be reported.
 _DATED_HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+\[?\d{4}-\d{2}-\d{2}\]?")
 
-# Fenced blocks are skipped so that an entry documenting the entry format does
-# not report itself. CommonMark 4.5: the full marker run matters, so a ``` line
-# inside a ```` block is content rather than a close. `finalize_session_log.py`
-# implements the same rule; the two are pinned to agree by
-# test_fence_handling_agrees_with_the_session_log_implementation.
-#
-# Deliberately limited to top-level fences. A fence opened on a container's own
-# line ("- ```markdown", "> ```") is not recognized here; that case, along with
-# blockquote-depth and tab-stop handling, is the subject of a focused follow-up
-# that consolidates this logic and finalize_session_log's into one module. Until
-# then a missed opener cannot fail silently: `unclosed_fence_line` reports the
-# resulting open fence and `migrate_entry_headings` refuses to touch the log.
-_FENCE_RE = re.compile(r"^ {0,3}(?P<marker>```+|~~~+)(?P<info>.*)$")
-
-
-def _fence_open_marker(line: str) -> str | None:
-    """Return the opening fence marker of a line, or None (CommonMark 4.5).
-
-    A backtick fence's info string may not contain backticks; such a line is
-    ordinary content, not a fence.
-    """
-    match = _FENCE_RE.match(line)
-    if match is None:
-        return None
-    marker = match.group("marker")
-    if marker[0] == "`" and "`" in match.group("info"):
-        return None
-    return marker
-
-
-def _fence_closes(line: str, open_marker: str) -> bool:
-    """True when a line closes the active fence: same character, at least the
-    opening length, and nothing but whitespace after (CommonMark 4.5)."""
-    match = _FENCE_RE.match(line)
-    if match is None:
-        return False
-    marker = match.group("marker")
-    return (
-        marker[0] == open_marker[0]
-        and len(marker) >= len(open_marker)
-        and not match.group("info").strip()
-    )
-
 _MAX_REPORTED_LINES = 5
 
 
@@ -183,18 +142,9 @@ def unclosed_fence_line(text: str) -> int | None:
     Everything after such a fence went unchecked, so callers must report it
     rather than treat a clean scan as proof the file is clean.
     """
-    fence_marker: str | None = None
-    opened_at: int | None = None
-    for lineno, raw in enumerate(split_log_lines(text), start=1):
-        line = raw.rstrip("\r")
-        if fence_marker is not None:
-            if _fence_closes(line, fence_marker):
-                fence_marker, opened_at = None, None
-            continue
-        marker = _fence_open_marker(line)
-        if marker is not None:
-            fence_marker, opened_at = marker, lineno
-    return opened_at
+    return fences.unclosed_fence_line(
+        line.rstrip("\r") for line in split_log_lines(text)
+    )
 
 
 def mislevelled_entry_lines_in_text(text: str) -> list[int]:
@@ -205,21 +155,21 @@ def mislevelled_entry_lines_in_text(text: str) -> list[int]:
     `unclosed_fence_line` reports that separately.
     """
     mislevelled: list[int] = []
-    fence_marker: str | None = None
+    fence: fences.Fence | None = None
 
     for lineno, raw in enumerate(split_log_lines(text), start=1):
         # Tolerate CRLF text even though every in-tree caller decodes with
         # universal newlines: this is a public entry point.
         line = raw.rstrip("\r")
 
-        if fence_marker is not None:
+        if fence is not None:
             # Everything inside a fence is illustrative content.
-            if _fence_closes(line, fence_marker):
-                fence_marker = None
+            if fences.closes(line, fence):
+                fence = None
             continue
-        opener = _fence_open_marker(line)
-        if opener is not None:
-            fence_marker = opener
+        opened = fences.opening_fence(line)
+        if opened is not None:
+            fence = opened
             continue
 
         # Anything the parsers accept is exempt; everything reaching the

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **One shared Markdown fence tracker.** `validate_structure.py` and
+  `finalize_session_log.py` each carried their own CommonMark 4.5 fence logic
+  and drifted apart, producing a run of defects: a four-backtick fence closed by
+  its own inner three-backtick line, a fence opened on a list marker's line going
+  unrecognized so its closer became a phantom opener, blockquoted fences that
+  could never close, and tab offsets measured in characters rather than columns.
+  Both now delegate to `markdown_fences.py`, which additionally handles
+  container-prefixed openers (`- ```markdown`, `> ```', `1. ```'),
+  blockquote-depth matching on closers, and column measurement with tabs
+  expanded to four-column stops. For `validate_structure` this removes a class
+  of false "entry" reports on documented examples; for `finalize_session_log` it
+  can only protect more authored content from footer stripping, never less.
+
 ## [0.7.0] - 2026-08-26
 
 ### Fixed
@@ -38,10 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   format, even a four-backtick fence wrapping a triple-backtick block, does not
   report itself. A fence left unclosed is reported explicitly, since everything
   after it went unchecked rather than clean, and the migration refuses such a
-  log rather than repairing only the part it could see. Fences opened on a
-  container's own line (`- ```markdown`) are not yet recognized; a focused
-  follow-up consolidates this logic with `finalize_session_log.py`'s and adds
-  container, blockquote-depth and tab-stop handling ([#76]).
+  log rather than repairing only the part it could see ([#76]).
 - **Migration for repositories holding mislevelled entries.**
   `migrate_existing_repos.py` gained an idempotent `Entry heading levels`
   action that raises `##` entries to `###` in place and runs before the
