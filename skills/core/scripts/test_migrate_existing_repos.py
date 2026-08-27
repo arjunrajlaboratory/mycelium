@@ -518,6 +518,39 @@ class TestMigrateEntryHeadings:
 
         assert decisions.read_text() == decisions_before
 
+    @pytest.mark.parametrize(
+        "heading",
+        [
+            "   ## [2026-04-01] Three spaces, h2",
+            "  ### [2026-04-01] Two spaces, canonical level",
+            " #### [2026-04-01] One space, h4",
+        ],
+    )
+    def test_indentation_is_normalized_away(
+        self, fake_repo: Path, heading: str
+    ) -> None:
+        """Repair must move the heading to column 1, not just fix the hashes."""
+        self._write_logs(
+            fake_repo, f"# Learnings\n\n{heading}\n**Tags**: [t]\n", "# Decisions\n"
+        )
+        path = fake_repo / ".living" / "learnings.md"
+
+        assert mig.migrate_entry_headings(fake_repo) is True
+        assert vs.mislevelled_entry_lines(path) == []
+        count, _ = gi.count_headers_and_topics(path, "learnings")
+        assert count == 1, "repaired heading must be readable by the parsers"
+
+    def test_four_space_indented_example_is_left_alone(
+        self, fake_repo: Path
+    ) -> None:
+        original = (
+            "# Learnings\n\n### [2026-04-01] Real\n\n"
+            "    ## [2026-01-01] Indented code block\n"
+        )
+        self._write_logs(fake_repo, original, "# Decisions\n")
+        assert mig.migrate_entry_headings(fake_repo) is False
+        assert (fake_repo / ".living" / "learnings.md").read_text() == original
+
     def test_crlf_log_is_repaired_and_normalized_to_lf(
         self, fake_repo: Path
     ) -> None:

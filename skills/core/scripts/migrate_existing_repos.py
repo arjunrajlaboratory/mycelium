@@ -312,10 +312,15 @@ def _relevel_entry_heading(line: str) -> str:
     heading's hashes alone would leave it unreadable and the repo failing
     validation forever while migration reported success.
 
+    Leading indentation is normalized away as well: up to three spaces is still
+    a valid ATX heading, but the parsers match a column-1 prefix, so an indented
+    heading has to move to column 1 to become readable.
+
     Callers pass text decoded with universal newlines, so no carriage return
     survives into the line.
     """
-    return vs.ENTRY_HEADING_PREFIX + line.lstrip("#").lstrip(" \t")
+    heading_text = line.lstrip(" ").lstrip("#").lstrip(" \t")
+    return vs.ENTRY_HEADING_PREFIX + heading_text
 
 
 def migrate_entry_headings(repo_path: Path, dry_run: bool = False) -> bool:

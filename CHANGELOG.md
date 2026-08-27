@@ -26,8 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.living/decisions.md` that `generate_index.py` cannot parse, naming the
   file, the count, and the offending line numbers. Mixed-level files are
   reported too — the case where a nonzero entry count masks silently dropped
-  entries. Only headings that *lead* with a date are treated as entries, as both
-  shipped templates do, so a structural heading that merely mentions one
+  entries. Indented headings are reported too: up to three leading spaces is
+  still a valid ATX heading but the parsers match a column-1 prefix, so an
+  indented entry — even at the canonical `###` level — was invisible to both the
+  index and the old check. Only headings that *lead* with a date are treated as
+  entries, as both shipped templates do, so a structural heading that merely
+  mentions one
   (`## Archive (entries before 2025-01-01)`) is left alone; headings inside
   fenced code blocks are ignored per CommonMark 4.5 — marker length, character,
   and info string all respected — so an entry documenting the entry format,
@@ -40,7 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass. Detection is delegated to `validate_structure.mislevelled_entry_lines`,
   so the validator and the repair cannot disagree about what is broken; only
   the heading lines it names are rewritten, leaving bodies, fenced examples,
-  and structural headings untouched. A log that is not valid UTF-8 is refused by
+  and structural headings untouched; indentation on a repaired heading is
+  normalized away so the result is actually readable. A log that is not valid
+  UTF-8 is refused by
   name rather than rewritten with replacement characters. Honors `--dry-run` and
   preserves file permissions ([#76]).
 - **Drift protection between entry guidance and the parsers.**

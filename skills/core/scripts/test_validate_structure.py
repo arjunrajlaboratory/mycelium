@@ -175,6 +175,43 @@ def test_undated_h2_context_headings_are_not_flagged(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "heading",
     [
+        "   ## [2026-08-01] Three spaces, h2",
+        "  ### [2026-08-01] Two spaces, canonical level",
+        " #### [2026-08-01] One space, h4",
+    ],
+)
+def test_indented_entry_headings_are_flagged(tmp_path: Path, heading: str) -> None:
+    """CommonMark allows up to three spaces before an ATX heading.
+
+    The parsers match a column-1 prefix, so an indented entry — even at the
+    canonical ``###`` level — is absent from INDEX.md. That is precisely the
+    silent failure this check exists to surface, so it must be reported.
+    """
+    target = _living(
+        tmp_path, learnings_md=f"# Learnings\n\n{heading}\n**Tags**: [t]\n"
+    )
+    path = tmp_path / ".living" / "learnings.md"
+    count, _ = gi.count_headers_and_topics(path, "learnings")
+    assert count == 0, "precondition: the parser cannot read this heading"
+    assert len(_errors(target)) == 1
+
+
+def test_four_space_indent_is_a_code_block_not_a_heading(tmp_path: Path) -> None:
+    """Four spaces is an indented code block in CommonMark, so it is content."""
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-08-01] Real\n\n"
+            "    ## [2026-01-01] Indented code, not an entry\n"
+        ),
+    )
+    assert _errors(target) == []
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
         "## Archive (entries before 2025-01-01)",
         "## Sprint 2026-04-01 retro",
         "## Migrated from old repo on 2026-01-15",

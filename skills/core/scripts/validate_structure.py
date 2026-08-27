@@ -103,7 +103,10 @@ ENTRY_HEADING_PREFIX = "### "
 # date somewhere ("## Archive (entries before 2025-01-01)") is not an entry, and
 # treating it as one both failed validation and let the repair mint a phantom
 # entry that renumbered every real one.
-_DATED_HEADING_RE = re.compile(r"^#{1,6}\s+\[?\d{4}-\d{2}-\d{2}\]?")
+# Up to three leading spaces is still an ATX heading (CommonMark 4.2); four is
+# an indented code block. The parsers match a column-1 prefix, so an indented
+# heading -- even at the canonical level -- is unreadable and must be reported.
+_DATED_HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+\[?\d{4}-\d{2}-\d{2}\]?")
 
 # Fenced blocks are skipped so that an entry documenting the entry format does
 # not report itself. CommonMark 4.5: the full marker run matters, so a ``` line
