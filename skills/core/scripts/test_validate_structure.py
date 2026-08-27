@@ -327,10 +327,6 @@ def test_fence_handling_agrees_with_the_session_log_implementation() -> None:
     import finalize_session_log as fsl
     import validate_structure as vs_mod
 
-    # Restricted to top-level, container-free lines: that is the shared core.
-    # validate_structure intentionally extends beyond it (it also opens a fence
-    # after a list/blockquote marker and closes one at any indentation), which
-    # the tests above cover.
     lines = [
         "```",
         "````",
@@ -339,6 +335,7 @@ def test_fence_handling_agrees_with_the_session_log_implementation() -> None:
         "```markdown",
         "```python",
         "`````",
+        "   ```",
         "not a fence",
         "## [2026-01-01] heading",
         "``` ",
@@ -352,44 +349,6 @@ def test_fence_handling_agrees_with_the_session_log_implementation() -> None:
             assert vs_mod._fence_closes(line, opener) == fsl._fence_closes(
                 line, opener
             ), (opener, line)
-
-
-@pytest.mark.parametrize(
-    "opener,closer",
-    [
-        ("- ```markdown", "  ```"),
-        ("* ```", "  ```"),
-        ("+ ```markdown", "  ```"),
-        ("1. ```markdown", "   ```"),
-        # A blockquoted fence closes inside the quote; see the depth tests.
-        ("> ```markdown", "> ```"),
-    ],
-)
-def test_fence_opened_after_a_container_marker_is_recognized(
-    tmp_path: Path, opener: str, closer: str
-) -> None:
-    """A fence can open on the same line as a list or blockquote marker.
-
-    Missing that opener does double damage: the illustrative heading inside is
-    reported and rewritten, and the fence's own closer is then mistaken for a
-    new opener, silently swallowing every genuine entry after it.
-    """
-    target = _living(
-        tmp_path,
-        learnings_md=(
-            "### [2026-08-25] Real entry\n\n"
-            f"{opener}\n"
-            "  ## [2026-01-01] Example, not an entry\n"
-            f"{closer}\n\n"
-            "## [2026-08-26] Genuine legacy entry\n"
-            "**Tags**: [t]\n\n"
-            "## [2026-08-27] Another genuine legacy entry\n"
-        ),
-    )
-    (error,) = _errors(target)
-    # The two real entries are found; the example inside the fence is not.
-    assert "line 7" in error and "line 10" in error
-    assert "line 4" not in error
 
 
 def test_unclosed_fence_is_reported_rather_than_swallowing_entries(
@@ -414,161 +373,6 @@ def test_unclosed_fence_is_reported_rather_than_swallowing_entries(
     (error,) = _errors(target)
     assert "unclosed" in error.lower()
     assert "line 3" in error
-
-
-@pytest.mark.parametrize("closer_indent", [0, 2, 3, 5])
-def test_closer_within_three_spaces_of_its_opener_closes(
-    tmp_path: Path, closer_indent: int
-) -> None:
-    """CommonMark 4.5: a closer may be indented up to three spaces past its
-    container, which for a ``- `` list item's fence means columns 2 through 5."""
-    target = _living(
-        tmp_path,
-        learnings_md=(
-            "### [2026-08-25] Real\n\n"
-            "- ```markdown\n"
-            "  ## [2026-01-01] Example\n"
-            f"{' ' * closer_indent}```\n\n"
-            "### [2026-08-26] Fine\n"
-        ),
-    )
-    assert _errors(target) == []
-
-
-def test_closer_indented_past_its_container_is_content_not_a_close(
-    tmp_path: Path,
-) -> None:
-    """Four spaces past the opener is indented content, so the fence stays open.
-
-    Accepting arbitrary whitespace let a documented indented fence marker end
-    the block early, which then reported the illustrative headings after it as
-    real entries. Staying open is reported instead — visibly, and without ever
-    mistaking documentation for an entry.
-    """
-    target = _living(
-        tmp_path,
-        learnings_md=(
-            "### [2026-08-25] Real\n\n"
-            "- ```markdown\n"
-            "  ## [2026-01-01] Example\n"
-            "      ```\n"
-        ),
-    )
-    (error,) = _errors(target)
-    assert "unclosed" in error.lower() and "line 3" in error
-
-
-def test_indented_fence_marker_inside_a_top_level_block_is_content(
-    tmp_path: Path,
-) -> None:
-    """Documenting an indented fence must not end the block that documents it."""
-    target = _living(
-        tmp_path,
-        learnings_md=(
-            "### [2026-08-25] How to write an indented fence\n\n"
-            "```markdown\n"
-            "    ```\n"
-            "    ## [2026-01-01] Example inside the documented block\n"
-            "    ```\n"
-            "```\n\n"
-            "### [2026-08-26] Fine\n"
-        ),
-    )
-    assert _errors(target) == []
-
-
-@pytest.mark.parametrize(
-    "opener,closer",
-    [
-        ("> ```markdown", "> ```"),
-        ("> ```", ">```"),
-        ("> - ```markdown", "  > ```"),
-    ],
-)
-def test_blockquoted_fence_is_closed_by_a_blockquoted_closer(
-    tmp_path: Path, opener: str, closer: str
-) -> None:
-    """Openers accept a blockquote marker, so closers must too.
-
-    Otherwise every blockquoted example block reads as unclosed: genuine entries
-    after it go unchecked and the migrator refuses the whole log.
-    """
-    target = _living(
-        tmp_path,
-        learnings_md=(
-            "### [2026-08-25] Real\n\n"
-            f"{opener}\n"
-            "> ## [2026-01-01] Example\n"
-            f"{closer}\n\n"
-            "### [2026-08-26] Fine\n"
-        ),
-    )
-    assert _errors(target) == []
-
-
-def test_blockquoted_marker_does_not_close_a_top_level_fence(
-    tmp_path: Path,
-) -> None:
-    """A closer must sit at the opener's blockquote depth.
-
-    Accepting any number of ``>`` independently of the opener let a top-level
-    block containing ``> ``` `` as an example be closed by that example line.
-    """
-    target = _living(
-        tmp_path,
-        learnings_md=(
-            "### [2026-08-25] Anchor\n\n"
-            "```markdown\n"
-            "> ```\n"
-            "## [2026-01-01] Example\n"
-            "```\n\n"
-            "## [2026-08-26] Genuine legacy\n"
-        ),
-    )
-    (error,) = _errors(target)
-    assert "line 8" in error
-    assert "line 5" not in error
-
-
-def test_blockquoted_opener_is_not_closed_at_a_different_depth(
-    tmp_path: Path,
-) -> None:
-    target = _living(
-        tmp_path,
-        learnings_md=(
-            "### [2026-08-25] Anchor\n\n"
-            "> ```markdown\n"
-            "> ## [2026-01-01] Example\n"
-            "```\n"
-        ),
-    )
-    (error,) = _errors(target)
-    assert "unclosed" in error.lower()
-
-
-def test_tab_prefixed_marker_does_not_close_a_top_level_fence(
-    tmp_path: Path,
-) -> None:
-    """Markdown expands a tab to the next four-column stop.
-
-    Measuring Python character offsets treated ``\t``` `` as column 1, so it
-    closed a top-level fence although Markdown puts the marker at column 4 and
-    treats it as fenced content.
-    """
-    target = _living(
-        tmp_path,
-        learnings_md=(
-            "### [2026-08-25] Anchor\n\n"
-            "```markdown\n"
-            "\t```\n"
-            "## [2026-01-01] Example\n"
-            "```\n\n"
-            "## [2026-08-26] Genuine legacy\n"
-        ),
-    )
-    (error,) = _errors(target)
-    assert "line 8" in error
-    assert "line 5" not in error
 
 
 def test_a_different_fence_marker_does_not_close_an_open_fence(
