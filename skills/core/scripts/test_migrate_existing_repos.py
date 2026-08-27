@@ -573,6 +573,52 @@ class TestMigrateEntryHeadings:
             mig.migrate_entry_headings(fake_repo)
         assert path.read_text() == original
 
+    def test_reports_the_entry_id_shift_recovery_causes(
+        self, fake_repo: Path
+    ) -> None:
+        """Recovering a hidden entry renumbers the ones after it — say so.
+
+        Entry IDs are positional, derived from file order at read time, so an
+        entry that becomes visible necessarily takes its slot in the sequence
+        and pushes later IDs along. That cannot be prevented without changing
+        the ID scheme, but it must not be silent: saved
+        `recall_lessons --id` references and index citations move.
+        """
+        self._write_logs(
+            fake_repo,
+            "# Learnings\n\n"
+            "## [2026-01-01] Was invisible\n**Tags**: [t]\n\n"
+            "### [2026-02-01] Established\n**Tags**: [t]\n",
+            "# Decisions\n",
+        )
+        notes: list[str] = []
+        assert mig.migrate_entry_headings(fake_repo, notes=notes) is True
+
+        assert notes, "the ID shift must be reported, not silent"
+        note = " ".join(notes)
+        assert "learnings.md" in note
+        assert "L-1" in note
+        assert "shift" in note.lower()
+
+    def test_migrate_one_surfaces_the_id_shift_in_its_status(
+        self, fake_repo: Path
+    ) -> None:
+        (fake_repo / ".living" / "learnings.md").write_text(
+            "# Learnings\n\n"
+            "## [2026-01-01] Was invisible\n**Tags**: [t]\n\n"
+            "### [2026-02-01] Established\n**Tags**: [t]\n",
+            encoding="utf-8",
+        )
+        result = mig.migrate_one(fake_repo)
+        assert "shift" in result["Entry heading levels"].lower()
+
+    def test_no_id_shift_note_when_nothing_is_recovered(
+        self, fake_repo: Path
+    ) -> None:
+        notes: list[str] = []
+        assert mig.migrate_entry_headings(fake_repo, notes=notes) is False
+        assert notes == []
+
     def test_crlf_log_is_repaired_and_normalized_to_lf(
         self, fake_repo: Path
     ) -> None:
@@ -666,7 +712,9 @@ class TestMigrateOne:
             encoding="utf-8",
         )
         result = mig.migrate_one(fake_repo)
-        assert result["Entry heading levels"] == "applied"
+        # The status also carries the entry-ID shift note; see
+        # test_migrate_one_surfaces_the_id_shift_in_its_status.
+        assert result["Entry heading levels"].startswith("applied")
 
         index = (fake_repo / ".living" / "INDEX.md").read_text()
         assert "Recovered by migration" in index

@@ -34,6 +34,7 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
+import generate_index as gi  # noqa: E402
 import init_knowledge as ik  # noqa: E402
 import init_repo as ir  # noqa: E402
 import validate_structure as vs  # noqa: E402
@@ -304,6 +305,41 @@ def ensure_todo_contract(repo_path: Path, dry_run: bool = False) -> bool:
     return missing
 
 
+# Entry IDs are positional: generate_index derives "{prefix}-{n}" from file
+# order at read time. Recovering a hidden entry therefore takes its slot in the
+# sequence and pushes later IDs along, which cannot be avoided without changing
+# the ID scheme -- but it must not be silent, because saved
+# `recall_lessons --id` references and index citations move.
+_ENTRY_LOG_ID_SCHEME = {
+    "learnings.md": ("learnings", "L"),
+    "decisions.md": ("decisions", "D"),
+}
+
+
+def _describe_id_shift(path: Path, repaired_lines: list[int]) -> str | None:
+    """Describe how recovering entries in `path` renumbered the ones after them.
+
+    Repair rewrites heading lines in place, so line numbers are stable and the
+    repaired lines identify exactly the entries that just became visible.
+    """
+    scheme = _ENTRY_LOG_ID_SCHEME.get(path.name)
+    if scheme is None:
+        return None
+    file_type, prefix = scheme
+    repaired = set(repaired_lines)
+    entries = gi.collect_entries(path, file_type, prefix)
+    recovered = [entry for entry in entries if entry["line_no"] in repaired]
+    if not recovered:
+        return None
+    ids = ", ".join(str(entry["id"]) for entry in recovered)
+    return (
+        f"{path.name}: recovered {len(recovered)} "
+        f"{'entry' if len(recovered) == 1 else 'entries'} as {ids}; IDs at and "
+        f"after {recovered[0]['id']} have shifted, so saved "
+        f"'recall_lessons --id' references and index citations may need updating"
+    )
+
+
 def _relevel_entry_heading(line: str) -> str:
     """Rewrite one heading line to the exact prefix the parsers match.
 
@@ -323,7 +359,11 @@ def _relevel_entry_heading(line: str) -> str:
     return vs.ENTRY_HEADING_PREFIX + heading_text
 
 
-def migrate_entry_headings(repo_path: Path, dry_run: bool = False) -> bool:
+def migrate_entry_headings(
+    repo_path: Path,
+    dry_run: bool = False,
+    notes: list[str] | None = None,
+) -> bool:
     """Raise mislevelled knowledge-log entries to the level the parsers read.
 
     Repos that followed the post-action hook's LEARNINGS directive, the transfer
@@ -343,7 +383,9 @@ def migrate_entry_headings(repo_path: Path, dry_run: bool = False) -> bool:
     Decoding uses universal newlines to match the validator, so a CRLF log is
     rewritten with LF endings. Every Mycelium writer already emits LF.
 
-    Returns True if any heading was rewritten (or would be, under dry-run).
+    Returns True if any heading was rewritten (or would be, under dry-run). When
+    `notes` is given, a line describing the resulting entry-ID shift is appended
+    to it for each repaired log.
     """
     living_dir = ir.ensure_safe_project_directory(
         repo_path, ".living", create=False
@@ -403,6 +445,10 @@ def migrate_entry_headings(repo_path: Path, dry_run: bool = False) -> bool:
         for lineno in mislevelled:
             lines[lineno - 1] = _relevel_entry_heading(lines[lineno - 1])
         ir._atomic_write_text(path, "\n".join(lines))
+        if notes is not None:
+            note = _describe_id_shift(path, mislevelled)
+            if note:
+                notes.append(note)
 
     return True
 
@@ -493,7 +539,10 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
     codex_hooks_applied = topup_codex_hooks(repo_path, dry_run=dry_run)
     todo_applied = ensure_todo_contract(repo_path, dry_run=dry_run)
     # Must precede regen_index: the rebuilt index has to see repaired entries.
-    headings_applied = migrate_entry_headings(repo_path, dry_run=dry_run)
+    heading_notes: list[str] = []
+    headings_applied = migrate_entry_headings(
+        repo_path, dry_run=dry_run, notes=heading_notes
+    )
     index_applied = regen_index(repo_path, dry_run=dry_run)
 
     return {
@@ -503,7 +552,10 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
         "Claude hooks top-up": _action_status(hooks_applied),
         "Legacy Codex hook cleanup": _action_status(codex_hooks_applied),
         "Todo contract": _action_status(todo_applied),
-        "Entry heading levels": _action_status(headings_applied),
+        "Entry heading levels": (
+            _action_status(headings_applied)
+            + ("; " + "; ".join(heading_notes) if heading_notes else "")
+        ),
         "INDEX.md regen": _action_status(index_applied),
     }
 

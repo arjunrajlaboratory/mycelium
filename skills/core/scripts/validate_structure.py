@@ -122,7 +122,7 @@ _FENCE_RE = re.compile(r"^ {0,3}(?P<marker>```+|~~~+)(?P<info>.*)$")
 # genuine entry after it. Full container tracking is out of scope here, so
 # accept a run of list/blockquote markers ahead of the fence.
 _FENCE_OPEN_RE = re.compile(
-    r"^ {0,3}(?:(?:[-+*]|\d{1,9}[.)])[ \t]+|>[ \t]?)*"
+    r"^(?P<prefix> {0,3}(?:(?:[-+*]|\d{1,9}[.)])[ \t]+|>[ \t]?)*)"
     r"(?P<marker>```+|~~~+)(?P<info>.*)$"
 )
 
@@ -136,14 +136,31 @@ _FENCE_CLOSE_RE = re.compile(r"^(?P<prefix>[ \t>]*)(?P<marker>```+|~~~+)(?P<info
 # How far past the opener's marker column a closer may still sit.
 _FENCE_CLOSE_SLACK = 3
 
+# Markdown expands a tab to the next four-column stop, so fence offsets have to
+# be measured in columns rather than characters -- a leading tab puts a marker at
+# column 4 (fenced content), not column 1.
+_TAB_STOP = 4
 
-def _fence_open(line: str) -> tuple[str, int] | None:
-    """Return an opening fence's ``(marker, marker column)``, or None.
+
+def _visual_column(prefix: str) -> int:
+    """Column at which `prefix` ends, with tabs expanded to Markdown tab stops."""
+    column = 0
+    for character in prefix:
+        if character == "\t":
+            column += _TAB_STOP - (column % _TAB_STOP)
+        else:
+            column += 1
+    return column
+
+
+def _fence_open(line: str) -> tuple[str, int, int] | None:
+    """Return an opening fence's ``(marker, column, blockquote depth)``, or None.
 
     A backtick fence's info string may not contain backticks; such a line is
-    ordinary content, not a fence (CommonMark 4.5). The column is where the
-    marker begins, which stands in for the container's indentation and bounds
-    how far a matching closer may be indented.
+    ordinary content, not a fence (CommonMark 4.5). The column stands in for the
+    container's indentation and bounds how far a matching closer may sit; the
+    blockquote depth must be matched exactly, so an example ``> ``` `` inside a
+    top-level block cannot close it.
     """
     match = _FENCE_OPEN_RE.match(line)
     if match is None:
@@ -151,7 +168,8 @@ def _fence_open(line: str) -> tuple[str, int] | None:
     marker = match.group("marker")
     if marker[0] == "`" and "`" in match.group("info"):
         return None
-    return marker, match.start("marker")
+    prefix = match.group("prefix")
+    return marker, _visual_column(prefix), prefix.count(">")
 
 
 def _fence_open_marker(line: str) -> str | None:
@@ -160,24 +178,30 @@ def _fence_open_marker(line: str) -> str | None:
     return None if opened is None else opened[0]
 
 
-def _fence_closes(line: str, open_marker: str, open_column: int = 0) -> bool:
+def _fence_closes(
+    line: str,
+    open_marker: str,
+    open_column: int = 0,
+    open_quote_depth: int = 0,
+) -> bool:
     """True when a line closes the active fence (CommonMark 4.5).
 
     Requires the same character, at least the opening length, nothing but
-    whitespace after the marker, and a marker column no more than
-    `_FENCE_CLOSE_SLACK` past the opener's -- beyond that the line is fenced
-    content. Blockquote continuation markers in the prefix are permitted,
-    matching what `_FENCE_OPEN_RE` accepts on the opener.
+    whitespace after the marker, the opener's blockquote depth, and a marker
+    column no more than `_FENCE_CLOSE_SLACK` past the opener's. Anything further
+    indented -- including via a tab, which reaches column 4 -- is fenced content.
     """
     match = _FENCE_CLOSE_RE.match(line)
     if match is None:
         return False
     marker = match.group("marker")
+    prefix = match.group("prefix")
     return (
         marker[0] == open_marker[0]
         and len(marker) >= len(open_marker)
         and not match.group("info").strip()
-        and match.start("marker") <= open_column + _FENCE_CLOSE_SLACK
+        and prefix.count(">") == open_quote_depth
+        and _visual_column(prefix) <= open_column + _FENCE_CLOSE_SLACK
     )
 
 _MAX_REPORTED_LINES = 5
@@ -212,12 +236,12 @@ def unclosed_fence_line(text: str) -> int | None:
     Everything after such a fence went unchecked, so callers must report it
     rather than treat a clean scan as proof the file is clean.
     """
-    fence: tuple[str, int] | None = None
+    fence: tuple[str, int, int] | None = None
     opened_at: int | None = None
     for lineno, raw in enumerate(split_log_lines(text), start=1):
         line = raw.rstrip("\r")
         if fence is not None:
-            if _fence_closes(line, fence[0], fence[1]):
+            if _fence_closes(line, *fence):
                 fence, opened_at = None, None
             continue
         opened = _fence_open(line)
@@ -234,7 +258,7 @@ def mislevelled_entry_lines_in_text(text: str) -> list[int]:
     `unclosed_fence_line` reports that separately.
     """
     mislevelled: list[int] = []
-    fence: tuple[str, int] | None = None
+    fence: tuple[str, int, int] | None = None
 
     for lineno, raw in enumerate(split_log_lines(text), start=1):
         # Tolerate CRLF text even though every in-tree caller decodes with
@@ -243,7 +267,7 @@ def mislevelled_entry_lines_in_text(text: str) -> list[int]:
 
         if fence is not None:
             # Everything inside a fence is illustrative content.
-            if _fence_closes(line, fence[0], fence[1]):
+            if _fence_closes(line, *fence):
                 fence = None
             continue
         opened = _fence_open(line)

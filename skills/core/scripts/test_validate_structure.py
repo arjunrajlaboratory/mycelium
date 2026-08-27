@@ -355,11 +355,18 @@ def test_fence_handling_agrees_with_the_session_log_implementation() -> None:
 
 
 @pytest.mark.parametrize(
-    "opener",
-    ["- ```markdown", "* ```", "+ ```markdown", "1. ```markdown", "> ```markdown"],
+    "opener,closer",
+    [
+        ("- ```markdown", "  ```"),
+        ("* ```", "  ```"),
+        ("+ ```markdown", "  ```"),
+        ("1. ```markdown", "   ```"),
+        # A blockquoted fence closes inside the quote; see the depth tests.
+        ("> ```markdown", "> ```"),
+    ],
 )
 def test_fence_opened_after_a_container_marker_is_recognized(
-    tmp_path: Path, opener: str
+    tmp_path: Path, opener: str, closer: str
 ) -> None:
     """A fence can open on the same line as a list or blockquote marker.
 
@@ -373,7 +380,7 @@ def test_fence_opened_after_a_container_marker_is_recognized(
             "### [2026-08-25] Real entry\n\n"
             f"{opener}\n"
             "  ## [2026-01-01] Example, not an entry\n"
-            "  ```\n\n"
+            f"{closer}\n\n"
             "## [2026-08-26] Genuine legacy entry\n"
             "**Tags**: [t]\n\n"
             "## [2026-08-27] Another genuine legacy entry\n"
@@ -497,6 +504,71 @@ def test_blockquoted_fence_is_closed_by_a_blockquoted_closer(
         ),
     )
     assert _errors(target) == []
+
+
+def test_blockquoted_marker_does_not_close_a_top_level_fence(
+    tmp_path: Path,
+) -> None:
+    """A closer must sit at the opener's blockquote depth.
+
+    Accepting any number of ``>`` independently of the opener let a top-level
+    block containing ``> ``` `` as an example be closed by that example line.
+    """
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "### [2026-08-25] Anchor\n\n"
+            "```markdown\n"
+            "> ```\n"
+            "## [2026-01-01] Example\n"
+            "```\n\n"
+            "## [2026-08-26] Genuine legacy\n"
+        ),
+    )
+    (error,) = _errors(target)
+    assert "line 8" in error
+    assert "line 5" not in error
+
+
+def test_blockquoted_opener_is_not_closed_at_a_different_depth(
+    tmp_path: Path,
+) -> None:
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "### [2026-08-25] Anchor\n\n"
+            "> ```markdown\n"
+            "> ## [2026-01-01] Example\n"
+            "```\n"
+        ),
+    )
+    (error,) = _errors(target)
+    assert "unclosed" in error.lower()
+
+
+def test_tab_prefixed_marker_does_not_close_a_top_level_fence(
+    tmp_path: Path,
+) -> None:
+    """Markdown expands a tab to the next four-column stop.
+
+    Measuring Python character offsets treated ``\t``` `` as column 1, so it
+    closed a top-level fence although Markdown puts the marker at column 4 and
+    treats it as fenced content.
+    """
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "### [2026-08-25] Anchor\n\n"
+            "```markdown\n"
+            "\t```\n"
+            "## [2026-01-01] Example\n"
+            "```\n\n"
+            "## [2026-08-26] Genuine legacy\n"
+        ),
+    )
+    (error,) = _errors(target)
+    assert "line 8" in error
+    assert "line 5" not in error
 
 
 def test_a_different_fence_marker_does_not_close_an_open_fence(

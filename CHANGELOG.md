@@ -47,8 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the validator and the repair cannot disagree about what is broken; only
   the heading lines it names are rewritten, leaving bodies, fenced examples,
   and structural headings untouched; indentation on a repaired heading is
-  normalized away so the result is actually readable. A log that is not valid
-  UTF-8 is refused by
+  normalized away so the result is actually readable. Recovering a hidden entry
+  necessarily renumbers the positional IDs after it, so the migration reports the
+  shift — saved `recall_lessons --id` references and index citations may need
+  updating. A log that is not valid UTF-8 is refused by
   name rather than rewritten with replacement characters. Honors `--dry-run` and
   preserves file permissions ([#76]).
 - **Drift protection between entry guidance and the parsers.**
