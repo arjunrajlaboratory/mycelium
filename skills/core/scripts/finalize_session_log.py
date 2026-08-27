@@ -16,6 +16,8 @@ import stat
 import sys
 import tempfile
 
+import markdown_fences as fences
+
 
 # Only the machine-emitted footer syntax is machine-owned: an HH:MM time and
 # numeric duration/file-count exactly as this module writes them. Authored
@@ -24,55 +26,23 @@ import tempfile
 _END_FOOTER_HEADING_RE = re.compile(
     r"^### \d{2}:\d{2} — Session ended \(\d+m, (?P<files>\d+) files\)$"
 )
-_FENCE_RE = re.compile(r"^ {0,3}(?P<marker>```+|~~~+)(?P<info>.*)$")
-
-
-def _fence_open_marker(line: str) -> str | None:
-    """Return the opening fence marker of a line, or None (CommonMark 4.5).
-
-    A backtick fence's info string may not contain backticks; such a line is
-    ordinary content, not a fence.
-    """
-    match = _FENCE_RE.match(line)
-    if match is None:
-        return None
-    marker = match.group("marker")
-    if marker[0] == "`" and "`" in match.group("info"):
-        return None
-    return marker
-
-
-def _fence_closes(line: str, open_marker: str) -> bool:
-    """True when a line closes the active fence: same character, at least the
-    opening length, and nothing but whitespace after (CommonMark 4.5)."""
-    match = _FENCE_RE.match(line)
-    if match is None:
-        return False
-    marker = match.group("marker")
-    return (
-        marker[0] == open_marker[0]
-        and len(marker) >= len(open_marker)
-        and not match.group("info").strip()
-    )
-
-
 def _strip_machine_footers(body: str) -> str:
     """Remove every machine-emitted end-footer block outside code fences."""
     lines = body.split("\n")
     kept: list[str] = []
-    open_marker: str | None = None
+    fence: fences.Fence | None = None
     index = 0
     while index < len(lines):
         line = lines[index]
-        if open_marker is not None:
-            if _fence_closes(line, open_marker):
-                open_marker = None
+        if fence is not None:
+            if fences.closes(line, fence):
+                fence = None
             kept.append(line)
             index += 1
             continue
-        candidate = _fence_open_marker(line)
-        if candidate is not None:
-            open_marker = candidate
+        opened = fences.opening_fence(line)
+        if opened is not None:
+            fence = opened
             kept.append(line)
             index += 1
             continue
