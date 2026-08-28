@@ -925,15 +925,15 @@ def _strip_command_prefix_words(
 ) -> tuple[list[str] | None, bool]:
     """Strip interleaved assignment and redirection words to a fixpoint."""
     stripped_any = False
-    while True:
+    before: list[str] | None = None
+    while tokens != before:
         before = tokens
         tokens = _strip_assignments(tokens)
         tokens, had_redirection = _strip_redirection_prefix(tokens)
         if tokens is None:
             return None, True
         stripped_any = stripped_any or had_redirection or tokens != before
-        if tokens == before:
-            return tokens, stripped_any
+    return tokens, stripped_any
 
 
 def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
