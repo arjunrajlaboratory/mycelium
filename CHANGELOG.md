@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.1] - 2026-08-28
 
 ### Fixed
 
@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opens with `[2,2]` keeps it. Entry titles themselves were never affected —
   `collect_entries` uses `split_entry_date_and_title` — so "Most recent" and
   `recall_lessons` output were always correct.
+
+### Changed
+
+- **The develop skill documents the release ordering and its traps.** A new
+  "Release, in this order" step spells out merge → refresh-and-hash-verify the
+  install → host audits → gate from a clean clone → tag, because each step is
+  only meaningful after the previous one. Two regression patterns were added:
+  the Claude plugin cache is keyed on the version string, so content changed
+  under an unchanged version is served stale and `marketplace update` does not
+  refresh it (pattern 1 and 34); and a pull request stacked on a branch that is
+  about to merge blocks the base-branch deletion that would retarget it, so the
+  child silently merges into an already-merged base (pattern 35).
 
 ## [0.7.0] - 2026-08-27
 
