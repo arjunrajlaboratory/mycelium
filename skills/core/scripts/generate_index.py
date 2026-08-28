@@ -77,7 +77,12 @@ def count_headers_and_topics(path: Path, file_type: str) -> tuple[int, list[str]
 # reached INDEX.md's topics column as "`` is structural". A domain tag is one
 # token, which also keeps a leading "[2,2]" as content.
 _LEADING_DATE_PREFIX_RE = re.compile(r"^\s*\[\d{4}-\d{2}-\d{2}\]\s*")
-_LEADING_DOMAIN_TAG_RE = re.compile(r"^\s*\[[\w./-]+\]\s*")
+# The negative lookahead matters: digits and hyphens are inside [\w./-], so
+# without it this also matches a date and the two-pass strip would consume a
+# second date that belongs to the title.
+_LEADING_DOMAIN_TAG_RE = re.compile(
+    r"^\s*\[(?!\d{4}-\d{2}-\d{2}\])[\w./-]+\]\s*"
+)
 
 
 def _extract_keywords(raw_headers: list[str]) -> list[str]:

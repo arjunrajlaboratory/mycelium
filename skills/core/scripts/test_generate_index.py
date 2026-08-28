@@ -631,6 +631,30 @@ class TestExtractKeywords:
         )
         assert keyword == "[dysp-sub] [extra] Title"
 
+    def test_a_second_date_belongs_to_the_title(self) -> None:
+        """The domain-tag pass must not consume a date-shaped token.
+
+        Digits and hyphens are inside ``[\\w./-]+``, so the tag matcher also
+        matched a date — defeating the one-date bound for exactly the title
+        shape this change exists to preserve.
+        """
+        (keyword,) = gi._extract_keywords(
+            ["[2026-05-16] [2025-01-01] cohort comparison"]
+        )
+        assert keyword == "[2025-01-01] cohort comparison"
+
+    def test_a_single_leading_date_is_still_the_stamp(self) -> None:
+        assert gi._extract_keywords(["[2025-01-01] cohort comparison"]) == [
+            "cohort comparison"
+        ]
+
+    @pytest.mark.parametrize(
+        "header",
+        ["[2026-05-16] [dysp] Title", "[dysp] [2026-05-16] Title"],
+    )
+    def test_date_and_tag_in_either_order_still_reduce(self, header: str) -> None:
+        assert gi._extract_keywords([header]) == ["Title"]
+
     def test_empty_and_bare_prefix_headers_are_dropped(self) -> None:
         assert gi._extract_keywords(["[2026-05-16]", "   ", ""]) == []
 
