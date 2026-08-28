@@ -551,6 +551,59 @@ class TestCollectEntries:
 # ---------------------------------------------------------------------------
 
 
+class TestExtractKeywords:
+    """Topic keywords feed INDEX.md's "Key topics" column.
+
+    The docstring has always described both bracketed forms as *prefixes*, but
+    the regexes were unanchored, so any bracketed text anywhere in a heading was
+    deleted — a real title reading "`[2,2]` is structural" was indexed as
+    "`` is structural".
+    """
+
+    def test_bracketed_text_inside_a_title_is_preserved(self) -> None:
+        header = (
+            "[2026-05-16] Bootstrap CIs are only as wide as the resampling "
+            "unit lets them be — `[2,2]` is structural, not stable"
+        )
+        (keyword,) = gi._extract_keywords([header])
+        assert "`[2,2]`" in keyword
+        assert keyword.startswith("Bootstrap CIs")
+
+    def test_leading_date_prefix_is_stripped(self) -> None:
+        assert gi._extract_keywords(["[2026-05-16] Panel size matters"]) == [
+            "Panel size matters"
+        ]
+
+    def test_leading_domain_tag_is_stripped(self) -> None:
+        assert gi._extract_keywords(["[dysp-sub] Panel size matters"]) == [
+            "Panel size matters"
+        ]
+
+    def test_leading_date_and_domain_tag_are_both_stripped(self) -> None:
+        assert gi._extract_keywords(
+            ["[2026-05-16] [lineage-snps] Panel size matters"]
+        ) == ["Panel size matters"]
+
+    def test_leading_bracket_that_is_not_a_tag_is_kept(self) -> None:
+        """A domain tag is a single token; `[2,2]` is content even up front."""
+        (keyword,) = gi._extract_keywords(["[2,2] resampling is structural"])
+        assert keyword == "[2,2] resampling is structural"
+
+    def test_bold_markers_are_still_unwrapped(self) -> None:
+        assert gi._extract_keywords(["[2026-05-16] **Bold** topic"]) == [
+            "Bold topic"
+        ]
+
+    def test_multiple_bracketed_spans_in_one_title_all_survive(self) -> None:
+        (keyword,) = gi._extract_keywords(
+            ["[2026-05-16] Compare `[2,2]` against `[3,3]` panels"]
+        )
+        assert keyword == "Compare `[2,2]` against `[3,3]` panels"
+
+    def test_empty_and_bare_prefix_headers_are_dropped(self) -> None:
+        assert gi._extract_keywords(["[2026-05-16]", "   ", ""]) == []
+
+
 def _write_tagged_learnings(living_dir: Path, entries: list[tuple[str, str, list[str]]]) -> Path:
     """Write a learnings.md from (date, title, tags) tuples."""
     path = living_dir / "learnings.md"

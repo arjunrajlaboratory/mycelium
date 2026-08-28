@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **INDEX.md topic keywords no longer delete bracketed text from titles.**
+  `_extract_keywords` documents `[YYYY-MM-DD]` and `[domain-tag]` as *prefixes*,
+  but matched them anywhere in a heading, so bracketed text belonging to the
+  title was deleted: a real entry reading ``— `[2,2]` is structural`` reached the
+  "Key topics" column as ``— `` is structural``. Both forms are now stripped only
+  as leading prefixes, and a domain tag must be a single token, so a heading that
+  opens with `[2,2]` keeps it. Entry titles themselves were never affected —
+  `collect_entries` uses `split_entry_date_and_title` — so "Most recent" and
+  `recall_lessons` output were always correct.
+
 ## [0.7.0] - 2026-08-27
 
 ### Fixed

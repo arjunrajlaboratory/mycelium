@@ -71,30 +71,43 @@ def count_headers_and_topics(path: Path, file_type: str) -> tuple[int, list[str]
     return count, keywords
 
 
+# The bracketed forms `_extract_keywords` strips are *prefixes*: a date stamp and
+# an optional single-token domain tag. Matching them anywhere deleted bracketed
+# text belonging to the title, so a heading reading "`[2,2]` is structural"
+# reached INDEX.md's topics column as "`` is structural". A domain tag is one
+# token, which also keeps a leading "[2,2]" as content.
+_LEADING_DATE_PREFIX_RE = re.compile(r"^\s*\[\d{4}-\d{2}-\d{2}\]\s*")
+_LEADING_DOMAIN_TAG_RE = re.compile(r"^\s*\[[\w./-]+\]\s*")
+
+
 def _extract_keywords(raw_headers: list[str]) -> list[str]:
     """Strip markdown formatting and dates from headers, return 3-5 topic words.
 
-    Handles:
-    - [YYYY-MM-DD] prefix
-    - [domain-tag] prefix
+    Handles, in each case only as a leading prefix:
+    - [YYYY-MM-DD] date stamp
+    - [domain-tag] single-token tag
     - **bold** markers
     - Leading # characters
+
+    Bracketed text elsewhere in the heading belongs to the title and is kept.
     """
     keywords: list[str] = []
-    date_re = re.compile(r"\[\d{4}-\d{2}-\d{2}\]")
-    tag_re = re.compile(r"\[[^\]]+\]")
     bold_re = re.compile(r"\*\*([^*]+)\*\*")
     leading_hash_re = re.compile(r"^#+\s*")
 
     for header in raw_headers:
-        # Remove date brackets
-        cleaned = date_re.sub("", header)
+        # Remove leading hashes (shouldn't be present after split, but defensive)
+        cleaned = leading_hash_re.sub("", header)
+        # Strip the bracketed prefixes only. A date stamp and a domain tag may
+        # both be present, in either order.
+        while True:
+            stripped = _LEADING_DATE_PREFIX_RE.sub("", cleaned, count=1)
+            stripped = _LEADING_DOMAIN_TAG_RE.sub("", stripped, count=1)
+            if stripped == cleaned:
+                break
+            cleaned = stripped
         # Replace bold with bare text
         cleaned = bold_re.sub(r"\1", cleaned)
-        # Remove any remaining bracket tags
-        cleaned = tag_re.sub("", cleaned)
-        # Remove leading hashes (shouldn't be present after split, but defensive)
-        cleaned = leading_hash_re.sub("", cleaned)
         cleaned = cleaned.strip(" :-–—")
 
         if cleaned:
