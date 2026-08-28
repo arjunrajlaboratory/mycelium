@@ -547,7 +547,7 @@ class TestCollectEntries:
 
 
 # ---------------------------------------------------------------------------
-# TestHeuristicSummary
+# TestExtractKeywords
 # ---------------------------------------------------------------------------
 
 
@@ -600,8 +600,44 @@ class TestExtractKeywords:
         )
         assert keyword == "Compare `[2,2]` against `[3,3]` panels"
 
+    @pytest.mark.parametrize(
+        "header,expected",
+        [
+            ("**[2026-05-16] Title**", "Title"),
+            ("**[dysp-sub]** Title", "Title"),
+            ("[2026-05-16] **[domain-tag]** Topic", "Topic"),
+            ("**[2026-05-16]** **[dysp]** Topic", "Topic"),
+        ],
+    )
+    def test_bold_wrapped_prefixes_are_still_stripped(
+        self, header: str, expected: str
+    ) -> None:
+        """Bold must be unwrapped before prefixes are matched.
+
+        The anchored prefix patterns cannot match a string starting with ``**``,
+        so stripping prefixes first would leak a bolded date or tag into the
+        topics column — which the pre-anchoring implementation did remove.
+        """
+        assert gi._extract_keywords([header]) == [expected]
+
+    def test_at_most_one_date_and_one_tag_are_stripped(self) -> None:
+        """Only the two documented prefixes are consumed, not every bracket.
+
+        Consuming leading brackets until none remain is the same over-stripping
+        this function is being fixed for, bounded by position but not by count.
+        """
+        (keyword,) = gi._extract_keywords(
+            ["[2026-05-16] [lineage-snps] [dysp-sub] [extra] Title"]
+        )
+        assert keyword == "[dysp-sub] [extra] Title"
+
     def test_empty_and_bare_prefix_headers_are_dropped(self) -> None:
         assert gi._extract_keywords(["[2026-05-16]", "   ", ""]) == []
+
+
+# ---------------------------------------------------------------------------
+# TestHeuristicSummary
+# ---------------------------------------------------------------------------
 
 
 def _write_tagged_learnings(living_dir: Path, entries: list[tuple[str, str, list[str]]]) -> Path:

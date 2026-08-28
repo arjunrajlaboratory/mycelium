@@ -89,7 +89,10 @@ def _extract_keywords(raw_headers: list[str]) -> list[str]:
     - **bold** markers
     - Leading # characters
 
-    Bracketed text elsewhere in the heading belongs to the title and is kept.
+    Bracketed text elsewhere in the heading belongs to the title and is kept,
+    and at most one of each prefix is consumed. A title that opens with its own
+    bracketed token is inherently ambiguous with a domain tag; the single-token
+    constraint keeps multi-word and punctuated spans such as `[2,2]`.
     """
     keywords: list[str] = []
     bold_re = re.compile(r"\*\*([^*]+)\*\*")
@@ -98,16 +101,21 @@ def _extract_keywords(raw_headers: list[str]) -> list[str]:
     for header in raw_headers:
         # Remove leading hashes (shouldn't be present after split, but defensive)
         cleaned = leading_hash_re.sub("", header)
-        # Strip the bracketed prefixes only. A date stamp and a domain tag may
-        # both be present, in either order.
-        while True:
-            stripped = _LEADING_DATE_PREFIX_RE.sub("", cleaned, count=1)
-            stripped = _LEADING_DOMAIN_TAG_RE.sub("", stripped, count=1)
-            if stripped == cleaned:
-                break
-            cleaned = stripped
-        # Replace bold with bare text
+        # Unwrap bold *before* matching prefixes: the prefix patterns are
+        # anchored, so a bolded "**[2026-05-16] Title**" would otherwise keep
+        # its date stamp in the topics column.
         cleaned = bold_re.sub(r"\1", cleaned)
+        # Strip at most one date stamp and one domain tag, in either order.
+        # Consuming every leading bracket instead would be the same
+        # over-stripping this function bounds by position, unbounded by count.
+        for first, second in (
+            (_LEADING_DATE_PREFIX_RE, _LEADING_DOMAIN_TAG_RE),
+            (_LEADING_DOMAIN_TAG_RE, _LEADING_DATE_PREFIX_RE),
+        ):
+            if first.match(cleaned):
+                cleaned = first.sub("", cleaned, count=1)
+                cleaned = second.sub("", cleaned, count=1)
+                break
         cleaned = cleaned.strip(" :-–—")
 
         if cleaned:
