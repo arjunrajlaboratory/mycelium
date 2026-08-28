@@ -547,6 +547,119 @@ class TestCollectEntries:
 
 
 # ---------------------------------------------------------------------------
+# TestExtractKeywords
+# ---------------------------------------------------------------------------
+
+
+class TestExtractKeywords:
+    """Topic keywords feed INDEX.md's "Key topics" column.
+
+    The docstring has always described both bracketed forms as *prefixes*, but
+    the regexes were unanchored, so any bracketed text anywhere in a heading was
+    deleted — a real title reading "`[2,2]` is structural" was indexed as
+    "`` is structural".
+    """
+
+    def test_bracketed_text_inside_a_title_is_preserved(self) -> None:
+        header = (
+            "[2026-05-16] Bootstrap CIs are only as wide as the resampling "
+            "unit lets them be — `[2,2]` is structural, not stable"
+        )
+        (keyword,) = gi._extract_keywords([header])
+        assert "`[2,2]`" in keyword
+        assert keyword.startswith("Bootstrap CIs")
+
+    def test_leading_date_prefix_is_stripped(self) -> None:
+        assert gi._extract_keywords(["[2026-05-16] Panel size matters"]) == [
+            "Panel size matters"
+        ]
+
+    def test_leading_domain_tag_is_stripped(self) -> None:
+        assert gi._extract_keywords(["[dysp-sub] Panel size matters"]) == [
+            "Panel size matters"
+        ]
+
+    def test_leading_date_and_domain_tag_are_both_stripped(self) -> None:
+        assert gi._extract_keywords(
+            ["[2026-05-16] [lineage-snps] Panel size matters"]
+        ) == ["Panel size matters"]
+
+    def test_leading_bracket_that_is_not_a_tag_is_kept(self) -> None:
+        """A domain tag is a single token; `[2,2]` is content even up front."""
+        (keyword,) = gi._extract_keywords(["[2,2] resampling is structural"])
+        assert keyword == "[2,2] resampling is structural"
+
+    def test_bold_markers_are_still_unwrapped(self) -> None:
+        assert gi._extract_keywords(["[2026-05-16] **Bold** topic"]) == [
+            "Bold topic"
+        ]
+
+    def test_multiple_bracketed_spans_in_one_title_all_survive(self) -> None:
+        (keyword,) = gi._extract_keywords(
+            ["[2026-05-16] Compare `[2,2]` against `[3,3]` panels"]
+        )
+        assert keyword == "Compare `[2,2]` against `[3,3]` panels"
+
+    @pytest.mark.parametrize(
+        "header,expected",
+        [
+            ("**[2026-05-16] Title**", "Title"),
+            ("**[dysp-sub]** Title", "Title"),
+            ("[2026-05-16] **[domain-tag]** Topic", "Topic"),
+            ("**[2026-05-16]** **[dysp]** Topic", "Topic"),
+        ],
+    )
+    def test_bold_wrapped_prefixes_are_still_stripped(
+        self, header: str, expected: str
+    ) -> None:
+        """Bold must be unwrapped before prefixes are matched.
+
+        The anchored prefix patterns cannot match a string starting with ``**``,
+        so stripping prefixes first would leak a bolded date or tag into the
+        topics column — which the pre-anchoring implementation did remove.
+        """
+        assert gi._extract_keywords([header]) == [expected]
+
+    def test_at_most_one_date_and_one_tag_are_stripped(self) -> None:
+        """Only the two documented prefixes are consumed, not every bracket.
+
+        Consuming leading brackets until none remain is the same over-stripping
+        this function is being fixed for, bounded by position but not by count.
+        """
+        (keyword,) = gi._extract_keywords(
+            ["[2026-05-16] [lineage-snps] [dysp-sub] [extra] Title"]
+        )
+        assert keyword == "[dysp-sub] [extra] Title"
+
+    def test_a_second_date_belongs_to_the_title(self) -> None:
+        """The domain-tag pass must not consume a date-shaped token.
+
+        Digits and hyphens are inside ``[\\w./-]+``, so the tag matcher also
+        matched a date — defeating the one-date bound for exactly the title
+        shape this change exists to preserve.
+        """
+        (keyword,) = gi._extract_keywords(
+            ["[2026-05-16] [2025-01-01] cohort comparison"]
+        )
+        assert keyword == "[2025-01-01] cohort comparison"
+
+    def test_a_single_leading_date_is_still_the_stamp(self) -> None:
+        assert gi._extract_keywords(["[2025-01-01] cohort comparison"]) == [
+            "cohort comparison"
+        ]
+
+    @pytest.mark.parametrize(
+        "header",
+        ["[2026-05-16] [dysp] Title", "[dysp] [2026-05-16] Title"],
+    )
+    def test_date_and_tag_in_either_order_still_reduce(self, header: str) -> None:
+        assert gi._extract_keywords([header]) == ["Title"]
+
+    def test_empty_and_bare_prefix_headers_are_dropped(self) -> None:
+        assert gi._extract_keywords(["[2026-05-16]", "   ", ""]) == []
+
+
+# ---------------------------------------------------------------------------
 # TestHeuristicSummary
 # ---------------------------------------------------------------------------
 

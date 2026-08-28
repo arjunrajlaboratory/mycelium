@@ -71,30 +71,56 @@ def count_headers_and_topics(path: Path, file_type: str) -> tuple[int, list[str]
     return count, keywords
 
 
+# The bracketed forms `_extract_keywords` strips are *prefixes*: a date stamp and
+# an optional single-token domain tag. Matching them anywhere deleted bracketed
+# text belonging to the title, so a heading reading "`[2,2]` is structural"
+# reached INDEX.md's topics column as "`` is structural". A domain tag is one
+# token, which also keeps a leading "[2,2]" as content.
+_LEADING_DATE_PREFIX_RE = re.compile(r"^\s*\[\d{4}-\d{2}-\d{2}\]\s*")
+# The negative lookahead matters: digits and hyphens are inside [\w./-], so
+# without it this also matches a date and the two-pass strip would consume a
+# second date that belongs to the title.
+_LEADING_DOMAIN_TAG_RE = re.compile(
+    r"^\s*\[(?!\d{4}-\d{2}-\d{2}\])[\w./-]+\]\s*"
+)
+
+
 def _extract_keywords(raw_headers: list[str]) -> list[str]:
     """Strip markdown formatting and dates from headers, return 3-5 topic words.
 
-    Handles:
-    - [YYYY-MM-DD] prefix
-    - [domain-tag] prefix
+    Handles, in each case only as a leading prefix:
+    - [YYYY-MM-DD] date stamp
+    - [domain-tag] single-token tag
     - **bold** markers
     - Leading # characters
+
+    Bracketed text elsewhere in the heading belongs to the title and is kept,
+    and at most one of each prefix is consumed. A title that opens with its own
+    bracketed token is inherently ambiguous with a domain tag; the single-token
+    constraint keeps multi-word and punctuated spans such as `[2,2]`.
     """
     keywords: list[str] = []
-    date_re = re.compile(r"\[\d{4}-\d{2}-\d{2}\]")
-    tag_re = re.compile(r"\[[^\]]+\]")
     bold_re = re.compile(r"\*\*([^*]+)\*\*")
     leading_hash_re = re.compile(r"^#+\s*")
 
     for header in raw_headers:
-        # Remove date brackets
-        cleaned = date_re.sub("", header)
-        # Replace bold with bare text
-        cleaned = bold_re.sub(r"\1", cleaned)
-        # Remove any remaining bracket tags
-        cleaned = tag_re.sub("", cleaned)
         # Remove leading hashes (shouldn't be present after split, but defensive)
-        cleaned = leading_hash_re.sub("", cleaned)
+        cleaned = leading_hash_re.sub("", header)
+        # Unwrap bold *before* matching prefixes: the prefix patterns are
+        # anchored, so a bolded "**[2026-05-16] Title**" would otherwise keep
+        # its date stamp in the topics column.
+        cleaned = bold_re.sub(r"\1", cleaned)
+        # Strip at most one date stamp and one domain tag, in either order.
+        # Consuming every leading bracket instead would be the same
+        # over-stripping this function bounds by position, unbounded by count.
+        for first, second in (
+            (_LEADING_DATE_PREFIX_RE, _LEADING_DOMAIN_TAG_RE),
+            (_LEADING_DOMAIN_TAG_RE, _LEADING_DATE_PREFIX_RE),
+        ):
+            if first.match(cleaned):
+                cleaned = first.sub("", cleaned, count=1)
+                cleaned = second.sub("", cleaned, count=1)
+                break
         cleaned = cleaned.strip(" :-–—")
 
         if cleaned:

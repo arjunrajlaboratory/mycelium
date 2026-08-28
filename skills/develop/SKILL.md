@@ -101,9 +101,14 @@ Use `$mycelium:lifecycle-audit` when changes touch plugin installation,
 discovery, dispatch, lifecycle hooks, lineage, or host payloads. Unit tests that
 invoke hook scripts directly do not prove automatic host dispatch.
 
-Verify the installed artifact is the exact candidate under test. Codex local
-development requires a cachebuster and reinstall into a new task; source and
-installed files must hash identically. Run a Claude Code CLI smoke for shared or
+Verify the installed artifact is the exact candidate under test, and do it
+**before** launching the host process. The Claude plugin cache is keyed on the
+version string, so any content change under an unchanged version is served
+stale and `claude plugin marketplace update` does not fix it — see
+`references/regression-patterns.md` patterns 1 and 34 for the mechanism and the
+refresh. Codex local development requires a cachebuster and reinstall into a new
+task. Source and installed files must hash identically; report the file count
+compared, not the version label. Run a Claude Code CLI smoke for shared or
 Claude-facing changes. Keep environmental failures distinct from Mycelium
 failures.
 
@@ -119,6 +124,44 @@ failures.
 
 Do not commit, push, post review replies, or retrigger external review unless the
 user authorized those outward actions.
+
+### 8. Release, in this order
+
+`docs/release-process.md` documents the gate. The ordering below is what makes
+its results mean anything, and every step has been got wrong at least once:
+
+1. **Merge first.** The gate's installed-artifact check compares against a
+   published, installed version, so a candidate that is not on the default
+   branch cannot satisfy it. Confirm the merge actually reached the default
+   branch — see pattern 35 before stacking anything.
+2. **Refresh and hash-verify the install.** Pattern 1's refresh, then the hash
+   comparison. Skipping this makes every later step certify the wrong tree.
+3. **Host audits, after the refresh.** `$mycelium:lifecycle-audit` on both
+   hosts. The gate requires evidence for Claude *and* Codex, or
+   `--waive-host-audits REASON` for both — it rejects one-sided evidence.
+4. **Run the gate from a clean disposable clone.** It refuses a dirty or
+   untracked tree with no bypass.
+5. **Tag last**, only after the gate passes, and tag the exact commit the gate
+   certified rather than whatever the default branch has moved to.
+
+Version bumps live in their own `release/X.Y.Z` change: three-way agreement
+across `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`
+(`metadata.version`), and the base of `.codex-plugin/plugin.json`, plus a fresh
+`+codex.<timestamp>` cachebuster and a dated changelog section. Fold any
+`## [Unreleased]` entries into that section — the gate only checks the dated
+section *exists*, so entries left under Unreleased ship as missing release notes.
+
+Operational gotchas, all of which have cost a full cycle:
+
+- `release_gate.py` runs the ladder via `sys.executable`. Invoke it with the
+  interpreter that actually has `pytest`, or the ladder fails on an import.
+- `codex exec` blocks reading stdin; redirect `< /dev/null` for a
+  non-interactive audit.
+- Codex plugin hooks need a one-time interactive trust step (`/hooks`, trust,
+  restart). A fresh `codex exec` in an untrusted project shows zero dispatch,
+  which is an environment result, not a hook defect.
+- `timeout` does not exist on macOS. A wrapper that silently fails to run makes
+  "no output" look like "no dispatch".
 
 ## Review output
 

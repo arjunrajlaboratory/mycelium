@@ -13,8 +13,32 @@ while the source branch contains different code.
 hashes of every exercised packaged file. For Codex local development, use the
 supported cachebuster/reinstall flow and launch a new task.
 
+**Why Claude goes stale specifically:** the Claude plugin cache lives at
+`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/` and is keyed on the
+**version string**. If repository content changes while the version stays the
+same — every commit between a version bump and its release — the installed tree
+never refreshes, and `claude plugin list` keeps reporting the version it was
+told. `claude plugin marketplace update <name>` refreshes marketplace metadata
+but **not** the content cache. Only removing the version directory and
+reinstalling refetches:
+
+```bash
+mv ~/.claude/plugins/cache/mycelium/mycelium/<version>{,.stale-backup}
+claude plugin install mycelium@mycelium
+```
+
+Codex is immune to this because its version carries `+codex.<token>`, which
+changes with the build. That asymmetry is the argument for never reusing a
+version number once content under it has changed.
+
 **Regression evidence:** Report plugin identity separately from hook behavior.
-A mismatched artifact makes the behavioral result inconclusive.
+A mismatched artifact makes the behavioral result inconclusive. Hash before
+auditing rather than trusting the version label:
+
+```bash
+git ls-files skills hooks .claude-plugin .codex-plugin   # then sha256 each
+```
+
 
 ## 2. Validation occurs after mutation begins
 
@@ -624,3 +648,36 @@ physically; unmodeled `pushd`/`source`/`eval` prefixes make a dependent
 trust decision fail closed), and authored content adjacent to generated
 blocks, and require unparseable words to be skipped without raising out of
 the hook.
+
+## 34. A version-keyed artifact is audited before it is refreshed
+
+**Failure:** A real-host audit runs against the cache that happened to be on
+disk, passes, and certifies a tree that was never exercised. The audit reads as
+evidence for the candidate while testing something else entirely.
+
+**Invariant:** Refresh and then hash-verify the installed artifact **before**
+launching any host process, and re-verify after any reinstall. An audit whose
+artifact was not verified first is inconclusive, not passing — the same standing
+as pattern 1, applied to sequencing rather than identity.
+
+**Regression evidence:** Record the file count compared and the missing/differing
+counts, not a version string. `154 packaged files, 0 missing, 0 differing` is
+evidence; `Version: 0.7.0` is not.
+
+## 35. A stacked pull request merges into a base that is about to disappear
+
+**Failure:** A child PR is opened against a parent branch on the assumption the
+host will retarget it when the parent merges. It does not: GitHub retargets a
+child when the base branch is **deleted**, and it refuses to delete a branch
+that is still the base of an open PR. The parent merges, the base survives, and
+the child merges into an already-merged branch — its content never reaches the
+default branch while the PR reads MERGED.
+
+**Invariant:** Either branch from the default branch and accept the noisier diff
+until the parent lands, or merge the stack bottom-up, retargeting each child to
+the default branch before merging its parent. Do not rely on auto-retarget.
+
+**Regression evidence:** After merging a stack, verify content reachability from
+the default branch rather than PR state. `git ls-tree <default> --name-only`
+for a file the child added, or `git log --oneline --merges <default>` for the
+child's merge commit. A MERGED badge is not evidence.
