@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-09-03
+
+### Changed
+
+- **The report skill enforces two standing prose rules: no mannered prose, and
+  concrete subjects over ideas/concepts.** Mannered prose (stock intensifiers,
+  rhetorical reversals, grand flourishes, elegant variation) is banned, and as a
+  general — but not exact — rule sentences take a concrete subject (we, the
+  cells, the model, the data) rather than a nominalized idea ("the observation
+  that...", "this finding demonstrates..."). Both rules are stated at draft
+  time (Phase 2 voice guidance, the section guide's General Writing Principles,
+  and two new before/after pairs in its "Read it aloud" block) and re-checked
+  blind by the Phase 5 framing-critique sub-agent. The core fallback
+  `writing-conventions.md` Style Guide carries the same two rules for
+  repositories without the report-generator pack.
+
 ## [0.7.1] - 2026-08-28
 
 ### Fixed
