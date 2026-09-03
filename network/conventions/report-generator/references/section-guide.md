@@ -399,6 +399,8 @@ These apply throughout the report:
 - **Readable over formulaic.** The rigor machinery (manifest sourcing, finding-form titles, acronym budgets, denominators) governs *correctness*; it does not require a flat, methods-section register everywhere. The Abstract, Problem Statement, and the opening of each Results unit should read like a paper a thoughtful person wrote — narrative, motivated, carrying the reader. Save the dense methods-paper voice for the technical detail and the supplement. If a section reads like an archive of verified facts rather than an explanation, it is too formulaic; rewrite the framing without weakening the rigor.
 - **Past tense** for methods and results ("We computed...", "The analysis showed..."). Present tense for statements that are currently true ("Figure 3 shows...", "These results suggest...").
 - **Active voice** when possible ("We filtered cells with fewer than 500 genes" not "Cells with fewer than 500 genes were filtered").
+- **No mannered prose.** Do not write prose that performs its own style: stock intensifiers ("Strikingly,", "Crucially,", "Notably,"), rhetorical reversals ("not merely X, but Y"), grand flourishes ("a testament to", "underscores the power of"), or elegant variation (rotating through synonyms for the same thing to avoid repeating it). Plain, direct sentences that repeat the canonical term are correct; a report is not the place to be writerly. This applies from the first draft — it is not a polish step.
+- **Concrete subjects, not ideas (general rule).** Prefer a concrete subject — we, the cells, the model, the data — over an idea or concept as the grammatical subject of the sentence. "The observation of elevated IL6 in treated cells raises the possibility of an inflammatory response" buries the actor; "Treated cells showed elevated IL6, which may reflect an inflammatory response" does not. Nominalization openers are the tell: "the fact that", "the observation that", "this finding demonstrates", "the improvement in X reflects". This is a general rule, not an exact one — sometimes the concept genuinely is the topic (defining a metric, weighing a named hypothesis).
 - **Precision over hedging**: "23% of genes were upregulated" not "a significant proportion of genes were upregulated." Use numbers.
 - **One idea per paragraph**. If a paragraph covers two topics, split it.
 - **Define before use**. Every abbreviation, every technical term, every symbol — define it before or at first use.
@@ -407,7 +409,7 @@ These apply throughout the report:
 
 ### Read it aloud
 
-The fastest test for stiff prose is to read a sentence aloud. If it sounds like something you would never say to a colleague, rewrite it. Three patterns recur in this skill's output — the fix is shown, not lectured:
+The fastest test for stiff prose is to read a sentence aloud. If it sounds like something you would never say to a colleague, rewrite it. Five patterns recur in this skill's output — the fix is shown, not lectured:
 
 - **Stored value, not spoken value.**
   - *Before:* "consensus is positive for a fraction 0.978 of evidenced claims."
@@ -423,5 +425,15 @@ The fastest test for stiff prose is to read a sentence aloud. If it sounds like 
   - *Before:* "The consensus score is positive for 97.8% of evidenced claims; the median is 0.75; the negative fraction is 1.1%."
   - *After:* "Among claims that carry any evidence at all, the literature is overwhelmingly consensual — 97.8% lean positive, the median agreement is 0.75, and only 1.1% lean negative."
   - Same numbers, but the second version tells the reader what they *mean* before listing them.
+
+- **Mannered prose.** Style that performs instead of explains.
+  - *Before:* "Strikingly, evidence-first calling not only recovers the known clones but stands as a testament to the power of the approach."
+  - *After:* "Evidence-first calling recovers all six known clones."
+  - Cut the intensifier, the "not only... but" reversal, and the flourish; keep the claim. Read aloud, the before version sounds like a press release, not a colleague.
+
+- **Idea as subject.** An abstraction is doing the acting that a concrete thing did.
+  - *Before:* "The observation of elevated IL6 expression in treated cells raises the possibility of an inflammatory response."
+  - *After:* "Treated cells showed elevated IL6 expression, which may reflect an inflammatory response."
+  - As a general (not exact) rule, make the grammatical subject the thing that acted — we, the cells, the model, the data — and let the interpretation follow. When the concept genuinely is the topic (a definition, a named hypothesis under discussion), a concept subject is fine.
 
 This complements "Readable over formulaic" above: that principle says *why*; these pairs show *how*.

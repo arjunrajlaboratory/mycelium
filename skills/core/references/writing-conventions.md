@@ -77,6 +77,8 @@ To use:
 
 - Write in past tense for methods and results ("We performed...", "The analysis showed...")
 - Use active voice when possible
+- Avoid mannered prose — no stock intensifiers ("Strikingly,", "Crucially,"), rhetorical reversals ("not merely X, but Y"), grand flourishes ("a testament to"), or elegant variation; plain, direct sentences that repeat the canonical term are correct
+- As a general (but not exact) rule, use concrete subjects — we, the cells, the model, the data — rather than ideas or concepts: "Treated cells showed elevated IL6, which may reflect an inflammatory response," not "The observation of elevated IL6 raises the possibility of an inflammatory response"
 - Define abbreviations on first use
 - Be precise about statistical claims — "associated with" not "caused by" (unless causation is established)
 - Keep paragraphs focused — one idea per paragraph

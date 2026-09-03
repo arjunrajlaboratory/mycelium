@@ -33,7 +33,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 
 **Inputs to load:**
 
-- `analysis/[name]/reports/[name]-report.tex` (the draft itself)
+- Every `.tex` source that contributes to the report — `analysis/[name]/reports/[name]-report.tex`, plus, when the report is split into separate files (the overview+supplement template permits a `main.tex` / `supplement.tex` split), each of those files. The orchestrator passes the complete list; all checks below run over all of them.
 - `analysis/[name]/reports/.manifest.json` (`terms[*]` and `policies` — nothing else)
 
 **Do NOT load:**
@@ -77,7 +77,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 
 **Inputs to load:**
 
-- `analysis/[name]/reports/[name]-report.tex` (the draft itself)
+- Every `.tex` source that contributes to the report — `analysis/[name]/reports/[name]-report.tex`, plus, when the report is split into separate files (the overview+supplement template permits a `main.tex` / `supplement.tex` split), each of those files. The orchestrator passes the complete list; the whole-document checks below (mannered prose, concept-as-subject) run over all of them, supplement included.
 - `references/section-guide.md`, resolved relative to the convention pack root. When the pack is installed, this resolves to `.living/conventions/report-generator/references/section-guide.md`; when running from the mycelium source tree it resolves to `network/conventions/report-generator/references/section-guide.md`. The orchestrator passes the absolute path to the sub-agent; the sub-agent does not need to know where it lives. (The craft notes — read once, do not re-read per check.)
 - The report's **audience tier** — the orchestrator passes `policies.audience_tier` (the single letter A / B / C) so the read-aloud jargon check can calibrate to the intended reader. This is the *only* manifest-derived value Phase 5 receives; it does not get the numbers, the framing fields, or the brief, so the standalone test stays honest. Default to Tier B (an adjacent-field colleague) if it is not supplied.
 
@@ -119,6 +119,8 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 > - Flag sentences that read as a *verified-facts archive* — a list of numbers and defined terms — rather than an explanation. The test: does the passage tell the reader what the numbers *mean* before (or instead of) enumerating them? A correct paragraph that reads like a CSV summary is a finding.
 > - Flag any term that, read aloud, a reader at the report's audience tier (`policies.audience_tier`, passed to you; default Tier B = an adjacent-field colleague) could not parse without the page in front of them. This catches bare coined jargon in *running prose* — e.g. "centrality is not a volume proxy" — that the acronym and title checks miss because it is neither an acronym nor a title. Suggest a glossed or plain rewrite the body already supports.
 > - Flag clunky number phrasings that the manifest's `unit` / `display` field should fix: "a fraction 0.978" should read "97.8%". You do not have the manifest, so flag the phrasing and let Phase 2 wire up the field.
+> - Flag **mannered prose** — writing that performs its own style rather than conveying content: stock intensifiers ("Strikingly,", "Crucially,", "Notably,"), rhetorical reversals ("not merely X, but Y"), grand flourishes ("a testament to", "underscores the power of"), and elegant variation (rotating through synonyms for the same thing to avoid repeating the canonical term). Unlike the read-aloud checks above, scan the **whole document** for this — Methods, Discussion, later Results paragraphs, and the supplement included, not just the load-bearing prose. Suggest the plain rewrite that keeps the claim and drops the performance; repeating the canonical term is correct, not a defect.
+> - Flag sentences whose grammatical subject is an **idea or concept** when a concrete subject was available — the actor should usually be we, the cells, the model, or the data. Nominalization openers are the tell: "the fact that", "the observation that", "this finding demonstrates", "the improvement in X reflects". Example fix: "The observation of elevated IL6 in treated cells raises the possibility of an inflammatory response" → "Treated cells showed elevated IL6, which may reflect an inflammatory response." Scan the **whole document** for this check too — stacks and repeat offenders can only be identified document-wide. This is a general rule, not an exact one: do not flag a sentence where the concept genuinely is the topic (a definition, a named hypothesis under discussion), and flag stacks and repeat offenders rather than every isolated instance.
 >
 > **Cross-document references.**
 > - Count every "as discussed in the previous report," "we previously showed X," "see §X" (for non-self references), or "this builds on Y."
@@ -145,7 +147,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 
 **Inputs to load:**
 
-- `analysis/[name]/reports/[name]-report.tex` (the draft itself).
+- Every `.tex` source that contributes to the report — `analysis/[name]/reports/[name]-report.tex`, plus, when the report is split into separate files (the overview+supplement template permits a `main.tex` / `supplement.tex` split), each of those files. The orchestrator passes the complete list; all checks below run over all of them.
 - `analysis/[name]/reports/.manifest.json` (full).
 - `analysis/[name]/reports/build/report_values.tex` — the generated macro file (renderer output). **Required for the display-faithfulness check below.** For entries with `unit`/`display`, the reader-facing number is the macro *body* emitted here, not the manifest `value` and not the hand-maintained `\SciVal{\Macro}{snapshot}` in the draft. Phase 7's scitexlintr reconciles the snapshot against the manifest value; Phase 6 checks that the generated macro body is a faithful display of that value. If the file is absent or older than `.manifest.json`, rerun `render_report_values_tex.py` before the check.
 - `analysis/[name]/reports/[name]-report.pdf` if it has been compiled — read with `pdftotext` to extract the prose-as-rendered (catches LaTeX-rendering edge cases that read differently than the source).
