@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blind by the Phase 5 framing-critique sub-agent. The core fallback
   `writing-conventions.md` Style Guide carries the same two rules for
   repositories without the report-generator pack.
+- **The report skill detects a stale installed convention pack.** The
+  `report-generator` pack carrying these rules is version 0.4.1, but plugin
+  upgrades refresh only the bundled `network/` tree — never the copy a
+  repository installed into `.living/conventions/` — so an existing repository
+  would keep drafting under the old pack. The report skill's routing step now
+  compares the installed pack's `CONVENTION_PACK.yaml` version against the
+  bundled one and, when the bundled pack is newer, offers the refresh
+  (`python skills/core/scripts/install_convention.py --name report-generator`,
+  which replaces the installed copy in place). Existing repositories should
+  run that refresh once after upgrading to pick up the new rules.
 
 ## [0.7.1] - 2026-08-28
 
