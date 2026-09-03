@@ -33,7 +33,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 
 **Inputs to load:**
 
-- `analysis/[name]/reports/[name]-report.tex` (the draft itself)
+- Every `.tex` source that contributes to the report — `analysis/[name]/reports/[name]-report.tex`, plus, when the report is split into separate files (the overview+supplement template permits a `main.tex` / `supplement.tex` split), each of those files. The orchestrator passes the complete list; all checks below run over all of them.
 - `analysis/[name]/reports/.manifest.json` (`terms[*]` and `policies` — nothing else)
 
 **Do NOT load:**
@@ -77,7 +77,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 
 **Inputs to load:**
 
-- `analysis/[name]/reports/[name]-report.tex` (the draft itself)
+- Every `.tex` source that contributes to the report — `analysis/[name]/reports/[name]-report.tex`, plus, when the report is split into separate files (the overview+supplement template permits a `main.tex` / `supplement.tex` split), each of those files. The orchestrator passes the complete list; the whole-document checks below (mannered prose, concept-as-subject) run over all of them, supplement included.
 - `references/section-guide.md`, resolved relative to the convention pack root. When the pack is installed, this resolves to `.living/conventions/report-generator/references/section-guide.md`; when running from the mycelium source tree it resolves to `network/conventions/report-generator/references/section-guide.md`. The orchestrator passes the absolute path to the sub-agent; the sub-agent does not need to know where it lives. (The craft notes — read once, do not re-read per check.)
 - The report's **audience tier** — the orchestrator passes `policies.audience_tier` (the single letter A / B / C) so the read-aloud jargon check can calibrate to the intended reader. This is the *only* manifest-derived value Phase 5 receives; it does not get the numbers, the framing fields, or the brief, so the standalone test stays honest. Default to Tier B (an adjacent-field colleague) if it is not supplied.
 
@@ -147,7 +147,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 
 **Inputs to load:**
 
-- `analysis/[name]/reports/[name]-report.tex` (the draft itself).
+- Every `.tex` source that contributes to the report — `analysis/[name]/reports/[name]-report.tex`, plus, when the report is split into separate files (the overview+supplement template permits a `main.tex` / `supplement.tex` split), each of those files. The orchestrator passes the complete list; all checks below run over all of them.
 - `analysis/[name]/reports/.manifest.json` (full).
 - `analysis/[name]/reports/build/report_values.tex` — the generated macro file (renderer output). **Required for the display-faithfulness check below.** For entries with `unit`/`display`, the reader-facing number is the macro *body* emitted here, not the manifest `value` and not the hand-maintained `\SciVal{\Macro}{snapshot}` in the draft. Phase 7's scitexlintr reconciles the snapshot against the manifest value; Phase 6 checks that the generated macro body is a faithful display of that value. If the file is absent or older than `.manifest.json`, rerun `render_report_values_tex.py` before the check.
 - `analysis/[name]/reports/[name]-report.pdf` if it has been compiled — read with `pdftotext` to extract the prose-as-rendered (catches LaTeX-rendering edge cases that read differently than the source).
