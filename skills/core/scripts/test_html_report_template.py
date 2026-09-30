@@ -163,6 +163,7 @@ def test_escape_returns_to_the_slides_report_section(page):
     page.locator(".deck-progress button").nth(6).click()  # a mid-report section
     source = page.evaluate("document.querySelectorAll('#deck .slide')[SciReport.current].dataset.source")
     page.keyboard.press("Escape")
+    page.wait_for_function(f"location.hash === '{source}'")
     s = state(page)
     assert not s["open"] and s["hidden"]
     assert s["hash"] == source
@@ -578,3 +579,112 @@ def test_contents_highlight_follows_scrolling_up(browser, tmp_path):
         assert current == "#results"
     finally:
         ctx.close()
+
+
+# ---------------------------------------------------------------------------
+# Review of the lifecycle/history rewrite
+# ---------------------------------------------------------------------------
+
+def test_descending_x_shows_the_played_part_of_the_line(browser, tmp_path):
+    fig = ('<figure class="sci-figure" id="fig-t" data-sci-interactive="timeseries">'
+           '<script type="application/json" data-sci-data="t">{"x":[10,5,0],"series":[{"name":"a","values":[1,2,3]}]}</script>'
+           '<div class="sci-media"></div><figcaption>T.</figcaption></figure>')
+    ctx, pg = open_page(browser, make_page(tmp_path, results=fig))
+    try:
+        g = pg.evaluate("""(() => { const s = document.querySelector('#fig-t svg');
+          const r = s.querySelector('clipPath rect'), c = s.querySelector('line[stroke-dasharray]');
+          return {x: +r.getAttribute('x'), w: +r.getAttribute('width'), cursor: +c.getAttribute('x1')}; })()""")
+        # Default index is the last point (x = 0, at the left); every earlier point
+        # (to its right) has been played, so the clip spans from the cursor rightward.
+        assert g["x"] <= g["cursor"] + 1 and g["w"] > 300, g
+    finally:
+        ctx.close()
+
+
+def test_closing_the_deck_does_not_leave_an_extra_history_entry(page):
+    page.click("[data-present]")
+    page.keyboard.press("ArrowRight")
+    page.keyboard.press("Escape")
+    page.wait_for_function("!SciReport.presenting && location.hash === '#result-growth'")
+    page.go_back()
+    assert not page.url.startswith(EXAMPLE.as_uri())  # one Back leaves the report
+
+
+def test_check_layout_does_not_stop_a_playing_figure(page):
+    page.goto(EXAMPLE.as_uri() + "#slides/5")
+    page.wait_for_function("SciReport.presenting")
+    slider = page.locator("#deck .slide.is-current input[type=range]")
+    slider.fill("0")
+    page.locator("#deck .slide.is-current button", has_text="Play").click()
+    page.evaluate("SciReport.checkLayout()")
+    assert page.locator("#deck .slide.is-current .sci-ts-controls button").text_content() == "Pause"
+
+
+def test_space_after_clicking_a_deck_button_advances(page):
+    page.goto(EXAMPLE.as_uri() + "#slides/3")
+    page.wait_for_function("SciReport.presenting")
+    page.click('[data-deck="prev"]')
+    assert state(page)["current"] == 1
+    page.keyboard.press("Space")
+    assert state(page)["current"] == 2
+
+
+def test_arrow_keys_on_radio_buttons_do_not_turn_the_slide(browser, tmp_path):
+    fig = ('<section id="result-r"><h3>Radios pick the view.</h3>'
+           '<figure class="sci-figure" id="fig-r" data-sci-interactive="radios">'
+           '<script type="application/json" data-sci-data="r">{"v":1}</script>'
+           '<div class="sci-media"></div><figcaption>R.</figcaption></figure></section>')
+    slides = ('<section class="slide slide--figure" data-source="#result-r"><h2>The radios pick the view.</h2>'
+              '<div class="slide-body"><div class="slide-figure" data-fig-ref="fig-r"></div></div></section>'
+              '<section class="slide" data-source="#result-r"><h2>A later slide exists to move to.</h2></section>')
+    extra = ("<script>SciReport.register('radios', function (figure) { var m = figure.querySelector('.sci-media');"
+             " ['a','b'].forEach(function (v) { var r = document.createElement('input'); r.type = 'radio'; r.name = 'v' + Math.random(); r.value = v; m.appendChild(r); }); });</script>")
+    ctx, pg = open_page(browser, make_page(tmp_path, results=fig, slides=slides, extra=extra))
+    try:
+        pg.evaluate("SciReport.open(1)")
+        pg.locator("#deck .slide.is-current input[type=radio]").first.focus()
+        pg.keyboard.press("ArrowRight")
+        assert pg.evaluate("SciReport.current") == 1
+    finally:
+        ctx.close()
+
+
+def test_print_restores_the_readers_state_afterwards(page):
+    slider = page.locator("main #fig-growth input[type=range]")
+    slider.fill("2")
+    page.evaluate("window.dispatchEvent(new Event('beforeprint'))")
+    assert slider.input_value() == "10"
+    page.evaluate("window.dispatchEvent(new Event('afterprint'))")
+    assert slider.input_value() == "2"
+
+
+def test_isolated_ids_leave_hex_colors_alone_and_follow_all_reference_attributes(browser, tmp_path):
+    fig = ('<section id="result-d"><h3>The diagram keeps its colors.</h3>'
+           '<figure class="sci-figure" id="fig-d" data-sci-diagram><div class="sci-media">'
+           '<svg viewBox="0 0 10 10"><style>.a{fill:#fff} #fff{stroke:red}</style>'
+           '<g id="fff" class="a" fill="#fff"><use href="#fff"/></g></svg>'
+           '<table><tr><th id="h1">H</th></tr><tr><td headers="h1">v</td></tr></table>'
+           '</div><figcaption>D.</figcaption></figure></section>')
+    slides = ('<section class="slide slide--figure" data-source="#result-d"><h2>The diagram keeps its colors.</h2>'
+              '<div class="slide-body"><div class="slide-figure" data-fig-ref="fig-d"></div></div></section>')
+    ctx, pg = open_page(browser, make_page(tmp_path, results=fig, slides=slides))
+    try:
+        copy = pg.evaluate("""(() => { const f = document.querySelector('#deck .slide-figure figure');
+          return {fill: f.querySelector('g').getAttribute('fill'), use: f.querySelector('use').getAttribute('href'),
+                  style: f.querySelector('style').textContent, headers: f.querySelector('td').getAttribute('headers')}; })()""")
+        assert copy["fill"] == "#fff"
+        assert copy["use"].startswith("#fff--s")
+        assert ".a{fill:#fff}" in copy["style"] and "#fff--s" in copy["style"]
+        assert copy["headers"].startswith("h1--s")
+    finally:
+        ctx.close()
+
+
+def test_go_on_a_closed_deck_does_not_touch_the_url(page):
+    page.evaluate("SciReport.go(3)")
+    assert page.evaluate("location.hash") == ""
+    page.click("[data-present]")
+    page.keyboard.press("Escape")
+    page.wait_for_function("!SciReport.presenting")
+    page.go_back()
+    assert not page.url.startswith(EXAMPLE.as_uri())

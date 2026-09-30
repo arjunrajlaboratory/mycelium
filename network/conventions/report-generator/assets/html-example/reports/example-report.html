@@ -698,7 +698,23 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
 
   /* ---------------- SVG id isolation (for figures copied into slides) ---------------- */
 
-  var ID_LIST_ATTRS = ["aria-labelledby", "aria-describedby", "aria-controls", "aria-owns", "aria-flowto", "for"];
+  var ID_LIST_ATTRS = ["aria-labelledby", "aria-describedby", "aria-controls", "aria-owns", "aria-flowto",
+    "aria-activedescendant", "aria-details", "aria-errormessage", "for", "headers", "list"];
+  var HREF_ATTRS = ["href", "xlink:href"];
+
+  // #id in CSS: rename only in selectors (outside declaration blocks) and in
+  // url(#id) — never inside a declaration, where "#fff" is a color.
+  function renameCssIds(css, map, refs) {
+    var out = "", depth = 0, chunk = "";
+    function flush() { out += depth === 0 ? chunk.replace(/#(-?[A-Za-z_][\w-]*)/g, function (m, id) { return map[id] ? "#" + map[id] : m; }) : chunk; chunk = ""; }
+    for (var i = 0; i < css.length; i++) {
+      var ch = css.charAt(i);
+      if (ch === "{" || ch === "}") { flush(); out += ch; depth += ch === "{" ? 1 : -1; if (depth < 0) depth = 0; }
+      else chunk += ch;
+    }
+    flush();
+    return refs(out);
+  }
 
   // Rename every id in a copied subtree and every reference to it: href="#x",
   // url(#x) in any attribute, id lists (aria-labelledby, for), and #x / url(#x)
@@ -716,16 +732,13 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
       Array.prototype.slice.call(n.attributes).forEach(function (attr) {
         var v = attr.value, nv = v;
         if (ID_LIST_ATTRS.indexOf(attr.name) >= 0) nv = v.split(/\s+/).map(function (t) { return map[t] || t; }).join(" ");
-        else if (v.indexOf("#") >= 0) {
-          nv = refs(v);
-          if (/^#/.test(nv) && map[nv.slice(1)]) nv = "#" + map[nv.slice(1)];
-        }
+        else if (HREF_ATTRS.indexOf(attr.name) >= 0 && /^#/.test(v) && map[v.slice(1)]) nv = "#" + map[v.slice(1)];
+        else if (attr.name === "style") nv = renameCssIds(v, map, refs);
+        else if (v.indexOf("url(") >= 0) nv = refs(v);  // fill="#fff" is a color, not a reference
         if (nv !== v) n.setAttribute(attr.name, nv);
       });
     });
-    $$("style", root).forEach(function (st) {
-      st.textContent = refs(st.textContent).replace(/#(-?[A-Za-z_][\w-]*)/g, function (m, id) { return map[id] ? "#" + map[id] : m; });
-    });
+    $$("style", root).forEach(function (st) { st.textContent = renameCssIds(st.textContent, map, refs); });
   }
 
   /* ---------------- Interactive figures ---------------- */
@@ -752,7 +765,10 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     if (!data) return;
     try {
       var api = init(figure, data) || {};
-      instances.push({ figure: figure, stop: api.stop || noop, reset: api.reset || noop });
+      instances.push({
+        figure: figure, stop: api.stop || noop, reset: api.reset || noop,
+        snapshot: api.snapshot || noop, restore: api.restore || noop
+      });
     } catch (e) { console.error("[SciReport] interactive figure failed", kind, e); }
   }
 
@@ -943,7 +959,11 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
       i = Math.max(0, Math.min(n - 1, i));
       var px = X(i);
       cursor.setAttribute("x1", px); cursor.setAttribute("x2", px);
-      clipRect.setAttribute("width", px + 1);
+      // Reveal the played part: from the first point to the cursor, in
+      // whichever direction x runs (descending x plays right to left).
+      var x0 = X(0);
+      clipRect.setAttribute("x", Math.min(x0, px) - 1);
+      clipRect.setAttribute("width", Math.abs(px - x0) + 2);
       range.value = i;
       range.setAttribute("aria-valuetext", (data.x_label ? data.x_label + " " : "") + xfmt(xs[i]));
       readout.setAttribute("aria-live", announce ? "polite" : "off");
@@ -982,7 +1002,9 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     range.value = defaultIndex; show(defaultIndex);
     return {
       stop: stop,
-      reset: function () { stop(); show(defaultIndex); }
+      reset: function () { stop(); show(defaultIndex); },
+      snapshot: function () { return +range.value; },
+      restore: function (i) { show(i); }
     };
   }
   interactiveKinds.timeseries = timeSeries;
@@ -992,7 +1014,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   var deck = $("#deck");
   var slides = deck ? $$(".slide", deck) : [];
   var current = 0, returnScroll = 0, leavingFullscreenByKey = false, open = false;
-  var opener = null, quiet = false, pushedEntry = false;
+  var opener = null, quiet = false, pushedEntry = false, pendingReturn = null;
   // Interactive report figures as they were before initialization; slide
   // copies are built from these, so a copy never inherits the report
   // figure's rendered controls (whose listeners do not clone).
@@ -1022,7 +1044,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     slides.forEach(function (slide, i) {
       var h = $("h1, h2", slide);
       var b = el("button", { type: "button", "aria-label": "Slide " + (i + 1) + (h ? ": " + h.textContent : "") });
-      b.addEventListener("click", function (e) { e.stopPropagation(); go(i); });
+      b.addEventListener("click", function (e) { e.stopPropagation(); go(i); deck.focus({ preventScroll: true }); });
       bar.appendChild(b);
     });
     // "Present from here" links next to report headings that slides summarize.
@@ -1060,7 +1082,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     var h = $("h1, h2", slides[current]);
     $(".deck-live", deck).textContent = "Slide " + (current + 1) + " of " + slides.length + (h ? ": " + h.textContent : "");
     var hash = "#slides/" + (current + 1);
-    if (!quiet && location.hash !== hash) history.replaceState(null, "", hash);
+    if (open && !quiet && location.hash !== hash) history.replaceState(null, "", hash);
   }
 
   function overflows(slide) {
@@ -1070,7 +1092,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   function go(i) {
     if (!slides.length) return;
     var target = Math.max(0, Math.min(slides.length - 1, i));
-    if (target !== current && slides[current]) eachInstance(slides[current], "stop");
+    if (!quiet && target !== current && slides[current]) eachInstance(slides[current], "stop");
     current = target;
     render();
     if (!quiet && overflows(slides[current])) {
@@ -1132,6 +1154,26 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     doc.body.classList.remove("presenting");
     if (quiet) return;
     var src = toSource !== false && slides[current] && slides[current].getAttribute("data-source");
+    if (pushedEntry && !keepUrl) {
+      // Opening pushed one entry; pop it so the reader's history is as it
+      // was, then finish the return once the browser has moved back.
+      pushedEntry = false;
+      // The browser would restore the pre-presentation scroll position on
+      // this Back step, undoing the return to the source section.
+      var restoration = history.scrollRestoration;
+      history.scrollRestoration = "manual";
+      pendingReturn = { src: src || null, restoration: restoration };
+      history.back();
+      // Finished on hashchange, which arrives after the browser's own scroll
+      // for this traversal; the timeout covers a browser that sends none.
+      setTimeout(function () { if (pendingReturn) completeReturn(); }, 400);
+      return;
+    }
+    pushedEntry = false;
+    finishClose(src, keepUrl);
+  }
+
+  function finishClose(src, keepUrl) {
     var target = src && src.charAt(0) === "#" && doc.getElementById(src.slice(1));
     if (target) {
       history.replaceState(null, "", src);
@@ -1173,8 +1215,12 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     if (t.isContentEditable || t.tagName === "TEXTAREA") return true;
     return t.tagName === "INPUT" && NON_TEXT_INPUTS.indexOf((t.type || "").toLowerCase()) < 0;
   }
+  var ARROW_WIDGETS = "[role=slider],[role=spinbutton],[role=radiogroup],[role=radio],[role=listbox],[role=tablist],[role=tab],[role=grid],[role=menu],[role=tree]";
   function ownsArrowKeys(t) {
-    return !!t && (isTextEntry(t) || t.tagName === "SELECT" || (t.tagName === "INPUT" && t.type === "range"));
+    if (!t) return false;
+    if (isTextEntry(t) || t.tagName === "SELECT") return true;
+    if (t.tagName === "INPUT" && (t.type === "range" || t.type === "radio")) return true;
+    return !!(t.closest && t.closest(ARROW_WIDGETS));
   }
 
   function onKey(e) {
@@ -1205,7 +1251,17 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     if (e.clientX - rect.left < rect.width * 0.25) prev(); else next();
   }
 
-  function fromHash() {
+  function completeReturn() {
+    var ret = pendingReturn; pendingReturn = null;
+    finishClose(ret.src, !ret.src);
+    if (ret.restoration) history.scrollRestoration = ret.restoration;
+  }
+
+  function fromHash(e) {
+    if (pendingReturn) {
+      if (e && e.type === "hashchange") completeReturn();
+      return;  // the popstate half of our own Back step
+    }
     var m = /^#slides(?:\/(\d+))?$/.exec(location.hash);
     if (m) openDeck(m[1] ? parseInt(m[1], 10) - 1 : 0);
     else if (open) closeDeck(false, true);
@@ -1216,14 +1272,18 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     deck.tabIndex = -1;
     prepareSlides();
     $$("[data-present]").forEach(function (b) { b.addEventListener("click", function () { openDeck(0); }); });
-    $$('[data-deck="next"]', deck).forEach(function (b) { b.addEventListener("click", function (e) { e.stopPropagation(); next(); }); });
-    $$('[data-deck="prev"]', deck).forEach(function (b) { b.addEventListener("click", function (e) { e.stopPropagation(); prev(); }); });
+    // Deck chrome returns focus to the deck after a click, so Space and Enter
+    // keep advancing slides instead of re-pressing the clicked button.
+    function chrome(fn) { return function (e) { e.stopPropagation(); fn(); if (open) deck.focus({ preventScroll: true }); }; }
+    $$('[data-deck="next"]', deck).forEach(function (b) { b.addEventListener("click", chrome(next)); });
+    $$('[data-deck="prev"]', deck).forEach(function (b) { b.addEventListener("click", chrome(prev)); });
     $$('[data-deck="close"]', deck).forEach(function (b) { b.addEventListener("click", function (e) { e.stopPropagation(); closeDeck(); }); });
-    $$('[data-deck="fullscreen"]', deck).forEach(function (b) { b.addEventListener("click", function (e) { e.stopPropagation(); toggleFullscreen(); }); });
+    $$('[data-deck="fullscreen"]', deck).forEach(function (b) { b.addEventListener("click", chrome(toggleFullscreen)); });
     $$("[data-deck-return]", deck).forEach(function (a) { a.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); closeDeck(); }); });
     $(".deck-viewport", deck).addEventListener("click", onStageClick);
     doc.addEventListener("keydown", onKey);
     window.addEventListener("resize", fit);
+    window.addEventListener("popstate", fromHash);
     window.addEventListener("hashchange", fromHash);
     doc.addEventListener("fullscreenchange", function () {
       fit();
@@ -1252,8 +1312,9 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   }
 
   window.SciReport = {
-    // init(figure, data) may return {stop, reset}: stop() halts animation,
-    // reset() shows the default state. Both are called by the deck and print.
+    // init(figure, data) may return {stop, reset, snapshot, restore}: stop()
+    // halts animation, reset() shows the default state, snapshot()/restore(s)
+    // save and put back the reader's state around printing.
     register: function (kind, init) { interactiveKinds[kind] = init; },
     open: openDeck, close: closeDeck, go: go, checkLayout: checkLayout,
     get current() { return current; }, get count() { return slides.length; }, get presenting() { return open; }
@@ -1267,8 +1328,21 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
       initInteractive(f);
     });
     // Print shows every interactive figure in its default state — the state
-    // the caption and prose describe — whatever the reader left it at.
-    window.addEventListener("beforeprint", function () { eachInstance(null, "reset"); });
+    // the caption and prose describe — and afterwards puts each back where
+    // the reader left it.
+    var beforePrint = null;
+    window.addEventListener("beforeprint", function () {
+      if (beforePrint) return;
+      beforePrint = instances.map(function (it) { try { return it.snapshot(); } catch (e) { return undefined; } });
+      eachInstance(null, "reset");
+    });
+    window.addEventListener("afterprint", function () {
+      if (!beforePrint) return;
+      instances.forEach(function (it, k) {
+        if (beforePrint[k] !== undefined) { try { it.restore(beforePrint[k]); } catch (e) { /* keep default */ } }
+      });
+      beforePrint = null;
+    });
     initDeck();
   }
   // Let report-specific scripts that follow this one call SciReport.register first.
