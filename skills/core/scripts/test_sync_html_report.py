@@ -311,7 +311,9 @@ def test_registered_table_rows_are_generated_from_csv(project):
     out = report.read_text(encoding="utf-8")
     rows = _between(out, "sci-rows")
     assert rows.count("<tr>") == 3
-    assert '<td class="num">9.5</td>' in rows and '<td class="num">12.0</td>' in rows
+    # data-precision rounds the fractional column; the integer column keeps its spelling.
+    assert '<td class="num">9.5</td>' in rows and '<td class="num">12</td>' in rows
+    assert '<td class="num">8.0</td>' in rows
     assert "<td></td>" in rows  # missing cell stays empty
     assert f'data-sha256="{sha(raw)}"' in out and f'data-content-sha256="{sha(rows.encode())}"' in out
 
@@ -371,8 +373,8 @@ def test_non_finite_data_is_a_sync_error_not_a_traceback(project, capsys):
 
 def test_attribute_lookup_does_not_match_hyphenated_suffixes():
     tag = '<svg stroke-width="2" data-height="9" width="400" height="300">'
-    assert shr._attr(tag, "width") == "400"
-    assert shr._attr(tag, "height") == "300"
+    attrs = dict(shr.tag_attrs(tag)[1])
+    assert attrs["width"] == "400" and attrs["height"] == "300" and attrs["stroke-width"] == "2"
     out = shr._svg_markup(tag + "</svg>", "f", "")
     assert 'viewBox="0 0 400 300"' in out and 'stroke-width="2"' in out
 
@@ -390,3 +392,77 @@ def test_csv_identifiers_keep_their_spelling_in_data_payloads(project):
     assert run(report, manifest) == 0
     payload = json.loads(_payload(report.read_text(encoding="utf-8"), "i"))
     assert payload["rows"] == [["007", 1.5], ["1E5", 2]]
+
+
+# -- second review: parse HTML, type columns strictly, scope styles ----------
+
+def test_quoted_gt_in_attributes_does_not_truncate_the_tag(project):
+    entry = fig_entry("plot", "../outputs/plot.svg", project.outputs, "plot.svg")
+    body = FIG.format(fid="plot").replace('data-alt="Alt text"', 'data-alt="p &gt; 0.05 in all arms" title="a > b"')
+    report, manifest = project(body, figures=[entry])
+    assert run(report, manifest) == 0
+    out = report.read_text(encoding="utf-8")
+    assert 'aria-label="p &gt; 0.05 in all arms"' in out
+    assert 'title="a &gt; b"' in out and f'data-sha256="{entry["sha256"]}"' in out
+    assert run(report, manifest, "--check") == 0  # rewritten tag is stable
+
+
+def test_markup_inside_script_strings_is_not_a_live_region(project):
+    entry = fig_entry("plot", "../outputs/plot.svg", project.outputs, "plot.svg")
+    js = ("<script>const tpl = '<figure data-sci-fig=\"ghost\"><!-- sci-media --><!-- /sci-media --></figure>"
+          "<table data-sci-table=\"ghost\"></table>';</script>")
+    report, manifest = project(js + FIG.format(fid="plot"), figures=[entry])
+    assert run(report, manifest) == 0
+    assert js in report.read_text(encoding="utf-8")
+
+
+def test_number_typing_is_strict_and_column_wide(project):
+    (project.outputs / "labels.csv").write_text(
+        "sample,replicate,value,year\n1_1,1,0.125,2024\n1_2,2,1.5,2025\n2_1,3,22.25,2026\n", encoding="utf-8")
+    raw = (project.outputs / "labels.csv").read_bytes()
+    entry = [{"id": "l", "path": "../outputs/labels.csv", "sha256": sha(raw)}]
+    report, manifest = project(DATA.format(did="l"), data=entry)
+    assert run(report, manifest) == 0
+    payload = json.loads(_payload(report.read_text(encoding="utf-8"), "l"))
+    assert [r[0] for r in payload["rows"]] == ["1_1", "1_2", "2_1"]
+    table = TABLE.format(did="l", attrs=' data-precision="1"')
+    report, manifest = project(table, data=entry)
+    assert run(report, manifest) == 0
+    rows = _between(report.read_text(encoding="utf-8"), "sci-rows")
+    first = rows.splitlines()[0]
+    # Labels and integer columns keep their spelling; only the fractional column is rounded.
+    assert first == '<tr><td>1_1</td><td class="num">1</td><td class="num">0.1</td><td class="num">2024</td></tr>'
+
+
+def test_inlined_svg_styles_are_scoped_to_their_figure():
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><style>*{stroke-linecap:butt}'
+           ".cls-1, .cls-2 > path{fill:red}</style><path class=\"cls-1\"/></svg>")
+    out = shr._svg_markup(svg, "fig one", "")
+    assert 'class="sci-svg-fig-one"' in out
+    assert ".sci-svg-fig-one *{stroke-linecap:butt}" in out
+    assert ".sci-svg-fig-one .cls-1, .sci-svg-fig-one .cls-2 > path{fill:red}" in out
+
+
+def test_byte_order_marks_are_stripped_from_csv_and_json(project):
+    (project.outputs / "bom.csv").write_bytes("﻿day,count\n0,1\n1,2\n".encode("utf-8"))
+    raw = (project.outputs / "bom.csv").read_bytes()
+    entry = [{"id": "b", "path": "../outputs/bom.csv", "sha256": sha(raw)}]
+    report, manifest = project(TABLE.format(did="b", attrs=' data-columns="day,count"'), data=entry)
+    assert run(report, manifest) == 0
+    report, manifest = project(DATA.format(did="b"), data=entry)
+    assert run(report, manifest) == 0
+    assert json.loads(_payload(report.read_text(encoding="utf-8"), "b"))["columns"] == ["day", "count"]
+
+
+def test_table_rounding_is_the_value_display_rounding():
+    import render_report_values_tex as rrv
+    for cell, p in [("0.125", 2), ("-0.001", 2), ("22.125", 1), ("1e30", 2)]:
+        assert shr._format_cell(cell, p)[0] == rrv.round_half_up(cell, p)
+
+
+def test_svg_root_with_quoted_gt_is_rewritten_safely():
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" data-note="a > b" width="40" height="30"><path/></svg>'
+    out = shr._svg_markup(svg, "f", "Alt")
+    root = out[: out.index("<path")]
+    assert 'data-note="a &gt; b"' in root and 'viewBox="0 0 40 30"' in root
+    assert 'aria-label="Alt"' in root and "width=" not in root and "height=" not in root

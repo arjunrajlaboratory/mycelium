@@ -39,7 +39,7 @@ Three manifest behaviors matter more in HTML, where every word of the report is 
 
 - **`label_aliases_forbidden` bans the phrase anywhere in the prose**, not only next to that value. List a phrase only if it is wrong everywhere in this report ("accuracy" when every accuracy in the report is exact-match accuracy); a word the report legitimately uses elsewhere ("edges", "median") cannot be a forbidden alias.
 - **`overloaded_warning` must appear verbatim in the prose** at or before the term's first use. Write it as the reader-facing sentence you will put in the report ("This is not a Wilks-sense likelihood-ratio test."), not as an instruction to the writer.
-- **Rounded display comes from `unit` + `precision`**, not hand-typed strings: `"unit": "percent"` (stored fraction → `95.4%`) or `"unit": "decimal"` (`7.47712` → `7.48` at precision 2), rounded half-up. A plain-text `display` (`"0.3183"`) is used as-is in HTML; only a TeX `display` (with `\\`, `$`, braces) needs a `display_html`.
+- **Rounded display comes from `unit` + `precision`**, not hand-typed strings: `"unit": "percent"` (stored fraction → `95.4%`) or `"unit": "decimal"` (`7.47712` → `7.48` at precision 2), rounded half-up. A plain-text `display` (`"0.3183"`) is used as-is in HTML; a TeX `display` — one containing `\\ $ { } ^ ~ %` or the ligatures `--`, ```` `` ```` or `''` — needs a `display_html`. `display_html` is HTML markup (`"3&times;"`, `"1.0 × 10<sup>-4</sup>"`): the span is checked by its rendered text and `--write` inserts the markup as written.
 
 Every figure and data entry needs a `sha256`. `sync_html_report.py` refuses to inline a file whose hash disagrees with the manifest — a regenerated figure means Phase 1 is re-run first.
 
@@ -67,7 +67,7 @@ For <span data-sci-text="diff-expr.contrast_phrase">treated versus control</span
 - Never type a manifest value as bare text — `raw-generated-value` fails the gate. A typo in the id fails with `unknown-value-id` (HTML has no compiler to catch it the way an undefined TeX macro does).
 - Values inside tables are wrapped too; table cells are prose.
 - Prefer words for structural numbers ("three doses", "the second experiment") exactly as in TeX.
-- Dates go in `<time>` (the template's byline already does this); `<time>` content is not linted, so a publication year or report date needs no waiver. The rendered form of a derived value typed as text ("95.4%") is itself a `raw-generated-value`.
+- Dates go in `<time>` (the template's byline already does this); `<time>` content is not linted, so a publication year or report date needs no waiver. A fractional percent that matches a manifest entry's rendering ("95.4%") typed as text is itself a `raw-generated-value`; a rounded decimal ("1.5") is only an unsourced-number warning, because many unrelated literals round to it.
 
 ### Figures
 
@@ -82,7 +82,7 @@ Every `<figure>` declares what it is — scitexlintr's `unfingerprinted-figure` 
 </figure>
 ```
 
-Leave the region between the two `sci-media` marker comments empty; `sync_html_report.py` fills it from the manifest (SVG inline with its ids namespaced, PNG/JPEG as a base64 image, PDF converted to SVG) and sets `data-sha256`. `data-alt` becomes the accessible name; sync also stamps `data-content-sha256`, the hash of the inlined markup, so a hand edit to an inlined figure fails the gate. A PDF whose SVG conversion would exceed 2 MB (dense scatter plots and embedding maps can expand from a few hundred kilobytes to tens of megabytes) is rasterized at 200 dpi instead, and sync says so. For such figures, registering a PNG export is better still. `check_html_report.py` warns above 15 MB for the whole file. Add `class="wide"` to let a figure break out of the text column. The figure's media is not prose (tick labels are not linted); its caption is.
+Leave the region between the two `sci-media` marker comments empty; `sync_html_report.py` fills it from the manifest (SVG inline with its ids namespaced and its `<style>` rules scoped to the figure, PNG/JPEG as a base64 image, PDF converted to SVG) and sets `data-sha256`. `data-alt` becomes the accessible name; sync also stamps `data-content-sha256`, the hash of the inlined markup, so a hand edit to an inlined figure fails the gate. A PDF whose SVG conversion would exceed 2 MB (dense scatter plots and embedding maps can expand from a few hundred kilobytes to tens of megabytes) is rasterized at 200 dpi instead, and sync says so. For such figures, registering a PNG export is better still. `check_html_report.py` warns above 15 MB for the whole file. Add `class="wide"` to let a figure break out of the text column. The figure's media is not prose (tick labels are not linted); its caption is.
 
 **Hand-drawn schematic** (inline SVG you write — a pipeline diagram, a design sketch):
 
@@ -113,7 +113,7 @@ Text inside a diagram **is** prose and is linted, so a diagram cannot smuggle an
 </div>
 ```
 
-`data-columns` selects and orders columns (default: all); `data-precision` rounds numeric cells half-up (default: the file's spelling). You write the caption and header; sync owns the rows between the markers.
+`data-columns` selects and orders columns (default: all); `data-precision` rounds the cells of fractional columns half-up (default: the file's spelling). Columns are typed as a whole: a column is numeric only if every cell is a plain number, so labels such as `007` or `1_1` keep their spelling, and integer columns (counts, replicate numbers, years) are never given decimals. You write the caption and header; sync owns the rows between the markers.
 
 **Other markup.** Definitions: `<dl>`. Display math: `<math display="block">` (scrolls horizontally rather than widening the page on a phone). References: a `<section id="references"><h2>References</h2><ol class="references">…</ol></section>` before the supplement, when the report cites anything. Delete the template's guidance comments as you fill each section.
 
@@ -152,7 +152,7 @@ The same contract holds: data only from the figure's `data-sci-data` block, a me
 
 ### Waivers
 
-`<!-- ANALYSIS_OK[rule-code]: what, why valid, where recorded -->` on or up to four lines above the finding — the same rule-scoped waiver as TeX. Do not nest `<!-- -->` inside another comment: HTML comments do not nest, so the inner `-->` ends the outer comment and the rest renders as page text.
+`<!-- ANALYSIS_OK[rule-code]: what, why valid, where recorded -->` on or up to four lines above the finding — the same rule-scoped waiver as TeX. Inside a `<script>`, where an HTML comment cannot appear, write it as a JavaScript comment: `// ANALYSIS_OK[script-data-literal]: …`. Do not nest `<!-- -->` inside another comment: HTML comments do not nest, so the inner `-->` ends the outer comment and the rest renders as page text.
 
 ---
 

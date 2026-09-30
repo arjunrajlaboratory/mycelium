@@ -60,8 +60,11 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
+from html.parser import HTMLParser
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from render_report_values_tex import round_half_up  # noqa: E402  (one rounding rule)
 
 RASTER_TYPES = {
     ".png": "image/png",
@@ -77,13 +80,7 @@ RASTER_TYPES = {
 MAX_INLINE_SVG_BYTES = 2 * 1024 * 1024
 RASTER_DPI = 200
 
-_FIGURE_OPEN_RE = re.compile(r"<figure\b[^>]*>", re.I)
-_SCRIPT_RE = re.compile(r"(<script\b[^>]*>)(.*?)(</script\s*>)", re.I | re.S)
-_MEDIA_RE = re.compile(r"(<!--\s*sci-media\s*-->)(.*?)(<!--\s*/sci-media\s*-->)", re.S)
-_ROWS_RE = re.compile(r"(<!--\s*sci-rows\s*-->)(.*?)(<!--\s*/sci-rows\s*-->)", re.S)
-_FIGURE_CLOSE_RE = re.compile(r"</figure\s*>", re.I)
-_TABLE_OPEN_RE = re.compile(r"<table\b[^>]*>", re.I)
-_TABLE_CLOSE_RE = re.compile(r"</table\s*>", re.I)
+_SCOPE_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 
 class SyncError(Exception):
@@ -97,22 +94,62 @@ class Edit:
     replacement: str
 
 
-def _attr(tag: str, name: str) -> str | None:
-    # The name must start the attribute: "width" is not the tail of "stroke-width".
-    m = re.search(r"(?<![\w:-])" + re.escape(name) + r"\s*=\s*(\"([^\"]*)\"|'([^']*)')", tag, re.I)
+# Attribute tokenization for one raw opening tag, quote-aware (a ">" inside a
+# quoted value does not end anything) and case-preserving (SVG's viewBox).
+_ATTR_TOKEN_RE = re.compile(r"""([^\s"'>/=]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'=<>`]+))?""")
+
+
+def tag_attrs(raw_tag: str) -> tuple[str, list[tuple[str, str | None]]]:
+    """(tag name, [(attribute, value)]) of a raw opening tag such as
+    ``get_starttag_text()`` returns. Values are entity-decoded."""
+    m = re.match(r"<\s*([^\s/>]+)", raw_tag)
     if not m:
-        return None
-    return html.unescape(m.group(2) if m.group(2) is not None else m.group(3))
+        raise SyncError(f"not an opening tag: {raw_tag[:40]!r}")
+    body = raw_tag[m.end():].rstrip(">").rstrip("/")
+    attrs = []
+    for a in _ATTR_TOKEN_RE.finditer(body):
+        value = a.group(2)
+        if value is not None and value[:1] in "\"'":
+            value = value[1:-1]
+        attrs.append((a.group(1), None if value is None else html.unescape(value)))
+    return m.group(1), attrs
 
 
-def _set_attr(tag: str, name: str, value: str) -> str:
-    """Return ``tag`` with attribute ``name`` set to ``value`` (added before ``>`` if absent)."""
-    pattern = re.compile(r"(\s" + re.escape(name) + r"\s*=\s*)(\"[^\"]*\"|'[^']*')", re.I)  # \s start: never a suffix
-    quoted = '"' + html.escape(value, quote=True) + '"'
-    if pattern.search(tag):
-        return pattern.sub(lambda m: m.group(1) + quoted, tag, count=1)
-    close = -2 if tag.endswith("/>") else -1
-    return tag[:close].rstrip() + f" {name}={quoted}" + tag[close:]
+def _build_tag(tagname: str, attrs: list[tuple[str, str | None]], updates: dict[str, str | None],
+               drop: tuple[str, ...] = ()) -> str:
+    """An opening tag rebuilt from parsed attributes, with ``updates`` set
+    (replacing or appending) and ``drop`` removed. Values are re-escaped, so
+    the result is valid whatever the original quoting was, and rebuilding is
+    idempotent."""
+    updates = dict(updates)
+    merged = [(k, updates.pop(k) if k in updates else v) for k, v in attrs if k.lower() not in drop]
+    merged += list(updates.items())
+    parts = [tagname] + [k if v is None else f'{k}="{html.escape(v, quote=True)}"' for k, v in merged]
+    return "<" + " ".join(parts) + ">"
+
+
+class _FirstTag(HTMLParser):
+    """Finds the first start tag named ``name`` and its raw source extent."""
+
+    def __init__(self, source: str, name: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.name, self.found = name, None
+        self.line_starts = [0] + [m.end() for m in re.finditer("\n", source)]
+
+    def handle_starttag(self, tag, attrs):
+        if self.found is None and tag == self.name:
+            line, col = self.getpos()
+            start = self.line_starts[line - 1] + col
+            self.found = (start, start + len(self.get_starttag_text() or ""))
+
+    handle_startendtag = handle_starttag
+
+
+def first_tag(source: str, name: str) -> tuple[int, int] | None:
+    parser = _FirstTag(source, name)
+    parser.feed(source)
+    parser.close()
+    return parser.found
 
 
 # ---------------------------------------------------------------------------
@@ -153,20 +190,30 @@ def _svg_markup(svg_text: str, figure_id: str, alt: str) -> str:
     s = re.sub(r"<!--.*?-->", "", s, flags=re.S)
     s = re.sub(r"<script\b.*?</script\s*>", "", s, flags=re.I | re.S)
     s = re.sub(r"\s+on[a-z]+\s*=\s*(\"[^\"]*\"|'[^']*')", "", s, flags=re.I)
-    m = re.search(r"<svg\b[^>]*>", s, re.I)
-    if not m:
+    extent = first_tag(s, "svg")
+    if extent is None:
         raise SyncError(f"figure {figure_id!r}: SVG has no <svg> root element")
-    root = m.group(0)
-    viewbox = _attr(root, "viewBox")
-    width, height = _attr(root, "width"), _attr(root, "height")
-    if viewbox is None and width and height:
-        w, h = (re.match(r"[\d.]+", v) for v in (width, height))
+    name, attrs = tag_attrs(s[extent[0]:extent[1]])
+    values = {k.lower(): v for k, v in attrs}
+    updates: dict[str, str | None] = {"role": "img", "aria-label": alt}
+    if values.get("viewbox") is None and values.get("width") and values.get("height"):
+        w, h = (re.match(r"[\d.]+", values[k]) for k in ("width", "height"))
         if w and h:
-            root = _set_attr(root, "viewBox", f"0 0 {w.group(0)} {h.group(0)}")
-    root = re.sub(r"\s(width|height)\s*=\s*(\"[^\"]*\"|'[^']*')", "", root)
-    root = _set_attr(root, "role", "img")
-    root = _set_attr(root, "aria-label", alt)
-    s = s[: m.start()] + root + s[m.end():]
+            updates["viewBox"] = f"0 0 {w.group(0)} {h.group(0)}"
+    # An inlined <style> applies to the whole page, so scope its rules to this
+    # figure: matplotlib's "*{stroke-linecap:butt}" must not restyle the deck
+    # icons, and two exports that both define .cls-1 must not recolor each other.
+    scope = "sci-svg-" + _SCOPE_RE.sub("-", figure_id)
+    if re.search(r"<style\b", s, re.I):
+        existing = values.get("class")
+        updates["class"] = f"{existing} {scope}".strip() if existing else scope
+    root = _build_tag(name, attrs, updates, drop=("width", "height"))
+    s = s[: extent[0]] + root + s[extent[1]:]
+    s = re.sub(
+        r"(<style\b[^>]*>)(.*?)(</style\s*>)",
+        lambda mm: mm.group(1) + scope_css(mm.group(2), "." + scope) + mm.group(3),
+        s, flags=re.I | re.S,
+    )
 
     # Namespace every id so several inlined figures (and their copies in the
     # slides) cannot resolve each other's clip paths, gradients, or markers.
@@ -189,6 +236,53 @@ def _svg_markup(svg_text: str, figure_id: str, alt: str) -> str:
             s,
         )
     return s.strip()
+
+
+def _split_selectors(selector: str) -> list[str]:
+    """Split a selector list on top-level commas (not those inside ``:is(a, b)``)."""
+    parts, depth, cur = [], 0, []
+    for ch in selector:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def scope_css(css: str, scope: str) -> str:
+    """Prefix every selector in ``css`` with ``scope`` (a class selector).
+    ``@media`` / ``@supports`` blocks are scoped recursively; other at-rules
+    (``@font-face``, ``@keyframes``, ``@import``) pass through unchanged."""
+    out, i, n = [], 0, len(css)
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    n = len(css)
+    while i < n:
+        brace = css.find("{", i)
+        if brace < 0:
+            out.append(css[i:])
+            break
+        head = css[i:brace].strip()
+        depth, j = 1, brace + 1
+        while j < n and depth:
+            depth += {"{": 1, "}": -1}.get(css[j], 0)
+            j += 1
+        body = css[brace + 1:j - 1]
+        if head.startswith("@"):
+            inner = scope_css(body, scope) if re.match(r"@(media|supports)\b", head, re.I) else body
+            out.append(f"{head}{{{inner}}}")
+        else:
+            prefixed = ", ".join(
+                (scope if sel in (":root", "svg") else f"{scope} {sel}") for sel in _split_selectors(head)
+            )
+            out.append(f"{prefixed}{{{body}}}")
+        i = j
+    return "".join(out)
 
 
 def _pdftocairo(path: Path, figure_id: str, mode: str) -> bytes:
@@ -239,55 +333,73 @@ def figure_markup(path: Path, figure_id: str, alt: str) -> str:
     )
 
 
-_LEADING_ZERO_RE = re.compile(r"^[+-]?0\d")
+# One strict notion of "a number in a data file": digits with an optional
+# sign, decimal point, and exponent. Python's int()/float()/Decimal() also
+# accept "1_1", " 7 ", "infinity" — spellings that in a CSV are labels.
+_NUMBER_RE = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+_INTEGER_RE = re.compile(r"[+-]?\d+")
+_LEADING_ZERO_RE = re.compile(r"[+-]?0\d")
+_NON_FINITE = {"nan", "+nan", "-nan", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity"}
 
 
-def _as_number(cell: str):
-    """The cell as int/float, or None if it is not a number. NaN and infinity
-    come back as floats on purpose: the JSON encoder then rejects them with a
-    SyncError instead of the chart silently plotting them."""
-    try:
-        return int(cell)
-    except ValueError:
-        pass
-    try:
-        return float(cell)
-    except ValueError:
-        return None
+def _is_number(cell: str) -> bool:
+    return bool(_NUMBER_RE.fullmatch(cell)) and not _LEADING_ZERO_RE.match(cell)
 
 
-def _typed_columns(rows: list[list[str]]) -> list[bool]:
-    """A column is numeric only if every non-empty cell is a number and none
-    is spelled like an identifier ("007"); otherwise the whole column keeps
-    its CSV spelling, so sample labels are never rewritten."""
-    width = max((len(r) for r in rows), default=0)
-    numeric = []
-    for j in range(width):
+def _column_types(header: list[str], rows: list[list[str]], data_id: str, name: str) -> list[str]:
+    """Type every column as a whole: "int", "float", or "text".
+
+    A column is numeric only if every non-empty cell is a strict number (so
+    "007" or "1_1" make the whole column text and labels keep their
+    spelling). A numeric column holding NaN or infinity is an error: JSON
+    cannot carry it and a chart would plot it silently."""
+    types = []
+    for j in range(len(header)):
         cells = [r[j] for r in rows if j < len(r) and r[j] != ""]
-        numeric.append(bool(cells) and all(
-            _as_number(c) is not None and not _LEADING_ZERO_RE.match(c.strip()) for c in cells
-        ))
-    return numeric
+        numeric = [c for c in cells if _is_number(c)]
+        odd = [c for c in cells if not _is_number(c)]
+        if cells and odd and all(c.lower() in _NON_FINITE for c in odd) and numeric:
+            raise SyncError(
+                f"data {data_id!r}: column {header[j]!r} of {name} holds a value that is not finite "
+                f"({odd[0]!r}); write missing values as empty cells"
+            )
+        if not cells or odd:
+            types.append("text")
+        else:
+            types.append("int" if all(_INTEGER_RE.fullmatch(c) for c in cells) else "float")
+    return types
+
+
+def _read_rows(path: Path, data_id: str) -> tuple[list[str], list[list[str]]]:
+    suffix = path.suffix.lower()
+    if suffix not in (".csv", ".tsv"):
+        raise SyncError(f"table {data_id!r}: registered tables are generated from .csv or .tsv, not {suffix!r}")
+    text = path.read_text(encoding="utf-8-sig")  # tolerate the BOM Excel writes
+    reader = csv.reader(io.StringIO(text), delimiter="\t" if suffix == ".tsv" else ",")
+    rows = [r for r in reader if r]
+    if not rows:
+        raise SyncError(f"data {data_id!r}: {path.name} is empty")
+    return rows[0], rows[1:]
 
 
 def data_payload(path: Path, data_id: str) -> str:
     suffix = path.suffix.lower()
-    text = path.read_text(encoding="utf-8")
     if suffix == ".json":
         try:
-            obj = json.loads(text)
+            obj = json.loads(path.read_text(encoding="utf-8-sig"))
         except json.JSONDecodeError as exc:
             raise SyncError(f"data {data_id!r}: invalid JSON in {path.name}: {exc}") from exc
     elif suffix in (".csv", ".tsv"):
-        reader = csv.reader(io.StringIO(text), delimiter="\t" if suffix == ".tsv" else ",")
-        rows = [r for r in reader if r]
-        if not rows:
-            raise SyncError(f"data {data_id!r}: {path.name} is empty")
-        body = rows[1:]
-        numeric = _typed_columns(body)
-        obj = {"columns": rows[0], "rows": [
-            [None if c == "" else (_as_number(c) if numeric[j] else c) for j, c in enumerate(r)]
-            for r in body
+        header, body = _read_rows(path, data_id)
+        types = _column_types(header, body, data_id, path.name)
+
+        def cell(c: str, t: str):
+            if c == "":
+                return None
+            return int(c) if t == "int" else float(c) if t == "float" else c
+
+        obj = {"columns": header, "rows": [
+            [cell(c, types[j] if j < len(types) else "text") for j, c in enumerate(r)] for r in body
         ]}
     else:
         raise SyncError(f"data {data_id!r}: unsupported data type {suffix!r} (use .json, .csv, or .tsv)")
@@ -302,39 +414,20 @@ def data_payload(path: Path, data_id: str) -> str:
     return payload.replace("</", "<\\/").replace("<!--", "<\\u0021--")
 
 
-def _read_rows(path: Path, data_id: str) -> tuple[list[str], list[list[str]]]:
-    suffix = path.suffix.lower()
-    if suffix not in (".csv", ".tsv"):
-        raise SyncError(f"table {data_id!r}: registered tables are generated from .csv or .tsv, not {suffix!r}")
-    reader = csv.reader(io.StringIO(path.read_text(encoding="utf-8")), delimiter="\t" if suffix == ".tsv" else ",")
-    rows = [r for r in reader if r]
-    if not rows:
-        raise SyncError(f"table {data_id!r}: {path.name} is empty")
-    return rows[0], rows[1:]
-
-
 def _format_cell(cell: str, precision: int | None) -> tuple[str, bool]:
-    """Return (text, is_numeric). Numeric cells keep their CSV spelling unless
-    ``precision`` asks for half-up rounding."""
-    try:
-        d = Decimal(cell.strip())
-    except InvalidOperation:
-        return cell, False
-    if not d.is_finite():
+    """(text, is_numeric) for one cell of a numeric column. ``precision``
+    rounds with the value-display rule (render_report_values_tex)."""
+    if not _is_number(cell):
         return cell, False
     if precision is None:
-        return cell.strip(), True
-    with localcontext() as ctx:
-        ctx.prec = max(28, d.adjusted() + precision + 5)
-        text = str(d.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_HALF_UP))
-    if text.startswith("-") and not text.strip("-0."):
-        text = text[1:]  # "-0.00" → "0.00", as the value display does
-    return text, True
+        return cell, True
+    return round_half_up(cell, precision), True
 
 
-def table_rows(path: Path, data_id: str, tag: str) -> str:
+def table_rows(path: Path, data_id: str, attrs: dict[str, str | None]) -> str:
     header, rows = _read_rows(path, data_id)
-    wanted = _attr(tag, "data-columns")
+    types = _column_types(header, rows, data_id, path.name)
+    wanted = attrs.get("data-columns")
     if wanted:
         names = [c.strip() for c in wanted.split(",") if c.strip()]
         missing = [c for c in names if c not in header]
@@ -343,7 +436,7 @@ def table_rows(path: Path, data_id: str, tag: str) -> str:
         idx = [header.index(c) for c in names]
     else:
         idx = list(range(len(header)))
-    raw_precision = _attr(tag, "data-precision")
+    raw_precision = attrs.get("data-precision")
     if raw_precision is not None and not raw_precision.strip().isdigit():
         raise SyncError(f"table {data_id!r}: data-precision must be a non-negative integer")
     precision = int(raw_precision) if raw_precision is not None else None
@@ -354,10 +447,13 @@ def table_rows(path: Path, data_id: str, tag: str) -> str:
             cell = r[i] if i < len(r) else ""
             if cell == "":
                 cells.append("<td></td>")
-                continue
-            text, numeric = _format_cell(cell, precision)
-            cls = ' class="num"' if numeric else ""
-            cells.append(f"<td{cls}>{html.escape(text, quote=False)}</td>")
+            elif types[i] == "text":
+                cells.append(f"<td>{html.escape(cell, quote=False)}</td>")
+            else:
+                # data-precision rounds fractional columns only: integer
+                # columns (counts, replicate numbers, years) keep their spelling.
+                text, _ = _format_cell(cell, precision if types[i] == "float" else None)
+                cells.append(f'<td class="num">{html.escape(text, quote=False)}</td>')
         out.append("<tr>" + "".join(cells) + "</tr>")
     return "\n".join(out)
 
@@ -372,13 +468,7 @@ def _content_sha(text: str) -> str:
 
 
 def _uncommented(source: str) -> str:
-    """``source`` with HTML comments blanked to spaces (same length, newlines kept).
-
-    Scanning happens on this view so example markup inside comments — the
-    template's guidance shows figure and data snippets — is never treated as
-    live. The ``sci-media`` markers are themselves comments, so they are
-    located in the original source, within a live figure's span.
-    """
+    """``source`` with HTML comments blanked to spaces (same length, newlines kept)."""
     return re.sub(r"<!--.*?-->", lambda m: re.sub(r"[^\n]", " ", m.group(0)), source, flags=re.S)
 
 
@@ -388,41 +478,89 @@ class Region:
     payload, or a registered table's rows."""
     kind: str                 # "figure" | "data" | "table"
     item_id: str
-    tag: str                  # the opening tag, as written
+    tagname: str
+    attrs: list[tuple[str, str | None]]
     tag_start: int
     tag_end: int
     content_start: int | None  # None: the figure/table has no markers
     content_end: int | None
 
+    def attr(self, name: str) -> str | None:
+        return next((v for k, v in self.attrs if k == name), None)
 
-_KINDS = (
-    # kind, opening-tag regex, id attribute, closing-tag regex, content-marker regex
-    ("figure", _FIGURE_OPEN_RE, "data-sci-fig", _FIGURE_CLOSE_RE, _MEDIA_RE),
-    ("table", _TABLE_OPEN_RE, "data-sci-table", _TABLE_CLOSE_RE, _ROWS_RE),
-)
+
+_ID_ATTR = {"figure": "data-sci-fig", "table": "data-sci-table", "script": "data-sci-data"}
+_MARKER = {"figure": "sci-media", "table": "sci-rows"}
+
+
+class _RegionParser(HTMLParser):
+    """Locates regions with the same tokenizer browsers approximate: quoted
+    ``>`` in attribute values, comments, and markup inside script strings are
+    all handled by the parser rather than by pattern matching."""
+
+    def __init__(self, source: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.source = source
+        self.line_starts = [0] + [m.end() for m in re.finditer("\n", source)]
+        self.open: list[dict] = []
+        self.comments: list[tuple[int, int, str]] = []
+        self.found: list[Region] = []
+
+    def _offset(self) -> int:
+        line, col = self.getpos()
+        return self.line_starts[line - 1] + col
+
+    def handle_starttag(self, tag, attrs):
+        start = self._offset()
+        raw = self.get_starttag_text() or ""
+        end = start + len(raw)
+        attr = _ID_ATTR.get(tag)
+        item = next((v for k, v in attrs if k == attr), None) if attr else None
+        if item:
+            _, attrs = tag_attrs(raw)  # keep the author's attribute spelling
+        self.open.append({"tag": tag, "attrs": attrs, "start": start, "end": end, "item": item})
+
+    def handle_startendtag(self, tag, attrs):
+        pass
+
+    def handle_comment(self, data):
+        start = self._offset()
+        self.comments.append((start, start + len(data) + 7, data.strip()))
+
+    def handle_endtag(self, tag):
+        close = self._offset()
+        for k in range(len(self.open) - 1, -1, -1):
+            if self.open[k]["tag"] == tag:
+                el = self.open[k]
+                del self.open[k:]
+                self._finish(el, close)
+                return
+
+    def _finish(self, el: dict, close: int) -> None:
+        if not el["item"]:
+            return
+        tag = el["tag"]
+        if tag == "script":
+            kind, lo, hi = "data", el["end"], close
+        else:
+            kind = tag
+            name = _MARKER[tag]
+            inside = [c for c in self.comments if el["end"] <= c[0] and c[1] <= close]
+            opening = next((c for c in inside if c[2] == name), None)
+            ending = next((c for c in inside if opening and c[0] >= opening[1] and c[2] == "/" + name), None)
+            lo, hi = (opening[1], ending[0]) if opening and ending else (None, None)
+        self.found.append(Region(kind, el["item"], tag, list(el["attrs"]), el["start"], el["end"], lo, hi))
 
 
 def regions(source: str) -> list[Region]:
-    """Every inlined region outside HTML comments, in document order."""
-    live = _uncommented(source)
-    found: list[Region] = []
-    for kind, open_re, attr, close_re, marker_re in _KINDS:
-        for m in open_re.finditer(live):
-            item_id = _attr(m.group(0), attr)
-            if not item_id:
-                continue
-            close = close_re.search(live, m.end())
-            markers = marker_re.search(source, m.end(), close.start() if close else len(source))
-            found.append(Region(kind, item_id, m.group(0), m.start(), m.end(),
-                                markers.end(1) if markers else None, markers.start(3) if markers else None))
-    for m in _SCRIPT_RE.finditer(live):
-        item_id = _attr(m.group(1), "data-sci-data")
-        if item_id:
-            found.append(Region("data", item_id, m.group(1), m.start(1), m.end(1), m.start(2), m.end(2)))
-    return sorted(found, key=lambda r: r.tag_start)
+    """Every inlined region outside comments and scripts, in document order."""
+    parser = _RegionParser(source)
+    parser.feed(source)
+    parser.close()
+    return sorted(parser.found, key=lambda r: r.tag_start)
 
 
-_MARKERS = {"figure": "<!-- sci-media --><!-- /sci-media -->", "table": "<!-- sci-rows --><!-- /sci-rows -->"}
+_MARKER_HINT = {"figure": "<!-- sci-media --><!-- /sci-media -->", "table": "<!-- sci-rows --><!-- /sci-rows -->"}
 
 
 def plan(source: str, manifest: dict, base: Path) -> list[Edit]:
@@ -433,21 +571,22 @@ def plan(source: str, manifest: dict, base: Path) -> list[Edit]:
     for r in regions(source):
         try:
             registry, section = (figures, "figures") if r.kind == "figure" else (data, "data")
-            attr = {"figure": "data-sci-fig", "table": "data-sci-table", "data": "data-sci-data"}[r.kind]
             entry = registry.get(r.item_id)
             if entry is None:
-                raise SyncError(f"{r.kind} {r.item_id!r}: {attr} id not in manifest {section}[*]")
+                raise SyncError(f"{r.kind} {r.item_id!r}: {_ID_ATTR[r.tagname]} id not in manifest {section}[*]")
             if r.content_start is None:
-                raise SyncError(f"{r.kind} {r.item_id!r}: no {_MARKERS[r.kind]} markers inside the {r.kind}")
+                raise SyncError(f"{r.kind} {r.item_id!r}: no {_MARKER_HINT[r.kind]} markers inside the {r.kind}")
             path = _checked_source(r.kind, r.item_id, entry, base)
             if r.kind == "figure":
-                content = figure_markup(path, r.item_id, _attr(r.tag, "data-alt") or "")
+                content = figure_markup(path, r.item_id, r.attr("data-alt") or "")
             elif r.kind == "table":
-                content = table_rows(path, r.item_id, r.tag)
+                content = table_rows(path, r.item_id, dict(r.attrs))
             else:
                 content = data_payload(path, r.item_id)
-            new_tag = _set_attr(r.tag, "data-sha256", entry["sha256"].lower())
-            new_tag = _set_attr(new_tag, "data-content-sha256", _content_sha(content))
+            new_tag = _build_tag(r.tagname, r.attrs, {
+                "data-sha256": entry["sha256"].lower(),
+                "data-content-sha256": _content_sha(content),
+            })
             edits.append(Edit(r.tag_start, r.tag_end, new_tag))
             edits.append(Edit(r.content_start, r.content_end, content))
         except SyncError as exc:

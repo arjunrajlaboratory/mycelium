@@ -110,6 +110,35 @@ def tex_escape(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def round_half_up(value: Any, precision: int) -> str:
+    """``value`` rounded half-up to ``precision`` decimal places, as a string.
+
+    The single rounding rule for rendered report values in this repository
+    (TeX macros here, registered HTML tables in sync_html_report.py) and the
+    mirror of scitexlintr's ``_display.derive_unit``: rounding happens on the
+    value's decimal spelling, so ``0.125`` → ``0.13`` where binary-float
+    formatting gives ``0.12``; ``-0.001`` → ``0.00`` (no negative zero); very
+    large magnitudes are exact. Non-finite values raise ``ValueError``.
+    """
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"cannot round a non-finite value ({value!r})")
+        d = Decimal(repr(value))
+    else:
+        try:
+            d = Decimal(str(value).strip())
+        except InvalidOperation as exc:
+            raise ValueError(f"not a number: {value!r}") from exc
+    if not d.is_finite():
+        raise ValueError(f"cannot round a non-finite value ({value!r})")
+    with localcontext() as ctx:
+        ctx.prec = max(28, d.adjusted() + precision + 5)
+        text = str(d.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_HALF_UP))
+    if text.startswith("-") and not text.strip("-0."):
+        text = text[1:]
+    return text
+
+
 def format_value(
     value: Any,
     *,
@@ -160,19 +189,9 @@ def format_value(
                 f"render_report_values_tex: unit={unit!r} requires a finite value, got {value!r}."
             )
         d = Decimal(repr(value)) if isinstance(value, float) else Decimal(value)
-        with localcontext() as ctx:
-            ctx.prec = max(28, d.adjusted() + precision + 5)
-            if unit == "percent":
-                d = d * 100
-            try:
-                text = str(d.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_HALF_UP))
-            except InvalidOperation as exc:
-                raise ValueError(
-                    f"render_report_values_tex: cannot render {value!r} at precision {precision}."
-                ) from exc
-        if text.startswith("-") and not text.strip("-0."):
-            text = text[1:]  # "-0.00" → "0.00"
-        return text + (r"\%" if unit == "percent" else "")
+        if unit == "percent":
+            d = d.scaleb(2)  # exact ×100 on the decimal form
+        return round_half_up(d, precision) + (r"\%" if unit == "percent" else "")
     if display is not None:
         if not isinstance(display, str):
             raise ValueError(

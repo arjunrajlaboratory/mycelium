@@ -131,16 +131,30 @@ _BLOCK = frozenset({"p", "div", "li", "ul", "ol", "section", "h1", "h2", "h3", "
 
 
 class _Builder(HTMLParser):
-    def __init__(self):
+    def __init__(self, source: str = ""):
         super().__init__(convert_charrefs=True)
         self.root = Node("#root", {}, 1, 1)
         self.stack = [self.root]
         self.styles: list[tuple[str, int, int]] = []
+        self.source = source
+        self.line_starts = [0] + [m.end() for m in re.finditer("\n", source)]
+        # Raw source extents of the first <style> and of the first runtime
+        # script, found by the parser (never by pattern matching, which a
+        # string or comment mentioning the tag would fool).
+        self.blocks: dict[str, tuple[int, int, int]] = {}
+        self._open_blocks: dict[str, int] = {}
+
+    def _offset(self) -> int:
+        line, col = self.getpos()
+        return self.line_starts[line - 1] + col if line - 1 < len(self.line_starts) else 0
 
     def handle_starttag(self, tag, attrs):
         line, col = self.getpos()
         node = Node(tag, {k: (v if v is not None else "") for k, v in attrs}, line, col + 1, self.stack[-1])
         self.stack[-1].children.append(node)
+        key = "style" if tag == "style" else "runtime" if tag == "script" and node.attrs.get("id") == "sci-report-runtime" else None
+        if key and key not in self.blocks and key not in self._open_blocks:
+            self._open_blocks[key] = self._offset()
         if tag not in VOID:
             self.stack.append(node)
 
@@ -150,6 +164,13 @@ class _Builder(HTMLParser):
         self.stack[-1].children.append(node)
 
     def handle_endtag(self, tag):
+        key = "style" if tag == "style" else "runtime" if tag == "script" else None
+        if key in self._open_blocks:
+            close = self._offset()
+            end = self.source.find(">", close) + 1
+            start = self._open_blocks.pop(key)
+            line = self.source.count("\n", 0, start) + 1
+            self.blocks[key] = (start, end, line)
         for i in range(len(self.stack) - 1, 0, -1):
             if self.stack[i].tag == tag:
                 del self.stack[i:]
@@ -166,14 +187,16 @@ def _norm(s: str) -> str:
     return " ".join(html.unescape(s).split())
 
 
-def _block(source: str, pattern: str) -> str | None:
-    """The first match of ``pattern`` outside HTML comments, as it appears in ``source``."""
-    m = re.search(pattern, _uncommented(source), re.S)
-    return source[m.start():m.end()] if m else None
+def _parse(source: str) -> _Builder:
+    builder = _Builder(source)
+    builder.feed(source)
+    builder.close()
+    return builder
 
 
-RUNTIME_RE = r'<script id="sci-report-runtime">.*?</script>'
-STYLE_RE = r"<style>.*?</style>"
+def _block_text(builder: _Builder, key: str) -> str | None:
+    extent = builder.blocks.get(key)
+    return builder.source[extent[0]:extent[1]] if extent else None
 
 
 # ---------------------------------------------------------------------------
@@ -219,9 +242,7 @@ def find_template(report: Path) -> Path:
 
 def check_source(source: str, filename: str = "<report>", *, min_slides: int = 10, max_slides: int = 20,
                  template: Path | None = TEMPLATE, report_only: bool = False) -> list[Finding]:
-    builder = _Builder()
-    builder.feed(source)
-    builder.close()
+    builder = _parse(source)
     root = builder.root
     live = _uncommented(source)
     findings: list[Finding] = []
@@ -278,14 +299,14 @@ def check_source(source: str, filename: str = "<report>", *, min_slides: int = 1
         emit("file-size", "warning", (1, 1), f"report is {size / 1048576:.1f} MB; above {MAX_FILE_BYTES // 1048576} MB it loads slowly and may not upload — register smaller figure exports")
 
     # -- runtime -------------------------------------------------------------
-    runtime = _block(source, RUNTIME_RE)
+    runtime = _block_text(builder, "runtime")
     if runtime is None:
         emit("runtime", "error", (1, 1), 'the <script id="sci-report-runtime"> block is missing; copy it from the template')
     elif template is not None and template.is_file():
-        tsrc = template.read_text(encoding="utf-8")
-        if runtime != _block(tsrc, RUNTIME_RE) or _block(source, STYLE_RE) != _block(tsrc, STYLE_RE):
-            line = source.count("\n", 0, re.search(RUNTIME_RE, live, re.S).start()) + 1
-            emit("runtime", "warning", (line, 1), "the runtime or style block differs from the bundled template; re-copy both from report-template.html")
+        tmpl = _parse(template.read_text(encoding="utf-8"))
+        if runtime != _block_text(tmpl, "runtime") or _block_text(builder, "style") != _block_text(tmpl, "style"):
+            emit("runtime", "warning", (builder.blocks["runtime"][2], 1),
+                 "the runtime or style block differs from the bundled template; re-copy both from report-template.html")
 
     # -- deck ----------------------------------------------------------------
     if report_only:
@@ -296,7 +317,8 @@ def check_source(source: str, filename: str = "<report>", *, min_slides: int = 1
         emit("slide-count", "error", (1, 1), 'no <div id="deck"> slide deck found')
         return _sorted(findings)
     in_deck = lambda n: n is deck or n.has_ancestor(lambda p: p is deck)  # noqa: E731
-    slides = [n for n in deck.iter() if n.tag == "section" and "slide" in n.classes()]
+    # Whatever element carries class="slide" — the runtime's own selector.
+    slides = [n for n in deck.iter() if "slide" in n.classes()]
     if not (min_slides <= len(slides) <= max_slides):
         emit("slide-count", "error", deck, f"deck has {len(slides)} slide(s); scope it to {min_slides}–{max_slides} (title slide included)")
     for i, s in enumerate(slides):
@@ -351,9 +373,7 @@ def main_text_stats(source: str) -> dict:
     """Word and figure counts for the main text — the HTML stand-in for the
     TeX shape budget's page count. Excludes the supplement, provenance, the
     footer, the deck, figure media, and code."""
-    builder = _Builder()
-    builder.feed(source)
-    builder.close()
+    builder = _parse(source)
     main = next((n for n in builder.root.iter() if n.tag == "main"), None)
     if main is None:
         return {"words": 0, "figures": 0}

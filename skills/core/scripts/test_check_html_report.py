@@ -274,3 +274,17 @@ def test_abbreviation_does_not_hide_a_second_sentence(tmp_path):
     assert "slide-title" in codes(check(tmp_path, build(slides=slides)), "error")
     ok = [slide(i) for i in range(10)] + [slide(10, title="Growth slows at high doses, e.g. 5 µM and above.")]
     assert "slide-title" not in codes(check(tmp_path, build(slides=ok)))
+
+
+def test_runtime_block_is_found_by_parsing_not_pattern_matching(tmp_path):
+    # A script whose string mentions the runtime's opening tag must not be
+    # mistaken for the runtime (a regex would match from the string onward).
+    decoy = "<script>const t = '<script id=\"sci-report-runtime\">';</script>"
+    text = build(ABSTRACT=f"<p>Abstract.</p>{decoy}")
+    assert "runtime" not in codes(check(tmp_path, text))
+
+
+def test_any_element_with_class_slide_is_a_slide(tmp_path):
+    slides = [slide(i) for i in range(10)] + ['<div class="slide" data-source="#result-growth"><p>No title.</p></div>']
+    findings = check(tmp_path, build(slides=slides))
+    assert "slide-title" in codes(findings, "error")
