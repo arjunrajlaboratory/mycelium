@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import math
 import subprocess
 import sys
@@ -347,6 +348,9 @@ def build(out_dir: Path = HERE) -> Path:
     fill = dict(FILL, SLIDES=slides_html())
     for key, value in fill.items():
         text = text.replace(f"%%{key}%%", value.strip())
+    # A finished report drops the template's guidance comments (the docs say
+    # to); only the sync markers stay.
+    text = re.sub(r"[ \t]*<!--(?!\s*/?sci-(?:media|rows)\s*-->).*?-->[ \t]*\n?", "", text, flags=re.S)
     report.write_text(text, encoding="utf-8")
     if not SYNC.is_file():
         raise SystemExit(

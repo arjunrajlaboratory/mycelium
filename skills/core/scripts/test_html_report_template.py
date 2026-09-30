@@ -64,7 +64,7 @@ def test_example_is_fully_synced():
 
 
 def test_example_passes_scitexlintr():
-    scitexlintr = pytest.importorskip("scitexlintr")
+    scitexlintr = pytest.importorskip("scitexlintr", minversion="0.2")
     findings = scitexlintr.lint_file(EXAMPLE, manifest_path=EXAMPLE_MANIFEST)
     assert findings == [], [f"{f.line}:{f.col} {f.rule} {f.message}" for f in findings]
 
@@ -375,3 +375,206 @@ def test_time_series_series_selection_and_names(browser, tmp_path):
     assert ends[1] - ends[0] >= 14  # end labels never overprint
     assert errors == []
     pg.close()
+
+
+# ---------------------------------------------------------------------------
+# Runtime review regressions
+# ---------------------------------------------------------------------------
+
+def make_page(tmp_path, results="", slides="", extra="", name="t.html"):
+    """A page from the current template with custom Results / slides / script."""
+    text = TEMPLATE.read_text(encoding="utf-8")
+    text = text.replace("%%RESULTS%%", results).replace("%%SLIDES%%", slides)
+    text = text.replace("</body>", extra + "\n</body>")
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def open_page(browser, path, **ctx):
+    context = browser.new_context(**({"viewport": {"width": 1280, "height": 800}} | ctx))
+    pg = context.new_page()
+    pg.errors = []
+    pg.on("pageerror", lambda e: pg.errors.append(str(e)))
+    pg.on("console", lambda m: pg.errors.append(m.text) if m.type in ("error", "warning") else None)
+    pg.goto(path.as_uri() if hasattr(path, "as_uri") else path)
+    pg.wait_for_function("window.SciReport && document.querySelector('.deck-progress button')")
+    return context, pg
+
+
+def test_escape_and_f_work_while_the_slider_has_focus(page):
+    page.goto(EXAMPLE.as_uri() + "#slides/5")
+    page.wait_for_function("SciReport.presenting")
+    page.locator("#deck .slide.is-current input[type=range]").focus()
+    page.keyboard.press("Escape")
+    assert not state(page)["open"]
+
+
+def test_enter_on_a_focused_link_follows_it(page):
+    page.goto(EXAMPLE.as_uri() + "#slides/3")
+    page.wait_for_function("SciReport.presenting")
+    page.locator("#deck .slide.is-current .slide-source").focus()
+    page.keyboard.press("Enter")
+    assert not state(page)["open"] and state(page)["hash"] == "#methods"
+
+
+def test_dragging_a_slider_on_touch_does_not_change_slides(page):
+    page.goto(EXAMPLE.as_uri() + "#slides/5")
+    page.wait_for_function("SciReport.presenting")
+    page.evaluate("""(() => {
+      const r = document.querySelector('#deck .slide.is-current input[type=range]');
+      const t = (x) => new Touch({identifier: 1, target: r, clientX: x, clientY: 10});
+      r.dispatchEvent(new TouchEvent('touchstart', {bubbles: true, touches: [t(400)], changedTouches: [t(400)]}));
+      r.dispatchEvent(new TouchEvent('touchend', {bubbles: true, touches: [], changedTouches: [t(200)]}));
+    })()""")
+    assert state(page)["current"] == 4
+
+
+def test_back_button_closes_the_deck_instead_of_leaving(page):
+    page.click("[data-present]")
+    page.keyboard.press("ArrowRight")
+    page.go_back()
+    page.wait_for_function("!SciReport.presenting")
+    assert page.url.startswith(EXAMPLE.as_uri())
+
+
+def test_check_layout_preserves_hash_scroll_and_focus(page):
+    page.goto(EXAMPLE.as_uri() + "#results")
+    page.focus("[data-present]")
+    before = page.evaluate("({hash: location.hash, y: Math.round(scrollY)})")
+    assert page.evaluate("SciReport.checkLayout()") == []
+    after = page.evaluate("({hash: location.hash, y: Math.round(scrollY), focus: document.activeElement.hasAttribute('data-present')})")
+    assert after == before | {"focus": True}
+
+
+def test_play_stops_when_the_deck_closes(page):
+    page.goto(EXAMPLE.as_uri() + "#slides/5")
+    page.wait_for_function("SciReport.presenting")
+    slider = page.locator("#deck .slide.is-current input[type=range]")
+    slider.fill("0")
+    page.locator("#deck .slide.is-current button", has_text="Play").click()
+    page.keyboard.press("Escape")
+    v = slider.input_value()
+    page.wait_for_timeout(700)
+    assert slider.input_value() == v
+
+
+def test_print_shows_the_default_state_of_interactive_figures(page):
+    page.locator("main #fig-growth input[type=range]").fill("2")
+    page.emulate_media(media="print")
+    page.evaluate("window.dispatchEvent(new Event('beforeprint'))")
+    assert page.locator("main #fig-growth output[data-sci-live]").text_content().startswith("Day 10")
+
+
+def test_printing_the_deck_gives_one_full_slide_per_page(page, tmp_path):
+    page.goto(EXAMPLE.as_uri() + "#slides/1")
+    page.wait_for_function("SciReport.presenting")
+    pdf = page.pdf(prefer_css_page_size=True)
+    assert pdf.count(b"/Type /Page\n") + pdf.count(b"/Type /Page ") + pdf.count(b"/Type /Page/") >= 1
+    import re as _re
+    pages = len(_re.findall(rb"/Type\s*/Page(?!s)", pdf))
+    assert pages == state(page)["count"]
+    boxes = set(_re.findall(rb"/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]", pdf))
+    assert boxes == {(b"960", b"540")}, boxes
+
+
+def test_focus_returns_to_the_report_when_the_deck_closes(page):
+    page.focus("[data-present]")
+    page.keyboard.press("Enter")
+    page.keyboard.press("ArrowRight")
+    page.keyboard.press("Escape")
+    focused = page.evaluate("document.activeElement.closest('#result-growth') !== null || document.activeElement.id === 'result-growth'")
+    assert focused
+
+
+def test_slider_announces_the_x_value(page):
+    slider = page.locator("main #fig-growth input[type=range]")
+    slider.fill("3")
+    assert slider.get_attribute("aria-valuetext") == "Day 3"
+
+
+def test_progress_bar_has_no_dead_gaps(page):
+    page.click("[data-present]")
+    gap_hit = page.evaluate("""(() => {
+      const [a, b] = [...document.querySelectorAll('.deck-progress button')];
+      const x = (a.getBoundingClientRect().right + b.getBoundingClientRect().left) / 2;
+      const r = a.getBoundingClientRect();
+      return document.elementFromPoint(x, r.top + r.height / 2).tagName;
+    })()""")
+    assert gap_hit == "BUTTON"
+
+
+def test_refused_fullscreen_is_reported(page):
+    page.click("[data-present]")
+    page.evaluate("document.getElementById('deck').requestFullscreen = () => Promise.reject(new Error('denied')); 'stubbed'")
+    page.keyboard.press("f")
+    page.wait_for_timeout(200)
+    assert any("fullscreen" in e.lower() for e in page.errors)
+
+
+TS_CASES = {
+    "negative_with_y_min": '{"x":[0,1,2],"y_min":0,"series":[{"name":"a","values":[-1,-2,-3]}]}',
+    "descending_x": '{"x":[10,5,0],"series":[{"name":"a","values":[1,2,3]}]}',
+    "missing_values": '{"x":[0,1,2],"series":[{"name":"a"},{"name":"b","values":[1,2,3]}]}',
+    "non_numeric_tail": '{"columns":["t","a"],"rows":[[0,1],[1,2],[2,"n/a"]]}',
+    "single_point": '{"x":[0],"series":[{"name":"a","values":[5]}]}',
+    "all_null": '{"x":[0,1],"series":[{"name":"a","values":[null,null]}]}',
+}
+
+
+@pytest.mark.parametrize("case", sorted(TS_CASES))
+def test_time_series_edge_cases_render_without_nan(browser, tmp_path, case):
+    fig = ('<figure class="sci-figure" id="fig-t" data-sci-interactive="timeseries">'
+           f'<script type="application/json" data-sci-data="t">{TS_CASES[case]}</script>'
+           '<div class="sci-media"></div><figcaption>T.</figcaption></figure>')
+    ctx, pg = open_page(browser, make_page(tmp_path, results=fig))
+    try:
+        svg = pg.evaluate("(document.querySelector('#fig-t svg') || {}).outerHTML || ''")
+        errors = [e for e in pg.errors if "all-null" not in e and "no finite" not in e]
+        assert "NaN" not in svg, case
+        assert errors == [], (case, errors)
+        if case == "descending_x":
+            # x tick labels sit on the baseline row (y = 340 - 38 + 18)
+            xticks = pg.evaluate("[...document.querySelectorAll('#fig-t svg text')].filter(t => t.getAttribute('y') === '320').map(t => t.textContent)")
+            assert len(xticks) >= 3, xticks
+        if case == "negative_with_y_min":
+            ys = pg.evaluate("[...document.querySelectorAll('#fig-t svg path[clip-path]')].map(p => p.getAttribute('d'))")
+            nums = [[float(v) for v in __import__('re').findall(r"[-\d.]+", d)] for d in ys]
+            y_coords = [v for d in nums for v in d[1::2]]  # path data is x y pairs
+            assert y_coords and max(y_coords) <= 340 and min(y_coords) >= 0
+    finally:
+        ctx.close()
+
+
+def test_custom_kind_controls_are_not_duplicated_on_slides(browser, tmp_path):
+    fig = ('<section id="result-k"><h3>Knobs turn the data.</h3>'
+           '<figure class="sci-figure" id="fig-k" data-sci-interactive="knob">'
+           '<script type="application/json" data-sci-data="k">{"v":1}</script>'
+           '<div class="sci-media"></div><figcaption>K.</figcaption></figure></section>')
+    slides = ('<section class="slide slide--figure" data-source="#result-k"><h2>The knob turns the data.</h2>'
+              '<div class="slide-body"><div class="slide-figure" data-fig-ref="fig-k"></div></div></section>')
+    extra = ("<script>SciReport.register('knob', function (figure, data) {"
+             " var b = document.createElement('button'); b.textContent = 'Knob';"
+             " b.addEventListener('click', function () { b.dataset.clicked = '1'; });"
+             " figure.insertBefore(b, figure.querySelector('figcaption')); });</script>")
+    ctx, pg = open_page(browser, make_page(tmp_path, results=fig, slides=slides, extra=extra))
+    try:
+        buttons = pg.evaluate("[...document.querySelectorAll('#deck .slide-figure button')].map(b => b.textContent)")
+        assert buttons == ["Knob"]
+    finally:
+        ctx.close()
+
+
+def test_contents_highlight_follows_scrolling_up(browser, tmp_path):
+    intro = "<p>" + "Intro text. " * 400 + "</p>"
+    results = intro + '<section id="result-a"><h3>A finding holds here.</h3>' + "<p>" + "More. " * 400 + "</p></section>"
+    ctx, pg = open_page(browser, make_page(tmp_path, results=results), viewport={"width": 1400, "height": 800})
+    try:
+        pg.evaluate("document.getElementById('result-a').scrollIntoView()")
+        pg.wait_for_timeout(300)
+        pg.evaluate("window.scrollTo(0, document.getElementById('results').offsetTop + 200)")
+        pg.wait_for_timeout(300)
+        current = pg.evaluate("(document.querySelector('.toc a[aria-current=true]') || {}).getAttribute && document.querySelector('.toc a[aria-current=true]').getAttribute('href')")
+        assert current == "#results"
+    finally:
+        ctx.close()

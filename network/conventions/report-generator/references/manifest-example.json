@@ -226,28 +226,28 @@
   "figures": [
     {
       "id": "clone_recovery_overview",
-      "path": "outputs/figures/clone_recovery_overview.pdf",
+      "path": "../outputs/figures/clone_recovery_overview.pdf",
       "sha256": "a3f2d8e91b4c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e",
       "caption_seed": "Adjusted Rand index between inferred clones and the 27-SNP legacy panel, for our pipeline (top-5 modules) and the production baseline.",
       "appears_in_sections": ["results.clone_recovery"]
     },
     {
       "id": "volcano_de",
-      "path": "outputs/figures/volcano_de.pdf",
+      "path": "../outputs/figures/volcano_de.pdf",
       "sha256": "b4e3c9d2a5f7d8e9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3",
       "caption_seed": "Volcano plot of differential expression between c1 (proliferative) and c4 (quiescent) clones. Each point is a gene; x-axis log2 fold change, y-axis -log10 adjusted p-value. Red points cross both thresholds (padj < 0.05, |log2FC| > 1).",
       "appears_in_sections": ["results.de"]
     },
     {
       "id": "nfkb_pathway_heatmap",
-      "path": "outputs/figures/nfkb_pathway_heatmap.pdf",
+      "path": "../outputs/figures/nfkb_pathway_heatmap.pdf",
       "sha256": "c5d4e0a1b6c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4",
       "caption_seed": "Expression of NF-kB pathway genes (23 of 87 pathway members differentially expressed) across the five inferred clones. Hierarchical clustering of cells groups c1 and c2 by shared upregulation.",
       "appears_in_sections": ["results.pathway"]
     },
     {
       "id": "worked_example_snp_score",
-      "path": "outputs/tables/worked_example_c017.csv",
+      "path": "../outputs/tables/worked_example_c017.csv",
       "sha256": "d6e5f1b2a3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0",
       "caption_seed": "Worked example: cell c_017's per-clone BCLRT score, showing how raw N and Y counts at three SNPs feed into the aggregate rank. The full ranking aggregates over all 1,231 SNPs.",
       "appears_in_sections": ["results.headline"],
@@ -255,7 +255,7 @@
     },
     {
       "id": "supplement_threshold_sensitivity",
-      "path": "outputs/figures/supplementary/threshold_sensitivity_pvalue.pdf",
+      "path": "../outputs/figures/supplementary/threshold_sensitivity_pvalue.pdf",
       "sha256": "e7f6a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1",
       "caption_seed": "Number of significant genes vs. adjusted p-value threshold across the range 0.01-0.10. Dashed red line indicates the chosen threshold (0.05); the result is stable across 0.03-0.07.",
       "appears_in_sections": ["supplement.S4"]

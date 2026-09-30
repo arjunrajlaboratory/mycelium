@@ -1,32 +1,4 @@
 <!doctype html>
-<!--
-  Mycelium Report Template — HTML (report + companion slides, one file)
-  =============================================================================
-  One self-contained file with two modes:
-
-    * the long-form REPORT (default view), and
-    * the companion SLIDES (press "Present", or open report.html#slides/1).
-      Esc (or leaving fullscreen) returns to the report section the current
-      slide came from.
-
-  Copy to analysis/[name]/reports/[name]-report.html and replace every
-  %%…%% placeholder marker (check_html_report.py fails on any that remain).
-  Read html-conventions.md in this convention pack before drafting — it
-  defines the value / figure / data / slide contracts used below.
-
-  Numbers: every reportable value is a wrapper span whose text is the
-  rendered value, e.g. <span data-sci-val="n_samples">48</span>. Never type a
-  manifest value as bare text. `scitexlintr report.html --manifest=.manifest.json
-  --write` refreshes stale values; `sync_html_report.py` refreshes figures and
-  interactive data. Do not edit the <style> block or the
-  <script id="sci-report-runtime"> block per report — they are the shared
-  runtime and are replaced wholesale when the template is upgraded.
-
-  Shapes: this file is the OVERVIEW + SUPPLEMENT shape (default).
-    * OVERVIEW: delete the <section id="supplement"> block.
-    * COMPREHENSIVE: move the supplement's methods detail into Methods and
-      delete the supplement heading.
--->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -282,8 +254,9 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
 }
 .deck-bar button:hover { background: #262624; color: #fff; }
 .deck-bar svg { width: 18px; height: 18px; }
-.deck-progress { flex: 1; display: flex; gap: 3px; align-items: center; height: 100%; }
-.deck-progress button { flex: 1; height: 16px; width: auto; border-radius: 0; padding: 0; display: flex; align-items: center; }
+/* Segments touch (no dead gaps between hit targets); the visible gap is padding. */
+.deck-progress { flex: 1; display: flex; gap: 0; align-items: center; height: 100%; }
+.deck-progress button { flex: 1; height: 24px; width: auto; border-radius: 0; padding: 0 1.5px; display: flex; align-items: center; }
 .deck-progress button::before { content: ""; display: block; width: 100%; height: 4px; border-radius: 2px; background: #3a3a37; }
 .deck-progress button.is-done::before { background: #86b6ef; }
 .deck-progress button:hover { background: transparent; }
@@ -322,9 +295,10 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   body.presenting > :not(#deck):not(script) { display: none !important; }
   body.presenting .deck { position: static; background: none; }
   body.presenting .deck-viewport { position: static; display: block; }
-  body.presenting .deck-stage { transform: none !important; width: auto; height: auto; }
+  body.presenting .deck-stage { position: static; left: auto; top: auto; transform: none !important; width: auto; height: auto; }
   body.presenting .slide { display: flex !important; position: relative; width: 13.333in; height: 7.5in; page: slide; break-after: page; border-radius: 0; animation: none; }
-  body.presenting .deck-bar { display: none; }
+  body.presenting .slide:last-child { break-after: auto; }
+  body.presenting .deck-bar, body.presenting .deck-live { display: none; }
 }
 </style>
 </head>
@@ -335,8 +309,6 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   <div class="masthead-inner">
     <p class="kicker">Worked example (synthetic data) · Analysis report</p>
     <h1>Drug X slows lung cancer cell growth without killing the cells</h1>
-    <!-- One or two sentences: the headline question and its answer, in plain
-         English. No acronyms, no bare numbers (wrap any value). -->
     <p class="dek">Does Drug X stop cultured lung cancer cells from growing? It slows them, in proportion to dose, but the treated cells stay alive.</p>
     <p class="byline"><span>Mycelium report generator</span><span><time>30 September 2026</time></span></p>
     <div class="actions">
@@ -357,19 +329,12 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   </nav>
 
   <main id="main">
-    <!-- Every <section> that a slide points at needs an id (slides carry
-         data-source="#that-id"). Headings under Results state findings, not
-         topics: "Evidence-first calling trades recall for precision", not
-         "Evidence-first calling". -->
 
     <section id="abstract" class="abstract">
       <h2>Abstract</h2>
       <div class="caveat"><span class="caveat-label">Synthetic example</span>
       <p>This report shows the HTML template filled in end to end. Its data were generated for the example and describe no real experiment.</p></div>
       <p>We asked whether Drug X slows the growth of cultured lung cancer cells, compared with cells given only the drug's solvent (vehicle). Cells were counted daily for ten days at two doses. At the high dose the growth rate fell by <span data-sci-val="drug-x.growth_rate_reduction_high">41.2%</span>, and the effect grew steadily with dose. The treated cells stayed alive: <span data-sci-val="drug-x.viability_high">93%</span> were viable at the end of the experiment, so the drug slows division rather than killing cells. All experiments used one cell line, so we do not yet know whether the effect generalizes.</p>
-      <!-- 150–250 words. Lead with the question, the comparison baseline,
-           and the primary metric (wrapped). State the single biggest caveat.
-           No undefined acronyms, citations, or figure references. -->
     </section>
 
     <section id="problem">
@@ -401,9 +366,6 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
         </div>
         <figcaption>Experimental design. Cells are seeded with vehicle or Drug X, counted daily, and each growth curve is summarized by its doubling time.</figcaption>
       </figure>
-      <!-- Overview + supplement shape: 4–6 sentences a non-specialist could
-           follow. Intuition before the technical name. Point to the
-           supplement for definitions and parameters. -->
     </section>
 
     <section id="results">
@@ -472,11 +434,6 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
         <h3>Treated cells stay alive, so Drug X is cytostatic</h3>
         <p>If the drug killed cells, the slower growth could simply reflect fewer living cells. It did not: at the high dose <span data-sci-val="drug-x.viability_high">93%</span> of cells were alive at the end of the experiment. Drug X slows division rather than killing cells.</p>
       </section>
-      <!-- One <section id="result-..."> per finding, each with an <h3> that
-           states the finding. Figure, table, and interactive-figure markup
-           is in html-conventions.md; refer to a figure in prose with an
-           a.xref link to its id (numbered at load). Delete these guidance
-           comments once the section is written. -->
     </section>
 
     <section id="conclusions">
@@ -489,7 +446,6 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     <section id="next-steps">
       <h2>Next steps</h2>
       <p>Repeat the growth assay across a panel of lung cancer cell lines, and test whether combining Drug X with a cytotoxic drug reduces cell number.</p>
-      <!-- Optional: delete this section if there are none. -->
     </section>
 
     <section id="provenance" class="provenance">
@@ -500,8 +456,6 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
         <dt>Dose response</dt><dd><code>scripts/03_dose_response.py</code> — sigmoid fit and bootstrap interval (synthetic example)</dd>
         <dt>Report build</dt><dd><code>build_example.py</code> regenerates this file from the template</dd>
       </dl>
-      <!-- A <dl> of every analysis script with a one-line description, the
-           manifest path, and the date values were last synced. -->
     </section>
 
     <section id="supplement" class="supplement">
@@ -541,9 +495,6 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
           </table>
         </div>
       </section>
-      <!-- <section id="supp-..."><h3>Title</h3>…</section> blocks, numbered
-           S1, S2, … automatically. Definitions, parameter rationale, the
-           failure-mode worked examples, and exhaustive tables go here. -->
     </section>
 
     <footer class="report-footer">
@@ -552,26 +503,6 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   </main>
 </div>
 
-<!-- ==========================================================================
-     SLIDES — 10 to 20 <section class="slide"> elements.
-     * The first slide is data-slide="title"; it is the only slide exempt
-       from the sentence-title rule.
-     * Every other slide has exactly one <h2> that is a complete sentence
-       (subject, verb, object; ends with a period; no colon). One slide, one
-       point. Read the titles alone in order: they must tell the story.
-     * Every other slide has data-source="#section-id" pointing at the report
-       section it summarizes; Esc returns there.
-     * At most one figure per slide, referenced — not copied — with
-       <div class="slide-figure" data-fig-ref="fig-id"></div>.
-     * About 40 words of body text at most. Values use the same wrapper
-       spans as the report.
-     Slide kinds (add the class to the section):
-       slide--figure     figure + optional <p class="takeaway">
-       slide--split      figure left, <div class="slide-text"> right
-       slide--statement  <div class="stat"><span data-sci-val=…>…</span></div>
-                         + <p class="stat-label">
-       slide--points     up to three short sentences in a <ul>
-     ========================================================================== -->
 <div id="deck" class="deck" hidden role="region" aria-label="Slides" aria-roledescription="slide deck">
   <div class="deck-viewport">
     <div class="deck-stage">
@@ -748,33 +679,52 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
         ol.appendChild(li);
       });
     });
-    if (!("IntersectionObserver" in window)) return;
-    var links = $$(".toc a");
-    var observer = new IntersectionObserver(function (entries) {
-      entries.forEach(function (e) {
-        if (!e.isIntersecting) return;
-        links.forEach(function (a) { a.setAttribute("aria-current", a.getAttribute("href") === "#" + e.target.id ? "true" : "false"); });
-      });
-    }, { rootMargin: "0px 0px -70% 0px" });
-    $$("main section[id]").forEach(function (s) { observer.observe(s); });
+    // Highlight the last section whose top has passed a line 30% down the
+    // viewport — recomputed from positions on every scroll, so scrolling up
+    // into a parent section's intro moves the highlight back.
+    var links = $$(".toc a"), sections = $$("main section[id]").filter(function (sec) {
+      return links.some(function (a) { return a.getAttribute("href") === "#" + sec.id; });
+    });
+    var pending = false;
+    function spy() {
+      pending = false;
+      var line = window.innerHeight * 0.3, active = null;
+      sections.forEach(function (sec) { if (sec.getBoundingClientRect().top <= line) active = sec; });
+      links.forEach(function (a) { a.setAttribute("aria-current", active && a.getAttribute("href") === "#" + active.id ? "true" : "false"); });
+    }
+    window.addEventListener("scroll", function () { if (!pending) { pending = true; requestAnimationFrame(spy); } }, { passive: true });
+    spy();
   }
 
   /* ---------------- SVG id isolation (for figures copied into slides) ---------------- */
 
+  var ID_LIST_ATTRS = ["aria-labelledby", "aria-describedby", "aria-controls", "aria-owns", "aria-flowto", "for"];
+
+  // Rename every id in a copied subtree and every reference to it: href="#x",
+  // url(#x) in any attribute, id lists (aria-labelledby, for), and #x / url(#x)
+  // in <style> text, so a copy never resolves to, or is styled by, the original.
   function isolateIds(root, suffix) {
     var map = {};
     $$("[id]", root).concat(root.id ? [root] : []).forEach(function (n) {
       var old = n.id; map[old] = old + suffix; n.id = old + suffix;
     });
     if (!Object.keys(map).length) return;
+    function refs(v) {
+      return v.replace(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/g, function (m, id) { return map[id] ? "url(#" + map[id] + ")" : m; });
+    }
     $$("*", root).concat([root]).forEach(function (n) {
       Array.prototype.slice.call(n.attributes).forEach(function (attr) {
         var v = attr.value, nv = v;
-        if (v.indexOf("#") < 0) return;
-        nv = v.replace(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/g, function (m, id) { return map[id] ? "url(#" + map[id] + ")" : m; });
-        if (/^#/.test(nv) && map[nv.slice(1)]) nv = "#" + map[nv.slice(1)];
+        if (ID_LIST_ATTRS.indexOf(attr.name) >= 0) nv = v.split(/\s+/).map(function (t) { return map[t] || t; }).join(" ");
+        else if (v.indexOf("#") >= 0) {
+          nv = refs(v);
+          if (/^#/.test(nv) && map[nv.slice(1)]) nv = "#" + map[nv.slice(1)];
+        }
         if (nv !== v) n.setAttribute(attr.name, nv);
       });
+    });
+    $$("style", root).forEach(function (st) {
+      st.textContent = refs(st.textContent).replace(/#(-?[A-Za-z_][\w-]*)/g, function (m, id) { return map[id] ? "#" + map[id] : m; });
     });
   }
 
@@ -787,17 +737,36 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     catch (e) { console.error("[SciReport] invalid JSON in data block", block.getAttribute("data-sci-data"), e); return null; }
   }
 
+  // Every initialized interactive figure, with the lifecycle hooks its kind
+  // returned: stop() halts animation, reset() returns to the default state.
+  // Deck navigation, closing, and printing call them, so no timer outlives
+  // its slide and print always shows the state the prose describes.
+  var instances = [];
+  function noop() {}
+
   function initInteractive(figure) {
     var kind = figure.getAttribute("data-sci-interactive");
     var init = interactiveKinds[kind];
     if (!init) { console.warn("[SciReport] no interactive kind registered for", kind); return; }
     var data = readData(figure);
     if (!data) return;
-    try { init(figure, data); } catch (e) { console.error("[SciReport] interactive figure failed", kind, e); }
+    try {
+      var api = init(figure, data) || {};
+      instances.push({ figure: figure, stop: api.stop || noop, reset: api.reset || noop });
+    } catch (e) { console.error("[SciReport] interactive figure failed", kind, e); }
+  }
+
+  function eachInstance(root, method) {
+    instances.forEach(function (it) {
+      if (!root || root.contains(it.figure)) {
+        try { it[method](); } catch (e) { console.error("[SciReport] interactive " + method + " failed", e); }
+      }
+    });
   }
 
   function niceTicks(lo, hi, count) {
     if (!(isFinite(lo) && isFinite(hi))) return [0, 1];
+    if (lo > hi) { var t = lo; lo = hi; hi = t; }
     if (lo === hi) { lo -= 1; hi += 1; }
     var span = hi - lo, raw = span / Math.max(1, count), mag = Math.pow(10, Math.floor(Math.log10(raw)));
     var step = [1, 2, 5, 10].map(function (m) { return m * mag; }).find(function (s) { return span / s <= count; }) || 10 * mag;
@@ -844,10 +813,22 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
       var list = names.split(",").map(function (n) { return n.trim(); });
       data.series = (data.series || []).map(function (s, i) { return list[i] ? Object.assign({}, s, { name: list[i] }) : s; });
     }
-    var xs = data.x || [], series = (data.series || []).slice(0, 8);
-    if ((data.series || []).length > 8) console.warn("[SciReport] time series capped at 8 series; fold the rest into Other or facet");
+    var xs = data.x || [];
     var n = xs.length;
+    // Normalize once: every series has n values, each a finite number or null
+    // (missing arrays, text such as "n/a", and infinities all become null).
+    function num(v) { return v == null || v === "" || !isFinite(+v) ? null : +v; }
+    var series = (data.series || []).slice(0, 8).map(function (s) {
+      var vals = Array.isArray(s && s.values) ? s.values : [];
+      var out = [];
+      for (var i = 0; i < n; i++) out.push(num(vals[i]));
+      return { name: String(s && s.name != null ? s.name : ""), values: out };
+    });
+    if ((data.series || []).length > 8) console.warn("[SciReport] time series capped at 8 series; fold the rest into Other or facet");
     if (!n || !series.length) return;
+    var values = [];
+    series.forEach(function (s) { s.values.forEach(function (v) { if (v != null) values.push(v); }); });
+    if (!values.length) { console.warn("[SciReport] time series has no finite values to draw"); return; }
     var fmt = new Intl.NumberFormat(undefined, data.y_format || { maximumSignificantDigits: 4 });
     var xfmt = function (v) { return typeof v === "number" ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(v) : String(v); };
     var mount = $(".sci-media", figure) || figure.insertBefore(el("div", { "class": "sci-media" }), $("figcaption", figure));
@@ -861,18 +842,21 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
       key.style.background = "var(--series-" + (i + 1) + ")"; item.appendChild(key); item.appendChild(doc.createTextNode(s.name));
       legend.appendChild(item);
     });
-    var readout = el("output", { "class": "sci-ts-readout", "data-sci-live": "", "aria-live": "polite" });
+    // Announced only when the reader settles on a value (slider input, end of
+    // Play), never on every animation tick or pointer move.
+    var readout = el("output", { "class": "sci-ts-readout", "data-sci-live": "", "aria-live": "off" });
     mount.appendChild(legend); mount.appendChild(readout);
 
     var longest = series.reduce(function (w, s) { return Math.max(w, String(s.name).length); }, 0);
     var W = 720, H = 340, m = { t: 12, r: series.length <= 4 ? Math.min(180, 16 + longest * 7) : 16, b: 38, l: 56 };
-    var values = [];
-    series.forEach(function (s) { (s.values || []).forEach(function (v) { if (v != null && isFinite(v)) values.push(+v); }); });
-    var ymin = data.y_min != null ? data.y_min : Math.min.apply(null, values), ymax = Math.max.apply(null, values);
+    // y_min extends the axis down to a floor (typically 0) but never hides data below it.
+    var dmin = Math.min.apply(null, values), dmax = Math.max.apply(null, values);
+    var ymin = data.y_min != null && isFinite(+data.y_min) ? Math.min(+data.y_min, dmin) : dmin;
+    var ymax = data.y_min != null && isFinite(+data.y_min) ? Math.max(+data.y_min, dmax) : dmax;
     var yt = niceTicks(ymin, ymax, 5);
     var y0 = yt[0], y1 = yt[yt.length - 1];
-    var numericX = xs.every(function (v) { return typeof v === "number"; });
-    var xlo = numericX ? xs[0] : 0, xhi = numericX ? xs[n - 1] : n - 1;
+    var numericX = xs.every(function (v) { return typeof v === "number" && isFinite(v); });
+    var xlo = numericX ? Math.min.apply(null, xs) : 0, xhi = numericX ? Math.max.apply(null, xs) : n - 1;
     function X(i) { var v = numericX ? xs[i] : i; return m.l + (xhi === xlo ? 0 : (v - xlo) / (xhi - xlo)) * (W - m.l - m.r); }
     function Y(v) { return m.t + (1 - (v - y0) / (y1 - y0)) * (H - m.t - m.b); }
 
@@ -907,13 +891,13 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     }
     var dots = [], endLabels = [];
     series.forEach(function (s, i) {
-      var color = "var(--series-" + (i + 1) + ")", d = pathFor(s.values || []);
+      var color = "var(--series-" + (i + 1) + ")", d = pathFor(s.values);
       root.appendChild(svg("path", { d: d, fill: "none", stroke: color, "stroke-width": 2, opacity: 0.22, "stroke-linejoin": "round", "stroke-linecap": "round" }));
       root.appendChild(svg("path", { d: d, fill: "none", stroke: color, "stroke-width": 2, "clip-path": "url(#" + id + "-clip)", "stroke-linejoin": "round", "stroke-linecap": "round" }));
       if (series.length <= 4) {
-        var last = (s.values || []).length - 1;
-        while (last >= 0 && (s.values[last] == null)) last--;
-        if (last >= 0) endLabels.push({ x: X(last) + 8, y: Y(+s.values[last]) + 4, text: s.name });
+        var last = n - 1;
+        while (last >= 0 && s.values[last] == null) last--;
+        if (last >= 0) endLabels.push({ x: X(last) + 8, y: Y(s.values[last]) + 4, text: s.name });
       }
     });
     // Direct labels at line ends, nudged apart so they never overprint.
@@ -955,12 +939,14 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
 
     var attr = figure.getAttribute("data-default-index");
     var defaultIndex = attr == null || attr === "last" ? n - 1 : Math.max(0, Math.min(n - 1, parseInt(attr, 10) || 0));
-    function show(i) {
+    function show(i, announce) {
       i = Math.max(0, Math.min(n - 1, i));
       var px = X(i);
       cursor.setAttribute("x1", px); cursor.setAttribute("x2", px);
       clipRect.setAttribute("width", px + 1);
       range.value = i;
+      range.setAttribute("aria-valuetext", (data.x_label ? data.x_label + " " : "") + xfmt(xs[i]));
+      readout.setAttribute("aria-live", announce ? "polite" : "off");
       readout.textContent = "";
       var head = el("span"); head.appendChild(doc.createTextNode((data.x_label ? data.x_label + " " : "") ));
       head.appendChild(el("b", null, xfmt(xs[i]))); readout.appendChild(head);
@@ -973,7 +959,10 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
       });
     }
     var timer = null;
-    function stop() { if (timer) { clearInterval(timer); timer = null; } play.textContent = "Play"; }
+    function stop() {
+      if (timer) { clearInterval(timer); timer = null; show(+range.value, true); }
+      play.textContent = "Play";
+    }
     play.addEventListener("click", function () {
       if (timer) { stop(); return; }
       var i = +range.value >= n - 1 ? 0 : +range.value;
@@ -981,7 +970,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
       show(i);
       timer = setInterval(function () { i += 1; show(i); if (i >= n - 1) stop(); }, Math.max(40, Math.min(250, 4000 / n)));
     });
-    range.addEventListener("input", function () { stop(); show(+range.value); });
+    range.addEventListener("input", function () { stop(); show(+range.value, true); });
     function nearest(evt) {
       var rect = root.getBoundingClientRect(), sx = (evt.clientX - rect.left) / rect.width * W, best = 0, bd = Infinity;
       for (var i = 0; i < n; i++) { var dd = Math.abs(X(i) - sx); if (dd < bd) { bd = dd; best = i; } }
@@ -991,6 +980,10 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     hit.addEventListener("pointerleave", function () { if (!timer) show(+range.value); });
     hit.addEventListener("click", function (evt) { evt.stopPropagation(); stop(); show(nearest(evt)); range.value = nearest(evt); });
     range.value = defaultIndex; show(defaultIndex);
+    return {
+      stop: stop,
+      reset: function () { stop(); show(defaultIndex); }
+    };
   }
   interactiveKinds.timeseries = timeSeries;
 
@@ -999,17 +992,20 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   var deck = $("#deck");
   var slides = deck ? $$(".slide", deck) : [];
   var current = 0, returnScroll = 0, leavingFullscreenByKey = false, open = false;
+  var opener = null, quiet = false, pushedEntry = false;
+  // Interactive report figures as they were before initialization; slide
+  // copies are built from these, so a copy never inherits the report
+  // figure's rendered controls (whose listeners do not clone).
+  var pristine = {};
 
   function prepareSlides() {
     slides.forEach(function (slide, i) {
       slide.setAttribute("aria-roledescription", "slide");
       slide.setAttribute("aria-label", (i + 1) + " of " + slides.length);
       $$(".slide-figure[data-fig-ref]", slide).forEach(function (slot) {
-        var src = doc.getElementById(slot.getAttribute("data-fig-ref"));
-        if (!src) { console.error("[SciReport] slide figure not found:", slot.getAttribute("data-fig-ref")); return; }
+        var ref = slot.getAttribute("data-fig-ref"), src = pristine[ref] || doc.getElementById(ref);
+        if (!src) { console.error("[SciReport] slide figure not found:", ref); return; }
         var clone = src.cloneNode(true);
-        $$(".sci-ts-controls, .sci-data-table", clone).forEach(function (n) { n.remove(); });
-        if (clone.hasAttribute("data-sci-interactive")) { var media = $(".sci-media", clone); if (media) media.textContent = ""; }
         clone.removeAttribute("id");
         isolateIds(clone, "--s" + (i + 1));
         slot.appendChild(clone);
@@ -1064,7 +1060,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     var h = $("h1, h2", slides[current]);
     $(".deck-live", deck).textContent = "Slide " + (current + 1) + " of " + slides.length + (h ? ": " + h.textContent : "");
     var hash = "#slides/" + (current + 1);
-    if (location.hash !== hash) history.replaceState(null, "", hash);
+    if (!quiet && location.hash !== hash) history.replaceState(null, "", hash);
   }
 
   function overflows(slide) {
@@ -1073,21 +1069,34 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
 
   function go(i) {
     if (!slides.length) return;
-    current = Math.max(0, Math.min(slides.length - 1, i));
+    var target = Math.max(0, Math.min(slides.length - 1, i));
+    if (target !== current && slides[current]) eachInstance(slides[current], "stop");
+    current = target;
     render();
-    if (overflows(slides[current])) {
+    if (!quiet && overflows(slides[current])) {
       console.warn("[SciReport] slide " + (current + 1) + " content overflows the slide; shorten it or split it");
     }
   }
 
   // Open every slide once and report the ones whose content does not fit
   // (1-based numbers). Used by the Phase 9 gate: SciReport.checkLayout().
+  // Leaves the page exactly as it found it: URL, scroll position, focus,
+  // and whether (and where) the deck was open.
   function checkLayout() {
     var wasOpen = open, was = current, bad = [];
-    if (!wasOpen) openDeck(0);
-    slides.forEach(function (s, i) { go(i); if (overflows(s)) bad.push(i + 1); });
-    go(was);
-    if (!wasOpen) closeDeck(false);
+    var hash = location.hash, x = window.scrollX, y = window.scrollY, focus = doc.activeElement;
+    quiet = true;
+    try {
+      if (!wasOpen) openDeck(0);
+      slides.forEach(function (s, i) { go(i); if (overflows(s)) bad.push(i + 1); });
+      go(was);
+      if (!wasOpen) closeDeck(false);
+    } finally {
+      quiet = false;
+    }
+    if (location.hash !== hash) history.replaceState(null, "", hash || location.pathname + location.search);
+    window.scrollTo(x, y);
+    if (focus && focus.focus) focus.focus({ preventScroll: true });
     return bad;
   }
   function next() { go(current + 1); }
@@ -1095,20 +1104,33 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
 
   function openDeck(i) {
     if (!slides.length) return;
-    if (!open) returnScroll = window.scrollY;
+    if (!open) {
+      returnScroll = window.scrollY;
+      var active = doc.activeElement;
+      opener = active && active !== doc.body && !deck.contains(active) ? active : null;
+      // One history entry for the whole deck, so Back closes it rather than
+      // leaving the report; slide changes inside the deck replace that entry.
+      pushedEntry = !quiet && !/^#slides/.test(location.hash);
+      if (pushedEntry) history.pushState(null, "", "#slides/" + ((i || 0) + 1));
+    }
     open = true;
     deck.hidden = false;
     doc.body.classList.add("presenting");
     go(i || 0); fit();
-    deck.focus({ preventScroll: true });
+    if (!quiet) deck.focus({ preventScroll: true });
   }
 
-  function closeDeck(toSource) {
+  // toSource: return to the current slide's data-source section (Esc, the
+  // return link, leaving fullscreen). keepUrl: the URL already moved (Back
+  // button, a typed hash), so leave history alone and follow it.
+  function closeDeck(toSource, keepUrl) {
     if (!open) return;
     open = false;
+    eachInstance(deck, "stop");
     if (doc.fullscreenElement) { leavingFullscreenByKey = true; doc.exitFullscreen().catch(function () {}); }
     deck.hidden = true;
     doc.body.classList.remove("presenting");
+    if (quiet) return;
     var src = toSource !== false && slides[current] && slides[current].getAttribute("data-source");
     var target = src && src.charAt(0) === "#" && doc.getElementById(src.slice(1));
     if (target) {
@@ -1116,33 +1138,60 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
       target.scrollIntoView({ block: "start" });
       var flashEl = target.matches("section") ? ($(":scope > h2, :scope > h3", target) || target) : target;
       flashEl.classList.remove("flash"); void flashEl.offsetWidth; flashEl.classList.add("flash");
+      // Keyboard users continue from the section they returned to.
+      if (!flashEl.hasAttribute("tabindex")) flashEl.setAttribute("tabindex", "-1");
+      flashEl.focus({ preventScroll: true });
+    } else if (keepUrl) {
+      var here = location.hash && doc.getElementById(location.hash.slice(1));
+      if (here) here.scrollIntoView({ block: "start" }); else window.scrollTo(0, returnScroll);
+      if (opener && opener.focus) opener.focus({ preventScroll: true });
     } else {
       history.replaceState(null, "", location.pathname + location.search);
       window.scrollTo(0, returnScroll);
+      if (opener && opener.focus) opener.focus({ preventScroll: true });
     }
+    opener = null;
   }
 
   function toggleFullscreen() {
     if (doc.fullscreenElement) { leavingFullscreenByKey = true; doc.exitFullscreen().catch(function () {}); }
-    else if (deck.requestFullscreen) deck.requestFullscreen().catch(function () {});
+    else if (deck.requestFullscreen) {
+      deck.requestFullscreen().catch(function (e) {
+        console.warn("[SciReport] the browser refused fullscreen" + (e && e.message ? ": " + e.message : ""));
+      });
+    }
   }
 
-  function isTyping(t) {
-    return t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  // One notion of "the reader is operating a control", shared by clicks,
+  // keys, and touch: such targets keep their own behavior and never turn
+  // the slide.
+  var INTERACTIVE = "a[href], button, input, select, textarea, summary, details, [role=button], [contenteditable], [data-no-advance], [data-sci-interactive]";
+  function interactiveTarget(t) { return !!(t && t.closest && t.closest(INTERACTIVE)); }
+  var NON_TEXT_INPUTS = ["range", "checkbox", "radio", "button", "submit", "reset", "color", "file", "image"];
+  function isTextEntry(t) {
+    if (!t) return false;
+    if (t.isContentEditable || t.tagName === "TEXTAREA") return true;
+    return t.tagName === "INPUT" && NON_TEXT_INPUTS.indexOf((t.type || "").toLowerCase()) < 0;
+  }
+  function ownsArrowKeys(t) {
+    return !!t && (isTextEntry(t) || t.tagName === "SELECT" || (t.tagName === "INPUT" && t.type === "range"));
   }
 
   function onKey(e) {
     if (!open || e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (isTyping(e.target)) return;
-    var onButton = e.target && e.target.tagName === "BUTTON";
+    var t = e.target;
+    if (e.key === "Escape") { closeDeck(); e.preventDefault(); return; }
+    if (isTextEntry(t)) return;
+    var navKeys = ["ArrowRight", "ArrowDown", "PageDown", "ArrowLeft", "ArrowUp", "PageUp", "Home", "End"];
+    if (navKeys.indexOf(e.key) >= 0 && ownsArrowKeys(t)) return;
+    var onControl = interactiveTarget(t) && t !== deck;
     switch (e.key) {
       case "ArrowRight": case "ArrowDown": case "PageDown": case "n": next(); break;
-      case " ": case "Enter": if (onButton) return; if (e.shiftKey) prev(); else next(); break;
+      case " ": case "Enter": if (onControl) return; if (e.shiftKey) prev(); else next(); break;
       case "ArrowLeft": case "ArrowUp": case "PageUp": case "p": case "Backspace": prev(); break;
       case "Home": go(0); break;
       case "End": go(slides.length - 1); break;
       case "f": case "F": toggleFullscreen(); break;
-      case "Escape": closeDeck(); break;
       default: return;
     }
     e.preventDefault();
@@ -1150,8 +1199,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
 
   function onStageClick(e) {
     if (!open) return;
-    var t = e.target;
-    if (t.closest("a, button, input, select, textarea, summary, details, [data-no-advance], [data-sci-interactive]")) return;
+    if (interactiveTarget(e.target)) return;
     if (window.getSelection && String(window.getSelection())) return;
     var rect = $(".deck-viewport", deck).getBoundingClientRect();
     if (e.clientX - rect.left < rect.width * 0.25) prev(); else next();
@@ -1160,7 +1208,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   function fromHash() {
     var m = /^#slides(?:\/(\d+))?$/.exec(location.hash);
     if (m) openDeck(m[1] ? parseInt(m[1], 10) - 1 : 0);
-    else if (open) closeDeck(false);
+    else if (open) closeDeck(false, true);
   }
 
   function initDeck() {
@@ -1190,7 +1238,10 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
       }
     });
     var touchX = null;
-    deck.addEventListener("touchstart", function (e) { touchX = e.touches[0].clientX; }, { passive: true });
+    deck.addEventListener("touchstart", function (e) {
+      // A drag on a slider or chart, or a pinch, is not a swipe.
+      touchX = e.touches.length === 1 && !interactiveTarget(e.target) ? e.touches[0].clientX : null;
+    }, { passive: true });
     deck.addEventListener("touchend", function (e) {
       if (touchX == null) return;
       var dx = e.changedTouches[0].clientX - touchX; touchX = null;
@@ -1201,6 +1252,8 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   }
 
   window.SciReport = {
+    // init(figure, data) may return {stop, reset}: stop() halts animation,
+    // reset() shows the default state. Both are called by the deck and print.
     register: function (kind, init) { interactiveKinds[kind] = init; },
     open: openDeck, close: closeDeck, go: go, checkLayout: checkLayout,
     get current() { return current; }, get count() { return slides.length; }, get presenting() { return open; }
@@ -1209,7 +1262,13 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   function start() {
     numberFigures();
     buildContents();
-    $$("main figure[data-sci-interactive]").forEach(initInteractive);
+    $$("main figure[data-sci-interactive]").forEach(function (f) {
+      if (f.id) pristine[f.id] = f.cloneNode(true);
+      initInteractive(f);
+    });
+    // Print shows every interactive figure in its default state — the state
+    // the caption and prose describe — whatever the reader left it at.
+    window.addEventListener("beforeprint", function () { eachInstance(null, "reset"); });
     initDeck();
   }
   // Let report-specific scripts that follow this one call SciReport.register first.

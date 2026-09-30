@@ -4,11 +4,11 @@ This file contains the full prompts dispatched to the sub-agents in Phases 4, 5,
 
 Each phase produces findings that flow back to Phase 2 (draft patches). Loop until the sub-agent returns no findings.
 
-**HTML format.** When the planning brief chose `format: html`, every "`.tex` source" below is the report's **reviewer copy** (`sync_html_report.py --reviewer-copy`, which stubs out inlined media and data but keeps line numbers), and `file` / `line` in findings point into the report. Tell each reviewer to read only the `<main>` element — the `<div id="deck">` holds the slide deck, which the Phase 9 reviewer handles. Value wrappers read as `<span data-sci-val="id">48</span>` rather than `\SciVal{\Macro}{48}`; figures are `<figure data-sci-fig="id">`; cross-references are empty `a.xref` links that the runtime numbers at load. Per-format substitutions:
+**HTML format.** When the planning brief chose `format: html`, every "`.tex` source" below is the report's **reviewer copy** (`sync_html_report.py --reviewer-copy`, which stubs out inlined media and data but keeps line numbers), and `file` / `line` in findings point into the report. Tell each reviewer to read only the `<main>` element — the `<div id="deck">` holds the slide deck, which the Phase 9 reviewer handles. Value wrappers read as `<span data-sci-val="id">48</span>` rather than `\SciVal{\Macro}{48}`; figures are `<figure data-sci-fig="id">`; cross-references are `a.xref` links whose text ("Figure", "Table") the runtime replaces with the number at load. Per-format substitutions:
 
 - **Phase 4:** "per page" budgets mean per ~500 words of main text. Captions include the runtime's "Figure N." label, which is not an acronym.
 - **Phase 5:** the skim surfaces are the masthead title and dek, the abstract, section headings, and figure captions.
-- **Phase 6:** there is no `build/report_values.tex` — scitexlintr already verifies every span's rendered text against `value` through `unit` / `precision` / `display_html`, so the display-faithfulness check reduces to "does a free-text `display_html` state a number that contradicts `value`". In place of `\includegraphics` paths, check each `figures[*].path` and `data[*].path` listed in the manifest, **wherever they live** — a synthesis report's figures and data routinely sit in sibling analyses, and reading those specific files (and the scripts that produced them, for code-grounding) is in scope. A data block's `data-sha256` is the hash of that source file, not of the inlined payload. Registered tables (`data-sci-table`) are generated from their CSV; verify the caption and header describe the columns, not each cell. "The compiled PDF" is the rendered page — screenshots of each figure when a browser is available.
+- **Phase 6:** there is no `build/report_values.tex` — scitexlintr already verifies every span's rendered text against `value` through `unit` / `precision` / `display_html`, so the display-faithfulness check reduces to "does a free-text `display_html` state a number that contradicts `value`". In place of `\includegraphics` paths, check each `figures[*].path` and `data[*].path` listed in the manifest (the Phase 6 input list below allows these wherever they live). A data block's `data-sha256` is the hash of that source file, not of the inlined payload. Registered tables (`data-sci-table`) are generated from their CSV; verify the caption and header describe the columns, not each cell. "The compiled PDF" is the rendered page — screenshots of each figure when a browser is available.
 
 Phase 9 below applies to the HTML format only.
 
@@ -137,7 +137,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 > - Default assumption: the report is standalone. If the prose makes that assumption look wrong, flag it loudly.
 >
 > **Report-shape consistency.**
-> - The report claims a shape implicitly through structure: a short main text + supplement vs. a single comprehensive document. Does the actual shape match the claim? An "overview" that runs 18 pages is not an overview.
+> - The report claims a shape implicitly through structure: a short main text + supplement vs. a single comprehensive document. Does the actual shape match the claim? An "overview" that runs 18 pages (HTML: about 9,000 words of main text) is not an overview.
 > - Section length skew: if the Methods section is more than ~50% of the main text by length, flag as shape inconsistency (likely a comprehensive draft labeled as overview, or a methods-heavy section that should have been split into main + supplement).
 >
 > **Caveat prominence.**
@@ -170,7 +170,7 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 - The planning brief (`.planning-brief.yaml`) — that would tell you the verification target's framing intent and bias the blind read.
 - The memory cheatsheet (`.memory-cheatsheet.md`) — same reason.
 - `.living/` in any directory — project-context that biases the blind read.
-- Any analysis directory other than `analysis/[name]/`.
+- Any analysis directory other than `analysis/[name]/` — **except** the specific files the manifest's `figures[*].path` and `data[*].path` point to, and the scripts that produced them (for code-grounding). A synthesis report's figures routinely live in sibling analyses; read those files, nothing else there. This applies to both formats.
 - Other reports under `analysis/[name]/reports/` that have been excluded from verification (e.g., a human-revised baseline kept for comparison). The orchestrator names these explicitly when present; in their absence assume the report under verification is the only one.
 
 The list above is permissive in scope but narrow in *kind*: you read the artifacts that the draft already cites or that the project's headline surfaces (STATUS, MANIFEST, etc.) carry, never the scaffolding the draft was written from. The blind read is preserved at the framing level — you still don't know the analyst's intent — while the verification has enough access to actually verify.
@@ -301,5 +301,5 @@ In practice, two iterations is typical. Three or more iterations on the same sub
 
 - **Sub-agents must not know the planning brief, the memory cheatsheet, or the analysis directory.** The point of phase-4/5/6 is the blind read. Honor the input list above strictly.
 - **One sub-agent per phase, not one sub-agent per checklist item.** Combining the checks in one prompt keeps the context small and lets the sub-agent share work (e.g., the regex pass for numeric tokens in Phase 6 is one pass, not one per check).
-- **Output is YAML, not Markdown.** This matters because the parent flow programmatically applies the findings — Markdown free-text is error-prone to parse. The orchestrator persists each phase's output to `analysis/[name]/reports/.review-plain-english.yaml`, `.review-framing.yaml`, and `.review-numerical.yaml` respectively (and, in the HTML format, Phase 9's to `.review-storyline.yaml`). The sub-agent returns the YAML body; the orchestrator owns the file.
+- **Output is YAML, not Markdown.** This matters because the parent flow programmatically applies the findings — Markdown free-text is error-prone to parse. The orchestrator persists each phase's output to `analysis/[name]/reports/.review-plain-english.yaml`, `.review-framing.yaml`, and `.review-numerical.yaml` respectively (HTML format: the same names with an `-html` suffix, plus Phase 9's `.review-storyline.yaml`). The sub-agent returns the YAML body; the orchestrator owns the file.
 - **Sub-agents err on the side of NOT flagging.** Each prompt says so; treat that line as load-bearing. False positives waste the drafter's time. A finding with `confidence: low` is fine; an invented finding is not.

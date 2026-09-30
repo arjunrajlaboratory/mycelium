@@ -215,7 +215,7 @@ def test_root_option_overrides_path_base(project, tmp_path):
 
 
 def test_synced_report_passes_scitexlintr_figure_and_data_rules(project):
-    scitexlintr = pytest.importorskip("scitexlintr")
+    scitexlintr = pytest.importorskip("scitexlintr", minversion="0.2")
     fig = fig_entry("plot", "../outputs/plot.svg", project.outputs, "plot.svg")
     raw = (project.outputs / "series.json").read_bytes()
     data = {"id": "s", "path": "../outputs/series.json", "sha256": sha(raw)}
@@ -333,7 +333,7 @@ def test_registered_table_column_selection_and_escaping(project):
 
 
 def test_synced_table_passes_scitexlintr(project):
-    scitexlintr = pytest.importorskip("scitexlintr")
+    scitexlintr = pytest.importorskip("scitexlintr", minversion="0.2")
     raw = (project.outputs / "table.csv").read_bytes()
     report, manifest = project(TABLE.format(did="t", attrs=""), data=[{"id": "t", "path": "../outputs/table.csv", "sha256": sha(raw)}])
     assert run(report, manifest) == 0

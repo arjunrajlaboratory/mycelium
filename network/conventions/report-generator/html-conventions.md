@@ -25,7 +25,7 @@ scitexlintr --version                       # must print 0.2.0 or later
 which pdftocairo                            # only needed when a registered figure is a PDF
 ```
 
-`scitexlintr` 0.1.x lints only TeX and will silently treat an `.html` file as TeX (every finding wrong), and it has no `--version` flag — if the command above errors, upgrade before Phase 7. Poppler's `pdftocairo` converts PDF figures to inline SVG; without it, register an SVG or PNG export of the figure instead.
+`scitexlintr` 0.1.x lints only TeX and will silently treat an `.html` file as TeX (every finding wrong), and it has no `--version` flag — if the command above errors, you have 0.1.x. Until scitexlintr 0.2.0 is released, both install commands above still fetch 0.1.x; the version check is what tells you whether the HTML gate can run. Poppler's `pdftocairo` converts PDF figures to inline SVG; without it, register an SVG or PNG export of the figure instead.
 
 ---
 
@@ -34,7 +34,7 @@ which pdftocairo                            # only needed when a registered figu
 The manifest schema is unchanged (see `references/manifest-example.json`) with two additions:
 
 - **`data[*]`** — one entry per data file behind an interactive figure: `{"id", "path", "sha256"}`. Register the analysis output (JSON, CSV, or TSV), not a copy made for the report. Paths resolve against the report's directory, exactly like `figures[*].path`.
-- **`display_html`** — if a number carries a TeX-only `display` override (e.g. `"3.2$\\times$"`), add the HTML rendering (`"3.2×"`). scitexlintr reports an error for a wrapper whose entry has `display` but no `display_html`; derive with `unit` / `precision` instead whenever possible.
+- **`display_html`** — if a number carries a TeX `display` override (e.g. `"3.2$\\times$"`), add the HTML rendering (`"3.2×"`). scitexlintr reports an error for a wrapper whose entry has a TeX `display` but no `display_html`; a plain-text `display` needs none (see below). Derive with `unit` / `precision` instead whenever possible.
 
 Three manifest behaviors matter more in HTML, where every word of the report is linted against the manifest (they hold in TeX too):
 
@@ -50,7 +50,7 @@ Every figure and data entry needs a `sha256`. `sync_html_report.py` refuses to i
 
 Copy `assets/report-template.html` to `analysis/[name]/reports/[name]-report.html` and replace every `%%PLACEHOLDER%%`. The template is the overview + supplement shape; for **overview**, delete the `<section id="supplement">` block; for **comprehensive**, move the supplement's methods detail into Methods and drop the supplement heading. The section guide (`references/section-guide.md`), both standing prose rules, US English, finding-form Results headings, and every other drafting rule in `analysis-conventions.md` Phase 2 apply unchanged.
 
-Do not edit the template's `<style>` block or its `<script id="sci-report-runtime">` block. They are the shared runtime; `check_html_report.py` warns when either differs from the bundled template, and a template upgrade replaces both wholesale. Report-specific behavior goes in a separate `<script>` after the runtime (see *Custom interactive figures*).
+Do not edit the template's `<style>` block or its `<script id="sci-report-runtime">` block. They are the shared runtime; `check_html_report.py` warns when either differs from the template (the installed pack's copy, else the plugin's), and a template upgrade replaces both wholesale. Report-specific behavior goes in a separate `<script>` after the runtime (see *Custom interactive figures*).
 
 ### Values
 
@@ -96,9 +96,9 @@ Leave the region between the two `sci-media` marker comments empty; `sync_html_r
 
 Text inside a diagram **is** prose and is linted, so a diagram cannot smuggle an unregistered number. Draw with `currentColor` so it reads in both themes. Use a diagram when a picture explains a mechanism faster than a paragraph — not to decorate.
 
-**Cross-references.** Write `<a class="xref" href="#fig-volcano">Figure</a>`; the runtime numbers figures and tables at load ("Figure 2", "Figure S1", "Table 1"). Do not type figure numbers — they would be unsourced numeric tokens and would go stale when figures move.
+**Cross-references.** Write `<a class="xref" href="#fig-volcano">Figure</a>`; the runtime numbers figures and tables at load ("Figure 2", "Figure S1", "Table 1"). Do not type figure numbers: they go stale when figures move, and the linter does not catch them (it skips "Figure 2" as a structural reference).
 
-**Structured Results style.** When the brief chose structured Results, use `<h4>Question</h4>`, `<h4>Findings</h4>`, `<h4>Interpretation</h4>` inside each result section in place of the TeX `\paragraph{…}` headers.
+**Structured Results style.** When the brief chose structured Results, use `<h4>Question</h4>`, `<h4>Discrimination</h4>`, `<h4>Findings</h4>`, `<h4>Interpretation</h4>` inside each result section in place of the TeX `\paragraph{…}` headers (the section guide's four; Discrimination — what each competing hypothesis predicts — is the load-bearing one).
 
 **Tables** use `<table class="sci-table">` with a `<caption>`, inside `<div class="table-wrap">` (give the wrapper the id you cross-reference); right-align numeric columns with `class="num"`. Captions and figure captions get their "Table 2." / "Figure S1." labels from the runtime, which numbers the cross-references too — do not type the label. A hand-written table's value cells are prose and use value spans.
 
@@ -176,16 +176,16 @@ Run in order; the gate **must not proceed** past a failing step.
 1. **Sync figures and data.**
    `python skills/core/scripts/sync_html_report.py analysis/[name]/reports/[name]-report.html --manifest analysis/[name]/reports/.manifest.json`
    A sha256 mismatch means a figure or data file changed after the manifest was built: re-run the analysis step if needed, refresh Phase 1, and sync again.
-2. **Fill values.** `scitexlintr [name]-report.html --manifest=.manifest.json --write` rewrites stale span text from the manifest. Review the diff — it is the list of numbers that changed.
-3. **Lint.** `scitexlintr [name]-report.html --manifest=.manifest.json` must exit with zero errors after waivers. Warnings follow the TeX gate's policy (fix real drift risks; document intentional leftovers in the compile log).
-4. **Structure.** `python skills/core/scripts/check_html_report.py --report-only [name]-report.html` must report zero errors — `--report-only` skips the deck rules while the deck is still empty (before Phase 9); drop the flag once the slides exist. It checks placeholders, self-containment (no external scripts, styles, frames, or media — hyperlinks are fine), the runtime block, and every slide rule below. Its summary line reports the **main-text word count**, which stands in for the TeX page count in the shape budget:
-   - **Overview**: target ≤ 1,800 words; flag above 2,200.
-   - **Overview + supplement** (DEFAULT): target ≤ 4,000 words of main text (the 10-minute read); flag above 5,000.
-   - **Comprehensive**: flag below 1,800 words.
+2. **Fill values.** `scitexlintr [name]-report.html --manifest=.manifest.json --write --fail-on=error` rewrites stale span text from the manifest. Review the diff — it is the list of numbers that changed.
+3. **Lint.** `scitexlintr [name]-report.html --manifest=.manifest.json --fail-on=error` must exit 0: no error-severity finding remains after waivers. (Without `--fail-on=error` the CLI exits 1 on warnings too.) Warnings follow the TeX gate's policy: fix real drift risks, and list intentional leftovers in the compile log — `--summary` counts them by rule. Two things the linter does not check: an integer percent typed as text (`95%`, skipped as typographic), and a typed figure number.
+4. **Structure.** `python skills/core/scripts/check_html_report.py --report-only [name]-report.html` must report zero errors — `--report-only` skips the deck rules while the deck is still empty (before Phase 9); drop the flag once the slides exist. It checks placeholders, self-containment (no external scripts, styles, frames, or media — hyperlinks are fine), the runtime block, and every slide rule below. Its summary line reports the **main-text word count**, which stands in for the TeX page count in the shape budget at one conversion, about 500 words per page (the same one Phase 4 uses):
+   - **Overview**: 2–5 pages → target 1,000–2,500 words; flag above 3,000.
+   - **Overview + supplement** (DEFAULT): ≤ 12 pages of main text → target ≤ 6,000 words; flag above 7,000.
+   - **Comprehensive**: flag below 2,500 words (under 5 pages).
 5. **Render and look.** Open the file in a browser (or screenshot it with Playwright / the browser tools). Check that every figure appears, that cross-references read "Figure N", that the console is free of errors, and that nothing overflows at phone width. The linters check content, not layout. Screenshot long pages in viewport-sized chunks: Chrome repeats content in full-page captures taller than 16,384 px, which looks like duplicated sections but is not.
-6. **Record** in `.compile-log-html.md` the same fields as the TeX gate, with these substitutions: the HTML file's SHA256 instead of the PDF's; main-text word count and shape-budget status instead of page count; `sync_html_report.py` result; `scitexlintr` version, exit code, error and warning counts; `check_html_report.py` error and warning counts; and the slide count and storyline-review verdict from Phase 9.
+6. **Record** (after the final pass only — see Phase 9d) in `.compile-log-html.md` the same fields as the TeX gate, with these substitutions: the HTML file's SHA256 instead of the PDF's; main-text word count and shape-budget status instead of page count; `sync_html_report.py` result; `scitexlintr` version, exit code, error and warning counts; `check_html_report.py` error and warning counts; and the slide count and storyline-review verdict from Phase 9.
 
-After the deck is written (Phase 9), run steps 1–5 again on the whole file — the deck lives in the same file, so its values, figure references, and structure pass through the same gate.
+The first pass runs steps 1–5 before the deck exists; the compile log (step 6) is written once, after the deck is written and Phase 9d has run steps 1–6 on the whole file — the deck lives in the same file, so its values, figure references, and structure pass through the same gate, and the logged SHA256 is the final file's.
 
 ---
 
@@ -224,13 +224,13 @@ The deck needs no extra work for navigation: → / Space / PageDown / click adva
 
 ### 9d. Gate
 
-Re-run Phase 7 steps 1–5, now without `--report-only`. `check_html_report.py` enforces the slide count, the title-slide position, one sentence-shaped `<h2>` per slide, resolvable `data-source` and `data-fig-ref` targets, and one figure per slide (errors), plus body length above 45 words and duplicate titles (warnings). Then check layout in a browser: `SciReport.checkLayout()` (in the page console, or `page.evaluate` in Playwright) must return `[]` — it opens every slide and lists the numbers of any whose content overflows the stage — and click through the deck once to confirm Esc returns to the right section.
+Re-run Phase 7 steps 1–6, now without `--report-only`, and write the compile log last. `check_html_report.py` enforces the slide count, the title-slide position, one sentence-shaped `<h2>` per slide, resolvable `data-source` and `data-fig-ref` targets, and one figure per slide (errors), plus body length above 45 words and duplicate titles (warnings). Then check layout in a browser: `SciReport.checkLayout()` (in the page console, or `page.evaluate` in Playwright) must return `[]` — it opens every slide and lists the numbers of any whose content overflows the stage — and click through the deck once to confirm Esc returns to the right section.
 
 ---
 
 ## Artifacts (HTML)
 
-An analysis can carry both a TeX and an HTML edition, so the HTML run's scaffolding takes an `-html` suffix and never overwrites the TeX run's. Both editions share one `.manifest.json` — the single source of truth for values — and its `policies`; if the HTML edition needs a different shape or audience tier, record it in `.planning-brief-html.yaml` and pass those policy values to the reviewers explicitly.
+An analysis can carry both a TeX and an HTML edition, so the HTML run's per-edition files — the planning brief, section outline, reviewer outputs, and compile log — take an `-html` suffix and never overwrite the TeX run's. The Phase 9 files exist only in the HTML format and need no suffix; the memory cheatsheet is shared. Both editions share one `.manifest.json` — the single source of truth for values — and its `policies`; if the HTML edition needs a different shape or audience tier, record it in `.planning-brief-html.yaml` and pass those policy values to the reviewers explicitly.
 
 | Phase | Artifact |
 |---|---|

@@ -234,7 +234,8 @@ def test_percent_display_matches_scitexlintr_display_contract() -> None:
     # The TeX renderer and scitexlintr's HTML check must derive the same
     # displayed string from the same manifest entry; only the escaping of
     # the percent sign differs between formats.
-    display = pytest.importorskip("scitexlintr._display")
+    pytest.importorskip("scitexlintr", minversion="0.2")
+    import scitexlintr._display as display
     cases = [(0.9653, 1), (0.93, 0), (0.5, 2), (1, 1), (0.0004, 3), (0.9535, 1), (0.125, 1)]
     for value, precision in cases:
         tex = rrv.format_value(value, unit="percent", precision=precision)

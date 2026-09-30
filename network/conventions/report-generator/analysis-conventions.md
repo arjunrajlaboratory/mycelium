@@ -14,7 +14,7 @@ User-in-the-loop phases: Phase 0 (planning brief). Optionally Phase 8 (headline 
 
 Internal-only phases: 0.5 (memory), 0.75 (outline + main/supplement assignment), 1 (manifest), 2 (draft), 3 (worked-example gate), 4–6 (sub-agent reviewers), 7 (recompile), and — HTML format only — 9 (slides).
 
-**Format.** Phases 0–6 are format-independent. With `format: html`, `html-conventions.md` replaces the TeX-specific parts of Phase 2 (template and value wrappers) and Phase 7 (the gate), and adds Phase 9 (slides), which runs after Phase 7 and before Phase 8. Where a passage below names `.tex`, `\SciVal`, `pdflatex`, or the PDF, read it as the HTML equivalent defined there.
+**Format.** Phases 0–3 are format-independent, and Phases 4–6 differ only in what the reviewers read (the HTML reviewer copy instead of the `.tex`; see `references/phase-prompts.md`). With `format: html`, `html-conventions.md` replaces the TeX-specific parts of Phase 2 (template and value wrappers) and Phase 7 (the gate), and adds Phase 9 (slides), which runs after Phase 7 and before Phase 8. Where a passage below names `.tex`, `\SciVal`, `pdflatex`, or the PDF, read it as the HTML equivalent defined there.
 
 ---
 
@@ -73,11 +73,11 @@ Required questions:
    - **Comprehensive** — single document with full methods, tables, and appendices inline. Use when the report *is* the artifact and no separate supplement is expected.
    - **Overview + supplement / appendix** (DEFAULT) — main text is the overview a collaborator could read in 10 minutes; supplement carries methods detail, worked examples for failure modes, and exhaustive tables.
 7. **Output format.** Default **PDF** (LaTeX). The alternative is **HTML + slides**: one self-contained HTML file that is both the long-form report and a 10–20 slide companion deck derived from it, with keyboard/click navigation, fullscreen, and a return to the matching report section on Esc. Choose HTML when the report will be shared as a link or presented, or when a time series is better explored with a slider than read off a static plot. Both formats run the same phases and gates; see `html-conventions.md`.
-8. **Results section style.** Default **narrative**: each result is prose, with a self-explanatory subsection title that states the finding. The alternative is **structured**: each result carries explicit `\paragraph{Question}` / `\paragraph{Findings}` / `\paragraph{Interpretation}` headers, paying for predictable skimmability with visual heaviness. Narrative is the default because it reads more like the final paper; structured pays off for long results sections (≥ 5 sub-results) or when readers want to land on a specific question quickly.
+8. **Results section style.** Default **narrative**: each result is prose, with a self-explanatory subsection title that states the finding. The alternative is **structured**: each result carries explicit `\paragraph{Question}` / `\paragraph{Discrimination}` / `\paragraph{Findings}` / `\paragraph{Interpretation}` headers (the section guide's four), paying for predictable skimmability with visual heaviness. Narrative is the default because it reads more like the final paper; structured pays off for long results sections (≥ 5 sub-results) or when readers want to land on a specific question quickly.
 
 The format, shape, and style choices drive the template selection in Phase 1 and the main-vs-supplement designation in Phase 0.75. They are not retrofitted after drafting.
 
-Persist the answers as a small YAML artifact at `analysis/[name]/reports/.planning-brief.yaml` (HTML format: `.planning-brief-html.yaml`; the HTML run's scaffolding files all take an `-html` suffix so a TeX edition of the same analysis is never overwritten — see the artifact table in `html-conventions.md`). All later phases read from it. The file is not shown to the user during normal flow; it is reproducible scaffolding.
+Persist the answers as a small YAML artifact at `analysis/[name]/reports/.planning-brief.yaml` (HTML format: `.planning-brief-html.yaml`; the HTML run's per-edition files — brief, outline, reviewer outputs, compile log — take an `-html` suffix so a TeX edition of the same analysis is never overwritten; see the artifact table in `html-conventions.md`). All later phases read from it. The file is not shown to the user during normal flow; it is reproducible scaffolding.
 
 ---
 
@@ -132,7 +132,7 @@ For each planned section, record:
 - **Required figures / tables** (by file path under `outputs/`).
 - **Dependencies on other sections** — if Methods §2.3 must precede Results §3.1, note it.
 
-Write the artifact to `analysis/[name]/reports/.section-outline.md`. Markdown is fine; the format is internal.
+Write the artifact to `analysis/[name]/reports/.section-outline.md` (HTML: `.section-outline-html.md`). Markdown is fine; the format is internal.
 
 This phase catches "the discussion section is making four different arguments" *before* the discussion has been written, when revision is cheap. It also fixes section ordering so the draft step doesn't impose ordering by what was easiest to write first.
 
@@ -268,7 +268,7 @@ The `policies` block is derived from the Phase-0 planning brief and is the only 
 | B (adjacent-field collaborator) — DEFAULT | 4 | moderate — gloss non-trivial terms per section | sentence |
 | C (in-field PI / close collaborator) | 6 | loose — gloss only coined terms, no per-section regloss for standard ones | sentence-or-none |
 
-`results_structure` is one of `narrative` (default) or `structured` (with explicit Question / Findings / Interpretation paragraph headers in each result). `shape` mirrors Phase 0's report-shape choice.
+`results_structure` is one of `narrative` (default) or `structured` (with explicit Question / Discrimination / Findings / Interpretation paragraph headers in each result). `shape` mirrors Phase 0's report-shape choice.
 
 Constraints the manifest must satisfy before Phase 2 may proceed:
 
@@ -330,7 +330,7 @@ While drafting:
 - **Integrate the figures the analysis already produced.** Look in `outputs/figures/` (and any figure directory the analysis uses) and pull the load-bearing plots into the report with `\includegraphics`, a self-contained caption, and a `\ref{}` from the prose — do not default to a figure-free methods-archive. A report that describes a result the analysis has a figure for, but omits the figure, is harder to read than it needs to be; figures are the in-house strength this skill should match. Register each figure you include in `manifest.figures[*]` with its `sha256` so Phase 6 can check freshness and `scitexlintr`'s `unfingerprinted-figure` rule is satisfied. Only the supplement-heavy or genuinely figure-free analysis should ship zero figures, and that should be a deliberate choice, not a default.
 
 - Every cross-document reference must either inline the relevant fact (≤ 1 sentence) or be deleted. The Phase-0 standalone default forbids "as discussed in the previous report" leaning. If Phase 0 picked **addendum**, the named base documents are introduced upfront and "see §X" references to them are acceptable in body text, but the abstract still stands alone.
-- Apply the manifest's `policies` block. `acronym_budget_per_page` and `acronym_strictness` set how aggressively to spell-out and re-gloss. `intuition_leadin_default_form` sets whether load-bearing concepts get a paragraph or a sentence of intuition before the formal definition. `results_structure` decides whether Results sections use prose subsection titles (narrative) or `\paragraph{Question}` / `\paragraph{Findings}` / `\paragraph{Interpretation}` headers (structured). These are configuration, not exhortation — the policy is what gets enforced by the sub-agent reviewers, so the draft should follow it on first pass rather than wait for findings.
+- Apply the manifest's `policies` block. `acronym_budget_per_page` and `acronym_strictness` set how aggressively to spell-out and re-gloss. `intuition_leadin_default_form` sets whether load-bearing concepts get a paragraph or a sentence of intuition before the formal definition. `results_structure` decides whether Results sections use prose subsection titles (narrative) or `\paragraph{Question}` / `\paragraph{Discrimination}` / `\paragraph{Findings}` / `\paragraph{Interpretation}` headers (structured). These are configuration, not exhortation — the policy is what gets enforced by the sub-agent reviewers, so the draft should follow it on first pass rather than wait for findings.
 - In every shape, 0 acronyms in section titles, the abstract, and figure captions, regardless of audience tier. Tier C only loosens what happens *inside* sections.
 - Every subsection title under Results states a finding, not a topic. "Evidence-first cell calling" is a topic; "Evidence-first calling trades recall for precision in a transparent way" is a finding. Phase 5 enforces this and it's cheap to get right the first time.
 
@@ -448,7 +448,7 @@ After the sub-agents pass:
    - **Overview + supplement** (DEFAULT): target main text ≤ a 10-minute read ≈ ≤ 12 pages. Flag if main text > 14 pages.
    - **Comprehensive**: no upper bound. Flag if main text < 5 pages (the shape was probably wrong; comprehensive reports rarely fit in fewer pages).
    A flag does not block compilation, but it appears in the compile log as `shape_budget: flagged` with a one-line reason. The drafter is expected to either prune to fit or, with explicit acknowledgement in the log, accept the overrun.
-6. Record in `analysis/[name]/reports/.compile-log.md`:
+6. Record in `analysis/[name]/reports/.compile-log.md` (HTML: `.compile-log-html.md`, written after Phase 9):
    - PDF SHA256
    - Compile timestamp
    - Main-text page count and shape-budget status (`within` / `flagged` with reason)
@@ -480,16 +480,16 @@ After the report passes the Phase 7 gate, derive a 10–20 slide deck in the sam
 
 | Phase | User-in-loop? | Artifact path |
 |---|---|---|
-| 0 — Planning brief | YES | `analysis/[name]/reports/.planning-brief.yaml` |
+| 0 — Planning brief | YES | `analysis/[name]/reports/.planning-brief.yaml` (HTML: `-html` suffix) |
 | 0.5 — Memory cheatsheet | no | `analysis/[name]/reports/.memory-cheatsheet.md` |
-| 0.75 — Section outline | no | `analysis/[name]/reports/.section-outline.md` |
+| 0.75 — Section outline | no | `analysis/[name]/reports/.section-outline.md` (HTML: `-html` suffix) |
 | 1 — Manifest | no | `analysis/[name]/reports/.manifest.json` |
 | 2 — Draft | no | `analysis/[name]/reports/[name]-report.tex` (HTML: `[name]-report.html`) |
 | 3 — Worked-example gate | no | (in-place patches to draft) |
-| 4 — Plain-English lint | no | `analysis/[name]/reports/.review-plain-english.yaml` |
-| 5 — Framing critique | no | `analysis/[name]/reports/.review-framing.yaml` |
-| 6 — Blind numerical re-verify | no | `analysis/[name]/reports/.review-numerical.yaml` |
-| 7 — Recompile log | no | `analysis/[name]/reports/.compile-log.md` |
+| 4 — Plain-English lint | no | `analysis/[name]/reports/.review-plain-english.yaml` (HTML: `-html` suffix) |
+| 5 — Framing critique | no | `analysis/[name]/reports/.review-framing.yaml` (HTML: `-html` suffix) |
+| 6 — Blind numerical re-verify | no | `analysis/[name]/reports/.review-numerical.yaml` (HTML: `-html` suffix) |
+| 7 — Recompile log | no | `analysis/[name]/reports/.compile-log.md` (HTML: `.compile-log-html.md`) |
 | 8 — Headline preview | optional | (in chat, not a file) |
 | 9a — Ghost deck (HTML) | no | `analysis/[name]/reports/.ghost-deck.md` |
 | 9b — Storyline review (HTML) | no | `analysis/[name]/reports/.review-storyline.yaml` |

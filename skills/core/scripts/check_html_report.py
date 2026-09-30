@@ -21,15 +21,17 @@ Errors
                   mark, or second sentence
   slide-source    a non-title slide lacks ``data-source="#id"`` naming an
                   element of the report (outside the deck)
-  slide-figure    a ``data-fig-ref`` does not name a report ``<figure>``, or
-                  a slide references more than one figure
+  slide-figure    a ``data-fig-ref`` is not on a ``class="slide-figure"``
+                  element (the only place the runtime places figures), does
+                  not name a report ``<figure>``, or a slide references more
+                  than one figure
 
 Warnings (errors with ``--strict``)
   slide-words     more than 45 words of body text on a slide
   slide-duplicate two slides share a title
-  runtime         the runtime or style block differs from the bundled
-                  template (stale or hand-edited — re-copy it from the
-                  template)
+  runtime         the runtime or style block differs from the template —
+                  the installed pack's, else the plugin's (stale or
+                  hand-edited: re-copy both blocks from it)
   file-size       the file exceeds 15 MB (usually several large raster
                   figures; register smaller exports)
 
@@ -306,7 +308,7 @@ def check_source(source: str, filename: str = "<report>", *, min_slides: int = 1
         tmpl = _parse(template.read_text(encoding="utf-8"))
         if runtime != _block_text(tmpl, "runtime") or _block_text(builder, "style") != _block_text(tmpl, "style"):
             emit("runtime", "warning", (builder.blocks["runtime"][2], 1),
-                 "the runtime or style block differs from the bundled template; re-copy both from report-template.html")
+                 f"the runtime or style block differs from the template ({template}); re-copy both blocks from it")
 
     # -- deck ----------------------------------------------------------------
     if report_only:

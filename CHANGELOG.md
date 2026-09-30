@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   15 MB, and reports the main-text word count used for the shape budget.
 - The CI Ubuntu job installs Playwright, Chromium, and poppler so the template's
   browser tests and the PDF-inlining tests run there; both skip where absent.
+- The deck runtime: Back closes the deck (one history entry per
+  presentation); Esc, F, and Enter behave correctly while a slider, button,
+  or link has focus, and a touch drag on a slider never turns the slide;
+  focus returns to the report section on close; interactive figures have a
+  stop/reset lifecycle, so Play stops when the slide or deck closes and
+  print shows each figure's default state; printing while presenting gives
+  exactly one slide per page; the time series handles descending x,
+  missing or non-numeric values, and a `y_min` above the data.
 
 ### Changed
 

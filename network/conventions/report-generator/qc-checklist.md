@@ -1,6 +1,6 @@
 # Report QC Checklist
 
-Run before finalizing any report (PDF, or HTML + slides — the HTML format replaces **Compilation** and **Formatting** with the **HTML format** section at the end; every other section applies to both). The list is split into **provenance** (does the result match what was actually run?) and **style** (is the prose clear and standalone?). Neither is more important than the other — calling them out separately helps the reader see at a glance whether an issue is factual or about clarity.
+Run before finalizing any report (PDF, or HTML + slides — the HTML format replaces **Compilation** and **Formatting** with the **HTML format** section at the end; every other section applies to both, reading `\ref{}` as an `a.xref` link, `\appendix` as the `<section id="supplement">`, and page counts as main-text words at about 500 per page). The list is split into **provenance** (does the result match what was actually run?) and **style** (is the prose clear and standalone?). Neither is more important than the other — calling them out separately helps the reader see at a glance whether an issue is factual or about clarity.
 
 Phase 4–6 sub-agents in the report-generator flow check most of these automatically. This file is the user-facing surface so a reader who only sees the QC list can still audit a finished report.
 
@@ -186,6 +186,7 @@ Report:
 - [ ] **Interactive figures are earned** — time or an ordered parameter is the axis of the argument; no autoplay; the default state (what print and prose describe) is meaningful on its own
 - [ ] **No number in prose comes from a slider readout** — prose quotes wrapped manifest values for fixed states only
 - [ ] **Figure references are `a.xref` links**, not typed numbers
+- [ ] **Gene names** in italics (`<i>`), and special characters written as text or entities (no TeX escapes left over)
 - [ ] **Tables that reproduce an analysis output row for row are registered** (`data-sci-table`), not hand-typed behind waivers
 - [ ] **Forbidden aliases are phrases wrong everywhere in the report** — `forbidden-alias` bans them document-wide
 
