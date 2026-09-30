@@ -257,3 +257,11 @@ def test_decimal_unit_rounds_to_precision() -> None:
     assert rrv.format_value(7.47712, unit="decimal", precision=2) == "7.48"
     assert rrv.format_value(22.125, unit="decimal", precision=2) == "22.13"
     assert rrv.format_value(3, unit="decimal", precision=1) == "3.0"
+
+
+def test_non_finite_and_huge_values_raise_value_error_not_decimal_errors() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        rrv.format_value(float("inf"), unit="decimal", precision=2)
+    with pytest.raises(ValueError, match="finite"):
+        rrv.format_value(float("nan"), unit="percent", precision=1)
+    assert rrv.format_value(10**30, unit="decimal", precision=2) == "1000000000000000000000000000000.00"

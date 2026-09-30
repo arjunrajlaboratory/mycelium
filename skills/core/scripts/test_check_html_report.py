@@ -254,3 +254,23 @@ def test_runtime_is_compared_with_the_installed_pack_template(tmp_path):
     assert chr_.check_file(p) == []
     assert chr_.find_template(p) == installed
     assert codes(chr_.check_file(p, template=TEMPLATE), "warning") == ["runtime"]
+
+
+def test_style_attributes_and_link_preloads_break_self_containment(tmp_path):
+    for snippet in (
+        '<div style="background:url(figs/a.png)">x</div>',
+        '<link rel="preload" href="https://cdn.example.com/f.woff2" as="font">',
+        '<link rel="icon" href="favicon.png">',
+    ):
+        text = build(ABSTRACT=f"<p>Abstract.</p>{snippet}")
+        assert "self-contained" in codes(check(tmp_path, text), "error"), snippet
+    ok = build(ABSTRACT='<p>Abstract.</p><div style="background:url(data:image/png;base64,AA==)">x</div>'
+                        '<link rel="canonical" href="https://example.org/report">')
+    assert "self-contained" not in codes(check(tmp_path, ok))
+
+
+def test_abbreviation_does_not_hide_a_second_sentence(tmp_path):
+    slides = [slide(i) for i in range(10)] + [slide(10, title="Growth slows in Fig. A panels. Cells survive.")]
+    assert "slide-title" in codes(check(tmp_path, build(slides=slides)), "error")
+    ok = [slide(i) for i in range(10)] + [slide(10, title="Growth slows at high doses, e.g. 5 µM and above.")]
+    assert "slide-title" not in codes(check(tmp_path, build(slides=ok)))

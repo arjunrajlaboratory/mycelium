@@ -60,7 +60,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from pathlib import Path
 
 RASTER_TYPES = {
@@ -98,7 +98,8 @@ class Edit:
 
 
 def _attr(tag: str, name: str) -> str | None:
-    m = re.search(r"\b" + re.escape(name) + r"\s*=\s*(\"([^\"]*)\"|'([^']*)')", tag, re.I)
+    # The name must start the attribute: "width" is not the tail of "stroke-width".
+    m = re.search(r"(?<![\w:-])" + re.escape(name) + r"\s*=\s*(\"([^\"]*)\"|'([^']*)')", tag, re.I)
     if not m:
         return None
     return html.unescape(m.group(2) if m.group(2) is not None else m.group(3))
@@ -106,7 +107,7 @@ def _attr(tag: str, name: str) -> str | None:
 
 def _set_attr(tag: str, name: str, value: str) -> str:
     """Return ``tag`` with attribute ``name`` set to ``value`` (added before ``>`` if absent)."""
-    pattern = re.compile(r"(\s" + re.escape(name) + r"\s*=\s*)(\"[^\"]*\"|'[^']*')", re.I)
+    pattern = re.compile(r"(\s" + re.escape(name) + r"\s*=\s*)(\"[^\"]*\"|'[^']*')", re.I)  # \s start: never a suffix
     quoted = '"' + html.escape(value, quote=True) + '"'
     if pattern.search(tag):
         return pattern.sub(lambda m: m.group(1) + quoted, tag, count=1)
@@ -238,9 +239,13 @@ def figure_markup(path: Path, figure_id: str, alt: str) -> str:
     )
 
 
-def _coerce(cell: str):
-    if cell == "":
-        return None
+_LEADING_ZERO_RE = re.compile(r"^[+-]?0\d")
+
+
+def _as_number(cell: str):
+    """The cell as int/float, or None if it is not a number. NaN and infinity
+    come back as floats on purpose: the JSON encoder then rejects them with a
+    SyncError instead of the chart silently plotting them."""
     try:
         return int(cell)
     except ValueError:
@@ -248,7 +253,21 @@ def _coerce(cell: str):
     try:
         return float(cell)
     except ValueError:
-        return cell
+        return None
+
+
+def _typed_columns(rows: list[list[str]]) -> list[bool]:
+    """A column is numeric only if every non-empty cell is a number and none
+    is spelled like an identifier ("007"); otherwise the whole column keeps
+    its CSV spelling, so sample labels are never rewritten."""
+    width = max((len(r) for r in rows), default=0)
+    numeric = []
+    for j in range(width):
+        cells = [r[j] for r in rows if j < len(r) and r[j] != ""]
+        numeric.append(bool(cells) and all(
+            _as_number(c) is not None and not _LEADING_ZERO_RE.match(c.strip()) for c in cells
+        ))
+    return numeric
 
 
 def data_payload(path: Path, data_id: str) -> str:
@@ -264,10 +283,21 @@ def data_payload(path: Path, data_id: str) -> str:
         rows = [r for r in reader if r]
         if not rows:
             raise SyncError(f"data {data_id!r}: {path.name} is empty")
-        obj = {"columns": rows[0], "rows": [[_coerce(c) for c in r] for r in rows[1:]]}
+        body = rows[1:]
+        numeric = _typed_columns(body)
+        obj = {"columns": rows[0], "rows": [
+            [None if c == "" else (_as_number(c) if numeric[j] else c) for j, c in enumerate(r)]
+            for r in body
+        ]}
     else:
         raise SyncError(f"data {data_id!r}: unsupported data type {suffix!r} (use .json, .csv, or .tsv)")
-    payload = json.dumps(obj, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    try:
+        payload = json.dumps(obj, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    except ValueError as exc:
+        raise SyncError(
+            f"data {data_id!r}: {path.name} contains a value that is not finite (NaN or "
+            "infinity), which JSON cannot carry; write missing values as empty cells or null"
+        ) from exc
     # Keep the payload from closing the <script> element or opening a comment.
     return payload.replace("</", "<\\/").replace("<!--", "<\\u0021--")
 
@@ -294,7 +324,12 @@ def _format_cell(cell: str, precision: int | None) -> tuple[str, bool]:
         return cell, False
     if precision is None:
         return cell.strip(), True
-    return str(d.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_HALF_UP)), True
+    with localcontext() as ctx:
+        ctx.prec = max(28, d.adjusted() + precision + 5)
+        text = str(d.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_HALF_UP))
+    if text.startswith("-") and not text.strip("-0."):
+        text = text[1:]  # "-0.00" → "0.00", as the value display does
+    return text, True
 
 
 def table_rows(path: Path, data_id: str, tag: str) -> str:
@@ -347,79 +382,76 @@ def _uncommented(source: str) -> str:
     return re.sub(r"<!--.*?-->", lambda m: re.sub(r"[^\n]", " ", m.group(0)), source, flags=re.S)
 
 
-def plan(source: str, manifest: dict, base: Path) -> list[Edit]:
+@dataclass
+class Region:
+    """One inlined region: a registered figure's media, a data block's
+    payload, or a registered table's rows."""
+    kind: str                 # "figure" | "data" | "table"
+    item_id: str
+    tag: str                  # the opening tag, as written
+    tag_start: int
+    tag_end: int
+    content_start: int | None  # None: the figure/table has no markers
+    content_end: int | None
+
+
+_KINDS = (
+    # kind, opening-tag regex, id attribute, closing-tag regex, content-marker regex
+    ("figure", _FIGURE_OPEN_RE, "data-sci-fig", _FIGURE_CLOSE_RE, _MEDIA_RE),
+    ("table", _TABLE_OPEN_RE, "data-sci-table", _TABLE_CLOSE_RE, _ROWS_RE),
+)
+
+
+def regions(source: str) -> list[Region]:
+    """Every inlined region outside HTML comments, in document order."""
     live = _uncommented(source)
+    found: list[Region] = []
+    for kind, open_re, attr, close_re, marker_re in _KINDS:
+        for m in open_re.finditer(live):
+            item_id = _attr(m.group(0), attr)
+            if not item_id:
+                continue
+            close = close_re.search(live, m.end())
+            markers = marker_re.search(source, m.end(), close.start() if close else len(source))
+            found.append(Region(kind, item_id, m.group(0), m.start(), m.end(),
+                                markers.end(1) if markers else None, markers.start(3) if markers else None))
+    for m in _SCRIPT_RE.finditer(live):
+        item_id = _attr(m.group(1), "data-sci-data")
+        if item_id:
+            found.append(Region("data", item_id, m.group(1), m.start(1), m.end(1), m.start(2), m.end(2)))
+    return sorted(found, key=lambda r: r.tag_start)
+
+
+_MARKERS = {"figure": "<!-- sci-media --><!-- /sci-media -->", "table": "<!-- sci-rows --><!-- /sci-rows -->"}
+
+
+def plan(source: str, manifest: dict, base: Path) -> list[Edit]:
     figures = {f.get("id"): f for f in manifest.get("figures") or [] if isinstance(f, dict)}
     data = {d.get("id"): d for d in manifest.get("data") or [] if isinstance(d, dict)}
     edits: list[Edit] = []
     errors: list[str] = []
-
-    for m in _FIGURE_OPEN_RE.finditer(live):
-        tag = m.group(0)
-        fid = _attr(tag, "data-sci-fig")
-        if not fid:
-            continue
+    for r in regions(source):
         try:
-            entry = figures.get(fid)
+            registry, section = (figures, "figures") if r.kind == "figure" else (data, "data")
+            attr = {"figure": "data-sci-fig", "table": "data-sci-table", "data": "data-sci-data"}[r.kind]
+            entry = registry.get(r.item_id)
             if entry is None:
-                raise SyncError(f"figure {fid!r}: data-sci-fig id not in manifest figures[*]")
-            close = _FIGURE_CLOSE_RE.search(live, m.end())
-            region_end = close.start() if close else len(source)
-            media = _MEDIA_RE.search(source, m.end(), region_end)
-            if media is None:
-                raise SyncError(
-                    f"figure {fid!r}: no <!-- sci-media --><!-- /sci-media --> markers inside the figure"
-                )
-            path = _checked_source("figure", fid, entry, base)
-            markup = figure_markup(path, fid, _attr(tag, "data-alt") or "")
-            new_tag = _set_attr(tag, "data-sha256", entry["sha256"].lower())
-            new_tag = _set_attr(new_tag, "data-content-sha256", _content_sha(markup))
-            edits.append(Edit(m.start(), m.end(), new_tag))
-            edits.append(Edit(media.end(1), media.start(3), markup))
+                raise SyncError(f"{r.kind} {r.item_id!r}: {attr} id not in manifest {section}[*]")
+            if r.content_start is None:
+                raise SyncError(f"{r.kind} {r.item_id!r}: no {_MARKERS[r.kind]} markers inside the {r.kind}")
+            path = _checked_source(r.kind, r.item_id, entry, base)
+            if r.kind == "figure":
+                content = figure_markup(path, r.item_id, _attr(r.tag, "data-alt") or "")
+            elif r.kind == "table":
+                content = table_rows(path, r.item_id, r.tag)
+            else:
+                content = data_payload(path, r.item_id)
+            new_tag = _set_attr(r.tag, "data-sha256", entry["sha256"].lower())
+            new_tag = _set_attr(new_tag, "data-content-sha256", _content_sha(content))
+            edits.append(Edit(r.tag_start, r.tag_end, new_tag))
+            edits.append(Edit(r.content_start, r.content_end, content))
         except SyncError as exc:
             errors.append(str(exc))
-
-    for m in _SCRIPT_RE.finditer(live):
-        tag = m.group(1)
-        did = _attr(tag, "data-sci-data")
-        if not did:
-            continue
-        try:
-            entry = data.get(did)
-            if entry is None:
-                raise SyncError(f"data {did!r}: data-sci-data id not in manifest data[*]")
-            path = _checked_source("data", did, entry, base)
-            payload = data_payload(path, did)
-            new_tag = _set_attr(tag, "data-sha256", entry["sha256"].lower())
-            new_tag = _set_attr(new_tag, "data-content-sha256", _content_sha(payload))
-            edits.append(Edit(m.start(1), m.end(1), new_tag))
-            edits.append(Edit(m.start(2), m.end(2), payload))
-        except SyncError as exc:
-            errors.append(str(exc))
-
-    for m in _TABLE_OPEN_RE.finditer(live):
-        tag = m.group(0)
-        tid = _attr(tag, "data-sci-table")
-        if not tid:
-            continue
-        try:
-            entry = data.get(tid)
-            if entry is None:
-                raise SyncError(f"table {tid!r}: data-sci-table id not in manifest data[*]")
-            close = _TABLE_CLOSE_RE.search(live, m.end())
-            region_end = close.start() if close else len(source)
-            rows = _ROWS_RE.search(source, m.end(), region_end)
-            if rows is None:
-                raise SyncError(f"table {tid!r}: no <!-- sci-rows --><!-- /sci-rows --> markers inside the table")
-            path = _checked_source("table", tid, entry, base)
-            body = table_rows(path, tid, tag)
-            new_tag = _set_attr(tag, "data-sha256", entry["sha256"].lower())
-            new_tag = _set_attr(new_tag, "data-content-sha256", _content_sha(body))
-            edits.append(Edit(m.start(), m.end(), new_tag))
-            edits.append(Edit(rows.end(1), rows.start(3), body))
-        except SyncError as exc:
-            errors.append(str(exc))
-
     if errors:
         raise SyncError("\n".join(errors))
     return edits
@@ -435,29 +467,14 @@ def apply(source: str, edits: list[Edit]) -> str:
 def reviewer_view(source: str) -> str:
     """``source`` with every inlined region replaced by a placeholder that
     keeps the region's newline count, so line numbers still match the report."""
-    live = _uncommented(source)
     edits: list[Edit] = []
-
-    def stub(label: str, start: int, end: int) -> None:
-        region = source[start:end]
-        edits.append(Edit(start, end, f"[{label}: {len(region)} characters omitted for review]" + "\n" * region.count("\n")))
-
-    for m in _FIGURE_OPEN_RE.finditer(live):
-        fid = _attr(m.group(0), "data-sci-fig")
-        close = _FIGURE_CLOSE_RE.search(live, m.end())
-        media = fid and _MEDIA_RE.search(source, m.end(), close.start() if close else len(source))
-        if media:
-            stub(f"figure {fid}", media.end(1), media.start(3))
-    for m in _SCRIPT_RE.finditer(live):
-        did = _attr(m.group(1), "data-sci-data")
-        if did:
-            stub(f"data {did}", m.start(2), m.end(2))
-    for m in _TABLE_OPEN_RE.finditer(live):
-        tid = _attr(m.group(0), "data-sci-table")
-        close = _TABLE_CLOSE_RE.search(live, m.end())
-        rows = tid and _ROWS_RE.search(source, m.end(), close.start() if close else len(source))
-        if rows:
-            stub(f"table {tid} rows", rows.end(1), rows.start(3))
+    for r in regions(source):
+        if r.content_start is None:
+            continue
+        region = source[r.content_start:r.content_end]
+        label = f"{r.kind} {r.item_id}" + (" rows" if r.kind == "table" else "")
+        edits.append(Edit(r.content_start, r.content_end,
+                          f"[{label}: {len(region)} characters omitted for review]" + "\n" * region.count("\n")))
     return apply(source, edits)
 
 

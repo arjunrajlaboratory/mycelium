@@ -61,6 +61,9 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from sync_html_report import _uncommented  # noqa: E402  (one definition of "outside comments")
+
 TEMPLATE = (
     Path(__file__).resolve().parents[3]
     / "network/conventions/report-generator/assets/report-template.html"
@@ -70,6 +73,10 @@ VOID = frozenset({
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
     "meta", "param", "source", "track", "wbr",
 })
+_ABBREVIATION_RE = re.compile(r"\b(?:e\.g|i\.e|et al|vs|Fig|Figs|Eq|No|approx|ca|Dr|St)\.")
+# <link> relations that only name another document; every other rel
+# (stylesheet, icon, preload, modulepreload, manifest, …) makes the browser fetch.
+_NONFETCHING_LINK_RELS = {"canonical", "alternate", "author", "license", "help", "next", "prev", "bookmark", "me"}
 MAX_BODY_WORDS = 45
 MAX_FILE_BYTES = 15 * 1024 * 1024
 MIN_TITLE_WORDS = 4
@@ -159,11 +166,6 @@ def _norm(s: str) -> str:
     return " ".join(html.unescape(s).split())
 
 
-def _uncommented(source: str) -> str:
-    """``source`` with HTML comments blanked (same length, newlines kept)."""
-    return re.sub(r"<!--.*?-->", lambda m: re.sub(r"[^\n]", " ", m.group(0)), source, flags=re.S)
-
-
 def _block(source: str, pattern: str) -> str | None:
     """The first match of ``pattern`` outside HTML comments, as it appears in ``source``."""
     m = re.search(pattern, _uncommented(source), re.S)
@@ -193,9 +195,10 @@ def _title_problems(title: str) -> list[str]:
     if ";" in title:
         problems.append("contains a semicolon (two points on one slide)")
     # A second sentence: terminal punctuation, space, then a capital letter.
-    if re.search(r"[.!?]\s+[A-Z]", title[:-1]) and not re.search(
-        r"\b(?:e\.g|i\.e|et al|vs|Fig|Figs|Eq|No|approx|ca)\.\s+[A-Z]", title
-    ):
+    # Abbreviations are masked first, so "Fig. A" does not end a sentence but
+    # does not excuse a real second sentence elsewhere in the title either.
+    masked = _ABBREVIATION_RE.sub(lambda m: m.group(0).replace(".", "_"), title[:-1])
+    if re.search(r"[.!?]\s+[A-Z]", masked):
         problems.append("contains more than one sentence")
     if len(words) < MIN_TITLE_WORDS:
         problems.append(f"has {len(words)} word(s); a sentence with subject, verb, and object needs at least {MIN_TITLE_WORDS}")
@@ -220,6 +223,7 @@ def check_source(source: str, filename: str = "<report>", *, min_slides: int = 1
     builder.feed(source)
     builder.close()
     root = builder.root
+    live = _uncommented(source)
     findings: list[Finding] = []
 
     def emit(code, severity, node_or_pos, message):
@@ -230,7 +234,7 @@ def check_source(source: str, filename: str = "<report>", *, min_slides: int = 1
         findings.append(Finding(code, severity, line, col, message))
 
     # -- placeholders (template guidance comments may mention them) ----------
-    for m in re.finditer(r"%%[A-Z][A-Z0-9_]*%%", _uncommented(source)):
+    for m in re.finditer(r"%%[A-Z][A-Z0-9_]*%%", live):
         if report_only and m.group(0) == "%%SLIDES%%":
             continue
         line = source.count("\n", 0, m.start()) + 1
@@ -244,8 +248,13 @@ def check_source(source: str, filename: str = "<report>", *, min_slides: int = 1
         refs = []
         if t == "script" and "src" in a:
             refs.append(("src", a["src"]))
-        if t == "link" and "stylesheet" in (a.get("rel") or "").lower():
-            refs.append(("href", a.get("href", "")))
+        if t == "link" and a.get("href"):
+            rels = set((a.get("rel") or "").lower().split())
+            if not rels or rels - _NONFETCHING_LINK_RELS:
+                refs.append(("href", a["href"]))
+        style = a.get("style") or ""
+        for m in re.finditer(r"url\(\s*['\"]?(?!data:|#)([^'\")]+)", style):
+            refs.append(("style", m.group(0)))
         if t in ("img", "source", "video", "audio", "track", "iframe", "embed", "input"):
             for k in ("src", "srcset", "poster"):
                 if k in a:
@@ -275,7 +284,7 @@ def check_source(source: str, filename: str = "<report>", *, min_slides: int = 1
     elif template is not None and template.is_file():
         tsrc = template.read_text(encoding="utf-8")
         if runtime != _block(tsrc, RUNTIME_RE) or _block(source, STYLE_RE) != _block(tsrc, STYLE_RE):
-            line = source.count("\n", 0, re.search(RUNTIME_RE, _uncommented(source), re.S).start()) + 1
+            line = source.count("\n", 0, re.search(RUNTIME_RE, live, re.S).start()) + 1
             emit("runtime", "warning", (line, 1), "the runtime or style block differs from the bundled template; re-copy both from report-template.html")
 
     # -- deck ----------------------------------------------------------------

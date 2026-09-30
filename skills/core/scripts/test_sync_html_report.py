@@ -353,3 +353,40 @@ def test_reviewer_copy_strips_media_and_keeps_line_numbers(project, tmp_path):
     assert "figure img" in text and "figure plot" in text
     assert text.count("\n") == full.count("\n")
     assert text.splitlines().index("<p>After.</p>") == full.splitlines().index("<p>After.</p>")
+
+
+# -- pre-release code review regressions ---------------------------------------
+
+def test_non_finite_data_is_a_sync_error_not_a_traceback(project, capsys):
+    (project.outputs / "bad.csv").write_text("t,v\n0,1\n1,inf\n", encoding="utf-8")
+    (project.outputs / "bad.json").write_text('{"v": [1, NaN]}', encoding="utf-8")
+    for name in ("bad.csv", "bad.json"):
+        raw = (project.outputs / name).read_bytes()
+        report, manifest = project(DATA.format(did="b"), data=[{"id": "b", "path": f"../outputs/{name}", "sha256": sha(raw)}])
+        before = report.read_bytes()
+        assert run(report, manifest) == 1
+        assert report.read_bytes() == before
+        assert "not finite" in capsys.readouterr().err
+
+
+def test_attribute_lookup_does_not_match_hyphenated_suffixes():
+    tag = '<svg stroke-width="2" data-height="9" width="400" height="300">'
+    assert shr._attr(tag, "width") == "400"
+    assert shr._attr(tag, "height") == "300"
+    out = shr._svg_markup(tag + "</svg>", "f", "")
+    assert 'viewBox="0 0 400 300"' in out and 'stroke-width="2"' in out
+
+
+def test_table_rounding_handles_large_values_and_negative_zero():
+    assert shr._format_cell("1e30", 2) == ("1000000000000000000000000000000.00", True)
+    assert shr._format_cell("-0.001", 2) == ("0.00", True)
+    assert shr._format_cell("nan", 2) == ("nan", False)
+
+
+def test_csv_identifiers_keep_their_spelling_in_data_payloads(project):
+    (project.outputs / "ids.csv").write_text("sample,value\n007,1.5\n1E5,2\n", encoding="utf-8")
+    raw = (project.outputs / "ids.csv").read_bytes()
+    report, manifest = project(DATA.format(did="i"), data=[{"id": "i", "path": "../outputs/ids.csv", "sha256": sha(raw)}])
+    assert run(report, manifest) == 0
+    payload = json.loads(_payload(report.read_text(encoding="utf-8"), "i"))
+    assert payload["rows"] == [["007", 1.5], ["1E5", 2]]

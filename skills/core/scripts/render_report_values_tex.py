@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from decimal import ROUND_HALF_UP, Decimal
+import math
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 import re
 import sys
 from pathlib import Path
@@ -154,10 +155,21 @@ def format_value(
                 "render_report_values_tex: precision must be a non-negative int, "
                 f"got {precision!r}."
             )
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(
+                f"render_report_values_tex: unit={unit!r} requires a finite value, got {value!r}."
+            )
         d = Decimal(repr(value)) if isinstance(value, float) else Decimal(value)
-        if unit == "percent":
-            d = d * 100
-        text = str(d.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_HALF_UP))
+        with localcontext() as ctx:
+            ctx.prec = max(28, d.adjusted() + precision + 5)
+            if unit == "percent":
+                d = d * 100
+            try:
+                text = str(d.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_HALF_UP))
+            except InvalidOperation as exc:
+                raise ValueError(
+                    f"render_report_values_tex: cannot render {value!r} at precision {precision}."
+                ) from exc
         if text.startswith("-") and not text.strip("-0."):
             text = text[1:]  # "-0.00" → "0.00"
         return text + (r"\%" if unit == "percent" else "")
