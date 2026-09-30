@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from decimal import ROUND_HALF_UP, Decimal
 import re
 import sys
 from pathlib import Path
@@ -122,7 +123,10 @@ def format_value(
     1. ``unit`` set    — DERIVE the displayed string from ``value``.
        ``unit="percent"`` turns the stored fraction ``0.978`` into ``97.8\\%``
        at ``precision`` decimal places (default 1; integer precision drops the
-       trailing ``.0``). Because the string is a pure function of the canonical
+       trailing ``.0``); ``unit="decimal"`` rounds the value itself
+       (``7.47712`` → ``7.48`` at precision 2). Rounding is half-up on the
+       value's decimal form (``0.9535`` → ``95.4\\%``), matching scitexlintr's
+       display contract. Because the string is a pure function of the canonical
        ``value``, it can never silently disagree with the number the
        verification layer (Phase 6 / scitexlintr) anchors on.
     2. ``display`` set — emit the author-supplied string VERBATIM (no escaping).
@@ -133,24 +137,30 @@ def format_value(
        time but it is not produced by default), strings are LaTeX-escaped.
     """
     if unit is not None:
-        if unit != "percent":
+        if unit not in ("percent", "decimal"):
             raise ValueError(
                 f"render_report_values_tex: unsupported unit {unit!r}. "
-                "v1 supports only unit='percent'."
+                "Supported units: 'percent', 'decimal'."
             )
         # bool is an int subclass — exclude it so True/False can't masquerade
         # as a fraction.
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(
-                "render_report_values_tex: unit='percent' requires a numeric "
-                f"fraction value, got {type(value).__name__!r} (value={value!r})."
+                f"render_report_values_tex: unit={unit!r} requires a numeric "
+                f"value, got {type(value).__name__!r} (value={value!r})."
             )
         if isinstance(precision, bool) or not isinstance(precision, int) or precision < 0:
             raise ValueError(
                 "render_report_values_tex: precision must be a non-negative int, "
                 f"got {precision!r}."
             )
-        return f"{value * 100:.{precision}f}" + r"\%"
+        d = Decimal(repr(value)) if isinstance(value, float) else Decimal(value)
+        if unit == "percent":
+            d = d * 100
+        text = str(d.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_HALF_UP))
+        if text.startswith("-") and not text.strip("-0."):
+            text = text[1:]  # "-0.00" → "0.00"
+        return text + (r"\%" if unit == "percent" else "")
     if display is not None:
         if not isinstance(display, str):
             raise ValueError(

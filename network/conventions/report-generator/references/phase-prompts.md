@@ -1,8 +1,16 @@
 # Phase prompts — sub-agent reviewers for report generation
 
-This file contains the full prompts dispatched to the sub-agents in Phases 4, 5, and 6 of the report-generator flow. Each prompt is designed to be **self-contained**: the sub-agent reads the draft `.tex` files and the named inputs only, with no inherited context from the parent session. That blind-read is the missing ingredient in self-declared consistency checks.
+This file contains the full prompts dispatched to the sub-agents in Phases 4, 5, and 6 of the report-generator flow, plus the Phase 9 storyline reviewer for the HTML format's slide deck. Each prompt is designed to be **self-contained**: the sub-agent reads the draft `.tex` files and the named inputs only, with no inherited context from the parent session. That blind-read is the missing ingredient in self-declared consistency checks.
 
 Each phase produces findings that flow back to Phase 2 (draft patches). Loop until the sub-agent returns no findings.
+
+**HTML format.** When the planning brief chose `format: html`, every "`.tex` source" below is the report's **reviewer copy** (`sync_html_report.py --reviewer-copy`, which stubs out inlined media and data but keeps line numbers), and `file` / `line` in findings point into the report. Tell each reviewer to read only the `<main>` element — the `<div id="deck">` holds the slide deck, which the Phase 9 reviewer handles. Value wrappers read as `<span data-sci-val="id">48</span>` rather than `\SciVal{\Macro}{48}`; figures are `<figure data-sci-fig="id">`; cross-references are empty `a.xref` links that the runtime numbers at load. Per-format substitutions:
+
+- **Phase 4:** "per page" budgets mean per ~500 words of main text. Captions include the runtime's "Figure N." label, which is not an acronym.
+- **Phase 5:** the skim surfaces are the masthead title and dek, the abstract, section headings, and figure captions.
+- **Phase 6:** there is no `build/report_values.tex` — scitexlintr already verifies every span's rendered text against `value` through `unit` / `precision` / `display_html`, so the display-faithfulness check reduces to "does a free-text `display_html` state a number that contradicts `value`". In place of `\includegraphics` paths, check each `figures[*].path` and `data[*].path` listed in the manifest, **wherever they live** — a synthesis report's figures and data routinely sit in sibling analyses, and reading those specific files (and the scripts that produced them, for code-grounding) is in scope. A data block's `data-sha256` is the hash of that source file, not of the inlined payload. Registered tables (`data-sci-table`) are generated from their CSV; verify the caption and header describe the columns, not each cell. "The compiled PDF" is the rendered page — screenshots of each figure when a browser is available.
+
+Phase 9 below applies to the HTML format only.
 
 If the `Agent` tool is unavailable (e.g., the report skill is running from inside a sub-agent context), execute the checklist in-line by reading the relevant inputs and applying the same questions. The output schema is the same either way.
 
@@ -241,6 +249,41 @@ The list above is permissive in scope but narrow in *kind*: you read the artifac
 
 ---
 
+## Phase 9 — Blind storyline review (HTML format)
+
+**Inputs to load:**
+
+- `analysis/[name]/reports/.ghost-deck.md` — the ordered slide titles, one per line (with each line's `data-source` section id, which the reviewer ignores for meaning).
+
+**Do NOT load:**
+
+- The report, the manifest, the planning brief, the memory cheatsheet, the analysis directory, or `.living/`.
+
+**Prompt:**
+
+> You are reading only the titles of a slide deck, in order, with **zero project context**. A good deck can be understood from its titles alone: each title is one complete declarative sentence — subject, verb, object — that makes exactly one point, and the sequence tells the whole story.
+>
+> **1. Restate the story.** From the titles alone, write:
+> - `headline`: the single main finding, in one sentence;
+> - `baseline`: what the finding is compared against, or `unstated` if no title says;
+> - `caveat`: the most important limitation, or `unstated`;
+> - `gaps`: anything a listener would need that no title supplies (the question being asked, how it was tested, what comes next).
+>
+> **2. Check every title except the first (the title slide).** Return a finding for any title that:
+> - is not a complete sentence with a subject, a verb, and an object or complement (a topic label such as "Growth results" or "Dose response" is a finding);
+> - makes more than one point — joined by "and", "while", "but", a semicolon, or a second clause that could be its own slide;
+> - states a topic or a method step without saying what was found, where the slide is clearly about a result;
+> - hedges so much it asserts nothing, or overclaims relative to the other titles (e.g. "proves" where the rest of the deck says "suggests");
+> - repeats the point of another title.
+>
+> **3. Check the arc.** Is the headline finding stated within the first three titles? Does the main caveat get its own title? Does any title depend on a term no earlier title introduced?
+>
+> Output YAML: `restatement: {headline, baseline, caveat, gaps}` and `findings:` in the shared output contract (use `section: storyline`, `line:` the ghost-deck line number). Err on the side of not flagging: a title that is a clear sentence making one point passes even if you would have phrased it differently.
+
+The orchestrator — not the sub-agent — compares `restatement` against the Phase-0 planning brief (headline question, baseline, primary metric, and the biggest caveat from the report). A mismatch in any of the three is a major finding against the storyline as a whole: revise the titles and re-run the review before building slides. The loop ends when the restatement matches and no major title findings remain; minor findings are resolved at the drafter's judgment, because each fresh blind reader finds a new term it would like introduced.
+
+---
+
 ## When to loop
 
 Each sub-agent phase loops:
@@ -258,5 +301,5 @@ In practice, two iterations is typical. Three or more iterations on the same sub
 
 - **Sub-agents must not know the planning brief, the memory cheatsheet, or the analysis directory.** The point of phase-4/5/6 is the blind read. Honor the input list above strictly.
 - **One sub-agent per phase, not one sub-agent per checklist item.** Combining the checks in one prompt keeps the context small and lets the sub-agent share work (e.g., the regex pass for numeric tokens in Phase 6 is one pass, not one per check).
-- **Output is YAML, not Markdown.** This matters because the parent flow programmatically applies the findings — Markdown free-text is error-prone to parse. The orchestrator persists each phase's output to `analysis/[name]/reports/.review-plain-english.yaml`, `.review-framing.yaml`, and `.review-numerical.yaml` respectively. The sub-agent returns the YAML body; the orchestrator owns the file.
+- **Output is YAML, not Markdown.** This matters because the parent flow programmatically applies the findings — Markdown free-text is error-prone to parse. The orchestrator persists each phase's output to `analysis/[name]/reports/.review-plain-english.yaml`, `.review-framing.yaml`, and `.review-numerical.yaml` respectively (and, in the HTML format, Phase 9's to `.review-storyline.yaml`). The sub-agent returns the YAML body; the orchestrator owns the file.
 - **Sub-agents err on the side of NOT flagging.** Each prompt says so; treat that line as load-bearing. False positives waste the drafter's time. A finding with `confidence: low` is fine; an invented finding is not.

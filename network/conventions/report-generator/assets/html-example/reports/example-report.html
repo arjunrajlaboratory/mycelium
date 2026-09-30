@@ -1,0 +1,1221 @@
+<!doctype html>
+<!--
+  Mycelium Report Template — HTML (report + companion slides, one file)
+  =============================================================================
+  One self-contained file with two modes:
+
+    * the long-form REPORT (default view), and
+    * the companion SLIDES (press "Present", or open report.html#slides/1).
+      Esc (or leaving fullscreen) returns to the report section the current
+      slide came from.
+
+  Copy to analysis/[name]/reports/[name]-report.html and replace every
+  %%…%% placeholder marker (check_html_report.py fails on any that remain).
+  Read html-conventions.md in this convention pack before drafting — it
+  defines the value / figure / data / slide contracts used below.
+
+  Numbers: every reportable value is a wrapper span whose text is the
+  rendered value, e.g. <span data-sci-val="n_samples">48</span>. Never type a
+  manifest value as bare text. `scitexlintr report.html --manifest=.manifest.json
+  --write` refreshes stale values; `sync_html_report.py` refreshes figures and
+  interactive data. Do not edit the <style> block or the
+  <script id="sci-report-runtime"> block per report — they are the shared
+  runtime and are replaced wholesale when the template is upgraded.
+
+  Shapes: this file is the OVERVIEW + SUPPLEMENT shape (default).
+    * OVERVIEW: delete the <section id="supplement"> block.
+    * COMPREHENSIVE: move the supplement's methods detail into Methods and
+      delete the supplement heading.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="mycelium report-generator (html)">
+<title>Drug X slows lung cancer cell growth without killing the cells</title>
+<style>
+/* ==========================================================================
+   Tokens — light and dark are both selected, not flipped.
+   ========================================================================== */
+:root {
+  color-scheme: light;
+  --paper: #fbfbf9;
+  --surface: #ffffff;
+  --ink: #1a1a19;
+  --ink-2: #52514e;
+  --muted: #7a7973;
+  --rule: #e1e0d9;
+  --rule-strong: #c3c2b7;
+  --accent: #1c5cab;
+  --accent-soft: #e6effa;
+  --caveat: #8a4b00;
+  --caveat-soft: #fbf1e4;
+  --highlight: #fff3c4;
+  --media-paper: #ffffff;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+  --serif: ui-serif, "Iowan Old Style", Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --measure: 42rem;
+  --wide: 60rem;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --paper: #121211; --surface: #1a1a19; --ink: #f2f1ec; --ink-2: #c3c2b7;
+    --muted: #9a998f; --rule: #2c2c2a; --rule-strong: #45443f; --accent: #86b6ef;
+    --accent-soft: #17273b; --caveat: #f0b36a; --caveat-soft: #2a1f12; --highlight: #3b3212;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #121211; --surface: #1a1a19; --ink: #f2f1ec; --ink-2: #c3c2b7;
+  --muted: #9a998f; --rule: #2c2c2a; --rule-strong: #45443f; --accent: #86b6ef;
+  --accent-soft: #17273b; --caveat: #f0b36a; --caveat-soft: #2a1f12; --highlight: #3b3212;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+  --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+}
+
+/* ==========================================================================
+   Report
+   ========================================================================== */
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 1.5rem; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 1.0625rem/1.62 var(--serif);
+  font-kerning: normal; text-rendering: optimizeLegibility;
+}
+body.presenting { overflow: hidden; }
+body.presenting > :not(#deck):not(script) { visibility: hidden; }
+a { color: var(--accent); text-underline-offset: 0.15em; text-decoration-thickness: 1px; }
+.skip { position: absolute; left: -999px; }
+.skip:focus { left: 1rem; top: 1rem; z-index: 10; background: var(--surface); padding: .5rem 1rem; }
+
+.masthead { padding: 3.5rem 1rem 2rem; border-bottom: 1px solid var(--rule); }
+.masthead-inner { max-width: calc(var(--wide) + 16rem); margin: 0 auto; padding-left: 0; }
+@media (min-width: 72rem) { .masthead-inner { padding-left: 16rem; } }
+.kicker { font: 600 .78rem/1.2 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 .9rem; }
+.masthead h1 { font: 700 clamp(1.9rem, 4.2vw, 2.9rem)/1.12 var(--sans); letter-spacing: -.02em; margin: 0 0 .9rem; max-width: 28ch; text-wrap: balance; }
+.dek { font-size: 1.28rem; line-height: 1.45; color: var(--ink-2); margin: 0 0 1.4rem; max-width: 38em; text-wrap: pretty; }
+.byline { font: .92rem/1.5 var(--sans); color: var(--ink-2); margin: 0; }
+.byline span + span::before { content: "·"; margin: 0 .5em; color: var(--muted); }
+.actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1.6rem; }
+.btn {
+  font: 600 .9rem/1 var(--sans); display: inline-flex; align-items: center; gap: .5em;
+  padding: .7em 1.05em; border-radius: 999px; border: 1px solid var(--rule-strong);
+  background: var(--surface); color: var(--ink); cursor: pointer; text-decoration: none;
+}
+.btn:hover { border-color: var(--ink-2); }
+.btn:focus-visible, .deck :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn-primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn-primary:hover { background: var(--ink-2); border-color: var(--ink-2); }
+.btn svg { width: 1em; height: 1em; }
+
+.layout {
+  display: grid; grid-template-columns: minmax(0, var(--wide)); justify-content: center;
+  max-width: calc(var(--wide) + 16rem); margin: 0 auto; padding: 0 1rem 5rem;
+}
+@media (min-width: 72rem) {
+  .layout { grid-template-columns: 13rem minmax(0, var(--wide)); column-gap: 3rem; }
+}
+.toc { display: none; }
+@media (min-width: 72rem) {
+  .toc { display: block; position: sticky; top: 0; align-self: start; max-height: 100vh; overflow: auto; padding: 2.5rem 0 2rem; font: .84rem/1.35 var(--sans); }
+}
+.toc-title { font: 600 .72rem/1 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 .8rem; }
+.toc ol { list-style: none; margin: 0; padding: 0; }
+.toc ol ol { padding-left: .85rem; margin: .3rem 0 .5rem; }
+.toc li { margin: .32rem 0; }
+.toc a { color: var(--ink-2); text-decoration: none; display: block; border-left: 2px solid transparent; padding-left: .55rem; margin-left: -.7rem; }
+.toc a:hover { color: var(--ink); }
+.toc a[aria-current="true"] { color: var(--ink); border-left-color: var(--accent); }
+.toc-inline { margin: 2rem 0 0; font: .95rem/1.4 var(--sans); }
+@media (min-width: 72rem) { .toc-inline { display: none; } }
+.toc-inline summary { cursor: pointer; color: var(--ink-2); }
+
+main { min-width: 0; padding-top: 2.2rem; }
+/* Prose keeps a readable measure; figures and tables marked .wide break out. */
+main :is(p, ul, ol, dl, h2, h3, h4, blockquote, pre, figure, .caveat, .table-wrap, math[display="block"]) { max-width: var(--measure); }
+main :is(figure, .table-wrap).wide { max-width: var(--wide); }
+main h2 {
+  font: 700 1.55rem/1.25 var(--sans); letter-spacing: -.01em; margin: 3.2rem 0 1rem;
+  padding-top: 1.2rem; border-top: 1px solid var(--rule); text-wrap: balance;
+}
+main section:first-child > h2 { border-top: 0; margin-top: 1rem; }
+main h3 { font: 650 1.18rem/1.35 var(--sans); margin: 2.4rem 0 .7rem; text-wrap: balance; }
+main h4 { font: 650 1rem/1.4 var(--sans); margin: 1.8rem 0 .5rem; color: var(--ink-2); }
+main p, main li { text-wrap: pretty; hyphens: auto; }
+main p { margin: 0 0 1.05rem; }
+main ul, main ol { padding-left: 1.3rem; margin: 0 0 1.1rem; }
+main li { margin: .3rem 0; }
+.present-here {
+  font: 500 .75rem/1 var(--sans); color: var(--muted); text-decoration: none; margin-left: .6rem;
+  vertical-align: .2em; white-space: nowrap; opacity: 0; transition: opacity .15s;
+}
+h2:hover .present-here, h3:hover .present-here, .present-here:focus { opacity: 1; }
+@media (hover: none) { .present-here { opacity: 1; } }
+.flash { animation: flash 1.6s ease-out; }
+@keyframes flash { from { background: var(--highlight); } to { background: transparent; } }
+
+.abstract { font-size: 1.1rem; line-height: 1.58; }
+.abstract h2 { font: 600 .78rem/1 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); border: 0; margin: 1rem 0 .8rem; padding: 0; }
+.caveat {
+  margin: 1.4rem 0; padding: .9rem 1.1rem; border-left: 3px solid var(--caveat);
+  background: var(--caveat-soft); font-size: .98rem; border-radius: 0 6px 6px 0;
+}
+.caveat > :last-child { margin-bottom: 0; }
+.caveat-label { font: 700 .72rem/1 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--caveat); display: block; margin-bottom: .45rem; }
+
+[data-sci-val], [data-sci-text] { font-variant-numeric: tabular-nums; }
+code, kbd, samp, pre { font-family: var(--mono); font-size: .88em; }
+main dl { margin: 0 0 1.1rem; }
+main dt { font: 650 .95rem/1.4 var(--sans); margin-top: .7rem; }
+main dd { margin: .15rem 0 0 1.2rem; }
+math[display="block"] { display: block; overflow-x: auto; overflow-y: hidden; margin: 1rem 0; padding: .2rem 0; }
+ol.references { font-size: .92rem; line-height: 1.5; padding-left: 1.6rem; }
+ol.references li { margin: .45rem 0; }
+time { font-variant-numeric: tabular-nums; }
+pre { background: var(--surface); border: 1px solid var(--rule); padding: .9rem 1rem; overflow: auto; border-radius: 6px; }
+
+/* Figures — media sits on a light card in both themes (analysis figures are drawn on white). */
+figure { margin: 2rem 0; }
+.sci-media { background: var(--media-paper); border: 1px solid var(--rule); border-radius: 8px; padding: .75rem; overflow: hidden; }
+.sci-media svg, .sci-media img { display: block; width: 100%; height: auto; max-height: 80vh; }
+[data-sci-diagram] .sci-media { background: var(--surface); }
+[data-sci-diagram] .sci-media svg { color: var(--ink); }
+figcaption { font: .9rem/1.5 var(--sans); color: var(--ink-2); margin-top: .7rem; max-width: var(--measure); }
+/* "Figure 2." / "Table S1." labels are inserted by the runtime, which also
+   numbers the cross-references, so the two can never disagree. */
+.sci-label { font-weight: 650; color: var(--ink); }
+
+.table-wrap { overflow-x: auto; margin: 1.6rem 0; }
+table.sci-table { border-collapse: collapse; font: .9rem/1.4 var(--sans); min-width: 60%; }
+table.sci-table caption { text-align: left; color: var(--ink-2); padding-bottom: .5rem; caption-side: top; }
+
+table.sci-table th, table.sci-table td { padding: .45rem .8rem; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+table.sci-table thead th { border-bottom: 1.5px solid var(--rule-strong); font-weight: 650; }
+table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.supplement > h2 { font-size: 1.9rem; }
+.supplement { counter-reset: supp; }
+.supplement > section > h3 { counter-increment: supp; }
+.supplement > section > h3::before { content: "S" counter(supp) " "; color: var(--muted); }
+.provenance dl { display: grid; grid-template-columns: minmax(8rem, max-content) 1fr; gap: .35rem 1.2rem; font: .9rem/1.45 var(--sans); }
+.provenance dt { color: var(--ink-2); }
+.provenance dd { margin: 0; overflow-wrap: anywhere; }
+.report-footer { max-width: var(--measure); font: .85rem/1.5 var(--sans); color: var(--muted); border-top: 1px solid var(--rule); margin-top: 4rem; padding-top: 1.2rem; }
+
+/* Interactive time series */
+.sci-ts-controls { display: flex; align-items: center; gap: .8rem; margin-top: .6rem; font: .85rem/1.3 var(--sans); flex-wrap: wrap; }
+.sci-ts-controls input[type="range"] { flex: 1 1 12rem; accent-color: var(--accent); }
+.sci-ts-controls button { font: 600 .8rem/1 var(--sans); border: 1px solid var(--rule-strong); background: var(--surface); color: var(--ink); border-radius: 999px; padding: .45em .9em; cursor: pointer; min-width: 4.6rem; }
+.sci-ts-readout { display: flex; flex-wrap: wrap; gap: .25rem 1rem; font: .85rem/1.35 var(--sans); color: #52514e; min-height: 1.4em; margin-bottom: .4rem; }
+.sci-ts-readout b { color: #0b0b0b; font-variant-numeric: tabular-nums; }
+.sci-ts-legend { display: flex; flex-wrap: wrap; gap: .3rem 1rem; font: .8rem/1.3 var(--sans); color: #52514e; margin-bottom: .3rem; }
+.sci-ts-key { display: inline-block; width: .9rem; height: 2px; vertical-align: middle; margin-right: .35rem; border-radius: 1px; }
+.sci-ts svg text { font: 11px var(--sans); fill: #898781; }
+.sci-ts svg .ts-label { font-size: 12px; fill: #52514e; }
+.sci-data-table { margin-top: .6rem; font: .85rem/1.4 var(--sans); }
+.sci-data-table summary { cursor: pointer; color: var(--ink-2); }
+.sci-data-table table { border-collapse: collapse; margin-top: .5rem; font-variant-numeric: tabular-nums; }
+.sci-data-table th, .sci-data-table td { padding: .2rem .6rem; border-bottom: 1px solid var(--rule); text-align: right; }
+
+/* ==========================================================================
+   Deck — a 1280×720 stage scaled to fit the viewport.
+   ========================================================================== */
+.deck { position: fixed; inset: 0; z-index: 100; background: #0f0f0e; color: var(--ink); font-family: var(--sans); }
+.deck[hidden] { display: none; }
+.deck-viewport { position: absolute; inset: 0 0 44px 0; overflow: hidden; }
+/* Centered by its own midpoint, so it stays centered when scaled below 1280px. */
+.deck-stage {
+  width: 1280px; height: 720px; position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%) scale(var(--deck-scale, 1)); transform-origin: center center;
+}
+.slide {
+  position: absolute; inset: 0; display: none; flex-direction: column;
+  background: var(--surface); color: var(--ink); padding: 56px 72px 48px; overflow: hidden;
+  border-radius: 4px; font: 26px/1.4 var(--sans);
+}
+.slide.is-current { display: flex; animation: slide-in .22s ease-out; }
+@keyframes slide-in { from { opacity: 0; } to { opacity: 1; } }
+.slide > h2 { font: 700 38px/1.18 var(--sans); letter-spacing: -.015em; margin: 0 0 28px; max-width: 30ch; text-wrap: balance; }
+.slide-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; justify-content: center; gap: 22px; }
+.slide-body p { margin: 0; max-width: 34ch; color: var(--ink-2); }
+.slide-body ul { margin: 0; padding-left: 1.1em; display: grid; gap: 18px; max-width: 36ch; }
+.slide-body li::marker { color: var(--muted); }
+.slide .takeaway { font-size: 24px; color: var(--ink-2); max-width: 44ch; }
+.slide-figure { flex: 1 1 auto; min-height: 0; display: flex; }
+.slide-figure figure { margin: 0; flex: 1; display: flex; flex-direction: column; min-height: 0; max-width: none; }
+.slide-figure .sci-media { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; }
+.slide-figure .sci-media svg, .slide-figure .sci-media img { width: 100%; height: 100%; object-fit: contain; }
+.slide-figure .sci-media.sci-ts { flex-direction: column; align-items: stretch; justify-content: flex-start; }
+.slide-figure figcaption, .slide-figure .sci-data-table { display: none; }
+.slide-figure .sci-ts { width: 100%; }
+.slide-figure .sci-ts svg { flex: 1 1 auto; min-height: 0; }
+.slide--split .slide-body { flex-direction: row; align-items: stretch; gap: 44px; }
+.slide--split .slide-figure { flex: 3 1 0; }
+.slide--split .slide-text { flex: 2 1 0; display: flex; flex-direction: column; justify-content: center; gap: 18px; }
+.slide--statement .slide-body { align-items: flex-start; }
+.slide .stat { font: 800 120px/1 var(--sans); letter-spacing: -.03em; color: var(--ink); }
+.slide .stat-label { font-size: 28px; color: var(--ink-2); max-width: 34ch; }
+.slide--title { justify-content: center; background: var(--ink); color: var(--paper); padding: 72px 96px 56px; }
+.slide--title h1 { font: 750 52px/1.1 var(--sans); letter-spacing: -.025em; margin: 0 0 24px; max-width: 24ch; text-wrap: balance; }
+.slide--title .slide-dek { font-size: 26px; line-height: 1.4; opacity: .82; max-width: 40ch; margin: 0 0 32px; }
+.slide--title .slide-byline { font-size: 20px; opacity: .7; margin: 0; }
+.slide--title .slide-hint { font-size: 16px; opacity: .55; margin: 40px 0 0; }
+.slide-source {
+  position: absolute; right: 28px; bottom: 16px; max-width: 60%; font: 500 15px/1 var(--sans);
+  color: var(--muted); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.slide-source:hover { color: var(--accent); }
+.deck-bar {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 44px; display: flex; align-items: center;
+  gap: 14px; padding: 0 14px; color: #c3c2b7; font: 500 13px/1 var(--sans); background: #0f0f0e;
+}
+.deck-bar button {
+  background: transparent; border: 0; color: inherit; width: 32px; height: 32px; border-radius: 6px;
+  display: grid; place-items: center; cursor: pointer; padding: 0;
+}
+.deck-bar button:hover { background: #262624; color: #fff; }
+.deck-bar svg { width: 18px; height: 18px; }
+.deck-progress { flex: 1; display: flex; gap: 3px; align-items: center; height: 100%; }
+.deck-progress button { flex: 1; height: 16px; width: auto; border-radius: 0; padding: 0; display: flex; align-items: center; }
+.deck-progress button::before { content: ""; display: block; width: 100%; height: 4px; border-radius: 2px; background: #3a3a37; }
+.deck-progress button.is-done::before { background: #86b6ef; }
+.deck-progress button:hover { background: transparent; }
+.deck-progress button:hover::before { background: #c3c2b7; }
+.deck-count { min-width: 4.5em; text-align: right; font-variant-numeric: tabular-nums; }
+.deck-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.deck:fullscreen { background: #000; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+/* ==========================================================================
+   Print — the report prints as a paper; while presenting, one slide per page.
+   ========================================================================== */
+@page { margin: 18mm 16mm; }
+@page slide { size: 13.333in 7.5in; margin: 0; }
+@media print {
+  /* Same specificity as the dark-mode selectors, and later, so print is always light. */
+  :root, :root:not([data-theme="light"]), :root[data-theme="dark"] {
+    color-scheme: light;
+    --paper: #fff; --surface: #fff; --ink: #000; --ink-2: #333; --muted: #555; --rule: #ccc;
+    --rule-strong: #999; --accent: #1c5cab; --accent-soft: #e6effa; --caveat: #8a4b00;
+    --caveat-soft: #fbf1e4; --highlight: #fff3c4;
+    --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+    --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+  }
+  body { font-size: 10.5pt; background: #fff; }
+  .toc, .toc-inline, .actions, .present-here, .skip, .sci-ts-controls button, .sci-ts-controls input { display: none !important; }
+  .layout { display: block; max-width: none; padding: 0; }
+  main h2 { break-after: avoid; }
+  main h3 { break-after: avoid; }
+  figure, table, .caveat { break-inside: avoid; }
+  a { color: inherit; text-decoration: none; }
+  body:not(.presenting) .deck { display: none !important; }
+  body.presenting > :not(#deck):not(script) { display: none !important; }
+  body.presenting .deck { position: static; background: none; }
+  body.presenting .deck-viewport { position: static; display: block; }
+  body.presenting .deck-stage { transform: none !important; width: auto; height: auto; }
+  body.presenting .slide { display: flex !important; position: relative; width: 13.333in; height: 7.5in; page: slide; break-after: page; border-radius: 0; animation: none; }
+  body.presenting .deck-bar { display: none; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the report</a>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <p class="kicker">Worked example (synthetic data) · Analysis report</p>
+    <h1>Drug X slows lung cancer cell growth without killing the cells</h1>
+    <!-- One or two sentences: the headline question and its answer, in plain
+         English. No acronyms, no bare numbers (wrap any value). -->
+    <p class="dek">Does Drug X stop cultured lung cancer cells from growing? It slows them, in proportion to dose, but the treated cells stay alive.</p>
+    <p class="byline"><span>Mycelium report generator</span><span><time>30 September 2026</time></span></p>
+    <div class="actions">
+      <button class="btn btn-primary" type="button" data-present>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>
+        Present slides
+      </button>
+      <a class="btn" href="#provenance">Provenance</a>
+    </div>
+    <details class="toc-inline"><summary>Contents</summary><ol data-toc></ol></details>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="toc" aria-label="Contents">
+    <p class="toc-title">Contents</p>
+    <ol data-toc></ol>
+  </nav>
+
+  <main id="main">
+    <!-- Every <section> that a slide points at needs an id (slides carry
+         data-source="#that-id"). Headings under Results state findings, not
+         topics: "Evidence-first calling trades recall for precision", not
+         "Evidence-first calling". -->
+
+    <section id="abstract" class="abstract">
+      <h2>Abstract</h2>
+      <div class="caveat"><span class="caveat-label">Synthetic example</span>
+      <p>This report shows the HTML template filled in end to end. Its data were generated for the example and describe no real experiment.</p></div>
+      <p>We asked whether Drug X slows the growth of cultured lung cancer cells, compared with cells given only the drug's solvent (vehicle). Cells were counted daily for ten days at two doses. At the high dose the growth rate fell by <span data-sci-val="drug-x.growth_rate_reduction_high">41.2%</span>, and the effect grew steadily with dose. The treated cells stayed alive: <span data-sci-val="drug-x.viability_high">93%</span> were viable at the end of the experiment, so the drug slows division rather than killing cells. All experiments used one cell line, so we do not yet know whether the effect generalizes.</p>
+      <!-- 150–250 words. Lead with the question, the comparison baseline,
+           and the primary metric (wrapped). State the single biggest caveat.
+           No undefined acronyms, citations, or figure references. -->
+    </section>
+
+    <section id="problem">
+      <h2>Problem statement</h2>
+      <p>A drug can stop a tumor from growing in two different ways: it can kill the cells, or it can slow how often they divide. The second kind of drug is called cytostatic (it slows or halts cell division without killing cells). The distinction matters because a cytostatic drug has to be combined with something else to shrink a tumor.</p>
+      <p>This report answers one question: does Drug X slow the growth of lung cancer cells in culture, and if it does, is that because the cells die or because they divide less often? The comparison throughout is cells given the vehicle alone.</p>
+    </section>
+
+    <section id="methods">
+      <h2>Methods</h2>
+      <p>We grew <span data-sci-text="drug-x.cell_line">A549</span> lung cancer cells in <span data-sci-val="drug-x.n_replicates">4</span> replicate wells per condition and counted them once a day. Each condition received vehicle, a low dose (<span data-sci-val="drug-x.dose_low_um">1</span>&nbsp;µM), or a high dose (<span data-sci-val="drug-x.dose_high_um">5</span>&nbsp;µM) of Drug X. From each growth curve we estimated a doubling time: the time the population takes to double while it is still growing freely. A separate dose series measured growth rate at more doses so that we could fit a dose–response curve. <a class="xref" href="#fig-design">Figure</a> shows the design; the supplement gives the fitting details.</p>
+      <figure class="sci-figure" id="fig-design" data-sci-diagram>
+        <div class="sci-media">
+          <svg viewBox="0 0 640 150" role="img" aria-label="Experimental design">
+            <g font-family="system-ui, sans-serif" font-size="14" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="10" y="45" width="150" height="60" rx="8"/>
+              <rect x="245" y="45" width="150" height="60" rx="8"/>
+              <rect x="480" y="45" width="150" height="60" rx="8"/>
+              <path d="M160 75h80" marker-end="url(#design-arrow)"/>
+              <path d="M395 75h80" marker-end="url(#design-arrow)"/>
+            </g>
+            <defs><marker id="design-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+            <g font-family="system-ui, sans-serif" font-size="14" fill="currentColor" text-anchor="middle">
+              <text x="85" y="72">Seed cells</text><text x="85" y="92" font-size="12" opacity=".7">vehicle or drug</text>
+              <text x="320" y="72">Count daily</text><text x="320" y="92" font-size="12" opacity=".7">ten days</text>
+              <text x="555" y="72">Fit growth</text><text x="555" y="92" font-size="12" opacity=".7">doubling time</text>
+            </g>
+          </svg>
+        </div>
+        <figcaption>Experimental design. Cells are seeded with vehicle or Drug X, counted daily, and each growth curve is summarized by its doubling time.</figcaption>
+      </figure>
+      <!-- Overview + supplement shape: 4–6 sentences a non-specialist could
+           follow. Intuition before the technical name. Point to the
+           supplement for definitions and parameters. -->
+    </section>
+
+    <section id="results">
+      <h2>Results</h2>
+      <section id="result-growth">
+        <h3>Drug X slows growth, and higher doses slow it more</h3>
+        <p>Cells given vehicle doubled every <span data-sci-val="drug-x.doubling_time_vehicle_h">22.4</span> hours. The low dose stretched the doubling time to <span data-sci-val="drug-x.doubling_time_low_h">27.9</span> hours and the high dose to <span data-sci-val="drug-x.doubling_time_high_h">38.1</span> hours, which is a <span data-sci-val="drug-x.growth_rate_reduction_high">41.2%</span> reduction in growth rate at the high dose. <a class="xref" href="#fig-growth">Figure</a> shows the daily counts; drag the slider to compare the conditions on any day.</p>
+        <figure class="sci-figure wide" id="fig-growth" data-sci-interactive="timeseries" data-default-index="last">
+          <script type="application/json" data-sci-data="growth_counts" data-sha256="85b8806dbd1a760813d075dc9f1eda5cc5ccea8bd2f7a5d0db1654d90f5e6738" data-content-sha256="e1f453f123d6d2b1d65abc51c9c2bb8360dad2e0a48944e5ace351a698d7e3d1">{"x":[0,1,2,3,4,5,6,7,8,9,10],"x_label":"Day","y_label":"Cells per well (thousands)","y_min":0,"y_format":{"maximumFractionDigits":0},"series":[{"name":"Vehicle","values":[10.0,20.5,40.7,76.9,133.4,205.0,275.3,329.1,362.8,381.4,390.9]},{"name":"1 µM","values":[10.0,17.8,31.2,53.2,87.1,134.3,191.4,249.9,300.6,338.4,363.5]},{"name":"5 µM","values":[10.0,15.3,23.1,34.7,51.3,74.1,104.2,141.1,183.0,226.5,267.5]}]}</script>
+          <div class="sci-media"></div>
+          <figcaption>Cells per well over ten days for vehicle and two doses of Drug X (mean of replicate wells). The treated populations approach the same ceiling as vehicle, but more slowly.</figcaption>
+        </figure>
+        <div class="table-wrap">
+          <table class="sci-table" id="tab-doubling">
+            <caption>Doubling time by condition.</caption>
+            <thead><tr><th>Condition</th><th class="num">Doubling time (hours)</th></tr></thead>
+            <tbody>
+              <tr><td>Vehicle</td><td class="num"><span data-sci-val="drug-x.doubling_time_vehicle_h">22.4</span></td></tr>
+              <tr><td>Low dose</td><td class="num"><span data-sci-val="drug-x.doubling_time_low_h">27.9</span></td></tr>
+              <tr><td>High dose</td><td class="num"><span data-sci-val="drug-x.doubling_time_high_h">38.1</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section id="result-dose">
+        <h3>Growth rate follows a standard dose–response curve</h3>
+        <p>Across the dose series, growth rate fell along a sigmoid curve (<a class="xref" href="#fig-dose">Figure</a>). Half of the maximal effect was reached at <span data-sci-val="drug-x.ic50_um">1.8</span>&nbsp;µM, with a 95% bootstrap interval from <span data-sci-val="drug-x.ic50_ci_low_um">1.4</span> to <span data-sci-val="drug-x.ic50_ci_high_um">2.3</span>&nbsp;µM. This is a half-maximal dose for growth rate, not for cell death.</p>
+        <figure class="sci-figure" id="fig-dose" data-sci-fig="dose_response" data-alt="Dose–response curve for growth rate" data-sha256="04772f73dcd72bb442ba63aade5644d207caad92aa1e86c52791fb8165cf737d" data-content-sha256="3b061da4459d4e05854eba03a5d86ce3d7adeb86ee9dbb12254f6315b14a28b9">
+          <div class="sci-media"><!-- sci-media --><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" font-family="Helvetica, Arial, sans-serif" role="img" aria-label="Dose–response curve for growth rate">
+<rect width="640" height="400" fill="#ffffff"/>
+<defs><clipPath id="dose_response-plot-area"><rect x="72" y="20" width="544" height="324"/></clipPath></defs>
+<line x1="72" x2="616" y1="344.0" y2="344.0" stroke="#e1e0d9"/>
+<text x="62" y="348.0" font-size="12" fill="#898781" text-anchor="end">0</text>
+<line x1="72" x2="616" y1="270.4" y2="270.4" stroke="#e1e0d9"/>
+<text x="62" y="274.4" font-size="12" fill="#898781" text-anchor="end">0.25</text>
+<line x1="72" x2="616" y1="196.7" y2="196.7" stroke="#e1e0d9"/>
+<text x="62" y="200.7" font-size="12" fill="#898781" text-anchor="end">0.5</text>
+<line x1="72" x2="616" y1="123.1" y2="123.1" stroke="#e1e0d9"/>
+<text x="62" y="127.1" font-size="12" fill="#898781" text-anchor="end">0.75</text>
+<line x1="72" x2="616" y1="49.5" y2="49.5" stroke="#e1e0d9"/>
+<text x="62" y="53.5" font-size="12" fill="#898781" text-anchor="end">1</text>
+<text x="134.9" y="364" font-size="12" fill="#898781" text-anchor="middle">0.1</text>
+<text x="344.0" y="364" font-size="12" fill="#898781" text-anchor="middle">1</text>
+<text x="553.1" y="364" font-size="12" fill="#898781" text-anchor="middle">10</text>
+<line x1="72" x2="616" y1="344" y2="344" stroke="#c3c2b7"/>
+<text x="344.0" y="388" font-size="13" fill="#52514e" text-anchor="middle">Drug X dose (µM, log scale)</text>
+<text transform="rotate(-90)" x="-182.0" y="18" font-size="13" fill="#52514e" text-anchor="middle">Growth rate relative to vehicle</text>
+<path d="M72.0 51.2 L76.5 51.3 L81.1 51.4 L85.6 51.5 L90.1 51.7 L94.7 51.8 L99.2 52.0 L103.7 52.1 L108.3 52.3 L112.8 52.5 L117.3 52.7 L121.9 52.9 L126.4 53.2 L130.9 53.4 L135.5 53.7 L140.0 53.9 L144.5 54.2 L149.1 54.5 L153.6 54.9 L158.1 55.2 L162.7 55.6 L167.2 56.0 L171.7 56.4 L176.3 56.8 L180.8 57.3 L185.3 57.8 L189.9 58.4 L194.4 58.9 L198.9 59.5 L203.5 60.2 L208.0 60.8 L212.5 61.5 L217.1 62.3 L221.6 63.1 L226.1 63.9 L230.7 64.8 L235.2 65.8 L239.7 66.8 L244.3 67.8 L248.8 68.9 L253.3 70.1 L257.9 71.3 L262.4 72.6 L266.9 73.9 L271.5 75.3 L276.0 76.8 L280.5 78.3 L285.1 79.9 L289.6 81.6 L294.1 83.4 L298.7 85.2 L303.2 87.1 L307.7 89.1 L312.3 91.1 L316.8 93.3 L321.3 95.5 L325.9 97.7 L330.4 100.1 L334.9 102.5 L339.5 104.9 L344.0 107.5 L348.5 110.1 L353.1 112.7 L357.6 115.4 L362.1 118.2 L366.7 121.0 L371.2 123.9 L375.7 126.7 L380.3 129.6 L384.8 132.6 L389.3 135.5 L393.9 138.5 L398.4 141.4 L402.9 144.4 L407.5 147.4 L412.0 150.3 L416.5 153.2 L421.1 156.1 L425.6 159.0 L430.1 161.8 L434.7 164.6 L439.2 167.3 L443.7 170.0 L448.3 172.6 L452.8 175.2 L457.3 177.7 L461.9 180.2 L466.4 182.5 L470.9 184.8 L475.5 187.1 L480.0 189.2 L484.5 191.3 L489.1 193.4 L493.6 195.3 L498.1 197.2 L502.7 199.0 L507.2 200.7 L511.7 202.3 L516.3 203.9 L520.8 205.4 L525.3 206.9 L529.9 208.3 L534.4 209.6 L538.9 210.8 L543.5 212.0 L548.0 213.1 L552.5 214.2 L557.1 215.2 L561.6 216.2 L566.1 217.1 L570.7 218.0 L575.2 218.8 L579.7 219.6 L584.3 220.3 L588.8 221.0 L593.3 221.7 L597.9 222.3 L602.4 222.9 L606.9 223.4 L611.5 223.9 L616.0 224.4" fill="none" stroke="#2a78d6" stroke-width="2" clip-path="url(#dose_response-plot-area)"/>
+<line x1="397.4" x2="397.4" y1="140.8" y2="344" stroke="#52514e" stroke-dasharray="4 4"/>
+<text x="405.4" y="334" font-size="12" fill="#52514e">half-maximal dose</text>
+<line x1="134.9" x2="134.9" y1="64.2" y2="46.5" stroke="#0d366b" stroke-width="1.5"/>
+<circle cx="134.9" cy="55.3" r="5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<line x1="234.7" x2="234.7" y1="81.9" y2="58.3" stroke="#0d366b" stroke-width="1.5"/>
+<circle cx="234.7" cy="70.1" r="5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<line x1="344.0" x2="344.0" y1="126.0" y2="96.6" stroke="#0d366b" stroke-width="1.5"/>
+<circle cx="344.0" cy="111.3" r="5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<line x1="443.7" x2="443.7" y1="205.6" y2="176.1" stroke="#0d366b" stroke-width="1.5"/>
+<circle cx="443.7" cy="190.8" r="5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+<line x1="553.1" x2="553.1" y1="235.0" y2="211.5" stroke="#0d366b" stroke-width="1.5"/>
+<circle cx="553.1" cy="223.2" r="5" fill="#2a78d6" stroke="#ffffff" stroke-width="2"/>
+</svg><!-- /sci-media --></div>
+          <figcaption>Growth rate relative to vehicle across a dose series of Drug X (points: mean and spread of replicate wells; line: fitted dose–response curve; dashed line: half-maximal dose).</figcaption>
+        </figure>
+      </section>
+      <section id="result-viability">
+        <h3>Treated cells stay alive, so Drug X is cytostatic</h3>
+        <p>If the drug killed cells, the slower growth could simply reflect fewer living cells. It did not: at the high dose <span data-sci-val="drug-x.viability_high">93%</span> of cells were alive at the end of the experiment. Drug X slows division rather than killing cells.</p>
+      </section>
+      <!-- One <section id="result-..."> per finding, each with an <h3> that
+           states the finding. Figure, table, and interactive-figure markup
+           is in html-conventions.md; refer to a figure in prose with an
+           a.xref link to its id (numbered at load). Delete these guidance
+           comments once the section is written. -->
+    </section>
+
+    <section id="conclusions">
+      <h2>Conclusions</h2>
+      <p>Drug X slows the growth of cultured lung cancer cells in proportion to dose, and it does so without killing them. On its own it would hold a tumor back rather than shrink it.</p>
+      <div class="caveat" id="caveat-one-line"><span class="caveat-label">Main caveat</span>
+      <p>Every experiment used one cell line (<span data-sci-text="drug-x.cell_line">A549</span>). The effect may be specific to it.</p></div>
+    </section>
+
+    <section id="next-steps">
+      <h2>Next steps</h2>
+      <p>Repeat the growth assay across a panel of lung cancer cell lines, and test whether combining Drug X with a cytotoxic drug reduces cell number.</p>
+      <!-- Optional: delete this section if there are none. -->
+    </section>
+
+    <section id="provenance" class="provenance">
+      <h2>Provenance</h2>
+      <dl>
+        <dt>Manifest</dt><dd><code>reports/.manifest.json</code></dd>
+        <dt>Growth fit</dt><dd><code>scripts/02_fit_growth.py</code> — doubling times from the daily counts (synthetic example)</dd>
+        <dt>Dose response</dt><dd><code>scripts/03_dose_response.py</code> — sigmoid fit and bootstrap interval (synthetic example)</dd>
+        <dt>Report build</dt><dd><code>build_example.py</code> regenerates this file from the template</dd>
+      </dl>
+      <!-- A <dl> of every analysis script with a one-line description, the
+           manifest path, and the date values were last synced. -->
+    </section>
+
+    <section id="supplement" class="supplement">
+      <h2>Supplement</h2>
+      <section id="supp-fitting">
+        <h3>How the doubling time is estimated</h3>
+        <p>Each growth curve is fit with a logistic model, which captures free exponential growth early on and the slowdown as wells fill (<a class="xref" href="#fig-logistic">Figure</a>). The doubling time is the early, exponential phase of that fit. <a class="xref" href="#tab-replicates">Table</a> lists the estimate for every replicate well.</p>
+        <figure class="sci-figure" id="fig-logistic" data-sci-diagram>
+          <div class="sci-media">
+            <svg viewBox="0 0 640 200" role="img" aria-label="Logistic growth schematic">
+              <path d="M40 170 C 200 168, 260 150, 320 100 S 440 32, 600 30" fill="none" stroke="currentColor" stroke-width="2"/>
+              <path d="M40 30 H600" stroke="currentColor" stroke-dasharray="4 4" opacity=".5"/>
+              <g font-family="system-ui, sans-serif" font-size="14" fill="currentColor">
+                <text x="60" y="150">exponential phase: doubling time</text>
+                <text x="430" y="22">carrying capacity</text>
+              </g>
+            </svg>
+          </div>
+          <figcaption>The logistic growth model. The early, exponential phase sets the doubling time; the dashed line is the ceiling a full well approaches.</figcaption>
+        </figure>
+        <div class="table-wrap" id="tab-replicates">
+          <table class="sci-table" data-sci-table="doubling_by_replicate" data-precision="1" data-sha256="f78d93189c3dd35a9e66bbf322fc4b4b969fdb41c810f975a975eee42eb8e2c0" data-content-sha256="d3bdada6ec4ba0537c536aea993a97ffb910cd67884994dc4725dba9c01dae2c">
+            <caption>Doubling time of every replicate well, by condition.</caption>
+            <thead><tr><th>Condition</th><th class="num">Replicate</th><th class="num">Doubling time (hours)</th></tr></thead>
+            <tbody><!-- sci-rows --><tr><td>Vehicle</td><td class="num">1.0</td><td class="num">21.8</td></tr>
+<tr><td>Vehicle</td><td class="num">2.0</td><td class="num">22.6</td></tr>
+<tr><td>Vehicle</td><td class="num">3.0</td><td class="num">22.9</td></tr>
+<tr><td>Vehicle</td><td class="num">4.0</td><td class="num">22.3</td></tr>
+<tr><td>1 µM</td><td class="num">1.0</td><td class="num">27.2</td></tr>
+<tr><td>1 µM</td><td class="num">2.0</td><td class="num">28.2</td></tr>
+<tr><td>1 µM</td><td class="num">3.0</td><td class="num">28.5</td></tr>
+<tr><td>1 µM</td><td class="num">4.0</td><td class="num">27.8</td></tr>
+<tr><td>5 µM</td><td class="num">1.0</td><td class="num">37.1</td></tr>
+<tr><td>5 µM</td><td class="num">2.0</td><td class="num">38.4</td></tr>
+<tr><td>5 µM</td><td class="num">3.0</td><td class="num">39.0</td></tr>
+<tr><td>5 µM</td><td class="num">4.0</td><td class="num">37.9</td></tr><!-- /sci-rows --></tbody>
+          </table>
+        </div>
+      </section>
+      <!-- <section id="supp-..."><h3>Title</h3>…</section> blocks, numbered
+           S1, S2, … automatically. Definitions, parameter rationale, the
+           failure-mode worked examples, and exhaustive tables go here. -->
+    </section>
+
+    <footer class="report-footer">
+      <p>Generated with the Mycelium report generator. Values, figures, and interactive data are checked against the report manifest by scitexlintr.</p>
+    </footer>
+  </main>
+</div>
+
+<!-- ==========================================================================
+     SLIDES — 10 to 20 <section class="slide"> elements.
+     * The first slide is data-slide="title"; it is the only slide exempt
+       from the sentence-title rule.
+     * Every other slide has exactly one <h2> that is a complete sentence
+       (subject, verb, object; ends with a period; no colon). One slide, one
+       point. Read the titles alone in order: they must tell the story.
+     * Every other slide has data-source="#section-id" pointing at the report
+       section it summarizes; Esc returns there.
+     * At most one figure per slide, referenced — not copied — with
+       <div class="slide-figure" data-fig-ref="fig-id"></div>.
+     * About 40 words of body text at most. Values use the same wrapper
+       spans as the report.
+     Slide kinds (add the class to the section):
+       slide--figure     figure + optional <p class="takeaway">
+       slide--split      figure left, <div class="slide-text"> right
+       slide--statement  <div class="stat"><span data-sci-val=…>…</span></div>
+                         + <p class="stat-label">
+       slide--points     up to three short sentences in a <ul>
+     ========================================================================== -->
+<div id="deck" class="deck" hidden role="region" aria-label="Slides" aria-roledescription="slide deck">
+  <div class="deck-viewport">
+    <div class="deck-stage">
+
+      <section class="slide slide--title" data-slide="title">
+        <h1>Drug X slows lung cancer cell growth without killing the cells</h1>
+        <p class="slide-dek">Does Drug X stop cultured lung cancer cells from growing? It slows them, in proportion to dose, but the treated cells stay alive.</p>
+        <p class="slide-byline">Mycelium report generator · <time>30 September 2026</time></p>
+        <p class="slide-hint">→ or click to advance · Esc returns to the report · F for fullscreen</p>
+      </section>
+
+      <section class="slide slide--statement" data-source="#result-growth">
+        <h2>Drug X slows the growth of cultured lung cancer cells.</h2>
+        <div class="slide-body"><div class="stat"><span data-sci-val="drug-x.growth_rate_reduction_high">41.2%</span></div><p class="stat-label">lower growth rate at the high dose, compared with vehicle</p></div>
+      </section>
+
+      <section class="slide slide--figure" data-source="#methods">
+        <h2>We counted treated and untreated cells daily for ten days.</h2>
+        <div class="slide-body"><div class="slide-figure" data-fig-ref="fig-design"></div></div>
+      </section>
+
+      <section class="slide slide--statement" data-source="#result-growth">
+        <h2>Untreated cells doubled roughly once a day.</h2>
+        <div class="slide-body"><div class="stat"><span data-sci-val="drug-x.doubling_time_vehicle_h">22.4</span> h</div><p class="stat-label">doubling time with vehicle</p></div>
+      </section>
+
+      <section class="slide slide--figure" data-source="#result-growth">
+        <h2>Each higher dose slowed growth further.</h2>
+        <div class="slide-body"><div class="slide-figure" data-fig-ref="fig-growth"></div><p class="takeaway">Drag the slider or press Play to step through the days.</p></div>
+      </section>
+
+      <section class="slide slide--points" data-source="#result-growth">
+        <h2>The high dose stretched the doubling time by more than half.</h2>
+        <div class="slide-body"><ul><li>Vehicle: <span data-sci-val="drug-x.doubling_time_vehicle_h">22.4</span> hours.</li><li>Low dose: <span data-sci-val="drug-x.doubling_time_low_h">27.9</span> hours.</li><li>High dose: <span data-sci-val="drug-x.doubling_time_high_h">38.1</span> hours.</li></ul></div>
+      </section>
+
+      <section class="slide slide--split" data-source="#result-dose">
+        <h2>Growth rate falls along a standard dose–response curve.</h2>
+        <div class="slide-body"><div class="slide-figure" data-fig-ref="fig-dose"></div><div class="slide-text"><p>Growth rate declines smoothly between the lowest and highest doses tested.</p></div></div>
+      </section>
+
+      <section class="slide slide--statement" data-source="#result-dose">
+        <h2>Half of the maximal effect arrives below the high dose.</h2>
+        <div class="slide-body"><div class="stat"><span data-sci-val="drug-x.ic50_um">1.8</span> µM</div><p class="stat-label">half-maximal dose for growth rate (95% interval <span data-sci-val="drug-x.ic50_ci_low_um">1.4</span> to <span data-sci-val="drug-x.ic50_ci_high_um">2.3</span> µM)</p></div>
+      </section>
+
+      <section class="slide slide--statement" data-source="#result-viability">
+        <h2>Treated cells stayed alive, so the drug is cytostatic.</h2>
+        <div class="slide-body"><div class="stat"><span data-sci-val="drug-x.viability_high">93%</span></div><p class="stat-label">of cells alive at the end, high dose</p></div>
+      </section>
+
+      <section class="slide slide--points" data-source="#caveat-one-line">
+        <h2>All of these results come from a single cell line.</h2>
+        <div class="slide-body"><ul><li>Every experiment used <span data-sci-text="drug-x.cell_line">A549</span> cells.</li><li>The effect may not generalize to other lung cancers.</li></ul></div>
+      </section>
+
+      <section class="slide slide--points" data-source="#next-steps">
+        <h2>A panel of cell lines would show whether the effect generalizes.</h2>
+        <div class="slide-body"><ul><li>Repeat the growth assay across several lung cancer lines.</li><li>Test Drug X alongside a drug that kills cells.</li></ul></div>
+      </section>
+
+      <section class="slide slide--points" data-source="#provenance">
+        <h2>Every number in this deck traces to a registered analysis output.</h2>
+        <div class="slide-body"><ul><li>Values, figures, and the growth data are checked against the report manifest.</li><li>Press Esc on any slide to read the matching report section.</li></ul></div>
+      </section>
+
+    </div>
+  </div>
+  <div class="deck-bar">
+    <button type="button" data-deck="close" aria-label="Back to the report (Esc)" title="Back to the report (Esc)">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button type="button" data-deck="prev" aria-label="Previous slide" title="Previous slide (←)">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12 3v10L5 8z" fill="currentColor" transform="translate(-1 0)"/></svg>
+    </button>
+    <button type="button" data-deck="next" aria-label="Next slide" title="Next slide (→)">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3v10l7-5z" fill="currentColor" transform="translate(1 0)"/></svg>
+    </button>
+    <div class="deck-progress" role="group" aria-label="Slide progress"></div>
+    <span class="deck-count" aria-hidden="true"></span>
+    <button type="button" data-deck="fullscreen" aria-label="Toggle fullscreen (F)" title="Fullscreen (F)">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <div class="deck-live" aria-live="polite"></div>
+</div>
+
+<script id="sci-report-runtime">
+/* Mycelium report runtime — shared by every HTML report. Do not edit per
+   report; add report-specific interactive kinds with
+   SciReport.register("kind", function (figure, data) { ... }) in a separate
+   <script> after this one. No external dependencies. */
+(function () {
+  "use strict";
+  var doc = document;
+  var interactiveKinds = {};
+  var uid = 0;
+
+  function $(sel, root) { return (root || doc).querySelector(sel); }
+  function $$(sel, root) { return Array.prototype.slice.call((root || doc).querySelectorAll(sel)); }
+  function el(tag, attrs, text) {
+    var n = doc.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  var SVGNS = "http://www.w3.org/2000/svg";
+  function svg(tag, attrs) {
+    var n = doc.createElementNS(SVGNS, tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+    return n;
+  }
+
+  /* ---------------- Figure numbers, cross-references, contents ---------------- */
+
+  // One numbering pass labels every caption and every cross-reference, so
+  // "Figure S2" in a caption and in the prose always agree. Supplement
+  // figures and tables are numbered S1, S2, ... separately.
+  function label(caption, text) {
+    if (!caption) return;
+    var old = $(":scope > .sci-label", caption);
+    if (old) old.remove();
+    var span = el("span", { "class": "sci-label" }, text + ". ");
+    caption.insertBefore(span, caption.firstChild);
+  }
+
+  function numberFigures() {
+    var numbers = {}, count = { fig: 0, figS: 0, tab: 0, tabS: 0 };
+    $$("main figure.sci-figure").forEach(function (f) {
+      var supp = !!f.closest(".supplement");
+      var text = supp ? "Figure S" + (++count.figS) : "Figure " + (++count.fig);
+      if (f.id) numbers[f.id] = text;
+      label($(":scope > figcaption", f), text);
+    });
+    $$("main table.sci-table").forEach(function (t) {
+      var supp = !!t.closest(".supplement");
+      var text = supp ? "Table S" + (++count.tabS) : "Table " + (++count.tab);
+      var host = t.closest(".table-wrap");
+      if (t.id) numbers[t.id] = text;
+      if (host && host.id) numbers[host.id] = text;
+      label($(":scope > caption", t), text);
+    });
+    $$("a.xref").forEach(function (a) {
+      var id = (a.getAttribute("href") || "").slice(1);
+      var target = id && doc.getElementById(id);
+      if (numbers[id]) { a.textContent = numbers[id]; return; }
+      if (target) {
+        var h = target.matches("h2,h3,h4") ? target : $("h2,h3,h4", target);
+        if (h && !a.textContent.trim()) a.textContent = h.textContent.replace(/\s*▶.*$/, "");
+      }
+    });
+  }
+
+  function buildContents() {
+    var lists = $$("[data-toc]");
+    if (!lists.length) return;
+    var items = [];
+    $$("main > section[id]").forEach(function (sec) {
+      var h = $(":scope > h2", sec);
+      if (!h) return;
+      var sub = $$(":scope > section[id] > h3", sec).map(function (h3) {
+        return { id: h3.parentElement.id, text: h3.textContent };
+      });
+      items.push({ id: sec.id, text: h.textContent, sub: sub });
+    });
+    lists.forEach(function (ol) {
+      items.forEach(function (it) {
+        var li = el("li"); var a = el("a", { href: "#" + it.id }, it.text); li.appendChild(a);
+        if (it.sub.length && ol.closest(".toc")) {
+          var inner = el("ol");
+          it.sub.forEach(function (s) { var l2 = el("li"); l2.appendChild(el("a", { href: "#" + s.id }, s.text)); inner.appendChild(l2); });
+          li.appendChild(inner);
+        }
+        ol.appendChild(li);
+      });
+    });
+    if (!("IntersectionObserver" in window)) return;
+    var links = $$(".toc a");
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (!e.isIntersecting) return;
+        links.forEach(function (a) { a.setAttribute("aria-current", a.getAttribute("href") === "#" + e.target.id ? "true" : "false"); });
+      });
+    }, { rootMargin: "0px 0px -70% 0px" });
+    $$("main section[id]").forEach(function (s) { observer.observe(s); });
+  }
+
+  /* ---------------- SVG id isolation (for figures copied into slides) ---------------- */
+
+  function isolateIds(root, suffix) {
+    var map = {};
+    $$("[id]", root).concat(root.id ? [root] : []).forEach(function (n) {
+      var old = n.id; map[old] = old + suffix; n.id = old + suffix;
+    });
+    if (!Object.keys(map).length) return;
+    $$("*", root).concat([root]).forEach(function (n) {
+      Array.prototype.slice.call(n.attributes).forEach(function (attr) {
+        var v = attr.value, nv = v;
+        if (v.indexOf("#") < 0) return;
+        nv = v.replace(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/g, function (m, id) { return map[id] ? "url(#" + map[id] + ")" : m; });
+        if (/^#/.test(nv) && map[nv.slice(1)]) nv = "#" + map[nv.slice(1)];
+        if (nv !== v) n.setAttribute(attr.name, nv);
+      });
+    });
+  }
+
+  /* ---------------- Interactive figures ---------------- */
+
+  function readData(figure) {
+    var block = $('script[type="application/json"][data-sci-data]', figure);
+    if (!block) return null;
+    try { return JSON.parse(block.textContent); }
+    catch (e) { console.error("[SciReport] invalid JSON in data block", block.getAttribute("data-sci-data"), e); return null; }
+  }
+
+  function initInteractive(figure) {
+    var kind = figure.getAttribute("data-sci-interactive");
+    var init = interactiveKinds[kind];
+    if (!init) { console.warn("[SciReport] no interactive kind registered for", kind); return; }
+    var data = readData(figure);
+    if (!data) return;
+    try { init(figure, data); } catch (e) { console.error("[SciReport] interactive figure failed", kind, e); }
+  }
+
+  function niceTicks(lo, hi, count) {
+    if (!(isFinite(lo) && isFinite(hi))) return [0, 1];
+    if (lo === hi) { lo -= 1; hi += 1; }
+    var span = hi - lo, raw = span / Math.max(1, count), mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    var step = [1, 2, 5, 10].map(function (m) { return m * mag; }).find(function (s) { return span / s <= count; }) || 10 * mag;
+    var start = Math.floor(lo / step) * step, ticks = [];
+    for (var v = start; v <= hi + step * 1e-9; v += step) ticks.push(Math.round(v / step) * step);
+    if (ticks[ticks.length - 1] < hi) ticks.push(ticks[ticks.length - 1] + step);
+    return ticks;
+  }
+
+  /* Time series with a scrubber, a play button, and a pinned readout.
+     Data: {"x": [...], "x_label": "Day", "y_label": "Cells",
+            "series": [{"name": "Control", "values": [...]}],
+            "y_format": {Intl.NumberFormat options}, "y_min": 0}
+     or the CSV form {"columns": [x, s1, s2, ...], "rows": [[...], ...]}.
+     data-x-label / data-y-label on the figure override the labels.
+     The figure's default state (data-default-index, default "last") is the
+     one print, reduced motion, and the prose describe. */
+  function timeSeries(figure, data) {
+    if (!data.x && data.columns && data.rows) {
+      // CSV form from sync_html_report.py: first column is x, the rest are series.
+      data = {
+        x: data.rows.map(function (r) { return r[0]; }),
+        x_label: data.columns[0],
+        series: data.columns.slice(1).map(function (name, j) {
+          return { name: name, values: data.rows.map(function (r) { return r[j + 1]; }) };
+        })
+      };
+    }
+    data = Object.assign({}, data);
+    if (figure.hasAttribute("data-x-label")) data.x_label = figure.getAttribute("data-x-label");
+    if (figure.hasAttribute("data-y-label")) data.y_label = figure.getAttribute("data-y-label");
+    // data-series="col_a,col_b" picks and orders series; data-series-names
+    // gives them reader-facing names ("Low retention,High retention").
+    var pick = figure.getAttribute("data-series"), names = figure.getAttribute("data-series-names");
+    if (pick) {
+      var byName = {};
+      (data.series || []).forEach(function (s) { byName[s.name] = s; });
+      data.series = pick.split(",").map(function (n) { return n.trim(); }).filter(Boolean).map(function (n) {
+        if (!byName[n]) console.error("[SciReport] data-series names an unknown series:", n);
+        return byName[n];
+      }).filter(Boolean);
+    }
+    if (names) {
+      var list = names.split(",").map(function (n) { return n.trim(); });
+      data.series = (data.series || []).map(function (s, i) { return list[i] ? Object.assign({}, s, { name: list[i] }) : s; });
+    }
+    var xs = data.x || [], series = (data.series || []).slice(0, 8);
+    if ((data.series || []).length > 8) console.warn("[SciReport] time series capped at 8 series; fold the rest into Other or facet");
+    var n = xs.length;
+    if (!n || !series.length) return;
+    var fmt = new Intl.NumberFormat(undefined, data.y_format || { maximumSignificantDigits: 4 });
+    var xfmt = function (v) { return typeof v === "number" ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(v) : String(v); };
+    var mount = $(".sci-media", figure) || figure.insertBefore(el("div", { "class": "sci-media" }), $("figcaption", figure));
+    mount.classList.add("sci-ts");
+    mount.textContent = "";
+    var id = "ts" + (++uid);
+
+    var legend = el("div", { "class": "sci-ts-legend" });
+    if (series.length >= 2) series.forEach(function (s, i) {
+      var item = el("span"); var key = el("span", { "class": "sci-ts-key" });
+      key.style.background = "var(--series-" + (i + 1) + ")"; item.appendChild(key); item.appendChild(doc.createTextNode(s.name));
+      legend.appendChild(item);
+    });
+    var readout = el("output", { "class": "sci-ts-readout", "data-sci-live": "", "aria-live": "polite" });
+    mount.appendChild(legend); mount.appendChild(readout);
+
+    var longest = series.reduce(function (w, s) { return Math.max(w, String(s.name).length); }, 0);
+    var W = 720, H = 340, m = { t: 12, r: series.length <= 4 ? Math.min(180, 16 + longest * 7) : 16, b: 38, l: 56 };
+    var values = [];
+    series.forEach(function (s) { (s.values || []).forEach(function (v) { if (v != null && isFinite(v)) values.push(+v); }); });
+    var ymin = data.y_min != null ? data.y_min : Math.min.apply(null, values), ymax = Math.max.apply(null, values);
+    var yt = niceTicks(ymin, ymax, 5);
+    var y0 = yt[0], y1 = yt[yt.length - 1];
+    var numericX = xs.every(function (v) { return typeof v === "number"; });
+    var xlo = numericX ? xs[0] : 0, xhi = numericX ? xs[n - 1] : n - 1;
+    function X(i) { var v = numericX ? xs[i] : i; return m.l + (xhi === xlo ? 0 : (v - xlo) / (xhi - xlo)) * (W - m.l - m.r); }
+    function Y(v) { return m.t + (1 - (v - y0) / (y1 - y0)) * (H - m.t - m.b); }
+
+    var root = svg("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": (data.y_label || "Value") + " over " + (data.x_label || "time") });
+    var defs = svg("defs"), clip = svg("clipPath", { id: id + "-clip" }), clipRect = svg("rect", { x: 0, y: 0, width: 0, height: H });
+    clip.appendChild(clipRect); defs.appendChild(clip); root.appendChild(defs);
+    yt.forEach(function (t) {
+      root.appendChild(svg("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: "#e1e0d9", "stroke-width": 1 }));
+      var lab = svg("text", { x: m.l - 8, y: Y(t) + 4, "text-anchor": "end" }); lab.textContent = fmt.format(t); root.appendChild(lab);
+    });
+    root.appendChild(svg("line", { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, stroke: "#c3c2b7", "stroke-width": 1 }));
+    var xticks = numericX ? niceTicks(xlo, xhi, 6).filter(function (t) { return t >= xlo && t <= xhi; }) : null;
+    (xticks || xs.map(function (_, i) { return i; }).filter(function (i) { return i % Math.ceil(n / 6) === 0; })).forEach(function (t) {
+      var px = numericX ? m.l + (t - xlo) / (xhi - xlo || 1) * (W - m.l - m.r) : X(t);
+      var lab = svg("text", { x: px, y: H - m.b + 18, "text-anchor": "middle" }); lab.textContent = numericX ? xfmt(t) : String(xs[t]); root.appendChild(lab);
+    });
+    if (data.x_label) { var xl = svg("text", { x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle", "class": "ts-label" }); xl.textContent = data.x_label; root.appendChild(xl); }
+    if (data.y_label) {
+      var yc = (m.t + H - m.b) / 2;
+      var yl = svg("text", { x: -yc, y: 14, "class": "ts-label", "text-anchor": "middle", transform: "rotate(-90)" });
+      yl.textContent = data.y_label; root.appendChild(yl);
+    }
+
+    function pathFor(vals) {
+      var d = "", pen = false;
+      for (var i = 0; i < n; i++) {
+        var v = vals[i];
+        if (v == null || !isFinite(v)) { pen = false; continue; }
+        d += (pen ? "L" : "M") + X(i).toFixed(1) + " " + Y(+v).toFixed(1); pen = true;
+      }
+      return d;
+    }
+    var dots = [], endLabels = [];
+    series.forEach(function (s, i) {
+      var color = "var(--series-" + (i + 1) + ")", d = pathFor(s.values || []);
+      root.appendChild(svg("path", { d: d, fill: "none", stroke: color, "stroke-width": 2, opacity: 0.22, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+      root.appendChild(svg("path", { d: d, fill: "none", stroke: color, "stroke-width": 2, "clip-path": "url(#" + id + "-clip)", "stroke-linejoin": "round", "stroke-linecap": "round" }));
+      if (series.length <= 4) {
+        var last = (s.values || []).length - 1;
+        while (last >= 0 && (s.values[last] == null)) last--;
+        if (last >= 0) endLabels.push({ x: X(last) + 8, y: Y(+s.values[last]) + 4, text: s.name });
+      }
+    });
+    // Direct labels at line ends, nudged apart so they never overprint.
+    endLabels.sort(function (a, b) { return a.y - b.y; });
+    for (var k = 1; k < endLabels.length; k++) {
+      if (endLabels[k].y - endLabels[k - 1].y < 14) endLabels[k].y = endLabels[k - 1].y + 14;
+    }
+    endLabels.forEach(function (l) {
+      var lab = svg("text", { x: l.x, y: Math.min(l.y, H - m.b), "class": "ts-label" }); lab.textContent = l.text; root.appendChild(lab);
+    });
+    var cursor = svg("line", { y1: m.t, y2: H - m.b, stroke: "#52514e", "stroke-width": 1, "stroke-dasharray": "3 3" });
+    root.appendChild(cursor);
+    series.forEach(function (s, i) {
+      var c = svg("circle", { r: 4.5, fill: "var(--series-" + (i + 1) + ")", stroke: "#ffffff", "stroke-width": 2 });
+      dots.push(c); root.appendChild(c);
+    });
+    var hit = svg("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent" });
+    root.appendChild(hit);
+    mount.appendChild(root);
+
+    var controls = el("div", { "class": "sci-ts-controls" });
+    var play = el("button", { type: "button", "data-no-advance": "" }, "Play");
+    var range = el("input", { type: "range", min: 0, max: n - 1, step: 1, "aria-label": (data.x_label || "Time") + " position" });
+    controls.appendChild(play); controls.appendChild(range);
+    figure.insertBefore(controls, $("figcaption", figure));
+
+    var cap = el("details", { "class": "sci-data-table" }); cap.appendChild(el("summary", null, "Data table"));
+    var table = el("table"), head = el("tr"); head.appendChild(el("th", null, data.x_label || "x"));
+    series.forEach(function (s) { head.appendChild(el("th", null, s.name)); });
+    var thead = el("thead"); thead.appendChild(head); table.appendChild(thead);
+    var tbody = el("tbody");
+    xs.forEach(function (x, i) {
+      var tr = el("tr"); tr.appendChild(el("td", null, xfmt(x)));
+      series.forEach(function (s) { var v = s.values[i]; tr.appendChild(el("td", null, v == null ? "–" : fmt.format(v))); });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody); cap.appendChild(table);
+    figure.insertBefore(cap, $("figcaption", figure));
+
+    var attr = figure.getAttribute("data-default-index");
+    var defaultIndex = attr == null || attr === "last" ? n - 1 : Math.max(0, Math.min(n - 1, parseInt(attr, 10) || 0));
+    function show(i) {
+      i = Math.max(0, Math.min(n - 1, i));
+      var px = X(i);
+      cursor.setAttribute("x1", px); cursor.setAttribute("x2", px);
+      clipRect.setAttribute("width", px + 1);
+      range.value = i;
+      readout.textContent = "";
+      var head = el("span"); head.appendChild(doc.createTextNode((data.x_label ? data.x_label + " " : "") ));
+      head.appendChild(el("b", null, xfmt(xs[i]))); readout.appendChild(head);
+      series.forEach(function (s, k) {
+        var v = s.values[i], ok = v != null && isFinite(v);
+        dots[k].style.display = ok ? "" : "none";
+        if (ok) { dots[k].setAttribute("cx", px); dots[k].setAttribute("cy", Y(+v)); }
+        var item = el("span"); item.appendChild(el("b", null, ok ? fmt.format(v) : "–")); item.appendChild(doc.createTextNode(" " + s.name));
+        readout.appendChild(item);
+      });
+    }
+    var timer = null;
+    function stop() { if (timer) { clearInterval(timer); timer = null; } play.textContent = "Play"; }
+    play.addEventListener("click", function () {
+      if (timer) { stop(); return; }
+      var i = +range.value >= n - 1 ? 0 : +range.value;
+      play.textContent = "Pause";
+      show(i);
+      timer = setInterval(function () { i += 1; show(i); if (i >= n - 1) stop(); }, Math.max(40, Math.min(250, 4000 / n)));
+    });
+    range.addEventListener("input", function () { stop(); show(+range.value); });
+    function nearest(evt) {
+      var rect = root.getBoundingClientRect(), sx = (evt.clientX - rect.left) / rect.width * W, best = 0, bd = Infinity;
+      for (var i = 0; i < n; i++) { var dd = Math.abs(X(i) - sx); if (dd < bd) { bd = dd; best = i; } }
+      return best;
+    }
+    hit.addEventListener("pointermove", function (evt) { if (!timer) show(nearest(evt)); });
+    hit.addEventListener("pointerleave", function () { if (!timer) show(+range.value); });
+    hit.addEventListener("click", function (evt) { evt.stopPropagation(); stop(); show(nearest(evt)); range.value = nearest(evt); });
+    range.value = defaultIndex; show(defaultIndex);
+  }
+  interactiveKinds.timeseries = timeSeries;
+
+  /* ---------------- Slides ---------------- */
+
+  var deck = $("#deck");
+  var slides = deck ? $$(".slide", deck) : [];
+  var current = 0, returnScroll = 0, leavingFullscreenByKey = false, open = false;
+
+  function prepareSlides() {
+    slides.forEach(function (slide, i) {
+      slide.setAttribute("aria-roledescription", "slide");
+      slide.setAttribute("aria-label", (i + 1) + " of " + slides.length);
+      $$(".slide-figure[data-fig-ref]", slide).forEach(function (slot) {
+        var src = doc.getElementById(slot.getAttribute("data-fig-ref"));
+        if (!src) { console.error("[SciReport] slide figure not found:", slot.getAttribute("data-fig-ref")); return; }
+        var clone = src.cloneNode(true);
+        $$(".sci-ts-controls, .sci-data-table", clone).forEach(function (n) { n.remove(); });
+        if (clone.hasAttribute("data-sci-interactive")) { var media = $(".sci-media", clone); if (media) media.textContent = ""; }
+        clone.removeAttribute("id");
+        isolateIds(clone, "--s" + (i + 1));
+        slot.appendChild(clone);
+        if (clone.hasAttribute("data-sci-interactive")) initInteractive(clone);
+      });
+      var source = slide.getAttribute("data-source");
+      if (source && source.charAt(0) === "#") {
+        var link = el("a", { "class": "slide-source", href: source, "data-deck-return": "" }, "↩ " + sectionTitle(doc.getElementById(source.slice(1))));
+        link.title = "Back to this section of the report";
+        slide.appendChild(link);
+      }
+    });
+    var bar = $(".deck-progress", deck);
+    slides.forEach(function (slide, i) {
+      var h = $("h1, h2", slide);
+      var b = el("button", { type: "button", "aria-label": "Slide " + (i + 1) + (h ? ": " + h.textContent : "") });
+      b.addEventListener("click", function (e) { e.stopPropagation(); go(i); });
+      bar.appendChild(b);
+    });
+    // "Present from here" links next to report headings that slides summarize.
+    var firstSlideFor = {};
+    slides.forEach(function (s, i) { var src = s.getAttribute("data-source"); if (src && !(src in firstSlideFor)) firstSlideFor[src] = i; });
+    Object.keys(firstSlideFor).forEach(function (src) {
+      var target = doc.getElementById(src.slice(1));
+      var heading = target && (target.matches("h2,h3") ? target : $(":scope > h2, :scope > h3", target));
+      if (!heading) return;
+      var a = el("a", { "class": "present-here", href: "#slides/" + (firstSlideFor[src] + 1), "aria-label": "Present from this section" }, "▶ present");
+      heading.appendChild(a);
+    });
+  }
+
+  // The heading a slide returns to: the target's own heading, else the
+  // heading of the nearest enclosing section (a caveat box, a table).
+  function sectionTitle(target) {
+    for (var n = target; n && n !== doc.body; n = n.parentElement) {
+      var h = n.matches("h2,h3") ? n : $(":scope > h2, :scope > h3", n);
+      if (h) return h.textContent.replace(/\s*▶.*$/, "");
+    }
+    return "Report";
+  }
+
+  function fit() {
+    if (!open) return;
+    var vp = $(".deck-viewport", deck), s = Math.min(vp.clientWidth / 1280, vp.clientHeight / 720);
+    deck.style.setProperty("--deck-scale", Math.max(0.1, s * 0.98).toFixed(4));
+  }
+
+  function render() {
+    slides.forEach(function (s, i) { s.classList.toggle("is-current", i === current); s.setAttribute("aria-hidden", i === current ? "false" : "true"); });
+    $$(".deck-progress button", deck).forEach(function (b, i) { b.classList.toggle("is-done", i <= current); b.setAttribute("aria-current", i === current ? "step" : "false"); });
+    $(".deck-count", deck).textContent = (current + 1) + " / " + slides.length;
+    var h = $("h1, h2", slides[current]);
+    $(".deck-live", deck).textContent = "Slide " + (current + 1) + " of " + slides.length + (h ? ": " + h.textContent : "");
+    var hash = "#slides/" + (current + 1);
+    if (location.hash !== hash) history.replaceState(null, "", hash);
+  }
+
+  function overflows(slide) {
+    return slide.scrollHeight > slide.clientHeight + 1 || slide.scrollWidth > slide.clientWidth + 1;
+  }
+
+  function go(i) {
+    if (!slides.length) return;
+    current = Math.max(0, Math.min(slides.length - 1, i));
+    render();
+    if (overflows(slides[current])) {
+      console.warn("[SciReport] slide " + (current + 1) + " content overflows the slide; shorten it or split it");
+    }
+  }
+
+  // Open every slide once and report the ones whose content does not fit
+  // (1-based numbers). Used by the Phase 9 gate: SciReport.checkLayout().
+  function checkLayout() {
+    var wasOpen = open, was = current, bad = [];
+    if (!wasOpen) openDeck(0);
+    slides.forEach(function (s, i) { go(i); if (overflows(s)) bad.push(i + 1); });
+    go(was);
+    if (!wasOpen) closeDeck(false);
+    return bad;
+  }
+  function next() { go(current + 1); }
+  function prev() { go(current - 1); }
+
+  function openDeck(i) {
+    if (!slides.length) return;
+    if (!open) returnScroll = window.scrollY;
+    open = true;
+    deck.hidden = false;
+    doc.body.classList.add("presenting");
+    go(i || 0); fit();
+    deck.focus({ preventScroll: true });
+  }
+
+  function closeDeck(toSource) {
+    if (!open) return;
+    open = false;
+    if (doc.fullscreenElement) { leavingFullscreenByKey = true; doc.exitFullscreen().catch(function () {}); }
+    deck.hidden = true;
+    doc.body.classList.remove("presenting");
+    var src = toSource !== false && slides[current] && slides[current].getAttribute("data-source");
+    var target = src && src.charAt(0) === "#" && doc.getElementById(src.slice(1));
+    if (target) {
+      history.replaceState(null, "", src);
+      target.scrollIntoView({ block: "start" });
+      var flashEl = target.matches("section") ? ($(":scope > h2, :scope > h3", target) || target) : target;
+      flashEl.classList.remove("flash"); void flashEl.offsetWidth; flashEl.classList.add("flash");
+    } else {
+      history.replaceState(null, "", location.pathname + location.search);
+      window.scrollTo(0, returnScroll);
+    }
+  }
+
+  function toggleFullscreen() {
+    if (doc.fullscreenElement) { leavingFullscreenByKey = true; doc.exitFullscreen().catch(function () {}); }
+    else if (deck.requestFullscreen) deck.requestFullscreen().catch(function () {});
+  }
+
+  function isTyping(t) {
+    return t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  }
+
+  function onKey(e) {
+    if (!open || e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (isTyping(e.target)) return;
+    var onButton = e.target && e.target.tagName === "BUTTON";
+    switch (e.key) {
+      case "ArrowRight": case "ArrowDown": case "PageDown": case "n": next(); break;
+      case " ": case "Enter": if (onButton) return; if (e.shiftKey) prev(); else next(); break;
+      case "ArrowLeft": case "ArrowUp": case "PageUp": case "p": case "Backspace": prev(); break;
+      case "Home": go(0); break;
+      case "End": go(slides.length - 1); break;
+      case "f": case "F": toggleFullscreen(); break;
+      case "Escape": closeDeck(); break;
+      default: return;
+    }
+    e.preventDefault();
+  }
+
+  function onStageClick(e) {
+    if (!open) return;
+    var t = e.target;
+    if (t.closest("a, button, input, select, textarea, summary, details, [data-no-advance], [data-sci-interactive]")) return;
+    if (window.getSelection && String(window.getSelection())) return;
+    var rect = $(".deck-viewport", deck).getBoundingClientRect();
+    if (e.clientX - rect.left < rect.width * 0.25) prev(); else next();
+  }
+
+  function fromHash() {
+    var m = /^#slides(?:\/(\d+))?$/.exec(location.hash);
+    if (m) openDeck(m[1] ? parseInt(m[1], 10) - 1 : 0);
+    else if (open) closeDeck(false);
+  }
+
+  function initDeck() {
+    if (!deck || !slides.length) { $$("[data-present]").forEach(function (b) { b.hidden = true; }); return; }
+    deck.tabIndex = -1;
+    prepareSlides();
+    $$("[data-present]").forEach(function (b) { b.addEventListener("click", function () { openDeck(0); }); });
+    $$('[data-deck="next"]', deck).forEach(function (b) { b.addEventListener("click", function (e) { e.stopPropagation(); next(); }); });
+    $$('[data-deck="prev"]', deck).forEach(function (b) { b.addEventListener("click", function (e) { e.stopPropagation(); prev(); }); });
+    $$('[data-deck="close"]', deck).forEach(function (b) { b.addEventListener("click", function (e) { e.stopPropagation(); closeDeck(); }); });
+    $$('[data-deck="fullscreen"]', deck).forEach(function (b) { b.addEventListener("click", function (e) { e.stopPropagation(); toggleFullscreen(); }); });
+    $$("[data-deck-return]", deck).forEach(function (a) { a.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); closeDeck(); }); });
+    $(".deck-viewport", deck).addEventListener("click", onStageClick);
+    doc.addEventListener("keydown", onKey);
+    window.addEventListener("resize", fit);
+    window.addEventListener("hashchange", fromHash);
+    doc.addEventListener("fullscreenchange", function () {
+      fit();
+      // In fullscreen the browser consumes Esc to exit fullscreen, so leaving
+      // fullscreen by any route other than our own F toggle means "escape the
+      // slideshow" and returns to the report.
+      // Only the exit event consumes the flag: the enter event can arrive
+      // after a quick second F press has already set it.
+      if (!doc.fullscreenElement) {
+        if (open && !leavingFullscreenByKey) closeDeck();
+        leavingFullscreenByKey = false;
+      }
+    });
+    var touchX = null;
+    deck.addEventListener("touchstart", function (e) { touchX = e.touches[0].clientX; }, { passive: true });
+    deck.addEventListener("touchend", function (e) {
+      if (touchX == null) return;
+      var dx = e.changedTouches[0].clientX - touchX; touchX = null;
+      if (Math.abs(dx) > 50) { if (dx < 0) next(); else prev(); }
+    });
+    window.addEventListener("beforeprint", function () { slides.forEach(function (s) { s.setAttribute("aria-hidden", "false"); }); });
+    fromHash();
+  }
+
+  window.SciReport = {
+    register: function (kind, init) { interactiveKinds[kind] = init; },
+    open: openDeck, close: closeDeck, go: go, checkLayout: checkLayout,
+    get current() { return current; }, get count() { return slides.length; }, get presenting() { return open; }
+  };
+
+  function start() {
+    numberFigures();
+    buildContents();
+    $$("main figure[data-sci-interactive]").forEach(initInteractive);
+    initDeck();
+  }
+  // Let report-specific scripts that follow this one call SciReport.register first.
+  if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", start);
+  else setTimeout(start, 0);
+})();
+</script>
+</body>
+</html>

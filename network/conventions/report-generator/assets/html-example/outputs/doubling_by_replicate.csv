@@ -1,0 +1,13 @@
+condition,replicate,doubling_time_h
+Vehicle,1,21.80
+Vehicle,2,22.60
+Vehicle,3,22.90
+Vehicle,4,22.30
+1 µM,1,27.15
+1 µM,2,28.15
+1 µM,3,28.52
+1 µM,4,27.78
+5 µM,1,37.08
+5 µM,2,38.44
+5 µM,3,38.95
+5 µM,4,37.93

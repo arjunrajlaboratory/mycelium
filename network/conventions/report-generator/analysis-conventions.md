@@ -1,6 +1,6 @@
 # Report Generator Conventions
 
-Guides the generation of structured LaTeX PDF reports from analysis project outputs. This skill is for formal writeups — not PowerPoint, not HTML notebook exports, not quick Markdown summaries (those go in the analysis README).
+Guides the generation of structured reports from analysis project outputs, in one of two formats chosen at Phase 0: a **LaTeX PDF** (default), or a **self-contained HTML report with a companion slide deck** (`format: html`, specified in `html-conventions.md`). This skill is for formal writeups — not PowerPoint, not notebook exports, not quick Markdown summaries (those go in the analysis README).
 
 The skill is organized as a **phase-based agentic flow**. Most phases are internal to the skill; the user is only consulted at Phase 0 (planning brief) and, optionally, Phase 8 (headline preview). Every phase produces a verifiable artifact, and the sub-agent review phases (4–6) get a fresh context so they read the draft blind — that is the missing ingredient in self-declared consistency checks.
 
@@ -10,15 +10,19 @@ The skill is organized as a **phase-based agentic flow**. Most phases are intern
 
 **Automatic except for explicit user questions.** Report generation is designed to be hands-off after the planning brief. The user's review point is the generated PDF, not the intermediate scaffolding. Every check that *could* have become a "show this to the user" step is instead an internal artifact that flows into the final report or into a sub-agent reviewer.
 
-User-in-the-loop phases: Phase 0 (planning brief). Optionally Phase 8 (headline preview before opening the PDF).
+User-in-the-loop phases: Phase 0 (planning brief). Optionally Phase 8 (headline preview before opening the PDF or HTML report).
 
-Internal-only phases: 0.5 (memory), 0.75 (outline + main/supplement assignment), 1 (manifest), 2 (draft), 3 (worked-example gate), 4–6 (sub-agent reviewers), 7 (recompile).
+Internal-only phases: 0.5 (memory), 0.75 (outline + main/supplement assignment), 1 (manifest), 2 (draft), 3 (worked-example gate), 4–6 (sub-agent reviewers), 7 (recompile), and — HTML format only — 9 (slides).
+
+**Format.** Phases 0–6 are format-independent. With `format: html`, `html-conventions.md` replaces the TeX-specific parts of Phase 2 (template and value wrappers) and Phase 7 (the gate), and adds Phase 9 (slides), which runs after Phase 7 and before Phase 8. Where a passage below names `.tex`, `\SciVal`, `pdflatex`, or the PDF, read it as the HTML equivalent defined there.
 
 ---
 
 ## Prerequisites
 
-Before generating a report, verify that `pdflatex` is available:
+HTML format: skip the `pdflatex` check below and follow the prerequisites in `html-conventions.md` (scitexlintr ≥ 0.2, optionally `pdftocairo`).
+
+Before generating a PDF report, verify that `pdflatex` is available:
 
 ```bash
 which pdflatex
@@ -68,11 +72,12 @@ Required questions:
    - **Overview** — main text only, 2–5 pages, no supplement. Use when the audience needs the headline and methods sketch but not the exhaustive table.
    - **Comprehensive** — single document with full methods, tables, and appendices inline. Use when the report *is* the artifact and no separate supplement is expected.
    - **Overview + supplement / appendix** (DEFAULT) — main text is the overview a collaborator could read in 10 minutes; supplement carries methods detail, worked examples for failure modes, and exhaustive tables.
-7. **Results section style.** Default **narrative**: each result is prose, with a self-explanatory subsection title that states the finding. The alternative is **structured**: each result carries explicit `\paragraph{Question}` / `\paragraph{Findings}` / `\paragraph{Interpretation}` headers, paying for predictable skimmability with visual heaviness. Narrative is the default because it reads more like the final paper; structured pays off for long results sections (≥ 5 sub-results) or when readers want to land on a specific question quickly.
+7. **Output format.** Default **PDF** (LaTeX). The alternative is **HTML + slides**: one self-contained HTML file that is both the long-form report and a 10–20 slide companion deck derived from it, with keyboard/click navigation, fullscreen, and a return to the matching report section on Esc. Choose HTML when the report will be shared as a link or presented, or when a time series is better explored with a slider than read off a static plot. Both formats run the same phases and gates; see `html-conventions.md`.
+8. **Results section style.** Default **narrative**: each result is prose, with a self-explanatory subsection title that states the finding. The alternative is **structured**: each result carries explicit `\paragraph{Question}` / `\paragraph{Findings}` / `\paragraph{Interpretation}` headers, paying for predictable skimmability with visual heaviness. Narrative is the default because it reads more like the final paper; structured pays off for long results sections (≥ 5 sub-results) or when readers want to land on a specific question quickly.
 
-The shape and style choices drive the template selection in Phase 1 and the main-vs-supplement designation in Phase 0.75. They are not retrofitted after drafting.
+The format, shape, and style choices drive the template selection in Phase 1 and the main-vs-supplement designation in Phase 0.75. They are not retrofitted after drafting.
 
-Persist the answers as a small YAML artifact at `analysis/[name]/reports/.planning-brief.yaml`. All later phases read from it. The file is not shown to the user during normal flow; it is reproducible scaffolding.
+Persist the answers as a small YAML artifact at `analysis/[name]/reports/.planning-brief.yaml` (HTML format: `.planning-brief-html.yaml`; the HTML run's scaffolding files all take an `-html` suffix so a TeX edition of the same analysis is never overwritten — see the artifact table in `html-conventions.md`). All later phases read from it. The file is not shown to the user during normal flow; it is reproducible scaffolding.
 
 ---
 
@@ -148,9 +153,9 @@ Build a JSON manifest of every concrete artifact the draft will contain. The Pha
 The agent then *enriches* each entry with the framing-aware fields the analysis cannot know:
 
 - `label_canonical` — the canonical phrasing the prose must use
-- `label_aliases_forbidden` — phrasings that would mislead in this report's framing
+- `label_aliases_forbidden` — phrasings that would mislead in this report's framing. scitexlintr's `forbidden-alias` rule bans each phrase **anywhere in the prose**, not only next to this value, so list only phrases that are wrong throughout the report; a word the report legitimately uses elsewhere cannot be a forbidden alias
 - `appears_in_sections` — where this value will be cited
-- `overloaded_warning` (rare) — when a value's name shadows an established literature term
+- `overloaded_warning` (rare) — when a value's name shadows an established literature term. Write it as the reader-facing sentence the report will contain: scitexlintr's `overloaded-term-no-warning` rule looks for this exact text at or before the term's first use
 
 For the ordinary fragment-merge path, the mechanical fields (`value`, `provenance`, `computed_at`) come from the fragment and must not be edited; the framing fields are this phase's contribution. Legacy exceptions are called out below and must be marked explicitly.
 
@@ -277,6 +282,8 @@ The draft step is not allowed to introduce a number, term, or worked-example val
 ---
 
 ## Phase 2 — Draft (INTERNAL)
+
+**HTML format:** follow `html-conventions.md` Phase 2 for the template, value spans, and figure markup; the TeX wrapper and preamble instructions in this section do not apply, and everything else does.
 
 Fill the template chosen in Phase 0 (overview / comprehensive / overview+supplement). Source every numeric token from `numbers[*].value` and every coined term from `terms[*]`. Read `references/section-guide.md` for the per-section craft.
 
@@ -421,6 +428,8 @@ The full sub-agent prompt is in `references/phase-prompts.md`.
 
 ## Phase 7 — Recompile + re-run (INTERNAL)
 
+**HTML format:** run the HTML gate in `html-conventions.md` Phase 7 instead of the steps below (sync figures and data, fill values, scitexlintr, `check_html_report.py`, render check, compile log), then Phase 9, then re-run that gate on the finished file.
+
 After the sub-agents pass:
 
 1. **Regenerate the LaTeX macros from the manifest.** Run `python skills/core/scripts/render_report_values_tex.py analysis/[name]/reports/.manifest.json`. This writes `build/report_values.tex` with one `\newcommand` per `numbers[*]` entry plus the `\SciVal` / `\SciText` wrappers. Re-run this step every time `.manifest.json` changes.
@@ -455,7 +464,15 @@ The compile log is the answer to "okay, so all of this is fixed now? and was cod
 
 Before the user opens the PDF, surface a one-paragraph summary that contains the headline question (from Phase 0), the baseline of comparison, the primary metric value, and the single biggest caveat. This pre-empts the most common framing failures (changelog framing, wrong metric featured) by giving the user a chance to reject the framing before they invest in reading the PDF.
 
+In the HTML format the preview comes after Phase 9, so the user opens the finished report and deck together.
+
 The preview is optional. Skip if the Phase-0 planning brief recorded a "skip-preview" preference, or if the report shape is **comprehensive** — in the comprehensive shape a tight one-paragraph summary tends to mislead by omission, and the user is expected to read the document end-to-end anyway.
+
+---
+
+## Phase 9 — Slides (HTML format only, INTERNAL + SUB-AGENT)
+
+After the report passes the Phase 7 gate, derive a 10–20 slide deck in the same file: a ghost deck of sentence titles (every title except the title slide is one declarative sentence — subject, verb, object — making exactly one point), a blind storyline review of those titles by a zero-context sub-agent, then the slides themselves, then the Phase 7 gate again. The full procedure is `html-conventions.md` Phase 9; the reviewer prompt is `references/phase-prompts.md` Phase 9.
 
 ---
 
@@ -467,13 +484,15 @@ The preview is optional. Skip if the Phase-0 planning brief recorded a "skip-pre
 | 0.5 — Memory cheatsheet | no | `analysis/[name]/reports/.memory-cheatsheet.md` |
 | 0.75 — Section outline | no | `analysis/[name]/reports/.section-outline.md` |
 | 1 — Manifest | no | `analysis/[name]/reports/.manifest.json` |
-| 2 — Draft | no | `analysis/[name]/reports/[name]-report.tex` |
+| 2 — Draft | no | `analysis/[name]/reports/[name]-report.tex` (HTML: `[name]-report.html`) |
 | 3 — Worked-example gate | no | (in-place patches to draft) |
 | 4 — Plain-English lint | no | `analysis/[name]/reports/.review-plain-english.yaml` |
 | 5 — Framing critique | no | `analysis/[name]/reports/.review-framing.yaml` |
 | 6 — Blind numerical re-verify | no | `analysis/[name]/reports/.review-numerical.yaml` |
 | 7 — Recompile log | no | `analysis/[name]/reports/.compile-log.md` |
 | 8 — Headline preview | optional | (in chat, not a file) |
+| 9a — Ghost deck (HTML) | no | `analysis/[name]/reports/.ghost-deck.md` |
+| 9b — Storyline review (HTML) | no | `analysis/[name]/reports/.review-storyline.yaml` |
 
 Phases 0.5 through 7 emit dotfile-prefixed artifacts so they do not clutter the analysis directory and so a future reader can audit the trail without it looking like part of the published report.
 
@@ -565,10 +584,15 @@ These come up frequently in computational analysis reports:
 - `assets/report-template-overview.tex` — overview shape.
 - `assets/report-template-comprehensive.tex` — comprehensive shape.
 - `assets/report-template-overview-supplement.tex` — default shape.
+- `html-conventions.md` — the HTML + slides format: value spans, declared figures, interactive figures, the HTML gate, and Phase 9.
+- `assets/report-template.html` — HTML template (report + deck + runtime in one file; all three shapes).
+- `assets/html-example/` — complete synthetic HTML report and 12-slide deck that passes every gate, with `build_example.py` to regenerate it.
 
 ## Cross-references outside this convention pack
 
 - `skills/core/references/report-values-guide.md` — analysis-side `register_value` helper that produces the `numbers[*]` fragments Phase 1 merges.
 - `skills/core/scripts/register_value.py` — the helper itself.
 - `skills/core/scripts/render_report_values_tex.py` — Phase 7 step 1; emits `build/report_values.tex` from `.manifest.json`.
-- scitexlintr — Phase 7 step 2; verifies the draft's `\SciVal`/`\SciText` snapshots against the manifest. It is the separate report-lint package under `tex/scitexlintr`, not the analysis-code `scilintr` CLI. Source: https://github.com/arjunrajlaboratory/scilintr/tree/main/tex/scitexlintr.
+- `skills/core/scripts/sync_html_report.py` — HTML Phase 7 step 1; inlines and fingerprints registered figures and interactive data.
+- `skills/core/scripts/check_html_report.py` — HTML Phase 7 step 4 and Phase 9d; structure, self-containment, and slide rules.
+- scitexlintr — Phase 7 step 2; verifies the draft's `\SciVal`/`\SciText` snapshots (HTML: `data-sci-val` / `data-sci-text` spans, declared figures, and data blocks; requires ≥ 0.2) against the manifest. It is the separate report-lint package under `tex/scitexlintr`, not the analysis-code `scilintr` CLI. Source: https://github.com/arjunrajlaboratory/scilintr/tree/main/tex/scitexlintr.

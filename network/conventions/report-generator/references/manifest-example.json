@@ -149,6 +149,17 @@
       "computed_at": "scripts/02_de.R:L172",
       "appears_in_sections": ["abstract", "results.de"],
       "_note": "unit:'percent' renders this as 80.6% in prose ('80.6% of the 247 DE genes are upregulated') while value stays the canonical fraction 0.806 — the scitexlintr / Phase-6 anchor. precision defaults to 1; the displayed string is DERIVED from value, so it cannot silently drift from it. Reserve the free-text 'display' field for a value no unit can derive (e.g. a fold-change rendered '3.2$\\times$')."
+    },
+    {
+      "id": "nfkb_fold_change_median",
+      "value": 3.2,
+      "display": "3.2$\\times$",
+      "display_html": "3.2×",
+      "label_canonical": "median fold change of NF-kB target genes",
+      "provenance": "outputs/tables/de_results.csv: median(2^log2FC) over NF-kB targets",
+      "computed_at": "scripts/02_de.R:L181",
+      "appears_in_sections": ["results.nfkb"],
+      "_note": "A rare non-derivable display. 'display' is the TeX rendering; the HTML format also needs 'display_html' (scitexlintr reports an error for an HTML wrapper whose entry has only a TeX 'display')."
     }
   ],
 
@@ -248,6 +259,15 @@
       "sha256": "e7f6a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1",
       "caption_seed": "Number of significant genes vs. adjusted p-value threshold across the range 0.01-0.10. Dashed red line indicates the chosen threshold (0.05); the result is stable across 0.03-0.07.",
       "appears_in_sections": ["supplement.S4"]
+    }
+  ],
+
+  "data": [
+    {
+      "id": "nfkb_activity_timecourse",
+      "path": "../outputs/tables/nfkb_activity_timecourse.csv",
+      "sha256": "d6e5f1b2c7d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5",
+      "_note": "HTML format only: the data behind an interactive figure (data-sci-interactive). sync_html_report.py embeds it and scitexlintr's unfingerprinted-data rule checks the sha256. Paths resolve against the report's directory, like figures[*].path."
     }
   ],
 
