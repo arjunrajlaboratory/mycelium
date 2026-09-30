@@ -57,7 +57,7 @@ def id_to_macro_name(manifest_id: str) -> str:
     for segment in local.split("_"):
         if not segment:
             continue
-        if segment.isdigit():
+        if segment.isascii() and segment.isdigit():
             out.append("".join(_DIGIT_WORDS[d] for d in segment))
         elif segment.isalpha() and len(segment) <= 3:
             out.append(segment.upper())
@@ -69,7 +69,7 @@ def id_to_macro_name(manifest_id: str) -> str:
             # \newcommand and scitexlintr's macro lookup.
             chars: list[str] = []
             for j, ch in enumerate(segment):
-                if ch.isdigit():
+                if ch in _DIGIT_WORDS:
                     chars.append(_DIGIT_WORDS[ch])
                 elif j == 0:
                     chars.append(ch.upper())
@@ -240,6 +240,11 @@ def render(manifest: dict, *, source_label: str | None = None) -> str:
         macro = id_to_macro_name(manifest_id)
         if not macro:
             continue
+        if not re.fullmatch(r"[A-Za-z]+", macro):
+            raise ValueError(
+                f"render_report_values_tex: manifest id {manifest_id!r} cannot form a TeX macro "
+                f"(\\{macro}): TeX control words are ASCII letters only; rename the id"
+            )
         value = entry["value"]
         formatted = format_value(
             value,

@@ -116,7 +116,7 @@ def tag_attrs(raw_tag: str) -> tuple[str, list[tuple[str, str | None]]]:
 
 
 def _build_tag(tagname: str, attrs: list[tuple[str, str | None]], updates: dict[str, str | None],
-               drop: tuple[str, ...] = ()) -> str:
+               drop: tuple[str, ...] = (), self_closing: bool = False) -> str:
     """An opening tag rebuilt from parsed attributes, with ``updates`` set
     (replacing or appending) and ``drop`` removed. Values are re-escaped, so
     the result is valid whatever the original quoting was, and rebuilding is
@@ -125,7 +125,178 @@ def _build_tag(tagname: str, attrs: list[tuple[str, str | None]], updates: dict[
     merged = [(k, updates.pop(k) if k in updates else v) for k, v in attrs if k.lower() not in drop]
     merged += list(updates.items())
     parts = [tagname] + [k if v is None else f'{k}="{html.escape(v, quote=True)}"' for k, v in merged]
-    return "<" + " ".join(parts) + ">"
+    return "<" + " ".join(parts) + ("/>" if self_closing else ">")
+
+
+_UNSAFE_URL_RE = re.compile(r"^(?:javascript|vbscript|data:text/html)", re.I)
+_URL_ATTRS = {"href", "xlink:href", "src", "action", "formaction"}
+_DROPPED_ELEMENTS = {"script", "foreignobject"}
+
+
+class _SvgSanitizer(HTMLParser):
+    """Finds every tag that must change in an SVG: elements that can run code
+    or embed a document (``<script>``, ``<foreignObject>``) are removed; event
+    handlers (``on*``, any quoting or case) and ``javascript:`` URLs are
+    dropped. Works from parsed tags, so unquoted or oddly spaced attributes
+    cannot slip past a pattern."""
+
+    def __init__(self, source: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.source = source
+        self.line_starts = [0] + [m.end() for m in re.finditer("\n", source)]
+        self.edits: list[Edit] = []
+        self.dropping: list[tuple[str, int]] = []
+
+    def _offset(self) -> int:
+        line, col = self.getpos()
+        return self.line_starts[line - 1] + col
+
+    def _start(self, tag: str, self_closing: bool) -> None:
+        start = self._offset()
+        raw = self.get_starttag_text() or ""
+        if tag in _DROPPED_ELEMENTS:
+            if self_closing or raw.rstrip().endswith("/>"):
+                self.edits.append(Edit(start, start + len(raw), ""))
+            else:
+                self.dropping.append((tag, start))
+            return
+        name, attrs = tag_attrs(raw)
+        kept = [(k, v) for k, v in attrs
+                if not k.lower().startswith("on")
+                and not (k.lower() in _URL_ATTRS and v and _UNSAFE_URL_RE.match(re.sub(r"[\s\x00-\x1f]", "", v)))]
+        if len(kept) != len(attrs):
+            self.edits.append(Edit(start, start + len(raw),
+                                   _build_tag(name, kept, {}, self_closing=raw.rstrip().endswith("/>"))))
+
+    def handle_starttag(self, tag, attrs):
+        self._start(tag, False)
+
+    def handle_startendtag(self, tag, attrs):
+        self._start(tag, True)
+
+    def handle_endtag(self, tag):
+        if self.dropping and self.dropping[-1][0] == tag:
+            _, start = self.dropping.pop()
+            close = self._offset()
+            self.edits.append(Edit(start, self.source.find(">", close) + 1, ""))
+
+
+class _SvgRewriter(HTMLParser):
+    """One parsed pass over an SVG that rewrites start tags (``tag_fn`` gets
+    the raw name and attributes and returns new attributes, or None to keep
+    the tag byte-for-byte) and ``<style>`` contents (``style_fn``)."""
+
+    def __init__(self, source: str, tag_fn, style_fn) -> None:
+        super().__init__(convert_charrefs=True)
+        self.source, self.tag_fn, self.style_fn = source, tag_fn, style_fn
+        self.line_starts = [0] + [m.end() for m in re.finditer("\n", source)]
+        self.edits: list[Edit] = []
+        self.style_open: int | None = None
+
+    def _offset(self) -> int:
+        line, col = self.getpos()
+        return self.line_starts[line - 1] + col
+
+    def _start(self, tag: str) -> None:
+        start = self._offset()
+        raw = self.get_starttag_text() or ""
+        name, attrs = tag_attrs(raw)
+        new = self.tag_fn(name, attrs) if self.tag_fn else None
+        if new is not None:
+            self.edits.append(Edit(start, start + len(raw), _build_tag(name, new, {}, self_closing=raw.rstrip().endswith("/>"))))
+        if tag == "style" and not raw.rstrip().endswith("/>"):
+            self.style_open = start + len(raw)
+
+    def handle_starttag(self, tag, attrs):
+        self._start(tag)
+
+    def handle_startendtag(self, tag, attrs):
+        self._start(tag)
+
+    def handle_endtag(self, tag):
+        if tag == "style" and self.style_open is not None and self.style_fn:
+            close = self._offset()
+            self.edits.append(Edit(self.style_open, close, self.style_fn(self.source[self.style_open:close])))
+            self.style_open = None
+
+
+def rewrite_svg(svg: str, tag_fn=None, style_fn=None) -> str:
+    parser = _SvgRewriter(svg, tag_fn, style_fn)
+    parser.feed(svg)
+    parser.close()
+    out = svg
+    for e in sorted(parser.edits, key=lambda e: e.start, reverse=True):
+        out = out[: e.start] + e.replacement + out[e.end:]
+    return out
+
+
+def _collect_ids(svg: str) -> set[str]:
+    found: set[str] = set()
+
+    def grab(name, attrs):
+        found.update(v for k, v in attrs if k.lower() == "id" and v)
+        return None
+
+    rewrite_svg(svg, tag_fn=grab)
+    return found
+
+
+_ID_LIST_ATTRS = {"aria-labelledby", "aria-describedby", "aria-controls", "aria-owns", "aria-flowto"}
+
+
+def _rename_css_refs(css: str, rename: dict[str, str]) -> str:
+    """``#id`` selectors and ``url(#id)`` references in CSS text."""
+    if not rename:
+        return css
+    css = re.sub(r"url\(\s*(['\"]?)#([^'\")\s]+)\1\s*\)",
+                 lambda m: f"url(#{rename[m.group(2)]})" if m.group(2) in rename else m.group(0), css)
+    return re.sub(r"(?<![\w-])#(-?[A-Za-z_][\w-]*)",
+                  lambda m: "#" + rename[m.group(1)] if m.group(1) in rename else m.group(0), css)
+
+
+def _rename_refs(attrs: list[tuple[str, str | None]], rename: dict[str, str]):
+    """New attribute list with ids and every reference to them renamed, or None if unchanged."""
+    if not rename:
+        return None
+    out, changed = [], False
+    for k, v in attrs:
+        key, new = k.lower(), v
+        if v is not None:
+            if key == "id" and v in rename:
+                new = rename[v]
+            elif key in ("href", "xlink:href") and v.startswith("#") and v[1:] in rename:
+                new = "#" + rename[v[1:]]
+            elif key in _ID_LIST_ATTRS:
+                new = " ".join(rename.get(t, t) for t in v.split())
+            elif "url(" in v:
+                new = _rename_css_refs(v, rename) if key == "style" else re.sub(
+                    r"url\(\s*(['\"]?)#([^'\")\s]+)\1\s*\)",
+                    lambda m: f"url(#{rename[m.group(2)]})" if m.group(2) in rename else m.group(0), v)
+            elif key == "style":
+                new = _rename_css_refs(v, rename)
+        changed = changed or new != v
+        out.append((k, new))
+    return out if changed else None
+
+
+def sanitize_svg(svg: str) -> str:
+    parser = _SvgSanitizer(svg)
+    parser.feed(svg)
+    parser.close()
+    for _, start in parser.dropping:  # unclosed: drop to the end
+        parser.edits.append(Edit(start, len(svg), ""))
+    # Apply outermost removals; skip edits nested inside a removed range.
+    edits = sorted(parser.edits, key=lambda e: (e.start, -e.end))
+    kept, last_end = [], -1
+    for e in edits:
+        if e.start < last_end:
+            continue
+        kept.append(e)
+        last_end = max(last_end, e.end)
+    out = svg
+    for e in reversed(kept):
+        out = out[: e.start] + e.replacement + out[e.end:]
+    return out
 
 
 class _FirstTag(HTMLParser):
@@ -188,18 +359,20 @@ def _svg_markup(svg_text: str, figure_id: str, alt: str) -> str:
     s = re.sub(r"<\?xml[^>]*\?>", "", svg_text)
     s = re.sub(r"<!DOCTYPE[^>]*>", "", s, flags=re.I)
     s = re.sub(r"<!--.*?-->", "", s, flags=re.S)
-    s = re.sub(r"<script\b.*?</script\s*>", "", s, flags=re.I | re.S)
-    s = re.sub(r"\s+on[a-z]+\s*=\s*(\"[^\"]*\"|'[^']*')", "", s, flags=re.I)
+    s = sanitize_svg(s)
     extent = first_tag(s, "svg")
     if extent is None:
         raise SyncError(f"figure {figure_id!r}: SVG has no <svg> root element")
     name, attrs = tag_attrs(s[extent[0]:extent[1]])
     values = {k.lower(): v for k, v in attrs}
     updates: dict[str, str | None] = {"role": "img", "aria-label": alt}
-    if values.get("viewbox") is None and values.get("width") and values.get("height"):
-        w, h = (re.match(r"[\d.]+", values[k]) for k in ("width", "height"))
+    has_viewbox = values.get("viewbox") is not None
+    if not has_viewbox and values.get("width") and values.get("height"):
+        # Only absolute user-unit sizes make a viewBox; "100%" does not.
+        w, h = (re.fullmatch(r"\s*([\d.]+)\s*(?:px|pt)?\s*", values[k]) for k in ("width", "height"))
         if w and h:
-            updates["viewBox"] = f"0 0 {w.group(0)} {h.group(0)}"
+            updates["viewBox"] = f"0 0 {w.group(1)} {h.group(1)}"
+            has_viewbox = True
     # An inlined <style> applies to the whole page, so scope its rules to this
     # figure: matplotlib's "*{stroke-linecap:butt}" must not restyle the deck
     # icons, and two exports that both define .cls-1 must not recolor each other.
@@ -207,35 +380,39 @@ def _svg_markup(svg_text: str, figure_id: str, alt: str) -> str:
     if re.search(r"<style\b", s, re.I):
         existing = values.get("class")
         updates["class"] = f"{existing} {scope}".strip() if existing else scope
-    root = _build_tag(name, attrs, updates, drop=("width", "height"))
+    # Width and height go only when a viewBox carries the geometry (CSS then sizes the figure).
+    root = _build_tag(name, attrs, updates, drop=("width", "height") if has_viewbox else ())
     s = s[: extent[0]] + root + s[extent[1]:]
-    s = re.sub(
-        r"(<style\b[^>]*>)(.*?)(</style\s*>)",
-        lambda mm: mm.group(1) + scope_css(mm.group(2), "." + scope) + mm.group(3),
-        s, flags=re.I | re.S,
-    )
+    scope_styles = "class" in updates
 
     # Namespace every id so several inlined figures (and their copies in the
-    # slides) cannot resolve each other's clip paths, gradients, or markers.
-    prefix = re.sub(r"[^A-Za-z0-9_-]", "-", figure_id) + "-"
-    ids = set(re.findall(r"\sid\s*=\s*\"([^\"]+)\"", s)) | set(re.findall(r"\sid\s*=\s*'([^']+)'", s))
-    if ids:
-        s = re.sub(
-            r"(\sid\s*=\s*)([\"'])([^\"']+)\2",
-            lambda mm: mm.group(1) + mm.group(2) + (prefix + mm.group(3) if mm.group(3) in ids else mm.group(3)) + mm.group(2),
-            s,
-        )
-        s = re.sub(
-            r"url\(\s*(['\"]?)#([^'\")\s]+)\1\s*\)",
-            lambda mm: f"url(#{prefix + mm.group(2)})" if mm.group(2) in ids else mm.group(0),
-            s,
-        )
-        s = re.sub(
-            r"((?:xlink:)?href\s*=\s*)([\"'])#([^\"']+)\2",
-            lambda mm: mm.group(1) + mm.group(2) + "#" + (prefix + mm.group(3) if mm.group(3) in ids else mm.group(3)) + mm.group(2),
-            s,
-        )
+    # slides) cannot resolve each other's clip paths, gradients, markers, or
+    # styles; every reference follows the rename.
+    prefix = _SCOPE_RE.sub("-", figure_id) + "-"
+    ids = _collect_ids(s)
+    rename = {i: prefix + i for i in ids}
+    s = rewrite_svg(
+        s,
+        tag_fn=lambda name, attrs: _rename_refs(attrs, rename),
+        style_fn=lambda css: scope_css(_rename_css_refs(_strip_cdata(css), rename), "." + scope) if scope_styles else _rename_css_refs(css, rename),
+    )
     return s.strip()
+
+
+def _strip_cdata(css: str) -> str:
+    return re.sub(r"<!\[CDATA\[|\]\]>", "", css)
+
+
+def _scope_selector(sel: str, scope: str) -> str:
+    """``scope`` is a class on the <svg> root, so a selector that starts at
+    the root (``svg``, ``svg .a``, ``svg>g``) gets the class on that compound
+    (``svg.S .a``); every other selector becomes a descendant of the root."""
+    if sel == ":root":
+        return "svg" + scope
+    m = re.match(r"svg(?![\w-])", sel)
+    if m:
+        return "svg" + scope + sel[3:]
+    return f"{scope} {sel}"
 
 
 def _split_selectors(selector: str) -> list[str]:
@@ -277,9 +454,7 @@ def scope_css(css: str, scope: str) -> str:
             inner = scope_css(body, scope) if re.match(r"@(media|supports)\b", head, re.I) else body
             out.append(f"{head}{{{inner}}}")
         else:
-            prefixed = ", ".join(
-                (scope if sel in (":root", "svg") else f"{scope} {sel}") for sel in _split_selectors(head)
-            )
+            prefixed = ", ".join(_scope_selector(sel, scope) for sel in _split_selectors(head))
             out.append(f"{prefixed}{{{body}}}")
         i = j
     return "".join(out)
@@ -437,7 +612,7 @@ def table_rows(path: Path, data_id: str, attrs: dict[str, str | None]) -> str:
     else:
         idx = list(range(len(header)))
     raw_precision = attrs.get("data-precision")
-    if raw_precision is not None and not raw_precision.strip().isdigit():
+    if raw_precision is not None and not re.fullmatch(r"[0-9]+", raw_precision.strip()):  # ASCII only
         raise SyncError(f"table {data_id!r}: data-precision must be a non-negative integer")
     precision = int(raw_precision) if raw_precision is not None else None
     out = []
@@ -574,6 +749,10 @@ def plan(source: str, manifest: dict, base: Path) -> list[Edit]:
             entry = registry.get(r.item_id)
             if entry is None:
                 raise SyncError(f"{r.kind} {r.item_id!r}: {_ID_ATTR[r.tagname]} id not in manifest {section}[*]")
+            if r.kind == "data" and (r.attr("type") or "").strip().lower() != "application/json":
+                # The runtime reads only script[type="application/json"][data-sci-data].
+                raise SyncError(f"data {r.item_id!r}: the block must be <script type=\"application/json\"> "
+                                "(the runtime reads only JSON blocks)")
             if r.content_start is None:
                 raise SyncError(f"{r.kind} {r.item_id!r}: no {_MARKER_HINT[r.kind]} markers inside the {r.kind}")
             path = _checked_source(r.kind, r.item_id, entry, base)

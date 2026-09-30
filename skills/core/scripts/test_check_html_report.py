@@ -288,3 +288,18 @@ def test_any_element_with_class_slide_is_a_slide(tmp_path):
     slides = [slide(i) for i in range(10)] + ['<div class="slide" data-source="#result-growth"><p>No title.</p></div>']
     findings = check(tmp_path, build(slides=slides))
     assert "slide-title" in codes(findings, "error")
+
+
+def test_figure_reference_must_use_the_runtime_selector(tmp_path):
+    bare = [slide(i) for i in range(10)] + [slide(10, body='<div data-fig-ref="fig-growth"></div>')]
+    found = check(tmp_path, build(slides=bare))
+    assert "slide-figure" in codes(found, "error")
+
+
+def test_gate_selectors_match_the_runtime():
+    # The contract between the checkers and the runtime, pinned: if the
+    # runtime's selectors change, this fails and the gates must follow.
+    runtime = TEMPLATE.read_text(encoding="utf-8")
+    for selector in ('.slide-figure[data-fig-ref]', 'script[type="application/json"][data-sci-data]',
+                     '$$(".slide", deck)', 'figure[data-sci-interactive]'):
+        assert selector in runtime, selector

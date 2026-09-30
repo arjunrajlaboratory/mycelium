@@ -354,6 +354,11 @@ def check_source(source: str, filename: str = "<report>", *, min_slides: int = 1
             emit("slide-source", "error", s, f"{label} data-source {src!r} points into the deck, not the report")
 
         refs = [n for n in s.iter() if "data-fig-ref" in n.attrs]
+        for r in refs:
+            if "slide-figure" not in r.classes():
+                # The runtime fills only .slide-figure[data-fig-ref]; anything else renders empty.
+                emit("slide-figure", "error", r, f'{label} data-fig-ref is not on a class="slide-figure" '
+                                                  "element, so the runtime will not place the figure")
         if len(refs) > 1:
             emit("slide-figure", "error", refs[1], f"{label} references {len(refs)} figures; one figure per slide")
         for r in refs:

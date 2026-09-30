@@ -19,7 +19,8 @@ Reference implementation: `assets/html-example/` is a complete synthetic report 
 ## Prerequisites
 
 ```bash
-python -m pip install "scitexlintr>=0.2"   # or the git install in CONVENTION_PACK.yaml
+python -m pip install "scitexlintr @ git+https://github.com/arjunrajlaboratory/scilintr.git#subdirectory=tex/scitexlintr"
+# (or: python -m pip install "scitexlintr>=0.2" once 0.2.0 is on PyPI)
 scitexlintr --version                       # must print 0.2.0 or later
 which pdftocairo                            # only needed when a registered figure is a PDF
 ```
@@ -82,7 +83,7 @@ Every `<figure>` declares what it is — scitexlintr's `unfingerprinted-figure` 
 </figure>
 ```
 
-Leave the region between the two `sci-media` marker comments empty; `sync_html_report.py` fills it from the manifest (SVG inline with its ids namespaced and its `<style>` rules scoped to the figure, PNG/JPEG as a base64 image, PDF converted to SVG) and sets `data-sha256`. `data-alt` becomes the accessible name; sync also stamps `data-content-sha256`, the hash of the inlined markup, so a hand edit to an inlined figure fails the gate. A PDF whose SVG conversion would exceed 2 MB (dense scatter plots and embedding maps can expand from a few hundred kilobytes to tens of megabytes) is rasterized at 200 dpi instead, and sync says so. For such figures, registering a PNG export is better still. `check_html_report.py` warns above 15 MB for the whole file. Add `class="wide"` to let a figure break out of the text column. The figure's media is not prose (tick labels are not linted); its caption is.
+Leave the region between the two `sci-media` marker comments empty; `sync_html_report.py` fills it from the manifest (SVG inline with its ids namespaced and its `<style>` rules scoped to the figure, PNG/JPEG as a base64 image, PDF converted to SVG) and sets `data-sha256`. `data-alt` becomes the accessible name; sync also stamps `data-content-sha256`, the hash of the inlined markup, so a hand edit to an inlined figure fails the gate. Inlined SVG is sanitized from its parsed tags (scripts, `<foreignObject>`, event handlers, and `javascript:` links removed), and its ids are renamed per figure everywhere they are referenced (`href`, `url(#…)`, `aria-labelledby`, and `#id` selectors in its styles). Every other element that embeds media — `<img>`, SVG `<image>`, `<picture>`/`<source>`, `<video>`, `<audio>`, `<iframe>`, `<object>`, `<embed>`, `<canvas>` — must sit inside a registered figure's media region (a `<canvas>` may also sit in an interactive figure, for a custom kind to draw on). A PDF whose SVG conversion would exceed 2 MB (dense scatter plots and embedding maps can expand from a few hundred kilobytes to tens of megabytes) is rasterized at 200 dpi instead, and sync says so. For such figures, registering a PNG export is better still. `check_html_report.py` warns above 15 MB for the whole file. Add `class="wide"` to let a figure break out of the text column. Only the region between the markers is exempt from prose linting and counts as registered media — exactly the span the content hash covers. Anything else you put inside the `<figure>` (a caption, a note, another image) is prose or an unregistered figure like everywhere else.
 
 **Hand-drawn schematic** (inline SVG you write — a pipeline diagram, a design sketch):
 
@@ -132,6 +133,7 @@ Use an interactive figure only when **time (or an ordered parameter) is the axis
 </figure>
 ```
 
+- The block must be `<script type="application/json" data-sci-data="…">` — the runtime reads only JSON blocks, and every tool rejects any other type. Any other non-JavaScript `<script>` holding content is flagged as unregistered data.
 - The data comes **only** from a registered `data[*]` block, which `sync_html_report.py` fills and fingerprints (source-file `data-sha256` plus `data-content-sha256` of the inlined payload, so a hand edit to the embedded data fails the gate). Never write data literals in script: an interactive figure with no registered block fails `unfingerprinted-data`, and a numeric array in a report script is flagged by `script-data-literal`.
 - The built-in `timeseries` kind renders lines, a scrubber, a Play button that animates through time, a pinned readout, and a data-table view. Data shape: `{"x": [...], "x_label", "y_label", "series": [{"name", "values": [...]}], "y_min", "y_format"}` or a CSV/TSV registered as-is (first column is x, the others are series). With a CSV, `data-series="col_a,col_b"` picks and orders the columns to plot and `data-series-names="Low retention,High retention"` gives them reader-facing names. Up to eight series; fold the rest into "Other" or facet.
 - One axis per figure. A derived series on a different scale (a difference, a ratio) is a second figure, not a second line on the same axis — leave it out of `data-series`.
@@ -212,7 +214,7 @@ Replace `%%SLIDES%%` in the deck with one `<section class="slide …">` per ghos
 
 - has exactly one `<h2>` — its ghost-deck title;
 - has `data-source="#section-id"` naming the report section it summarizes — Esc, the slide's return link, and the report's "▶ present" links all use it;
-- carries **at most one figure**, referenced rather than copied: `<div class="slide-figure" data-fig-ref="fig-id"></div>` (the runtime copies the report's figure, including interactive ones);
+- carries **at most one figure**, referenced rather than copied: `<div class="slide-figure" data-fig-ref="fig-id"></div>` (the runtime copies the report's figure, including interactive ones; it fills only elements with `class="slide-figure"`, and the gate rejects a `data-fig-ref` anywhere else);
 - has at most about 40 words of body text — the title carries the point; the body supports it;
 - uses the same value spans as the report for every number.
 

@@ -707,3 +707,28 @@ neighbors: the same markup inside a comment, inside a script string, and
 inside a quoted attribute value; a quoted `>`; a hyphenated attribute
 suffix; nested comments; and a second copy of a "first-only" element. Each
 must be ignored, preserved byte-for-byte, or rejected — never rewritten.
+
+## 37. An exemption is wider than the evidence that justifies it
+
+**Failure:** A checker exempts a region because something vouches for it,
+but the exemption covers more than the voucher does, or the checker accepts
+a looser spelling than the consumer it protects. The HTML report linter
+exempted a whole registered `<figure>` from prose checks while the content
+hash covered only the media between its markers, so a hand-typed paragraph
+or image beside the media shipped unchecked. The slide gate accepted any
+`data-fig-ref` while the runtime fills only `.slide-figure[data-fig-ref]`,
+and the data gate accepted any `<script data-sci-data>` while the runtime
+reads only `type="application/json"` — both passed while the page rendered
+blank figures.
+
+**Invariant:** An exemption's scope is exactly the scope of its evidence
+(the hashed span, the signed file, the tested path) — never the enclosing
+element. A gate's notion of "valid" is the consumer's selector, not a
+superset: pin the two together with a contract test, and make near-miss
+spellings a finding rather than silently accepted.
+
+**Regression evidence:** For each exemption, place unvouched content just
+outside the vouched span but inside the exempt container, and require a
+finding. For each consumer selector, feed the gate a near-miss (missing
+class, missing type) and require a finding, plus a test that asserts the
+consumer's selector strings still match what the gate enforces.

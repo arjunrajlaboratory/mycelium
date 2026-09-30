@@ -265,3 +265,10 @@ def test_non_finite_and_huge_values_raise_value_error_not_decimal_errors() -> No
     with pytest.raises(ValueError, match="finite"):
         rrv.format_value(float("nan"), unit="percent", precision=1)
     assert rrv.format_value(10**30, unit="decimal", precision=2) == "1000000000000000000000000000000.00"
+
+
+def test_ids_that_cannot_form_a_tex_macro_are_a_clear_error() -> None:
+    assert rrv.id_to_macro_name("r2_score") == "RTwoScore"
+    assert rrv.id_to_macro_name("r²_score") == "R²Score"  # mirrors scitexlintr; no KeyError
+    with pytest.raises(ValueError, match="TeX macro"):
+        rrv.render({"numbers": [{"id": "r²_score", "value": 0.91}]})

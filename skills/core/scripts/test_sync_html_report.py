@@ -466,3 +466,63 @@ def test_svg_root_with_quoted_gt_is_rewritten_safely():
     root = out[: out.index("<path")]
     assert 'data-note="a &gt; b"' in root and 'viewBox="0 0 40 30"' in root
     assert 'aria-label="Alt"' in root and "width=" not in root and "height=" not in root
+
+
+# -- third review: sanitize by parsing, finish isolation, match the runtime ----
+
+def test_svg_sanitizer_drops_handlers_and_script_urls_in_any_spelling():
+    svg = ('<svg viewBox="0 0 1 1"><rect onclick=alert(1) ONLOAD="x()" width="1"/>'
+           '<a href=" JavaScript:alert(1)"><text>x</text></a><a xlink:href="javascript:y()">y</a>'
+           '<foreignObject><iframe src="https://x"></iframe></foreignObject>'
+           '<script type="text/ecmascript">z()</script><a href="#ok">ok</a></svg>')
+    out = shr._svg_markup(svg, "f", "")
+    low = out.lower()
+    for bad in ("onclick", "onload", "javascript:", "foreignobject", "<iframe", "<script", "z()"):
+        assert bad not in low, bad
+    assert '<rect width="1"/>' in out and 'href="#f-ok"' not in out  # no id "ok" to rename
+    assert '<a href="#ok">' in out
+
+
+def test_scoped_css_keeps_rules_that_target_the_svg_root():
+    css = "svg .a{fill:red} svg{font:10px} svg>g text{x:1} .b svg .c{y:2}"
+    assert shr.scope_css(css, ".S") == "svg.S .a{fill:red}svg.S{font:10px}svg.S>g text{x:1}.S .b svg .c{y:2}"
+
+
+def test_cdata_wrapped_styles_are_scoped():
+    svg = '<svg viewBox="0 0 1 1"><style><![CDATA[@media print{.a{fill:red}} .b{x:1}]]></style></svg>'
+    out = shr._svg_markup(svg, "f", "")
+    assert "@media print{.sci-svg-f .a{fill:red}}" in out and ".sci-svg-f .b{x:1}" in out
+    assert "CDATA" not in out
+
+
+def test_renamed_ids_follow_into_style_selectors_and_aria_references():
+    svg = ('<svg viewBox="0 0 1 1"><style>#layer1 path{fill:red} .x{fill:url(#grad)}</style>'
+           '<title id="t1">T</title><g id="layer1" aria-labelledby="t1 missing"><path/></g>'
+           '<linearGradient id="grad"/></svg>')
+    out = shr._svg_markup(svg, "f", "")
+    assert "#f-layer1 path" in out and "url(#f-grad)" in out
+    assert 'aria-labelledby="f-t1 missing"' in out
+
+
+def test_percentage_sizes_do_not_become_a_viewbox():
+    out = shr._svg_markup('<svg width="100%" height="100%"><path/></svg>', "f", "")
+    root = out[: out.index("<path")]
+    assert "viewBox" not in root and 'width="100%"' in root and 'height="100%"' in root
+    out = shr._svg_markup('<svg width="640px" height="480px"><path/></svg>', "f", "")
+    assert 'viewBox="0 0 640 480"' in out[: out.index("<path")]
+
+
+def test_data_block_without_json_type_is_a_sync_error(project, capsys):
+    raw = (project.outputs / "series.json").read_bytes()
+    body = '<figure data-sci-interactive="timeseries"><script data-sci-data="s">{}</script></figure>'
+    report, manifest = project(body, data=[{"id": "s", "path": "../outputs/series.json", "sha256": sha(raw)}])
+    assert run(report, manifest) == 1
+    assert "application/json" in capsys.readouterr().err
+
+
+def test_unicode_digit_table_precision_is_a_sync_error(project, capsys):
+    raw = (project.outputs / "table.csv").read_bytes()
+    report, manifest = project(TABLE.format(did="t", attrs=' data-precision="²"'),
+                               data=[{"id": "t", "path": "../outputs/table.csv", "sha256": sha(raw)}])
+    assert run(report, manifest) == 1
+    assert "data-precision" in capsys.readouterr().err
