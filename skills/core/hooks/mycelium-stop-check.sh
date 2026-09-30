@@ -268,8 +268,8 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
             while IFS= read -r activity_path; do
               [ -z "$activity_path" ] && continue
               case "$activity_path" in
-                "$LOG_REPO"/*) printf '%s\n' "${activity_path#"$LOG_REPO"/}" ;;
-                *) printf '%s\n' "$activity_path" ;;
+                ("$LOG_REPO"/*) printf '%s\n' "${activity_path#"$LOG_REPO"/}" ;;
+                (*) printf '%s\n' "$activity_path" ;;
               esac
             done < "$ACTIVITY_FILE_CHECK"
           fi
