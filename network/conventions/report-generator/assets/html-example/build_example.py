@@ -5,7 +5,9 @@ generated below. It exists to show a finished report + slide deck that passes
 every gate (scitexlintr, check_html_report.py, sync_html_report.py --check),
 and it doubles as the fixture for the template's browser tests.
 
-Regenerate after any template change (tests fail until you do):
+Regenerate after any template change (tests fail until you do), from the
+root of the Mycelium plugin checkout (an installed copy under .living/ is
+reference material and cannot rebuild itself):
 
     python network/conventions/report-generator/assets/html-example/build_example.py
 

@@ -526,3 +526,62 @@ def test_unicode_digit_table_precision_is_a_sync_error(project, capsys):
                                data=[{"id": "t", "path": "../outputs/table.csv", "sha256": sha(raw)}])
     assert run(report, manifest) == 1
     assert "data-precision" in capsys.readouterr().err
+
+
+# -- fourth end-to-end run ------------------------------------------------------
+
+def test_significant_figures_keep_tiny_and_huge_values_visible(project):
+    (project.outputs / "p.csv").write_text("model,p\nneutral,5.4421e-09\nhybrid,0.012345\nbig,123456789\n", encoding="utf-8")
+    raw = (project.outputs / "p.csv").read_bytes()
+    report, manifest = project(TABLE.format(did="p", attrs=' data-sig="3"'),
+                               data=[{"id": "p", "path": "../outputs/p.csv", "sha256": sha(raw)}])
+    assert run(report, manifest) == 0
+    rows = _between(report.read_text(encoding="utf-8"), "sci-rows")
+    assert '<td class="num">5.44e-9</td>' in rows
+    assert '<td class="num">0.0123</td>' in rows
+    assert '<td class="num">1.23e8</td>' in rows
+
+
+def test_precision_and_sig_together_are_an_error(project, capsys):
+    raw = (project.outputs / "table.csv").read_bytes()
+    report, manifest = project(TABLE.format(did="t", attrs=' data-sig="3" data-precision="1"'),
+                               data=[{"id": "t", "path": "../outputs/table.csv", "sha256": sha(raw)}])
+    assert run(report, manifest) == 1
+    assert "data-sig" in capsys.readouterr().err
+
+
+WORKED_TABLE = (
+    '<table class="sci-table" data-sci-worked="{wid}"{attrs}><caption>Worked example.</caption>'
+    "<thead><tr><th>SNP</th><th>N</th><th>Y</th></tr></thead>"
+    "<tbody><!-- sci-rows --><!-- /sci-rows --></tbody></table>"
+)
+
+
+def test_worked_example_table_is_rendered_from_manifest_rows(project):
+    rows = [{"snp_id": "X17", "N": 5, "Y": 3, "note": "<seed>"}, {"snp_id": "X2", "N": 2, "Y": 1, "note": "x"}]
+    report, manifest = project(WORKED_TABLE.format(wid="c017", attrs=' data-columns="snp_id,N,Y"'))
+    m = json.loads(manifest.read_text()); m["worked_examples"] = [{"id": "c017", "rows": rows}]
+    manifest.write_text(json.dumps(m), encoding="utf-8")
+    assert run(report, manifest) == 0
+    out = report.read_text(encoding="utf-8")
+    body = _between(out, "sci-rows")
+    assert body.splitlines()[0] == '<tr><td>X17</td><td class="num">5</td><td class="num">3</td></tr>'
+    canonical = json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert f'data-sha256="{sha(canonical.encode())}"' in out
+    pytest.importorskip("scitexlintr", minversion="0.2")
+    import scitexlintr
+    assert scitexlintr.lint_file(report, manifest_path=manifest) == []
+
+
+def test_unknown_worked_example_is_a_sync_error(project, capsys):
+    report, manifest = project(WORKED_TABLE.format(wid="nope", attrs=""))
+    assert run(report, manifest) == 1
+    assert "worked_examples" in capsys.readouterr().err
+
+
+def test_reviewer_copy_creates_its_directory(project, tmp_path):
+    report, manifest = project(FIG.format(fid="plot").replace("<!-- sci-media --><!-- /sci-media -->", "<!-- sci-media --><!-- /sci-media -->"),
+                               figures=[fig_entry("plot", "../outputs/plot.svg", project.outputs, "plot.svg")])
+    out = tmp_path / "new" / "dir" / "review.html"
+    assert run(report, manifest, f"--reviewer-copy={out}") == 0
+    assert out.is_file()

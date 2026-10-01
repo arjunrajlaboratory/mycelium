@@ -139,6 +139,30 @@ def round_half_up(value: Any, precision: int) -> str:
     return text
 
 
+def round_significant(value: Any, sig: int) -> str:
+    """``value`` rounded half-up to ``sig`` significant figures.
+
+    Fixed notation for magnitudes in [1e-3, 1e6); otherwise scientific
+    (``5.44e-9``, ``1.23e8``), so a p-value or an effect of 1e-9 never
+    renders as ``0.000``. Non-finite values raise ``ValueError``."""
+    if isinstance(sig, bool) or not isinstance(sig, int) or sig < 1:
+        raise ValueError(f"significant figures must be a positive int, got {sig!r}")
+    d = Decimal(repr(value)) if isinstance(value, float) else Decimal(str(value).strip())
+    if not d.is_finite():
+        raise ValueError(f"cannot round a non-finite value ({value!r})")
+    if d == 0:
+        return "0"
+    e = d.adjusted()
+    if -3 <= e < 6:
+        return round_half_up(d, max(0, sig - 1 - e))
+    mantissa = d.scaleb(-e)
+    text = round_half_up(mantissa, sig - 1)
+    if abs(Decimal(text)) >= 10:  # 9.99 → 10.0 after rounding: renormalize
+        e += 1
+        text = round_half_up(mantissa.scaleb(-1), sig - 1)
+    return f"{text}e{e}"
+
+
 def format_value(
     value: Any,
     *,

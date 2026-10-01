@@ -179,6 +179,7 @@
       "plain_english": "a per-cell logistic regression with two covariates (log total panel coverage and a flat-false-positive artifact-load term). The score is the log-likelihood difference between the proposed-clone-of-origin model and a null model.",
       "first_use_section": "methods.technical_detail",
       "load_bearing": true,
+      "match": ["branch-coherency test"],
       "overloaded_warning": "This is NOT the standard log-likelihood-ratio test in the Wilks sense — the statistic is dLL = LL_branch - LL_null without the factor of 2. A threshold of 10 on dLL corresponds to a Wilks statistic of 20, not 10. Readers trained on chi-square nulls for LRTs will mis-extrapolate the threshold."
     },
     {

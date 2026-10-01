@@ -164,7 +164,9 @@ figcaption { font: .9rem/1.5 var(--sans); color: var(--ink-2); margin-top: .7rem
    numbers the cross-references, so the two can never disagree. */
 .sci-label { font-weight: 650; color: var(--ink); }
 
-.table-wrap { overflow-x: auto; margin: 1.6rem 0; }
+.table-wrap { overflow-x: auto; margin: 1.6rem 0; container-type: inline-size; }
+/* A wide table scrolls; its caption stays put and wraps within the visible width. */
+table.sci-table caption { position: sticky; left: 0; max-width: 100cqi; }
 table.sci-table { border-collapse: collapse; font: .9rem/1.4 var(--sans); min-width: 60%; }
 table.sci-table caption { text-align: left; color: var(--ink-2); padding-bottom: .5rem; caption-side: top; }
 
@@ -801,6 +803,27 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
      The figure's default state (data-default-index, default "last") is the
      one print, reduced motion, and the prose describe. */
   function timeSeries(figure, data) {
+    // Long format (one row per x and group): data-long="x_column,group_column,value_column"
+    // pivots it into one series per group, before any other handling.
+    var longSpec = figure.getAttribute("data-long");
+    if (longSpec && data.columns && data.rows) {
+      var spec = longSpec.split(",").map(function (c) { return c.trim(); });
+      var ix = data.columns.indexOf(spec[0]), ig = data.columns.indexOf(spec[1]), iv = data.columns.indexOf(spec[2]);
+      if (spec.length !== 3 || ix < 0 || ig < 0 || iv < 0) {
+        console.error("[SciReport] data-long must name three columns (x, group, value) of", data.columns);
+        return;
+      }
+      var xsL = [], groups = [], gIndex = {};
+      data.rows.forEach(function (r) {
+        if (xsL.indexOf(r[ix]) < 0) xsL.push(r[ix]);
+        if (!(String(r[ig]) in gIndex)) { gIndex[String(r[ig])] = groups.length; groups.push(r[ig]); }
+      });
+      if (xsL.every(function (v) { return typeof v === "number"; })) xsL.sort(function (a, b) { return a - b; });
+      var pivot = groups.map(function (g) { return { name: spec[1] + " " + g, values: xsL.map(function () { return null; }) }; });
+      data.rows.forEach(function (r) { pivot[gIndex[String(r[ig])]].values[xsL.indexOf(r[ix])] = r[iv]; });
+      data = { x: xsL, x_label: spec[0], y_label: spec[2], series: pivot,
+               y_format: data.y_format, y_min: data.y_min, y_scale: data.y_scale };
+    }
     if (!data.x && data.columns && data.rows) {
       // CSV form from sync_html_report.py: first column is x, the rest are series.
       data = {
@@ -833,7 +856,15 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     var n = xs.length;
     // Normalize once: every series has n values, each a finite number or null
     // (missing arrays, text such as "n/a", and infinities all become null).
-    function num(v) { return v == null || v === "" || !isFinite(+v) ? null : +v; }
+    // data-y-scale="log" (or "y_scale": "log"): a log axis for data spanning
+    // orders of magnitude; values at or below zero cannot be drawn on it.
+    var logY = (figure.getAttribute("data-y-scale") || data.y_scale) === "log";
+    var dropped = 0;
+    function num(v) {
+      if (v == null || v === "" || !isFinite(+v)) return null;
+      if (logY && +v <= 0) { dropped++; return null; }
+      return +v;
+    }
     var series = (data.series || []).slice(0, 8).map(function (s) {
       var vals = Array.isArray(s && s.values) ? s.values : [];
       var out = [];
@@ -844,6 +875,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     if (!n || !series.length) return;
     var values = [];
     series.forEach(function (s) { s.values.forEach(function (v) { if (v != null) values.push(v); }); });
+    if (dropped) console.warn("[SciReport] log y-axis: " + dropped + " value(s) at or below zero not drawn");
     if (!values.length) { console.warn("[SciReport] time series has no finite values to draw"); return; }
     var fmt = new Intl.NumberFormat(undefined, data.y_format || { maximumSignificantDigits: 4 });
     var xfmt = function (v) { return typeof v === "number" ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(v) : String(v); };
@@ -865,23 +897,42 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
 
     var longest = series.reduce(function (w, s) { return Math.max(w, String(s.name).length); }, 0);
     var W = 720, H = 340, m = { t: 12, r: series.length <= 4 ? Math.min(180, 16 + longest * 7) : 16, b: 38, l: 56 };
+    // Axis maths runs in "t space": log10(v) on a log axis, v otherwise.
+    function T(v) { return logY ? Math.log10(v) : v; }
+    var tv = values.map(T);
+    var dmin = Math.min.apply(null, tv), dmax = Math.max.apply(null, tv);
     // y_min extends the axis down to a floor (typically 0) but never hides data below it.
-    var dmin = Math.min.apply(null, values), dmax = Math.max.apply(null, values);
-    var ymin = data.y_min != null && isFinite(+data.y_min) ? Math.min(+data.y_min, dmin) : dmin;
-    var ymax = data.y_min != null && isFinite(+data.y_min) ? Math.max(+data.y_min, dmax) : dmax;
-    var yt = niceTicks(ymin, ymax, 5);
+    var floor = data.y_min != null && isFinite(+data.y_min) && (!logY || +data.y_min > 0) ? T(+data.y_min) : null;
+    var ymin = floor != null ? Math.min(floor, dmin) : dmin;
+    var ymax = floor != null ? Math.max(floor, dmax) : dmax;
+    var yt;
+    if (logY) {
+      var lo = Math.floor(ymin), hi = Math.ceil(ymax);
+      if (lo === hi) hi = lo + 1;
+      var stepD = Math.max(1, Math.ceil((hi - lo) / 6));
+      yt = [];
+      for (var d = lo; d <= hi; d += stepD) yt.push(d);
+      if (yt[yt.length - 1] < hi) yt.push(yt[yt.length - 1] + stepD);
+    } else {
+      yt = niceTicks(ymin, ymax, 5);
+    }
     var y0 = yt[0], y1 = yt[yt.length - 1];
+    function tickLabel(t) {
+      if (!logY) return fmt.format(t);
+      return Math.abs(t) >= 4 ? "1e" + t : fmt.format(Math.pow(10, t));
+    }
     var numericX = xs.every(function (v) { return typeof v === "number" && isFinite(v); });
     var xlo = numericX ? Math.min.apply(null, xs) : 0, xhi = numericX ? Math.max.apply(null, xs) : n - 1;
     function X(i) { var v = numericX ? xs[i] : i; return m.l + (xhi === xlo ? 0 : (v - xlo) / (xhi - xlo)) * (W - m.l - m.r); }
-    function Y(v) { return m.t + (1 - (v - y0) / (y1 - y0)) * (H - m.t - m.b); }
+    function Yt(t) { return m.t + (1 - (t - y0) / (y1 - y0)) * (H - m.t - m.b); }
+    function Y(v) { return Yt(T(v)); }
 
     var root = svg("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": (data.y_label || "Value") + " over " + (data.x_label || "time") });
     var defs = svg("defs"), clip = svg("clipPath", { id: id + "-clip" }), clipRect = svg("rect", { x: 0, y: 0, width: 0, height: H });
     clip.appendChild(clipRect); defs.appendChild(clip); root.appendChild(defs);
     yt.forEach(function (t) {
-      root.appendChild(svg("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: "#e1e0d9", "stroke-width": 1 }));
-      var lab = svg("text", { x: m.l - 8, y: Y(t) + 4, "text-anchor": "end" }); lab.textContent = fmt.format(t); root.appendChild(lab);
+      root.appendChild(svg("line", { x1: m.l, x2: W - m.r, y1: Yt(t), y2: Yt(t), stroke: "#e1e0d9", "stroke-width": 1 }));
+      var lab = svg("text", { x: m.l - 8, y: Yt(t) + 4, "text-anchor": "end" }); lab.textContent = tickLabel(t); root.appendChild(lab);
     });
     root.appendChild(svg("line", { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, stroke: "#c3c2b7", "stroke-width": 1 }));
     var xticks = numericX ? niceTicks(xlo, xhi, 6).filter(function (t) { return t >= xlo && t <= xhi; }) : null;

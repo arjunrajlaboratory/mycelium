@@ -293,7 +293,7 @@ Each sub-agent phase loops:
 3. Re-run the same sub-agent.
 4. Repeat until the sub-agent returns no findings.
 
-In practice, two iterations is typical. Three or more iterations on the same sub-agent is a signal that the manifest (Phase 1) or the planning brief (Phase 0) needs revision — the draft is being patched against findings that should have been prevented upstream. Flag this in the compile log.
+In practice, two iterations is typical. Three or more iterations on the same sub-agent is a signal that the manifest (Phase 1) or the planning brief (Phase 0) needs revision — the draft is being patched against findings that should have been prevented upstream. Flag this in the compile log. The Phase 9 storyline review is the exception: a deck often needs three or four rounds of title edits, each fixing something real; what matters there is that the restatement converges on the brief (see Phase 9).
 
 ---
 

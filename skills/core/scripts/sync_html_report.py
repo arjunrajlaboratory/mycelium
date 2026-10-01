@@ -64,7 +64,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from render_report_values_tex import round_half_up  # noqa: E402  (one rounding rule)
+from render_report_values_tex import round_half_up, round_significant  # noqa: E402  (one rounding rule)
 
 RASTER_TYPES = {
     ".png": "image/png",
@@ -589,32 +589,38 @@ def data_payload(path: Path, data_id: str) -> str:
     return payload.replace("</", "<\\/").replace("<!--", "<\\u0021--")
 
 
-def _format_cell(cell: str, precision: int | None) -> tuple[str, bool]:
+def _format_cell(cell: str, precision: int | None, sig: int | None = None) -> tuple[str, bool]:
     """(text, is_numeric) for one cell of a numeric column. ``precision``
-    rounds with the value-display rule (render_report_values_tex)."""
+    (decimal places) or ``sig`` (significant figures) rounds with the
+    value-display rule (render_report_values_tex)."""
     if not _is_number(cell):
         return cell, False
+    if sig is not None:
+        return round_significant(cell, sig), True
     if precision is None:
         return cell, True
     return round_half_up(cell, precision), True
 
 
-def table_rows(path: Path, data_id: str, attrs: dict[str, str | None]) -> str:
-    header, rows = _read_rows(path, data_id)
-    types = _column_types(header, rows, data_id, path.name)
-    wanted = attrs.get("data-columns")
-    if wanted:
-        names = [c.strip() for c in wanted.split(",") if c.strip()]
-        missing = [c for c in names if c not in header]
-        if missing:
-            raise SyncError(f"table {data_id!r}: data-columns names {missing} not in {path.name} (columns: {header})")
-        idx = [header.index(c) for c in names]
-    else:
-        idx = list(range(len(header)))
-    raw_precision = attrs.get("data-precision")
-    if raw_precision is not None and not re.fullmatch(r"[0-9]+", raw_precision.strip()):  # ASCII only
-        raise SyncError(f"table {data_id!r}: data-precision must be a non-negative integer")
-    precision = int(raw_precision) if raw_precision is not None else None
+def _int_attr(attrs: dict, name: str, item: str, minimum: int = 0) -> int | None:
+    raw = attrs.get(name)
+    if raw is None:
+        return None
+    if not re.fullmatch(r"[0-9]+", raw.strip()) or int(raw) < minimum:  # ASCII only
+        raise SyncError(f"table {item!r}: {name} must be an integer of at least {minimum}")
+    return int(raw)
+
+
+def _rounding(attrs: dict, item: str) -> tuple[int | None, int | None]:
+    precision = _int_attr(attrs, "data-precision", item)
+    sig = _int_attr(attrs, "data-sig", item, minimum=1)
+    if precision is not None and sig is not None:
+        raise SyncError(f"table {item!r}: use data-precision (decimal places) or data-sig (significant figures), not both")
+    return precision, sig
+
+
+def _render_rows(header: list[str], rows: list[list[str]], types: list[str], idx: list[int],
+                 precision: int | None, sig: int | None) -> str:
     out = []
     for r in rows:
         cells = []
@@ -625,12 +631,60 @@ def table_rows(path: Path, data_id: str, attrs: dict[str, str | None]) -> str:
             elif types[i] == "text":
                 cells.append(f"<td>{html.escape(cell, quote=False)}</td>")
             else:
-                # data-precision rounds fractional columns only: integer
-                # columns (counts, replicate numbers, years) keep their spelling.
-                text, _ = _format_cell(cell, precision if types[i] == "float" else None)
+                # Rounding applies to fractional columns only: integer columns
+                # (counts, replicate numbers, years) keep their spelling.
+                fractional = types[i] == "float"
+                text, _ = _format_cell(cell, precision if fractional else None, sig if fractional else None)
                 cells.append(f'<td class="num">{html.escape(text, quote=False)}</td>')
         out.append("<tr>" + "".join(cells) + "</tr>")
     return "\n".join(out)
+
+
+def _select_columns(header: list[str], attrs: dict, item: str, where: str) -> list[int]:
+    wanted = attrs.get("data-columns")
+    if not wanted:
+        return list(range(len(header)))
+    names = [c.strip() for c in wanted.split(",") if c.strip()]
+    missing = [c for c in names if c not in header]
+    if missing:
+        raise SyncError(f"table {item!r}: data-columns names {missing} not in {where} (columns: {header})")
+    return [header.index(c) for c in names]
+
+
+def worked_rows_sha256(rows) -> str:
+    """Mirror of scitexlintr's ``worked_rows_sha256``: canonical JSON of the rows."""
+    canonical = json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def worked_rows(entry: dict, item: str, attrs: dict) -> str:
+    """Rows of a ``data-sci-worked`` table, rendered from the manifest's
+    ``worked_examples[item].rows`` (a list of objects, one per row)."""
+    rows = entry.get("rows")
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        raise SyncError(f"worked example {item!r}: rows must be a list of objects")
+    header: list[str] = []
+    for r in rows:
+        header += [k for k in r if k not in header]
+
+    def spell(v) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        return repr(v) if isinstance(v, float) else str(v)
+
+    cells = [[spell(r.get(k)) for k in header] for r in rows]
+    types = _column_types(header, cells, item, "worked_examples")
+    precision, sig = _rounding(attrs, item)
+    return _render_rows(header, cells, types, _select_columns(header, attrs, item, "worked_examples"), precision, sig)
+
+
+def table_rows(path: Path, data_id: str, attrs: dict[str, str | None]) -> str:
+    header, rows = _read_rows(path, data_id)
+    types = _column_types(header, rows, data_id, path.name)
+    precision, sig = _rounding(attrs, data_id)
+    return _render_rows(header, rows, types, _select_columns(header, attrs, data_id, path.name), precision, sig)
 
 
 def _content_sha(text: str) -> str:
@@ -691,9 +745,13 @@ class _RegionParser(HTMLParser):
         end = start + len(raw)
         attr = _ID_ATTR.get(tag)
         item = next((v for k, v in attrs if k == attr), None) if attr else None
+        worked = None
+        if tag == "table" and not item:
+            worked = next((v for k, v in attrs if k == "data-sci-worked"), None)
+            item = worked
         if item:
             _, attrs = tag_attrs(raw)  # keep the author's attribute spelling
-        self.open.append({"tag": tag, "attrs": attrs, "start": start, "end": end, "item": item})
+        self.open.append({"tag": tag, "attrs": attrs, "start": start, "end": end, "item": item, "worked": bool(worked)})
 
     def handle_startendtag(self, tag, attrs):
         pass
@@ -718,7 +776,7 @@ class _RegionParser(HTMLParser):
         if tag == "script":
             kind, lo, hi = "data", el["end"], close
         else:
-            kind = tag
+            kind = "worked" if el.get("worked") else tag
             name = _MARKER[tag]
             inside = [c for c in self.comments if el["end"] <= c[0] and c[1] <= close]
             opening = next((c for c in inside if c[2] == name), None)
@@ -735,16 +793,33 @@ def regions(source: str) -> list[Region]:
     return sorted(parser.found, key=lambda r: r.tag_start)
 
 
-_MARKER_HINT = {"figure": "<!-- sci-media --><!-- /sci-media -->", "table": "<!-- sci-rows --><!-- /sci-rows -->"}
+_MARKER_HINT = {"figure": "<!-- sci-media --><!-- /sci-media -->", "table": "<!-- sci-rows --><!-- /sci-rows -->",
+                "worked": "<!-- sci-rows --><!-- /sci-rows -->"}
 
 
 def plan(source: str, manifest: dict, base: Path) -> list[Edit]:
     figures = {f.get("id"): f for f in manifest.get("figures") or [] if isinstance(f, dict)}
     data = {d.get("id"): d for d in manifest.get("data") or [] if isinstance(d, dict)}
+    worked = {w.get("id"): w for w in manifest.get("worked_examples") or [] if isinstance(w, dict)}
     edits: list[Edit] = []
     errors: list[str] = []
     for r in regions(source):
         try:
+            if r.kind == "worked":
+                # Rendered from the manifest itself; fingerprinted by its rows.
+                entry = worked.get(r.item_id)
+                if entry is None:
+                    raise SyncError(f"worked example {r.item_id!r}: data-sci-worked id not in manifest worked_examples[*]")
+                if r.content_start is None:
+                    raise SyncError(f"worked example {r.item_id!r}: no {_MARKER_HINT['worked']} markers inside the table")
+                content = worked_rows(entry, r.item_id, dict(r.attrs))
+                new_tag = _build_tag(r.tagname, r.attrs, {
+                    "data-sha256": worked_rows_sha256(entry.get("rows") or []),
+                    "data-content-sha256": _content_sha(content),
+                })
+                edits.append(Edit(r.tag_start, r.tag_end, new_tag))
+                edits.append(Edit(r.content_start, r.content_end, content))
+                continue
             registry, section = (figures, "figures") if r.kind == "figure" else (data, "data")
             entry = registry.get(r.item_id)
             if entry is None:
@@ -790,7 +865,7 @@ def reviewer_view(source: str) -> str:
         if r.content_start is None:
             continue
         region = source[r.content_start:r.content_end]
-        label = f"{r.kind} {r.item_id}" + (" rows" if r.kind == "table" else "")
+        label = f"{r.kind} {r.item_id}" + (" rows" if r.kind in ("table", "worked") else "")
         edits.append(Edit(r.content_start, r.content_end,
                           f"[{label}: {len(region)} characters omitted for review]" + "\n" * region.count("\n")))
     return apply(source, edits)
@@ -847,6 +922,7 @@ def main(argv: list[str] | None = None) -> int:
         if out.resolve() == report.resolve():
             print("--reviewer-copy must not be the report itself", file=sys.stderr)
             return 2
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(reviewer_view(source), encoding="utf-8")
         print(f"wrote reviewer copy {out}")
         return 0

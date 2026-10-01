@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   print shows each figure's default state; printing while presenting gives
   exactly one slide per page; the time series handles descending x,
   missing or non-numeric values, and a `y_min` above the data.
+- The time series takes long-format data (`data-long="x,group,value"`) and
+  a log y-axis (`data-y-scale="log"`); registered tables round to
+  significant figures (`data-sig`), with scientific notation for very small
+  or large values; worked-example tables render from the manifest's rows
+  (`data-sci-worked`); wide-table captions stay in view.
 
 ### Changed
 

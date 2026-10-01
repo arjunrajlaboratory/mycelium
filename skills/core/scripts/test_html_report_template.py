@@ -688,3 +688,71 @@ def test_go_on_a_closed_deck_does_not_touch_the_url(page):
     page.wait_for_function("!SciReport.presenting")
     page.go_back()
     assert not page.url.startswith(EXAMPLE.as_uri())
+
+
+# ---------------------------------------------------------------------------
+# Fourth end-to-end run: long-format data, log axis, wide tables
+# ---------------------------------------------------------------------------
+
+LONG = ('{"columns":["time","dims","occ"],"rows":['
+        '[0.25,1,0.73],[0.25,2,0.53],[0.25,3,0.39],'
+        '[1,1,0.1],[1,2,0.01],[1,3,0.001],'
+        '[4,1,1e-3],[4,2,1e-6],[4,3,5.4e-9]]}')
+
+
+def ts_page(tmp_path, data, attrs):
+    fig = ('<figure class="sci-figure" id="fig-t" data-sci-interactive="timeseries" ' + attrs + '>'
+           f'<script type="application/json" data-sci-data="t">{data}</script>'
+           '<div class="sci-media"></div><figcaption>T.</figcaption></figure>')
+    return make_page(tmp_path, results=fig)
+
+
+def test_long_format_data_is_pivoted_into_series(browser, tmp_path):
+    ctx, pg = open_page(browser, ts_page(tmp_path, LONG, 'data-long="time,dims,occ" data-series-names="1 dim,2 dims,3 dims"'))
+    try:
+        legend = pg.evaluate("[...document.querySelectorAll('#fig-t .sci-ts-legend span')].map(s => s.textContent).filter(Boolean)")
+        assert legend == ["1 dim", "2 dims", "3 dims"]
+        assert pg.evaluate("document.querySelector('#fig-t input[type=range]').max") == "2"  # three x values
+        assert pg.errors == []
+    finally:
+        ctx.close()
+
+
+def test_log_y_axis_spans_orders_of_magnitude(browser, tmp_path):
+    ctx, pg = open_page(browser, ts_page(tmp_path, LONG, 'data-long="time,dims,occ" data-y-scale="log"'))
+    try:
+        svg = pg.evaluate("document.querySelector('#fig-t svg').outerHTML")
+        assert "NaN" not in svg
+        ticks = pg.evaluate("[...document.querySelectorAll('#fig-t svg text[text-anchor=end]')].map(t => t.textContent)")
+        assert len(ticks) >= 4  # several decades labeled
+        ys = pg.evaluate("[...document.querySelectorAll('#fig-t svg circle')].map(c => +c.getAttribute('cy'))")
+        assert len(set(round(y) for y in ys)) == 3  # the three series are visibly separated at the last time
+        assert pg.errors == []
+    finally:
+        ctx.close()
+
+
+def test_log_axis_drops_non_positive_values_with_a_warning(browser, tmp_path):
+    data = '{"x":[0,1,2],"series":[{"name":"a","values":[1,0,-1]},{"name":"b","values":[1,10,100]}]}'
+    ctx, pg = open_page(browser, ts_page(tmp_path, data, 'data-y-scale="log"'))
+    try:
+        assert "NaN" not in pg.evaluate("document.querySelector('#fig-t svg').outerHTML")
+        assert any("log" in e.lower() for e in pg.errors)
+    finally:
+        ctx.close()
+
+
+def test_wide_table_caption_stays_within_view(browser, tmp_path):
+    cols = "".join(f"<th>Column {i} with a long header</th>" for i in range(12))
+    cells = "".join(f"<td>{i}</td>" for i in range(12))
+    table = ('<div class="table-wrap" id="tab-w"><table class="sci-table"><caption>'
+             + "A long caption that explains every column of this very wide table in detail. " * 3
+             + f"</caption><thead><tr>{cols}</tr></thead><tbody><tr>{cells}</tr></tbody></table></div>")
+    ctx, pg = open_page(browser, make_page(tmp_path, results=table), viewport={"width": 1280, "height": 800})
+    try:
+        box = pg.evaluate("""(() => { const w = document.querySelector('#tab-w').getBoundingClientRect();
+          const c = document.querySelector('#tab-w caption').getBoundingClientRect();
+          return {wl: w.left, wr: w.right, cl: c.left, cr: c.right}; })()""")
+        assert box["cl"] >= box["wl"] - 1 and box["cr"] <= box["wr"] + 1, box
+    finally:
+        ctx.close()
