@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-10-01
 
 ### Added
 
@@ -62,6 +62,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed pack with
   `python skills/core/scripts/install_convention.py --name report-generator`
   to pick up 0.5.0.
+
+### Fixed
+
+- **The Stop hook parses on bash 4.2** (#86). A `case` inside a command
+  substitution in `mycelium-stop-check.sh` used the bare-pattern form, which
+  bash 4.2 — the system bash on RHEL/CentOS 7, still common on HPC login
+  nodes — rejects as a syntax error. A Stop hook that fails to parse exits
+  2, which blocks every stop, so the agent was sent back to work on every
+  turn. The patterns now use the POSIX leading-parenthesis form, which every
+  bash parses; behavior is unchanged.
 
 ## [0.7.2] - 2026-09-03
 
