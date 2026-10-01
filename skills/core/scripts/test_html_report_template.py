@@ -756,3 +756,15 @@ def test_wide_table_caption_stays_within_view(browser, tmp_path):
         assert box["cl"] >= box["wl"] - 1 and box["cr"] <= box["wr"] + 1, box
     finally:
         ctx.close()
+
+
+def test_group_labels_that_shadow_object_properties_work(browser, tmp_path):
+    data = ('{"columns":["t","g","v"],"rows":[[0,"constructor",1],[1,"constructor",2],'
+            '[0,"__proto__",3],[1,"__proto__",4],[0,"toString",5],[1,"toString",6]]}')
+    ctx, pg = open_page(browser, ts_page(tmp_path, data, 'data-long="t,g,v" data-series="g constructor,g toString"'))
+    try:
+        assert pg.errors == []
+        legend = pg.evaluate("[...document.querySelectorAll('#fig-t .sci-ts-legend span')].map(s => s.textContent).filter(Boolean)")
+        assert legend == ["g constructor", "g toString"]
+    finally:
+        ctx.close()

@@ -491,7 +491,10 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
 (function () {
   "use strict";
   var doc = document;
-  var interactiveKinds = {};
+  // Maps keyed by report data or element ids are prototype-free, so a key
+  // such as "constructor" or "__proto__" is an ordinary key.
+  function dict() { return Object.create(null); }
+  var interactiveKinds = dict();
   var uid = 0;
 
   function $(sel, root) { return (root || doc).querySelector(sel); }
@@ -523,7 +526,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   }
 
   function numberFigures() {
-    var numbers = {}, count = { fig: 0, figS: 0, tab: 0, tabS: 0 };
+    var numbers = dict(), count = { fig: 0, figS: 0, tab: 0, tabS: 0 };
     $$("main figure.sci-figure").forEach(function (f) {
       var supp = !!f.closest(".supplement");
       var text = supp ? "Figure S" + (++count.figS) : "Figure " + (++count.fig);
@@ -613,7 +616,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   // url(#x) in any attribute, id lists (aria-labelledby, for), and #x / url(#x)
   // in <style> text, so a copy never resolves to, or is styled by, the original.
   function isolateIds(root, suffix) {
-    var map = {};
+    var map = dict();
     $$("[id]", root).concat(root.id ? [root] : []).forEach(function (n) {
       var old = n.id; map[old] = old + suffix; n.id = old + suffix;
     });
@@ -704,7 +707,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
         console.error("[SciReport] data-long must name three columns (x, group, value) of", data.columns);
         return;
       }
-      var xsL = [], groups = [], gIndex = {};
+      var xsL = [], groups = [], gIndex = dict();
       data.rows.forEach(function (r) {
         if (xsL.indexOf(r[ix]) < 0) xsL.push(r[ix]);
         if (!(String(r[ig]) in gIndex)) { gIndex[String(r[ig])] = groups.length; groups.push(r[ig]); }
@@ -732,7 +735,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     // gives them reader-facing names ("Low retention,High retention").
     var pick = figure.getAttribute("data-series"), names = figure.getAttribute("data-series-names");
     if (pick) {
-      var byName = {};
+      var byName = dict();
       (data.series || []).forEach(function (s) { byName[s.name] = s; });
       data.series = pick.split(",").map(function (n) { return n.trim(); }).filter(Boolean).map(function (n) {
         if (!byName[n]) console.error("[SciReport] data-series names an unknown series:", n);
@@ -960,7 +963,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   // Interactive report figures as they were before initialization; slide
   // copies are built from these, so a copy never inherits the report
   // figure's rendered controls (whose listeners do not clone).
-  var pristine = {};
+  var pristine = dict();
 
   function prepareSlides() {
     slides.forEach(function (slide, i) {
@@ -990,7 +993,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
       bar.appendChild(b);
     });
     // "Present from here" links next to report headings that slides summarize.
-    var firstSlideFor = {};
+    var firstSlideFor = dict();
     slides.forEach(function (s, i) { var src = s.getAttribute("data-source"); if (src && !(src in firstSlideFor)) firstSlideFor[src] = i; });
     Object.keys(firstSlideFor).forEach(function (src) {
       var target = doc.getElementById(src.slice(1));

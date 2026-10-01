@@ -593,3 +593,11 @@ def test_a_column_of_only_non_finite_values_is_a_sync_error(project, capsys):
     report, manifest = project(DATA.format(did="n"), data=[{"id": "n", "path": "../outputs/nan.csv", "sha256": sha(raw)}])
     assert run(report, manifest) == 1
     assert "not finite" in capsys.readouterr().err
+
+
+def test_namespacing_handles_mixed_case_url_and_leaves_hex_colors_alone():
+    svg = ('<svg viewBox="0 0 1 1"><style>.x{fill:#fff} #fff{stroke:URL(#g)}</style>'
+           '<linearGradient id="g"/><g id="fff" fill="URL(#g)" stroke="#fff"/></svg>')
+    out = shr._svg_markup(svg, "f", "")
+    assert 'fill="url(#f-g)"' in out.lower() and 'stroke="#fff"' in out
+    assert ".x{fill:#fff}" in out and "#f-fff" in out and "#f-g" in out

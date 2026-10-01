@@ -244,14 +244,43 @@ def _collect_ids(svg: str) -> set[str]:
 _ID_LIST_ATTRS = {"aria-labelledby", "aria-describedby", "aria-controls", "aria-owns", "aria-flowto"}
 
 
+_URL_REF_RE = re.compile(r"url\(\s*(['\"]?)#([^'\")\s]+)\1\s*\)", re.I)  # CSS is case-insensitive: URL(#g)
+
+
+def _rename_url_refs(text: str, rename: dict[str, str]) -> str:
+    return _URL_REF_RE.sub(lambda m: f"url(#{rename[m.group(2)]})" if m.group(2) in rename else m.group(0), text)
+
+
 def _rename_css_refs(css: str, rename: dict[str, str]) -> str:
-    """``#id`` selectors and ``url(#id)`` references in CSS text."""
+    """``url(#id)`` anywhere, and ``#id`` only in selector text (outside
+    declaration blocks) — inside a declaration ``#fff`` is a color, even when
+    an element happens to have id="fff". Mirrors the runtime's renameCssIds."""
     if not rename:
         return css
-    css = re.sub(r"url\(\s*(['\"]?)#([^'\")\s]+)\1\s*\)",
-                 lambda m: f"url(#{rename[m.group(2)]})" if m.group(2) in rename else m.group(0), css)
-    return re.sub(r"(?<![\w-])#(-?[A-Za-z_][\w-]*)",
-                  lambda m: "#" + rename[m.group(1)] if m.group(1) in rename else m.group(0), css)
+    out, depth, chunk = [], 0, []
+
+    def flush():
+        text = "".join(chunk)
+        if depth == 0:
+            text = re.sub(r"(?<![\w-])#(-?[A-Za-z_][\w-]*)",
+                          lambda m: "#" + rename[m.group(1)] if m.group(1) in rename else m.group(0), text)
+        out.append(text)
+        chunk.clear()
+
+    for ch in css:
+        if ch in "{}":
+            flush()
+            out.append(ch)
+            depth = depth + 1 if ch == "{" else max(0, depth - 1)
+        else:
+            chunk.append(ch)
+    flush()
+    return _rename_url_refs("".join(out), rename)
+
+
+def _rename_css_declarations(style: str, rename: dict[str, str]) -> str:
+    """A style attribute is declarations only: rename url(#id), never #hex."""
+    return _rename_url_refs(style, rename)
 
 
 def _rename_refs(attrs: list[tuple[str, str | None]], rename: dict[str, str]):
@@ -268,12 +297,10 @@ def _rename_refs(attrs: list[tuple[str, str | None]], rename: dict[str, str]):
                 new = "#" + rename[v[1:]]
             elif key in _ID_LIST_ATTRS:
                 new = " ".join(rename.get(t, t) for t in v.split())
-            elif "url(" in v:
-                new = _rename_css_refs(v, rename) if key == "style" else re.sub(
-                    r"url\(\s*(['\"]?)#([^'\")\s]+)\1\s*\)",
-                    lambda m: f"url(#{rename[m.group(2)]})" if m.group(2) in rename else m.group(0), v)
             elif key == "style":
-                new = _rename_css_refs(v, rename)
+                new = _rename_css_declarations(v, rename)
+            elif "url(" in v.lower():
+                new = _rename_url_refs(v, rename)
         changed = changed or new != v
         out.append((k, new))
     return out if changed else None
