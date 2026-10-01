@@ -292,7 +292,7 @@ These are installed automatically during `mycelium init`:
 | Convention Pack | Description |
 |----------------|-------------|
 | [robust-analysis](network/conventions/robust-analysis/) | Defensive execution, validation checks, sensitivity sweeps, null hypothesis testing |
-| [report-generator](network/conventions/report-generator/) | Structured LaTeX PDF report generation with provenance |
+| [report-generator](network/conventions/report-generator/) | Structured report generation with provenance — LaTeX PDF, or a self-contained HTML report with a companion slide deck |
 | [idea-generator](network/conventions/idea-generator/) | Persona-based creative ideation for new analysis directions |
 
 ### Domain Packs (opt-in)

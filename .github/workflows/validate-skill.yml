@@ -32,6 +32,17 @@ jobs:
         run: |
           pip install pytest pyyaml
 
+      # Browser tests for the HTML report template (test_html_report_template.py)
+      # and PDF-figure inlining (poppler's pdftocairo). Both skip cleanly where
+      # these are absent, so only this job provisions them.
+      - name: Install HTML report test dependencies
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+          sudo apt-get install -y poppler-utils
+          # The HTML lint tests need scitexlintr >= 0.2 (its HTML frontend).
+          pip install "scitexlintr>=0.2"
+
       - name: Validate shared skill frontmatter and Codex metadata
         run: |
           python -c "

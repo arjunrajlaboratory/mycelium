@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 import re
 import sys
 from pathlib import Path
@@ -55,7 +57,7 @@ def id_to_macro_name(manifest_id: str) -> str:
     for segment in local.split("_"):
         if not segment:
             continue
-        if segment.isdigit():
+        if segment.isascii() and segment.isdigit():
             out.append("".join(_DIGIT_WORDS[d] for d in segment))
         elif segment.isalpha() and len(segment) <= 3:
             out.append(segment.upper())
@@ -67,7 +69,7 @@ def id_to_macro_name(manifest_id: str) -> str:
             # \newcommand and scitexlintr's macro lookup.
             chars: list[str] = []
             for j, ch in enumerate(segment):
-                if ch.isdigit():
+                if ch in _DIGIT_WORDS:
                     chars.append(_DIGIT_WORDS[ch])
                 elif j == 0:
                     chars.append(ch.upper())
@@ -108,6 +110,69 @@ def tex_escape(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def round_half_up(value: Any, precision: int) -> str:
+    """``value`` rounded half-up to ``precision`` decimal places, as a string.
+
+    The single rounding rule for rendered report values in this repository
+    (TeX macros here, registered HTML tables in sync_html_report.py) and the
+    mirror of scitexlintr's ``_display.derive_unit``: rounding happens on the
+    value's decimal spelling, so ``0.125`` → ``0.13`` where binary-float
+    formatting gives ``0.12``; ``-0.001`` → ``0.00`` (no negative zero); very
+    large magnitudes are exact. Non-finite values raise ``ValueError``.
+    """
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"cannot round a non-finite value ({value!r})")
+        d = Decimal(repr(value))
+    else:
+        try:
+            d = Decimal(str(value).strip())
+        except InvalidOperation as exc:
+            raise ValueError(f"not a number: {value!r}") from exc
+    if not d.is_finite():
+        raise ValueError(f"cannot round a non-finite value ({value!r})")
+    with localcontext() as ctx:
+        ctx.prec = max(28, d.adjusted() + precision + 5)
+        text = str(d.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_HALF_UP))
+    if text.startswith("-") and not text.strip("-0."):
+        text = text[1:]
+    return text
+
+
+def round_significant(value: Any, sig: int) -> str:
+    """``value`` rounded half-up to ``sig`` significant figures.
+
+    Fixed notation for magnitudes in [1e-3, 1e6); otherwise scientific
+    (``5.44e-9``, ``1.23e8``), so a p-value or an effect of 1e-9 never
+    renders as ``0.000``. Non-finite values raise ``ValueError``."""
+    if isinstance(sig, bool) or not isinstance(sig, int) or sig < 1:
+        raise ValueError(f"significant figures must be a positive int, got {sig!r}")
+    d = Decimal(repr(value)) if isinstance(value, float) else Decimal(str(value).strip())
+    if not d.is_finite():
+        raise ValueError(f"cannot round a non-finite value ({value!r})")
+    if d == 0:
+        return "0"
+    e = d.adjusted()
+    if -3 <= e < 6:
+        places = sig - 1 - e
+        if places >= 0:
+            return round_half_up(d, places)
+        # More integer digits than significant figures: round the integer
+        # places too (12345.6 at 3 sig figs is 12300, not 12346).
+        with localcontext() as ctx:
+            ctx.prec = max(28, e + 5)
+            q = d.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+        if q.adjusted() < 6:
+            return format(q, "f")
+        # Rounding carried past 999,999: fall through to scientific notation.
+    mantissa = d.scaleb(-e)
+    text = round_half_up(mantissa, sig - 1)
+    if abs(Decimal(text)) >= 10:  # 9.99 → 10.0 after rounding: renormalize
+        e += 1
+        text = round_half_up(mantissa.scaleb(-1), sig - 1)
+    return f"{text}e{e}"
+
+
 def format_value(
     value: Any,
     *,
@@ -122,7 +187,10 @@ def format_value(
     1. ``unit`` set    — DERIVE the displayed string from ``value``.
        ``unit="percent"`` turns the stored fraction ``0.978`` into ``97.8\\%``
        at ``precision`` decimal places (default 1; integer precision drops the
-       trailing ``.0``). Because the string is a pure function of the canonical
+       trailing ``.0``); ``unit="decimal"`` rounds the value itself
+       (``7.47712`` → ``7.48`` at precision 2). Rounding is half-up on the
+       value's decimal form (``0.9535`` → ``95.4\\%``), matching scitexlintr's
+       display contract. Because the string is a pure function of the canonical
        ``value``, it can never silently disagree with the number the
        verification layer (Phase 6 / scitexlintr) anchors on.
     2. ``display`` set — emit the author-supplied string VERBATIM (no escaping).
@@ -133,24 +201,31 @@ def format_value(
        time but it is not produced by default), strings are LaTeX-escaped.
     """
     if unit is not None:
-        if unit != "percent":
+        if unit not in ("percent", "decimal"):
             raise ValueError(
                 f"render_report_values_tex: unsupported unit {unit!r}. "
-                "v1 supports only unit='percent'."
+                "Supported units: 'percent', 'decimal'."
             )
         # bool is an int subclass — exclude it so True/False can't masquerade
         # as a fraction.
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(
-                "render_report_values_tex: unit='percent' requires a numeric "
-                f"fraction value, got {type(value).__name__!r} (value={value!r})."
+                f"render_report_values_tex: unit={unit!r} requires a numeric "
+                f"value, got {type(value).__name__!r} (value={value!r})."
             )
         if isinstance(precision, bool) or not isinstance(precision, int) or precision < 0:
             raise ValueError(
                 "render_report_values_tex: precision must be a non-negative int, "
                 f"got {precision!r}."
             )
-        return f"{value * 100:.{precision}f}" + r"\%"
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(
+                f"render_report_values_tex: unit={unit!r} requires a finite value, got {value!r}."
+            )
+        d = Decimal(repr(value)) if isinstance(value, float) else Decimal(value)
+        if unit == "percent":
+            d = d.scaleb(2)  # exact ×100 on the decimal form
+        return round_half_up(d, precision) + (r"\%" if unit == "percent" else "")
     if display is not None:
         if not isinstance(display, str):
             raise ValueError(
@@ -199,6 +274,11 @@ def render(manifest: dict, *, source_label: str | None = None) -> str:
         macro = id_to_macro_name(manifest_id)
         if not macro:
             continue
+        if not re.fullmatch(r"[A-Za-z]+", macro):
+            raise ValueError(
+                f"render_report_values_tex: manifest id {manifest_id!r} cannot form a TeX macro "
+                f"(\\{macro}): TeX control words are ASCII letters only; rename the id"
+            )
         value = entry["value"]
         formatted = format_value(
             value,

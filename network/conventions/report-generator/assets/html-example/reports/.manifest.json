@@ -1,0 +1,113 @@
+{
+  "_note": "SYNTHETIC example manifest for the HTML report template. No real experiment.",
+  "numbers": [
+    {
+      "id": "drug-x.n_replicates",
+      "value": 4,
+      "label_canonical": "replicate wells per dose",
+      "provenance": "scripts/02_fit_growth.py (synthetic example)"
+    },
+    {
+      "id": "drug-x.dose_low_um",
+      "value": 1,
+      "label_canonical": "low dose (µM)",
+      "provenance": "scripts/02_fit_growth.py (synthetic example)"
+    },
+    {
+      "id": "drug-x.dose_high_um",
+      "value": 5,
+      "label_canonical": "high dose (µM)",
+      "provenance": "scripts/02_fit_growth.py (synthetic example)"
+    },
+    {
+      "id": "drug-x.doubling_time_vehicle_h",
+      "value": 22.4,
+      "label_canonical": "doubling time with vehicle (hours)",
+      "provenance": "scripts/02_fit_growth.py (synthetic example)"
+    },
+    {
+      "id": "drug-x.doubling_time_low_h",
+      "value": 27.9,
+      "label_canonical": "doubling time at the low dose (hours)",
+      "provenance": "scripts/02_fit_growth.py (synthetic example)"
+    },
+    {
+      "id": "drug-x.doubling_time_high_h",
+      "value": 38.1,
+      "label_canonical": "doubling time at the high dose (hours)",
+      "provenance": "scripts/02_fit_growth.py (synthetic example)"
+    },
+    {
+      "id": "drug-x.growth_rate_reduction_high",
+      "value": 0.412,
+      "label_canonical": "reduction in growth rate at the high dose",
+      "provenance": "scripts/02_fit_growth.py (synthetic example)",
+      "unit": "percent",
+      "precision": 1,
+      "label_aliases_forbidden": [
+        "reduction in cell number",
+        "kill rate"
+      ]
+    },
+    {
+      "id": "drug-x.ic50_um",
+      "value": 1.8,
+      "label_canonical": "half-maximal dose for growth-rate inhibition (µM)",
+      "provenance": "scripts/02_fit_growth.py (synthetic example)",
+      "label_aliases_forbidden": [
+        "IC50 for viability"
+      ]
+    },
+    {
+      "id": "drug-x.ic50_ci_low_um",
+      "value": 1.4,
+      "label_canonical": "lower bound of the 95% bootstrap interval on the half-maximal dose",
+      "provenance": "scripts/02_fit_growth.py (synthetic example)"
+    },
+    {
+      "id": "drug-x.ic50_ci_high_um",
+      "value": 2.3,
+      "label_canonical": "upper bound of the 95% bootstrap interval on the half-maximal dose",
+      "provenance": "scripts/02_fit_growth.py (synthetic example)"
+    },
+    {
+      "id": "drug-x.viability_high",
+      "value": 0.93,
+      "label_canonical": "fraction of cells alive at day ten, high dose",
+      "provenance": "scripts/02_fit_growth.py (synthetic example)",
+      "unit": "percent",
+      "precision": 0
+    },
+    {
+      "id": "drug-x.cell_line",
+      "value": "A549",
+      "label_canonical": "cell line",
+      "provenance": "scripts/02_fit_growth.py (synthetic example)"
+    }
+  ],
+  "figures": [
+    {
+      "id": "dose_response",
+      "path": "../outputs/figures/dose_response.svg",
+      "sha256": "04772f73dcd72bb442ba63aade5644d207caad92aa1e86c52791fb8165cf737d"
+    }
+  ],
+  "data": [
+    {
+      "id": "growth_counts",
+      "path": "../outputs/growth_counts.json",
+      "sha256": "85b8806dbd1a760813d075dc9f1eda5cc5ccea8bd2f7a5d0db1654d90f5e6738"
+    },
+    {
+      "id": "doubling_by_replicate",
+      "path": "../outputs/doubling_by_replicate.csv",
+      "sha256": "f78d93189c3dd35a9e66bbf322fc4b4b969fdb41c810f975a975eee42eb8e2c0"
+    }
+  ],
+  "terms": [
+    {
+      "id": "cytostatic",
+      "expansion": "slows or halts cell division without killing cells"
+    }
+  ]
+}

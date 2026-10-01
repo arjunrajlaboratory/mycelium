@@ -228,3 +228,62 @@ def test_format_value_percent_direct() -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_percent_display_matches_scitexlintr_display_contract() -> None:
+    # The TeX renderer and scitexlintr's HTML check must derive the same
+    # displayed string from the same manifest entry; only the escaping of
+    # the percent sign differs between formats.
+    pytest.importorskip("scitexlintr", minversion="0.2")
+    import scitexlintr._display as display
+    cases = [(0.9653, 1), (0.93, 0), (0.5, 2), (1, 1), (0.0004, 3), (0.9535, 1), (0.125, 1)]
+    for value, precision in cases:
+        tex = rrv.format_value(value, unit="percent", precision=precision)
+        html = display.derive_unit(value, "percent", precision, percent_sign="%")
+        assert tex == html.replace("%", r"\%"), (value, precision)
+    for value, precision in [(7.47712, 2), (22.125, 2), (22.125, 1), (-0.0001, 2), (3, 1)]:
+        tex = rrv.format_value(value, unit="decimal", precision=precision)
+        assert tex == display.derive_unit(value, "decimal", precision, percent_sign=""), (value, precision)
+    for value in [48, 0.05, 2.5e-08, True]:
+        assert rrv.format_value(value) == display.natural(value)
+
+
+def test_percent_rounds_half_up_on_the_decimal_value() -> None:
+    # 0.9535 * 100 is 95.35 exactly in decimal; binary-float formatting gives 95.3.
+    assert rrv.format_value(0.9535, unit="percent", precision=1) == r"95.4\%"
+    assert rrv.format_value(0.125, unit="percent", precision=0) == r"13\%"
+
+
+def test_decimal_unit_rounds_to_precision() -> None:
+    assert rrv.format_value(7.47712, unit="decimal", precision=2) == "7.48"
+    assert rrv.format_value(22.125, unit="decimal", precision=2) == "22.13"
+    assert rrv.format_value(3, unit="decimal", precision=1) == "3.0"
+
+
+def test_non_finite_and_huge_values_raise_value_error_not_decimal_errors() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        rrv.format_value(float("inf"), unit="decimal", precision=2)
+    with pytest.raises(ValueError, match="finite"):
+        rrv.format_value(float("nan"), unit="percent", precision=1)
+    assert rrv.format_value(10**30, unit="decimal", precision=2) == "1000000000000000000000000000000.00"
+
+
+def test_ids_that_cannot_form_a_tex_macro_are_a_clear_error() -> None:
+    assert rrv.id_to_macro_name("r2_score") == "RTwoScore"
+    assert rrv.id_to_macro_name("r²_score") == "R²Score"  # mirrors scitexlintr; no KeyError
+    with pytest.raises(ValueError, match="TeX macro"):
+        rrv.render({"numbers": [{"id": "r²_score", "value": 0.91}]})
+
+
+@pytest.mark.parametrize("value,sig,expected", [
+    (12345.6, 3, "12300"),
+    (999999, 2, "1.0e6"),
+    (99999.9, 3, "100000"),
+    (123.456, 3, "123"),
+    (123.456, 5, "123.46"),
+    (0.0012345, 2, "0.0012"),
+    (5.4421e-09, 3, "5.44e-9"),
+    (-12345.6, 2, "-12000"),
+])
+def test_significant_figures_round_integer_places_too(value, sig, expected) -> None:
+    assert rrv.round_significant(value, sig) == expected

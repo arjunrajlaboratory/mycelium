@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **HTML report + companion slides, a second output format for the report
+  skill.** The planning brief gains an output-format question (LaTeX PDF by
+  default, or HTML + slides). The HTML format produces one self-contained file
+  holding the long-form report and a 10–20 slide deck derived from it: every
+  slide title after the title slide is a single declarative sentence making one
+  point; keyboard, click, and swipe navigation; fullscreen; a progress bar that
+  jumps to any slide; `#slides/N` deep links; and Esc (or leaving fullscreen)
+  returns to the report section the current slide summarizes. It runs the same
+  phases and blind reviewers as the PDF format, the same scitexlintr drift gate
+  (value spans, sha256-checked inline figures, fingerprinted interactive data),
+  and a new Phase 9: a ghost deck of sentence titles, a blind storyline review
+  of those titles alone, then the slides. Interactive time-series figures
+  (scrubber, Play, readout, data table) are available for when time is the axis
+  of the argument, drawn only from manifest-registered data. The
+  `report-generator` pack is now version 0.5.0 and adds `html-conventions.md`,
+  `assets/report-template.html`, and a complete synthetic worked example
+  (`assets/html-example/`) that passes every gate.
+- `skills/core/scripts/sync_html_report.py` inlines registered figures (SVG
+  with namespaced ids; PNG/JPEG as data URIs; PDF via `pdftocairo`, rasterized
+  when its SVG would exceed 2 MB) and interactive data (JSON, CSV, TSV) from the
+  manifest, refusing any file whose sha256 disagrees with it and writing nothing
+  on any failure.
+- `skills/core/scripts/check_html_report.py` gates placeholders,
+  self-containment, the shared runtime, and the slide rules (count, title slide,
+  sentence-shaped titles, resolvable `data-source` and `data-fig-ref`, one
+  figure per slide), warns on wordy slides, duplicate titles, and files over
+  15 MB, and reports the main-text word count used for the shape budget.
+- The CI Ubuntu job installs Playwright, Chromium, and poppler so the template's
+  browser tests and the PDF-inlining tests run there; both skip where absent.
+- The deck runtime: Back closes the deck (one history entry per
+  presentation); Esc, F, and Enter behave correctly while a slider, button,
+  or link has focus, and a touch drag on a slider never turns the slide;
+  focus returns to the report section on close; interactive figures have a
+  stop/reset lifecycle, so Play stops when the slide or deck closes and
+  print shows each figure's default state; printing while presenting gives
+  exactly one slide per page; the time series handles descending x,
+  missing or non-numeric values, and a `y_min` above the data.
+- The time series takes long-format data (`data-long="x,group,value"`) and
+  a log y-axis (`data-y-scale="log"`); registered tables round to
+  significant figures (`data-sig`), with scientific notation for very small
+  or large values; worked-example tables render from the manifest's rows
+  (`data-sci-worked`); wide-table captions stay in view.
+- SVG id renaming has one contract (`test_svg_rename_contract.py`) that
+  both implementations — sync's inlining and the runtime's slide copies —
+  must meet: references resolve and `#hex` colors are never renamed.
+
+### Changed
+
+- The HTML format requires scitexlintr 0.2.0 or later (its HTML frontend).
+  Existing projects are unaffected until they choose `format: html`; refresh the
+  installed pack with
+  `python skills/core/scripts/install_convention.py --name report-generator`
+  to pick up 0.5.0.
+
 ## [0.7.2] - 2026-09-03
 
 ### Changed

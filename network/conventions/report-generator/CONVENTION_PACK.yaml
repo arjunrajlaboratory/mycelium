@@ -1,9 +1,12 @@
 ---
 name: report-generator
-version: 0.4.1
+version: 0.5.0
 core: true
 description: >
-  Structured LaTeX PDF report generation for computational analyses. Provides a
+  Structured report generation for computational analyses, as a LaTeX PDF or as
+  one self-contained HTML file holding the report and a 10-20 slide companion
+  deck (sentence titles, keyboard/click navigation, fullscreen, Esc returns to
+  the matching report section; see html-conventions.md). Provides a
   phase-based agentic flow (planning brief with audience-tier ladder and
   narrative-vs-structured Results choice; memory consultation; source-of-truth
   manifest fed by analysis-side register_value fragments and enriched with
@@ -12,16 +15,21 @@ description: >
   plain-English, framing, and numerical re-verification; then recompile with a
   scitexlintr drift-check gate and a shape-budget check), three template
   variants (overview, comprehensive, overview+supplement default), section-by-
-  section writing guidance, and a provenance/style QC checklist. Not for
-  presentations or notebook exports.
+  section writing guidance, and a provenance/style QC checklist. The HTML format
+  adds an HTML template, a worked example, figure/data inlining
+  (sync_html_report.py), a structure and slide gate (check_html_report.py), and
+  a Phase 9 ghost-deck + blind storyline review. Not for standalone slide decks
+  or notebook exports.
 author: mycelium
 dependencies:
   # External runtime dependency — install when this convention is active.
   # Phase 7 invokes the `scitexlintr` CLI; see analysis-conventions.md.
-  # This is the LaTeX-report package from scilintr/tex/scitexlintr, distinct
-  # from the analysis-code `scilintr` CLI.
+  # This is the report-lint package from scilintr/tex/scitexlintr, distinct
+  # from the analysis-code `scilintr` CLI. The HTML format needs >= 0.2.0.
   - name: scitexlintr
     type: python-package
-    install: 'pip install "scitexlintr @ git+https://github.com/arjunrajlaboratory/scilintr.git#subdirectory=tex/scitexlintr"'
-tags: [report, latex, pdf, writing, core]
+    # The HTML format needs >= 0.2.0 (check with `scitexlintr --version`).
+    install: 'pip install "scitexlintr>=0.2"'
+    install_from_source: 'pip install "scitexlintr @ git+https://github.com/arjunrajlaboratory/scilintr.git@scitexlintr-v0.2.0#subdirectory=tex/scitexlintr"'
+tags: [report, latex, pdf, html, slides, writing, core]
 ---

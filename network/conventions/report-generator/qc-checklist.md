@@ -1,6 +1,6 @@
 # Report QC Checklist
 
-Run before finalizing any report PDF. The list is split into **provenance** (does the result match what was actually run?) and **style** (is the prose clear and standalone?). Neither is more important than the other — calling them out separately helps the reader see at a glance whether an issue is factual or about clarity.
+Run before finalizing any report (PDF, or HTML + slides — the HTML format replaces **Compilation** and **Formatting** with the **HTML format** section at the end; every other section applies to both, reading `\ref{}` as an `a.xref` link, `\appendix` as the `<section id="supplement">`, and page counts as main-text words at about 500 per page). The list is split into **provenance** (does the result match what was actually run?) and **style** (is the prose clear and standalone?). Neither is more important than the other — calling them out separately helps the reader see at a glance whether an issue is factual or about clarity.
 
 Phase 4–6 sub-agents in the report-generator flow check most of these automatically. This file is the user-facing surface so a reader who only sees the QC list can still audit a finished report.
 
@@ -166,3 +166,36 @@ These checks verify the prose works for a skim reader and a careful reader simul
 - [ ] **Sensitivity figures** referenced from main-text methods section
 - [ ] **Each figure** has a caption explaining what was varied and the conclusion
 - [ ] **Appendix** uses `\appendix` command for correct numbering (overview+supplement and comprehensive shapes)
+
+---
+
+## HTML format (report + slides)
+
+Build and gate (replaces **Compilation**):
+
+- [ ] **`sync_html_report.py --check` passes** — every registered figure and data block is inlined and its `data-sha256` matches the file the manifest fingerprints
+- [ ] **`scitexlintr` ≥ 0.2 blocking errors are 0** after waivers — including the HTML-only `unknown-value-id` and `unfingerprinted-data`
+- [ ] **`check_html_report.py` errors are 0** — no leftover placeholders, nothing loaded from outside the file, runtime block present, all slide rules met
+- [ ] **Rendered in a browser** — every figure appears, cross-references read "Figure N", no console errors, no horizontal scroll at phone width
+- [ ] **`SciReport.checkLayout()` returns `[]`** — no slide's content overflows the stage
+- [ ] `.compile-log-html.md` records the HTML SHA256, main-text word count and shape-budget status, and each gate's result
+
+Report:
+
+- [ ] **Every figure is declared** — `data-sci-fig` (registered), `data-sci-interactive` (registered data), or `data-sci-diagram` (hand-drawn, text linted as prose)
+- [ ] **Interactive figures are earned** — time or an ordered parameter is the axis of the argument; no autoplay; the default state (what print and prose describe) is meaningful on its own
+- [ ] **No number in prose comes from a slider readout** — prose quotes wrapped manifest values for fixed states only
+- [ ] **Figure references are `a.xref` links**, not typed numbers
+- [ ] **Gene names** in italics (`<i>`), and special characters written as text or entities (no TeX escapes left over)
+- [ ] **Tables that reproduce an analysis output row for row are registered** (`data-sci-table`), not hand-typed behind waivers
+- [ ] **Forbidden aliases are phrases wrong everywhere in the report** — `forbidden-alias` bans them document-wide
+
+Slides:
+
+- [ ] **10–20 slides**, title slide first and only
+- [ ] **Every other title is one declarative sentence** — subject, verb, object; ends with a period; one point per slide
+- [ ] **The titles alone tell the story** — the Phase 9 storyline reviewer restated the headline, baseline, and caveat to match the planning brief
+- [ ] **The main caveat has its own slide**
+- [ ] **Every slide points back** (`data-source`) to the report section it summarizes, and Esc lands there
+- [ ] **At most one figure per slide**, referenced from the report rather than copied; body text around 40 words or fewer
+- [ ] **Nothing on a slide is absent from the report** — no new numbers, figures, or claims
