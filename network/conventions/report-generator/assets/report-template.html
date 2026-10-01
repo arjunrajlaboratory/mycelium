@@ -345,7 +345,7 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
     <p class="byline"><span>%%AUTHORS%%</span><span><time>%%DATE%%</time></span></p>
     <div class="actions">
       <button class="btn btn-primary" type="button" data-present>
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>
+        <svg data-sci-icon viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>
         Present slides
       </button>
       <a class="btn" href="#provenance">Provenance</a>
@@ -466,18 +466,18 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
   </div>
   <div class="deck-bar">
     <button type="button" data-deck="close" aria-label="Back to the report (Esc)" title="Back to the report (Esc)">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <svg data-sci-icon viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
     <button type="button" data-deck="prev" aria-label="Previous slide" title="Previous slide (←)">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12 3v10L5 8z" fill="currentColor" transform="translate(-1 0)"/></svg>
+      <svg data-sci-icon viewBox="0 0 16 16" aria-hidden="true"><path d="M12 3v10L5 8z" fill="currentColor" transform="translate(-1 0)"/></svg>
     </button>
     <button type="button" data-deck="next" aria-label="Next slide" title="Next slide (→)">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3v10l7-5z" fill="currentColor" transform="translate(1 0)"/></svg>
+      <svg data-sci-icon viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3v10l7-5z" fill="currentColor" transform="translate(1 0)"/></svg>
     </button>
     <div class="deck-progress" role="group" aria-label="Slide progress"></div>
     <span class="deck-count" aria-hidden="true"></span>
     <button type="button" data-deck="fullscreen" aria-label="Toggle fullscreen (F)" title="Fullscreen (F)">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <svg data-sci-icon viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
     </button>
   </div>
   <div class="deck-live" aria-live="polite"></div>
@@ -621,16 +621,17 @@ table.sci-table td.num, table.sci-table th.num { text-align: right; font-variant
       var old = n.id; map[old] = old + suffix; n.id = old + suffix;
     });
     if (!Object.keys(map).length) return;
-    function refs(v) {
-      return v.replace(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/g, function (m, id) { return map[id] ? "url(#" + map[id] + ")" : m; });
+    function refs(v) {  // CSS function names are case-insensitive: URL(#g) too
+      return v.replace(/url\(\s*['"]?#([^'")\s]+)['"]?\s*\)/gi, function (m, id) { return map[id] ? "url(#" + map[id] + ")" : m; });
     }
     $$("*", root).concat([root]).forEach(function (n) {
       Array.prototype.slice.call(n.attributes).forEach(function (attr) {
         var v = attr.value, nv = v;
         if (ID_LIST_ATTRS.indexOf(attr.name) >= 0) nv = v.split(/\s+/).map(function (t) { return map[t] || t; }).join(" ");
         else if (HREF_ATTRS.indexOf(attr.name) >= 0 && /^#/.test(v) && map[v.slice(1)]) nv = "#" + map[v.slice(1)];
-        else if (attr.name === "style") nv = renameCssIds(v, map, refs);
-        else if (v.indexOf("url(") >= 0) nv = refs(v);  // fill="#fff" is a color, not a reference
+        // A style attribute is declarations only: rename url(#id), never a #hex color.
+        else if (attr.name === "style") nv = refs(v);
+        else if (/url\(/i.test(v)) nv = refs(v);  // fill="#fff" is a color, not a reference
         if (nv !== v) n.setAttribute(attr.name, nv);
       });
     });

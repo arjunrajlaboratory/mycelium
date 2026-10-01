@@ -334,3 +334,8 @@ def test_svg_fragment_references_are_fine(tmp_path):
     ok = build(ABSTRACT='<p>Abstract.</p><svg viewBox="0 0 4 4"><defs><linearGradient id="g"/></defs>'
                         '<rect fill="url(#g)" width="4" height="4"/><use href="#g"/></svg>')
     assert "self-contained" not in codes(check(tmp_path, ok))
+
+
+def test_duplicate_resource_attributes_are_checked_as_the_browser_reads_them(tmp_path):
+    text = build(ABSTRACT='<p>Abstract.</p><p><img alt="" src="https://example.com/x.png" src="data:image/png;base64,AA=="></p>')
+    assert "self-contained" in codes(check(tmp_path, text), "error")

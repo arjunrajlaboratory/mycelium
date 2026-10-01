@@ -241,7 +241,10 @@ def _collect_ids(svg: str) -> set[str]:
     return found
 
 
-_ID_LIST_ATTRS = {"aria-labelledby", "aria-describedby", "aria-controls", "aria-owns", "aria-flowto"}
+# The same id-reference attributes the runtime's ID_LIST_ATTRS renames when it
+# copies a figure into a slide (test_svg_rename_contract.py holds both to one list).
+_ID_LIST_ATTRS = {"aria-labelledby", "aria-describedby", "aria-controls", "aria-owns", "aria-flowto",
+                  "aria-activedescendant", "aria-details", "aria-errormessage", "for", "headers", "list"}
 
 
 _URL_REF_RE = re.compile(r"url\(\s*(['\"]?)#([^'\")\s]+)\1\s*\)", re.I)  # CSS is case-insensitive: URL(#g)

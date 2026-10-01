@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   significant figures (`data-sig`), with scientific notation for very small
   or large values; worked-example tables render from the manifest's rows
   (`data-sci-worked`); wide-table captions stay in view.
+- SVG id renaming has one contract (`test_svg_rename_contract.py`) that
+  both implementations — sync's inlining and the runtime's slide copies —
+  must meet: references resolve and `#hex` colors are never renamed.
 
 ### Changed
 

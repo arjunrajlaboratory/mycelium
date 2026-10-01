@@ -132,6 +132,14 @@ class Node:
 _BLOCK = frozenset({"p", "div", "li", "ul", "ol", "section", "h1", "h2", "h3", "h4", "figure", "figcaption", "tr", "td", "th", "br"})
 
 
+def _first_wins(attrs) -> dict:
+    """Attributes as a browser reads them: the first of duplicates wins."""
+    out: dict = {}
+    for k, v in attrs:
+        out.setdefault(k, v if v is not None else "")
+    return out
+
+
 class _Builder(HTMLParser):
     def __init__(self, source: str = ""):
         super().__init__(convert_charrefs=True)
@@ -152,7 +160,7 @@ class _Builder(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         line, col = self.getpos()
-        node = Node(tag, {k: (v if v is not None else "") for k, v in attrs}, line, col + 1, self.stack[-1])
+        node = Node(tag, _first_wins(attrs), line, col + 1, self.stack[-1])
         self.stack[-1].children.append(node)
         key = "style" if tag == "style" else "runtime" if tag == "script" and node.attrs.get("id") == "sci-report-runtime" else None
         if key and key not in self.blocks and key not in self._open_blocks:
@@ -162,7 +170,7 @@ class _Builder(HTMLParser):
 
     def handle_startendtag(self, tag, attrs):
         line, col = self.getpos()
-        node = Node(tag, {k: (v if v is not None else "") for k, v in attrs}, line, col + 1, self.stack[-1])
+        node = Node(tag, _first_wins(attrs), line, col + 1, self.stack[-1])
         self.stack[-1].children.append(node)
 
     def handle_endtag(self, tag):

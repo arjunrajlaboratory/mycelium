@@ -96,7 +96,7 @@ Leave the region between the two `sci-media` marker comments empty; `sync_html_r
 </figure>
 ```
 
-Text inside a diagram **is** prose and is linted, so a diagram cannot smuggle an unregistered number. Draw with `currentColor` so it reads in both themes. Use a diagram when a picture explains a mechanism faster than a paragraph — not to decorate.
+Text inside a diagram **is** prose and is linted, so a diagram cannot smuggle an unregistered number. Any other inline `<svg>` outside a registered figure is flagged as unregistered media; an icon in a button or link must say so with `data-sci-icon` (the template's icons do). Draw with `currentColor` so it reads in both themes. Use a diagram when a picture explains a mechanism faster than a paragraph — not to decorate.
 
 **Cross-references.** Write `<a class="xref" href="#fig-volcano">Figure</a>`; the runtime numbers figures and tables at load ("Figure 2", "Figure S1", "Table 1"). Do not type figure numbers: they go stale when figures move, and the linter does not catch them (it skips "Figure 2" as a structural reference).
 
