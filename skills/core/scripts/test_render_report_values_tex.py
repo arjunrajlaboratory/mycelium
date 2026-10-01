@@ -273,3 +273,17 @@ def test_ids_that_cannot_form_a_tex_macro_are_a_clear_error() -> None:
     assert rrv.id_to_macro_name("r²_score") == "R²Score"  # mirrors scitexlintr; no KeyError
     with pytest.raises(ValueError, match="TeX macro"):
         rrv.render({"numbers": [{"id": "r²_score", "value": 0.91}]})
+
+
+@pytest.mark.parametrize("value,sig,expected", [
+    (12345.6, 3, "12300"),
+    (999999, 2, "1.0e6"),
+    (99999.9, 3, "100000"),
+    (123.456, 3, "123"),
+    (123.456, 5, "123.46"),
+    (0.0012345, 2, "0.0012"),
+    (5.4421e-09, 3, "5.44e-9"),
+    (-12345.6, 2, "-12000"),
+])
+def test_significant_figures_round_integer_places_too(value, sig, expected) -> None:
+    assert rrv.round_significant(value, sig) == expected

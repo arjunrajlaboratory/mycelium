@@ -303,3 +303,16 @@ def test_gate_selectors_match_the_runtime():
     for selector in ('.slide-figure[data-fig-ref]', 'script[type="application/json"][data-sci-data]',
                      '$$(".slide", deck)', 'figure[data-sci-interactive]'):
         assert selector in runtime, selector
+
+
+def test_every_srcset_candidate_and_css_image_set_must_be_inline(tmp_path):
+    for snippet in (
+        '<p><img alt="" src="data:image/png;base64,AA==" srcset="data:image/png;base64,AA== 1x, https://example.com/p.png 2x"></p>',
+        '<picture><source srcset="data:image/png;base64,AA== 1x, figs/p@2x.png 2x"><img alt="" src="data:image/png;base64,AA=="></picture>',
+        '<div style="background-image: image-set(\'figs/a.png\' 1x, \'figs/b.png\' 2x)">x</div>',
+    ):
+        text = build(ABSTRACT=f"<p>Abstract.</p>{snippet}")
+        assert "self-contained" in codes(check(tmp_path, text), "error"), snippet
+    ok = build(ABSTRACT='<p>Abstract.</p><p><img alt="" src="data:image/png;base64,AA==" '
+                        'srcset="data:image/png;base64,AA== 1x, data:image/png;base64,BB== 2x"></p>')
+    assert "self-contained" not in codes(check(tmp_path, ok))

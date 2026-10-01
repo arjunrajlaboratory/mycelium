@@ -189,6 +189,52 @@ def _norm(s: str) -> str:
     return " ".join(html.unescape(s).split())
 
 
+def srcset_urls(value: str) -> list[str]:
+    """Every candidate URL in a srcset, parsed as the HTML spec does: a URL is
+    a run of non-whitespace (trailing commas end it — a data: URL may itself
+    contain commas), optionally followed by descriptors up to the next comma."""
+    urls, i, n = [], 0, len(value)
+    while i < n:
+        while i < n and (value[i].isspace() or value[i] == ","):
+            i += 1
+        j = i
+        while j < n and not value[j].isspace():
+            j += 1
+        url = value[i:j]
+        if not url:
+            break
+        if url.endswith(","):
+            urls.append(url.rstrip(","))
+            i = j
+            continue
+        urls.append(url)
+        depth = 0  # skip descriptors (e.g. "2x", "640w") to the next top-level comma
+        while j < n and not (value[j] == "," and depth == 0):
+            depth += {"(": 1, ")": -1}.get(value[j], 0)
+            j += 1
+        i = j + 1
+    return urls
+
+
+def css_external_refs(css: str, include_import: bool = False) -> list[str]:
+    """External resources a stylesheet or style attribute would load:
+    url(...) targets and the quoted candidates of image-set(...) (which load
+    without url()), excluding data: URIs and same-document #fragments."""
+    found = []
+    if include_import:
+        found += [m.group(0) for m in re.finditer(r"@import\b[^;]*", css)]
+    found += [m.group(0) for m in re.finditer(r"url\(\s*['\"]?(?!data:|#)([^'\")]+)", css)]
+    for m in re.finditer(r"image-set\(", css):
+        depth, j = 1, m.end()
+        while j < len(css) and depth:
+            depth += {"(": 1, ")": -1}.get(css[j], 0)
+            j += 1
+        for q in re.finditer(r"['\"]([^'\"]+)['\"]", css[m.end():j]):
+            if not q.group(1).startswith(("data:", "#")):
+                found.append(q.group(0))
+    return found
+
+
 def _parse(source: str) -> _Builder:
     builder = _Builder(source)
     builder.feed(source)
@@ -275,9 +321,8 @@ def check_source(source: str, filename: str = "<report>", *, min_slides: int = 1
             rels = set((a.get("rel") or "").lower().split())
             if not rels or rels - _NONFETCHING_LINK_RELS:
                 refs.append(("href", a["href"]))
-        style = a.get("style") or ""
-        for m in re.finditer(r"url\(\s*['\"]?(?!data:|#)([^'\")]+)", style):
-            refs.append(("style", m.group(0)))
+        for ref in css_external_refs(a.get("style") or ""):
+            refs.append(("style", ref))
         if t in ("img", "source", "video", "audio", "track", "iframe", "embed", "input"):
             for k in ("src", "srcset", "poster"):
                 if k in a:
@@ -290,11 +335,15 @@ def check_source(source: str, filename: str = "<report>", *, min_slides: int = 1
                 if v and not v.startswith("#"):
                     refs.append((k, v))
         for k, v in refs:
-            if not v.strip().startswith("data:"):
-                emit("self-contained", "error", n, f"<{t} {k}={v[:60]!r}> loads an external resource; inline it (figures: sync_html_report.py)")
+            urls = srcset_urls(v) if k == "srcset" else [v.strip()]
+            for url in urls:
+                if url.startswith("data:"):
+                    continue
+                emit("self-contained", "error", n, f"<{t} {k}={url[:60]!r}> loads an external resource; inline it (figures: sync_html_report.py)")
+                break
     for css, line, col in builder.styles:
-        for m in re.finditer(r"@import|url\(\s*['\"]?(?!data:|#)([^'\")]+)", css):
-            emit("self-contained", "error", (line, col), f"stylesheet references an external resource ({m.group(0)[:60]!r})")
+        for ref in css_external_refs(css, include_import=True):
+            emit("self-contained", "error", (line, col), f"stylesheet references an external resource ({ref[:60]!r})")
 
     size = len(source.encode("utf-8"))
     if size > MAX_FILE_BYTES:

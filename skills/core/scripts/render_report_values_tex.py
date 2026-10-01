@@ -154,7 +154,17 @@ def round_significant(value: Any, sig: int) -> str:
         return "0"
     e = d.adjusted()
     if -3 <= e < 6:
-        return round_half_up(d, max(0, sig - 1 - e))
+        places = sig - 1 - e
+        if places >= 0:
+            return round_half_up(d, places)
+        # More integer digits than significant figures: round the integer
+        # places too (12345.6 at 3 sig figs is 12300, not 12346).
+        with localcontext() as ctx:
+            ctx.prec = max(28, e + 5)
+            q = d.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+        if q.adjusted() < 6:
+            return format(q, "f")
+        # Rounding carried past 999,999: fall through to scientific notation.
     mantissa = d.scaleb(-e)
     text = round_half_up(mantissa, sig - 1)
     if abs(Decimal(text)) >= 10:  # 9.99 → 10.0 after rounding: renormalize
