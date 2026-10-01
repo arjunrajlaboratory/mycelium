@@ -28,10 +28,8 @@ dependencies:
   # from the analysis-code `scilintr` CLI. The HTML format needs >= 0.2.0.
   - name: scitexlintr
     type: python-package
-    # The HTML format needs >= 0.2.0 (check with `scitexlintr --version`). Until
-    # that release exists, both commands below still fetch 0.1.x; after it,
-    # pin the git install to the release tag.
-    install: 'pip install "scitexlintr @ git+https://github.com/arjunrajlaboratory/scilintr.git#subdirectory=tex/scitexlintr"'
-    install_from_pypi: 'pip install "scitexlintr>=0.2"'
+    # The HTML format needs >= 0.2.0 (check with `scitexlintr --version`).
+    install: 'pip install "scitexlintr>=0.2"'
+    install_from_source: 'pip install "scitexlintr @ git+https://github.com/arjunrajlaboratory/scilintr.git@scitexlintr-v0.2.0#subdirectory=tex/scitexlintr"'
 tags: [report, latex, pdf, html, slides, writing, core]
 ---

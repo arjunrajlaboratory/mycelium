@@ -40,9 +40,8 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
           sudo apt-get install -y poppler-utils
-          # The HTML lint tests need scitexlintr >= 0.2 (its HTML frontend);
-          # until that release is on PyPI they skip, and this says so.
-          pip install "scitexlintr>=0.2" || echo "::warning::scitexlintr>=0.2 is not on PyPI yet; HTML lint tests will be skipped"
+          # The HTML lint tests need scitexlintr >= 0.2 (its HTML frontend).
+          pip install "scitexlintr>=0.2"
 
       - name: Validate shared skill frontmatter and Codex metadata
         run: |

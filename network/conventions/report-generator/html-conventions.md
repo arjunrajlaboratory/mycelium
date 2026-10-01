@@ -19,13 +19,12 @@ Reference implementation: `assets/html-example/` is a complete synthetic report 
 ## Prerequisites
 
 ```bash
-python -m pip install "scitexlintr @ git+https://github.com/arjunrajlaboratory/scilintr.git#subdirectory=tex/scitexlintr"
-# (or: python -m pip install "scitexlintr>=0.2" once 0.2.0 is on PyPI)
+python -m pip install "scitexlintr>=0.2"   # from PyPI (or the pinned git install in CONVENTION_PACK.yaml)
 scitexlintr --version                       # must print 0.2.0 or later
 which pdftocairo                            # only needed when a registered figure is a PDF
 ```
 
-`scitexlintr` 0.1.x lints only TeX and will silently treat an `.html` file as TeX (every finding wrong), and it has no `--version` flag — if the command above errors, you have 0.1.x. Until scitexlintr 0.2.0 is released, both install commands above still fetch 0.1.x; the version check is what tells you whether the HTML gate can run. Poppler's `pdftocairo` converts PDF figures to inline SVG; without it, register an SVG or PNG export of the figure instead.
+`scitexlintr` 0.1.x lints only TeX and will silently treat an `.html` file as TeX (every finding wrong), and it has no `--version` flag — if the command above errors, you have 0.1.x — upgrade with the install command before Phase 7. Poppler's `pdftocairo` converts PDF figures to inline SVG; without it, register an SVG or PNG export of the figure instead.
 
 ---
 
