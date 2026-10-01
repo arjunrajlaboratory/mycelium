@@ -106,6 +106,13 @@ def page(browser):
     ctx.close()
 
 
+def wait_closed(pg, hash=None):
+    """Closing the deck pops its history entry and finishes on hashchange,
+    so the URL and focus settle a moment after the key press or click."""
+    cond = "!SciReport.presenting" + (f" && location.hash === '{hash}'" if hash else "")
+    pg.wait_for_function(cond)
+
+
 def state(pg):
     return pg.evaluate(
         "({open: SciReport.presenting, current: SciReport.current, count: SciReport.count,"
@@ -175,8 +182,8 @@ def test_slide_source_link_returns_to_report(page):
     page.goto(EXAMPLE.as_uri() + "#slides/4")
     page.wait_for_function("SciReport.presenting")
     page.locator("#deck .slide.is-current .slide-source").click()
+    wait_closed(page, "#result-growth")
     assert not state(page)["open"]
-    assert state(page)["hash"] == "#result-growth"
 
 
 def test_deep_link_opens_requested_slide(page):
@@ -416,7 +423,8 @@ def test_enter_on_a_focused_link_follows_it(page):
     page.wait_for_function("SciReport.presenting")
     page.locator("#deck .slide.is-current .slide-source").focus()
     page.keyboard.press("Enter")
-    assert not state(page)["open"] and state(page)["hash"] == "#methods"
+    wait_closed(page, "#methods")
+    assert not state(page)["open"]
 
 
 def test_dragging_a_slider_on_touch_does_not_change_slides(page):
@@ -484,6 +492,8 @@ def test_focus_returns_to_the_report_when_the_deck_closes(page):
     page.keyboard.press("Enter")
     page.keyboard.press("ArrowRight")
     page.keyboard.press("Escape")
+    wait_closed(page, "#result-growth")
+    page.wait_for_function("document.activeElement !== document.body")
     focused = page.evaluate("document.activeElement.closest('#result-growth') !== null || document.activeElement.id === 'result-growth'")
     assert focused
 
