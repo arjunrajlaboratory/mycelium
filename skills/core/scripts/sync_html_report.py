@@ -533,7 +533,7 @@ def _column_types(header: list[str], rows: list[list[str]], data_id: str, name: 
         cells = [r[j] for r in rows if j < len(r) and r[j] != ""]
         numeric = [c for c in cells if _is_number(c)]
         odd = [c for c in cells if not _is_number(c)]
-        if cells and odd and all(c.lower() in _NON_FINITE for c in odd) and numeric:
+        if cells and odd and all(c.lower() in _NON_FINITE for c in odd):
             raise SyncError(
                 f"data {data_id!r}: column {header[j]!r} of {name} holds a value that is not finite "
                 f"({odd[0]!r}); write missing values as empty cells"

@@ -585,3 +585,11 @@ def test_reviewer_copy_creates_its_directory(project, tmp_path):
     out = tmp_path / "new" / "dir" / "review.html"
     assert run(report, manifest, f"--reviewer-copy={out}") == 0
     assert out.is_file()
+
+
+def test_a_column_of_only_non_finite_values_is_a_sync_error(project, capsys):
+    (project.outputs / "nan.csv").write_text("t,v\n0,nan\n1,inf\n", encoding="utf-8")
+    raw = (project.outputs / "nan.csv").read_bytes()
+    report, manifest = project(DATA.format(did="n"), data=[{"id": "n", "path": "../outputs/nan.csv", "sha256": sha(raw)}])
+    assert run(report, manifest) == 1
+    assert "not finite" in capsys.readouterr().err

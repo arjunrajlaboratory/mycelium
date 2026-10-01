@@ -222,9 +222,10 @@ def css_external_refs(css: str, include_import: bool = False) -> list[str]:
     without url()), excluding data: URIs and same-document #fragments."""
     found = []
     if include_import:
-        found += [m.group(0) for m in re.finditer(r"@import\b[^;]*", css)]
-    found += [m.group(0) for m in re.finditer(r"url\(\s*['\"]?(?!data:|#)([^'\")]+)", css)]
-    for m in re.finditer(r"image-set\(", css):
+        found += [m.group(0) for m in re.finditer(r"@import\b[^;]*", css, re.I)]
+    # CSS function and at-rule names are ASCII case-insensitive (URL(), IMAGE-SET()).
+    found += [m.group(0) for m in re.finditer(r"url\(\s*['\"]?(?!data:|#)([^'\")]+)", css, re.I)]
+    for m in re.finditer(r"image-set\(", css, re.I):
         depth, j = 1, m.end()
         while j < len(css) and depth:
             depth += {"(": 1, ")": -1}.get(css[j], 0)
@@ -329,11 +330,16 @@ def check_source(source: str, filename: str = "<report>", *, min_slides: int = 1
                     refs.append((k, a[k]))
         if t == "object" and "data" in a:
             refs.append(("data", a["data"]))
-        if t in ("image", "use") and n.has_ancestor(lambda p: p.tag == "svg"):
+        if t == "svg" or n.has_ancestor(lambda p: p.tag == "svg"):
+            # Any SVG element can reference a resource (image, use, feImage,
+            # pattern, …) by href, and any presentation attribute by url().
             for k in ("href", "xlink:href"):
                 v = a.get(k, "")
                 if v and not v.startswith("#"):
                     refs.append((k, v))
+            for k, v in a.items():
+                if k != "style" and v and "url(" in v.lower():
+                    refs += [(k, r) for r in css_external_refs(v)]
         for k, v in refs:
             urls = srcset_urls(v) if k == "srcset" else [v.strip()]
             for url in urls:
