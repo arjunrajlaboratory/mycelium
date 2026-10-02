@@ -2,6 +2,11 @@
   "_description": "Worked example of a Phase-1 source-of-truth manifest. Drawn from a small SNP-tree-flavoured differential-expression-with-clone-recovery analysis. Every numeric token that appears in the corresponding report draft has an entry here; every coined term that the report uses has a plain-English rendering; every worked-example table cell has row-level provenance. Phase 6 (blind numerical re-verify) cross-checks the draft against this file. NOTE on field names: each numbers[*] entry uses 'id' (not 'key'). The register_value helper writes 'key' into the analysis-side outputs/numbers.json fragment; Phase 1 renames 'key' -> 'id' when merging fragments into this manifest, because render_report_values_tex.py keys macros off 'id'. NOTE on confidence intervals: CI bounds are modelled as their own scalar numbers[*] entries (e.g. exact_accuracy_test_ci_low / _ci_high), not as a nested 'uncertainty' object — register_value emits scalars only, and a bound bundled in a nested object would get no \\SciVal macro and so escape scitexlintr drift detection. NOTE on display fields: a numbers[*] entry may carry optional unit/precision/display fields that control only how value is rendered in prose (unit:'percent' renders the stored fraction 0.978 as 97.8\\%); value itself is never edited and stays the verification anchor — see frac_de_genes_upregulated.",
   "_schema_version": "0.4.0",
 
+  "linters": {
+    "_note": "Written by check_linter_versions.py --record in Phase 7: the linter versions that certified this report. Not hand-edited.",
+    "scitexlintr": "0.2.0"
+  },
+
   "policies": {
     "audience_tier": "B",
     "audience_description": "Lab PI plus one external wet-lab collaborator with no statistical-genetics background",

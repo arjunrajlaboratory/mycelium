@@ -19,12 +19,12 @@ Reference implementation: `assets/html-example/` is a complete synthetic report 
 ## Prerequisites
 
 ```bash
-python -m pip install "scitexlintr>=0.2"   # from PyPI (or the pinned git install in CONVENTION_PACK.yaml)
-scitexlintr --version                       # must print 0.2.0 or later
+python skills/core/scripts/check_linter_versions.py "scitexlintr>=0.2"   # installed vs latest; never installs
+python -m pip install "scitexlintr>=0.2"   # only if the check says missing or too old (pinned git install: CONVENTION_PACK.yaml)
 which pdftocairo                            # only needed when a registered figure is a PDF
 ```
 
-`scitexlintr` 0.1.x lints only TeX and will silently treat an `.html` file as TeX (every finding wrong), and it has no `--version` flag — if the command above errors, you have 0.1.x — upgrade with the install command before Phase 7. Poppler's `pdftocairo` converts PDF figures to inline SVG; without it, register an SVG or PNG export of the figure instead.
+`scitexlintr` 0.1.x lints only TeX and will silently treat an `.html` file as TeX (every finding wrong), and it has no `--version` flag — the version check reports it as undeterminable — upgrade with the install command before Phase 7. When the check reports a newer release, tell the user and upgrade only if they agree, between reports rather than mid-report (`analysis-conventions.md` → Linter version preflight). Poppler's `pdftocairo` converts PDF figures to inline SVG; without it, register an SVG or PNG export of the figure instead.
 
 ---
 
@@ -178,7 +178,7 @@ python skills/core/scripts/sync_html_report.py [name]-report.html --manifest .ma
 
 Run in order; the gate **must not proceed** past a failing step.
 
-1. **Sync figures and data.**
+1. **Record the linter version, then sync figures and data.** `python skills/core/scripts/check_linter_versions.py --record analysis/[name]/reports/.manifest.json "scitexlintr>=0.2"` writes the installed version into the manifest's `linters` object (it fails, recording nothing, if the linter is missing or below 0.2). Then:
    `python skills/core/scripts/sync_html_report.py analysis/[name]/reports/[name]-report.html --manifest analysis/[name]/reports/.manifest.json`
    A sha256 mismatch means a figure or data file changed after the manifest was built: re-run the analysis step if needed, refresh Phase 1, and sync again.
 2. **Fill values.** `scitexlintr [name]-report.html --manifest=.manifest.json --write --fail-on=error` rewrites stale span text from the manifest. Review the diff — it is the list of numbers that changed.

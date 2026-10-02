@@ -1,6 +1,6 @@
 ---
 name: report-generator
-version: 0.5.0
+version: 0.5.1
 core: true
 description: >
   Structured report generation for computational analyses, as a LaTeX PDF or as

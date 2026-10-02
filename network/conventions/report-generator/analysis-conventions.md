@@ -20,7 +20,7 @@ Internal-only phases: 0.5 (memory), 0.75 (outline + main/supplement assignment),
 
 ## Prerequisites
 
-HTML format: skip the `pdflatex` check below and follow the prerequisites in `html-conventions.md` (scitexlintr ≥ 0.2, optionally `pdftocairo`).
+HTML format: skip the `pdflatex` check below and follow the prerequisites in `html-conventions.md` (scitexlintr ≥ 0.2, optionally `pdftocairo`). Both formats run the linter version preflight below.
 
 Before generating a PDF report, verify that `pdflatex` is available:
 
@@ -33,17 +33,20 @@ If not installed, guide the user to install the **full** TeX Live distribution:
 - **Linux**: `sudo apt-get install texlive-full` or equivalent
 - **Do not** install BasicTeX or minimal distributions — missing packages cause frustrating compilation failures
 
-Also verify that the LaTeX report linter is available:
+## Linter version preflight (both formats)
+
+Run once per report, before Phase 0:
 
 ```bash
-which scitexlintr
-scitexlintr --help
+python skills/core/scripts/check_linter_versions.py "scitexlintr>=0.2"
 ```
+
+It prints the installed `scitexlintr`, the latest release on PyPI, and whether an update is available. It **never installs or upgrades**. Exit 1 means the linter is missing or older than 0.2 (0.1.x has no `--version` flag and is reported as undeterminable): install with the command it prints, then re-run. Exit 0 with "update available" is advice — tell the user the installed and latest versions and offer the printed upgrade command, but run it only if they agree. Upgrade between reports, not mid-report: a newer linter can add rules, so a report that passed yesterday could fail today for reasons unrelated to its content. An unreachable index (offline, HPC nodes) reports "latest unknown" and is not a failure; pass `--offline` to skip the lookup.
 
 `scitexlintr` is a separate Python package from the analysis-code `scilintr` CLI, even though both live in the `scilintr` repository. Installing `scilintr` does not imply that `scitexlintr` is on the path. If it is missing, install the report linter into the environment that will run Phase 7:
 
 ```bash
-python -m pip install "scitexlintr @ git+https://github.com/arjunrajlaboratory/scilintr.git#subdirectory=tex/scitexlintr"
+python -m pip install "scitexlintr>=0.2"   # PyPI; the pinned git install is in CONVENTION_PACK.yaml
 ```
 
 When working from a local `scilintr` checkout, an editable install is also fine:
@@ -432,7 +435,7 @@ The full sub-agent prompt is in `references/phase-prompts.md`.
 
 After the sub-agents pass:
 
-1. **Regenerate the LaTeX macros from the manifest.** Run `python skills/core/scripts/render_report_values_tex.py analysis/[name]/reports/.manifest.json`. This writes `build/report_values.tex` with one `\newcommand` per `numbers[*]` entry plus the `\SciVal` / `\SciText` wrappers. Re-run this step every time `.manifest.json` changes.
+1. **Record the linter version, then regenerate the LaTeX macros from the manifest.** `python skills/core/scripts/check_linter_versions.py --record analysis/[name]/reports/.manifest.json "scitexlintr>=0.2"` adds the installed version to the manifest's `linters` object, so the report states which linter certified it; it fails, recording nothing, if the linter is missing or below 0.2. Record first: it rewrites `.manifest.json`, so recording after the render would leave `build/report_values.tex` looking older than its manifest. Then run `python skills/core/scripts/render_report_values_tex.py analysis/[name]/reports/.manifest.json`. This writes `build/report_values.tex` with one `\newcommand` per `numbers[*]` entry plus the `\SciVal` / `\SciText` wrappers. Re-run this step every time `.manifest.json` changes.
 2. **Run scitexlintr on the draft.** `scitexlintr analysis/[name]/reports/[name]-report.tex --manifest=analysis/[name]/reports/.manifest.json`. The recompile gate **must not proceed** if error findings remain after waivers. Warnings are advisory by default: fix the ones that point to real drift risk, document intentional leftovers in the compile log, and promote them to blocking errors only when the team has stabilized that rule for the report type. Auto-fix snapshot drift with `--write` (typically interactively, not in the gate):
    - `snapshot-mismatch` is the load-bearing check — the snapshot in `\SciVal{\Macro}{...}` must equal the manifest value. Use `--write` to rewrite stale snapshots; the diff is small and reviewable.
    - `raw-generated-value`, `unwrapped-threshold`, and `forbidden-alias` are error checks; fix the prose to use the appropriate wrapper and label.
@@ -454,7 +457,7 @@ After the sub-agents pass:
    - Main-text page count and shape-budget status (`within` / `flagged` with reason)
    - Sub-agent reviewer verdicts (each: PASS / loop count to convergence)
    - Whether code was re-run since the last manifest snapshot
-   - `scitexlintr` exit code, error count after waivers (must be 0 for the gate to pass), and warning count/disposition
+   - `scitexlintr` version (as recorded in the manifest's `linters`), exit code, error count after waivers (must be 0 for the gate to pass), and warning count/disposition
 
 The compile log is the answer to "okay, so all of this is fixed now? and was code rerun in case things changed?" — that question lands on every report draft and the log makes the answer mechanical.
 
