@@ -15,6 +15,7 @@ Phase 4–6 sub-agents in the report-generator flow check most of these automati
 - [ ] **BibTeX** pass run if citations are used
 - [ ] `.compile-log.md` exists and records PDF SHA256, compile timestamp, and sub-agent reviewer verdicts
 - [ ] **`build/report_values.tex` is fresh** — regenerated from `.manifest.json` in this compile cycle (Phase 7 step 1)
+- [ ] **Linter version recorded** — `check_linter_versions.py --record` wrote the `scitexlintr` version into `.manifest.json` `linters` (Phase 7 step 2), and `.compile-log.md` states it
 - [ ] **`scitexlintr` blocking errors are 0** after waivers (Phase 7 step 2) — no `snapshot-mismatch`, `raw-generated-value`, `unwrapped-threshold`, `forbidden-alias`, or `unfingerprinted-figure` error findings remain
 - [ ] **`scitexlintr` warnings are reviewed** — `bare-generated-macro`, `unsourced-numeric-token`, and `handwritten-numeric-claim` warnings are fixed, waived with specific `% ANALYSIS_OK[rule-code]` comments, or listed in `.compile-log.md` as advisory narrative numbers
 
@@ -174,6 +175,7 @@ These checks verify the prose works for a skim reader and a careful reader simul
 Build and gate (replaces **Compilation**):
 
 - [ ] **`sync_html_report.py --check` passes** — every registered figure and data block is inlined and its `data-sha256` matches the file the manifest fingerprints
+- [ ] **Linter version recorded** — `check_linter_versions.py --record` wrote the `scitexlintr` version into `.manifest.json` `linters`, and the compile log states it
 - [ ] **`scitexlintr` ≥ 0.2 blocking errors are 0** after waivers — including the HTML-only `unknown-value-id` and `unfingerprinted-data`
 - [ ] **`check_html_report.py` errors are 0** — no leftover placeholders, nothing loaded from outside the file, runtime block present, all slide rules met
 - [ ] **Rendered in a browser** — every figure appears, cross-references read "Figure N", no console errors, no horizontal scroll at phone width

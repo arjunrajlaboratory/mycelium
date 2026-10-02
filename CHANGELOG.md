@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Linter version preflight.** `skills/core/scripts/check_linter_versions.py`
+  reports the installed `scilintr` / `scitexlintr`, the latest release on
+  PyPI, and whether an update is available, and enforces a minimum
+  (`"scitexlintr>=0.2"`). It never installs or upgrades anything: the report
+  and analyze skills now run it once per report or session, tell the user when a newer
+  release exists, and upgrade only with the user's agreement, between reports
+  rather than mid-report, because a newer linter can add rules and change
+  what passes. An unreachable index (offline, HPC nodes) is reported as
+  "latest unknown" and never fails the check.
+- **Reports record the linter version that certified them.** Phase 7 runs
+  `check_linter_versions.py --record .manifest.json "scitexlintr>=0.2"`,
+  which writes the installed version into the manifest's `linters` object.
+  The compile log and QC checklist (both formats) now include it.
+  Report-generator pack 0.5.1.
+
 ## [0.8.0] - 2026-10-01
 
 ### Added

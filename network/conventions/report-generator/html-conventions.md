@@ -19,12 +19,12 @@ Reference implementation: `assets/html-example/` is a complete synthetic report 
 ## Prerequisites
 
 ```bash
-python -m pip install "scitexlintr>=0.2"   # from PyPI (or the pinned git install in CONVENTION_PACK.yaml)
-scitexlintr --version                       # must print 0.2.0 or later
+python skills/core/scripts/check_linter_versions.py "scitexlintr>=0.2"   # installed vs latest; never installs
+python -m pip install "scitexlintr>=0.2"   # only if the check says missing or too old (pinned git install: CONVENTION_PACK.yaml)
 which pdftocairo                            # only needed when a registered figure is a PDF
 ```
 
-`scitexlintr` 0.1.x lints only TeX and will silently treat an `.html` file as TeX (every finding wrong), and it has no `--version` flag — if the command above errors, you have 0.1.x — upgrade with the install command before Phase 7. Poppler's `pdftocairo` converts PDF figures to inline SVG; without it, register an SVG or PNG export of the figure instead.
+`scitexlintr` 0.1.x lints only TeX and will silently treat an `.html` file as TeX (every finding wrong), and it has no `--version` flag — the version check reports it as undeterminable — upgrade with the install command before Phase 7. When the check reports a newer release, tell the user and upgrade only if they agree, between reports rather than mid-report (`analysis-conventions.md` → Linter version preflight). Poppler's `pdftocairo` converts PDF figures to inline SVG; without it, register an SVG or PNG export of the figure instead.
 
 ---
 
@@ -181,7 +181,7 @@ Run in order; the gate **must not proceed** past a failing step.
 1. **Sync figures and data.**
    `python skills/core/scripts/sync_html_report.py analysis/[name]/reports/[name]-report.html --manifest analysis/[name]/reports/.manifest.json`
    A sha256 mismatch means a figure or data file changed after the manifest was built: re-run the analysis step if needed, refresh Phase 1, and sync again.
-2. **Fill values.** `scitexlintr [name]-report.html --manifest=.manifest.json --write --fail-on=error` rewrites stale span text from the manifest. Review the diff — it is the list of numbers that changed.
+2. **Record the linter version, then fill values.** `python skills/core/scripts/check_linter_versions.py --record analysis/[name]/reports/.manifest.json "scitexlintr>=0.2"` writes the installed version into the manifest's `linters` object. Then `scitexlintr [name]-report.html --manifest=.manifest.json --write --fail-on=error` rewrites stale span text from the manifest. Review the diff — it is the list of numbers that changed.
 3. **Lint.** `scitexlintr [name]-report.html --manifest=.manifest.json --fail-on=error` must exit 0: no error-severity finding remains after waivers. (Without `--fail-on=error` the CLI exits 1 on warnings too.) Warnings follow the TeX gate's policy: fix real drift risks, and list intentional leftovers in the compile log — `--summary` counts them by rule. Two things the linter does not check: an integer percent typed as text (`95%`, skipped as typographic), and a typed figure number.
 4. **Structure.** `python skills/core/scripts/check_html_report.py --report-only [name]-report.html` must report zero errors — `--report-only` skips the deck rules while the deck is still empty (before Phase 9); drop the flag once the slides exist. It checks placeholders, self-containment (no external scripts, styles, frames, or media — hyperlinks are fine), the runtime block, and every slide rule below. Its summary line reports the **main-text word count**, which stands in for the TeX page count in the shape budget at one conversion, about 500 words per page (the same one Phase 4 uses):
    - **Overview**: 2–5 pages → target 1,000–2,500 words; flag above 3,000.

@@ -46,6 +46,8 @@ pip install scilintr
 
 After install, the `scilintr` CLI is on `$PATH`. Verify with `scilintr --help`.
 
+To see whether a newer release exists, run `python3 skills/core/scripts/check_linter_versions.py scilintr`. It compares the installed version with the latest on PyPI and prints an upgrade command, but never installs: ask the user before upgrading, because a new release can add rules.
+
 **R (R analysis code)** — published on CRAN:
 
 ```r
