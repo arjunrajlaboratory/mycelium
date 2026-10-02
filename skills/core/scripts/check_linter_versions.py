@@ -114,8 +114,14 @@ def metadata_version(name: str, executable: str | None = None) -> str | None:
     """The package version from the environment the CLI runs in.
 
     A console script's shebang names its own interpreter (a pipx or project
-    venv), whose installed version can differ from this interpreter's."""
+    venv), whose installed version can differ from this interpreter's. When
+    the command is not a Python console script (a shell wrapper, a shim), its
+    environment is unknown, so this interpreter's metadata would be a guess
+    about some other install: return None. With no command at all, this
+    interpreter's metadata only feeds the "not on PATH" message."""
     interpreter = _script_interpreter(executable) if executable else None
+    if executable and interpreter is None:
+        return None
     if interpreter and Path(interpreter).resolve() != Path(sys.executable).resolve():
         try:
             result = subprocess.run(

@@ -237,3 +237,26 @@ def test_unparseable_metadata_version_with_minimum_fails(tmp_path, monkeypatch, 
     code, out = run(monkeypatch, capsys, ["scitexlintr>=0.2"], path)
     assert code == 1
     assert "cannot determine" in out
+
+
+def test_non_python_launcher_does_not_borrow_this_interpreters_metadata(tmp_path, monkeypatch, capsys):
+    # Codex P1: an old 0.1 command on PATH (no --version) behind a shell
+    # wrapper, while this interpreter has 0.2 metadata. The minimum must not be
+    # satisfied by an unrelated environment.
+    path = fake_cli(tmp_path, "scitexlintr", "error: unrecognized arguments: --version", exit_code=2)
+    monkeypatch.setattr(clv.metadata, "version", lambda name: "0.2.0")
+    code, out = run(monkeypatch, capsys, ["scitexlintr>=0.2"], path)
+    assert code == 1
+    assert "cannot determine" in out
+
+
+def test_same_interpreter_script_uses_in_process_metadata(tmp_path, monkeypatch, capsys):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    cli = bin_dir / "scilintr"
+    cli.write_text(f"#!{sys.executable}\nimport sys; sys.exit(2)\n")
+    cli.chmod(0o755)
+    monkeypatch.setattr(clv.metadata, "version", lambda name: "0.1.1")
+    code, out = run(monkeypatch, capsys, ["scilintr"], bin_dir, {"scilintr": "0.1.1"})
+    assert code == 0
+    assert "scilintr 0.1.1 (latest 0.1.1): ok" in out
