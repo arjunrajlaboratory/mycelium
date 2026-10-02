@@ -45,7 +45,9 @@ from importlib import metadata
 from pathlib import Path
 
 _SPEC_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:>=([0-9]+(?:\.[0-9]+)*))?$")
-_VERSION_RE = re.compile(r"\b([0-9]+(?:\.[0-9]+)+)\b")
+# The whole version token, suffix included ("0.2.0rc1", "0.2.0.post1").
+_VERSION_RE = re.compile(r"\b([0-9]+(?:\.[0-9]+)+[0-9A-Za-z.+_-]*)")
+_PRE_RE = re.compile(r"[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview|dev)[-_.]?[0-9]*", re.IGNORECASE)
 PYPI_URL = "https://pypi.org/pypi/{name}/json"
 
 
@@ -61,9 +63,9 @@ def parse_spec(spec: str) -> tuple[str, tuple[int, ...] | None]:
 def version_key(text: str | None) -> tuple[int, ...] | None:
     """Release segments as a comparable tuple, trailing zeros dropped.
 
-    Only the leading release number counts (``0.3.0rc1`` -> ``(0, 3)``), so a
-    pre-release compares as its release — close enough for a minimum check,
-    and it never lets an unparseable suffix skip the check altogether."""
+    Only the leading release number counts (``0.3.0rc1`` -> ``(0, 3)``), so an
+    unparseable suffix never skips a check; ``release_order`` adds the
+    pre-release ordering on top."""
     match = re.match(r"\s*v?([0-9]+(?:\.[0-9]+)*)", text or "")
     if not match:
         return None
@@ -71,6 +73,17 @@ def version_key(text: str | None) -> tuple[int, ...] | None:
     while len(parts) > 1 and parts[-1] == 0:
         parts.pop()
     return tuple(parts)
+
+
+def release_order(text: str | None) -> tuple[tuple[int, ...], int] | None:
+    """Sort key for an installed or published version: its release number,
+    then 0 for a pre-release (``rc``, ``a``, ``b``, ``dev``) or 1 for a final
+    or post release, so ``0.2.0rc1`` < ``0.2.0`` <= ``0.2.0.post1``."""
+    key = version_key(text)
+    if key is None:
+        return None
+    suffix = re.sub(r"^\s*v?[0-9]+(?:\.[0-9]+)*", "", text)
+    return key, 0 if _PRE_RE.match(suffix) else 1
 
 
 def _fmt(key: tuple[int, ...]) -> str:
@@ -87,7 +100,7 @@ def cli_version(executable: str) -> str | None:
     if result.returncode != 0:
         return None
     match = _VERSION_RE.search(result.stdout + result.stderr)
-    return match.group(1) if match else None
+    return match.group(1).rstrip(".-_+") if match else None
 
 
 _METADATA_SNIPPET = "import sys, importlib.metadata as m; print(m.version(sys.argv[1]))"
@@ -162,7 +175,7 @@ class Result:
 
     @property
     def update_available(self) -> bool:
-        current, newest = version_key(self.version), version_key(self.latest)
+        current, newest = release_order(self.version), release_order(self.latest)
         return bool(current and newest and newest > current)
 
 
@@ -178,7 +191,7 @@ def check(spec: str, offline: bool, timeout: float) -> Result:
         result.problem = "not installed" if version is None else "not on PATH"
     elif minimum and version_key(version) is None:
         result.problem = f"cannot determine the installed version; {_fmt(minimum)} or later is required"
-    elif minimum and version_key(version) < minimum:
+    elif minimum and release_order(version) < (minimum, 1):
         result.problem = f"{version} is below the required {_fmt(minimum)}"
     return result
 

@@ -260,3 +260,36 @@ def test_same_interpreter_script_uses_in_process_metadata(tmp_path, monkeypatch,
     code, out = run(monkeypatch, capsys, ["scilintr"], bin_dir, {"scilintr": "0.1.1"})
     assert code == 0
     assert "scilintr 0.1.1 (latest 0.1.1): ok" in out
+
+
+def test_prerelease_of_the_minimum_fails_and_keeps_its_suffix(tmp_path, monkeypatch, capsys, no_metadata):
+    # Codex P2: "0.2.0rc1" was read as "0.2", passing >=0.2 and recording the
+    # wrong version. A pre-release sorts below its final release.
+    path = fake_cli(tmp_path, "scitexlintr", "scitexlintr 0.2.0rc1")
+    code, out = run(monkeypatch, capsys, ["scitexlintr>=0.2"], path, {"scitexlintr": "0.2.0"})
+    assert code == 1
+    assert "0.2.0rc1 is below the required 0.2" in out
+
+
+def test_prerelease_above_the_minimum_reports_the_final_release(tmp_path, monkeypatch, capsys, no_metadata):
+    path = fake_cli(tmp_path, "scitexlintr", "scitexlintr 0.3.0rc1")
+    manifest = tmp_path / ".manifest.json"
+    manifest.write_text("{}\n")
+    code, out = run(monkeypatch, capsys, ["--record", str(manifest), "scitexlintr>=0.2"], path, {"scitexlintr": "0.3.0"})
+    assert code == 0
+    assert "scitexlintr 0.3.0rc1 (latest 0.3.0): update available: 0.3.0." in out
+    assert json.loads(manifest.read_text())["linters"] == {"scitexlintr": "0.3.0rc1"}
+
+
+def test_post_release_counts_as_its_release(tmp_path, monkeypatch, capsys, no_metadata):
+    path = fake_cli(tmp_path, "scitexlintr", "scitexlintr 0.2.0.post1")
+    code, out = run(monkeypatch, capsys, ["scitexlintr>=0.2"], path, {"scitexlintr": "0.2.0"})
+    assert code == 0
+    assert "scitexlintr 0.2.0.post1 (latest 0.2.0): ok" in out
+
+
+def test_version_token_drops_trailing_punctuation(tmp_path, monkeypatch, capsys, no_metadata):
+    path = fake_cli(tmp_path, "scitexlintr", "scitexlintr version 0.2.1.")
+    code, out = run(monkeypatch, capsys, ["scitexlintr>=0.2"], path, {"scitexlintr": "0.2.1"})
+    assert code == 0
+    assert "scitexlintr 0.2.1 (latest 0.2.1): ok" in out
