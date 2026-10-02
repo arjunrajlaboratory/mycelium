@@ -59,10 +59,15 @@ def parse_spec(spec: str) -> tuple[str, tuple[int, ...] | None]:
 
 
 def version_key(text: str | None) -> tuple[int, ...] | None:
-    """Release segments as a comparable tuple, trailing zeros dropped."""
-    if not text or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", text.strip()):
+    """Release segments as a comparable tuple, trailing zeros dropped.
+
+    Only the leading release number counts (``0.3.0rc1`` -> ``(0, 3)``), so a
+    pre-release compares as its release — close enough for a minimum check,
+    and it never lets an unparseable suffix skip the check altogether."""
+    match = re.match(r"\s*v?([0-9]+(?:\.[0-9]+)*)", text or "")
+    if not match:
         return None
-    parts = [int(p) for p in text.strip().split(".")]
+    parts = [int(p) for p in match.group(1).split(".")]
     while len(parts) > 1 and parts[-1] == 0:
         parts.pop()
     return tuple(parts)
@@ -85,7 +90,42 @@ def cli_version(executable: str) -> str | None:
     return match.group(1) if match else None
 
 
-def metadata_version(name: str) -> str | None:
+_METADATA_SNIPPET = "import sys, importlib.metadata as m; print(m.version(sys.argv[1]))"
+
+
+def _script_interpreter(executable: str) -> str | None:
+    """The Python interpreter named by a console script's shebang, if any."""
+    try:
+        with open(executable, "rb") as handle:
+            first = handle.readline(512).decode("utf-8", "replace")
+    except OSError:
+        return None
+    if not first.startswith("#!"):
+        return None
+    words = first[2:].split()
+    if words and Path(words[0]).name == "env" and len(words) > 1:
+        words = [shutil.which(words[1]) or words[1]]
+    if words and "python" in Path(words[0]).name:
+        return words[0]
+    return None
+
+
+def metadata_version(name: str, executable: str | None = None) -> str | None:
+    """The package version from the environment the CLI runs in.
+
+    A console script's shebang names its own interpreter (a pipx or project
+    venv), whose installed version can differ from this interpreter's."""
+    interpreter = _script_interpreter(executable) if executable else None
+    if interpreter and Path(interpreter).resolve() != Path(sys.executable).resolve():
+        try:
+            result = subprocess.run(
+                [interpreter, "-c", _METADATA_SNIPPET, name],
+                capture_output=True, text=True, timeout=20, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        text = result.stdout.strip()
+        return text if result.returncode == 0 and version_key(text) else None
     try:
         return metadata.version(name)
     except metadata.PackageNotFoundError:
@@ -123,15 +163,16 @@ class Result:
 def check(spec: str, offline: bool, timeout: float) -> Result:
     name, minimum = parse_spec(spec)
     executable = shutil.which(name)
-    version = (cli_version(executable) if executable else None) or metadata_version(name)
-    installed = executable is not None or version is not None
+    version = (cli_version(executable) if executable else None) or metadata_version(name, executable)
     latest = None if offline else fetch_latest(name, timeout)
-    result = Result(name, minimum, installed, version, latest)
-    if not installed:
-        result.problem = "not installed"
-    elif minimum and version is None:
+    result = Result(name, minimum, executable is not None, version, latest)
+    if executable is None:
+        # The skills run the command, so a package importable here but with no
+        # command on PATH (a --user install, an inactive venv) is not usable.
+        result.problem = "not installed" if version is None else "not on PATH"
+    elif minimum and version_key(version) is None:
         result.problem = f"cannot determine the installed version; {_fmt(minimum)} or later is required"
-    elif minimum and version_key(version) is not None and version_key(version) < minimum:
+    elif minimum and version_key(version) < minimum:
         result.problem = f"{version} is below the required {_fmt(minimum)}"
     return result
 
@@ -142,6 +183,12 @@ def describe(result: Result) -> list[str]:
         return [
             f"{result.name}: not installed.",
             f'  Install: python -m pip install "{result.requirement}"',
+        ]
+    if result.problem == "not on PATH":
+        return [
+            f"{result.name} {result.version} is installed for this Python, but the "
+            f"`{result.name}` command is not on PATH.",
+            "  Activate the environment that has it, or add its bin directory to PATH.",
         ]
     if result.problem:
         return [
@@ -159,7 +206,8 @@ def describe(result: Result) -> list[str]:
 
 
 def record(manifest_path: Path, results: list[Result]) -> None:
-    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    target = manifest_path.resolve()  # write through a symlink, not over it
+    data = json.loads(target.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{manifest_path} must contain a JSON object")
     linters = data.get("linters")
@@ -169,12 +217,14 @@ def record(manifest_path: Path, results: list[Result]) -> None:
         if result.version:
             linters[result.name] = result.version
     data["linters"] = linters
-    fd, tmp = tempfile.mkstemp(prefix=".manifest.", dir=manifest_path.parent, text=True)
+    mode = target.stat().st_mode & 0o7777
+    fd, tmp = tempfile.mkstemp(prefix=".manifest.", dir=target.parent, text=True)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2, ensure_ascii=False)
             handle.write("\n")
-        os.replace(tmp, manifest_path)
+        os.chmod(tmp, mode)  # mkstemp creates 0600; keep the manifest's mode
+        os.replace(tmp, target)
     finally:
         Path(tmp).unlink(missing_ok=True)
 

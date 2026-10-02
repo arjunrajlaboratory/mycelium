@@ -29,7 +29,7 @@ def fake_cli(tmp_path: Path, name: str, output: str | None, exit_code: int = 0) 
 @pytest.fixture
 def no_metadata(monkeypatch):
     """Keep the test interpreter's own installed packages out of the result."""
-    monkeypatch.setattr(clv, "metadata_version", lambda name: None)
+    monkeypatch.setattr(clv, "metadata_version", lambda name, executable=None: None)
 
 
 def run(monkeypatch, capsys, argv, path=None, latest=None):
@@ -94,7 +94,7 @@ def test_unknown_version_without_minimum_is_ok(tmp_path, monkeypatch, capsys, no
 
 def test_metadata_fallback_when_cli_has_no_version_flag(tmp_path, monkeypatch, capsys):
     path = fake_cli(tmp_path, "scilintr", "usage", exit_code=2)
-    monkeypatch.setattr(clv, "metadata_version", lambda name: "0.1.1")
+    monkeypatch.setattr(clv, "metadata_version", lambda name, executable=None: "0.1.1")
     code, out = run(monkeypatch, capsys, ["scilintr"], path, {"scilintr": "0.1.1"})
     assert code == 0
     assert "scilintr 0.1.1 (latest 0.1.1): ok" in out
@@ -164,3 +164,76 @@ def test_record_rejects_non_object_manifest(tmp_path, monkeypatch, capsys, no_me
     assert code == 1
     assert "JSON object" in out
     assert manifest.read_text() == "[]\n"
+
+
+# --- review fixes -----------------------------------------------------------
+
+
+def test_record_preserves_manifest_permissions(tmp_path, monkeypatch, capsys, no_metadata):
+    path = fake_cli(tmp_path, "scitexlintr", "scitexlintr 0.2.0")
+    manifest = tmp_path / ".manifest.json"
+    manifest.write_text("{}\n")
+    manifest.chmod(0o644)
+    code, _ = run(monkeypatch, capsys, ["--record", str(manifest), "scitexlintr>=0.2"], path)
+    assert code == 0
+    assert stat.S_IMODE(manifest.stat().st_mode) == 0o644  # mkstemp would leave 0600
+
+
+def test_record_through_a_symlink_updates_the_target(tmp_path, monkeypatch, capsys, no_metadata):
+    path = fake_cli(tmp_path, "scitexlintr", "scitexlintr 0.2.0")
+    real = tmp_path / "real.json"
+    real.write_text("{}\n")
+    link = tmp_path / ".manifest.json"
+    link.symlink_to(real)
+    code, _ = run(monkeypatch, capsys, ["--record", str(link), "scitexlintr>=0.2"], path)
+    assert code == 0
+    assert link.is_symlink()
+    assert json.loads(real.read_text())["linters"] == {"scitexlintr": "0.2.0"}
+
+
+def test_package_installed_but_cli_not_on_path_fails(tmp_path, monkeypatch, capsys):
+    # e.g. a --user install whose bin directory is not on PATH: the skills run
+    # the CLI, so "importable here" is not "usable".
+    (tmp_path / "empty").mkdir()
+    monkeypatch.setattr(clv, "metadata_version", lambda name, executable=None: "0.2.0")
+    code, out = run(monkeypatch, capsys, ["scitexlintr>=0.2"], tmp_path / "empty")
+    assert code == 1
+    assert "not on PATH" in out
+
+
+def test_prerelease_below_minimum_fails(tmp_path, monkeypatch, capsys):
+    path = fake_cli(tmp_path, "scitexlintr", "usage", exit_code=2)
+    monkeypatch.setattr(clv, "metadata_version", lambda name, executable=None: "0.1.9rc1")
+    code, out = run(monkeypatch, capsys, ["scitexlintr>=0.2"], path)
+    assert code == 1
+    assert "below the required 0.2" in out
+
+
+def test_version_key_reads_the_release_prefix():
+    assert clv.version_key("0.3.0rc1") == (0, 3)
+    assert clv.version_key("1.2.post1") == (1, 2)
+
+
+def test_metadata_comes_from_the_cli_interpreter(tmp_path, monkeypatch, capsys):
+    # The CLI lives in another environment (pipx, a project venv): its version
+    # is what that environment has installed, not what this interpreter has.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    other_python = tmp_path / "other-env-python"
+    other_python.write_text('#!/bin/sh\nprintf "0.1.1\\n"\n')
+    other_python.chmod(0o755)
+    cli = bin_dir / "scilintr"
+    cli.write_text(f"#!{other_python}\nexit 2\n")
+    cli.chmod(0o755)
+    monkeypatch.setattr(clv.metadata, "version", lambda name: "9.9.9")
+    code, out = run(monkeypatch, capsys, ["scilintr"], bin_dir, {"scilintr": "0.1.1"})
+    assert code == 0
+    assert "scilintr 0.1.1 (latest 0.1.1): ok" in out
+
+
+def test_unparseable_metadata_version_with_minimum_fails(tmp_path, monkeypatch, capsys):
+    path = fake_cli(tmp_path, "scitexlintr", "usage", exit_code=2)
+    monkeypatch.setattr(clv, "metadata_version", lambda name, executable=None: "unknown")
+    code, out = run(monkeypatch, capsys, ["scitexlintr>=0.2"], path)
+    assert code == 1
+    assert "cannot determine" in out
