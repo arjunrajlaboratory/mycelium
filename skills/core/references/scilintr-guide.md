@@ -60,6 +60,14 @@ CLI:
 Rscript -e 'scilintr::main()' path/to/project
 ```
 
+To see whether CRAN has a newer release (this checks, it does not install):
+
+```bash
+Rscript -e 'op <- old.packages(repos = "https://cloud.r-project.org"); cat(if ("scilintr" %in% rownames(op)) paste("update available:", op["scilintr", "ReposVer"]) else "no newer CRAN release", "\n")'
+```
+
+`check_linter_versions.py` covers only the Python package. As with Python, ask the user before upgrading.
+
 Pick the language that matches the code you wrote. A project with both R and Python should install both.
 
 ## Usage
