@@ -860,9 +860,69 @@ def _simple_command_suffix(command: str, offset: int) -> str | None:
     return None if quote is not None else command[offset:index]
 
 
+_IO_NUMBER_RX = re.compile(r"\d+|\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _blank_io_numbers(fragment: str) -> str:
+    """Blank redirection I/O numbers (``2>err``, ``{fd}>log``).
+
+    In ``[n]>word`` the number belongs to the redirection only when it is a
+    whole unquoted word immediately followed by the operator; ``cmd 2 >x``,
+    ``cmd "2">x``, and ``cmd a2>x`` keep their argument. Offsets are kept so
+    later shell scanning is unchanged.
+    """
+    out = list(fragment)
+    quote: str | None = None
+    word_start = True
+    index = 0
+    while index < len(fragment):
+        char = fragment[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if quote == '"':
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        if char == "\\":
+            word_start = False
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            word_start = False
+            index += 1
+            continue
+        if char in " \t\r\n;&|()":
+            word_start = True
+            index += 1
+            continue
+        if char in "<>":
+            # The next word is the redirection target, never an I/O number.
+            word_start = False
+            index += 1
+            continue
+        if word_start:
+            match = _IO_NUMBER_RX.match(fragment, index)
+            if match and fragment[match.end() : match.end() + 1] in {"<", ">"}:
+                for position in range(match.start(), match.end()):
+                    out[position] = " "
+                index = match.end()
+                continue
+        word_start = False
+        index += 1
+    return "".join(out)
+
+
 def _simple_command_argv(fragment: str) -> list[str] | None:
     """Tokenize argv while consuming shell redirection operators and targets."""
-    fragment = _strip_unquoted_shell_comments(fragment)
+    fragment = _strip_unquoted_shell_comments(_blank_io_numbers(fragment))
     if fragment is None:
         return None
     try:
@@ -1670,12 +1730,15 @@ class _RunnerRun(NamedTuple):
     invocation cwd) and ``source`` a descriptive pseudo-source when no entry
     file can be named; exactly one is set. ``run_dir`` is the directory the
     runner executes the workflow in when an option changes it
-    (``snakemake --directory``, ``sbatch --chdir``), else ``None``.
+    (``snakemake --directory``, ``sbatch --chdir``), else ``None``;
+    ``run_dir_unknown`` marks configuration outside argv (a Snakemake
+    profile) that may move the run somewhere this parser cannot see.
     """
 
     entry: str | None
     source: str | None
     run_dir: str | None = None
+    run_dir_unknown: bool = False
 
 
 # Shell options form a small, closed set. Model it completely: an option
@@ -1703,6 +1766,41 @@ _BASH_EXECUTING_LONG = frozenset(
 )
 _BASH_VALUE_LONG = frozenset({"--rcfile", "--init-file"})
 _SHELL_SCRIPT_SUFFIXES = (".sh", ".bash")
+# `set -o` and `shopt -s` names across Bash 3.2 (macOS) through 5.3. Bash
+# exits before reading the script when `-o`/`-O` names anything else.
+_BASH_SET_O_NAMES = frozenset(
+    {
+        "allexport", "braceexpand", "emacs", "errexit", "errtrace",
+        "functrace", "hashall", "histexpand", "history", "ignoreeof",
+        "interactive-comments", "keyword", "monitor", "noclobber", "noexec",
+        "noglob", "nolog", "notify", "nounset", "onecmd", "physical",
+        "pipefail", "posix", "privileged", "verbose", "vi", "xtrace",
+    }
+)
+_BASH_SHOPT_NAMES = frozenset(
+    {
+        "array_expand_once", "assoc_expand_once", "autocd",
+        "bash_source_fullpath", "cdable_vars", "cdspell", "checkhash",
+        "checkjobs", "checkwinsize", "cmdhist", "compat31", "compat32",
+        "compat40", "compat41", "compat42", "compat43", "compat44",
+        "complete_fullquote", "direxpand", "dirspell", "dotglob", "execfail",
+        "expand_aliases", "extdebug", "extglob", "extquote", "failglob",
+        "force_fignore", "globasciiranges", "globskipdots", "globstar",
+        "gnu_errfmt", "histappend", "histreedit", "histverify",
+        "hostcomplete", "huponexit", "inherit_errexit", "interactive_comments",
+        "lastpipe", "lithist", "localvar_inherit", "localvar_unset",
+        "login_shell", "mailwarn", "no_empty_cmd_completion", "nocaseglob",
+        "nocasematch", "noexpand_translation", "nullglob",
+        "patsub_replacement", "progcomp", "progcomp_alias", "promptvars",
+        "restricted_shell", "shift_verbose", "sourcepath", "varredir_close",
+        "xpg_echo",
+    }
+)
+# `sh` is bash in POSIX mode on macOS and dash on Debian; accept either's
+# `set -o` names. zsh and ksh have large, version-specific option sets, so
+# only their no-exec spelling is checked.
+_SH_SET_O_NAMES = _BASH_SET_O_NAMES | frozenset({"debug", "interactive", "stdin"})
+_SHELL_SET_O_NAMES = {"bash": _BASH_SET_O_NAMES, "sh": _SH_SET_O_NAMES, "dash": _SH_SET_O_NAMES}
 
 
 def _shell_option_is_noexec(name: str) -> bool:
@@ -1748,8 +1846,16 @@ def _shell_runner_script(shell: str, args: list[str]) -> str | None:
                 if index + 1 >= len(args):
                     return None
                 value = args[index + 1]
-                if sign == "-" and flags[-1] == "o" and _shell_option_is_noexec(value):
-                    return None
+                if flags[-1] == "O":
+                    # shopt names exist only in bash.
+                    if shell != "bash" or value not in _BASH_SHOPT_NAMES:
+                        return None
+                else:
+                    if sign == "-" and _shell_option_is_noexec(value):
+                        return None
+                    known = _SHELL_SET_O_NAMES.get(shell)
+                    if known is not None and value not in known:
+                        return None
                 index += 2
             else:
                 index += 1
@@ -1824,6 +1930,8 @@ _SNAKEMAKE_VALUE_OPTIONS = {
     "--directory": "directory",
     "-e": "executor",
     "--executor": "executor",
+    "--profile": "profile",
+    "--workflow-profile": "workflow_profile",
 }
 _SNAKEMAKE_NONEXECUTING_EXECUTORS = frozenset({"dryrun", "touch"})
 _SNAKEMAKE_DEFAULT_SNAKEFILES = (
@@ -1834,6 +1942,93 @@ _SNAKEMAKE_DEFAULT_SNAKEFILES = (
 )
 
 
+_SNAKEMAKE_PROFILE_FILE_RX = re.compile(r"(?:profile|config)(?:\.v\d+\+)?\.yaml")
+_SNAKEMAKE_PROFILE_KEY_RX = re.compile(
+    rb"""^["']?(?P<key>directory|snakefile)["']?[ \t]*:""", re.M
+)
+
+
+def _snakemake_user_profile_roots() -> list[Path]:
+    """Every user/site config dir Snakemake's appdirs may search, any OS."""
+    home = Path.home()
+    roots = [
+        home / ".config" / "snakemake",
+        home / "Library" / "Application Support" / "snakemake",
+        Path("/etc/xdg/snakemake"),
+        Path("/Library/Application Support/snakemake"),
+    ]
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        roots.insert(0, Path(xdg) / "snakemake")
+    return roots
+
+
+def _snakemake_profile_files(location: Path) -> list[Path]:
+    if location.is_file():
+        return [location]
+    try:
+        return [
+            child
+            for child in location.iterdir()
+            if _SNAKEMAKE_PROFILE_FILE_RX.fullmatch(child.name) and child.is_file()
+        ]
+    except OSError:
+        return []
+
+
+def _snakemake_profile_overrides(
+    profiles: list[str], workflow_profile: str | None, cwd: Path, snakefile: str | None
+) -> set[str] | None:
+    """Return the run-locating keys active profiles set (``directory``,
+    ``snakefile``), or ``None`` when an active profile cannot be inspected.
+
+    Mirrors snakemake.cli: ``--profile`` is a path or a name searched in the
+    cwd and the user/site config dirs; the workflow profile defaults to
+    ``profiles/default`` beside the cwd or the Snakefile unless ``none``.
+    Every candidate location is inspected, so a divergence from Snakemake's
+    own choice can only leave the run unresolved, never wrong.
+    """
+    files: list[Path] = []
+    for profile in profiles:
+        if profile == "none":
+            continue
+        path = Path(profile)
+        if not path.is_absolute():
+            path = cwd / path
+        if path.exists():
+            candidates = [path]
+        else:
+            candidates = [
+                root / profile
+                for root in [cwd, *_snakemake_user_profile_roots()]
+                if (root / profile).exists()
+            ]
+        found = [f for candidate in candidates for f in _snakemake_profile_files(candidate)]
+        if not found:
+            return None
+        files.extend(found)
+    if workflow_profile != "none":
+        name = workflow_profile or "default"
+        candidates = [Path(name), Path("profiles") / name]
+        if snakefile:
+            candidates.append(Path(snakefile).parent / "profiles" / name)
+        for candidate in candidates:
+            location = candidate if candidate.is_absolute() else cwd / candidate
+            if location.exists():
+                files.extend(_snakemake_profile_files(location))
+                break
+    keys: set[str] = set()
+    for profile_file in files:
+        try:
+            content = profile_file.read_bytes()[: 1024 * 1024]
+        except OSError:
+            return None
+        keys.update(
+            m.group("key").decode() for m in _SNAKEMAKE_PROFILE_KEY_RX.finditer(content)
+        )
+    return keys
+
+
 def _snakemake_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
     """Describe an executing snakemake argv, or ``None`` for a non-run.
 
@@ -1842,6 +2037,7 @@ def _snakemake_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
     entry stays cwd-relative while the workflow's I/O uses the directory.
     """
     values: dict[str, str] = {}
+    profiles: list[str] = []
     index = 0
     while index < len(args):
         token = args[index]
@@ -1856,6 +2052,8 @@ def _snakemake_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
                     value = args[index + 1]
                     index += 1
                 values[_SNAKEMAKE_VALUE_OPTIONS[name]] = value
+                if name == "--profile":
+                    profiles.append(value)
         elif token in _SNAKEMAKE_VALUE_OPTIONS:
             if index + 1 >= len(args):
                 return None
@@ -1874,19 +2072,49 @@ def _snakemake_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
         index += 1
     if values.get("executor") in _SNAKEMAKE_NONEXECUTING_EXECUTORS:
         return None
-    run_dir = values.get("directory")
     snakefile = values.get("snakefile")
+    default_snakefile = next(
+        (c for c in _SNAKEMAKE_DEFAULT_SNAKEFILES if (cwd / c).is_file()), None
+    )
+    overrides = _snakemake_profile_overrides(
+        profiles, values.get("workflow_profile"), cwd, snakefile or default_snakefile
+    )
+    run_dir = values.get("directory")
+    run_dir_unknown = run_dir is None and (
+        overrides is None or "directory" in overrides
+    )
+    if not snakefile:
+        if overrides is None or "snakefile" in overrides:
+            # A profile may name the Snakefile; do not hash a guessed one.
+            return _RunnerRun(
+                None,
+                "# Snakemake workflow run (Snakefile set by a profile)",
+                run_dir,
+                run_dir_unknown,
+            )
+        snakefile = default_snakefile
     if snakefile:
-        return _RunnerRun(snakefile, None, run_dir)
-    for candidate in _SNAKEMAKE_DEFAULT_SNAKEFILES:
-        if (cwd / candidate).is_file():
-            return _RunnerRun(candidate, None, run_dir)
-    return _RunnerRun(None, "# Snakemake workflow run (no Snakefile found)", run_dir)
+        return _RunnerRun(snakefile, None, run_dir, run_dir_unknown)
+    return _RunnerRun(
+        None,
+        "# Snakemake workflow run (no Snakefile found)",
+        run_dir,
+        run_dir_unknown,
+    )
 
 
 _NEXTFLOW_GLOBAL_VALUE_OPTIONS = {"-C", "-c", "-config", "-log", "-syslog", "-trace"}
 _NEXTFLOW_GLOBAL_FLAG_OPTIONS = {"-q", "-quiet", "-bg", "-background", "-d", "-dockerize"}
 _NEXTFLOW_NONEXECUTING_RUN_OPTIONS = {"-h", "-help", "-preview", "-stub", "-stub-run"}
+
+
+def _nextflow_sets_main_script(pipeline_dir: Path) -> bool:
+    """Whether ``manifest.mainScript`` may name an entry other than main.nf."""
+    try:
+        config = (pipeline_dir / "nextflow.config").read_bytes()[:1024 * 1024]
+    except OSError:
+        return False
+    return b"mainScript" in config
 
 
 def _nextflow_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
@@ -1910,7 +2138,9 @@ def _nextflow_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
     pipeline = run_args[0]
     if pipeline.endswith(".nf"):
         return _RunnerRun(pipeline, None)
-    if (cwd / pipeline / "main.nf").is_file():
+    if (cwd / pipeline / "main.nf").is_file() and not _nextflow_sets_main_script(
+        cwd / pipeline
+    ):
         return _RunnerRun(str(Path(pipeline) / "main.nf"), None)
     return _RunnerRun(None, f"# Nextflow pipeline run: {pipeline}")
 
@@ -1940,21 +2170,23 @@ _SBATCH_FLAG_LONG = {
 _SBATCH_NONEXECUTING = {"-h", "--help", "-V", "--version", "-u", "--usage", "--test-only"}
 
 
-def _sbatch_detection(args: list[str]) -> _RunnerRun | None:
-    """Describe an ``sbatch`` submission, or ``None`` when nothing is queued.
+class _SbatchOptions(NamedTuple):
+    executes: bool
+    chdir: str | None
+    wrap: str | None
+    script: str | None
 
-    The job script is read at submission, relative to the invocation cwd;
-    ``-D``/``--chdir`` sets the directory the job then runs in.
-    """
+
+def _parse_sbatch_options(args: list[str]) -> _SbatchOptions:
+    """Parse sbatch options up to the job script (CLI or ``#SBATCH`` line)."""
     chdir: str | None = None
     wrap: str | None = None
-    script: str | None = None
     index = 0
     while index < len(args):
         token = args[index]
         name, has_value, value = token.partition("=")
         if name in _SBATCH_NONEXECUTING:
-            return None
+            return _SbatchOptions(False, chdir, wrap, None)
         if token.startswith("--"):
             if name in _SBATCH_FLAG_LONG or has_value:
                 index += 1
@@ -1962,7 +2194,7 @@ def _sbatch_detection(args: list[str]) -> _RunnerRun | None:
                 value = args[index + 1]
                 index += 2
             else:
-                return None
+                return _SbatchOptions(False, chdir, wrap, None)
             if name == "--wrap":
                 wrap = value
             elif name == "--chdir":
@@ -1979,17 +2211,86 @@ def _sbatch_detection(args: list[str]) -> _RunnerRun | None:
                 value = args[index + 1]
                 index += 2
             else:
-                return None
+                return _SbatchOptions(False, chdir, wrap, None)
             if token[:2] == "-D":
                 chdir = value
         else:
-            script = token
+            return _SbatchOptions(True, chdir, wrap, token)
+    return _SbatchOptions(True, chdir, wrap, None)
+
+
+_SBATCH_DIRECTIVE_READ_LIMIT_BYTES = 1024 * 1024
+
+
+def _sbatch_script_directives(script: Path) -> list[str] | None:
+    """Return the option words of a job script's ``#SBATCH`` header.
+
+    Slurm reads ``#SBATCH`` lines only before the first command; blank and
+    other comment lines do not end the header. ``None`` means the header
+    could not be read or parsed.
+    """
+    words: list[str] = []
+    try:
+        with script.open("rb") as handle:
+            raw = handle.read(_SBATCH_DIRECTIVE_READ_LIMIT_BYTES)
+    except OSError:
+        return None
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
             break
-    if wrap is not None:
-        return _RunnerRun(None, f"# sbatch --wrap: {wrap}", chdir)
-    if script is not None:
-        return _RunnerRun(script, None, chdir)
-    return _RunnerRun(None, "# sbatch job submission (script from stdin)", chdir)
+        if not re.match(r"#SBATCH(?:\s|$)", line):
+            continue
+        try:
+            words.extend(shlex.split(line[len("#SBATCH") :], comments=True))
+        except ValueError:
+            return None
+    return words
+
+
+def _sbatch_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
+    """Describe an ``sbatch`` submission, or ``None`` when nothing is queued.
+
+    Slurm resolves a relative job script against ``--chdir`` when given, else
+    the submission directory, and runs the job in the command line's
+    ``--chdir``, else the script header's, else the submission directory.
+    """
+    options = _parse_sbatch_options(args)
+    if not options.executes:
+        return None
+    if options.wrap is not None:
+        return _RunnerRun(None, f"# sbatch --wrap: {options.wrap}", options.chdir)
+    if options.script is None:
+        return _RunnerRun(
+            None, "# sbatch job submission (script from stdin)", options.chdir
+        )
+    script = Path(options.script)
+    if not script.is_absolute():
+        base = (
+            cwd
+            if options.chdir is None
+            else _resolve_runner_directory(options.chdir, cwd)
+        )
+        if base is None:
+            return _RunnerRun(
+                None,
+                f"# sbatch job script {options.script} "
+                "(submission directory unresolved)",
+                options.chdir,
+            )
+        script = base / script
+    chdir = options.chdir
+    directives = _sbatch_script_directives(script) if script.is_file() else []
+    if directives is None:
+        directives = []
+    header = _parse_sbatch_options(directives)
+    if not header.executes:
+        return None
+    if chdir is None and header.chdir is not None:
+        chdir = header.chdir
+    return _RunnerRun(str(script), None, chdir)
 
 
 def _runner_detection(argv: list[str], cwd: Path) -> _RunnerRun | None:
@@ -2004,7 +2305,7 @@ def _runner_detection(argv: list[str], cwd: Path) -> _RunnerRun | None:
     if name == "nextflow":
         return _nextflow_detection(args, cwd)
     if name == "sbatch":
-        return _sbatch_detection(args)
+        return _sbatch_detection(args, cwd)
     return _RunnerRun(argv[0], None)
 
 
@@ -2068,11 +2369,12 @@ def _detect_runners(
             run = _runner_detection(argv, effective_cwd)
             if run is None:
                 continue
-            io_cwd = (
-                effective_cwd
-                if run.run_dir is None
-                else _resolve_runner_directory(run.run_dir, effective_cwd)
-            )
+            if run.run_dir_unknown:
+                io_cwd = None
+            elif run.run_dir is None:
+                io_cwd = effective_cwd
+            else:
+                io_cwd = _resolve_runner_directory(run.run_dir, effective_cwd)
             if run.entry is None:
                 out.append((None, run.source, io_cwd))
                 continue

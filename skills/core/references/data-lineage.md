@@ -16,15 +16,19 @@ Snakefile a `snakemake` run uses (`-s`/`--snakefile`, else the default lookup),
 an `sbatch` job script, and the `main.nf` of `nextflow run`. Non-executing modes
 are not runs and are ignored, including those selected by an option's value:
 `bash -n`/`-c`/`-s`/`-D`, `--dump-strings`, `--pretty-print`, `-o noexec`, and
-any option the shell would reject; snakemake dry runs, `--executor dryrun` or
+any option or `-o`/`-O` name the shell would reject; snakemake dry runs, `--executor dryrun` or
 `touch`, and graph/lint/list/unlock/touch modes; `nextflow run`
 `-preview`/`-stub-run` and non-`run` subcommands; and `sbatch`
-`--test-only`/`--help`. The entry point resolves against the invocation
-directory, but the run's own I/O resolves against `snakemake --directory` or
-`sbatch --chdir` when given (Snakemake reads the Snakefile before changing
-directory; sbatch reads the job script at submission). A run directory the
-shell would expand (`$VAR`, `~`, a substitution) is recorded with no I/O and a
-warning rather than guessed. When no entry file
+`--test-only`/`--help` (on the command line or in the script's `#SBATCH`
+header). Entry points and run directories follow each runner's own rules:
+Snakemake reads the Snakefile in the invocation directory and runs under
+`--directory`; Slurm resolves a relative job script under `--chdir` and runs
+the job in the command line's `--chdir`, else the `#SBATCH` header's.
+Configuration the parser cannot see is never guessed: a run directory the shell
+would expand (`$VAR`, `~`, a substitution), or a Snakemake profile that sets
+`directory:` or `snakefile:` (or cannot be located), leaves the event's I/O or
+entry unresolved with a warning. Redirection I/O numbers (`bash 2>err run.sh`)
+are consumed with their operator. When no entry file
 can be named (`sbatch --wrap`, a remote `nextflow run nf-core/<pipeline>`, a
 snakemake run with no Snakefile found) the run is still recorded, with a
 descriptive `script_source` and `io_detection: "unresolved"`. The scripts these

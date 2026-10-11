@@ -2853,14 +2853,14 @@ def test_runner_snakemake_directory_sets_io_cwd_not_entry(
         "sbatch -J x -D work -p short job.sh",
     ],
 )
-def test_runner_sbatch_chdir_sets_io_cwd_not_entry(
+def test_runner_sbatch_chdir_sets_io_cwd_and_script_base(
     tmp_path: Path, command: str
 ) -> None:
-    """The job script is resolved at submission; it runs under --chdir."""
-    (tmp_path / "job.sh").write_text("echo hi\n")
+    """Slurm resolves the job script and runs the job under --chdir."""
     (tmp_path / "work").mkdir()
+    (tmp_path / "work" / "job.sh").write_text("echo hi\n")
     assert _runner_cwds(command, tmp_path) == [
-        (tmp_path / "job.sh", None, tmp_path / "work")
+        (tmp_path / "work" / "job.sh", None, tmp_path / "work")
     ]
 
 
@@ -2874,9 +2874,8 @@ def test_runner_sbatch_wrap_carries_chdir(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "command",
     [
-        "sbatch --chdir=$SCRATCH/run job.sh",
-        "sbatch -D `pwd`/run job.sh",
         "snakemake --directory $WORK -c1",
+        "snakemake -d ~/work -c1",
     ],
 )
 def test_runner_dynamic_directory_keeps_run_but_not_io_cwd(
@@ -3004,3 +3003,261 @@ def test_runner_keeps_executing_option_values(
     assert _runner_detections(command, tmp_path) == [
         (tmp_path / expected_script, None)
     ], command
+
+
+# ---------- runner resolution rules and redirection I/O numbers ----------
+
+
+def test_runner_sbatch_resolves_script_under_chdir(tmp_path: Path) -> None:
+    """Slurm resolves a relative job script against --chdir when given."""
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "job.sh").write_text("echo hi\n")
+    (tmp_path / "job.sh").write_text("echo decoy\n")
+    for command in ("sbatch --chdir work job.sh", "sbatch -D work ./job.sh"):
+        assert _runner_cwds(command, tmp_path) == [(work / "job.sh", None, work)]
+    absolute = tmp_path / "job.sh"
+    assert _runner_cwds(f"sbatch -D work {absolute}", tmp_path) == [
+        (absolute, None, work)
+    ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["sbatch --chdir=$SCRATCH job.sh", "sbatch -D `pwd`/run job.sh"],
+)
+def test_runner_sbatch_script_under_dynamic_chdir_is_not_guessed(
+    tmp_path: Path, command: str
+) -> None:
+    (tmp_path / "job.sh").write_text("echo decoy\n")
+    detections = _runner_cwds(command, tmp_path)
+    assert len(detections) == 1
+    script, source, io_cwd = detections[0]
+    assert script is None and io_cwd is None
+    assert "job.sh" in source
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [
+        "#SBATCH --chdir=work",
+        "#SBATCH --chdir work",
+        "#SBATCH -D work",
+        "#SBATCH -Dwork",
+        "#SBATCH -J fit -D work  # run under work",
+    ],
+)
+def test_runner_sbatch_honors_script_chdir_directive(
+    tmp_path: Path, directive: str
+) -> None:
+    (tmp_path / "work").mkdir()
+    (tmp_path / "job.sh").write_text(
+        f"#!/bin/bash\n#SBATCH -p short\n\n{directive}\npython fit.py\n"
+    )
+    assert _runner_cwds("sbatch job.sh", tmp_path) == [
+        (tmp_path / "job.sh", None, tmp_path / "work")
+    ]
+
+
+def test_runner_sbatch_cli_chdir_overrides_directive(tmp_path: Path) -> None:
+    (tmp_path / "cli").mkdir()
+    (tmp_path / "cli" / "job.sh").write_text("#!/bin/bash\n#SBATCH -D other\n")
+    assert _runner_cwds("sbatch -D cli job.sh", tmp_path) == [
+        (tmp_path / "cli" / "job.sh", None, tmp_path / "cli")
+    ]
+
+
+def test_runner_sbatch_ignores_directives_after_first_command(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "job.sh").write_text(
+        "#!/bin/bash\nmodule load R\n#SBATCH -D work\nRscript fit.R\n"
+    )
+    assert _runner_cwds("sbatch job.sh", tmp_path) == [
+        (tmp_path / "job.sh", None, tmp_path)
+    ]
+
+
+def test_runner_sbatch_dynamic_directive_leaves_io_unresolved(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "job.sh").write_text("#!/bin/bash\n#SBATCH --chdir=$HOME/run\n")
+    assert _runner_cwds("sbatch job.sh", tmp_path) == [
+        (tmp_path / "job.sh", None, None)
+    ]
+
+
+def test_runner_nextflow_directory_with_manifest_main_script_is_not_guessed(
+    tmp_path: Path,
+) -> None:
+    pipeline = tmp_path / "pipe"
+    pipeline.mkdir()
+    (pipeline / "main.nf").write_text("workflow {}\n")
+    (pipeline / "nextflow.config").write_text(
+        "manifest {\n  mainScript = 'pipeline.nf'\n}\n"
+    )
+    detections = _runner_detections("nextflow run pipe", tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None
+    assert "pipe" in detections[0][1]
+
+
+@pytest.mark.parametrize(
+    "command,expected_script",
+    [
+        ("bash 2>err.log run.sh", "run.sh"),
+        ("bash 2>&1 run.sh", "run.sh"),
+        ("bash 1>out.log 2>err.log run.sh", "run.sh"),
+        ("sbatch 2>err.log job.sh", "job.sh"),
+        ("sbatch 2>/dev/null -J fit job.sh", "job.sh"),
+        ("nextflow 2>err.log run main.nf", "main.nf"),
+        ("snakemake 2>err.log -s alt.smk -c1", "alt.smk"),
+    ],
+)
+def test_runner_consumes_redirection_io_numbers(
+    tmp_path: Path, command: str, expected_script: str
+) -> None:
+    (tmp_path / expected_script).write_text("echo hi\n")
+    assert _runner_detections(command, tmp_path) == [
+        (tmp_path / expected_script, None)
+    ], command
+
+
+def test_simple_command_argv_io_numbers_only_when_adjacent() -> None:
+    argv = lineage_event._simple_command_argv
+    assert argv("bash 2>err run.sh") == ["bash", "run.sh"]
+    assert argv("bash {fd}>err run.sh") == ["bash", "run.sh"]
+    # A separated or quoted digit is an argument, not an I/O number.
+    assert argv("cmd 2 >err x") == ["cmd", "2", "x"]
+    assert argv('cmd "2">err x') == ["cmd", "2", "x"]
+    assert argv("cmd a2>err x") == ["cmd", "a2", "x"]
+    assert argv("cmd x 2>&1") == ["cmd", "x"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -o definitely_not_an_option run.sh",
+        "bash -O definitely_not_an_option run.sh",
+        "bash +O definitely_not_an_option run.sh",
+        "sh -o definitely_not_an_option run.sh",
+    ],
+)
+def test_runner_rejects_invalid_shell_option_names(
+    tmp_path: Path, command: str
+) -> None:
+    (tmp_path / "run.sh").write_text("echo hi\n")
+    assert _runner_detections(command, tmp_path) == [], command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -o errexit -o nounset -o pipefail run.sh",
+        "bash -o interactive-comments run.sh",
+        "bash -O extglob -O globstar -O nullglob run.sh",
+        "bash -O inherit_errexit run.sh",
+        "sh -o errexit run.sh",
+        "zsh -o extended_glob run.sh",
+    ],
+)
+def test_runner_accepts_valid_shell_option_names(
+    tmp_path: Path, command: str
+) -> None:
+    (tmp_path / "run.sh").write_text("echo hi\n")
+    assert _runner_detections(command, tmp_path) == [
+        (tmp_path / "run.sh", None)
+    ], command
+
+
+def _snakemake_tree(tmp_path: Path) -> None:
+    (tmp_path / "Snakefile").write_text("rule all:\n    input: []\n")
+
+
+def _profile(directory: Path, body: str, name: str = "config.yaml") -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / name).write_text(body)
+
+
+@pytest.mark.parametrize(
+    "location,name",
+    [
+        ("profiles/default", "config.yaml"),
+        ("profiles/default", "profile.yaml"),
+        ("workflow/profiles/default", "config.v8+.yaml"),
+    ],
+)
+def test_runner_snakemake_default_profile_directory_is_not_guessed(
+    tmp_path: Path, location: str, name: str
+) -> None:
+    _snakemake_tree(tmp_path)
+    if location.startswith("workflow/"):
+        (tmp_path / "Snakefile").unlink()
+        (tmp_path / "workflow").mkdir()
+        (tmp_path / "workflow" / "Snakefile").write_text("rule all:\n    input: []\n")
+    _profile(tmp_path / location, "executor: slurm\ndirectory: /scratch/run\n", name)
+    detections = _runner_cwds("snakemake -j 10", tmp_path)
+    assert len(detections) == 1 and detections[0][0] is not None
+    assert detections[0][2] is None
+
+
+def test_runner_snakemake_profile_without_directory_keeps_cwd(
+    tmp_path: Path,
+) -> None:
+    _snakemake_tree(tmp_path)
+    _profile(tmp_path / "profiles/default", "executor: slurm\njobs: 10\n")
+    assert _runner_cwds("snakemake", tmp_path) == [
+        (tmp_path / "Snakefile", None, tmp_path)
+    ]
+
+
+def test_runner_snakemake_cli_directory_overrides_profile(tmp_path: Path) -> None:
+    _snakemake_tree(tmp_path)
+    _profile(tmp_path / "profiles/default", "directory: elsewhere\n")
+    assert _runner_cwds("snakemake -d work -c1", tmp_path) == [
+        (tmp_path / "Snakefile", None, tmp_path / "work")
+    ]
+
+
+def test_runner_snakemake_workflow_profile_none_disables_default(
+    tmp_path: Path,
+) -> None:
+    _snakemake_tree(tmp_path)
+    _profile(tmp_path / "profiles/default", "directory: elsewhere\n")
+    assert _runner_cwds("snakemake --workflow-profile none -c1", tmp_path) == [
+        (tmp_path / "Snakefile", None, tmp_path)
+    ]
+
+
+def test_runner_snakemake_explicit_profiles(tmp_path: Path, monkeypatch) -> None:
+    _snakemake_tree(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _profile(tmp_path / "local", "directory: elsewhere\n")
+    _profile(tmp_path / "quiet", "jobs: 4\n")
+    _profile(tmp_path / "home/.config/snakemake/slurm", "executor: slurm\n")
+
+    def io_cwd(command: str) -> Path | None:
+        detections = _runner_cwds(command, tmp_path)
+        assert len(detections) == 1, command
+        return detections[0][2]
+
+    assert io_cwd("snakemake --profile local") is None
+    assert io_cwd("snakemake --profile=quiet") == tmp_path
+    assert io_cwd("snakemake --profile slurm") == tmp_path
+    assert io_cwd("snakemake --workflow-profile local") is None
+    # A named profile that cannot be found here may set anything.
+    assert io_cwd("snakemake --profile cluster") is None
+
+
+def test_runner_snakemake_profile_snakefile_is_not_guessed(tmp_path: Path) -> None:
+    _snakemake_tree(tmp_path)
+    _profile(tmp_path / "profiles/default", "snakefile: workflow/main.smk\n")
+    detections = _runner_cwds("snakemake -c1", tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None
+    assert "profile" in detections[0][1]
+    assert detections[0][2] == tmp_path
+    # An explicit --snakefile still wins over the profile.
+    (tmp_path / "alt.smk").write_text("rule all:\n    input: []\n")
+    assert _runner_cwds("snakemake -s alt.smk -c1", tmp_path) == [
+        (tmp_path / "alt.smk", None, tmp_path)
+    ]
