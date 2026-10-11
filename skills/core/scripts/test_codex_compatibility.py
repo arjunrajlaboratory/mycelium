@@ -1862,6 +1862,48 @@ def test_codex_post_action_retains_analysis_after_tooling_prefix(tmp_path, prefi
     assert (repo / ".mycelium" / "mycelium-reminded.tmp").is_file()
 
 
+@pytest.mark.parametrize(
+    "command,fires",
+    [
+        ("bash run.sh", True),
+        ("./run.sh", True),
+        ("snakemake -c1", True),
+        ("sbatch job.sh", True),
+        ("nextflow run main.nf", True),
+        ("snakemake -n", False),
+        ("bash -n run.sh", False),
+        ("cat run.sh", False),
+        ("sbatch --test-only job.sh", False),
+    ],
+)
+def test_post_action_fires_for_pipeline_runners(tmp_path, command, fires):
+    repo = _repo(tmp_path)
+    for name in ("run.sh", "job.sh", "Snakefile", "main.nf"):
+        (repo / name).write_text("echo hi\n")
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": {"exit_code": 0},
+            "turn_id": "turn-pipeline-runner",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    reminder = repo / ".mycelium" / "mycelium-reminded.tmp"
+    if fires:
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "MYCELIUM POST-ACTION PROTOCOL" in context
+        assert reminder.is_file()
+    else:
+        assert result.stdout == ""
+        assert not reminder.exists()
+
+
 def test_codex_post_tool_use_ignores_mycelium_structure_validator(tmp_path):
     repo = _repo(tmp_path)
     plugin_root = tmp_path / "plugin"

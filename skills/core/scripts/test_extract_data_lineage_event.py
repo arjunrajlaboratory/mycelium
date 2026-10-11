@@ -2516,3 +2516,292 @@ def test_main_retains_python_module_execution_as_unresolved_lineage(
     assert event["bash_cmd"] == command
     assert event["io_detection"] == "unresolved"
     assert "analysis_pipeline" in event["script_source"]
+
+
+# ---------- pipeline and shell-script runners ----------
+
+
+def _runner_detections(command: str, cwd: Path, bash_exit: int | None = 0):
+    """Post-action view: detections proven to execute, inline Python excluded."""
+    return [
+        (script, inline)
+        for script, inline, _ in lineage_event._detect_scripts_with_cwd(
+            command,
+            cwd,
+            bash_exit=bash_exit,
+            require_execution_evidence=True,
+            include_python_inline=False,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "command,expected_script",
+    [
+        ("bash run.sh", "run.sh"),
+        ("sh run.sh", "run.sh"),
+        ("zsh run.sh --cores 4", "run.sh"),
+        ("bash -eux run.sh", "run.sh"),
+        ("bash -o pipefail run.sh", "run.sh"),
+        ("bash -eo pipefail run.sh", "run.sh"),
+        ("bash --norc run.sh", "run.sh"),
+        ("/bin/bash run.sh", "run.sh"),
+        ('bash "run.sh"', "run.sh"),
+        ("./run.sh", "run.sh"),
+        ("./run.sh -n", "run.sh"),
+        ("time bash run.sh", "run.sh"),
+        ("env FOO=1 bash run.sh", "run.sh"),
+        ("conda run -n env bash run.sh", "run.sh"),
+        ("bash run.sh > logs/run.log 2>&1", "run.sh"),
+        ("sbatch job.sh", "job.sh"),
+        ("sbatch -J name -p short --mem=4G job.sh", "job.sh"),
+        ("sbatch --parsable --hold job.sh", "job.sh"),
+        ("sbatch --job-name x -t 01:00:00 job.sh arg1", "job.sh"),
+        ("nextflow run main.nf -profile test", "main.nf"),
+        ("nextflow -C extra.config run main.nf", "main.nf"),
+        ("nextflow -q run main.nf --input samples.csv", "main.nf"),
+        ("snakemake -s alt.smk -c1", "alt.smk"),
+        ("snakemake --snakefile=alt.smk --cores 1", "alt.smk"),
+    ],
+)
+def test_runner_detects_entry_script(
+    tmp_path: Path, command: str, expected_script: str
+) -> None:
+    (tmp_path / expected_script).write_text("echo hi\n")
+    assert _runner_detections(command, tmp_path) == [
+        (tmp_path / expected_script, None)
+    ]
+
+
+def test_runner_shell_script_resolves_through_cd(tmp_path: Path) -> None:
+    analysis = tmp_path / "analysis" / "rnaseq"
+    analysis.mkdir(parents=True)
+    (analysis / "run.sh").write_text("snakemake -c1\n")
+    assert _runner_detections("cd analysis/rnaseq && bash run.sh", tmp_path) == [
+        (analysis / "run.sh", None)
+    ]
+    assert _runner_detections("analysis/rnaseq/run.sh", tmp_path) == [
+        (analysis / "run.sh", None)
+    ]
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["Snakefile", "snakefile", "workflow/Snakefile", "workflow/snakefile"],
+)
+def test_runner_snakemake_finds_default_snakefile(
+    tmp_path: Path, layout: str
+) -> None:
+    snakefile = tmp_path / layout
+    snakefile.parent.mkdir(parents=True, exist_ok=True)
+    snakefile.write_text("rule all:\n    input: []\n")
+    for command in ("snakemake -c1", "snakemake --cores 4 all", "snakemake -pk -j 8"):
+        detections = _runner_detections(command, tmp_path)
+        assert len(detections) == 1 and detections[0][1] is None, command
+        # Case-insensitive filesystems resolve `Snakefile` to a lowercase file,
+        # exactly as snakemake's own existence-ordered lookup does.
+        assert detections[0][0].samefile(snakefile), command
+
+
+def test_runner_without_resolvable_entry_is_still_detected(tmp_path: Path) -> None:
+    """A run whose entry file cannot be named is work, not silence."""
+    snake = _runner_detections("snakemake -c1", tmp_path)
+    assert len(snake) == 1 and snake[0][0] is None
+    assert "Snakemake" in snake[0][1]
+
+    remote = _runner_detections("nextflow run nf-core/rnaseq -r 3.14", tmp_path)
+    assert len(remote) == 1 and remote[0][0] is None
+    assert "nf-core/rnaseq" in remote[0][1]
+
+    wrapped = _runner_detections('sbatch -c 4 --wrap "python fit.py"', tmp_path)
+    assert len(wrapped) == 1 and wrapped[0][0] is None
+    assert "python fit.py" in wrapped[0][1]
+
+    assigned = _runner_detections("sbatch --wrap='Rscript fit.R'", tmp_path)
+    assert len(assigned) == 1 and "Rscript fit.R" in assigned[0][1]
+
+
+def test_runner_nextflow_directory_pipeline_uses_main_nf(tmp_path: Path) -> None:
+    (tmp_path / "main.nf").write_text("workflow {}\n")
+    assert _runner_detections("nextflow run . -profile test", tmp_path) == [
+        (tmp_path / "main.nf", None)
+    ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Shell: syntax check, inline source, stdin, help, no script.
+        "bash -n run.sh",
+        "bash -en run.sh",
+        "bash -c 'echo run.sh'",
+        "bash -s < run.sh",
+        "bash --version",
+        "bash --help run.sh",
+        "bash",
+        "bash notes.txt",
+        # Shell scripts mentioned rather than executed.
+        "cat run.sh",
+        "chmod +x run.sh",
+        "git add run.sh",
+        "echo bash run.sh",
+        "echo ./run.sh",
+        "run.sh",
+        "vim analysis/run.sh",
+        "if false; then\nbash run.sh\nfi",
+        "true # && bash run.sh",
+        # Snakemake: dry runs and non-executing modes.
+        "snakemake -n",
+        "snakemake -np -c1",
+        "snakemake --dry-run -c1",
+        "snakemake --dryrun",
+        "snakemake --help",
+        "snakemake --version",
+        "snakemake --lint",
+        "snakemake --list",
+        "snakemake --unlock",
+        "snakemake --dag | dot -Tpdf > dag.pdf",
+        "snakemake --rulegraph",
+        "snakemake --summary",
+        "snakemake --touch -c1",
+        "grep rule Snakefile",
+        "echo snakemake -c1",
+        # Nextflow: anything other than an executing `run`.
+        "nextflow -version",
+        "nextflow pull nf-core/rnaseq",
+        "nextflow log",
+        "nextflow run main.nf -preview",
+        "nextflow run -help",
+        "nextflow run main.nf -stub-run",
+        # sbatch: help and validation without submission.
+        "sbatch --help",
+        "sbatch --version",
+        "sbatch --usage",
+        "sbatch --test-only job.sh",
+        "squeue -u me",
+    ],
+)
+def test_runner_rejects_non_executing_forms(tmp_path: Path, command: str) -> None:
+    for name in ("run.sh", "job.sh", "Snakefile", "main.nf", "notes.txt"):
+        (tmp_path / name).write_text("echo hi\n")
+    (tmp_path / "analysis").mkdir()
+    (tmp_path / "analysis" / "run.sh").write_text("echo hi\n")
+    assert _runner_detections(command, tmp_path) == [], command
+
+
+def test_runner_failed_conditional_branch_is_not_proven(tmp_path: Path) -> None:
+    (tmp_path / "run.sh").write_text("echo hi\n")
+    assert _runner_detections("false && bash run.sh", tmp_path, bash_exit=1) == []
+    assert _runner_detections("true && bash run.sh", tmp_path, bash_exit=1) == [
+        (tmp_path / "run.sh", None)
+    ]
+
+
+def test_runner_is_analysis_gate(tmp_path: Path) -> None:
+    for command in (
+        "bash run.sh",
+        "./run.sh",
+        "snakemake -c1",
+        "sbatch job.sh",
+        "nextflow run main.nf",
+    ):
+        assert is_analysis(command), command
+    for command in ("ls -la", "cat run.sh", "git status"):
+        assert not is_analysis(command), command
+
+
+def test_runner_skips_shell_scripts_shipped_in_the_plugin(tmp_path: Path) -> None:
+    hook = lineage_event._EXECUTING_PLUGIN_ROOT / "skills/core/hooks/mycelium-health.sh"
+    assert hook.is_file()
+    assert _runner_detections(f"bash {hook}", tmp_path) == []
+    assert _runner_detections(str(hook), tmp_path) == []
+
+
+def test_main_records_runner_entry_script_as_lineage(tmp_path: Path) -> None:
+    import json
+    import subprocess
+
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    (tmp_path / "run.sh").write_text("#!/bin/bash\nsnakemake -c1\n")
+    target = tmp_path / "events.tmp"
+    base = [
+        sys.executable,
+        str(extractor),
+        "--cwd",
+        str(tmp_path),
+        "--ts",
+        "2026-10-11T12:00:00Z",
+        "--bash-exit",
+        "0",
+    ]
+
+    post_action = subprocess.run(
+        [*base, "--bash-cmd", "bash run.sh", "--check-post-action"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert post_action.returncode == 0, post_action.stderr
+
+    dry_run = subprocess.run(
+        [*base, "--bash-cmd", "snakemake -n", "--check-post-action"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert dry_run.returncode == 1, dry_run.stderr
+
+    result = subprocess.run(
+        [*base, "--bash-cmd", "bash run.sh", "--append-to", str(target)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    event = json.loads(target.read_text())
+    assert event["script"] == str(tmp_path / "run.sh")
+    assert "snakemake -c1" in event["script_source"]
+
+
+@pytest.mark.parametrize(
+    "command,expected_script",
+    [
+        # Option values that look like scripts are not the job script.
+        ("sbatch -o out.sh job.sh", "job.sh"),
+        ("sbatch --output out.sh job.sh", "job.sh"),
+        ("sbatch --output=out.sh job.sh", "job.sh"),
+        ("bash --rcfile rc.sh run.sh", "run.sh"),
+        # Arguments after the script belong to the script, not the runner.
+        ("bash run.sh --help", "run.sh"),
+        ("bash run.sh -n", "run.sh"),
+        ("sbatch job.sh --test-only", "job.sh"),
+        # Pipelines and quoting.
+        ("bash run.sh | tee logs/run.log", "run.sh"),
+        ('bash "my run.sh"', "my run.sh"),
+        ('"./my run.sh"', "my run.sh"),
+    ],
+)
+def test_runner_option_arity_and_script_arguments(
+    tmp_path: Path, command: str, expected_script: str
+) -> None:
+    (tmp_path / expected_script).write_text("echo hi\n")
+    assert _runner_detections(command, tmp_path) == [
+        (tmp_path / expected_script, None)
+    ], command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "bash run.sh"',
+        "echo 'snakemake -c1'",
+        'git commit -m "sbatch job.sh"',
+        "python -c 'print(\"nextflow run main.nf\")'",
+        "bashful run.sh",
+        "mysnakemake -c1",
+    ],
+)
+def test_runner_ignores_runner_text_in_arguments(tmp_path: Path, command: str) -> None:
+    for name in ("run.sh", "job.sh", "Snakefile", "main.nf"):
+        (tmp_path / name).write_text("echo hi\n")
+    assert _runner_detections(command, tmp_path) == [], command

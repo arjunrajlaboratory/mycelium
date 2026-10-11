@@ -3,7 +3,8 @@
 
 Invoked by mycelium-data-tracker.sh after each Bash tool call. Detects
 analysis invocations (python/R/Rscript/jupyter/uv-run/poetry-run/conda-run,
-including inline -c and -e), extracts script source, regex-scans for data
+including inline -c and -e) and pipeline runners (`bash`/`sh` scripts,
+`./run.sh`, snakemake, sbatch, `nextflow run`), extracts script source, regex-scans for data
 I/O and seeds, SHAs the script and the touched files AT EXECUTION TIME.
 
 If the command isn't an analysis or its script is unreadable, exits 0 silently.
@@ -161,6 +162,22 @@ RX_JUPYTER_SCRIPT_PATH = re.compile(
     rf"(?:nbconvert|execute)\s+{_JUPYTER_OPTIONS}"
     rf"(?P<path>{_JUPYTER_SCRIPT_PATH})"
 )
+# Workflow engines and shell wrappers run analysis the interpreter patterns
+# never see: `bash run.sh`, `./run.sh`, `snakemake`, `sbatch`, `nextflow run`.
+# These regexes only locate candidate command words; each candidate must pass
+# the shared command-position and control-flow proofs, and its parsed argv
+# must not select a non-executing mode (dry run, syntax check, help, lint).
+_SHELL_RUNNER_NAMES = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_PIPELINE_RUNNER_NAMES = frozenset({"snakemake", "sbatch", "nextflow"})
+RX_RUNNER_COMMAND = re.compile(
+    rf"(?<![A-Za-z0-9_.-])(?P<runner_exe>"
+    rf"{_shell_executable_pattern(r'(?:bash|sh|zsh|dash|ksh|snakemake|sbatch|nextflow)')})"
+)
+RX_SHELL_SCRIPT_COMMAND = re.compile(
+    rf"(?<![A-Za-z0-9_.-])(?P<runner_exe>{_shell_path_pattern(r'\.sh')})"
+)
+RUNNER_PATTERNS = (RX_RUNNER_COMMAND, RX_SHELL_SCRIPT_COMMAND)
+
 IGNORED_PYTHON_MODULES = {
     "black",
     "compileall",
@@ -629,6 +646,10 @@ def is_analysis(bash_cmd: str) -> bool:
     return any(
         _match_has_expected_executable(match, pattern)
         for pattern in ANALYSIS_PATTERNS
+        for match in pattern.finditer(bash_cmd)
+    ) or any(
+        _runner_word(match) is not None
+        for pattern in RUNNER_PATTERNS
         for match in pattern.finditer(bash_cmd)
     )
 
@@ -1624,6 +1645,322 @@ def _match_is_proven_executed(
     return False
 
 
+def _runner_word(match: re.Match[str]) -> str | None:
+    """Return a decoded runner command word, or ``None`` for a near miss.
+
+    A bare ``x.sh`` is resolved through PATH rather than the cwd, so direct
+    execution counts only for a word containing a directory separator.
+    """
+    word = _decode_shell_word(match.group("runner_exe"))
+    if word is None:
+        return None
+    name = Path(word).name
+    if name in _SHELL_RUNNER_NAMES or name in _PIPELINE_RUNNER_NAMES:
+        return word
+    if name.endswith(".sh") and "/" in word:
+        return word
+    return None
+
+
+_SHELL_VALUE_OPTIONS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+# -c runs inline source, -n only parses, -s reads the script from stdin.
+_SHELL_NONEXECUTING_SHORT = frozenset("cns")
+_SHELL_TERMINAL_LONG = {"--help", "--version"}
+_SHELL_SCRIPT_SUFFIXES = (".sh", ".bash")
+
+
+def _shell_runner_script(args: list[str]) -> str | None:
+    """Return the script a ``bash``-family argv executes, if it runs one."""
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            index += 1
+            break
+        if token in _SHELL_VALUE_OPTIONS:
+            index += 2
+            continue
+        if token.startswith("--"):
+            if token.split("=", 1)[0] in _SHELL_TERMINAL_LONG:
+                return None
+            index += 1
+            continue
+        if len(token) > 1 and token[0] in "-+":
+            flags = token[1:]
+            if not flags.isalpha():
+                return None
+            if token[0] == "-" and _SHELL_NONEXECUTING_SHORT & set(flags):
+                return None
+            # `-eo pipefail`: a trailing o/O takes the next word as its value.
+            index += 2 if flags[-1] in "oO" else 1
+            continue
+        break
+    if index >= len(args):
+        return None
+    script = args[index]
+    return script if script.endswith(_SHELL_SCRIPT_SUFFIXES) else None
+
+
+_SNAKEMAKE_NONEXECUTING_LONG = frozenset(
+    {
+        "--archive",
+        "--bash-completion",
+        "--cleanup-metadata",
+        "--cleanup-shadow",
+        "--cm",
+        "--conda-cleanup-envs",
+        "--conda-cleanup-pkgs",
+        "--conda-create-envs-only",
+        "--containerize",
+        "--create-envs-only",
+        "--d3dag",
+        "--dag",
+        "--delete-all-output",
+        "--delete-temp-output",
+        "--detailed-summary",
+        "--dry-run",
+        "--dryrun",
+        "--export-cwl",
+        "--filegraph",
+        "--generate-unit-tests",
+        "--help",
+        "--lc",
+        "--li",
+        "--lint",
+        "--list",
+        "--list-changes",
+        "--list-code-changes",
+        "--list-conda-envs",
+        "--list-input-changes",
+        "--list-params-changes",
+        "--list-rules",
+        "--list-target-rules",
+        "--list-untracked",
+        "--list-version-changes",
+        "--lp",
+        "--lt",
+        "--lu",
+        "--lv",
+        "--print-compilation",
+        "--report",
+        "--rulegraph",
+        "--summary",
+        "--touch",
+        "--unlock",
+        "--version",
+    }
+)
+# Boolean short options that may be clustered (`-np`, `-pk`). A cluster made
+# only of these letters is parsed; anything else is left as an option value.
+_SNAKEMAKE_FLAG_SHORT = frozenset("nprkFSDlthv")
+_SNAKEMAKE_NONEXECUTING_SHORT = frozenset("nSDlthv")
+_SNAKEMAKE_DEFAULT_SNAKEFILES = (
+    "Snakefile",
+    "snakefile",
+    "workflow/Snakefile",
+    "workflow/snakefile",
+)
+
+
+def _snakemake_detection(
+    args: list[str], cwd: Path
+) -> tuple[str | None, str | None] | None:
+    """Return (entry path, pseudo-source) for an executing snakemake argv."""
+    snakefile: str | None = None
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token.startswith("--"):
+            name, has_value, value = token.partition("=")
+            if name in _SNAKEMAKE_NONEXECUTING_LONG:
+                return None
+            if name == "--snakefile":
+                if has_value:
+                    snakefile = value
+                elif index + 1 < len(args):
+                    snakefile = args[index + 1]
+                    index += 1
+        elif token == "-s":
+            if index + 1 < len(args):
+                snakefile = args[index + 1]
+                index += 1
+        elif (
+            len(token) > 1
+            and token[0] == "-"
+            and token[1:].isalpha()
+            and set(token[1:]) <= _SNAKEMAKE_FLAG_SHORT
+        ):
+            if _SNAKEMAKE_NONEXECUTING_SHORT & set(token[1:]):
+                return None
+        elif token.startswith("-s") and len(token) > 2:
+            snakefile = token[2:]
+        index += 1
+    if snakefile:
+        return snakefile, None
+    for candidate in _SNAKEMAKE_DEFAULT_SNAKEFILES:
+        if (cwd / candidate).is_file():
+            return candidate, None
+    return None, "# Snakemake workflow run (no Snakefile found)"
+
+
+_NEXTFLOW_GLOBAL_VALUE_OPTIONS = {"-C", "-c", "-config", "-log", "-syslog", "-trace"}
+_NEXTFLOW_GLOBAL_FLAG_OPTIONS = {"-q", "-quiet", "-bg", "-background", "-d", "-dockerize"}
+_NEXTFLOW_NONEXECUTING_RUN_OPTIONS = {"-h", "-help", "-preview", "-stub", "-stub-run"}
+
+
+def _nextflow_detection(
+    args: list[str], cwd: Path
+) -> tuple[str | None, str | None] | None:
+    """Return (entry path, pseudo-source) for ``nextflow run``; else ``None``."""
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in _NEXTFLOW_GLOBAL_VALUE_OPTIONS:
+            index += 2
+        elif token in _NEXTFLOW_GLOBAL_FLAG_OPTIONS or token.startswith("-D"):
+            index += 1
+        else:
+            break
+    if index >= len(args) or args[index] != "run":
+        return None
+    run_args = args[index + 1 :]
+    if any(token in _NEXTFLOW_NONEXECUTING_RUN_OPTIONS for token in run_args):
+        return None
+    if not run_args or run_args[0].startswith("-"):
+        return None, "# Nextflow pipeline run"
+    pipeline = run_args[0]
+    if pipeline.endswith(".nf"):
+        return pipeline, None
+    if (cwd / pipeline / "main.nf").is_file():
+        return str(Path(pipeline) / "main.nf"), None
+    return None, f"# Nextflow pipeline run: {pipeline}"
+
+
+# getopt optional arguments must be attached, so these are flags when bare.
+_SBATCH_FLAG_SHORT = {"-H", "-I", "-k", "-O", "-Q", "-s", "-v", "-W"}
+_SBATCH_FLAG_LONG = {
+    "--contiguous",
+    "--exclusive",
+    "--get-user-env",
+    "--hold",
+    "--ignore-pbs",
+    "--immediate",
+    "--nice",
+    "--no-kill",
+    "--no-requeue",
+    "--overcommit",
+    "--oversubscribe",
+    "--parsable",
+    "--quiet",
+    "--requeue",
+    "--spread-job",
+    "--use-min-nodes",
+    "--verbose",
+    "--wait",
+}
+_SBATCH_NONEXECUTING = {"-h", "--help", "-V", "--version", "-u", "--usage", "--test-only"}
+
+
+def _sbatch_detection(args: list[str]) -> tuple[str | None, str | None] | None:
+    """Return (job script, pseudo-source) for an ``sbatch`` submission."""
+    index = 0
+    while index < len(args):
+        token = args[index]
+        name, has_value, value = token.partition("=")
+        if name in _SBATCH_NONEXECUTING:
+            return None
+        if name == "--wrap":
+            if has_value:
+                return None, f"# sbatch --wrap: {value}"
+            if index + 1 < len(args):
+                return None, f"# sbatch --wrap: {args[index + 1]}"
+            return None
+        if token.startswith("--"):
+            index += 1 if has_value or name in _SBATCH_FLAG_LONG else 2
+        elif token.startswith("-") and len(token) > 1:
+            # `-J name` takes a value; `-Jname` carries it attached.
+            index += 1 if len(token) > 2 or token in _SBATCH_FLAG_SHORT else 2
+        else:
+            return token, None
+    return None, "# sbatch job submission (script from stdin)"
+
+
+def _runner_detection(
+    argv: list[str], cwd: Path
+) -> tuple[str | None, str | None] | None:
+    """Dispatch a runner argv to (entry path, pseudo-source), or ``None``."""
+    name = Path(argv[0]).name
+    args = argv[1:]
+    if name in _SHELL_RUNNER_NAMES:
+        script = _shell_runner_script(args)
+        return (script, None) if script is not None else None
+    if name == "snakemake":
+        return _snakemake_detection(args, cwd)
+    if name == "nextflow":
+        return _nextflow_detection(args, cwd)
+    if name == "sbatch":
+        return _sbatch_detection(args)
+    return argv[0], None
+
+
+def _is_bundled_plugin_file(canonical: Path) -> bool:
+    """True for a file shipped inside the running Mycelium plugin tree."""
+    try:
+        return canonical.is_relative_to(_EXECUTING_PLUGIN_ROOT)
+    except ValueError:
+        return False
+
+
+def _detect_runners(
+    bash_cmd: str,
+    cwd: Path,
+    *,
+    bash_exit: int | None,
+    require_execution_evidence: bool,
+) -> list[tuple[Path | None, str | None, Path]]:
+    """Detect proven pipeline-runner and shell-script executions."""
+    out: list[tuple[Path | None, str | None, Path]] = []
+    for pattern in RUNNER_PATTERNS:
+        for m in pattern.finditer(bash_cmd):
+            word = _runner_word(m)
+            if word is None:
+                continue
+            effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
+            if effective_cwd is None:
+                continue
+            if require_execution_evidence and not _match_is_proven_executed(
+                bash_cmd, m.start(), bash_exit, cwd
+            ):
+                continue
+            fragment = _simple_command_suffix(bash_cmd, m.start())
+            if fragment is None:
+                continue
+            argv = _simple_command_argv(fragment)
+            if not argv or argv[0] != word:
+                continue
+            detection = _runner_detection(argv, effective_cwd)
+            if detection is None:
+                continue
+            raw_path, source = detection
+            if raw_path is None:
+                out.append((None, source, effective_cwd))
+                continue
+            unresolved = Path(raw_path)
+            if not unresolved.is_absolute():
+                unresolved = effective_cwd / unresolved
+            try:
+                path = Path(os.path.abspath(unresolved))
+                canonical = Path(os.path.realpath(unresolved))
+            except ValueError:
+                continue
+            if _is_bundled_plugin_file(canonical) or _is_managed_utility_path(
+                canonical
+            ):
+                continue
+            out.append((path, None, effective_cwd))
+    return out
+
+
 def _detect_scripts_with_cwd(
     bash_cmd: str,
     cwd: Path,
@@ -1751,6 +2088,19 @@ def _detect_scripts_with_cwd(
             if path not in seen_paths:
                 out.append((path, None, effective_cwd))
                 seen_paths.add(path)
+    for path, source, effective_cwd in _detect_runners(
+        bash_cmd,
+        cwd,
+        bash_exit=bash_exit,
+        require_execution_evidence=require_execution_evidence,
+    ):
+        if path is not None:
+            if path not in seen_paths:
+                out.append((path, None, effective_cwd))
+                seen_paths.add(path)
+        elif (source, effective_cwd) not in seen_inline:
+            out.append((None, source, effective_cwd))
+            seen_inline.add((source, effective_cwd))
     return out
 
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # mycelium-data-tracker.sh — Claude Code PostToolUse hook (Bash matcher)
-# Detects analysis invocations (python/R/Rscript/jupyter/uv/poetry), regex-
+# Detects analysis invocations (python/R/Rscript/jupyter/uv/poetry, plus
+# shell-script, snakemake, sbatch, and nextflow runners), regex-
 # extracts the script's data I/O at execution time, SHA-snapshots the script
 # + touched files, and appends one NDJSON event per detected script to
 # .mycelium/mycelium-data-events.tmp under fcntl.flock. Consumed at Stop by
