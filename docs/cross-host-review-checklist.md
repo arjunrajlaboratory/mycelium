@@ -192,7 +192,10 @@ hook, filesystem, or lifecycle boundaries.
       `sbatch`, `nextflow run`) open the post-action cycle and record their
       entry point, while their non-executing modes (`bash -n`, snakemake dry
       runs and graph/lint modes, `nextflow run -preview`, `sbatch --test-only`)
-      and mere mentions (`cat run.sh`) do not.
+      and mere mentions (`cat run.sh`) do not. Modes selected by an option
+      value (`--executor dryrun`, `bash -o noexec`) are parsed, and options
+      that move the run (`snakemake --directory`, `sbatch --chdir`) set the
+      directory lineage resolves I/O against, never the entry point.
 - [ ] Absolute, versioned, virtual-environment, and PATH-resolved interpreter
       names are detected, including quoted or backslash-escaped paths with
       whitespace.

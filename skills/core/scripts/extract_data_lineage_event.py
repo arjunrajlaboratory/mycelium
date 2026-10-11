@@ -39,6 +39,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 SIZE_LIMIT_BYTES = 100 * 1024 * 1024
 EMBED_LIMIT_BYTES = 100 * 1024
@@ -1662,37 +1663,96 @@ def _runner_word(match: re.Match[str]) -> str | None:
     return None
 
 
-_SHELL_VALUE_OPTIONS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
-# -c runs inline source, -n only parses, -s reads the script from stdin.
-_SHELL_NONEXECUTING_SHORT = frozenset("cns")
-_SHELL_TERMINAL_LONG = {"--help", "--version"}
+class _RunnerRun(NamedTuple):
+    """What one runner invocation executes.
+
+    ``entry`` is the entry-point path as written (resolved against the
+    invocation cwd) and ``source`` a descriptive pseudo-source when no entry
+    file can be named; exactly one is set. ``run_dir`` is the directory the
+    runner executes the workflow in when an option changes it
+    (``snakemake --directory``, ``sbatch --chdir``), else ``None``.
+    """
+
+    entry: str | None
+    source: str | None
+    run_dir: str | None = None
+
+
+# Shell options form a small, closed set. Model it completely: an option
+# outside it makes the shell exit with an error before running anything, so
+# an unknown option is not execution evidence.
+_SHELL_EXECUTING_SHORT = {
+    "bash": frozenset("abefhkmptuvxBCEHPTilr"),
+    # POSIX set options plus the login/privileged flags sh, dash, ksh, and
+    # zsh all accept.
+    "default": frozenset("abCefhiklmpuvx"),
+}
+# -c runs inline source, -n and -D only parse, -s reads the script from stdin.
+_SHELL_NONEXECUTING_SHORT = frozenset("cnsD")
+_BASH_EXECUTING_LONG = frozenset(
+    {
+        "--debugger",
+        "--login",
+        "--noediting",
+        "--noprofile",
+        "--norc",
+        "--posix",
+        "--restricted",
+        "--verbose",
+    }
+)
+_BASH_VALUE_LONG = frozenset({"--rcfile", "--init-file"})
 _SHELL_SCRIPT_SUFFIXES = (".sh", ".bash")
 
 
-def _shell_runner_script(args: list[str]) -> str | None:
-    """Return the script a ``bash``-family argv executes, if it runs one."""
+def _shell_option_is_noexec(name: str) -> bool:
+    """``-o noexec`` (zsh also spells it ``NO_EXEC``) parses without running."""
+    return name.lower().replace("_", "") == "noexec"
+
+
+def _shell_runner_script(shell: str, args: list[str]) -> str | None:
+    """Return the script a shell argv executes, if it runs one."""
+    executing_short = _SHELL_EXECUTING_SHORT.get(
+        shell, _SHELL_EXECUTING_SHORT["default"]
+    )
     index = 0
     while index < len(args):
         token = args[index]
         if token == "--":
             index += 1
             break
-        if token in _SHELL_VALUE_OPTIONS:
-            index += 2
-            continue
         if token.startswith("--"):
-            if token.split("=", 1)[0] in _SHELL_TERMINAL_LONG:
+            if shell != "bash":
                 return None
-            index += 1
+            if token in _BASH_VALUE_LONG:
+                index += 2
+            elif token in _BASH_EXECUTING_LONG:
+                index += 1
+            else:
+                # --help, --version, --dump-strings, --dump-po-strings,
+                # --pretty-print, and unknown options all exit without
+                # running the script.
+                return None
             continue
         if len(token) > 1 and token[0] in "-+":
-            flags = token[1:]
-            if not flags.isalpha():
+            sign, flags = token[0], token[1:]
+            takes_value = flags[-1] in "oO"
+            letters = flags[:-1] if takes_value else flags
+            if not letters.isalpha() and letters:
                 return None
-            if token[0] == "-" and _SHELL_NONEXECUTING_SHORT & set(flags):
+            if sign == "-" and _SHELL_NONEXECUTING_SHORT & set(letters):
                 return None
-            # `-eo pipefail`: a trailing o/O takes the next word as its value.
-            index += 2 if flags[-1] in "oO" else 1
+            if set(letters) - executing_short:
+                return None
+            if takes_value:
+                if index + 1 >= len(args):
+                    return None
+                value = args[index + 1]
+                if sign == "-" and flags[-1] == "o" and _shell_option_is_noexec(value):
+                    return None
+                index += 2
+            else:
+                index += 1
             continue
         break
     if index >= len(args):
@@ -1718,6 +1778,7 @@ _SNAKEMAKE_NONEXECUTING_LONG = frozenset(
         "--delete-all-output",
         "--delete-temp-output",
         "--detailed-summary",
+        "--draft-notebook",
         "--dry-run",
         "--dryrun",
         "--export-cwl",
@@ -1754,6 +1815,17 @@ _SNAKEMAKE_NONEXECUTING_LONG = frozenset(
 # only of these letters is parsed; anything else is left as an option value.
 _SNAKEMAKE_FLAG_SHORT = frozenset("nprkFSDlthv")
 _SNAKEMAKE_NONEXECUTING_SHORT = frozenset("nSDlthv")
+# Value options whose value changes what runs or where. Snakemake's built-in
+# `dryrun` and `touch` executors are the dry-run and --touch modes.
+_SNAKEMAKE_VALUE_OPTIONS = {
+    "-s": "snakefile",
+    "--snakefile": "snakefile",
+    "-d": "directory",
+    "--directory": "directory",
+    "-e": "executor",
+    "--executor": "executor",
+}
+_SNAKEMAKE_NONEXECUTING_EXECUTORS = frozenset({"dryrun", "touch"})
 _SNAKEMAKE_DEFAULT_SNAKEFILES = (
     "Snakefile",
     "snakefile",
@@ -1762,28 +1834,33 @@ _SNAKEMAKE_DEFAULT_SNAKEFILES = (
 )
 
 
-def _snakemake_detection(
-    args: list[str], cwd: Path
-) -> tuple[str | None, str | None] | None:
-    """Return (entry path, pseudo-source) for an executing snakemake argv."""
-    snakefile: str | None = None
+def _snakemake_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
+    """Describe an executing snakemake argv, or ``None`` for a non-run.
+
+    Snakemake resolves the Snakefile in the invocation directory and only
+    then changes into ``--directory`` (snakemake.api.WorkflowApi), so the
+    entry stays cwd-relative while the workflow's I/O uses the directory.
+    """
+    values: dict[str, str] = {}
     index = 0
     while index < len(args):
         token = args[index]
+        name, has_value, value = token.partition("=")
         if token.startswith("--"):
-            name, has_value, value = token.partition("=")
             if name in _SNAKEMAKE_NONEXECUTING_LONG:
                 return None
-            if name == "--snakefile":
-                if has_value:
-                    snakefile = value
-                elif index + 1 < len(args):
-                    snakefile = args[index + 1]
+            if name in _SNAKEMAKE_VALUE_OPTIONS:
+                if not has_value:
+                    if index + 1 >= len(args):
+                        return None
+                    value = args[index + 1]
                     index += 1
-        elif token == "-s":
-            if index + 1 < len(args):
-                snakefile = args[index + 1]
-                index += 1
+                values[_SNAKEMAKE_VALUE_OPTIONS[name]] = value
+        elif token in _SNAKEMAKE_VALUE_OPTIONS:
+            if index + 1 >= len(args):
+                return None
+            values[_SNAKEMAKE_VALUE_OPTIONS[token]] = args[index + 1]
+            index += 1
         elif (
             len(token) > 1
             and token[0] == "-"
@@ -1792,15 +1869,19 @@ def _snakemake_detection(
         ):
             if _SNAKEMAKE_NONEXECUTING_SHORT & set(token[1:]):
                 return None
-        elif token.startswith("-s") and len(token) > 2:
-            snakefile = token[2:]
+        elif len(token) > 2 and token[:2] in _SNAKEMAKE_VALUE_OPTIONS:
+            values[_SNAKEMAKE_VALUE_OPTIONS[token[:2]]] = token[2:]
         index += 1
+    if values.get("executor") in _SNAKEMAKE_NONEXECUTING_EXECUTORS:
+        return None
+    run_dir = values.get("directory")
+    snakefile = values.get("snakefile")
     if snakefile:
-        return snakefile, None
+        return _RunnerRun(snakefile, None, run_dir)
     for candidate in _SNAKEMAKE_DEFAULT_SNAKEFILES:
         if (cwd / candidate).is_file():
-            return candidate, None
-    return None, "# Snakemake workflow run (no Snakefile found)"
+            return _RunnerRun(candidate, None, run_dir)
+    return _RunnerRun(None, "# Snakemake workflow run (no Snakefile found)", run_dir)
 
 
 _NEXTFLOW_GLOBAL_VALUE_OPTIONS = {"-C", "-c", "-config", "-log", "-syslog", "-trace"}
@@ -1808,10 +1889,8 @@ _NEXTFLOW_GLOBAL_FLAG_OPTIONS = {"-q", "-quiet", "-bg", "-background", "-d", "-d
 _NEXTFLOW_NONEXECUTING_RUN_OPTIONS = {"-h", "-help", "-preview", "-stub", "-stub-run"}
 
 
-def _nextflow_detection(
-    args: list[str], cwd: Path
-) -> tuple[str | None, str | None] | None:
-    """Return (entry path, pseudo-source) for ``nextflow run``; else ``None``."""
+def _nextflow_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
+    """Describe ``nextflow run``; any other subcommand is not a run."""
     index = 0
     while index < len(args):
         token = args[index]
@@ -1827,13 +1906,13 @@ def _nextflow_detection(
     if any(token in _NEXTFLOW_NONEXECUTING_RUN_OPTIONS for token in run_args):
         return None
     if not run_args or run_args[0].startswith("-"):
-        return None, "# Nextflow pipeline run"
+        return _RunnerRun(None, "# Nextflow pipeline run")
     pipeline = run_args[0]
     if pipeline.endswith(".nf"):
-        return pipeline, None
+        return _RunnerRun(pipeline, None)
     if (cwd / pipeline / "main.nf").is_file():
-        return str(Path(pipeline) / "main.nf"), None
-    return None, f"# Nextflow pipeline run: {pipeline}"
+        return _RunnerRun(str(Path(pipeline) / "main.nf"), None)
+    return _RunnerRun(None, f"# Nextflow pipeline run: {pipeline}")
 
 
 # getopt optional arguments must be attached, so these are flags when bare.
@@ -1861,46 +1940,90 @@ _SBATCH_FLAG_LONG = {
 _SBATCH_NONEXECUTING = {"-h", "--help", "-V", "--version", "-u", "--usage", "--test-only"}
 
 
-def _sbatch_detection(args: list[str]) -> tuple[str | None, str | None] | None:
-    """Return (job script, pseudo-source) for an ``sbatch`` submission."""
+def _sbatch_detection(args: list[str]) -> _RunnerRun | None:
+    """Describe an ``sbatch`` submission, or ``None`` when nothing is queued.
+
+    The job script is read at submission, relative to the invocation cwd;
+    ``-D``/``--chdir`` sets the directory the job then runs in.
+    """
+    chdir: str | None = None
+    wrap: str | None = None
+    script: str | None = None
     index = 0
     while index < len(args):
         token = args[index]
         name, has_value, value = token.partition("=")
         if name in _SBATCH_NONEXECUTING:
             return None
-        if name == "--wrap":
-            if has_value:
-                return None, f"# sbatch --wrap: {value}"
-            if index + 1 < len(args):
-                return None, f"# sbatch --wrap: {args[index + 1]}"
-            return None
         if token.startswith("--"):
-            index += 1 if has_value or name in _SBATCH_FLAG_LONG else 2
+            if name in _SBATCH_FLAG_LONG or has_value:
+                index += 1
+            elif index + 1 < len(args):
+                value = args[index + 1]
+                index += 2
+            else:
+                return None
+            if name == "--wrap":
+                wrap = value
+            elif name == "--chdir":
+                chdir = value
         elif token.startswith("-") and len(token) > 1:
             # `-J name` takes a value; `-Jname` carries it attached.
-            index += 1 if len(token) > 2 or token in _SBATCH_FLAG_SHORT else 2
+            if len(token) > 2:
+                value = token[2:]
+                index += 1
+            elif token in _SBATCH_FLAG_SHORT:
+                index += 1
+                continue
+            elif index + 1 < len(args):
+                value = args[index + 1]
+                index += 2
+            else:
+                return None
+            if token[:2] == "-D":
+                chdir = value
         else:
-            return token, None
-    return None, "# sbatch job submission (script from stdin)"
+            script = token
+            break
+    if wrap is not None:
+        return _RunnerRun(None, f"# sbatch --wrap: {wrap}", chdir)
+    if script is not None:
+        return _RunnerRun(script, None, chdir)
+    return _RunnerRun(None, "# sbatch job submission (script from stdin)", chdir)
 
 
-def _runner_detection(
-    argv: list[str], cwd: Path
-) -> tuple[str | None, str | None] | None:
-    """Dispatch a runner argv to (entry path, pseudo-source), or ``None``."""
+def _runner_detection(argv: list[str], cwd: Path) -> _RunnerRun | None:
+    """Dispatch a runner argv to what it executes, or ``None`` for a non-run."""
     name = Path(argv[0]).name
     args = argv[1:]
     if name in _SHELL_RUNNER_NAMES:
-        script = _shell_runner_script(args)
-        return (script, None) if script is not None else None
+        script = _shell_runner_script(name, args)
+        return _RunnerRun(script, None) if script is not None else None
     if name == "snakemake":
         return _snakemake_detection(args, cwd)
     if name == "nextflow":
         return _nextflow_detection(args, cwd)
     if name == "sbatch":
         return _sbatch_detection(args)
-    return argv[0], None
+    return _RunnerRun(argv[0], None)
+
+
+def _resolve_runner_directory(value: str, cwd: Path) -> Path | None:
+    """Resolve a runner's static run directory; ``None`` when unknowable.
+
+    The directory need not exist yet (snakemake creates it), but a value the
+    shell would expand (``$VAR``, a backtick substitution, ``~``) cannot be
+    reproduced from argv, so I/O under it is left unresolved, not guessed.
+    """
+    if not value or any(marker in value for marker in ("$", "`", "~")):
+        return None
+    target = Path(value)
+    if not target.is_absolute():
+        target = cwd / target
+    try:
+        return Path(os.path.abspath(target))
+    except ValueError:
+        return None
 
 
 def _is_bundled_plugin_file(canonical: Path) -> bool:
@@ -1917,9 +2040,13 @@ def _detect_runners(
     *,
     bash_exit: int | None,
     require_execution_evidence: bool,
-) -> list[tuple[Path | None, str | None, Path]]:
-    """Detect proven pipeline-runner and shell-script executions."""
-    out: list[tuple[Path | None, str | None, Path]] = []
+) -> list[tuple[Path | None, str | None, Path | None]]:
+    """Detect proven pipeline-runner and shell-script executions.
+
+    The third element is the directory the run's I/O resolves against, or
+    ``None`` when a runner option moves the run somewhere unknowable.
+    """
+    out: list[tuple[Path | None, str | None, Path | None]] = []
     for pattern in RUNNER_PATTERNS:
         for m in pattern.finditer(bash_cmd):
             word = _runner_word(m)
@@ -1938,14 +2065,18 @@ def _detect_runners(
             argv = _simple_command_argv(fragment)
             if not argv or argv[0] != word:
                 continue
-            detection = _runner_detection(argv, effective_cwd)
-            if detection is None:
+            run = _runner_detection(argv, effective_cwd)
+            if run is None:
                 continue
-            raw_path, source = detection
-            if raw_path is None:
-                out.append((None, source, effective_cwd))
+            io_cwd = (
+                effective_cwd
+                if run.run_dir is None
+                else _resolve_runner_directory(run.run_dir, effective_cwd)
+            )
+            if run.entry is None:
+                out.append((None, run.source, io_cwd))
                 continue
-            unresolved = Path(raw_path)
+            unresolved = Path(run.entry)
             if not unresolved.is_absolute():
                 unresolved = effective_cwd / unresolved
             try:
@@ -1957,7 +2088,7 @@ def _detect_runners(
                 canonical
             ):
                 continue
-            out.append((path, None, effective_cwd))
+            out.append((path, None, io_cwd))
     return out
 
 
@@ -1968,10 +2099,10 @@ def _detect_scripts_with_cwd(
     bash_exit: int | None = None,
     require_execution_evidence: bool = False,
     include_python_inline: bool = True,
-) -> list[tuple[Path | None, str | None, Path]]:
-    out: list[tuple[Path | None, str | None, Path]] = []
+) -> list[tuple[Path | None, str | None, Path | None]]:
+    out: list[tuple[Path | None, str | None, Path | None]] = []
     seen_paths: set[Path] = set()
-    seen_inline: set[tuple[str, Path]] = set()
+    seen_inline: set[tuple[str, Path | None]] = set()
     for m in RX_PYTHON_C.finditer(bash_cmd):
         if not _match_has_expected_executable(m, RX_PYTHON_C):
             continue
@@ -2088,7 +2219,7 @@ def _detect_scripts_with_cwd(
             if path not in seen_paths:
                 out.append((path, None, effective_cwd))
                 seen_paths.add(path)
-    for path, source, effective_cwd in _detect_runners(
+    for path, source, io_cwd in _detect_runners(
         bash_cmd,
         cwd,
         bash_exit=bash_exit,
@@ -2096,11 +2227,11 @@ def _detect_scripts_with_cwd(
     ):
         if path is not None:
             if path not in seen_paths:
-                out.append((path, None, effective_cwd))
+                out.append((path, None, io_cwd))
                 seen_paths.add(path)
-        elif (source, effective_cwd) not in seen_inline:
-            out.append((None, source, effective_cwd))
-            seen_inline.add((source, effective_cwd))
+        elif (source, io_cwd) not in seen_inline:
+            out.append((None, source, io_cwd))
+            seen_inline.add((source, io_cwd))
     return out
 
 
@@ -2667,11 +2798,14 @@ def get_git_sha(cwd: Path) -> str | None:
 def build_event_for_detection(
     detection: tuple[Path | None, str | None],
     args: argparse.Namespace,
-    cwd: Path,
+    cwd: Path | None,
     git_sha: str | None,
 ) -> dict | None:
     """Build one NDJSON event dict for a single (script_path, inline) detection.
 
+    ``cwd`` is the directory the run's relative I/O resolves against, or
+    ``None`` when a runner moved the run somewhere unknowable; its literal
+    paths are then left unresolved rather than recorded under a wrong root.
     Returns None only if the script is unreadable or the detection is empty.
     """
     script_path, inline_source = detection
@@ -2697,6 +2831,24 @@ def build_event_for_detection(
         return None
 
     inputs, outputs, filters, seeds = scan_source(source)
+    if cwd is None:
+        return _event_dict(
+            args,
+            script_path,
+            script_sha,
+            script_source_embed,
+            git_sha,
+            inputs=[],
+            outputs=[],
+            io_detection="unresolved",
+            lineage_warnings=[
+                "The runner's working directory could not be resolved "
+                "statically, so the script's literal I/O paths were not "
+                "recorded."
+            ],
+            filters=filters,
+            seeds=seeds,
+        )
     recovered_inputs, recovered_outputs = _repository_literal_io(
         source, cwd, inputs, outputs
     )
@@ -2713,6 +2865,35 @@ def build_event_for_detection(
             "resolve paths dynamically or delegate I/O through imports."
         )
 
+    return _event_dict(
+        args,
+        script_path,
+        script_sha,
+        script_source_embed,
+        git_sha,
+        inputs=[file_record(p, cwd) for p in inputs],
+        outputs=[file_record(p, cwd) for p in outputs],
+        io_detection=io_detection,
+        lineage_warnings=lineage_warnings,
+        filters=filters,
+        seeds=seeds,
+    )
+
+
+def _event_dict(
+    args: argparse.Namespace,
+    script_path: Path | None,
+    script_sha: str | None,
+    script_source_embed: str | None,
+    git_sha: str | None,
+    *,
+    inputs: list[dict],
+    outputs: list[dict],
+    io_detection: str,
+    lineage_warnings: list[str],
+    filters: list[str],
+    seeds: list[int],
+) -> dict:
     return {
         "ts": args.ts,
         "agent_id": args.agent_id or None,
@@ -2724,8 +2905,8 @@ def build_event_for_detection(
         "script_sha256": script_sha,
         "script_source": script_source_embed,
         "git_sha": git_sha,
-        "inputs": [file_record(p, cwd) for p in inputs],
-        "outputs": [file_record(p, cwd) for p in outputs],
+        "inputs": inputs,
+        "outputs": outputs,
         "io_detection": io_detection,
         "lineage_warnings": lineage_warnings,
         "filters_detected": filters,

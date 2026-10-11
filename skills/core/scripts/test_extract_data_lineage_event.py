@@ -2805,3 +2805,202 @@ def test_runner_ignores_runner_text_in_arguments(tmp_path: Path, command: str) -
     for name in ("run.sh", "job.sh", "Snakefile", "main.nf"):
         (tmp_path / name).write_text("echo hi\n")
     assert _runner_detections(command, tmp_path) == [], command
+
+
+# ---------- runner semantics: option values and execution directory ----------
+
+
+def _runner_cwds(command: str, cwd: Path):
+    return [
+        (script, inline, io_cwd)
+        for script, inline, io_cwd in lineage_event._detect_scripts_with_cwd(
+            command,
+            cwd,
+            bash_exit=0,
+            require_execution_evidence=True,
+            include_python_inline=False,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "snakemake -d work -c1",
+        "snakemake --directory work -c1",
+        "snakemake --directory=work -c1",
+        "snakemake -dwork -c1",
+    ],
+)
+def test_runner_snakemake_directory_sets_io_cwd_not_entry(
+    tmp_path: Path, command: str
+) -> None:
+    """Snakemake resolves the Snakefile before changing into --directory."""
+    (tmp_path / "Snakefile").write_text("rule all:\n    input: []\n")
+    (tmp_path / "work").mkdir()
+    assert _runner_cwds(command, tmp_path) == [
+        (tmp_path / "Snakefile", None, tmp_path / "work")
+    ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sbatch -D work job.sh",
+        "sbatch --chdir work job.sh",
+        "sbatch --chdir=work job.sh",
+        "sbatch -Dwork job.sh",
+        "sbatch -J x -D work -p short job.sh",
+    ],
+)
+def test_runner_sbatch_chdir_sets_io_cwd_not_entry(
+    tmp_path: Path, command: str
+) -> None:
+    """The job script is resolved at submission; it runs under --chdir."""
+    (tmp_path / "job.sh").write_text("echo hi\n")
+    (tmp_path / "work").mkdir()
+    assert _runner_cwds(command, tmp_path) == [
+        (tmp_path / "job.sh", None, tmp_path / "work")
+    ]
+
+
+def test_runner_sbatch_wrap_carries_chdir(tmp_path: Path) -> None:
+    (tmp_path / "work").mkdir()
+    detections = _runner_cwds('sbatch --chdir work --wrap "python fit.py"', tmp_path)
+    assert len(detections) == 1
+    assert detections[0][2] == tmp_path / "work"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sbatch --chdir=$SCRATCH/run job.sh",
+        "sbatch -D `pwd`/run job.sh",
+        "snakemake --directory $WORK -c1",
+    ],
+)
+def test_runner_dynamic_directory_keeps_run_but_not_io_cwd(
+    tmp_path: Path, command: str
+) -> None:
+    """An unknowable run directory is still a run; its I/O cwd is unknown."""
+    for name in ("job.sh", "Snakefile"):
+        (tmp_path / name).write_text("echo hi\n")
+    detections = _runner_cwds(command, tmp_path)
+    assert len(detections) == 1, command
+    assert detections[0][0] is not None
+    assert detections[0][2] is None
+
+
+def test_main_resolves_runner_io_under_its_directory(tmp_path: Path) -> None:
+    import json
+    import subprocess
+
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    (tmp_path / "Snakefile").write_text(
+        "import pandas as pd\npd.read_csv('inputs.csv')\n"
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "inputs.csv").write_text("a\n1\n")
+    target = tmp_path / "events.tmp"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-10-11T12:00:00Z",
+            "--bash-exit",
+            "0",
+            "--bash-cmd",
+            "snakemake --directory work -c1",
+            "--append-to",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    event = json.loads(target.read_text())
+    assert event["script"] == str(tmp_path / "Snakefile")
+    assert event["inputs"][0]["path"] == str(work / "inputs.csv")
+    assert "_missing" not in event["inputs"][0]
+
+
+def test_runner_event_with_unknown_directory_records_no_io(tmp_path: Path) -> None:
+    script = tmp_path / "Snakefile"
+    script.write_text("import pandas as pd\npd.read_csv('inputs.csv')\n")
+    (tmp_path / "inputs.csv").write_text("a\n1\n")
+    args = argparse.Namespace(
+        ts="2026-10-11T12:00:00Z",
+        agent_id=None,
+        agent_type=None,
+        bash_cmd="snakemake --directory $WORK -c1",
+        bash_exit=0,
+    )
+    event = build_event_for_detection((script, None), args, None, None)
+    assert event is not None
+    assert event["script"] == str(script)
+    assert event["inputs"] == [] and event["outputs"] == []
+    assert event["io_detection"] == "unresolved"
+    assert any("working directory" in w for w in event["lineage_warnings"])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Bash modes that parse or print but run no command.
+        "bash -D run.sh",
+        "bash -eD run.sh",
+        "bash --dump-strings run.sh",
+        "bash --dump-po-strings run.sh",
+        "bash --pretty-print run.sh",
+        "bash -o noexec run.sh",
+        "bash -euo noexec run.sh",
+        "zsh -o no_exec run.sh",
+        # Options bash rejects with an error before running anything.
+        "bash --bogus run.sh",
+        "bash -Z run.sh",
+        # Snakemake executor values that run no jobs.
+        "snakemake --executor dryrun",
+        "snakemake --executor=dryrun -c1",
+        "snakemake -e dryrun",
+        "snakemake -edryrun",
+        "snakemake --executor touch",
+        "snakemake --draft-notebook out.txt",
+    ],
+)
+def test_runner_rejects_value_selected_non_executing_modes(
+    tmp_path: Path, command: str
+) -> None:
+    for name in ("run.sh", "Snakefile"):
+        (tmp_path / name).write_text("echo hi\n")
+    assert _runner_detections(command, tmp_path) == [], command
+
+
+@pytest.mark.parametrize(
+    "command,expected_script",
+    [
+        ("bash +o noexec run.sh", "run.sh"),
+        ("bash -o pipefail -o errexit run.sh", "run.sh"),
+        ("bash --login --noprofile run.sh", "run.sh"),
+        ("bash -O extglob run.sh", "run.sh"),
+        ("sh -l run.sh", "run.sh"),
+        ("zsh -f run.sh", "run.sh"),
+        ("dash -e run.sh", "run.sh"),
+        ("snakemake --executor slurm -j 10", "Snakefile"),
+        ("snakemake -e local -c1", "Snakefile"),
+        ("snakemake --executor=cluster-generic -j 4", "Snakefile"),
+    ],
+)
+def test_runner_keeps_executing_option_values(
+    tmp_path: Path, command: str, expected_script: str
+) -> None:
+    (tmp_path / expected_script).write_text("echo hi\n")
+    assert _runner_detections(command, tmp_path) == [
+        (tmp_path / expected_script, None)
+    ], command
