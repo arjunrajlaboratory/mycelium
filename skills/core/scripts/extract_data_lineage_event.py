@@ -174,8 +174,9 @@ RX_RUNNER_COMMAND = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<runner_exe>"
     rf"{_shell_executable_pattern(r'(?:bash|sh|zsh|dash|ksh|snakemake|sbatch|nextflow)')})"
 )
+_SHELL_SCRIPT_PATH = _shell_path_pattern(r"\.sh")
 RX_SHELL_SCRIPT_COMMAND = re.compile(
-    rf"(?<![A-Za-z0-9_.-])(?P<runner_exe>{_shell_path_pattern(r'\.sh')})"
+    rf"(?<![A-Za-z0-9_.-])(?P<runner_exe>{_SHELL_SCRIPT_PATH})"
 )
 RUNNER_PATTERNS = (RX_RUNNER_COMMAND, RX_SHELL_SCRIPT_COMMAND)
 
