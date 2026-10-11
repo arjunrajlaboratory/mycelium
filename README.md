@@ -226,7 +226,7 @@ Mycelium ships seven hook scripts and registers the supported subset for each ho
 | Hook | Event | Purpose |
 |------|-------|---------|
 | `mycelium-health.sh` | SessionStart | Loads session resume context, refreshes INDEX.md counts, injects knowledge summaries, triggers daily knowledge audit, checks for pending cross-project transfers |
-| `mycelium-post-action.sh` | PostToolUse (shell) | Detects code execution (Python/R/Jupyter) and injects the full 10-step post-action protocol. Debounced per work cycle. |
+| `mycelium-post-action.sh` | PostToolUse (shell) | Detects code execution (Python/R/Jupyter, plus shell-script, Snakemake, Slurm `sbatch`, and Nextflow runs) and injects the full 10-step post-action protocol. Debounced per work cycle. |
 | `mycelium-activity-tracker.sh` | PostToolUse (file edits) | Silently tracks file modifications so edit-only sessions are also enforced |
 | `mycelium-read-tracker.sh` | PostToolUse (Read) | Logs `.living/` file access for consumption telemetry |
 | `mycelium-stop-check.sh` | Stop | Serializes data-lineage consolidation, auto-finalizes session logs, blocks session end if `.living/` wasn't updated after significant work, reminds about session summary |

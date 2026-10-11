@@ -5,6 +5,7 @@ Inputs:
     --events-file: path to NDJSON events file (one event per line, written by
         the future mycelium-data-tracker.sh PostToolUse hook). Each event
         captures one execution of an analysis script (python/R/Rscript/jupyter)
+        or pipeline entry point (shell script, Snakefile, sbatch job, main.nf)
         and the data files it touched.
     --output: path to write the consolidated manifest JSON.
     --session-id: session ID for the manifest header.

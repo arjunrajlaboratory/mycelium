@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Pipeline runs now trigger the post-action protocol.** The execution
+  detector recognised only Python, R, and Jupyter, so an analysis run through
+  `bash run.sh`, `./run.sh`, `snakemake`, `sbatch`, or `nextflow run` opened no
+  bookkeeping cycle and left no lineage. These runners are now detected with
+  the same command-position and control-flow proofs as interpreters, and their
+  entry point (shell script, Snakefile, job script, `main.nf`) is recorded as
+  the lineage event's script. Dry runs and other non-executing modes are
+  ignored. Thanks to Mikhael Manurung, whose
+  [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) documented
+  the gap (issue #91).
+
 ## [0.8.1] - 2026-10-02
 
 ### Added

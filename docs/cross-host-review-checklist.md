@@ -188,6 +188,11 @@ hook, filesystem, or lifecycle boundaries.
 ## 5. Execution and Working-Directory Inference
 
 - [ ] Direct Python, R, and Jupyter execution is detected.
+- [ ] Pipeline runners (`bash`/`sh` scripts, `./run.sh`, `snakemake`,
+      `sbatch`, `nextflow run`) open the post-action cycle and record their
+      entry point, while their non-executing modes (`bash -n`, snakemake dry
+      runs and graph/lint modes, `nextflow run -preview`, `sbatch --test-only`)
+      and mere mentions (`cat run.sh`) do not.
 - [ ] Absolute, versioned, virtual-environment, and PATH-resolved interpreter
       names are detected, including quoted or backslash-escaped paths with
       whitespace.
@@ -497,6 +502,7 @@ exercise them.
 | Jupyter receives `--show-config`, `--show-config-json`, or `--generate-config` before or after an apparent notebook, including after a shell redirection | No execution or lineage is attributed; terminal-looking text inside an ordinary option value, a redirection target, and an actual neighboring Jupyter command remain scoped correctly. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | A Claude or Codex hook config is valid JSON but has malformed event, group, handler, or command types | Initialization and migration reject it before changing guidance, runtime state, hooks, todo files, or the knowledge index. |
+| `bash run.sh`, `./run.sh`, `snakemake -c1`, `sbatch job.sh`, or `nextflow run main.nf` runs; or `snakemake -n`, `bash -n run.sh`, `sbatch --test-only job.sh`, or `cat run.sh` runs | Runs open the post-action cycle and record their entry script as lineage; non-executing modes and mentions produce neither. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |
 
 ## Validation Gate

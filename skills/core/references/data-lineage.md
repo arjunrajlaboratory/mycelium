@@ -8,7 +8,19 @@ The subsystem is independent from the rest of mycelium's logging: it fires when
 an analysis-script invocation is detected (`python`, `R`, `Rscript`, `jupyter`,
 `uv run python`, `poetry run python`, `conda run … python`, including inline
 `-c` / `-e`). Standard shell execution wrappers (`time`, `exec`, `nice`, and
-`timeout`) may precede or nest around those interpreters. If static scanning
+`timeout`) may precede or nest around those interpreters.
+
+Pipeline runners are detected too, recording their entry point as the event's
+script: a shell script run as `bash`/`sh`/`zsh run.sh` or `./run.sh`, the
+Snakefile a `snakemake` run uses (`-s`/`--snakefile`, else the default lookup),
+an `sbatch` job script, and the `main.nf` of `nextflow run`. Non-executing modes
+are not runs and are ignored: `bash -n`/`-c`/`-s`, snakemake dry runs and
+graph/lint/list/unlock/touch modes, `nextflow run -preview`/`-stub-run` and
+non-`run` subcommands, and `sbatch --test-only`/`--help`. When no entry file
+can be named (`sbatch --wrap`, a remote `nextflow run nf-core/<pipeline>`, a
+snakemake run with no Snakefile found) the run is still recorded, with a
+descriptive `script_source` and `io_detection: "unresolved"`. The scripts these
+runners launch internally are not visible to the hook. If static scanning
 cannot resolve any file paths, the execution is retained as unresolved with an
 explicit warning rather than dropped.
 
