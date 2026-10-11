@@ -3261,3 +3261,152 @@ def test_runner_snakemake_profile_snakefile_is_not_guessed(tmp_path: Path) -> No
     assert _runner_cwds("snakemake -s alt.smk -c1", tmp_path) == [
         (tmp_path / "alt.smk", None, tmp_path)
     ]
+
+
+# ---------- round 3: environment-selected profiles and grammar gaps ----------
+
+
+@pytest.fixture
+def clean_profile_env(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("SNAKEMAKE_PROFILE", raising=False)
+    return monkeypatch
+
+
+def test_runner_snakemake_env_profile_is_honored(
+    tmp_path: Path, clean_profile_env
+) -> None:
+    _snakemake_tree(tmp_path)
+    _profile(tmp_path / "moved", "directory: elsewhere\n")
+    _profile(tmp_path / "plain", "jobs: 4\n")
+
+    def io_cwd(command: str) -> Path | None:
+        detections = _runner_cwds(command, tmp_path)
+        assert len(detections) == 1, command
+        return detections[0][2]
+
+    clean_profile_env.setenv("SNAKEMAKE_PROFILE", "moved")
+    assert io_cwd("snakemake -c1") is None
+    # --profile on the command line replaces the environment variable.
+    assert io_cwd("snakemake --profile plain -c1") == tmp_path
+    assert io_cwd("snakemake --profile none -c1") == tmp_path
+    clean_profile_env.delenv("SNAKEMAKE_PROFILE")
+    # A prefix assignment or `env` sets it for this command only.
+    assert io_cwd("SNAKEMAKE_PROFILE=moved snakemake -c1") is None
+    assert io_cwd("env SNAKEMAKE_PROFILE=moved snakemake -c1") is None
+    assert io_cwd("SNAKEMAKE_PROFILE=plain snakemake -c1") == tmp_path
+    # An assignment the parser cannot follow is not guessed.
+    assert io_cwd("export SNAKEMAKE_PROFILE=moved; snakemake -c1") is None
+    assert io_cwd("SNAKEMAKE_PROFILE=$P snakemake -c1") is None
+
+
+def test_runner_snakemake_workflow_profile_checks_every_candidate(
+    tmp_path: Path, clean_profile_env
+) -> None:
+    _snakemake_tree(tmp_path)
+    (tmp_path / "default").mkdir()
+    _profile(tmp_path / "profiles/default", "directory: elsewhere\n")
+    detections = _runner_cwds("snakemake -c1", tmp_path)
+    assert len(detections) == 1 and detections[0][2] is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "executor: dryrun\n",
+        "executor: 'touch'\n",
+        "dry-run: true\n",
+        "dryrun: True\n",
+        "touch: yes\n",
+        "lint: true\n",
+    ],
+)
+def test_runner_snakemake_profile_non_executing_modes(
+    tmp_path: Path, clean_profile_env, body: str
+) -> None:
+    _snakemake_tree(tmp_path)
+    _profile(tmp_path / "profiles/default", body)
+    assert _runner_detections("snakemake -c1", tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["executor: slurm\n", "dry-run: false\n", "touch: no\n", "jobs: 10\n"],
+)
+def test_runner_snakemake_profile_executing_settings(
+    tmp_path: Path, clean_profile_env, body: str
+) -> None:
+    _snakemake_tree(tmp_path)
+    _profile(tmp_path / "profiles/default", body)
+    assert _runner_detections("snakemake -c1", tmp_path) == [
+        (tmp_path / "Snakefile", None)
+    ]
+
+
+def test_runner_snakemake_cli_executor_overrides_profile(
+    tmp_path: Path, clean_profile_env
+) -> None:
+    _snakemake_tree(tmp_path)
+    _profile(tmp_path / "profiles/default", "executor: dryrun\n")
+    assert _runner_detections("snakemake --executor slurm -j 4", tmp_path) == [
+        (tmp_path / "Snakefile", None)
+    ]
+
+
+def test_runner_bash_falls_back_to_path_lookup(tmp_path: Path, monkeypatch) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "job.sh").write_text("echo hi\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setenv("PATH", f"{tmp_path / 'empty'}:{bin_dir}")
+    assert _runner_detections("bash job.sh", work) == [(bin_dir / "job.sh", None)]
+    # The current directory wins over PATH.
+    (work / "job.sh").write_text("echo local\n")
+    assert _runner_detections("bash job.sh", work) == [(work / "job.sh", None)]
+    # A PATH this command changes is not guessed from the hook's PATH.
+    (work / "job.sh").unlink()
+    assert _runner_detections(f"PATH=/nowhere bash job.sh", work) == [
+        (work / "job.sh", None)
+    ]
+    # Only bash searches PATH for its script operand.
+    assert _runner_detections("sh job.sh", work) == [(work / "job.sh", None)]
+
+
+@pytest.mark.parametrize("command", ["bash - run.sh", "bash -e - run.sh", "sh - run.sh"])
+def test_runner_lone_dash_ends_shell_options(tmp_path: Path, command: str) -> None:
+    (tmp_path / "run.sh").write_text("echo hi\n")
+    assert _runner_detections(command, tmp_path) == [(tmp_path / "run.sh", None)]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sbatch --wrap 'echo hi' job.sh",
+        "sbatch --wrap='echo hi' job.sh arg",
+        "sbatch job.sh --wrap 'echo hi'",
+    ],
+)
+def test_runner_sbatch_wrap_with_script_is_an_error(
+    tmp_path: Path, command: str
+) -> None:
+    (tmp_path / "job.sh").write_text("echo hi\n")
+    if command.startswith("sbatch job.sh"):
+        # After the script, `--wrap` is the job's own argument.
+        assert _runner_detections(command, tmp_path) == [(tmp_path / "job.sh", None)]
+    else:
+        assert _runner_detections(command, tmp_path) == []
+
+
+def test_runner_snakemake_conflicting_profiles_keep_the_run(
+    tmp_path: Path, clean_profile_env
+) -> None:
+    """Merge order across profiles is not modelled, so a non-executing value
+    decides only when every active profile agrees."""
+    _snakemake_tree(tmp_path)
+    _profile(tmp_path / "profiles/default", "executor: dryrun\ndry-run: true\n")
+    _profile(tmp_path / "hpc", "executor: slurm\ndry-run: false\n")
+    assert _runner_detections("snakemake --profile hpc", tmp_path) == [
+        (tmp_path / "Snakefile", None)
+    ]

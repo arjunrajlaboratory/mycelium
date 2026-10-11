@@ -27,7 +27,12 @@ the job in the command line's `--chdir`, else the `#SBATCH` header's.
 Configuration the parser cannot see is never guessed: a run directory the shell
 would expand (`$VAR`, `~`, a substitution), or a Snakemake profile that sets
 `directory:` or `snakefile:` (or cannot be located), leaves the event's I/O or
-entry unresolved with a warning. Redirection I/O numbers (`bash 2>err run.sh`)
+entry unresolved with a warning. Profiles come from `--profile`, else
+`$SNAKEMAKE_PROFILE` (the hook's environment or a `VAR=x` prefix on the
+command), plus the workflow profile; a profile that puts Snakemake in a
+non-executing mode (`executor: dryrun`, `dry-run: true`) is not a run when
+every active profile agrees. `bash script` falls back to `PATH` when the script
+is not in the cwd, as bash does. Redirection I/O numbers (`bash 2>err run.sh`)
 are consumed with their operator. When no entry file
 can be named (`sbatch --wrap`, a remote `nextflow run nf-core/<pipeline>`, a
 snakemake run with no Snakefile found) the run is still recorded, with a
