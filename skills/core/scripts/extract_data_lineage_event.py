@@ -1816,7 +1816,8 @@ def _shell_runner_script(shell: str, args: list[str]) -> str | None:
     index = 0
     while index < len(args):
         token = args[index]
-        if token == "--":
+        if token in {"--", "-"}:
+            # A lone `-` ends option processing exactly like `--`.
             index += 1
             break
         if token.startswith("--"):
@@ -1943,9 +1944,11 @@ _SNAKEMAKE_DEFAULT_SNAKEFILES = (
 
 
 _SNAKEMAKE_PROFILE_FILE_RX = re.compile(r"(?:profile|config)(?:\.v\d+\+)?\.yaml")
-_SNAKEMAKE_PROFILE_KEY_RX = re.compile(
-    rb"""^["']?(?P<key>directory|snakefile)["']?[ \t]*:""", re.M
+# A top-level YAML `key: value` line; nested keys are indented and skipped.
+_SNAKEMAKE_PROFILE_LINE_RX = re.compile(
+    r"""^["']?(?P<key>[A-Za-z][A-Za-z0-9_-]*)["']?[ \t]*:[ \t]*(?P<value>.*)$"""
 )
+_PROFILE_FALSE_VALUES = frozenset({"", "false", "no", "off", "0", "null", "~", "none"})
 
 
 def _snakemake_user_profile_roots() -> list[Path]:
@@ -1976,18 +1979,43 @@ def _snakemake_profile_files(location: Path) -> list[Path]:
         return []
 
 
-def _snakemake_profile_overrides(
-    profiles: list[str], workflow_profile: str | None, cwd: Path, snakefile: str | None
-) -> set[str] | None:
-    """Return the run-locating keys active profiles set (``directory``,
-    ``snakefile``), or ``None`` when an active profile cannot be inspected.
+def _profile_settings(content: str) -> dict[str, list[str]]:
+    """Top-level profile keys (normalized to CLI spelling) and their values."""
+    settings: dict[str, list[str]] = {}
+    for line in content.splitlines():
+        match = _SNAKEMAKE_PROFILE_LINE_RX.match(line)
+        if match is None:
+            continue
+        value = match.group("value").split(" #", 1)[0].strip().strip("'\"")
+        key = match.group("key").replace("_", "-")
+        settings.setdefault(key, []).append(value)
+    return settings
 
-    Mirrors snakemake.cli: ``--profile`` is a path or a name searched in the
-    cwd and the user/site config dirs; the workflow profile defaults to
-    ``profiles/default`` beside the cwd or the Snakefile unless ``none``.
-    Every candidate location is inspected, so a divergence from Snakemake's
-    own choice can only leave the run unresolved, never wrong.
+
+def _snakemake_profile_overrides(
+    profiles: list[str],
+    workflow_profile: str | None,
+    cwd: Path,
+    snakefile: str | None,
+    env: dict[str, str | None],
+) -> dict[str, list[str]] | None:
+    """Return the settings active profiles apply, or ``None`` when an active
+    profile cannot be inspected.
+
+    Mirrors snakemake.cli: ``--profile`` (else ``$SNAKEMAKE_PROFILE``; the
+    value ``none`` disables both) is a path or a name searched in the cwd and
+    the user/site config dirs; the workflow profile defaults to ``default``
+    under ``profiles/`` beside the cwd or the Snakefile unless ``none``.
+    Every candidate location is inspected and every value kept, so a
+    divergence from Snakemake's own choice can only leave the run
+    unresolved, never wrong.
     """
+    if not profiles and "SNAKEMAKE_PROFILE" in env:
+        env_profile = env["SNAKEMAKE_PROFILE"]
+        if env_profile is None:
+            return None
+        if env_profile:
+            profiles = [env_profile]
     files: list[Path] = []
     for profile in profiles:
         if profile == "none":
@@ -2012,24 +2040,28 @@ def _snakemake_profile_overrides(
         candidates = [Path(name), Path("profiles") / name]
         if snakefile:
             candidates.append(Path(snakefile).parent / "profiles" / name)
+        # Snakemake stops at the first existing candidate (erroring if it
+        # holds no profile file); inspecting all of them is a safe superset.
         for candidate in candidates:
             location = candidate if candidate.is_absolute() else cwd / candidate
             if location.exists():
                 files.extend(_snakemake_profile_files(location))
-                break
-    keys: set[str] = set()
+    settings: dict[str, list[str]] = {}
     for profile_file in files:
         try:
             content = profile_file.read_bytes()[: 1024 * 1024]
         except OSError:
             return None
-        keys.update(
-            m.group("key").decode() for m in _SNAKEMAKE_PROFILE_KEY_RX.finditer(content)
-        )
-    return keys
+        for key, values in _profile_settings(
+            content.decode("utf-8", errors="replace")
+        ).items():
+            settings.setdefault(key, []).extend(values)
+    return settings
 
 
-def _snakemake_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
+def _snakemake_detection(
+    args: list[str], cwd: Path, env: dict[str, str | None]
+) -> _RunnerRun | None:
     """Describe an executing snakemake argv, or ``None`` for a non-run.
 
     Snakemake resolves the Snakefile in the invocation directory and only
@@ -2077,8 +2109,28 @@ def _snakemake_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
         (c for c in _SNAKEMAKE_DEFAULT_SNAKEFILES if (cwd / c).is_file()), None
     )
     overrides = _snakemake_profile_overrides(
-        profiles, values.get("workflow_profile"), cwd, snakefile or default_snakefile
+        profiles,
+        values.get("workflow_profile"),
+        cwd,
+        snakefile or default_snakefile,
+        env,
     )
+    if overrides is not None:
+        # Profile keys are command-line options; the same modes run nothing.
+        # Merge order across profiles is not modelled, so a mode decides only
+        # when every active value agrees: a disagreement keeps the run.
+        for key, settings in overrides.items():
+            if f"--{key}" in _SNAKEMAKE_NONEXECUTING_LONG and all(
+                value.lower() not in _PROFILE_FALSE_VALUES for value in settings
+            ):
+                return None
+        executors = overrides.get("executor", [])
+        if (
+            "executor" not in values
+            and executors
+            and all(value in _SNAKEMAKE_NONEXECUTING_EXECUTORS for value in executors)
+        ):
+            return None
     run_dir = values.get("directory")
     run_dir_unknown = run_dir is None and (
         overrides is None or "directory" in overrides
@@ -2260,6 +2312,9 @@ def _sbatch_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
     options = _parse_sbatch_options(args)
     if not options.executes:
         return None
+    if options.wrap is not None and options.script is not None:
+        # Slurm rejects a script name or arguments alongside --wrap.
+        return None
     if options.wrap is not None:
         return _RunnerRun(None, f"# sbatch --wrap: {options.wrap}", options.chdir)
     if options.script is None:
@@ -2293,15 +2348,60 @@ def _sbatch_detection(args: list[str], cwd: Path) -> _RunnerRun | None:
     return _RunnerRun(str(script), None, chdir)
 
 
-def _runner_detection(argv: list[str], cwd: Path) -> _RunnerRun | None:
+def _bash_script_path(script: str, cwd: Path, env: dict[str, str | None]) -> str:
+    """Bash opens its script operand in the cwd, then searches ``PATH``."""
+    if "/" in script or (cwd / script).is_file():
+        return script
+    search_path = env.get("PATH")
+    if not search_path:
+        return script
+    for directory in search_path.split(":"):
+        candidate = Path(directory or ".")
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        candidate = candidate / script
+        if candidate.is_file():
+            return str(candidate)
+    return script
+
+
+def _runner_environment(
+    bash_cmd: str, prefix: list[str]
+) -> dict[str, str | None]:
+    """The environment a runner sees: the hook's, plus this command's prefix
+    assignments (``VAR=x cmd``, ``env VAR=x cmd``). A variable the command
+    sets any other way (``export``, an expansion) is unknown (``None``).
+    """
+    env: dict[str, str | None] = dict(os.environ)
+    assigned: dict[str, int] = {}
+    for token in prefix:
+        if not _ASSIGNMENT_RX.match(token):
+            continue
+        key, value = token.split("=", 1)
+        env[key] = None if any(marker in value for marker in ("$", "`")) else value
+        assigned[key] = assigned.get(key, 0) + 1
+    for key in ("PATH", "SNAKEMAKE_PROFILE"):
+        if bash_cmd.count(key) > assigned.get(key, 0):
+            env[key] = None
+    return env
+
+
+def _runner_detection(
+    argv: list[str], cwd: Path, env: dict[str, str | None] | None = None
+) -> _RunnerRun | None:
     """Dispatch a runner argv to what it executes, or ``None`` for a non-run."""
+    env = dict(os.environ) if env is None else env
     name = Path(argv[0]).name
     args = argv[1:]
     if name in _SHELL_RUNNER_NAMES:
         script = _shell_runner_script(name, args)
-        return _RunnerRun(script, None) if script is not None else None
+        if script is None:
+            return None
+        if name == "bash":
+            script = _bash_script_path(script, cwd, env)
+        return _RunnerRun(script, None)
     if name == "snakemake":
-        return _snakemake_detection(args, cwd)
+        return _snakemake_detection(args, cwd, env)
     if name == "nextflow":
         return _nextflow_detection(args, cwd)
     if name == "sbatch":
@@ -2366,7 +2466,10 @@ def _detect_runners(
             argv = _simple_command_argv(fragment)
             if not argv or argv[0] != word:
                 continue
-            run = _runner_detection(argv, effective_cwd)
+            prefix = _current_command_prefix(bash_cmd[: m.start()]) or []
+            run = _runner_detection(
+                argv, effective_cwd, _runner_environment(bash_cmd, prefix)
+            )
             if run is None:
                 continue
             if run.run_dir_unknown:
