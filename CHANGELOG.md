@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bookkeeping cycle and left no lineage. These runners are now detected with
   the same command-position and control-flow proofs as interpreters, and their
   entry point (shell script, Snakefile, job script, `main.nf`) is recorded as
-  the lineage event's script. Dry runs and other non-executing modes are
-  ignored. Thanks to Mikhael Manurung, whose
+  the lineage event's script, with its I/O resolved under `snakemake
+  --directory` or `sbatch --chdir` when given. Dry runs and other
+  non-executing modes, including value-selected ones such as `snakemake
+  --executor dryrun` and `bash -o noexec`, are ignored. Thanks to Mikhael Manurung, whose
   [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) documented
   the gap (issue #91).
 
