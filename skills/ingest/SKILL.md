@@ -53,5 +53,5 @@ Pull a new dataset into the analytical framework, ensuring it is properly docume
    - Update `data/DATA_MANIFEST.md` (done in step 7)
    - Update the dataset documentation file
    - Log decisions to `.living/decisions.md`
-   - Log learnings to `.living/learnings.md`
+   - Log learnings to `.living/learnings.md`. Derive `mitigation_type` by the rule in `skills/core/templates/learning-entry.md`: `structural` if a shipped test, assertion, type constraint, frozenset, or schema validation enforces it; otherwise `convention` if a `.living/conventions.md` entry covers it; otherwise `ambient-awareness`.
    - Run `skills/core/scripts/validate_structure.py`

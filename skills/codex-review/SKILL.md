@@ -168,7 +168,7 @@ If the user chose draft-only, hand them the reply text and stop.
 
 If the same error pattern has now shown up across more than one Codex round (or
 more than one PR), log a short entry to `.living/learnings.md` per the core
-Post-Action Hook Protocol — e.g. "Codex has flagged swallowed exceptions on three
+Post-Action Hook Protocol (Derive `mitigation_type` by the rule in `skills/core/templates/learning-entry.md`: `structural` if a shipped test, assertion, type constraint, frozenset, or schema validation enforces it; otherwise `convention` if a `.living/conventions.md` entry covers it; otherwise `ambient-awareness`.) — e.g. "Codex has flagged swallowed exceptions on three
 PRs; candidate for a lint rule / convention." Recurring patterns are exactly what
 should crystallize into a convention so the mistake stops being made in the first
 place. Otherwise no logging is needed.

@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`harden` skill.** `/mycelium:harden` (`$mycelium:harden` on Codex) takes
+  one learning that is still `ambient-awareness` but names a concrete
+  `structural_mitigation_candidate`, writes that check as a test in the
+  repository's own test setup, shows it failing when the problem is present
+  (bad-data fixture for a data check, the unmitigated implementation for a
+  code check) and passing on the current code, and after the user confirms
+  marks the learning `structural` with a `Shipped:` note. It never edits
+  analysis code. Core's post-action guidance no longer tells agents to mark a
+  learning `structural` when the test is only a candidate. How to set
+  `mitigation_type` is now stated once, as a rule in the learning template
+  (structural if a shipped check enforces the learning, otherwise convention
+  if a `.living/conventions.md` entry covers it, otherwise ambient-awareness),
+  and core, the skill-generation guide, the post-action directive, and harden
+  defer to it; every instruction that writes a learning or adds a convention
+  (the post-action directive, core's post-action steps, the generated
+  `MYCELIUM.md`, and the transfer skill) now applies it, so learnings logged
+  or transferred through the normal path carry `mitigation_type` and
+  `structural_mitigation_candidate` and can be hardened. A transferred
+  learning's type comes from the target's own enforcement.
+  `validate_structure.py` now warns about learnings without a valid
+  `mitigation_type` (a warning, since older repositories predate the field),
+  so an untyped entry is caught however it was written. Adapted from
+  [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
+  Manurung (MIT, issue #91).
+
 - **Data contract check before an analysis runs.** `analyze` has a new
   preflight step. Before the first run, the agent writes down what the analysis
   assumes about its sample table in `analysis/<name>/data_contract.json`. The

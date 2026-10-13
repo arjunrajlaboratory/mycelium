@@ -67,7 +67,7 @@ IGNORE:
 
 ### 4. Apply transfers
 
-For each identified transfer, **automatically append** the learning to the target project's `.living/learnings.md` using the learning entry template format:
+For each identified transfer, **automatically append** the learning to the target project's `.living/learnings.md` using the learning entry template format. Derive `mitigation_type` by the rule in `skills/core/templates/learning-entry.md`: `structural` if a shipped test, assertion, type constraint, frozenset, or schema validation enforces it; otherwise `convention` if a `.living/conventions.md` entry covers it; otherwise `ambient-awareness`. Judge enforcement in the target project (see the rules below):
 
 ```markdown
 ### [YYYY-MM-DD] [Short Learning Title]
@@ -82,14 +82,19 @@ For each identified transfer, **automatically append** the learning to the targe
 
 **Tags**: [relevant, tags, for, searchability]
 
+**mitigation_type**: [structural|convention|ambient-awareness — derived in the target, see below]
+
+**structural_mitigation_candidate**: [The concrete test or check that would catch this in the target project, adapted from the source's]
+
 source: [source project name] (auto-transferred by mycelium)
 ```
 
 **Transfer rules**:
 - Rewrite the learning for the target project's context — don't dump the source project's jargon
-- Keep entries concise (5-8 lines max)
+- Keep each field to one or two sentences; the entry still carries every field above, including both mitigation fields and `source:`
+- Derive `mitigation_type` by the rule in `skills/core/templates/learning-entry.md`: `structural` if a shipped test, assertion, type constraint, frozenset, or schema validation enforces it; otherwise `convention` if a `.living/conventions.md` entry covers it; otherwise `ambient-awareness`. Judge enforcement in the **target** project, never the source: search the target's code (not only its tests) for a shipped check of any of those kinds, and read the target's own `.living/conventions.md`. A check the source shipped does not protect the target.
 - The `source:` field with `(auto-transferred by mycelium)` tag makes transfers auditable and distinguishable from manual entries
-- Also append each transfer to the meta-project's `.living/learnings.md` if not already present there (the cross-project aggregate)
+- Also append each transfer to the meta-project's `.living/learnings.md` if not already present there (the cross-project aggregate), judging enforcement in the meta-project the same way. Derive `mitigation_type` by the rule in `skills/core/templates/learning-entry.md`: `structural` if a shipped test, assertion, type constraint, frozenset, or schema validation enforces it; otherwise `convention` if a `.living/conventions.md` entry covers it; otherwise `ambient-awareness`.
 - Use `printf >> file` to append — do NOT read the full target file first
 
 ### 5. Generate report
@@ -123,8 +128,8 @@ date -u +"%Y-%m-%dT%H:%M:%SZ" > {meta-project}/.living/outputs/knowledge-transfe
 
 - Total runtime target: <2 minutes
 - NEVER read full learnings files — always use `tail -80`
-- Use `printf >> file` to append entries — never read target files before writing
-- Keep transferred entries concise (5-8 lines each)
+- Use `printf >> file` to append entries — never read the target's learnings file before writing (reading its `.living/conventions.md` and grepping its tests to derive `mitigation_type` is expected)
+- Keep transferred entries concise: one or two sentences per field, with every field of the entry format above
 - The `(auto-transferred by mycelium)` tag in the source field makes transfers auditable
 - If a transfer would be a near-duplicate of an existing recent entry in the target (check with `tail -30`), skip it
 

@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import markdown_fences as fences
+from detect_recurrence import _MITIGATION_LINE_RE
 
 
 def parse_args():
@@ -229,6 +230,74 @@ def check_entry_heading_levels(target_dir: Path, result: ValidationResult):
         )
 
 
+VALID_MITIGATION_TYPES = ("structural", "convention", "ambient-awareness")
+LEARNING_TEMPLATE = Path(__file__).resolve().parent.parent / "templates" / "learning-entry.md"
+
+
+def mitigation_rule() -> str:
+    """The template's one-line mitigation_type rule, read from the template itself."""
+    fallback = "Derive it by the rule in skills/core/templates/learning-entry.md."
+    try:
+        text = " ".join(LEARNING_TEMPLATE.read_text(encoding="utf-8").split())
+    except OSError:
+        return fallback
+    found = re.search(r"(Derive mitigation_type .+? otherwise ambient-awareness\.)", text)
+    return found.group(1) if found else fallback
+
+
+_LEARNING_HEADING_RE = re.compile(r"^#{2,3} \[?(\d{4}-\d{2}-\d{2})\]?\s*(.*)$")
+
+
+def learning_mitigation_types(text: str) -> list[tuple[int, str, str | None]]:
+    """(line, title, raw mitigation_type or None) for each learning entry.
+
+    Lines come from the shared `markdown_fences.visible_lines` reader, so
+    fenced code, HTML comments, and indented code examples neither split an
+    entry nor stand in for its field, and the field line is the same one
+    detect_recurrence selects. Unlike detect_recurrence, the value is kept
+    literally (no typo aliases), since harden filters on the exact value.
+    Canonical `### [date]` and legacy `## [date]` headings both start an entry.
+    """
+    entries: list[list] = []
+    for lineno, visible, indent in fences.visible_lines(split_log_lines(text)):
+        heading = _LEARNING_HEADING_RE.match(visible)
+        if heading:
+            entries.append([lineno, heading.group(2).strip() or heading.group(1), None])
+            continue
+        # Same selection as detect_recurrence: the first visible field line
+        # that is not an indented code example (fails toward a warning).
+        field = None if indent >= 4 else _MITIGATION_LINE_RE.match(visible)
+        if field and entries and entries[-1][2] is None:
+            entries[-1][2] = field.group(1).strip().strip("*`\"'").strip()
+    return [tuple(entry) for entry in entries]
+
+
+def check_learning_mitigation_types(target_dir: Path, result: ValidationResult):
+    """Warn about learnings whose mitigation_type is missing or not a valid type.
+
+    This checks the output rather than the instructions: however an agent was
+    told to log a learning, an untyped entry is skipped by harden and cannot
+    be weighed by detect_recurrence. A warning, not an error, because older
+    repositories predate the field.
+    """
+    path = target_dir / ".living" / "learnings.md"
+    if not path.is_file():
+        return
+    entries = learning_mitigation_types(path.read_text(encoding="utf-8", errors="replace"))
+    bad = [(n, title) for n, title, value in entries if value not in VALID_MITIGATION_TYPES]
+    if not bad:
+        return
+    shown = "; ".join(f'line {n} "{title}"' for n, title in bad[:_MAX_REPORTED_LINES])
+    if len(bad) > _MAX_REPORTED_LINES:
+        shown += f"; and {len(bad) - _MAX_REPORTED_LINES} more"
+    noun = "learning" if len(bad) == 1 else "learnings"
+    result.warning(
+        f".living/learnings.md has {len(bad)} {noun} without a valid "
+        f"mitigation_type ({shown}); harden skips them and detect_recurrence "
+        f"cannot weigh them. {mitigation_rule()}"
+    )
+
+
 def check_top_level_directories(target_dir: Path, result: ValidationResult):
     """Check that all four top-level directories exist."""
     required_dirs = ["algorithms", "analysis", "data", "reference_material", "todo"]
@@ -373,6 +442,9 @@ def main():
 
     print("Checking knowledge log entry heading levels...")
     check_entry_heading_levels(target_dir, result)
+
+    print("Checking learning mitigation types...")
+    check_learning_mitigation_types(target_dir, result)
 
     print("Checking top-level directories...")
     check_top_level_directories(target_dir, result)
