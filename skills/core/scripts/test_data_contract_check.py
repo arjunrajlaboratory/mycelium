@@ -567,6 +567,16 @@ class TableShapeTest(unittest.TestCase):
         self.assertEqual(code, 2, out)
         self.assertIn("C=0", [a.get("observed") for a in json.loads(out)["alerts"] if a["blocking"]][0])
 
+    def test_inferred_levels_include_levels_seen_without_a_unit(self):
+        # Codex P1 on #97: visit 56 appears only on an NA participant; it is still a level.
+        self.tsv("levels.tsv", ["participant", "visit"],
+                 [["p1", "0"], ["p1", "28"], ["p2", "0"], ["p2", "28"], ["NA", "56"]])
+        code, out, _ = invoke_raw(contract([{"kind": "pairing", "unit": "participant", "within": "visit"}],
+                                           table="levels.tsv"), root=self.root)
+        self.assertEqual(code, 2, out)
+        blocking = [a for a in json.loads(out)["alerts"] if a["blocking"]]
+        self.assertEqual(blocking[0]["expected"], "every participant at 0, 28, 56")
+
     def test_group_membership_survives_a_missing_within(self):
         # Codex P1 on #97: p1's only B row lacks a visit; p1 still spans A and B.
         self.tsv("span.tsv", ["participant", "cohort", "visit"],
