@@ -14,21 +14,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `structural_mitigation_candidate`, writes that check as a test in the
   repository's own test setup, shows it failing when the problem is present
   (bad-data fixture for a data check, the unmitigated implementation for a
-  code check) and passing on the current code, and after the user confirms marks the learning
-  `structural` with a `Shipped:` note. It never edits analysis code. Core's
-  post-action guidance no longer tells agents to mark a learning `structural`
-  when the test is only a candidate. The transitions between
-  `mitigation_type` values are now stated once, in the learning template,
-  and core, the skill-generation guide, and harden defer to it: an unshipped
-  `structural` entry returns to `ambient-awareness` (not `convention`), and
-  `convention` requires an existing `.living/conventions.md` entry. The
-  post-action directive, the `learnings.md` header written by init, and the
-  transfer skill now ask for `mitigation_type` and
-  `structural_mitigation_candidate`, so learnings logged through the normal
-  path can be hardened (transferred learnings start as
-  `ambient-awareness`). Adapted
-  from [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by
-  Mikhael Manurung (MIT, issue #91).
+  code check) and passing on the current code, and after the user confirms
+  marks the learning `structural` with a `Shipped:` note. It never edits
+  analysis code. Core's post-action guidance no longer tells agents to mark a
+  learning `structural` when the test is only a candidate. The transitions
+  between `mitigation_type` values are now stated once, in the learning
+  template, and core, the skill-generation guide, and harden defer to it: an
+  unshipped `structural` entry returns to `ambient-awareness` (not
+  `convention`), and `convention` requires an existing
+  `.living/conventions.md` entry. The post-action directive, the
+  `learnings.md` header written by init, and the transfer skill now ask for
+  `mitigation_type` and `structural_mitigation_candidate`, so learnings logged
+  through the normal path can be hardened (transferred learnings start as
+  `ambient-awareness`). Adapted from
+  [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
+  Manurung (MIT, issue #91).
+
+- **Data contract check before an analysis runs.** `analyze` has a new
+  preflight step. Before the first run, the agent writes down what the analysis
+  assumes about its sample table in `analysis/<name>/data_contract.json`. The
+  assumptions covered are required columns, cohort levels and row counts, one
+  row per unit of replication, pairing across timepoints, and batch versus
+  contrast nesting. `skills/core/scripts/data_contract_check.py` then checks
+  them against the CSV, TSV, or `.h5ad` `obs` table. Each failure is reported
+  with its expected value, observed value, and evidence, and a blocking failure
+  stops the analysis until the user decides. The contract is never loosened to
+  make it pass without the user's agreement. The checker is read-only and needs
+  only the standard library (h5py is optional, for `.h5ad`). It runs as a
+  managed utility, so it opens no post-action cycle. Guide:
+  `skills/core/references/data-contract-check.md`. Adapted from
+  [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
+  Manurung (MIT, issue #91). The port also hardens the checker:
+  - A malformed contract is a usage error rather than a traceback or a silent
+    pass. Examples: `"units_may_span_groups": "false"` (which upstream treated
+    as true), a bare string for `columns`, a fractional `min_rows`, and
+    `levels` without a `column`.
+  - Duplicate header names and rows wider than the header now block, where
+    upstream silently read the wrong column or shifted values.
+  - Unsupported file formats, and text that is not valid UTF-8, are a gap
+    rather than being parsed leniently.
+  - Lines that cannot be parsed (an unclosed quote swallowed every later
+    row), IDs that differ only in surrounding whitespace, misspelled or
+    repeated contract keys, and `N/A`/`#N/A` read as values are now caught.
+  - Each fact is derived from the rows complete in exactly the columns it
+    needs. A row missing one key no longer hides the group, unit, or level
+    its other keys reveal; upstream let several such cases pass. Examples:
+    a group with no identified unit, a unit seen at no timepoint, a
+    timepoint or contrast level seen only on incomplete rows, and missing
+    cohort values counted toward `min_rows`.
+  - Contrast levels that split into groups sharing no batch now block, not
+    only single isolated levels.
 
 ### Fixed
 

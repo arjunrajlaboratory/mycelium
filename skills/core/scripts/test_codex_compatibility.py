@@ -1994,6 +1994,47 @@ def test_codex_post_tool_use_ignores_mycelium_control_plane_utilities(
     assert not (repo / ".mycelium" / "mycelium-data-events.tmp").exists()
 
 
+def test_documented_data_contract_command_opens_no_bookkeeping(tmp_path):
+    """The data-contract guide's run command is a managed utility, not analysis."""
+    guide = (
+        PLUGIN_ROOT / "skills" / "core" / "references" / "data-contract-check.md"
+    ).read_text()
+    block = guide.split("## 2. Run it", 1)[1].split("```bash\n", 1)[1]
+    command = block.split("\n```", 1)[0].replace("\\\n", " ")
+    assert "data_contract_check.py" in command
+    repo = _repo(tmp_path)
+    state = repo / ".mycelium"
+    state.mkdir()
+    (state / "plugin-root").write_text(f"{PLUGIN_ROOT}\n")
+    payload = {
+        "cwd": str(repo),
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_response": {"exit_code": 0},
+    }
+
+    result = _run_hook("mycelium-post-action.sh", repo, payload)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert not (repo / ".mycelium" / "mycelium-reminded.tmp").exists()
+    lineage = _run_hook("mycelium-data-tracker.sh", repo, payload)
+    assert lineage.returncode == 0, lineage.stderr
+    assert not (repo / ".mycelium" / "mycelium-data-events.tmp").exists()
+
+    # Paired positive: the same command shape on a user script is analysis.
+    script = repo / "analysis" / "check.py"
+    script.parent.mkdir()
+    script.write_text("import pandas as pd\npd.read_csv('input.csv')\n")
+    user_command = command.split('"', 2)[0] + "analysis/check.py " + command.split('" ', 1)[1]
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        dict(payload, tool_input={"command": user_command}),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "MYCELIUM POST-ACTION PROTOCOL" in result.stdout
+
+
 def test_conventional_layout_user_script_is_still_analysis(tmp_path):
     """Codex P2 on PR #70: a path shape alone must not suppress bookkeeping.
 

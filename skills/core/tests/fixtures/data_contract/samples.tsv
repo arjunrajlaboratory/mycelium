@@ -1,0 +1,10 @@
+﻿"sample"	"participant"	"cohort"	"visit"	"batch"	"keep"
+"s1"	"p1"	"A"	"0"	"b1"	TRUE
+"s2"	"p1"	"A"	"28"	"b1"	TRUE
+"s3"	"p2"	"A"	"0"	"b1"	TRUE
+"s4"	"p2"	"A"	"28"	"b2"	TRUE
+"s5"	"p3"	"B"	"0"	"b2"	TRUE
+"s6"	"p3"	"B"	"28"	"b2"	TRUE
+"s7"	"p4"	"B"	"0"	"b2"	TRUE
+"s8"	"p4"	"B"	"0"	"b2"	FALSE
+"s9"	"p5"	"B"	"0"	NA	TRUE

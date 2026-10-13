@@ -1,0 +1,7 @@
+participant	visit	batch
+p1	0	b1
+p1	28	b1
+p2	0	b2
+p2	28	b2
+p3	56	b3
+p4	56	b3
