@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **One registry row per session.** The post-action directive asked the agent
+  to "update the current session row" in `LOG_REGISTRY.md` without naming
+  the session ID; an agent that guessed one left a second row once Stop wrote
+  the canonical row (seen in the 0.8.2 Codex lifecycle audit). The directive
+  now names the exact Session ID and a ready-to-run upsert command, or tells
+  the agent to leave the registry to Stop when no ID is known. Stop also folds
+  any row that links this session's log under another ID into the canonical
+  row, keeping its authored Summary, Key Outputs, and Tags
+  (`upsert_registry_row.py --log-link`).
+
 ## [0.8.2] - 2026-10-11
 
 ### Fixed

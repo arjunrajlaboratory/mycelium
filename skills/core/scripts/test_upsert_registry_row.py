@@ -199,3 +199,190 @@ def test_concurrent_distinct_upserts_do_not_lose_rows(tmp_path: Path) -> None:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def _run_log_link(
+    registry: Path, session_id: str, row: str, log_name: str
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--preserve-authored",
+            "--log-link",
+            log_name,
+            str(registry),
+            session_id,
+            row,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "log_cell",
+    [
+        "2026-10-12-001-audit.md",
+        "[log](2026-10-12-001-audit.md)",
+        "[log](.living/log/2026-10-12-001-audit.md)",
+    ],
+)
+def test_log_link_folds_row_with_guessed_session_id(
+    tmp_path: Path, log_cell: str
+) -> None:
+    """An agent row keyed by a guessed ID but linking this session's log is
+    the same session: fold its authored cells into one canonical row."""
+    registry = tmp_path / "LOG_REGISTRY.md"
+    other = (
+        "| 2026-10-11 | 2026-10-11-004 | proj | main | 9m | 2 | other work | "
+        "out.csv | complete | x | [log](2026-10-11-004-proj.md) |\n"
+    )
+    agent = (
+        "| 2026-10-12 | 001-audit | proj | main | — | — | Ran the runner probe. | "
+        f"report.md | active | lifecycle | {log_cell} |\n"
+    )
+    registry.write_text(HEADER + other + agent)
+    canonical = (
+        "| 2026-10-12 | 2026-10-12-001 | proj | main | 3m | 2 | a.md, b.md |  | "
+        "complete |  | [log](2026-10-12-001-audit.md) |"
+    )
+
+    result = _run_log_link(
+        registry, "2026-10-12-001", canonical, "2026-10-12-001-audit.md"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "upserted"
+    content = registry.read_text()
+    assert "001-audit |" not in content
+    assert content.count("2026-10-12-001-audit.md") == 1
+    assert (
+        "| 2026-10-12 | 2026-10-12-001 | proj | main | 3m | 2 | Ran the runner probe. "
+        "| report.md | complete | lifecycle | [log](2026-10-12-001-audit.md) |"
+    ) in content
+    assert other in content
+
+
+def test_log_link_collapses_canonical_and_stray_rows(tmp_path: Path) -> None:
+    registry = tmp_path / "LOG_REGISTRY.md"
+    canonical_old = (
+        "| 2026-10-12 | 2026-10-12-001 | proj | main | 1m | 1 |  |  | active |  | "
+        "[log](2026-10-12-001-audit.md) |\n"
+    )
+    stray = (
+        "| 2026-10-12 | guessed | proj | main | — | — | Authored summary | k.csv | "
+        "active | t | 2026-10-12-001-audit.md |\n"
+    )
+    registry.write_text(HEADER + canonical_old + stray)
+    canonical = (
+        "| 2026-10-12 | 2026-10-12-001 | proj | main | 3m | 2 | files |  | complete |  | "
+        "[log](2026-10-12-001-audit.md) |"
+    )
+
+    result = _run_log_link(
+        registry, "2026-10-12-001", canonical, "2026-10-12-001-audit.md"
+    )
+
+    assert result.returncode == 0, result.stderr
+    content = registry.read_text()
+    rows = [line for line in content.splitlines() if "2026-10-12-001-audit.md" in line]
+    assert rows == [
+        "| 2026-10-12 | 2026-10-12-001 | proj | main | 3m | 2 | Authored summary | k.csv "
+        "| complete | t | [log](2026-10-12-001-audit.md) |"
+    ]
+
+
+def test_log_link_does_not_fold_a_different_log(tmp_path: Path) -> None:
+    """A basename that merely contains this log's name is another session."""
+    registry = tmp_path / "LOG_REGISTRY.md"
+    neighbor = (
+        "| 2026-10-12 | x | proj | main | 1m | 1 | keep me |  | complete |  | "
+        "[log](old-2026-10-12-001-audit.md) |\n"
+    )
+    registry.write_text(HEADER + neighbor)
+    canonical = (
+        "| 2026-10-12 | 2026-10-12-001 | proj | main | 3m | 2 | files |  | complete |  | "
+        "[log](2026-10-12-001-audit.md) |"
+    )
+
+    result = _run_log_link(
+        registry, "2026-10-12-001", canonical, "2026-10-12-001-audit.md"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "appended"
+    assert neighbor in registry.read_text()
+
+
+def test_log_link_requires_a_plain_basename(tmp_path: Path) -> None:
+    registry = tmp_path / "LOG_REGISTRY.md"
+    registry.write_text(HEADER)
+    row = _row("2026-10-12-001")
+    for bad in ("", "../x.md", "sub/x.md"):
+        result = _run_log_link(registry, "2026-10-12-001", row, bad)
+        assert result.returncode == 1, bad
+    assert registry.read_text() == HEADER
+
+
+def test_log_link_leaves_later_exact_id_rows_alone(tmp_path: Path) -> None:
+    """Folding is for rows keyed by a guessed ID. A second row under the
+    canonical ID (e.g. merged from another branch) is another session's
+    record and survives, as it did before --log-link existed."""
+    registry = tmp_path / "LOG_REGISTRY.md"
+    first = (
+        "| 2026-10-12 | 2026-10-12-001 | proj | main | 1m | 1 | ours |  | active |  | "
+        "[log](2026-10-12-001-audit.md) |\n"
+    )
+    merged = (
+        "| 2026-10-12 | 2026-10-12-001 | proj | other | 4m | 3 | from the other branch | "
+        "x.csv | complete | y | [log](2026-10-12-001-audit.md) |\n"
+    )
+    registry.write_text(HEADER + first + merged)
+    canonical = (
+        "| 2026-10-12 | 2026-10-12-001 | proj | main | 3m | 2 | files |  | complete |  | "
+        "[log](2026-10-12-001-audit.md) |"
+    )
+
+    result = _run_log_link(
+        registry, "2026-10-12-001", canonical, "2026-10-12-001-audit.md"
+    )
+
+    assert result.returncode == 0, result.stderr
+    content = registry.read_text()
+    assert merged in content
+    assert "| 3m | 2 | ours |" in content
+
+
+def test_log_link_prefers_the_canonical_rows_authored_cells(tmp_path: Path) -> None:
+    """The canonical row's authored text wins over a stray, whatever the order."""
+    registry = tmp_path / "LOG_REGISTRY.md"
+    stray = (
+        "| 2026-10-12 | guessed | proj | main | — | — | stray summary | stray.csv | "
+        "active | stray | 2026-10-12-001-audit.md |\n"
+    )
+    canonical_old = (
+        "| 2026-10-12 | 2026-10-12-001 | proj | main | 1m | 1 | canonical summary |  | "
+        "active |  | [log](2026-10-12-001-audit.md) |\n"
+    )
+    registry.write_text(HEADER + stray + canonical_old)
+    canonical = (
+        "| 2026-10-12 | 2026-10-12-001 | proj | main | 3m | 2 | files |  | complete |  | "
+        "[log](2026-10-12-001-audit.md) |"
+    )
+
+    result = _run_log_link(
+        registry, "2026-10-12-001", canonical, "2026-10-12-001-audit.md"
+    )
+
+    assert result.returncode == 0, result.stderr
+    rows = [
+        line
+        for line in registry.read_text().splitlines()
+        if "2026-10-12-001-audit.md" in line
+    ]
+    # Summary from the canonical row; empty canonical cells fall back to the stray.
+    assert rows == [
+        "| 2026-10-12 | 2026-10-12-001 | proj | main | 3m | 2 | canonical summary "
+        "| stray.csv | complete | stray | [log](2026-10-12-001-audit.md) |"
+    ]

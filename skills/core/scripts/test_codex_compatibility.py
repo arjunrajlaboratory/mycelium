@@ -3850,3 +3850,162 @@ def test_lineage_only_session_preserves_log_and_reserves_session_id(tmp_path):
     assert int(second_session_id.rsplit("-", 1)[1]) == int(
         first_session_id.rsplit("-", 1)[1]
     ) + 1
+
+
+def _start_identified_session(repo: Path, host_id: str) -> tuple[Path, str]:
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "session_id": host_id},
+    )
+    assert start.returncode == 0, start.stderr
+    state = _host_state(repo, host_id)
+    log_path = Path((state / "active-session-log.tmp").read_text().splitlines()[0])
+    return log_path, log_path.name[:14]
+
+
+def test_post_action_directive_names_the_exact_registry_identity(tmp_path):
+    """The directive must not ask for a registry row keyed by an ID it never
+    supplies; an agent that guesses one forks the session into two rows."""
+    repo = _repo(tmp_path)
+    host_id = "registry-identity"
+    log_path, session_id = _start_identified_session(repo, host_id)
+    (repo / "analysis.py").write_text("print('work')\n")
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "session_id": host_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "python3 analysis.py"},
+            "tool_response": {"exit_code": 0},
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "MYCELIUM POST-ACTION PROTOCOL" in context
+    assert f"Session ID `{session_id}`" in context
+    assert f"[log]({log_path.name})" in context
+    assert f" {session_id} '| " in context  # ready-to-run upsert keyed by it
+
+
+def test_post_action_directive_without_session_defers_registry_to_stop(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "analysis.py").write_text("print('work')\n")
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": "python3 analysis.py"},
+            "tool_response": {"exit_code": 0},
+            "turn_id": "no-session",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "MYCELIUM POST-ACTION PROTOCOL" in context
+    assert "Update the current session row" not in context
+    assert "Stop writes this session's LOG_REGISTRY.md row" in context
+
+
+@pytest.mark.parametrize(
+    "log_cell_template", ["{name}", "[log]({name})"]
+)
+def test_stop_folds_agent_registry_row_with_guessed_session_id(
+    tmp_path, log_cell_template
+):
+    """Reproduces the 0.8.2 Codex lifecycle audit: an agent upserted a row
+    under an invented ID; Stop must leave one canonical row for the session."""
+    repo = _repo(tmp_path)
+    host_id = "registry-guess"
+    log_path, session_id = _start_identified_session(repo, host_id)
+    registry = repo / ".living" / "log" / "LOG_REGISTRY.md"
+    other = (
+        "| 2026-10-01 | 2026-10-01-002 | repo | main | 5m | 1 | earlier | | "
+        "complete | | [log](2026-10-01-002-repo.md) |\n"
+    )
+    log_cell = log_cell_template.format(name=log_path.name)
+    with registry.open("a") as handle:
+        handle.write(other)
+        handle.write(
+            f"| 2026-10-12 | 001-repo | repo | main | — | — | Ran the runner probe. | "
+            f"conversation report | active | lifecycle-audit | {log_cell} |\n"
+        )
+    (repo / "work.py").write_text("print('work')\n")
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\n### Registry identity\nOne row per session.\n"
+    )
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "session_id": host_id},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"decision": "block"' not in result.stdout
+    content = registry.read_text()
+    session_rows = [line for line in content.splitlines() if log_path.name in line]
+    assert len(session_rows) == 1, content
+    assert f"| {session_id} |" in session_rows[0]
+    assert "Ran the runner probe." in session_rows[0]
+    assert "| complete |" in session_rows[0]
+    assert "| 001-repo |" not in content
+    assert other.strip() in content
+
+
+def test_post_action_registry_command_round_trips_through_stop(tmp_path):
+    """The command the directive hands the agent must work as written and
+    leave exactly one row, carrying the agent's authored cells, after Stop."""
+    repo = _repo(tmp_path)
+    host_id = "registry-roundtrip"
+    log_path, session_id = _start_identified_session(repo, host_id)
+    (repo / "analysis.py").write_text("print('work')\n")
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "session_id": host_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "python3 analysis.py"},
+            "tool_response": {"exit_code": 0},
+        },
+    )
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    command = context.split("with exactly: ", 1)[1].split(". Stop fills", 1)[0]
+    assert "| 2026-" in command and "| repo |" in command  # date and project filled
+    assert "apostrophe" in context
+    command = (
+        command.replace("<summary>", "Fitted the model.")
+        .replace("<key outputs>", "outputs/fit.csv")
+        .replace("<tags>", "modeling")
+    )
+    upsert = subprocess.run(
+        ["bash", "-c", command], cwd=repo, capture_output=True, text=True
+    )
+    assert upsert.returncode == 0, upsert.stderr
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\n### Round trip\nDirective command works.\n"
+    )
+
+    stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "session_id": host_id},
+    )
+
+    assert stop.returncode == 0, stop.stderr
+    assert '"decision": "block"' not in stop.stdout
+    registry = (repo / ".living" / "log" / "LOG_REGISTRY.md").read_text()
+    rows = [line for line in registry.splitlines() if log_path.name in line]
+    assert len(rows) == 1, registry
+    assert f"| {session_id} |" in rows[0]
+    assert "| Fitted the model. | outputs/fit.csv | complete | modeling |" in rows[0]

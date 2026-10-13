@@ -732,3 +732,25 @@ outside the vouched span but inside the exempt container, and require a
 finding. For each consumer selector, feed the gate a near-miss (missing
 class, missing type) and require a finding, plus a test that asserts the
 consumer's selector strings still match what the gate enforces.
+
+## 38. A directive delegates a keyed write without supplying the key
+
+**Failure:** A hook tells the agent to update shared state keyed by an
+identity — "update the current session row" in `LOG_REGISTRY.md` — but never
+names that identity. The agent infers one (`001-audit-codex` from the log
+file name), and the finalizer, keyed by the real ID, appends a second row:
+one session, two registry rows. Found by the 0.8.2 Codex lifecycle audit;
+Claude's agent skipped the optional step, so only one host showed it.
+
+**Invariant:** A directive that asks for a keyed write supplies the exact key
+and, where practical, the exact command; when the key is unresolvable it
+tells the agent to leave the write to the lifecycle owner. The owner also
+reconciles on a second, unforgeable identity (the session log's unique file
+name) so a wrongly keyed agent row folds into the canonical one, keeping the
+agent's authored cells.
+
+**Regression evidence:** Assert the injected directive names the exact key;
+run the directive's command as written, then the finalizer, and require one
+row with the authored cells; seed a row under a guessed key that links the
+same log (bare and markdown-link forms) and require it to fold; require a
+row for a different log, including a suffix-sharing name, to survive.
