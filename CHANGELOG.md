@@ -30,7 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `levels` without a `column`.
   - Duplicate header names and rows wider than the header now block, where
     upstream silently read the wrong column or shifted values.
-  - Unsupported file formats are a gap rather than being parsed as TSV.
+  - Unsupported file formats, and text that is not valid UTF-8, are a gap
+    rather than being parsed leniently.
+  - Lines that cannot be parsed (an unclosed quote swallowed every later
+    row), IDs that differ only in surrounding whitespace, misspelled or
+    repeated contract keys, and `N/A`/`#N/A` read as values are now caught.
+  - Each fact is derived from the rows complete in exactly the columns it
+    needs. A row missing one key no longer hides the group, unit, or level
+    its other keys reveal; upstream let several such cases pass. Examples:
+    a group with no identified unit, a unit seen at no timepoint, a
+    timepoint or contrast level seen only on incomplete rows, and missing
+    cohort values counted toward `min_rows`.
+  - Contrast levels that split into groups sharing no batch now block, not
+    only single isolated levels.
 
 ### Fixed
 
