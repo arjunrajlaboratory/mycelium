@@ -539,6 +539,39 @@ class TableShapeTest(unittest.TestCase):
         blocking = sorted(a["message"] for a in json.loads(out)["alerts"] if a["blocking"])
         self.assertEqual(blocking, ["'batch' has missing values", "'cohort' has missing values"])
 
+    def tsv(self, name, header, rows):
+        self.write(name, "\t".join(header) + "\n" + "".join("\t".join(r) + "\n" for r in rows))
+
+    def test_group_with_no_complete_unit_counts_as_zero_units(self):
+        # Codex P1 on #97: group C has rows but no unit; it must fail min_units_per_group.
+        self.tsv("units.tsv", ["participant", "cohort"],
+                 [["p1", "A"], ["p2", "A"], ["p3", "B"], ["p4", "B"], ["NA", "C"]])
+        code, out, _ = invoke_raw(contract([{"kind": "unit_of_replication", "unit": "participant",
+                                             "group": "cohort"}], table="units.tsv"), root=self.root)
+        self.assertEqual(code, 2, out)
+        self.assertIn("C=0", [a.get("observed") for a in json.loads(out)["alerts"] if a["blocking"]][0])
+
+    def test_unit_with_no_within_value_is_incomplete(self):
+        # Codex P1 on #97: p3 has rows but no visit; it is observed at no level.
+        self.tsv("pairs.tsv", ["participant", "visit"],
+                 [["p1", "0"], ["p1", "28"], ["p2", "0"], ["p2", "28"], ["p3", "NA"]])
+        code, out, _ = invoke_raw(contract([{"kind": "pairing", "unit": "participant", "within": "visit",
+                                             "levels": ["0", "28"]}], table="pairs.tsv"), root=self.root)
+        self.assertEqual(code, 2, out)
+        blocking = [a for a in json.loads(out)["alerts"] if a["blocking"]]
+        self.assertEqual(blocking[0]["observed"], "1 of 3 units incomplete")
+        self.assertIn("p3 lacks 0, 28", blocking[0]["evidence"])
+
+    def test_contrast_level_with_no_known_batch_blocks(self):
+        # Sweep of the same pattern: level C is only seen with a missing batch.
+        self.tsv("batches.tsv", ["batch", "level"],
+                 [["b1", "A"], ["b1", "B"], ["b2", "A"], ["b2", "B"], ["NA", "C"]])
+        code, out, _ = invoke_raw(contract([{"kind": "batch_confounding", "batch": "batch",
+                                             "contrast": "level"}], table="batches.tsv"), root=self.root)
+        self.assertEqual(code, 2, out)
+        blocking = [a for a in json.loads(out)["alerts"] if a["blocking"]]
+        self.assertEqual(blocking[0]["observed"], "C")
+
     def test_disconnected_batch_components_block(self):
         # Codex P1 on #97: b1 holds A/B, b2 holds C/D; A vs C is confounded with batch.
         self.write("split.tsv", "sample\tbatch\tlevel\n" + "".join(
