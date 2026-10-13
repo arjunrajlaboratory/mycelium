@@ -31,6 +31,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pytest pyyaml
+          # data_contract_check reads .h5ad obs through h5py; its tests skip without it.
+          pip install h5py
 
       # Browser tests for the HTML report template (test_html_report_template.py)
       # and PDF-figure inlining (poppler's pdftocairo). Both skip cleanly where

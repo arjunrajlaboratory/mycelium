@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Data contract check before an analysis runs.** `analyze` has a new
+  preflight step. Before the first run, the agent writes down what the analysis
+  assumes about its sample table in `analysis/<name>/data_contract.json`. The
+  assumptions covered are required columns, cohort levels and row counts, one
+  row per unit of replication, pairing across timepoints, and batch versus
+  contrast nesting. `skills/core/scripts/data_contract_check.py` then checks
+  them against the CSV, TSV, or `.h5ad` `obs` table. Each failure is reported
+  with its expected value, observed value, and evidence, and a blocking failure
+  stops the analysis until the user decides. The contract is never loosened to
+  make it pass without the user's agreement. The checker is read-only and needs
+  only the standard library (h5py is optional, for `.h5ad`). It runs as a
+  managed utility, so it opens no post-action cycle. Guide:
+  `skills/core/references/data-contract-check.md`. Adapted from
+  [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
+  Manurung (MIT, issue #91). The port also hardens the checker:
+  - A malformed contract is a usage error rather than a traceback or a silent
+    pass. Examples: `"units_may_span_groups": "false"` (which upstream treated
+    as true), a bare string for `columns`, a fractional `min_rows`, and
+    `levels` without a `column`.
+  - Duplicate header names and rows wider than the header now block, where
+    upstream silently read the wrong column or shifted values.
+  - Unsupported file formats are a gap rather than being parsed as TSV.
+
 ### Fixed
 
 - **One registry row per session.** The post-action directive asked the agent
