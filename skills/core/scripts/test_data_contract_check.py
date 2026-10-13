@@ -102,8 +102,9 @@ class DataContractCheckTest(unittest.TestCase):
         self.assertEqual(observed, ["1 of 8 rows", "absent: C"])
 
     def test_contract_cannot_downgrade_severity(self):
+        # "severity" is not a contract key: it is rejected, never honored as a downgrade.
         code, _ = run([{"kind": "schema", "columns": ["donor"], "severity": "warning"}])
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 1)
 
     def test_zero_rows_after_filter_blocks(self):
         code, alerts = run([{"kind": "unit_of_replication", "unit": "participant", "group": "cohort"}],
@@ -471,6 +472,34 @@ class ContractValidationTest(unittest.TestCase):
     def test_levels_need_a_column(self):
         self.assertUsageError(contract([{"kind": "cohort", "levels": ["A", "B"]}]), "'levels' needs 'column'")
 
+    def test_misspelled_keys_are_rejected_not_ignored(self):
+        # An ignored typo silently drops an assumption: the check runs at its default.
+        self.assertUsageError(contract([{"kind": "unit_of_replication", "unit": "participant",
+                                         "group": "cohort", "min_unit_per_group": 3}]),
+                              "unknown key 'min_unit_per_group'")
+        self.assertUsageError(contract([{"kind": "schema", "columns": ["sample"]}], filter=[]),
+                              "unknown key 'filter'")
+        self.assertUsageError(contract([{"kind": "schema", "columns": ["sample"],
+                                         "filters": [{"column": "keep", "equals": "TRUE", "note": 1}]}]),
+                              "unknown key 'note'")
+
+    def test_notes_are_allowed(self):
+        code, out, _ = invoke_raw(contract([{"kind": "schema", "columns": ["sample"], "label": "ids",
+                                             "note": "from the plan"}], note="plan v2"))
+        self.assertEqual(code, 0, out)
+
+    def test_duplicate_json_keys_are_rejected(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            handle.write('{"schema": "mycelium.data_contract.v1", "table": "samples.tsv", "checks": '
+                         '[{"kind": "cohort", "column": "cohort", "min_rows": 40, "min_rows": 4}]}')
+        try:
+            proc = subprocess.run([sys.executable, SCRIPT, "--contract", handle.name, "--root", FIXTURES],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        finally:
+            os.unlink(handle.name)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("duplicate key 'min_rows'", proc.stderr.decode())
+
     def test_mycelium_extra_schema_still_accepted(self):
         code, out, _ = invoke_raw(contract([{"kind": "schema", "columns": ["sample"]}],
                                            schema="mycelium-extra.data_contract.v1"))
@@ -646,6 +675,39 @@ class TableShapeTest(unittest.TestCase):
         self.assertEqual(code, 3, out)
         self.assertIn("not valid UTF-8", json.loads(out)["alerts"][0]["observed"])
 
+    def test_unclosed_quote_blocks_instead_of_swallowing_rows(self):
+        # csv's lenient mode reads the rest of the file into one field, so rows vanish.
+        self.write("quote.tsv", 'participant\tvisit\np1\t"0\np1\t28\np2\t0\n')
+        code, out, err = invoke_raw(contract([{"kind": "pairing", "unit": "participant", "within": "visit"}],
+                                             table="quote.tsv"), root=self.root)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(code, 2, out)
+        self.assertIn("cannot be parsed", out)
+
+    def test_ids_differing_only_in_whitespace_block(self):
+        # "p1" and "p1 " would count as two units and hide a repeated cell.
+        self.tsv("space.tsv", ["participant", "cohort"],
+                 [["p1", "A"], ["p1 ", "A"], ["p2", "A"], ["p3", "B"], ["p4", "B"]])
+        code, out, _ = invoke_raw(contract([{"kind": "unit_of_replication", "unit": "participant",
+                                             "group": "cohort"}], table="space.tsv"), root=self.root)
+        self.assertEqual(code, 2, out)
+        self.assertIn("differ only in surrounding whitespace", out)
+
+    def test_not_in_filter_reports_rows_it_keeps_without_a_value(self):
+        self.tsv("pref.tsv", ["sample", "preferred"], [["s1", "TRUE"], ["s2", "FALSE"], ["s3", "NA"]])
+        code, out, _ = invoke_raw(contract([{"kind": "schema", "columns": ["sample"],
+                                             "filters": [{"column": "preferred", "not_in": ["FALSE"]}]}],
+                                           table="pref.tsv"), root=self.root)
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 rows have no value in filter column 'preferred'", out)
+
+    def test_spreadsheet_missing_markers_are_missing(self):
+        # "N/A" and Excel's "#N/A" must not count as cohort rows toward min_rows.
+        self.tsv("na.tsv", ["cohort"], [["A"], ["B"], ["N/A"], ["#N/A"]])
+        code, out, _ = invoke_raw(contract([{"kind": "cohort", "column": "cohort", "levels": ["A", "B"],
+                                             "min_rows": 4}], table="na.tsv"), root=self.root)
+        self.assertEqual(code, 2, out)
+
     def test_unsupported_format_is_a_gap_not_a_tsv(self):
         self.write("samples.xlsx", "PK\x03\x04 not a table")
         code, out, _ = invoke_raw(contract([{"kind": "schema", "columns": ["sample"]}], table="samples.xlsx"),
@@ -689,6 +751,84 @@ class DocumentationContractTest(unittest.TestCase):
             self.assertIn(path, analyze)
             self.assertTrue(os.path.isfile(os.path.join(PLUGIN_ROOT, path)), path)
         self.assertIn("Never loosen the contract to make it pass", analyze)
+
+
+class MissingKeyMatrixTest(unittest.TestCase):
+    """Each fact comes from the rows complete in exactly the columns it needs.
+
+    A row missing one key is left out of the facts that need that key (with a
+    warning), but still counts toward every fact it does carry: a new group,
+    unit, or level it reveals is held to the contract like any other.
+    """
+
+    UNIT = {"kind": "unit_of_replication", "unit": "participant", "group": "cohort", "within": ["visit"]}
+    UNIT_BASE = [["p1", "A", "0"], ["p2", "A", "0"], ["p3", "B", "0"], ["p4", "B", "0"]]
+    PAIRING = {"kind": "pairing", "unit": "participant", "within": "visit"}
+    PAIRING_BASE = [["p1", "0"], ["p1", "28"], ["p2", "0"], ["p2", "28"]]
+    BATCH = {"kind": "batch_confounding", "batch": "batch", "contrast": "level"}
+    BATCH_BASE = [["b1", "A"], ["b1", "B"], ["b2", "A"], ["b2", "B"]]
+    COHORT = {"kind": "cohort", "column": "cohort", "levels": ["A", "B"], "rows": 4}
+    COHORT_BASE = [["A"], ["A"], ["B"], ["B"]]
+
+    CASES = [
+        # (check, header, base rows, added row, expected exit, why)
+        (UNIT, ["participant", "cohort", "visit"], UNIT_BASE, None, 0, "base passes"),
+        (UNIT, ["participant", "cohort", "visit"], UNIT_BASE, ["NA", "C", "0"], 2, "group C has 0 units"),
+        (UNIT, ["participant", "cohort", "visit"], UNIT_BASE, ["p9", "C", "NA"], 2, "group C has 1 unit"),
+        (UNIT, ["participant", "cohort", "visit"], UNIT_BASE, ["p1", "B", "NA"], 2, "p1 spans A and B"),
+        (UNIT, ["participant", "cohort", "visit"], UNIT_BASE, ["p1", "A", "NA"], 0, "repeat unknowable"),
+        (UNIT, ["participant", "cohort", "visit"], UNIT_BASE, ["p9", "NA", "0"], 0, "group unknowable"),
+        (PAIRING, ["participant", "visit"], PAIRING_BASE, None, 0, "base passes"),
+        (PAIRING, ["participant", "visit"], PAIRING_BASE, ["NA", "56"], 2, "visit 56 is a level"),
+        (PAIRING, ["participant", "visit"], PAIRING_BASE, ["p3", "NA"], 2, "p3 is at no level"),
+        (PAIRING, ["participant", "visit"], PAIRING_BASE, ["p1", "NA"], 0, "nothing new"),
+        (BATCH, ["batch", "level"], BATCH_BASE, None, 0, "base passes"),
+        (BATCH, ["batch", "level"], BATCH_BASE, ["NA", "C"], 2, "level C has no batch"),
+        (BATCH, ["batch", "level"], BATCH_BASE, ["b3", "NA"], 0, "nothing new"),
+        (COHORT, ["cohort"], COHORT_BASE, None, 0, "base passes"),
+        (COHORT, ["cohort"], COHORT_BASE, ["NA"], 0, "an NA row is not a cohort row"),
+    ]
+
+    def test_matrix(self):
+        root = tempfile.mkdtemp()
+        try:
+            for n, (check, header, base, added, expected, why) in enumerate(self.CASES):
+                rows = base + ([added] if added else [])
+                name = "m{}.tsv".format(n)
+                with open(os.path.join(root, name), "w") as handle:
+                    handle.write("\t".join(header) + "\n" + "".join("\t".join(r) + "\n" for r in rows))
+                code, out, err = invoke_raw(contract([dict(check)], table=name), root=root)
+                self.assertEqual(code, expected, (why, added, out, err))
+                if added and "NA" in added:
+                    self.assertIn("missing value", out, why)
+        finally:
+            shutil.rmtree(root)
+
+    def test_all_incomplete_rows_still_report_the_population(self):
+        # No row is complete, but group B visibly has one unit.
+        root = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(root, "t.tsv"), "w") as handle:
+                handle.write("participant\tcohort\tvisit\np1\tA\tNA\np2\tA\tNA\np3\tB\tNA\n")
+            code, out, _ = invoke_raw(contract([dict(self.UNIT)], table="t.tsv"), root=root)
+            self.assertEqual(code, 2, out)
+            self.assertIn("B=1", out)
+        finally:
+            shutil.rmtree(root)
+
+    def test_level_count_uses_every_observed_level(self):
+        # A and B are both observed; B only without a batch. That is "no known
+        # batch", not "fewer than two levels".
+        root = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(root, "t.tsv"), "w") as handle:
+                handle.write("batch\tlevel\nb1\tA\nb1\tA\nNA\tB\n")
+            code, out, _ = invoke_raw(contract([dict(self.BATCH)], table="t.tsv"), root=root)
+            self.assertEqual(code, 2, out)
+            self.assertIn("no known batch", out)
+            self.assertNotIn("fewer than two levels", out)
+        finally:
+            shutil.rmtree(root)
 
 
 if __name__ == "__main__":

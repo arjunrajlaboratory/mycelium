@@ -59,8 +59,9 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   tab-separated; `.h5ad` through its `obs` (with h5py, when it is importable;
   `X` and layers are never read). Any other format is a gap: export it to CSV
   or TSV.
-- A header that names a column twice, or a row with more fields than the
-  header, blocks: no check on that table can be trusted. (An R `write.table`
+- A header that names a column twice, a row with more fields than the header,
+  or a line that cannot be parsed (an unclosed quote, for example) blocks: no
+  check on that table can be trusted. (An R `write.table`
   export with row names writes one fewer header field than each row; re-export
   it with `row.names = FALSE`.) A short row's missing trailing fields count as
   missing values.
@@ -76,6 +77,15 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
 - `filters` (`equals`, `in`, `not_in`; exactly one per filter) apply to every
   check. A check may add its own `filters`, `table`, and `label`. Filter values
   and levels are strings or numbers, compared as text (`"TRUE"`, not `true`).
+  Rows with no value in a `not_in` filter's column pass it, and the run says
+  how many.
+- Only the keys listed here are accepted, plus free-text `note` and `reason`
+  on the contract or any check (for example, the plan's reason for a
+  `max_share`). A misspelled key, or a key given twice, is a malformed
+  contract rather than a silently dropped assumption.
+- In every column a check or filter names, values that differ only in
+  surrounding whitespace (`p1` and `p1 `) block: they would be counted as two
+  units.
 - `schema`: every column in `columns` exists.
 - `cohort`: the required `levels` of `column` are present; `min_rows` or exact
   `rows` holds; and the `no_missing` columns have no missing values. Rows with
@@ -94,7 +104,7 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   1, such as `0.7`) it also warns when a batch holds more than that share of
   one contrast level's rows; the plan sets `max_share` with its reason. Every
   run prints the batch-by-contrast table of row counts and shares.
-- Missing values (`""`, `NA`, `NaN`, `NULL`, `None`, `<NA>`; any case) in a
+- Missing values (`""`, `NA`, `N/A`, `#N/A`, `NaN`, `NULL`, `None`, `<NA>`; any case) in a
   check's key columns are left out of that check and reported as a warning.
   The population they belong to is not: a group whose rows all lack a unit
   counts as zero units, a unit whose rows all lack a `within` value is

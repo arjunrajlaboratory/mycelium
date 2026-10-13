@@ -29,7 +29,7 @@ SCHEMA = "mycelium.data_contract.v1"
 # Contracts written for mycelium-extra's checker run unchanged.
 ACCEPTED_SCHEMAS = (SCHEMA, "mycelium-extra.data_contract.v1")
 ALERT_SCHEMA = "mycelium.contract_alert.v1"
-MISSING = {"", "na", "nan", "null", "none", "<na>"}
+MISSING = {"", "na", "n/a", "#n/a", "nan", "null", "none", "<na>"}
 MAX_EVIDENCE = 5
 
 
@@ -85,9 +85,16 @@ def read_table(path, wanted=None):
             os.path.splitext(path)[1] or path))
     # Decode strictly: replacing bad bytes would merge distinct identifiers
     # (p\xff and p\xfe both become p\ufffd) and could fake a passing check.
+    # Parse strictly too: lenient csv reads everything after an unclosed quote
+    # into one field, so later rows silently vanish.
     try:
         with open(path, newline="", encoding="utf-8-sig") as handle:
-            records = list(csv.reader(handle, delimiter=delimiter))
+            reader = csv.reader(handle, delimiter=delimiter, strict=True)
+            try:
+                records = list(reader)
+            except csv.Error as error:
+                raise TableShapeError("line {} cannot be parsed ({}), so later rows may be missing or "
+                                      "merged".format(reader.line_num, error))
     except UnicodeDecodeError as error:
         raise TableGap("the table is not valid UTF-8 (byte {} at offset {}); re-export it as UTF-8".format(
             error.object[error.start:error.start + 1], error.start))
@@ -230,7 +237,9 @@ def read_h5ad_obs(path, wanted=None):
     return columns, rows, unreadable
 
 
-def apply_filters(rows, filters, columns):
+def apply_filters(rows, filters, columns, kind):
+    """Return (kept rows, warnings)."""
+    warnings = []
     for rule in filters:
         column = rule.get("column")
         if "equals" in rule:
@@ -242,9 +251,37 @@ def apply_filters(rows, filters, columns):
         elif "not_in" in rule:
             banned = {str(v) for v in rule["not_in"]}
             rows = [r for r in rows if r[column] not in banned]
+            # A row with no value passes a not_in filter by absence of evidence.
+            unknown = sum(1 for r in rows if is_missing(r[column]))
+            if unknown:
+                warnings.append(alert(
+                    kind, "{} rows have no value in filter column '{}' and were kept by its not_in "
+                    "filter".format(unknown, column), False, observed="{} of {} rows".format(unknown, len(rows))))
         else:
             raise ContractError("filter needs equals, in, or not_in: {}".format(rule))
-    return rows
+    return rows, warnings
+
+
+def spelling_variants(rows, columns, kind):
+    """Block when one value is spelled two ways that differ only in surrounding whitespace.
+
+    "p1" and "p1 " compare as two units, which can hide a repeated cell or a
+    shared unit, so the table's identities cannot be trusted as written.
+    """
+    alerts = []
+    for column in columns:
+        spellings = defaultdict(set)
+        for r in rows:
+            if not is_missing(r[column]):
+                spellings[r[column].strip()].add(r[column])
+        clashes = sorted(sorted(v) for v in spellings.values() if len(v) > 1)
+        if clashes:
+            alerts.append(alert(
+                kind, "values of '{}' differ only in surrounding whitespace, so one identity may be "
+                "counted twice".format(column), True, expected="one spelling per value",
+                observed="{} values spelled more than one way".format(len(clashes)),
+                evidence=[" / ".join(repr(s) for s in v) for v in clashes]))
+    return alerts
 
 
 def need(check, key):
@@ -259,9 +296,20 @@ def as_list(value):
     return value if isinstance(value, list) else [value]
 
 
+def having(rows, *keys):
+    """The rows with a value in every one of `keys`.
+
+    Each fact a check reports is derived from the rows complete in exactly the
+    columns that fact needs, never from rows complete in all of the check's
+    columns: a row missing one key still reveals the groups, units, and levels
+    in its other keys, and those are held to the contract like any other.
+    """
+    return [r for r in rows if not any(is_missing(r[k]) for k in keys)]
+
+
 def drop_missing(rows, keys, kind):
-    """Split rows into complete and a warning for rows missing any key column."""
-    kept = [r for r in rows if not any(is_missing(r[k]) for k in keys)]
+    """Rows complete in every key, plus a warning naming the rows that are not."""
+    kept = having(rows, *keys)
     dropped = len(rows) - len(kept)
     warnings = []
     if dropped:
@@ -285,9 +333,8 @@ def check_cohort(check, columns, rows):
     column = check.get("column")
     counted = rows
     if column is not None:
-        # A row with no cohort value cannot contribute to a cohort comparison,
-        # so it counts toward neither the levels nor the row counts. no_missing
-        # below still sees every filtered row.
+        # A row with no cohort value counts toward neither the levels nor the
+        # row counts; no_missing below still sees every filtered row.
         counted, alerts = drop_missing(rows, [column], "cohort")
         present = Counter(r[column] for r in counted)
         absent = [lvl for lvl in as_list(check.get("levels")) if str(lvl) not in present]
@@ -315,15 +362,11 @@ def check_unit(check, columns, rows):
     unit = need(check, "unit")
     group = need(check, "group")
     within = as_list(check.get("within"))
-    # Each sub-check prunes only on the keys it uses. Every observed group is
-    # held to the minimum, even one whose rows all lack a unit, and a unit's
-    # group membership does not depend on its `within` value being present.
-    groups = {r[group] for r in rows if not is_missing(r[group])}
-    members = [r for r in rows if not is_missing(r[unit]) and not is_missing(r[group])]
-    rows, alerts = drop_missing(rows, [unit, group] + within, "unit_of_replication")
-    if not rows:
-        return alerts
-    cells = Counter((r[group],) + tuple(r[w] for w in within) + (r[unit],) for r in rows)
+    _, alerts = drop_missing(rows, [unit, group] + within, "unit_of_replication")
+    # Repeats need every key; membership needs only unit and group; the groups
+    # held to the minimum need only group (a group with no unit has 0 units).
+    cells = Counter((r[group],) + tuple(r[w] for w in within) + (r[unit],)
+                    for r in having(rows, unit, group, *within))
     repeats = sorted(key for key, n in cells.items() if n > 1)
     if repeats:
         labels = [group] + within + [unit]
@@ -335,8 +378,8 @@ def check_unit(check, columns, rows):
             observed="{} repeated cells".format(len(repeats)),
             evidence=[", ".join("{}={}".format(l, v) for l, v in zip(labels, key)) +
                       " ({} rows)".format(cells[key]) for key in repeats]))
-    units = {g: set() for g in groups}
-    for r in members:
+    units = {r[group]: set() for r in having(rows, group)}
+    for r in having(rows, unit, group):
         units[r[group]].add(r[unit])
     minimum = int(check.get("min_units_per_group", 2))
     small = sorted((g, len(u)) for g, u in units.items() if len(u) < minimum)
@@ -345,8 +388,8 @@ def check_unit(check, columns, rows):
             "unit_of_replication", "groups with fewer distinct {} than required".format(unit), True,
             expected=">= {} per {}".format(minimum, group),
             observed=", ".join("{}={}".format(g, n) for g, n in small)))
-    shared = sorted(u for u in set.union(set(), *units.values()) if sum(u in s for s in units.values()) > 1) \
-        if len(units) > 1 else []
+    spans = Counter(u for members in units.values() for u in members)
+    shared = sorted(u for u, n in spans.items() if n > 1)
     if shared and not check.get("units_may_span_groups", False):
         alerts.append(alert(
             "unit_of_replication", "some {} appear in more than one {} level".format(unit, group), True,
@@ -358,17 +401,16 @@ def check_unit(check, columns, rows):
 def check_pairing(check, columns, rows):
     unit = need(check, "unit")
     within = need(check, "within")
-    # A unit whose rows all lack a `within` value is observed at no level: it
-    # stays in the population as incomplete rather than vanishing.
-    # Likewise a level seen only on rows without a unit is still a level.
-    population = {r[unit] for r in rows if not is_missing(r[unit])}
-    observed_levels = sorted({r[within] for r in rows if not is_missing(r[within])})
-    rows, alerts = drop_missing(rows, [unit, within], "pairing")
-    if not rows:
+    _, alerts = drop_missing(rows, [unit, within], "pairing")
+    # The units come from every row with a unit, the levels (when the contract
+    # does not list them) from every row with a level: a unit seen at no level
+    # is incomplete, and a level seen with no unit is still a level.
+    levels = [str(l) for l in as_list(check.get("levels"))] or \
+        sorted({r[within] for r in having(rows, within)})
+    seen = {r[unit]: set() for r in having(rows, unit)}
+    if not seen or not levels:
         return alerts
-    levels = [str(l) for l in as_list(check.get("levels"))] or observed_levels
-    seen = {u: set() for u in population}
-    for r in rows:
+    for r in having(rows, unit, within):
         seen[r[unit]].add(r[within])
     incomplete = sorted((u, sorted(set(levels) - s)) for u, s in seen.items() if set(levels) - s)
     if incomplete:
@@ -383,27 +425,27 @@ def check_pairing(check, columns, rows):
 def check_batch(check, columns, rows):
     batch = need(check, "batch")
     contrast = need(check, "contrast")
-    observed_levels = {r[contrast] for r in rows if not is_missing(r[contrast])}
-    rows, alerts = drop_missing(rows, [batch, contrast], "batch_confounding")
-    if not rows:
-        return alerts
+    batched, alerts = drop_missing(rows, [batch, contrast], "batch_confounding")
+    observed = sorted({r[contrast] for r in having(rows, contrast)})
+    if len(observed) < 2:
+        return alerts + [alert("batch_confounding", "the contrast has fewer than two levels", True,
+                               observed=", ".join(observed) or "none")]
     # A level seen only with a missing batch drops out of the batch table, so
     # its confounding with batch cannot be checked at all.
-    unbatched = sorted(observed_levels - {r[contrast] for r in rows})
+    levels = sorted({r[contrast] for r in batched})
+    unbatched = sorted(set(observed) - set(levels))
     if unbatched:
         alerts.append(alert(
             "batch_confounding", "contrast levels with no known batch; their batch confounding cannot "
             "be checked", True, expected="every {} level has rows with a {}".format(contrast, batch),
             observed=", ".join(unbatched)))
+    if not batched:
+        return alerts
     table = defaultdict(Counter)
-    for r in rows:
+    for r in batched:
         table[r[batch]][r[contrast]] += 1
-    levels = sorted({r[contrast] for r in rows})
     evidence = ["{}: {}".format(b, ", ".join("{}={}".format(l, c[l]) for l in levels if c[l]))
                 for b, c in sorted(table.items())]
-    if len(levels) < 2:
-        return alerts + [alert("batch_confounding", "the contrast has fewer than two levels", True,
-                               observed=", ".join(levels) or "none")]
     single = sorted(b for b, c in table.items() if len(c) == 1)
     if len(single) == len(table):
         alerts.append(alert(
@@ -436,7 +478,7 @@ def check_batch(check, columns, rows):
             observed=", ".join(lone)))
     share = check.get("max_share")
     if share is not None:
-        totals = Counter(r[contrast] for r in rows)
+        totals = Counter(r[contrast] for r in batched)
         over = [(b, l) for b, c in sorted(table.items()) for l in levels
                 if c[l] and c[l] / float(totals[l]) > share]
         if over:
@@ -557,6 +599,7 @@ def validate_filters(where, filters):
         at = "{}filters[{}]".format(where + " " if where else "", n)
         if not isinstance(rule, dict):
             fail(at, "must be an object")
+        reject_unknown(at, rule, FILTER_KEYS)
         if "column" not in rule:
             fail(at, "needs a 'column'")
         validate_column(at, rule, "column")
@@ -572,6 +615,37 @@ def validate_filters(where, filters):
                 json.dumps(rule[op])))
 
 
+NOTES = ("note", "reason")  # free text, recorded with the contract and never read
+CONTRACT_KEYS = {"schema", "table", "filters", "checks"} | set(NOTES)
+CHECK_KEYS = {"kind", "table", "filters", "label"} | set(NOTES)
+KIND_KEYS = {
+    "schema": {"columns"},
+    "cohort": {"column", "levels", "min_rows", "rows", "no_missing"},
+    "unit_of_replication": {"unit", "group", "within", "min_units_per_group", "units_may_span_groups"},
+    "pairing": {"unit", "within", "levels"},
+    "batch_confounding": {"batch", "contrast", "max_share"},
+}
+FILTER_KEYS = {"column", "equals", "in", "not_in"}
+
+
+def reject_unknown(where, value, known):
+    """An unread key is an assumption the contract states but nothing checks."""
+    unknown = sorted(set(value) - known)
+    if unknown:
+        fail(where, "has unknown key '{}' (a misspelled key would silently drop an assumption); "
+                    "known keys: {}".format(unknown[0], ", ".join(sorted(known))))
+
+
+def reject_duplicate_keys(pairs):
+    """json object_pairs_hook: a repeated key would silently keep only its last value."""
+    seen = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ContractError("duplicate key '{}' in the contract".format(key))
+        seen[key] = value
+    return seen
+
+
 def validate_contract(contract):
     """Contract syntax the checks rely on; a bad value is a usage error, never a pass.
 
@@ -582,6 +656,7 @@ def validate_contract(contract):
         raise ContractError("contract must be a JSON object")
     if contract.get("schema") not in ACCEPTED_SCHEMAS:
         raise ContractError("contract schema must be " + SCHEMA)
+    reject_unknown("contract", contract, CONTRACT_KEYS)
     if "table" in contract and (not isinstance(contract["table"], str) or not contract["table"]):
         raise ContractError("table must be a non-empty path string")
     validate_filters("", contract.get("filters", []))
@@ -596,6 +671,7 @@ def validate_contract(contract):
         if kind not in CHECKS:
             raise ContractError("unknown check kind at {}: {}".format(where, json.dumps(kind)))
         where = "{} ({})".format(where, kind)
+        reject_unknown(where, check, CHECK_KEYS | KIND_KEYS[kind])
         if "table" in check and (not isinstance(check["table"], str) or not check["table"]):
             fail(where, "'table' must be a non-empty path string")
         if "label" in check and not isinstance(check["label"], str):
@@ -708,14 +784,17 @@ def run_contract(contract, base_dir):
                                    evidence=["{}: {}".format(c, unreadable[c]) for c in gaps]))
         rows_checked = 0
         if not found:
-            rows = apply_filters(rows, filters, columns)
+            found.extend(spelling_variants(rows, sorted(set(named)), kind))
+        if not found:
+            rows, filter_warnings = apply_filters(rows, filters, columns, kind)
+            found.extend(filter_warnings)
             rows_checked = len(rows)
             if not rows:
                 found.append(alert(kind, "no rows left after filters; the check would pass vacuously", True,
                                    expected=">= 1 row",
                                    observed="0 of {} rows".format(len(cache[path][1])),
                                    evidence=[json.dumps(f, sort_keys=True) for f in filters]))
-            else:
+            if rows:
                 found.extend(CHECKS[kind](check, columns, rows))
         for record in found:
             record["check"] = label
@@ -764,7 +843,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         with open(args.contract, encoding="utf-8") as handle:
-            contract = json.load(handle)
+            contract = json.load(handle, object_pairs_hook=reject_duplicate_keys)
         summaries, alerts = run_contract(contract, args.root)
     except (ContractError, ValueError, OSError) as error:
         print("contract error: {}".format(error), file=sys.stderr)
