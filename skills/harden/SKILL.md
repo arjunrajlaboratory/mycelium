@@ -82,7 +82,10 @@ test checks:
   commit before the fix, checked out in a temporary `git worktree` (it holds
   only tracked files, so copy the new test into it), or the fix monkeypatched
   out inside a throwaway run. It must fail there, on its targeted assertion: a
-  missing test, import error, or collection failure is not a red run. Never edit the
+  missing test, import error, or collection failure is not a red run. Then
+  remove the worktree with `git worktree remove --force <path>` (`--force`
+  because the copied test leaves it dirty), which also clears its Git
+  metadata; deleting the directory alone does not. Never edit the
   repository's code to stage the red run, and never keep a test that fails on
   the input it is meant to handle.
 

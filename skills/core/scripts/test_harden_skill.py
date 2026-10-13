@@ -82,6 +82,8 @@ def test_harden_red_run_matches_the_kind_of_check() -> None:
     # in, and the failure must come from its assertion, not a missing test.
     assert "copy the new test into it" in harden
     assert "targeted assertion" in harden
+    # The copied test leaves the worktree dirty; remove it, metadata included.
+    assert "git worktree remove --force" in harden
     assert "pass on the current code" in harden.lower()
 
 
