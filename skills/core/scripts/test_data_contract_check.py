@@ -513,6 +513,15 @@ class TableShapeTest(unittest.TestCase):
         self.assertEqual(code, 2, out)
         self.assertIn("more fields than the header", out)
 
+    def test_row_wider_than_header_blocks_even_when_the_extra_field_is_empty(self):
+        # Codex P1 on #97: "r1,p1," under "unit,visit" is a shifted row-name export,
+        # not unit=r1, visit=p1.
+        self.write("shift.csv", "unit,visit\nr1,p1,\nr2,p1,\n")
+        code, out, _ = invoke_raw(contract([{"kind": "pairing", "unit": "unit", "within": "visit"}],
+                                           table="shift.csv"), root=self.root)
+        self.assertEqual(code, 2, out)
+        self.assertIn("more fields than the header", out)
+
     def test_duplicate_header_names_block(self):
         self.write("dup.tsv", "sample\tcohort\tcohort\ns1\tA\tB\n")
         code, out, _ = invoke_raw(contract([{"kind": "cohort", "column": "cohort", "levels": ["A"]}],
