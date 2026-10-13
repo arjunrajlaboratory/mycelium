@@ -83,6 +83,12 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
   fi
 fi
 
+# Render a value as one shell word for a command the agent will run: paths and
+# front-matter text are data, never syntax (quotes, backticks, $(...)).
+mycelium_shell_word() { printf '%q' "$1"; }
+# Single-quote a template whose <placeholders> the agent fills in place.
+mycelium_single_quoted() { local quote="'" escaped="'\\''"; printf "'%s'" "${1//$quote/$escaped}"; }
+
 # The registry row is keyed by the session ID in the active log's front
 # matter. Name it exactly: an agent left to infer an ID writes a second row
 # for the same session. Without a resolvable ID, Stop owns the row entirely.
@@ -94,7 +100,9 @@ if [[ -n "${LOG_PATH:-}" && -f "$LOG_PATH" ]]; then
     _REGISTRY_PROJECT=$({ grep -m1 '^project:' "$LOG_PATH" || true; } | sed 's/^project: *//' | mycelium_registry_cell)
     _REGISTRY_DATE=$(date +%Y-%m-%d)
     _REGISTRY_FILE="$(dirname "$LOG_PATH")/LOG_REGISTRY.md"
-    REGISTRY_STEP="8. LOG REGISTRY: This session's row is Session ID \`${_REGISTRY_SESSION_ID}\`, Log [log](${_REGISTRY_LOG}); never use another ID. Record a 1-sentence past-tense Summary, semicolon-separated Key Outputs, and Tags with exactly: python3 \"${HERE}/../scripts/upsert_registry_row.py\" \"${_REGISTRY_FILE}\" ${_REGISTRY_SESSION_ID} '| ${_REGISTRY_DATE} | ${_REGISTRY_SESSION_ID} | ${_REGISTRY_PROJECT} |  |  |  | <summary> | <key outputs> | active | <tags> | [log](${_REGISTRY_LOG}) |'. Stop fills the factual columns. Cells are single-quoted: write no | and no apostrophe in them (rephrase, e.g. did not)."
+    _REGISTRY_ROW=$(mycelium_single_quoted "| ${_REGISTRY_DATE} | ${_REGISTRY_SESSION_ID} | ${_REGISTRY_PROJECT} |  |  |  | <summary> | <key outputs> | active | <tags> | [log](${_REGISTRY_LOG}) |")
+    _REGISTRY_COMMAND="python3 $(mycelium_shell_word "${HERE}/../scripts/upsert_registry_row.py") $(mycelium_shell_word "$_REGISTRY_FILE") ${_REGISTRY_SESSION_ID} ${_REGISTRY_ROW}"
+    REGISTRY_STEP="8. LOG REGISTRY: This session's row is Session ID \`${_REGISTRY_SESSION_ID}\`, Log [log](${_REGISTRY_LOG}); never use another ID. Record a 1-sentence past-tense Summary, semicolon-separated Key Outputs, and Tags with exactly: ${_REGISTRY_COMMAND}. Stop fills the factual columns. Cells are single-quoted: write no | and no apostrophe in them (rephrase, e.g. did not)."
   fi
 fi
 
@@ -116,7 +124,7 @@ fi
 # complete file to the shared resume pointer under the global lifecycle lock.
 LIVING_DIRECTIVE="${LIVING_DIRECTIVE//.mycelium\/last-session.md/${STATE_DIR}\/last-session.md}"
 if [[ -n "$LIVING_DIRECTIVE" ]]; then
-  LIVING_DIRECTIVE="${LIVING_DIRECTIVE}\n\nCONCURRENT WRITER SAFETY: Mutate LOG_REGISTRY.md only with python3 \"${HERE}/../scripts/upsert_registry_row.py\". Mutate FINDINGS_REGISTRY.md and TODO_REGISTRY.md only with python3 \"${HERE}/../scripts/upsert_table_row.py\". Do not use an unlocked read/edit/write sequence for a shared table."
+  LIVING_DIRECTIVE="${LIVING_DIRECTIVE}\n\nCONCURRENT WRITER SAFETY: Mutate LOG_REGISTRY.md only with python3 $(mycelium_shell_word "${HERE}/../scripts/upsert_registry_row.py"). Mutate FINDINGS_REGISTRY.md and TODO_REGISTRY.md only with python3 $(mycelium_shell_word "${HERE}/../scripts/upsert_table_row.py"). Do not use an unlocked read/edit/write sequence for a shared table."
 fi
 
 # Assemble and emit single JSON

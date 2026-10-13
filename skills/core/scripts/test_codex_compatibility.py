@@ -4059,3 +4059,45 @@ def test_post_action_registry_command_lets_later_updates_replace_authored_cells(
     assert len(rows) == 1, registry
     assert "| Refit with priors. | b.csv | complete | modeling |" in rows[0]
     assert "First pass." not in registry
+
+
+def test_post_action_registry_command_is_shell_safe_for_hostile_paths(tmp_path):
+    """Paths and front-matter values are data: a quote, backtick, or $()
+    in the repository name must neither break the command nor execute."""
+    repo = tmp_path / "it's \"q\" $(touch PWNED) `touch PWNED2`"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".living").mkdir()
+    for name in ("learnings.md", "decisions.md", "conventions.md"):
+        (repo / ".living" / name).write_text(f"# {name}\n")
+    host_id = "registry-hostile"
+    log_path, session_id = _start_identified_session(repo, host_id)
+    (repo / "analysis.py").write_text("print('work')\n")
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "session_id": host_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "python3 analysis.py"},
+            "tool_response": {"exit_code": 0},
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    command = context.split("with exactly: ", 1)[1].split(". Stop fills", 1)[0]
+    command = (
+        command.replace("<summary>", "Fitted the model.")
+        .replace("<key outputs>", "fit.csv")
+        .replace("<tags>", "modeling")
+    )
+    upsert = subprocess.run(
+        ["bash", "-c", command], cwd=tmp_path, capture_output=True, text=True
+    )
+
+    assert upsert.returncode == 0, upsert.stderr
+    assert not (tmp_path / "PWNED").exists() and not (tmp_path / "PWNED2").exists()
+    registry = (repo / ".living" / "log" / "LOG_REGISTRY.md").read_text()
+    rows = [line for line in registry.splitlines() if log_path.name in line]
+    assert len(rows) == 1 and "| Fitted the model. |" in rows[0], registry
