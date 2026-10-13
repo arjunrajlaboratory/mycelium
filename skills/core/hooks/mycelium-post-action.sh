@@ -94,7 +94,7 @@ if [[ -n "${LOG_PATH:-}" && -f "$LOG_PATH" ]]; then
     _REGISTRY_PROJECT=$({ grep -m1 '^project:' "$LOG_PATH" || true; } | sed 's/^project: *//' | mycelium_registry_cell)
     _REGISTRY_DATE=$(date +%Y-%m-%d)
     _REGISTRY_FILE="$(dirname "$LOG_PATH")/LOG_REGISTRY.md"
-    REGISTRY_STEP="8. LOG REGISTRY: This session's row is Session ID \`${_REGISTRY_SESSION_ID}\`, Log [log](${_REGISTRY_LOG}); never use another ID. Record a 1-sentence past-tense Summary, semicolon-separated Key Outputs, and Tags with exactly: python3 \"${HERE}/../scripts/upsert_registry_row.py\" --preserve-authored \"${_REGISTRY_FILE}\" ${_REGISTRY_SESSION_ID} '| ${_REGISTRY_DATE} | ${_REGISTRY_SESSION_ID} | ${_REGISTRY_PROJECT} |  |  |  | <summary> | <key outputs> | active | <tags> | [log](${_REGISTRY_LOG}) |'. Stop fills the factual columns. Cells are single-quoted: write no | and no apostrophe in them (rephrase, e.g. did not)."
+    REGISTRY_STEP="8. LOG REGISTRY: This session's row is Session ID \`${_REGISTRY_SESSION_ID}\`, Log [log](${_REGISTRY_LOG}); never use another ID. Record a 1-sentence past-tense Summary, semicolon-separated Key Outputs, and Tags with exactly: python3 \"${HERE}/../scripts/upsert_registry_row.py\" \"${_REGISTRY_FILE}\" ${_REGISTRY_SESSION_ID} '| ${_REGISTRY_DATE} | ${_REGISTRY_SESSION_ID} | ${_REGISTRY_PROJECT} |  |  |  | <summary> | <key outputs> | active | <tags> | [log](${_REGISTRY_LOG}) |'. Stop fills the factual columns. Cells are single-quoted: write no | and no apostrophe in them (rephrase, e.g. did not)."
   fi
 fi
 

@@ -4009,3 +4009,53 @@ def test_post_action_registry_command_round_trips_through_stop(tmp_path):
     assert len(rows) == 1, registry
     assert f"| {session_id} |" in rows[0]
     assert "| Fitted the model. | outputs/fit.csv | complete | modeling |" in rows[0]
+
+
+def test_post_action_registry_command_lets_later_updates_replace_authored_cells(
+    tmp_path,
+):
+    """The agent is the author: a later post-action update in the same
+    session must replace its earlier Summary, not be preserved against it."""
+    repo = _repo(tmp_path)
+    host_id = "registry-update-twice"
+    log_path, session_id = _start_identified_session(repo, host_id)
+    (repo / "analysis.py").write_text("print('work')\n")
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "session_id": host_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "python3 analysis.py"},
+            "tool_response": {"exit_code": 0},
+        },
+    )
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    template = context.split("with exactly: ", 1)[1].split(". Stop fills", 1)[0]
+    for summary, outputs in (("First pass.", "a.csv"), ("Refit with priors.", "b.csv")):
+        command = (
+            template.replace("<summary>", summary)
+            .replace("<key outputs>", outputs)
+            .replace("<tags>", "modeling")
+        )
+        upsert = subprocess.run(
+            ["bash", "-c", command], cwd=repo, capture_output=True, text=True
+        )
+        assert upsert.returncode == 0, upsert.stderr
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\n### Twice\nLater authored text wins.\n"
+    )
+
+    stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "session_id": host_id},
+    )
+
+    assert stop.returncode == 0, stop.stderr
+    registry = (repo / ".living" / "log" / "LOG_REGISTRY.md").read_text()
+    rows = [line for line in registry.splitlines() if log_path.name in line]
+    assert len(rows) == 1, registry
+    assert "| Refit with priors. | b.csv | complete | modeling |" in rows[0]
+    assert "First pass." not in registry
