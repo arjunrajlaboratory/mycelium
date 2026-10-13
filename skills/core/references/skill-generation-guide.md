@@ -123,19 +123,19 @@ When in doubt, err toward proposing a convention and letting the reviewer reject
 
 ## Using `mitigation_type` to Guide Promotion Decisions
 
-Every learning entry carries a `mitigation_type` field that directly informs how — and how urgently — it should be promoted at crystallize time.
+Every learning entry carries a `mitigation_type` field that directly informs how — and how urgently — it should be promoted at crystallize time. The type records what enforces the learning now; the allowed transitions between types are defined once, in `skills/core/templates/learning-entry.md`, and the procedure below applies them.
 
 ### The three types and their recurrence risk
 
 | mitigation_type | Description | Recurrence risk | Crystallize action |
 |---|---|---|---|
 | `structural` | A test, assertion, type constraint, frozenset, or schema validation was added to make this class of error impossible or immediately detectable. | Near-zero — the code enforces it. | No promotion needed; record for provenance. |
-| `convention` | The learning has been or should be promoted to a mandatory checklist item in `.living/conventions.md`. | Moderate — violation requires bypassing the convention. | Add or strengthen the conventions.md entry; cite the learning. |
+| `convention` | The learning has been promoted to a mandatory checklist item that exists in `.living/conventions.md`. | Moderate — violation requires bypassing the convention. | Add or strengthen the conventions.md entry; cite the learning. |
 | `ambient-awareness` | General "watch for X" with no enforcement mechanism. | High — depends entirely on memory. | **Highest urgency**: either convert to `structural` (add a test) or promote to `convention`. |
 
 ### Decision procedure at crystallize time
 
-1. **Audit ambient-awareness entries first.** These carry the highest recurrence risk. For each one, ask: *"What test or invariant would have caught this?"* (the `structural_mitigation_candidate` field should already answer this). If the answer is concrete, ship the test with `$mycelium:harden`, which reclassifies the entry to `structural` once the test fails when the problem is present and passes on current code. If structural mitigation is genuinely impractical, promote to `convention`.
+1. **Audit ambient-awareness entries first.** These carry the highest recurrence risk. For each one, ask: *"What test or invariant would have caught this?"* (the `structural_mitigation_candidate` field should already answer this). If the answer is concrete, ship the test with `$mycelium:harden`, which reclassifies the entry to `structural` once the test fails when the problem is present and passes on current code. If structural mitigation is genuinely impractical, add the `.living/conventions.md` entry and then set `convention`.
 
 2. **Cluster ambient-awareness entries before promoting.** Two ambient-awareness learnings on the same topic should produce *one* convention, not two. Use `detect_recurrence.py` to identify clusters: `python3 skills/core/scripts/detect_recurrence.py --living-dir <path>`. Merge related entries into a single, generalized convention.
 

@@ -109,3 +109,21 @@ def test_unshipped_structural_entries_return_to_harden() -> None:
     assert "demote to `convention` until the test ships" not in guide
     assert "demote to `ambient-awareness`" in guide
     assert "reclassified at crystallize time" not in _flat(HARDEN)
+
+
+def test_template_is_the_single_statement_of_the_mitigation_lifecycle() -> None:
+    # Every Codex finding on #96 was one document's copy of the lifecycle
+    # disagreeing with another's. The template states the transitions; the
+    # other documents point to it and must not contradict it.
+    template = _flat(TEMPLATE)
+    for transition in (
+        "ambient-awareness → structural",
+        "ambient-awareness → convention",
+        "structural → ambient-awareness",
+        "convention → ambient-awareness",
+    ):
+        assert transition in template
+    for path in (HARDEN, CORE, GUIDE):
+        assert "skills/core/templates/learning-entry.md" in _flat(path), path
+    guide = _flat(GUIDE)
+    assert "has been or should be promoted" not in guide  # a proposed convention is still ambient-awareness

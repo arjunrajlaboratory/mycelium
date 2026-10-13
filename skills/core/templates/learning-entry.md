@@ -33,6 +33,19 @@
                      Weakest; high recurrence risk. Use this for any learning
                      whose mitigation has not yet been implemented, even if a
                      candidate is described below.
+
+  Transitions (this block is the one statement of them; other guides defer
+  to it). The type records what enforces the learning now, never what is
+  planned:
+  ambient-awareness → structural: the test or check has shipped
+                     (`$mycelium:harden` ships it and records `Shipped:`).
+  ambient-awareness → convention: the `.living/conventions.md` entry exists.
+  structural → ambient-awareness: the recorded test or check no longer
+                     exists (or never shipped).
+  convention → ambient-awareness: the `.living/conventions.md` entry was
+                     removed.
+  convention → structural: a shipped test replaces the checklist item; only
+                     the user changes an enforced classification.
 -->
 
 **structural_mitigation_candidate**: [What test or invariant would have caught this? Be specific — name the function, file, or assertion. If the mitigation has actually shipped, set `mitigation_type: structural`. If it is only a candidate, keep type as `ambient-awareness` until the test lands.]

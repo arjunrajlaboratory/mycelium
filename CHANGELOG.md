@@ -17,7 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code check) and passing on the current code, and after the user confirms marks the learning
   `structural` with a `Shipped:` note. It never edits analysis code. Core's
   post-action guidance no longer tells agents to mark a learning `structural`
-  when the test is only a candidate, matching the learning template. Adapted
+  when the test is only a candidate. The transitions between
+  `mitigation_type` values are now stated once, in the learning template,
+  and core, the skill-generation guide, and harden defer to it: an unshipped
+  `structural` entry returns to `ambient-awareness` (not `convention`), and
+  `convention` requires an existing `.living/conventions.md` entry. Adapted
   from [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by
   Mikhael Manurung (MIT, issue #91).
 
