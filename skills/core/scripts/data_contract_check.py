@@ -83,8 +83,14 @@ def read_table(path, wanted=None):
     else:
         raise TableGap("unsupported table format '{}'; export it to CSV or TSV".format(
             os.path.splitext(path)[1] or path))
-    with open(path, newline="", encoding="utf-8-sig", errors="replace") as handle:
-        records = list(csv.reader(handle, delimiter=delimiter))
+    # Decode strictly: replacing bad bytes would merge distinct identifiers
+    # (p\xff and p\xfe both become p\ufffd) and could fake a passing check.
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as handle:
+            records = list(csv.reader(handle, delimiter=delimiter))
+    except UnicodeDecodeError as error:
+        raise TableGap("the table is not valid UTF-8 (byte {} at offset {}); re-export it as UTF-8".format(
+            error.object[error.start:error.start + 1], error.start))
     if not records:
         return [], [], {}
     columns = records[0]
@@ -112,12 +118,20 @@ def read_table(path, wanted=None):
 
 # ---------------------------------------------------------------- h5ad obs
 
+def decode(value):
+    """UTF-8 bytes from an .h5ad, strictly; undecodable bytes make the column unreadable."""
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise TableGap("a value is not valid UTF-8 ({!r})".format(value[:error.end]))
+
+
 def text(value):
     """One obs value as the string a CSV export would hold; missing values become ""."""
     if value is None:
         return ""
     if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
+        return decode(value)
     if isinstance(value, bool):
         return "True" if value else "False"
     if isinstance(value, float) and value != value:
@@ -128,7 +142,7 @@ def text(value):
 def attr(node, key, default=None):
     value = node.attrs.get(key, default)
     if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
+        return decode(value)
     if hasattr(value, "tolist") and not isinstance(value, str):
         value = value.tolist()
     if isinstance(value, list):
