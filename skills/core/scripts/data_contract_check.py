@@ -267,13 +267,13 @@ def check_schema(check, columns, rows):
 def check_cohort(check, columns, rows):
     alerts = []
     column = check.get("column")
+    counted = rows
     if column is not None:
         # A row with no cohort value cannot contribute to a cohort comparison,
-        # so it counts toward neither the levels nor the row counts.
-        rows, alerts = drop_missing(rows, [column], "cohort")
-        if not rows:
-            return alerts
-        present = Counter(r[column] for r in rows)
+        # so it counts toward neither the levels nor the row counts. no_missing
+        # below still sees every filtered row.
+        counted, alerts = drop_missing(rows, [column], "cohort")
+        present = Counter(r[column] for r in counted)
         absent = [lvl for lvl in as_list(check.get("levels")) if str(lvl) not in present]
         if absent:
             alerts.append(alert(
@@ -281,12 +281,12 @@ def check_cohort(check, columns, rows):
                 expected=", ".join(str(l) for l in check["levels"]),
                 observed="absent: " + ", ".join(str(l) for l in absent),
                 evidence=["{}={}".format(k, v) for k, v in sorted(present.items())]))
-    if "min_rows" in check and len(rows) < int(check["min_rows"]):
+    if "min_rows" in check and len(counted) < int(check["min_rows"]):
         alerts.append(alert("cohort", "fewer rows than the plan assumes", True,
-                            expected=">= {}".format(check["min_rows"]), observed=str(len(rows))))
-    if "rows" in check and len(rows) != int(check["rows"]):
+                            expected=">= {}".format(check["min_rows"]), observed=str(len(counted))))
+    if "rows" in check and len(counted) != int(check["rows"]):
         alerts.append(alert("cohort", "row count differs from the plan", True,
-                            expected=str(check["rows"]), observed=str(len(rows))))
+                            expected=str(check["rows"]), observed=str(len(counted))))
     for col in as_list(check.get("no_missing")):
         n = sum(1 for r in rows if is_missing(r[col]))
         if n:
