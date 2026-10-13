@@ -83,9 +83,11 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   on the contract or any check (for example, the plan's reason for a
   `max_share`). A misspelled key, or a key given twice, is a malformed
   contract rather than a silently dropped assumption.
-- In every column a check or filter names, values that differ only in
-  surrounding whitespace (`p1` and `p1 `) block: they would be counted as two
-  units.
+- Values that differ only in surrounding whitespace (`p1` and `p1 `) block:
+  they would be counted as two units. The check's identity columns (`column`,
+  `unit`, `group`, `within`, `batch`, `contrast`) are scanned on the rows its
+  filters keep; filter columns are scanned on every row, since a variant
+  spelling silently escapes the filter.
 - `schema`: every column in `columns` exists.
 - `cohort`: the required `levels` of `column` are present; `min_rows` or exact
   `rows` holds; and the `no_missing` columns have no missing values. Rows with

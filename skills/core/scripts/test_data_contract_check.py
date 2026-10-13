@@ -693,6 +693,24 @@ class TableShapeTest(unittest.TestCase):
         self.assertEqual(code, 2, out)
         self.assertIn("differ only in surrounding whitespace", out)
 
+    def test_whitespace_variants_in_filtered_out_rows_are_ignored(self):
+        # Codex P2 on #97: rows the filter excludes are outside the check.
+        self.tsv("scoped.tsv", ["participant", "cohort", "keep"],
+                 [["p1", "A", "TRUE"], ["p2", "A", "TRUE"], ["p3", "B", "TRUE"], ["p4", "B", "TRUE"],
+                  ["x", "A", "FALSE"], ["x ", "A", "FALSE"]])
+        code, out, _ = invoke_raw(contract([{"kind": "unit_of_replication", "unit": "participant",
+                                             "group": "cohort"}], table="scoped.tsv",
+                                           filters=[{"column": "keep", "equals": "TRUE"}]), root=self.root)
+        self.assertEqual(code, 0, out)
+
+    def test_whitespace_variants_in_a_filter_column_block(self):
+        # " TRUE" would be silently excluded by equals TRUE.
+        self.tsv("keep.tsv", ["participant", "keep"], [["p1", "TRUE"], ["p2", "TRUE "]])
+        code, out, _ = invoke_raw(contract([{"kind": "schema", "columns": ["participant"]}], table="keep.tsv",
+                                           filters=[{"column": "keep", "equals": "TRUE"}]), root=self.root)
+        self.assertEqual(code, 2, out)
+        self.assertIn("differ only in surrounding whitespace", out)
+
     def test_not_in_filter_reports_rows_it_keeps_without_a_value(self):
         self.tsv("pref.tsv", ["sample", "preferred"], [["s1", "TRUE"], ["s2", "FALSE"], ["s3", "NA"]])
         code, out, _ = invoke_raw(contract([{"kind": "schema", "columns": ["sample"],
