@@ -94,8 +94,12 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   1, such as `0.7`) it also warns when a batch holds more than that share of
   one contrast level's rows; the plan sets `max_share` with its reason. Every
   run prints the batch-by-contrast table of row counts and shares.
-- Missing values (`""`, `NA`, `NaN`, `NULL`, `None`, `<NA>`; any case) in a check's key columns
-  are left out of that check and reported as a warning.
+- Missing values (`""`, `NA`, `NaN`, `NULL`, `None`, `<NA>`; any case) in a
+  check's key columns are left out of that check and reported as a warning.
+  The population they belong to is not: a group whose rows all lack a unit
+  counts as zero units, a unit whose rows all lack a `within` value is
+  incomplete, and a contrast level seen only without a batch blocks, because
+  its confounding cannot be checked.
 
 ## 2. Run it
 

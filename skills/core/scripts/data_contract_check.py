@@ -299,6 +299,9 @@ def check_unit(check, columns, rows):
     unit = need(check, "unit")
     group = need(check, "group")
     within = as_list(check.get("within"))
+    # Every observed group is held to the minimum, even one whose rows all
+    # lack a unit: dropping incomplete rows must not drop the group itself.
+    groups = {r[group] for r in rows if not is_missing(r[group])}
     rows, alerts = drop_missing(rows, [unit, group] + within, "unit_of_replication")
     if not rows:
         return alerts
@@ -314,7 +317,7 @@ def check_unit(check, columns, rows):
             observed="{} repeated cells".format(len(repeats)),
             evidence=[", ".join("{}={}".format(l, v) for l, v in zip(labels, key)) +
                       " ({} rows)".format(cells[key]) for key in repeats]))
-    units = defaultdict(set)
+    units = {g: set() for g in groups}
     for r in rows:
         units[r[group]].add(r[unit])
     minimum = int(check.get("min_units_per_group", 2))
@@ -324,7 +327,7 @@ def check_unit(check, columns, rows):
             "unit_of_replication", "groups with fewer distinct {} than required".format(unit), True,
             expected=">= {} per {}".format(minimum, group),
             observed=", ".join("{}={}".format(g, n) for g, n in small)))
-    shared = sorted(u for u in set.union(*units.values()) if sum(u in s for s in units.values()) > 1) \
+    shared = sorted(u for u in set.union(set(), *units.values()) if sum(u in s for s in units.values()) > 1) \
         if len(units) > 1 else []
     if shared and not check.get("units_may_span_groups", False):
         alerts.append(alert(
@@ -337,11 +340,14 @@ def check_unit(check, columns, rows):
 def check_pairing(check, columns, rows):
     unit = need(check, "unit")
     within = need(check, "within")
+    # A unit whose rows all lack a `within` value is observed at no level: it
+    # stays in the population as incomplete rather than vanishing.
+    population = {r[unit] for r in rows if not is_missing(r[unit])}
     rows, alerts = drop_missing(rows, [unit, within], "pairing")
     if not rows:
         return alerts
     levels = [str(l) for l in as_list(check.get("levels"))] or sorted({r[within] for r in rows})
-    seen = defaultdict(set)
+    seen = {u: set() for u in population}
     for r in rows:
         seen[r[unit]].add(r[within])
     incomplete = sorted((u, sorted(set(levels) - s)) for u, s in seen.items() if set(levels) - s)
@@ -357,9 +363,18 @@ def check_pairing(check, columns, rows):
 def check_batch(check, columns, rows):
     batch = need(check, "batch")
     contrast = need(check, "contrast")
+    observed_levels = {r[contrast] for r in rows if not is_missing(r[contrast])}
     rows, alerts = drop_missing(rows, [batch, contrast], "batch_confounding")
     if not rows:
         return alerts
+    # A level seen only with a missing batch drops out of the batch table, so
+    # its confounding with batch cannot be checked at all.
+    unbatched = sorted(observed_levels - {r[contrast] for r in rows})
+    if unbatched:
+        alerts.append(alert(
+            "batch_confounding", "contrast levels with no known batch; their batch confounding cannot "
+            "be checked", True, expected="every {} level has rows with a {}".format(contrast, batch),
+            observed=", ".join(unbatched)))
     table = defaultdict(Counter)
     for r in rows:
         table[r[batch]][r[contrast]] += 1
