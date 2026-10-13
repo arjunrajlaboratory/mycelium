@@ -784,11 +784,17 @@ def run_contract(contract, base_dir):
                                    evidence=["{}: {}".format(c, unreadable[c]) for c in gaps]))
         rows_checked = 0
         if not found:
-            found.extend(spelling_variants(rows, sorted(set(named)), kind))
+            # Filter columns are scanned on every row, since a variant spelling
+            # silently escapes the filter; the check's own columns only on the
+            # rows the filters keep, since excluded rows are outside the check.
+            found.extend(spelling_variants(rows, sorted(set(filter_columns(filters))), kind))
         if not found:
             rows, filter_warnings = apply_filters(rows, filters, columns, kind)
             found.extend(filter_warnings)
             rows_checked = len(rows)
+            identity = [check[k] for k in ("column", "unit", "group", "batch", "contrast") if k in check]
+            identity += as_list(check.get("within"))
+            found.extend(spelling_variants(rows, sorted(set(identity)), kind))
             if not rows:
                 found.append(alert(kind, "no rows left after filters; the check would pass vacuously", True,
                                    expected=">= 1 row",
