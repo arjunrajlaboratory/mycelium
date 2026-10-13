@@ -299,9 +299,11 @@ def check_unit(check, columns, rows):
     unit = need(check, "unit")
     group = need(check, "group")
     within = as_list(check.get("within"))
-    # Every observed group is held to the minimum, even one whose rows all
-    # lack a unit: dropping incomplete rows must not drop the group itself.
+    # Each sub-check prunes only on the keys it uses. Every observed group is
+    # held to the minimum, even one whose rows all lack a unit, and a unit's
+    # group membership does not depend on its `within` value being present.
     groups = {r[group] for r in rows if not is_missing(r[group])}
+    members = [r for r in rows if not is_missing(r[unit]) and not is_missing(r[group])]
     rows, alerts = drop_missing(rows, [unit, group] + within, "unit_of_replication")
     if not rows:
         return alerts
@@ -318,7 +320,7 @@ def check_unit(check, columns, rows):
             evidence=[", ".join("{}={}".format(l, v) for l, v in zip(labels, key)) +
                       " ({} rows)".format(cells[key]) for key in repeats]))
     units = {g: set() for g in groups}
-    for r in rows:
+    for r in members:
         units[r[group]].add(r[unit])
     minimum = int(check.get("min_units_per_group", 2))
     small = sorted((g, len(u)) for g, u in units.items() if len(u) < minimum)
