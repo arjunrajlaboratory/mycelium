@@ -27,7 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MYCELIUM.md`, and the transfer skill) now applies it, so learnings logged
   or transferred through the normal path carry `mitigation_type` and
   `structural_mitigation_candidate` and can be hardened. A transferred
-  learning's type comes from the target's own enforcement. Adapted from
+  learning's type comes from the target's own enforcement.
+  `validate_structure.py` now warns about learnings without a valid
+  `mitigation_type` (a warning, since older repositories predate the field),
+  so an untyped entry is caught however it was written. Adapted from
   [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
   Manurung (MIT, issue #91).
 

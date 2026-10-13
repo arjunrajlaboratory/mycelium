@@ -242,10 +242,23 @@ def test_every_instruction_that_writes_a_learning_or_convention_applies_the_rule
         PLUGIN_ROOT / "skills" / "lifecycle-audit" / "references" / "audit-protocol.md": "a labeled probe in a disposable repo, not a learning",
     }
     rule = _norm(_canonical_rule())
+    # Every shipped text file an agent may follow, not a guessed subtree:
+    # convention packs under network/ carry instructions too (Codex on #96).
+    # Other hooks only warn or block and route to the post-action directive.
+    import subprocess
+
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=PLUGIN_ROOT, capture_output=True, text=True, check=True
+    ).stdout.split()
     paths = [
-        p for p in sorted((PLUGIN_ROOT / "skills").rglob("*"))
-        if p.suffix in {".md", ".template"} or p.name == "mycelium-post-action.sh"
+        PLUGIN_ROOT / f for f in tracked
+        if not f.startswith(("docs/", "analysis/", ".github/"))
+        and f not in {"CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md"}
+        and not (PLUGIN_ROOT / f).is_symlink()
+        and (Path(f).suffix in {".md", ".template", ".yaml", ".yml"}
+             or Path(f).name == "mycelium-post-action.sh")
     ]
+    assert any(p.parts[-4:-2] == ("network", "conventions") for p in paths)
     writers, offenders = 0, []
     for path in paths:
         if path in skip:

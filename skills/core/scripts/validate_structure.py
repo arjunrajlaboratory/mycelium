@@ -13,6 +13,7 @@ import re
 import sys
 from pathlib import Path
 
+import detect_recurrence
 import markdown_fences as fences
 
 
@@ -229,6 +230,73 @@ def check_entry_heading_levels(target_dir: Path, result: ValidationResult):
         )
 
 
+VALID_MITIGATION_TYPES = ("structural", "convention", "ambient-awareness")
+LEARNING_TEMPLATE = Path(__file__).resolve().parent.parent / "templates" / "learning-entry.md"
+
+
+def mitigation_rule() -> str:
+    """The template's one-line mitigation_type rule, read from the template itself."""
+    fallback = "Derive it by the rule in skills/core/templates/learning-entry.md."
+    try:
+        text = " ".join(LEARNING_TEMPLATE.read_text(encoding="utf-8").split())
+    except OSError:
+        return fallback
+    found = re.search(r"(Derive mitigation_type .+? otherwise ambient-awareness\.)", text)
+    return found.group(1) if found else fallback
+
+
+def fenced_line_numbers(text: str) -> set[int]:
+    """1-based lines inside fenced code blocks (fence delimiters included)."""
+    inside: set[int] = set()
+    fence: fences.Fence | None = None
+    for lineno, raw in enumerate(split_log_lines(text), start=1):
+        line = raw.rstrip("\r")
+        if fence is not None:
+            inside.add(lineno)
+            if fences.closes(line, fence):
+                fence = None
+            continue
+        opened = fences.opening_fence(line)
+        if opened is not None:
+            fence = opened
+            inside.add(lineno)
+    return inside
+
+
+def check_learning_mitigation_types(target_dir: Path, result: ValidationResult):
+    """Warn about learnings whose mitigation_type is missing or not a valid type.
+
+    This checks the output rather than the instructions: however an agent was
+    told to log a learning, an untyped entry is skipped by harden and cannot
+    be weighed by detect_recurrence. A warning, not an error, because older
+    repositories predate the field.
+    """
+    path = target_dir / ".living" / "learnings.md"
+    if not path.is_file():
+        return
+    records = detect_recurrence.collect_learning_records(path)
+    # The shared entry parser does not skip code fences; an example entry
+    # inside a fence is illustrative, not a learning.
+    fenced = fenced_line_numbers(path.read_text(encoding="utf-8", errors="replace"))
+    bad = [
+        r for r in records
+        if r["line_no"] not in fenced and r["mitigation_type"] not in VALID_MITIGATION_TYPES
+    ]
+    if not bad:
+        return
+    shown = "; ".join(
+        f'line {r["line_no"]} "{r["title"]}"' for r in bad[:_MAX_REPORTED_LINES]
+    )
+    if len(bad) > _MAX_REPORTED_LINES:
+        shown += f"; and {len(bad) - _MAX_REPORTED_LINES} more"
+    noun = "learning" if len(bad) == 1 else "learnings"
+    result.warning(
+        f".living/learnings.md has {len(bad)} {noun} without a valid "
+        f"mitigation_type ({shown}); harden skips them and detect_recurrence "
+        f"cannot weigh them. {mitigation_rule()}"
+    )
+
+
 def check_top_level_directories(target_dir: Path, result: ValidationResult):
     """Check that all four top-level directories exist."""
     required_dirs = ["algorithms", "analysis", "data", "reference_material", "todo"]
@@ -373,6 +441,9 @@ def main():
 
     print("Checking knowledge log entry heading levels...")
     check_entry_heading_levels(target_dir, result)
+
+    print("Checking learning mitigation types...")
+    check_learning_mitigation_types(target_dir, result)
 
     print("Checking top-level directories...")
     check_top_level_directories(target_dir, result)

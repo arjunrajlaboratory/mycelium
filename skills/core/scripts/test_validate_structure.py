@@ -584,3 +584,55 @@ def test_other_living_files_are_not_subject_to_the_check(tmp_path: Path) -> None
         conventions_md="# Conventions\n\n## [2026-08-25] A convention\n\nbody\n",
     )
     assert _errors(target) == []
+
+
+# ---------------------------------------------------------------------------
+# Learnings without a valid mitigation_type
+# ---------------------------------------------------------------------------
+#
+# Whatever instruction led to a learning (the post-action directive, a
+# convention pack's checklist, a hand-written note), an entry with no valid
+# mitigation_type is skipped by harden and miscounted by detect_recurrence.
+# Validation checks the output, so no wording of an instruction can bypass it.
+
+
+def _mitigation_warnings(target_dir: Path) -> list[str]:
+    from validate_structure import check_learning_mitigation_types
+
+    result = ValidationResult()
+    check_learning_mitigation_types(target_dir, result)
+    assert result.errors == [], result.errors  # legacy repos must not fail
+    return result.warnings
+
+
+def test_untyped_and_invalid_learnings_are_reported(tmp_path: Path) -> None:
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] Typed\n\n**mitigation_type**: convention\n\n"
+            "### [2026-10-02] Untyped\n\n**Category**: gotcha\n\n"
+            "### [2026-10-03] Invalid\n\n**mitigation_type**: maybe-later\n\n"
+            "## [2025-01-01] Legacy untyped\n\n**Category**: tip\n"
+        ),
+    )
+    warnings = _mitigation_warnings(target)
+    assert len(warnings) == 1
+    assert "3 learnings" in warnings[0]
+    assert "Untyped" in warnings[0] and "Invalid" in warnings[0] and "Legacy untyped" in warnings[0]
+    assert "Typed" not in warnings[0].replace("Untyped", "")
+    # The warning carries the template's rule, so the fix needs no lookup.
+    assert "otherwise convention if a .living/conventions.md entry covers it" in warnings[0]
+
+
+def test_fully_typed_learnings_pass_quietly(tmp_path: Path) -> None:
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] A\n\n**mitigation_type**: structural\n\n"
+            "### [2026-10-02] B\n\n**mitigation_type**: ambient-awareness\n"
+            "\n```markdown\n### [2026-10-03] Example inside a fence\n```\n"
+        ),
+    )
+    assert _mitigation_warnings(target) == []
