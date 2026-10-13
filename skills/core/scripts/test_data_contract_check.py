@@ -551,6 +551,17 @@ class TableShapeTest(unittest.TestCase):
         self.assertEqual(code, 2, out)
         self.assertIn("C=0", [a.get("observed") for a in json.loads(out)["alerts"] if a["blocking"]][0])
 
+    def test_group_membership_survives_a_missing_within(self):
+        # Codex P1 on #97: p1's only B row lacks a visit; p1 still spans A and B.
+        self.tsv("span.tsv", ["participant", "cohort", "visit"],
+                 [["p1", "A", "0"], ["p2", "A", "0"], ["p3", "B", "0"], ["p4", "B", "0"], ["p1", "B", "NA"]])
+        code, out, _ = invoke_raw(contract([{"kind": "unit_of_replication", "unit": "participant",
+                                             "group": "cohort", "within": ["visit"]}], table="span.tsv"),
+                                  root=self.root)
+        self.assertEqual(code, 2, out)
+        blocking = [a for a in json.loads(out)["alerts"] if a["blocking"]]
+        self.assertEqual(blocking[0]["evidence"], ["p1"])
+
     def test_unit_with_no_within_value_is_incomplete(self):
         # Codex P1 on #97: p3 has rows but no visit; it is observed at no level.
         self.tsv("pairs.tsv", ["participant", "visit"],
