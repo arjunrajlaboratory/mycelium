@@ -129,7 +129,7 @@ relative table paths from another directory.
 A missing table or column, or filters that leave no rows, is a failed
 assumption and blocks. A table or column the checker cannot read (an `.h5ad`
 without h5py, a file that is not HDF5, an `obs` encoding it does not recognise,
-an unsupported format) is a gap: the check did not run, so it is neither a pass
+an unsupported format, text that is not valid UTF-8) is a gap: the check did not run, so it is neither a pass
 nor a failure.
 
 ## 3. Act on the alerts

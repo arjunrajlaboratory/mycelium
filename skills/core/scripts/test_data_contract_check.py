@@ -320,6 +320,22 @@ class H5adTest(unittest.TestCase):
         self.assertEqual(result["checks"][0]["status"], "gap")
         self.assertIn("not in a recognised AnnData encoding", result["alerts"][0]["observed"])
 
+    def test_undecodable_obs_bytes_are_a_gap(self):
+        import h5py
+        import numpy as np
+        path = os.path.join(self.root, "bytes.h5ad")
+        samples_h5ad(path)
+        with h5py.File(path, "a") as handle:
+            rows = len(handle["obs/participant"])
+            del handle["obs/participant"]
+            handle["obs"].create_dataset("participant", data=np.array([b"p\xff", b"p\xfe"] * (rows // 2)
+                                                                      + [b"p\xfd"] * (rows % 2), dtype="S2"))
+        code, out = invoke([{"kind": "pairing", "unit": "participant", "within": "visit"}],
+                           table="bytes.h5ad", root=self.root)
+        self.assertEqual(code, 3, out)
+        gap = json.loads(out)["alerts"][0]
+        self.assertIn("not valid UTF-8", gap["evidence"][0])
+
     def test_not_hdf5_is_a_gap(self):
         with open(os.path.join(self.root, "broken.h5ad"), "w") as handle:
             handle.write("not hdf5")
@@ -601,6 +617,15 @@ class TableShapeTest(unittest.TestCase):
         code, out, _ = invoke_raw(contract([{"kind": "batch_confounding", "batch": "batch",
                                              "contrast": "level"}], table="chain.tsv"), root=self.root)
         self.assertEqual(code, 0, out)
+
+    def test_undecodable_bytes_are_a_gap_not_merged_ids(self):
+        # Codex P1 on #97: p\xff and p\xfe must not both become p\ufffd and pair up.
+        with open(os.path.join(self.root, "latin.tsv"), "wb") as handle:
+            handle.write(b"participant\tvisit\np\xff\t0\np\xfe\t28\n")
+        code, out, _ = invoke_raw(contract([{"kind": "pairing", "unit": "participant", "within": "visit"}],
+                                           table="latin.tsv"), root=self.root)
+        self.assertEqual(code, 3, out)
+        self.assertIn("not valid UTF-8", json.loads(out)["alerts"][0]["observed"])
 
     def test_unsupported_format_is_a_gap_not_a_tsv(self):
         self.write("samples.xlsx", "PK\x03\x04 not a table")
