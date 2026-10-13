@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`harden` skill.** `/mycelium:harden` (`$mycelium:harden` on Codex) takes
+  one learning that is still `ambient-awareness` but names a concrete
+  `structural_mitigation_candidate`, writes that check as a test in the
+  repository's own test setup, shows it failing on a minimal reproduction and
+  passing on the current code, and after the user confirms marks the learning
+  `structural` with a `Shipped:` note. It never edits analysis code. Core's
+  post-action guidance no longer tells agents to mark a learning `structural`
+  when the test is only a candidate, matching the learning template. Adapted
+  from [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by
+  Mikhael Manurung (MIT, issue #91).
+
 ### Fixed
 
 - **One registry row per session.** The post-action directive asked the agent
