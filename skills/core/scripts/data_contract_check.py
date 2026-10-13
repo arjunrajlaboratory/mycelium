@@ -103,8 +103,10 @@ def read_table(path, wanted=None):
     for line_no, record in enumerate(records[1:], start=2):
         if not record:
             continue  # a blank line, as csv.DictReader skips it
+        # Any extra field is malformed, even an empty one: the extra field may be
+        # a leading row name, which shifts every value one column to the right.
         extra = record[len(columns):]
-        if any(cell.strip() for cell in extra):
+        if extra:
             hint = "; an R write.table export with row names does this, so re-export with " \
                 "row.names = FALSE" if len(extra) == 1 else ""
             raise TableShapeError("line {} has more fields than the header ({} > {}), so its values "
