@@ -26,7 +26,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 - `/mycelium:report` or `$mycelium:report` — generate a structured report
 - `/mycelium:ideas` or `$mycelium:ideas` — brainstorm with disciplinary personas
 - `/mycelium:transfer` or `$mycelium:transfer` — cross-pollinate learnings across sibling projects
-- `/mycelium:harden` or `$mycelium:harden` — turn one learning's `structural_mitigation_candidate` into a test that fails on a reproduction and passes on current code, then mark the learning `structural`
+- `/mycelium:harden` or `$mycelium:harden` — turn one learning's `structural_mitigation_candidate` into a test that fails when the problem is present and passes on current code, then mark the learning `structural`
 - `/mycelium:review` or `$mycelium:review` — review code/analysis changes (PR, commit, or diff) for the kinds of mistakes that matter in scientific work; supports `grill` mode for conversational interrogation of analytical decisions
 - `/mycelium:codex-review` or `$mycelium:codex-review` — respond to Codex review comments on a PR: fix the flagged instance and audit the whole branch for other instances of the same error pattern, with an access-gated `@codex review` re-trigger
 

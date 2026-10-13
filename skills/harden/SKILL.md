@@ -4,9 +4,9 @@ description: >
   Ship one learning's structural_mitigation_candidate as a real test, then mark
   the learning's mitigation_type structural. Picks a learning in
   .living/learnings.md that is still ambient-awareness but names a concrete
-  check, writes the test in the repository's own test setup, proves it fails on
-  a minimal reproduction and passes on the current code, and updates only that
-  entry after the user confirms. Use when the user asks to harden, enforce, or
+  check, writes the test in the repository's own test setup, proves it fails
+  when the learning's problem is present and passes on the current code, and
+  updates only that entry after the user confirms. Use when the user asks to harden, enforce, or
   turn a learning, gotcha, or lesson into a test or structural mitigation. Do
   not use for recording a new learning, promoting learnings to conventions,
   adding checks inside analysis code, or changing Mycelium itself.
@@ -34,9 +34,13 @@ learning per run.
 - Search it for `structural_mitigation_candidate`, then read each matching
   entry. An entry starts at the `### [YYYY-MM-DD]` heading above the match;
   older projects may use a legacy `## [YYYY-MM-DD]` heading.
-- Keep entries whose `mitigation_type` is not `structural` and whose candidate
-  names a concrete check: a function, file, column, or assertion. Skip the
-  template placeholder and vague candidates ("be careful with X").
+- Keep entries whose `mitigation_type` is `ambient-awareness` and whose
+  candidate names a concrete check: a function, file, column, or assertion.
+  Skip the template placeholder and vague candidates ("be careful with X").
+  Leave `convention` entries and entries with no `mitigation_type` alone: a
+  convention is reclassified at crystallize time
+  (`skills/core/references/skill-generation-guide.md`), and an untyped entry
+  needs its type recorded first.
 - A candidate that places its check in analysis code ("In
   `analysis/.../x.py`, assert ...") still qualifies when the check reads a file
   a test can read too: show it with "(check moves to a test)". If it checks a
@@ -63,13 +67,24 @@ learning per run.
 
 ## 3. Prove it guards something
 
-Run the test twice and show both results. It must:
+A test guards something only if it fails when the learning's problem is
+present and passes now. How to make the problem present depends on what the
+test checks:
 
-1. **Fail on a minimal reproduction** of the original problem: a small fixture
-   built in the test, or a parameter that recreates the bad input.
-2. **Pass on the current code** or data.
+- **A data check** (a column, a sample count, a file format) asserts a property
+  of a file. Its red run feeds the same assertion a small fixture, built in the
+  test or a temporary file, that recreates the bad data. It must fail there.
+- **A code check** (a function's behavior) passes on the problematic input once
+  the fix is in. Its red run is against the unmitigated implementation: the
+  commit before the fix, checked out in a temporary `git worktree`, or the fix
+  monkeypatched out inside a throwaway run. It must fail there. Never edit the
+  repository's code to stage the red run, and never keep a test that fails on
+  the input it is meant to handle.
 
-If it cannot be made to fail on the reproduction, it guards nothing: stop, and
+Then the green run: the test must pass on the current code or data. Show both
+runs.
+
+If it cannot be made to fail in its red run, it guards nothing: stop, and
 leave the entry `ambient-awareness`. If it fails on the current code, the
 problem is live: report it, and do not mark the learning structural.
 

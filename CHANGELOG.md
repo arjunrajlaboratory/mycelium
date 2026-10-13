@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`harden` skill.** `/mycelium:harden` (`$mycelium:harden` on Codex) takes
   one learning that is still `ambient-awareness` but names a concrete
   `structural_mitigation_candidate`, writes that check as a test in the
-  repository's own test setup, shows it failing on a minimal reproduction and
-  passing on the current code, and after the user confirms marks the learning
+  repository's own test setup, shows it failing when the problem is present
+  (bad-data fixture for a data check, the unmitigated implementation for a
+  code check) and passing on the current code, and after the user confirms marks the learning
   `structural` with a `Shipped:` note. It never edits analysis code. Core's
   post-action guidance no longer tells agents to mark a learning `structural`
   when the test is only a candidate, matching the learning template. Adapted

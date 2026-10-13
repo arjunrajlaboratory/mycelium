@@ -63,11 +63,26 @@ def test_harden_finds_canonical_and_legacy_learning_headings() -> None:
     assert "`## [YYYY-MM-DD]`" in harden
 
 
+def test_harden_only_selects_ambient_awareness_entries() -> None:
+    # "Not structural" would also admit convention entries and overwrite them.
+    harden = _flat(HARDEN)
+    assert "`mitigation_type` is `ambient-awareness`" in harden
+    assert "is not `structural`" not in harden
+
+
+def test_harden_red_run_matches_the_kind_of_check() -> None:
+    # A code regression test passes on the bad input once the fix is in; its
+    # red run is against the unmitigated implementation. A data check's red run
+    # is a fixture that recreates the bad data.
+    harden = _flat(HARDEN)
+    assert "unmitigated implementation" in harden
+    assert "recreates the bad data" in harden
+    assert "pass on the current code" in harden.lower()
+
+
 def test_harden_keeps_tests_out_of_analysis_code() -> None:
     harden = _flat(HARDEN)
     assert "Never edit analysis code" in harden
-    assert "fail on a minimal reproduction" in harden.lower()
-    assert "pass on the current code" in harden.lower()
     # The source skill referenced mycelium-extra's approval gate; we ship none.
     assert ".mycelium-extra" not in harden
     assert "Mikhael Manurung" in harden

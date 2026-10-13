@@ -135,7 +135,7 @@ Every learning entry carries a `mitigation_type` field that directly informs how
 
 ### Decision procedure at crystallize time
 
-1. **Audit ambient-awareness entries first.** These carry the highest recurrence risk. For each one, ask: *"What test or invariant would have caught this?"* (the `structural_mitigation_candidate` field should already answer this). If the answer is concrete, ship the test with `$mycelium:harden`, which reclassifies the entry to `structural` once the test fails on a reproduction and passes on current code. If structural mitigation is genuinely impractical, promote to `convention`.
+1. **Audit ambient-awareness entries first.** These carry the highest recurrence risk. For each one, ask: *"What test or invariant would have caught this?"* (the `structural_mitigation_candidate` field should already answer this). If the answer is concrete, ship the test with `$mycelium:harden`, which reclassifies the entry to `structural` once the test fails when the problem is present and passes on current code. If structural mitigation is genuinely impractical, promote to `convention`.
 
 2. **Cluster ambient-awareness entries before promoting.** Two ambient-awareness learnings on the same topic should produce *one* convention, not two. Use `detect_recurrence.py` to identify clusters: `python3 skills/core/scripts/detect_recurrence.py --living-dir <path>`. Merge related entries into a single, generalized convention.
 
