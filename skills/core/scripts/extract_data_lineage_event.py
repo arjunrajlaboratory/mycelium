@@ -214,6 +214,7 @@ _MANAGED_SCRIPTS_DIR_SUFFIX = "skills/core/scripts/"
 _STATIC_MANAGED_SCRIPT_RELPATHS = frozenset(
     {
         "crystallize_findings.py",
+        "data_contract_check.py",
         "detect_recurrence.py",
         "extract_data_lineage.py",
         "extract_data_lineage_event.py",
