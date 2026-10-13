@@ -93,6 +93,9 @@ def test_core_never_marks_an_unshipped_candidate_structural() -> None:
     core = _flat(CORE)
     assert "if you can name a concrete test or invariant, upgrade the entry" not in core
     assert "$mycelium:harden" in core
+    # Only an unshipped test candidate waits at ambient-awareness; a learning
+    # already enforced by a conventions.md entry keeps `convention`.
+    assert "already enforced by an entry in `.living/conventions.md`" in core
 
 
 def test_unshipped_structural_entries_return_to_harden() -> None:
