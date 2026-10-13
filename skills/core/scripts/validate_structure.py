@@ -285,7 +285,13 @@ def learning_mitigation_types(text: str) -> list[tuple[int, str, str | None]]:
             continue
         # One field-line matcher shared with detect_recurrence; the value is
         # compared literally (markup stripped, no typo aliases).
+        # Four or more columns of indentation (tabs expanded) is an indented
+        # code block: an example there is not the field. The shared matcher
+        # accepts any indentation, so exclude it here, failing toward a warning.
+        indent = visible[: len(visible) - len(visible.lstrip(" \t"))]
         field = _MITIGATION_LINE_RE.match(visible)
+        if field and fences.visual_column(indent) >= 4:
+            field = None
         if field and entries and entries[-1][2] is None:
             entries[-1][2] = field.group(1).strip().strip("*`\"'").strip()
     return [tuple(entry) for entry in entries]

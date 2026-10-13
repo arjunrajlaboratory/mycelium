@@ -701,3 +701,20 @@ def test_field_spellings_match_the_recurrence_reader(tmp_path: Path) -> None:
     assert _mitigation_warnings(target) == []
     for line in ("mitigation_type: convention", "**mitigation_type:** structural"):
         assert detect_recurrence._MITIGATION_LINE_RE.match(line)
+
+
+def test_indented_code_field_does_not_count(tmp_path: Path) -> None:
+    # Four spaces or a tab make an indented code block in Markdown; an example
+    # field there is not the entry's type (Codex on #96). Fail toward a warning.
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] Spaces\n\nExample:\n\n    **mitigation_type**: structural\n\n"
+            "### [2026-10-02] Tab\n\nExample:\n\n\t**mitigation_type**: structural\n\n"
+            "### [2026-10-03] Slightly indented\n\n  **mitigation_type**: convention\n"
+        ),
+    )
+    warnings = _mitigation_warnings(target)
+    assert len(warnings) == 1 and "2 learnings" in warnings[0]
+    assert "Slightly indented" not in warnings[0]
