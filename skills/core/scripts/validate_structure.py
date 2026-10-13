@@ -13,8 +13,8 @@ import re
 import sys
 from pathlib import Path
 
-import detect_recurrence
 import markdown_fences as fences
+from detect_recurrence import _MITIGATION_LINE_RE
 
 
 def parse_args():
@@ -245,22 +245,50 @@ def mitigation_rule() -> str:
     return found.group(1) if found else fallback
 
 
-def fenced_line_numbers(text: str) -> set[int]:
-    """1-based lines inside fenced code blocks (fence delimiters included)."""
-    inside: set[int] = set()
+_LEARNING_HEADING_RE = re.compile(r"^#{2,3} \[?(\d{4}-\d{2}-\d{2})\]?\s*(.*)$")
+
+
+def learning_mitigation_types(text: str) -> list[tuple[int, str, str | None]]:
+    """(line, title, raw mitigation_type or None) for each learning entry.
+
+    Its own parser, deliberately unlike detect_recurrence's: it reads the
+    field's literal value (no typo aliases, since harden filters on the exact
+    value) and ignores fenced code and HTML comments both when finding entry
+    headings and when finding the field, so an example inside an entry neither
+    splits it nor stands in for its field. Canonical `### [date]` and legacy
+    `## [date]` headings both start an entry.
+    """
+    entries: list[list] = []
     fence: fences.Fence | None = None
+    in_comment = False
     for lineno, raw in enumerate(split_log_lines(text), start=1):
         line = raw.rstrip("\r")
         if fence is not None:
-            inside.add(lineno)
             if fences.closes(line, fence):
                 fence = None
+            continue
+        if in_comment:
+            if "-->" in line:
+                in_comment = False
             continue
         opened = fences.opening_fence(line)
         if opened is not None:
             fence = opened
-            inside.add(lineno)
-    return inside
+            continue
+        visible = re.sub(r"<!--.*?-->", "", line)
+        if "<!--" in visible:
+            in_comment = True
+            visible = visible[: visible.index("<!--")]
+        heading = _LEARNING_HEADING_RE.match(visible)
+        if heading:
+            entries.append([lineno, heading.group(2).strip() or heading.group(1), None])
+            continue
+        # One field-line matcher shared with detect_recurrence; the value is
+        # compared literally (markup stripped, no typo aliases).
+        field = _MITIGATION_LINE_RE.match(visible)
+        if field and entries and entries[-1][2] is None:
+            entries[-1][2] = field.group(1).strip().strip("*`\"'").strip()
+    return [tuple(entry) for entry in entries]
 
 
 def check_learning_mitigation_types(target_dir: Path, result: ValidationResult):
@@ -274,19 +302,11 @@ def check_learning_mitigation_types(target_dir: Path, result: ValidationResult):
     path = target_dir / ".living" / "learnings.md"
     if not path.is_file():
         return
-    records = detect_recurrence.collect_learning_records(path)
-    # The shared entry parser does not skip code fences; an example entry
-    # inside a fence is illustrative, not a learning.
-    fenced = fenced_line_numbers(path.read_text(encoding="utf-8", errors="replace"))
-    bad = [
-        r for r in records
-        if r["line_no"] not in fenced and r["mitigation_type"] not in VALID_MITIGATION_TYPES
-    ]
+    entries = learning_mitigation_types(path.read_text(encoding="utf-8", errors="replace"))
+    bad = [(n, title) for n, title, value in entries if value not in VALID_MITIGATION_TYPES]
     if not bad:
         return
-    shown = "; ".join(
-        f'line {r["line_no"]} "{r["title"]}"' for r in bad[:_MAX_REPORTED_LINES]
-    )
+    shown = "; ".join(f'line {n} "{title}"' for n, title in bad[:_MAX_REPORTED_LINES])
     if len(bad) > _MAX_REPORTED_LINES:
         shown += f"; and {len(bad) - _MAX_REPORTED_LINES} more"
     noun = "learning" if len(bad) == 1 else "learnings"

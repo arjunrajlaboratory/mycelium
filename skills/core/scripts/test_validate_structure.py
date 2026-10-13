@@ -636,3 +636,68 @@ def test_fully_typed_learnings_pass_quietly(tmp_path: Path) -> None:
         ),
     )
     assert _mitigation_warnings(target) == []
+
+
+def test_aliases_the_recurrence_parser_tolerates_are_not_valid(tmp_path: Path) -> None:
+    # detect_recurrence normalizes typos on purpose; validation must not, since
+    # harden filters on the literal value (Codex on #96).
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] Typo\n\n**mitigation_type**: structual\n\n"
+            "### [2026-10-02] Prefix\n\n**mitigation_type**: ambient-garbage\n\n"
+            "### [2026-10-03] Checklist\n\n**mitigation_type**: checklist\n"
+        ),
+    )
+    warnings = _mitigation_warnings(target)
+    assert len(warnings) == 1 and "3 learnings" in warnings[0]
+
+
+def test_fenced_example_inside_an_entry_does_not_hide_its_field(tmp_path: Path) -> None:
+    # A real entry whose body shows an example heading before its own field.
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] Headings in fences\n\n"
+            "**What happened**: an example like this broke parsing:\n\n"
+            "```markdown\n### [2026-01-01] Example\n```\n\n"
+            "**mitigation_type**: structural\n"
+        ),
+    )
+    assert _mitigation_warnings(target) == []
+
+
+def test_fenced_or_commented_field_does_not_count(tmp_path: Path) -> None:
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] Fenced field\n\n"
+            "```\n**mitigation_type**: structural\n```\n\n"
+            "### [2026-10-02] Commented field\n\n"
+            "<!--\n**mitigation_type**: convention\n-->\n"
+        ),
+    )
+    warnings = _mitigation_warnings(target)
+    assert len(warnings) == 1 and "2 learnings" in warnings[0]
+
+
+def test_field_spellings_match_the_recurrence_reader(tmp_path: Path) -> None:
+    # Validation and detect_recurrence must agree on what a field line is
+    # (one shared matcher); only the value check is stricter here.
+    import detect_recurrence
+
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] Plain\n\nmitigation_type: convention\n\n"
+            "### [2026-10-02] Bold colon inside\n\n**mitigation_type:** structural\n\n"
+            "### [2026-10-03] Quoted\n\n> **mitigation_type**: `ambient-awareness`\n"
+        ),
+    )
+    assert _mitigation_warnings(target) == []
+    for line in ("mitigation_type: convention", "**mitigation_type:** structural"):
+        assert detect_recurrence._MITIGATION_LINE_RE.match(line)
