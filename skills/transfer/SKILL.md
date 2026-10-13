@@ -92,7 +92,7 @@ source: [source project name] (auto-transferred by mycelium)
 **Transfer rules**:
 - Rewrite the learning for the target project's context — don't dump the source project's jargon
 - Keep each field to one or two sentences; the entry still carries every field above, including both mitigation fields and `source:`
-- A transferred learning is always `ambient-awareness`: nothing enforces it in the target project yet, even if the source shipped a test (see the transitions in `skills/core/templates/learning-entry.md`)
+- A transferred learning is always `ambient-awareness`: nothing enforces it in the target project yet, even if the source shipped a test (by the rule in `skills/core/templates/learning-entry.md`)
 - The `source:` field with `(auto-transferred by mycelium)` tag makes transfers auditable and distinguishable from manual entries
 - Also append each transfer to the meta-project's `.living/learnings.md` if not already present there (the cross-project aggregate)
 - Use `printf >> file` to append — do NOT read the full target file first

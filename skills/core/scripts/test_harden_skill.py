@@ -101,7 +101,7 @@ def test_core_never_marks_an_unshipped_candidate_structural() -> None:
     assert "$mycelium:harden" in core
     # Only an unshipped test candidate waits at ambient-awareness; a learning
     # already enforced by a conventions.md entry keeps `convention`.
-    assert "already enforced by an entry in `.living/conventions.md`" in core
+    assert "otherwise `convention` if a `.living/conventions.md` entry covers it" in core
 
 
 def test_unshipped_structural_entries_return_to_harden() -> None:
@@ -114,27 +114,31 @@ def test_unshipped_structural_entries_return_to_harden() -> None:
 
 
 def test_template_is_the_single_statement_of_the_mitigation_lifecycle() -> None:
-    # Every Codex finding on #96 was one document's copy of the lifecycle
-    # disagreeing with another's. The template states the transitions; the
-    # other documents point to it and must not contradict it.
+    # Every Codex finding on #96 was a restated copy of the lifecycle drifting
+    # from another, including a transition list that could never be complete.
+    # The template states one precedence rule over current enforcement; the
+    # other documents defer to it, and steps that change enforcement record it.
     template = _flat(TEMPLATE)
-    for transition in (
-        "ambient-awareness → structural",
-        "ambient-awareness → convention",
-        "structural → ambient-awareness",
-        "convention → ambient-awareness",
-        "convention → structural",
+    for clause in (
+        "derive it in this order",
+        "re-derive it whenever enforcement changes",
+        "otherwise convention",
+        "otherwise ambient-awareness",
     ):
-        assert transition in template
-    assert "only the user changes an enforced classification" in template
+        assert clause in template, clause
+    assert "Transitions" not in template  # an enumerated list drifts; the rule does not
     for path in (HARDEN, CORE, GUIDE):
         assert "skills/core/templates/learning-entry.md" in _flat(path), path
     guide = _flat(GUIDE)
     assert "has been or should be promoted" not in guide  # a proposed convention is still ambient-awareness
-    # Crystallize applies convention → ambient-awareness to a missing entry;
-    # re-adding a removed convention is the user's decision, not automatic.
-    assert "If missing, add it now" not in guide
-    assert "If it is missing, demote the learning to `ambient-awareness`" in guide
+    assert "If missing, add it now" not in guide  # a removed entry may be intentional
+    assert "Add or strengthen the conventions.md entry" not in guide  # same, in the table
+    assert "re-derive its type" in guide
+    hook = (PLUGIN_ROOT / "skills" / "core" / "hooks" / "mycelium-post-action.sh").read_text()
+    crystallize = hook[hook.index("7. CRYSTALLIZE"):hook.index("REGISTRY_STEP}", hook.index("7. CRYSTALLIZE"))]
+    assert "mitigation_type: convention" in crystallize  # the step that adds the entry records it
+    transfer = _flat(PLUGIN_ROOT / "skills" / "transfer" / "SKILL.md")
+    assert "see the transitions" not in transfer
 
 
 def _template_fields() -> list[str]:
@@ -167,15 +171,22 @@ def test_structural_means_any_shipped_check_not_only_a_test() -> None:
     # The template counts a shipped test, assertion, type constraint, or schema
     # validation as structural; a copy that says "unless a test has shipped"
     # misfiles shipped assertions as ambient-awareness (Codex on #96).
+    # Read the mechanism list from the template's structural definition, so a
+    # hand-copied list cannot drop one (Codex on #96 caught a missing frozenset).
     template = _flat(TEMPLATE)
-    mechanisms = ("test", "assertion", "type constraint", "schema validation")
-    assert all(m in template for m in mechanisms)
+    listed = re.search(r"structural — A (.+?) has SHIPPED", template).group(1)
+    mechanisms = [m.strip() for m in re.split(r",\s*(?:or\s+)?", listed)]
+    assert "frozenset" in mechanisms and len(mechanisms) == 5, mechanisms
     hook = (PLUGIN_ROOT / "skills" / "core" / "hooks" / "mycelium-post-action.sh").read_text()
     directive = next(line for line in hook.splitlines() if "LIVING_DIRECTIVE=\"MYCELIUM" in line)
     for mechanism in mechanisms:
         assert mechanism in directive, mechanism
     assert "unless a test has shipped" not in directive
-    assert "while the test is only a candidate" not in _flat(CORE)
+    core = _flat(CORE)
+    assert "while the test is only a candidate" not in core
+    for name, text in (("core", core), ("guide", _flat(GUIDE))):
+        for mechanism in mechanisms:
+            assert mechanism in text, (name, mechanism)
 
 
 def test_transfer_length_rule_fits_the_full_entry_format() -> None:

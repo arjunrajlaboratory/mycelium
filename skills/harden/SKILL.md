@@ -38,12 +38,12 @@ learning per run.
   candidate names a concrete check: a function, file, column, or assertion.
   Skip the template placeholder and vague candidates ("be careful with X").
   Leave `convention` entries and entries with no `mitigation_type` alone: a
-  convention is already enforced, and only the user changes that; an
-  untyped entry needs its type recorded first. An entry marked `structural`
-  whose test never shipped goes back to `ambient-awareness`, which makes it a
-  candidate here. These are the transitions defined in
-  `skills/core/templates/learning-entry.md`; harden performs only
-  ambient-awareness → structural.
+  convention entry is already enforced, so harden does not take it, and an
+  untyped entry needs its type derived first. An entry marked `structural`
+  whose check never shipped re-derives to `ambient-awareness`, which makes it
+  a candidate here. The type follows the rule in
+  `skills/core/templates/learning-entry.md`; harden only ships a check, after
+  which that rule makes the entry `structural`.
 - A candidate that places its check in analysis code ("In
   `analysis/.../x.py`, assert ...") still qualifies when the check reads a file
   a test can read too: show it with "(check moves to a test)". If it checks a
@@ -109,6 +109,6 @@ confirms, edit only that entry:
 - `**structural_mitigation_candidate**: <unchanged text> Shipped: <test path> (YYYY-MM-DD).`
 
 Append the `Shipped:` note to the end of the existing candidate text, even
-when that text wraps over several lines. Change no other field or entry, and do not commit. If Mycelium's Stop hook
-asks for `.living/` updates afterwards, follow it. End with one line: the
-learning, the test path, and how to run it.
+when that text wraps over several lines. Change no other field or entry, and
+do not commit. If Mycelium's Stop hook asks for `.living/` updates afterwards,
+follow it. End with one line: the learning, the test path, and how to run it.
