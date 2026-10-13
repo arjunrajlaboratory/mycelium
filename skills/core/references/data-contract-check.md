@@ -78,7 +78,8 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   and levels are strings or numbers, compared as text (`"TRUE"`, not `true`).
 - `schema`: every column in `columns` exists.
 - `cohort`: the required `levels` of `column` are present; `min_rows` or exact
-  `rows` holds; and the `no_missing` columns have no missing values.
+  `rows` holds; and the `no_missing` columns have no missing values. Rows with
+  no `column` value are left out of the levels and counts, with a warning.
 - `unit_of_replication`: at most one row per `unit` in each `group` × `within`
   cell, and at least `min_units_per_group` distinct units per group (default
   2). No unit appears in two groups unless `units_may_span_groups` is `true`
@@ -86,7 +87,9 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
 - `pairing`: every unit is observed at every `within` level (the listed
   `levels`, or every level present).
 - `batch_confounding`: blocks when the contrast is fully nested in batch, or
-  when a level shares no batch with another level. Warns when some batches hold
+  when the levels split into groups that share no batch (batch 1 holds A and
+  B, batch 2 holds C and D), since every comparison across groups is then
+  confounded with batch. Warns when some batches hold
   one level, or a level sits in one batch. With `max_share` (above 0, at most
   1, such as `0.7`) it also warns when a batch holds more than that share of
   one contrast level's rows; the plan sets `max_share` with its reason. Every

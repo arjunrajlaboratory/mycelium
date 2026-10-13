@@ -125,7 +125,7 @@ class DataContractCheckTest(unittest.TestCase):
         code, alerts = run([{"kind": "batch_confounding", "batch": "batch", "contrast": "visit",
                              "table": "isolated.tsv"}])
         self.assertEqual(code, 2)
-        self.assertEqual([a["observed"] for a in alerts if a["blocking"]], ["56"])
+        self.assertEqual([a["observed"] for a in alerts if a["blocking"]], ["0, 28 | 56"])
 
     def test_bad_contract_is_usage_error(self):
         code, _ = run([{"kind": "nonsense"}])
@@ -518,6 +518,35 @@ class TableShapeTest(unittest.TestCase):
                                            table="r.tsv"), root=self.root)
         self.assertEqual(code, 2, out)
         self.assertIn("row.names", out)
+
+    def test_missing_cohort_values_do_not_count_toward_rows(self):
+        # Codex P1 on #97: 3 assigned rows plus 1 NA must not satisfy min_rows 4.
+        self.write("cohort.tsv", "sample\tcohort\ns1\tA\ns2\tA\ns3\tB\ns4\tNA\n")
+        code, out, _ = invoke_raw(contract([{"kind": "cohort", "column": "cohort", "levels": ["A", "B"],
+                                             "min_rows": 4}], table="cohort.tsv"), root=self.root)
+        self.assertEqual(code, 2, out)
+        alerts = json.loads(out)["alerts"]
+        self.assertTrue(any("missing value in cohort" in a["message"] for a in alerts))
+        self.assertTrue(any(a["blocking"] and a.get("observed") == "3" for a in alerts))
+
+    def test_disconnected_batch_components_block(self):
+        # Codex P1 on #97: b1 holds A/B, b2 holds C/D; A vs C is confounded with batch.
+        self.write("split.tsv", "sample\tbatch\tlevel\n" + "".join(
+            "s{}\t{}\t{}\n".format(i, b, l) for i, (b, l) in enumerate(
+                [("b1", "A"), ("b1", "B"), ("b2", "C"), ("b2", "D")])))
+        code, out, _ = invoke_raw(contract([{"kind": "batch_confounding", "batch": "batch",
+                                             "contrast": "level"}], table="split.tsv"), root=self.root)
+        self.assertEqual(code, 2, out)
+        blocking = [a for a in json.loads(out)["alerts"] if a["blocking"]]
+        self.assertEqual(blocking[0]["observed"], "A, B | C, D")
+
+    def test_connected_through_a_shared_batch_passes(self):
+        self.write("chain.tsv", "sample\tbatch\tlevel\n" + "".join(
+            "s{}\t{}\t{}\n".format(i, b, l) for i, (b, l) in enumerate(
+                [("b1", "A"), ("b1", "B"), ("b2", "B"), ("b2", "C")])))
+        code, out, _ = invoke_raw(contract([{"kind": "batch_confounding", "batch": "batch",
+                                             "contrast": "level"}], table="chain.tsv"), root=self.root)
+        self.assertEqual(code, 0, out)
 
     def test_unsupported_format_is_a_gap_not_a_tsv(self):
         self.write("samples.xlsx", "PK\x03\x04 not a table")
