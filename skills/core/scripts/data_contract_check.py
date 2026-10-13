@@ -358,11 +358,13 @@ def check_pairing(check, columns, rows):
     within = need(check, "within")
     # A unit whose rows all lack a `within` value is observed at no level: it
     # stays in the population as incomplete rather than vanishing.
+    # Likewise a level seen only on rows without a unit is still a level.
     population = {r[unit] for r in rows if not is_missing(r[unit])}
+    observed_levels = sorted({r[within] for r in rows if not is_missing(r[within])})
     rows, alerts = drop_missing(rows, [unit, within], "pairing")
     if not rows:
         return alerts
-    levels = [str(l) for l in as_list(check.get("levels"))] or sorted({r[within] for r in rows})
+    levels = [str(l) for l in as_list(check.get("levels"))] or observed_levels
     seen = {u: set() for u in population}
     for r in rows:
         seen[r[unit]].add(r[within])
