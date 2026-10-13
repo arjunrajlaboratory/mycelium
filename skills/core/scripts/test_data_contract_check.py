@@ -529,6 +529,16 @@ class TableShapeTest(unittest.TestCase):
         self.assertTrue(any("missing value in cohort" in a["message"] for a in alerts))
         self.assertTrue(any(a["blocking"] and a.get("observed") == "3" for a in alerts))
 
+    def test_no_missing_sees_rows_with_a_missing_cohort(self):
+        # Codex P1 on #97: pruning missing cohort rows must not hide them from no_missing.
+        self.write("cohort.tsv", "sample\tcohort\tbatch\ns1\tA\tb1\ns2\tB\tb1\ns3\tNA\tNA\n")
+        code, out, _ = invoke_raw(contract([{"kind": "cohort", "column": "cohort", "levels": ["A", "B"],
+                                             "no_missing": ["cohort", "batch"]}], table="cohort.tsv"),
+                                  root=self.root)
+        self.assertEqual(code, 2, out)
+        blocking = sorted(a["message"] for a in json.loads(out)["alerts"] if a["blocking"])
+        self.assertEqual(blocking, ["'batch' has missing values", "'cohort' has missing values"])
+
     def test_disconnected_batch_components_block(self):
         # Codex P1 on #97: b1 holds A/B, b2 holds C/D; A vs C is confounded with batch.
         self.write("split.tsv", "sample\tbatch\tlevel\n" + "".join(
