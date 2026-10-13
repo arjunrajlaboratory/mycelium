@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """CommonMark 4.5 fenced-code-block tracking, shared across Mycelium scripts.
 
-Two call sites need to know whether a line sits inside a fenced code block:
+Several call sites need to know whether a line sits inside a fenced code block:
 
 - `validate_structure.py`, which must not mistake a heading inside a documented
-  example for a real knowledge entry, and
+  example for a real knowledge entry,
+- the entry parsers (`generate_index.py`, `detect_recurrence.py`,
+  `recall_lessons.py`, `knowledge_map/extract_entries.py`,
+  `knowledge_map/extract_logs.py`), which must not count or split on such a
+  heading either (via `mark_fenced`), and
 - `finalize_session_log.py`, which must not strip a machine-shaped footer that a
   human deliberately wrote inside a fence.
 
-They each grew their own copy of this logic and drifted apart, which produced a
-run of defects: a four-backtick fence closed by its own inner three-backtick
-line, a fence opened on a list marker's line going unrecognized so its closer
-became a phantom opener, blockquoted fences that could never close, and tab
-offsets measured in characters rather than columns. This module is the single
-implementation; both call sites delegate to it.
+The first and last each grew their own copy of this logic and drifted apart,
+which produced a run of defects: a four-backtick fence closed by its own inner
+three-backtick line, a fence opened on a list marker's line going unrecognized
+so its closer became a phantom opener, blockquoted fences that could never
+close, and tab offsets measured in characters rather than columns. This module is the single
+implementation; every call site delegates to it.
 
 Container tracking is still not a full Markdown parser -- nested containers with
 irregular indentation can defeat it. Callers must therefore treat a fence left
@@ -24,7 +28,7 @@ open at end of input as a reportable condition rather than a clean parse; see
 from __future__ import annotations
 
 import re
-from typing import Iterable, NamedTuple
+from typing import Iterable, Iterator, NamedTuple
 
 # An opening fence may sit up to three spaces in, optionally behind a run of
 # list-item or blockquote markers ("- ```markdown", "> ```", "1. ```").
@@ -109,6 +113,27 @@ def closes(line: str, fence: Fence) -> bool:
         and prefix.count(">") == fence.quote_depth
         and visual_column(prefix) <= fence.column + CLOSE_SLACK
     )
+
+
+def mark_fenced(lines: Iterable[str]) -> Iterator[tuple[str, bool]]:
+    """Yield each line unchanged, paired with whether it belongs to a fence.
+
+    Opening and closing fence lines count as fenced along with their content,
+    so a caller looking for structure (headings, tag lines) only has to act on
+    lines paired with False. Trailing line endings are ignored for matching.
+    A fence left open marks the rest of the input as fenced; callers that need
+    to surface that use `unclosed_fence_line`.
+    """
+    fence: Fence | None = None
+    for line in lines:
+        bare = line.rstrip("\r\n")
+        if fence is not None:
+            if closes(bare, fence):
+                fence = None
+            yield line, True
+            continue
+        fence = opening_fence(bare)
+        yield line, fence is not None
 
 
 def unclosed_fence_line(lines: Iterable[str]) -> int | None:

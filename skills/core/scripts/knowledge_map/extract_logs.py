@@ -15,6 +15,7 @@ Contract mirrors extract_entries.py:
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,6 +24,13 @@ from graph_model import (
     ProjectMeta,
     sha256_hash,
 )
+
+# markdown_fences lives one directory up, beside the core scripts.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+import markdown_fences as fences  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -146,10 +154,12 @@ def _parse_log_file(fpath: Path) -> tuple[str, str, list[str]]:
         return fpath.stem, "", []
 
     lines = raw.splitlines()
+    # Headings, Tags lines and hashtags inside code fences are examples.
+    unfenced = [line for line, fenced in fences.mark_fenced(lines) if not fenced]
 
     # --- title: first heading ---
     title: str | None = None
-    for line in lines:
+    for line in unfenced:
         m = _HEADING_RE.match(line.strip())
         if m:
             title = m.group(1).strip()
@@ -161,7 +171,7 @@ def _parse_log_file(fpath: Path) -> tuple[str, str, list[str]]:
     tags: list[str] = []
 
     # 1. Tags: line (same pattern as extract_entries._parse_tags)
-    for line in lines:
+    for line in unfenced:
         m = _TAGS_LINE_RE.match(line.strip())
         if m:
             raw_tags = m.group(1)
@@ -171,7 +181,9 @@ def _parse_log_file(fpath: Path) -> tuple[str, str, list[str]]:
 
     # 2. Fallback: #hashtag tokens from first 30 lines
     if not tags:
-        head = "\n".join(lines[:30])
+        head = "\n".join(
+            line for line, fenced in fences.mark_fenced(lines[:30]) if not fenced
+        )
         tags = _HASHTAG_RE.findall(head)
 
     # --- body_excerpt: full log body, frontmatter stripped, newlines preserved ---

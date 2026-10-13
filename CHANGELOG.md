@@ -55,6 +55,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any row that links this session's log under another ID into the canonical
   row, keeping its authored Summary, Key Outputs, and Tags
   (`upsert_registry_row.py --log-link`).
+- **Fenced example headings are no longer counted as entries.** An entry that
+  documents the entry format inside a code fence (```` ```markdown ````
+  followed by `### [2026-10-03] Title`) was counted as a real entry. That
+  inflated `.living/INDEX.md` counts and the SessionStart `MYCELIUM SUMMARY`,
+  shifted every later `L-`/`D-` ID, added fake records to `detect_recurrence`
+  clusters, cut `recall_lessons` entry text off at the example, and split
+  knowledge-map entries at it. Every entry parser now skips fenced lines
+  through the shared CommonMark fence tracker (`markdown_fences.mark_fenced`),
+  as `validate_structure` already did. Tags lines and `## F-` finding
+  headings inside fences are ignored too. Existing projects need no
+  migration; the next index refresh corrects the counts. An entry ID can
+  shift down where a fenced example used to sit before it.
 
 ## [0.8.2] - 2026-10-11
 
