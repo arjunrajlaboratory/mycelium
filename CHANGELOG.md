@@ -20,14 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   learning `structural` when the test is only a candidate. How to set
   `mitigation_type` is now stated once, as a rule in the learning template
   (structural if a shipped check enforces the learning, otherwise convention
-  if a `.living/conventions.md` entry covers it, otherwise
-  ambient-awareness), and core, the skill-generation guide, the post-action
-  directive, and harden defer to it; the post-action crystallize step records
-  the type change when it adds a convention. The post-action directive, the
-  `learnings.md` header written by init, and the transfer skill now ask for
-  `mitigation_type` and `structural_mitigation_candidate`, so learnings logged
-  through the normal path can be hardened (transferred learnings start as
-  `ambient-awareness`). Adapted from
+  if a `.living/conventions.md` entry covers it, otherwise ambient-awareness),
+  and core, the skill-generation guide, the post-action directive, and harden
+  defer to it; every instruction that writes a learning or adds a convention
+  (the post-action directive, core's post-action steps, the generated
+  `MYCELIUM.md`, and the transfer skill) now applies it, so learnings logged
+  or transferred through the normal path carry `mitigation_type` and
+  `structural_mitigation_candidate` and can be hardened. A transferred
+  learning's type comes from the target's own enforcement. Adapted from
   [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
   Manurung (MIT, issue #91).
 

@@ -193,3 +193,45 @@ def test_transfer_length_rule_fits_the_full_entry_format() -> None:
     # Heading + five fields + two mitigation fields + source: is nine lines.
     transfer = _flat(PLUGIN_ROOT / "skills" / "transfer" / "SKILL.md")
     assert "5-8 lines" not in transfer
+
+
+_WRITES_LEARNING = re.compile(
+    r"\b(append|printf|add)\b[^\n]{0,80}?learnings\.md"
+    r"|add a new convention|promote to `?\.living/conventions\.md"
+    r"|automatically append\*\* the learning",
+    re.I,
+)
+
+
+def _instruction_units(path: Path) -> list[str]:
+    """Numbered steps or bullets of a Markdown file, or the hook directive's lines."""
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".sh":
+        text = text.replace("\\n", "\n")
+    return [u for u in re.split(r"\n(?=\s*(?:\d+\.|-)\s)|\n\s*\n", text) if u.strip()]
+
+
+def test_every_instruction_that_writes_a_learning_or_convention_applies_the_rule() -> None:
+    # Root cause of the later Codex findings on #96: a step that writes a
+    # learning, or adds a convention that now enforces learnings, without
+    # deriving mitigation_type by the template's rule. Sweep every shipped
+    # instruction rather than the ones a reviewer happened to name.
+    skip = {
+        TEMPLATE,  # the canonical statement itself
+        PLUGIN_ROOT / "skills" / "develop" / "references" / "regression-patterns.md",
+        # A report placeholder suggesting an action; it writes nothing.
+        PLUGIN_ROOT / "skills" / "core" / "templates" / "knowledge-transfer-report.md",
+    }
+    paths = [
+        p for p in sorted((PLUGIN_ROOT / "skills").rglob("*"))
+        if p.suffix in {".md", ".template"} or p.name == "mycelium-post-action.sh"
+    ]
+    offenders = []
+    for path in paths:
+        if path in skip or "/review/" in path.as_posix() or path.name.startswith("test_"):
+            continue
+        for unit in _instruction_units(path):
+            if _WRITES_LEARNING.search(unit) and "mitigation_type" not in unit \
+                    and "learning-entry.md" not in unit:
+                offenders.append(f"{path.relative_to(PLUGIN_ROOT)}: {' '.join(unit.split())[:90]}")
+    assert offenders == []
