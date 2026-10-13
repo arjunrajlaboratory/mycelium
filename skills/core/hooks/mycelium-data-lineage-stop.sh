@@ -125,7 +125,7 @@ try:
             "events_file_size": int(events_size),
             "output_path": out_file,
             "log_tail": log_tail,
-            "dispatched_at": datetime.datetime.now(datetime.UTC).isoformat().replace(
+            "dispatched_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace(
                 "+00:00", "Z"
             ),
         }, out, indent=2)
