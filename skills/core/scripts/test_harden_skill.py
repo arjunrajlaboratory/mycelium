@@ -161,3 +161,24 @@ def _init_learnings_header() -> str:
     source = (PLUGIN_ROOT / "skills" / "core" / "scripts" / "init_repo.py").read_text()
     start = source.index('"learnings.md": (')
     return source[start:source.index("),", start)]
+
+
+def test_structural_means_any_shipped_check_not_only_a_test() -> None:
+    # The template counts a shipped test, assertion, type constraint, or schema
+    # validation as structural; a copy that says "unless a test has shipped"
+    # misfiles shipped assertions as ambient-awareness (Codex on #96).
+    template = _flat(TEMPLATE)
+    mechanisms = ("test", "assertion", "type constraint", "schema validation")
+    assert all(m in template for m in mechanisms)
+    hook = (PLUGIN_ROOT / "skills" / "core" / "hooks" / "mycelium-post-action.sh").read_text()
+    directive = next(line for line in hook.splitlines() if "LIVING_DIRECTIVE=\"MYCELIUM" in line)
+    for mechanism in mechanisms:
+        assert mechanism in directive, mechanism
+    assert "unless a test has shipped" not in directive
+    assert "while the test is only a candidate" not in _flat(CORE)
+
+
+def test_transfer_length_rule_fits_the_full_entry_format() -> None:
+    # Heading + five fields + two mitigation fields + source: is nine lines.
+    transfer = _flat(PLUGIN_ROOT / "skills" / "transfer" / "SKILL.md")
+    assert "5-8 lines" not in transfer
