@@ -251,47 +251,22 @@ _LEARNING_HEADING_RE = re.compile(r"^#{2,3} \[?(\d{4}-\d{2}-\d{2})\]?\s*(.*)$")
 def learning_mitigation_types(text: str) -> list[tuple[int, str, str | None]]:
     """(line, title, raw mitigation_type or None) for each learning entry.
 
-    Its own parser, deliberately unlike detect_recurrence's: it reads the
-    field's literal value (no typo aliases, since harden filters on the exact
-    value) and ignores fenced code and HTML comments both when finding entry
-    headings and when finding the field, so an example inside an entry neither
-    splits it nor stands in for its field. Canonical `### [date]` and legacy
-    `## [date]` headings both start an entry.
+    Lines come from the shared `markdown_fences.visible_lines` reader, so
+    fenced code, HTML comments, and indented code examples neither split an
+    entry nor stand in for its field, and the field line is the same one
+    detect_recurrence selects. Unlike detect_recurrence, the value is kept
+    literally (no typo aliases), since harden filters on the exact value.
+    Canonical `### [date]` and legacy `## [date]` headings both start an entry.
     """
     entries: list[list] = []
-    fence: fences.Fence | None = None
-    in_comment = False
-    for lineno, raw in enumerate(split_log_lines(text), start=1):
-        line = raw.rstrip("\r")
-        if fence is not None:
-            if fences.closes(line, fence):
-                fence = None
-            continue
-        if in_comment:
-            if "-->" in line:
-                in_comment = False
-            continue
-        opened = fences.opening_fence(line)
-        if opened is not None:
-            fence = opened
-            continue
-        visible = re.sub(r"<!--.*?-->", "", line)
-        if "<!--" in visible:
-            in_comment = True
-            visible = visible[: visible.index("<!--")]
+    for lineno, visible, indent in fences.visible_lines(split_log_lines(text)):
         heading = _LEARNING_HEADING_RE.match(visible)
         if heading:
             entries.append([lineno, heading.group(2).strip() or heading.group(1), None])
             continue
-        # One field-line matcher shared with detect_recurrence; the value is
-        # compared literally (markup stripped, no typo aliases).
-        # Four or more columns of indentation (tabs expanded) is an indented
-        # code block: an example there is not the field. The shared matcher
-        # accepts any indentation, so exclude it here, failing toward a warning.
-        indent = visible[: len(visible) - len(visible.lstrip(" \t"))]
-        field = _MITIGATION_LINE_RE.match(visible)
-        if field and fences.visual_column(indent) >= 4:
-            field = None
+        # Same selection as detect_recurrence: the first visible field line
+        # that is not an indented code example (fails toward a warning).
+        field = None if indent >= 4 else _MITIGATION_LINE_RE.match(visible)
         if field and entries and entries[-1][2] is None:
             entries[-1][2] = field.group(1).strip().strip("*`\"'").strip()
     return [tuple(entry) for entry in entries]

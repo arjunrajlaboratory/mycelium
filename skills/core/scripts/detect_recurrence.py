@@ -38,6 +38,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 import generate_index as gi  # noqa: E402
+import markdown_fences as fences  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -137,10 +138,16 @@ def _slice_entry_text(path: Path, header_prefix: str, header_line_no: int) -> st
 
 
 def _extract_mitigation_type(text: str) -> str:
-    """Parse the mitigation_type value from an entry body. Returns 'unknown' if absent."""
-    # Strip HTML comments first so commented-out guidance isn't matched
-    clean = _COMMENT_RE.sub("", text)
-    for line in clean.splitlines():
+    """Parse the mitigation_type value from an entry body. Returns 'unknown' if absent.
+
+    The field line is chosen exactly as validate_structure chooses it: the
+    first line a reader sees (outside fences and comments) that is not an
+    indented code example. Only the value handling differs: this reader maps
+    common typos to a type, the validator does not.
+    """
+    for _, line, indent in fences.visible_lines(text.splitlines()):
+        if indent >= 4:
+            continue
         m = _MITIGATION_LINE_RE.match(line)
         if m:
             val = m.group(1).strip().strip("*`\"'").lower()

@@ -718,3 +718,24 @@ def test_indented_code_field_does_not_count(tmp_path: Path) -> None:
     warnings = _mitigation_warnings(target)
     assert len(warnings) == 1 and "2 learnings" in warnings[0]
     assert "Slightly indented" not in warnings[0]
+
+
+_TRICKY_BODIES = {
+    "fenced example first": "```\nmitigation_type: structural\n```\n\n**mitigation_type**: ambient-awareness\n",
+    "indented example first": "Example:\n\n    mitigation_type: structural\n\n**mitigation_type**: ambient-awareness\n",
+    "commented example first": "<!-- mitigation_type: structural -->\n**mitigation_type**: ambient-awareness\n",
+    "multi-line comment first": "<!--\nmitigation_type: convention\n-->\n**mitigation_type**: ambient-awareness\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(_TRICKY_BODIES))
+def test_validator_and_recurrence_select_the_same_field(name: str) -> None:
+    # Two readers of one field must agree on which line is the field (Codex on
+    # #96); they may differ only in how strictly they judge its value.
+    import detect_recurrence
+    from validate_structure import learning_mitigation_types
+
+    body = _TRICKY_BODIES[name]
+    [(_, _, validated)] = learning_mitigation_types("### [2026-10-01] Entry\n\n" + body)
+    assert validated == "ambient-awareness"
+    assert detect_recurrence._extract_mitigation_type(body) == "ambient-awareness"
