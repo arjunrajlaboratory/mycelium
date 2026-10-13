@@ -268,6 +268,11 @@ def check_cohort(check, columns, rows):
     alerts = []
     column = check.get("column")
     if column is not None:
+        # A row with no cohort value cannot contribute to a cohort comparison,
+        # so it counts toward neither the levels nor the row counts.
+        rows, alerts = drop_missing(rows, [column], "cohort")
+        if not rows:
+            return alerts
         present = Counter(r[column] for r in rows)
         absent = [lvl for lvl in as_list(check.get("levels")) if str(lvl) not in present]
         if absent:
@@ -377,16 +382,17 @@ def check_batch(check, columns, rows):
             "batch_confounding", "some batches hold only one '{}' level".format(contrast), False,
             observed="{} of {} batches single-level".format(len(single), len(table)),
             evidence=["{}: {}".format(b, next(iter(table[b]))) for b in single]))
-    isolated = sorted(l for l in levels
-                      if all(len(c) == 1 for c in table.values() if c[l]))
-    if isolated:
+    components = level_components(table, levels)
+    if len(components) > 1:
         alerts.append(alert(
             "batch_confounding",
-            "contrast levels that share no batch with another level; any contrast with them is confounded with batch",
-            True, expected="every level shares a batch with another level",
-            observed=", ".join(isolated),
-            evidence=["{}: {}".format(l, ", ".join(sorted(b for b, c in table.items() if c[l])))
-                      for l in isolated]))
+            "contrast levels fall into groups that share no batch; any comparison across groups is "
+            "confounded with batch",
+            True, expected="every level linked to every other through shared batches",
+            observed=" | ".join(", ".join(group) for group in components),
+            evidence=["{}: {}".format(", ".join(group), ", ".join(
+                sorted(b for b, c in table.items() if any(c[l] for l in group)))) for group in components]))
+    isolated = {l for group in components if len(group) == 1 for l in group}
     lone = sorted(l for l in levels if l not in isolated
                   and sum(1 for c in table.values() if c[l]) == 1)
     if lone:
@@ -407,6 +413,26 @@ def check_batch(check, columns, rows):
                 evidence=["{} holds {} of {} {} rows ({})".format(
                     b, table[b][l], totals[l], l, percent(table[b][l] / float(totals[l]))) for b, l in over]))
     return alerts
+
+
+def level_components(table, levels):
+    """Contrast levels grouped by the batches that connect them, each group sorted."""
+    parent = {l: l for l in levels}
+
+    def root(level):
+        while parent[level] != level:
+            parent[level] = parent[parent[level]]
+            level = parent[level]
+        return level
+
+    for counts in table.values():
+        present = [l for l in levels if counts[l]]
+        for other in present[1:]:
+            parent[root(other)] = root(present[0])
+    groups = defaultdict(list)
+    for level in levels:
+        groups[root(level)].append(level)
+    return sorted(sorted(group) for group in groups.values())
 
 
 def percent(share):
