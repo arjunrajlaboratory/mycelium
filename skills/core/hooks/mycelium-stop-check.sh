@@ -404,7 +404,10 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
           # .upsert_registry_row.err for operator debugging. Do NOT echo the
           # row on rejection — that would defeat the validation the script
           # exists to perform.
-          python3 "$UPSERT_SCRIPT" --preserve-authored "$LOG_DIR/LOG_REGISTRY.md" "$SESSION_ID" "$NEW_ROW" \
+          # --log-link folds a row the agent keyed by a guessed session ID
+          # but linked to this session's log, so one session keeps one row.
+          python3 "$UPSERT_SCRIPT" --preserve-authored --log-link "$LOG_BASENAME" \
+            "$LOG_DIR/LOG_REGISTRY.md" "$SESSION_ID" "$NEW_ROW" \
             >/dev/null 2>"$LOG_DIR/.upsert_registry_row.err" \
             && { rm -f "$LOG_DIR/.upsert_registry_row.err"; REGISTRY_OK=true; }
         fi

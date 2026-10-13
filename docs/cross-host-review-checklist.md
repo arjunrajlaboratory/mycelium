@@ -182,6 +182,9 @@ hook, filesystem, or lifecycle boundaries.
       private handoff to shared `.mycelium/last-session.md`.
 - [ ] Stop updates factual registry fields without overwriting an agent-authored
       Summary, Key Outputs, or Tags for the same session.
+- [ ] Any directive asking the agent to write a keyed registry row names the
+      exact session ID (or defers the write to Stop), and Stop folds a row
+      keyed by a guessed ID that links the same session log into one row.
 - [ ] Cleanup and retention policies distinguish active, accepted, stale, and
       corrupt state.
 
@@ -498,6 +501,7 @@ exercise them.
 | Every action in a session has `bash_wall_s` and `bash_exit` null | The manifest reports `total_wall_seconds: null` with zero timed/known-exit coverage and full `total_action_count`; nothing reads as a measured zero or an implicit success. |
 | The plugin-root pointer carries a trailing space, CRLF, NUL byte, or extra lines; or the accessor word is single-quoted, bare, prefixed with a user component, or followed by `..` traversal | Verification reproduces the exact bash expansion or refuses: only a double-quoted, word-anchored accessor whose expanded value verifies is suppressed; every divergent form keeps detection and no input can raise out of the hook. |
 | A finalized log contains an authored `— Session ended` look-alike heading, a machine-shaped example in a four-backtick fence with inner ``` lines, or an authored bullet directly after the generated file list | Finalization rebuilds only the machine footer; every authored line survives byte-identical across retries. |
+| The agent upserts its registry row under a guessed session ID that links the session's own log | Stop leaves exactly one row with the canonical session ID and the agent's authored Summary, Key Outputs, and Tags; a row for any other log survives. |
 | Stop finalizes a registry row already enriched by the agent | Date, branch, duration, file count, status, and log link become factual final values while Summary, Key Outputs, and Tags remain authored and byte-equivalent at the cell level. |
 | A review report is rendered from multiple specialist outputs | Same-root findings are deduplicated, IDs are globally consecutive, per-category/global tallies match the rendered headings, and cross-input schema/feature/label comparability was checked. |
 | An analysis composes existing data paths dynamically from `Path`, dictionaries, or loop variables | Unique filenames reachable from recognized I/O path arguments are recovered conservatively after execution; direction follows the call, while ambiguous or over-bound searches remain unresolved with an explicit warning. |
