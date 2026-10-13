@@ -16,7 +16,7 @@ import shlex
 import shutil
 import sys
 import tempfile
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -646,7 +646,7 @@ def install_core_convention_packs(target_dir: Path):
         print("  No core convention packs found in network.")
         return
 
-    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     conventions_dir = target_dir / ".living" / "conventions"
     yaml_path = conventions_dir / "ACTIVE_CONVENTIONS.yaml"
 
