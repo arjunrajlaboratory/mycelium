@@ -21,6 +21,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import markdown_fences as fences
 from mycelium_locks import (
     LockError,
     atomic_write_text,
@@ -41,6 +42,22 @@ def _require_real_directory(path: Path) -> None:
     metadata = path.lstat()
     if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
         raise LockError(f"unsafe findings directory: {path}")
+
+
+def _mark_fenced(path: Path, lines: list[str]) -> list[tuple[str, bool]]:
+    """Pair each line with whether it sits in a code fence; report open fences.
+
+    A fence left open marks the rest of the file as fenced, which hides every
+    later real finding, so say where it opened instead of dropping them quietly.
+    """
+    opened_at = fences.unclosed_fence_line(lines)
+    if opened_at is not None:
+        print(
+            f"warning: {path}:{opened_at}: unclosed code fence; findings after "
+            "it are treated as example text",
+            file=sys.stderr,
+        )
+    return list(fences.mark_fenced(lines))
 
 
 def find_meta_root(start: Path) -> Path | None:
@@ -100,12 +117,15 @@ def parse_topic_file(path: Path) -> dict:
             elif line.startswith("status:"):
                 status = line.split(":", 1)[1].strip()
 
+    # Structure inside a code fence is an illustrative example, not a finding.
+    structural = [line for line, fenced in _mark_fenced(path, lines) if not fenced]
+
     # Count findings by ## F- headers
-    finding_count = len([l for l in lines if l.startswith("## F-")])
+    finding_count = len([l for l in structural if l.startswith("## F-")])
 
     # Extract statuses from **Status:** lines
     statuses = []
-    for line in lines:
+    for line in structural:
         match = re.match(r"\*\*Status:\*\*\s*(\w+)", line)
         if match:
             statuses.append(match.group(1).lower())
@@ -121,7 +141,7 @@ def parse_topic_file(path: Path) -> dict:
     # Count open questions
     open_questions = 0
     in_questions = False
-    for line in lines:
+    for line in structural:
         if line.startswith("### Open Questions"):
             in_questions = True
             continue
@@ -269,30 +289,33 @@ def rebuild_project_registry(findings_dir: Path) -> None:
     .living/findings/FINDINGS_REGISTRY.md with a sorted table of all findings.
     """
     rows: list[dict] = []
+    scanned_topic = False
 
     for topic_file in sorted(findings_dir.glob("*.md")):
         if topic_file.name in {"INDEX.md", "FINDINGS_REGISTRY.md"}:
             continue
 
         _require_regular_file(topic_file)
+        scanned_topic = True
         topic_slug = topic_file.stem
         content = topic_file.read_text(encoding="utf-8", errors="replace")
         lines = content.splitlines()
 
-        # Split into per-finding sections by ## F-NNN headers
+        # Split into per-finding sections by ## F-NNN headers. Fenced lines stay
+        # in the section body but never start a section or carry a field.
         current_id: str | None = None
-        current_lines: list[str] = []
-        sections: list[tuple[str, list[str]]] = []
+        current_lines: list[tuple[str, bool]] = []
+        sections: list[tuple[str, list[tuple[str, bool]]]] = []
 
-        for line in lines:
-            match = re.match(r"^## (F-\d+)", line)
+        for line, fenced in _mark_fenced(topic_file, lines):
+            match = None if fenced else re.match(r"^## (F-\d+)", line)
             if match:
                 if current_id is not None:
                     sections.append((current_id, current_lines))
                 current_id = match.group(1)
                 current_lines = []
             elif current_id is not None:
-                current_lines.append(line)
+                current_lines.append((line, fenced))
 
         if current_id is not None:
             sections.append((current_id, current_lines))
@@ -305,7 +328,9 @@ def rebuild_project_registry(findings_dir: Path) -> None:
             last_evidence_date = ""
 
             in_evidence = False
-            for line in finding_lines:
+            for line, fenced in finding_lines:
+                if fenced:
+                    continue
                 claim_match = re.match(r"\*\*Claim:\*\*\s*(.*)", line)
                 if claim_match:
                     claim = claim_match.group(1).strip()
@@ -346,7 +371,10 @@ def rebuild_project_registry(findings_dir: Path) -> None:
                 }
             )
 
-    if not rows:
+    registry_path = findings_dir / "FINDINGS_REGISTRY.md"
+    # With no findings, leave a missing registry missing, but empty an existing
+    # one: its rows describe findings that are gone (or were fenced examples).
+    if not rows and not (scanned_topic and registry_path.exists()):
         return
 
     # Sort by finding ID numerically
@@ -371,8 +399,8 @@ def rebuild_project_registry(findings_dir: Path) -> None:
         )
 
     atomic_write_text(
-        findings_dir / "FINDINGS_REGISTRY.md",
-        template_header + "\n" + "\n".join(table_rows) + "\n",
+        registry_path,
+        template_header + "\n" + "".join(row + "\n" for row in table_rows),
         root=findings_dir.parent.parent,
     )
 
