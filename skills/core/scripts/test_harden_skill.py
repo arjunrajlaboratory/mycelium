@@ -121,9 +121,15 @@ def test_template_is_the_single_statement_of_the_mitigation_lifecycle() -> None:
         "ambient-awareness → convention",
         "structural → ambient-awareness",
         "convention → ambient-awareness",
+        "convention → structural",
     ):
         assert transition in template
+    assert "only the user changes an enforced classification" in template
     for path in (HARDEN, CORE, GUIDE):
         assert "skills/core/templates/learning-entry.md" in _flat(path), path
     guide = _flat(GUIDE)
     assert "has been or should be promoted" not in guide  # a proposed convention is still ambient-awareness
+    # Crystallize applies convention → ambient-awareness to a missing entry;
+    # re-adding a removed convention is the user's decision, not automatic.
+    assert "If missing, add it now" not in guide
+    assert "If it is missing, demote the learning to `ambient-awareness`" in guide

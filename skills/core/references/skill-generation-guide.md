@@ -139,7 +139,7 @@ Every learning entry carries a `mitigation_type` field that directly informs how
 
 2. **Cluster ambient-awareness entries before promoting.** Two ambient-awareness learnings on the same topic should produce *one* convention, not two. Use `detect_recurrence.py` to identify clusters: `python3 skills/core/scripts/detect_recurrence.py --living-dir <path>`. Merge related entries into a single, generalized convention.
 
-3. **Convention entries verify the checklist.** If a learning is `convention`, confirm the corresponding entry exists in `.living/conventions.md`. If missing, add it now. If present, check whether the convention text needs strengthening based on the new learning.
+3. **Convention entries verify the checklist.** If a learning is `convention`, confirm the corresponding entry exists in `.living/conventions.md`. If it is missing, demote the learning to `ambient-awareness` (the template's convention → ambient-awareness transition): the entry may have been removed on purpose, so restoring it is the user's decision, and the learning returns to `convention` only once an entry exists again. If present, check whether the convention text needs strengthening based on the new learning.
 
 4. **Structural entries close the loop.** If a learning is `structural`, confirm the test or invariant actually exists in the codebase. If not (i.e., the mitigation_type was aspirational), demote to `ambient-awareness`, as the learning template requires for an unshipped candidate, so `$mycelium:harden` can ship the test. Demote to `convention` only when a matching `.living/conventions.md` entry actually exists.
 
