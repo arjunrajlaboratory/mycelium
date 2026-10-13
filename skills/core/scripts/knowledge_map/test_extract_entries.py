@@ -250,5 +250,85 @@ Tags: discovery, important
         self.assertEqual(keys, sorted(keys), msg="Entries are not sorted")
 
 
+class TestFencedHeadings(unittest.TestCase):
+    """Headings and Tags lines inside fenced code blocks are examples, not structure."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmpdir.name)
+        self.projects = [
+            ProjectMeta(
+                id="proj",
+                name="Project",
+                path="proj",
+                family="test-family",
+                has_living=True,
+            )
+        ]
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def _entries(self, rel: str, content: str) -> list:
+        _write(self.root / "proj" / ".living" / rel, content)
+        result = extract_entries(self.root, self.projects, {})
+        return sorted(
+            (e for e in result.entries if e.source_path.endswith(rel)),
+            key=lambda e: e.line_start or 0,
+        )
+
+    def test_aggregate_section_skips_fenced_heading_and_tags(self) -> None:
+        entries = self._entries(
+            "learnings.md",
+            "# Learnings\n\n"
+            "### [2026-10-01] Document the format\n\n"
+            "```markdown\n"
+            "### [2026-10-03] Example title\n"
+            "**Tags**: fake-tag\n"
+            "```\n\n"
+            "**Tags**: real-tag\n\n"
+            "### [2026-10-02] Second real entry\n",
+        )
+        self.assertEqual(
+            [e.title for e in entries], ["Document the format", "Second real entry"]
+        )
+        self.assertEqual(entries[0].tags, ["real-tag"])
+
+    def test_conventions_skip_fenced_heading(self) -> None:
+        entries = self._entries(
+            "conventions.md",
+            "# Conventions\n\n"
+            "## Real convention\n\n"
+            "~~~\n## Example convention\n~~~\n\n"
+            "## Second convention\n",
+        )
+        self.assertEqual(
+            [e.title for e in entries], ["Real convention", "Second convention"]
+        )
+
+    def test_whole_file_title_skips_fenced_heading(self) -> None:
+        entries = self._entries(
+            "findings/finding.md",
+            "```\n# Example heading\n```\n\n# Real finding title\nBody.\n",
+        )
+        self.assertEqual([e.title for e in entries], ["Real finding title"])
+
+
+class TestFencedLogHeadings(unittest.TestCase):
+    def test_log_title_and_tags_skip_fences(self) -> None:
+        from extract_logs import _parse_log_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "2026-10-01-001-session.md"
+            path.write_text(
+                "```\n# Example title\nTags: fake\n```\n\n"
+                "# Real session title\nTags: real\n",
+                encoding="utf-8",
+            )
+            title, _, tags = _parse_log_file(path)
+        self.assertEqual(title, "Real session title")
+        self.assertEqual(tags, ["real"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

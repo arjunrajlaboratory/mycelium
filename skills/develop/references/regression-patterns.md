@@ -410,6 +410,14 @@ examples inside both ordinary report prose and fenced blocks. Require fenced
 content and later appendix tables to be ignored while wrong zero tallies and
 unexpected live categories fail.
 
+**Recurrence:** The knowledge-log parsers had the same defect after
+`validate_structure` was fixed. `generate_index` (counts, `collect_entries`,
+snippets, `## F-` totals), `detect_recurrence`, `recall_lessons`, the
+SessionStart summary's `grep -c`, and the knowledge-map extractors all counted a
+fenced `### [date] Example` as an entry. Fixing one reader of a format does not
+fix its siblings: sweep every reader, and route each through
+`markdown_fences.mark_fenced` rather than a local fence loop or a bare grep.
+
 ## 22. Review orchestration assumes unlimited subagent capacity
 
 **Failure:** A review dispatches all specialist agents concurrently even when
