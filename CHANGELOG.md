@@ -21,7 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mitigation_type` values are now stated once, in the learning template,
   and core, the skill-generation guide, and harden defer to it: an unshipped
   `structural` entry returns to `ambient-awareness` (not `convention`), and
-  `convention` requires an existing `.living/conventions.md` entry. Adapted
+  `convention` requires an existing `.living/conventions.md` entry. The
+  post-action directive, the `learnings.md` header written by init, and the
+  transfer skill now ask for `mitigation_type` and
+  `structural_mitigation_candidate`, so learnings logged through the normal
+  path can be hardened (transferred learnings start as
+  `ambient-awareness`). Adapted
   from [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by
   Mikhael Manurung (MIT, issue #91).
 

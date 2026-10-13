@@ -133,3 +133,29 @@ def test_template_is_the_single_statement_of_the_mitigation_lifecycle() -> None:
     # re-adding a removed convention is the user's decision, not automatic.
     assert "If missing, add it now" not in guide
     assert "If it is missing, demote the learning to `ambient-awareness`" in guide
+
+
+def _template_fields() -> list[str]:
+    fields = re.findall(r"^\*\*([A-Za-z_ ]+)\*\*:", TEMPLATE.read_text(encoding="utf-8"), re.M)
+    assert "mitigation_type" in fields and "structural_mitigation_candidate" in fields
+    return fields
+
+
+def test_every_learning_format_names_every_template_field() -> None:
+    # Each place that tells an agent how to write a learning restates the
+    # format; a copy missing the mitigation fields yields untyped learnings
+    # that harden skips (Codex on #96). The field list comes from the template.
+    sources = {
+        "post-action hook": (PLUGIN_ROOT / "skills" / "core" / "hooks" / "mycelium-post-action.sh").read_text(),
+        "init_repo learnings.md header": _init_learnings_header(),
+        "transfer skill": (PLUGIN_ROOT / "skills" / "transfer" / "SKILL.md").read_text(),
+    }
+    for name, text in sources.items():
+        missing = [f for f in _template_fields() if f not in text]
+        assert missing == [], f"{name} omits {missing}"
+
+
+def _init_learnings_header() -> str:
+    source = (PLUGIN_ROOT / "skills" / "core" / "scripts" / "init_repo.py").read_text()
+    start = source.index('"learnings.md": (')
+    return source[start:source.index("),", start)]

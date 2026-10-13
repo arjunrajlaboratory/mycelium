@@ -82,12 +82,17 @@ For each identified transfer, **automatically append** the learning to the targe
 
 **Tags**: [relevant, tags, for, searchability]
 
+**mitigation_type**: ambient-awareness
+
+**structural_mitigation_candidate**: [The concrete test or check that would catch this in the target project, adapted from the source's]
+
 source: [source project name] (auto-transferred by mycelium)
 ```
 
 **Transfer rules**:
 - Rewrite the learning for the target project's context — don't dump the source project's jargon
 - Keep entries concise (5-8 lines max)
+- A transferred learning is always `ambient-awareness`: nothing enforces it in the target project yet, even if the source shipped a test (see the transitions in `skills/core/templates/learning-entry.md`)
 - The `source:` field with `(auto-transferred by mycelium)` tag makes transfers auditable and distinguishable from manual entries
 - Also append each transfer to the meta-project's `.living/learnings.md` if not already present there (the cross-project aggregate)
 - Use `printf >> file` to append — do NOT read the full target file first
