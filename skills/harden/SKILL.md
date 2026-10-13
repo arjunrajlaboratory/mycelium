@@ -79,8 +79,10 @@ test checks:
   test or a temporary file, that recreates the bad data. It must fail there.
 - **A code check** (a function's behavior) passes on the problematic input once
   the fix is in. Its red run is against the unmitigated implementation: the
-  commit before the fix, checked out in a temporary `git worktree`, or the fix
-  monkeypatched out inside a throwaway run. It must fail there. Never edit the
+  commit before the fix, checked out in a temporary `git worktree` (it holds
+  only tracked files, so copy the new test into it), or the fix monkeypatched
+  out inside a throwaway run. It must fail there, on its targeted assertion: a
+  missing test, import error, or collection failure is not a red run. Never edit the
   repository's code to stage the red run, and never keep a test that fails on
   the input it is meant to handle.
 

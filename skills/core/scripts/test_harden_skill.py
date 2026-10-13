@@ -78,6 +78,10 @@ def test_harden_red_run_matches_the_kind_of_check() -> None:
     harden = _flat(HARDEN)
     assert "unmitigated implementation" in harden
     assert "recreates the bad data" in harden
+    # A pre-fix worktree holds only tracked files: the new test must be copied
+    # in, and the failure must come from its assertion, not a missing test.
+    assert "copy the new test into it" in harden
+    assert "targeted assertion" in harden
     assert "pass on the current code" in harden.lower()
 
 
