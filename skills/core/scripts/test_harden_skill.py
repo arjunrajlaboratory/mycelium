@@ -15,6 +15,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[3]
 HARDEN = PLUGIN_ROOT / "skills" / "harden" / "SKILL.md"
 TEMPLATE = PLUGIN_ROOT / "skills" / "core" / "templates" / "learning-entry.md"
 CORE = PLUGIN_ROOT / "skills" / "core" / "SKILL.md"
+GUIDE = PLUGIN_ROOT / "skills" / "core" / "references" / "skill-generation-guide.md"
 
 ENTRY = """### [2026-10-01] Plate 3 barcodes are swapped
 
@@ -92,3 +93,12 @@ def test_core_never_marks_an_unshipped_candidate_structural() -> None:
     core = _flat(CORE)
     assert "if you can name a concrete test or invariant, upgrade the entry" not in core
     assert "$mycelium:harden" in core
+
+
+def test_unshipped_structural_entries_return_to_harden() -> None:
+    # The template keeps an unshipped candidate at ambient-awareness; demoting
+    # it to convention would strand it outside harden's candidate filter.
+    guide = _flat(GUIDE)
+    assert "demote to `convention` until the test ships" not in guide
+    assert "demote to `ambient-awareness`" in guide
+    assert "reclassified at crystallize time" not in _flat(HARDEN)

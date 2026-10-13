@@ -38,9 +38,12 @@ learning per run.
   candidate names a concrete check: a function, file, column, or assertion.
   Skip the template placeholder and vague candidates ("be careful with X").
   Leave `convention` entries and entries with no `mitigation_type` alone: a
-  convention is reclassified at crystallize time
-  (`skills/core/references/skill-generation-guide.md`), and an untyped entry
-  needs its type recorded first.
+  convention is already enforced through `.living/conventions.md`, and
+  changing its type is the user's call; an untyped entry needs its type
+  recorded first. An entry marked `structural` whose test never shipped is
+  demoted to `ambient-awareness` at crystallize time
+  (`skills/core/references/skill-generation-guide.md`), which makes it a
+  candidate here.
 - A candidate that places its check in analysis code ("In
   `analysis/.../x.py`, assert ...") still qualifies when the check reads a file
   a test can read too: show it with "(check moves to a test)". If it checks a

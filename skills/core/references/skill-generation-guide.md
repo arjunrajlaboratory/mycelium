@@ -141,7 +141,7 @@ Every learning entry carries a `mitigation_type` field that directly informs how
 
 3. **Convention entries verify the checklist.** If a learning is `convention`, confirm the corresponding entry exists in `.living/conventions.md`. If missing, add it now. If present, check whether the convention text needs strengthening based on the new learning.
 
-4. **Structural entries close the loop.** If a learning is `structural`, confirm the test or invariant actually exists in the codebase. If not (i.e., the mitigation_type was aspirational), demote to `convention` until the test ships.
+4. **Structural entries close the loop.** If a learning is `structural`, confirm the test or invariant actually exists in the codebase. If not (i.e., the mitigation_type was aspirational), demote to `ambient-awareness`, as the learning template requires for an unshipped candidate, so `$mycelium:harden` can ship the test. Demote to `convention` only when a matching `.living/conventions.md` entry actually exists.
 
 ### Audit finding that motivated this field
 
