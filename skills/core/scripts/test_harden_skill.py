@@ -134,9 +134,8 @@ def test_template_is_the_single_statement_of_the_mitigation_lifecycle() -> None:
     assert "If missing, add it now" not in guide  # a removed entry may be intentional
     assert "Add or strengthen the conventions.md entry" not in guide  # same, in the table
     assert "re-derive its type" in guide
-    hook = (PLUGIN_ROOT / "skills" / "core" / "hooks" / "mycelium-post-action.sh").read_text()
-    crystallize = hook[hook.index("7. CRYSTALLIZE"):hook.index("REGISTRY_STEP}", hook.index("7. CRYSTALLIZE"))]
-    assert "mitigation_type: convention" in crystallize  # the step that adds the entry records it
+    # Steps that add a convention re-derive the cited learnings' type: pinned
+    # by test_every_instruction_that_writes_a_learning_or_convention_applies_the_rule.
     transfer = _flat(PLUGIN_ROOT / "skills" / "transfer" / "SKILL.md")
     assert "see the transitions" not in transfer
 
@@ -196,42 +195,65 @@ def test_transfer_length_rule_fits_the_full_entry_format() -> None:
 
 
 _WRITES_LEARNING = re.compile(
-    r"\b(append|printf|add)\b[^\n]{0,80}?learnings\.md"
-    r"|add a new convention|promote to `?\.living/conventions\.md"
-    r"|automatically append\*\* the learning",
+    # Active verb forms only ("are logged" describes, it does not instruct),
+    # with the path allowed on a later line of the same step.
+    r"\b(append|appends|printf|add|adds|log|logs|record|records|write|writes)\b"
+    r"[\s\S]{0,160}?learnings\.md"
+    r"|\badds? a new convention|promote to `?\.living/conventions\.md|automatically append",
     re.I,
 )
 
 
+def _norm(text: str) -> str:
+    return " ".join(text.replace("`", "").split()).lower()
+
+
+def _canonical_rule() -> str:
+    """The one-line rule the template asks every writer to quote verbatim."""
+    found = re.search(
+        r"adds a convention, so no copy can paraphrase it partially: "
+        r"(Derive mitigation_type .+? otherwise ambient-awareness\.)",
+        _flat(TEMPLATE),
+    )
+    assert found, "template lost its one-line rule"
+    return found.group(1)
+
+
 def _instruction_units(path: Path) -> list[str]:
-    """Numbered steps or bullets of a Markdown file, or the hook directive's lines."""
+    """Numbered steps or bullets outside code fences, or the hook directive's lines."""
     text = path.read_text(encoding="utf-8")
     if path.suffix == ".sh":
         text = text.replace("\\n", "\n")
+    text = re.sub(r"^```.*?^```", "", text, flags=re.M | re.S)
     return [u for u in re.split(r"\n(?=\s*(?:\d+\.|-)\s)|\n\s*\n", text) if u.strip()]
 
 
 def test_every_instruction_that_writes_a_learning_or_convention_applies_the_rule() -> None:
-    # Root cause of the later Codex findings on #96: a step that writes a
-    # learning, or adds a convention that now enforces learnings, without
-    # deriving mitigation_type by the template's rule. Sweep every shipped
-    # instruction rather than the ones a reviewer happened to name.
+    # Root cause of the later Codex findings on #96: each writer restated the
+    # type rule partially (tests only, convention without structural first),
+    # and a narrow detector missed writers entirely. Every shipped step that
+    # writes a learning or adds a convention must quote the template's
+    # one-line rule verbatim, read from the template itself.
     skip = {
-        TEMPLATE,  # the canonical statement itself
-        PLUGIN_ROOT / "skills" / "develop" / "references" / "regression-patterns.md",
-        # A report placeholder suggesting an action; it writes nothing.
-        PLUGIN_ROOT / "skills" / "core" / "templates" / "knowledge-transfer-report.md",
+        TEMPLATE: "the canonical statement itself",
+        PLUGIN_ROOT / "skills" / "develop" / "references" / "regression-patterns.md": "describes past defects",
+        PLUGIN_ROOT / "skills" / "core" / "templates" / "knowledge-transfer-report.md": "a report placeholder; writes nothing",
+        PLUGIN_ROOT / "skills" / "lifecycle-audit" / "references" / "child-task-prompt.md": "forbids writing to .living",
+        PLUGIN_ROOT / "skills" / "lifecycle-audit" / "references" / "audit-protocol.md": "a labeled probe in a disposable repo, not a learning",
     }
+    rule = _norm(_canonical_rule())
     paths = [
         p for p in sorted((PLUGIN_ROOT / "skills").rglob("*"))
         if p.suffix in {".md", ".template"} or p.name == "mycelium-post-action.sh"
     ]
-    offenders = []
+    writers, offenders = 0, []
     for path in paths:
-        if path in skip or "/review/" in path.as_posix() or path.name.startswith("test_"):
+        if path in skip:
             continue
         for unit in _instruction_units(path):
-            if _WRITES_LEARNING.search(unit) and "mitigation_type" not in unit \
-                    and "learning-entry.md" not in unit:
-                offenders.append(f"{path.relative_to(PLUGIN_ROOT)}: {' '.join(unit.split())[:90]}")
+            if _WRITES_LEARNING.search(unit):
+                writers += 1
+                if rule not in _norm(unit):
+                    offenders.append(f"{path.relative_to(PLUGIN_ROOT)}: {' '.join(unit.split())[:90]}")
+    assert writers >= 12, writers  # the sweep must keep seeing the known writers
     assert offenders == []

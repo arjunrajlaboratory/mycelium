@@ -43,6 +43,10 @@
        (`$mycelium:harden` ships a test and records `Shipped:`);
     2. otherwise convention — a `.living/conventions.md` entry covers it;
     3. otherwise ambient-awareness.
+  One-line form, quoted verbatim (backticks optional) by every instruction
+  that writes a learning or adds a convention, so no copy can paraphrase it
+  partially:
+  Derive mitigation_type by the rule in skills/core/templates/learning-entry.md: structural if a shipped test, assertion, type constraint, frozenset, or schema validation enforces it; otherwise convention if a .living/conventions.md entry covers it; otherwise ambient-awareness.
 -->
 
 **structural_mitigation_candidate**: [What test or invariant would have caught this? Be specific — name the function, file, or assertion. If the mitigation has actually shipped, set `mitigation_type: structural`. If it is only a candidate, keep type as `ambient-awareness` until the test lands.]

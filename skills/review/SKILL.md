@@ -342,7 +342,7 @@ rather than skipping Step 5.
 Treat a review as a significant action: log a short entry to
 `.living/learnings.md` if the review surfaced a recurring pattern (e.g., "the
 analyze script is using `t-test` on count data — this is the third time this
-pattern has come up, consider a convention"). Otherwise no logging is needed.
+pattern has come up, consider a convention"). Derive `mitigation_type` by the rule in `skills/core/templates/learning-entry.md`: `structural` if a shipped test, assertion, type constraint, frozenset, or schema validation enforces it; otherwise `convention` if a `.living/conventions.md` entry covers it; otherwise `ambient-awareness`. Otherwise no logging is needed.
 
 ## Grill mode protocol
 
