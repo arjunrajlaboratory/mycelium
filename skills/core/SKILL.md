@@ -168,7 +168,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 4. Audit reports are written to `{meta-project}/.living/outputs/knowledge-transfers/YYYY-MM-DD.md`.
 
 **When this runs**:
-- **Automatic**: `mycelium-health.sh` checks `.living/outputs/knowledge-transfers/.last-run` at session start. If >24h old or missing, it emits a directive to dispatch the transfer as a background subagent.
+- **Automatic**: `mycelium-health.sh` checks `.living/outputs/knowledge-transfers/.last-run` at session start. If >24h old, missing, unreadable (line 1 must be a `YYYY-MM-DDTHH:MM:SSZ` UTC stamp), or in the future, it emits a directive to dispatch the transfer as a background subagent.
 - **Manual**: User invokes `/mycelium:transfer` or says "transfer knowledge", "cross-pollinate".
 
 **Lifecycle position**: This phase sits between crystallization (patterns → conventions) and contribution (conventions → network). Crystallize extracts patterns within a project; transfer propagates relevant patterns across projects; contribute shares generalized patterns with the network.
@@ -362,7 +362,7 @@ Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `mycelium-health.sh` | SessionStart | Loads `.mycelium/last-session.md` for session resume (agent + user); warns if `.living/` is missing or incomplete; records session timestamp; triggers weekly knowledge audit if `~/.mycelium/knowledge/.last-audit` is >7 days old |
+| `mycelium-health.sh` | SessionStart | Loads `.mycelium/last-session.md` for session resume (agent + user); warns if `.living/` is missing or incomplete; records session timestamp; triggers the daily knowledge audit if `~/.mycelium/knowledge/.last-audit` is >24h old, unreadable, or in the future (the stamp is the first token of line 1, e.g. `1791826296 daily-audit`) |
 | `mycelium-post-action.sh` | PostToolUse (shell) | Detects code execution and directs the active agent to run the full post-action protocol |
 | `mycelium-stop-check.sh` | Stop | Consolidates data lineage synchronously, checks `.living/` was updated after significant work, and warns if the session summary was not written |
 

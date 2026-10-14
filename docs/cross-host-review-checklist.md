@@ -364,6 +364,9 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] A stale-lock reaper claims and revalidates the observed directory
       generation plus owner before deletion; it cannot remove a replacement
       owner's lock during the mkdir-to-owner publication window.
+- [ ] Staleness guards act only on timestamps actually read; an unreadable or
+      vanished lock mtime never counts as age, and a contender's transient
+      reap claim inside a lock cannot make the owner's release leave it behind.
 - [ ] `.mycelium`, `.living`, marker files, and output parents cannot redirect
       writes outside the project through symlinks.
 - [ ] Machine-local pointer refreshes reject existing links and use atomic
@@ -478,7 +481,7 @@ exercise them.
 | Registry summary contains `|`, or the registry/lineage helper fails | Table cells remain valid; helper failure blocks Stop and preserves retry state without duplicate finalization. |
 | Registry finalization fails, then SessionStart resumes or compacts before Stop retries | The same unfinalized log and session ID remain active; the retry produces one final log and registry row. |
 | A review report contains category headings, `F99`, or tally rows inside a fenced evidence block | Fenced examples are ignored; live finding IDs and tallies still validate exactly. |
-| `learnings.md`, `decisions.md`, `conventions.md`, or a findings topic documents its own heading format inside a ``` or `~~~` fence | INDEX.md, the SessionStart summary, entry IDs, recurrence clusters, recall text, and knowledge-map entries count only the live headings; an entry's text runs past its fenced example. |
+| `learnings.md`, `decisions.md`, `conventions.md`, or a findings topic documents its own heading format inside a ``` or `~~~` fence | INDEX.md, the SessionStart summary, entry IDs, recurrence clusters, recall text, knowledge-map entries, `FINDINGS_REGISTRY.md` rows and fields, and the cross-project findings INDEX (count, strongest status, open questions) reflect only live structure; an entry's text runs past its fenced example; a registry whose only rows were fenced examples is emptied; an unclosed fence in a findings topic is reported with its line. |
 | A required review category has no findings but claims a nonzero tally, or a later appendix has another four-column table | The false zero-category tally is rejected and the appendix table is ignored. |
 | The host has fewer subagent slots than review specialists | Specialists run in waves; capacity errors are retried or completed in-line, and all applicable axes appear exactly once. |
 | Interpreter or script paths concatenate quoted, bare, and escaped shell-word components | Python, R, and Jupyter reminders and lineage use the single decoded argv value. |
@@ -512,6 +515,7 @@ exercise them.
 | A review report is rendered from multiple specialist outputs | Same-root findings are deduplicated, IDs are globally consecutive, per-category/global tallies match the rendered headings, and cross-input schema/feature/label comparability was checked. |
 | An analysis composes existing data paths dynamically from `Path`, dictionaries, or loop variables | Unique filenames reachable from recognized I/O path arguments are recovered conservatively after execution; direction follows the call, while ambiguous or over-bound searches remain unresolved with an explicit warning. |
 | A recent lifecycle lock records an owner PID that has terminated | The next caller claims and revalidates that exact generation before recovering it; a recent ownerless lock is not mistaken for dead-owner proof, and a replacement owner's lock survives competing delayed reapers. |
+| A waiter stats the lock just after the prior owner's `rmdir`, or a delayed reaper's claim sits inside the lock when its owner releases | The missing mtime is not treated as age, so no claim lands in the successor's lock; release waits out any transient claim, leaving no ownerless lock for waiters to time out on and no dropped PostToolUse event. |
 | Jupyter receives `--show-config`, `--show-config-json`, or `--generate-config` before or after an apparent notebook, including after a shell redirection | No execution or lineage is attributed; terminal-looking text inside an ordinary option value, a redirection target, and an actual neighboring Jupyter command remain scoped correctly. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | A Claude or Codex hook config is valid JSON but has malformed event, group, handler, or command types | Initialization and migration reject it before changing guidance, runtime state, hooks, todo files, or the knowledge index. |

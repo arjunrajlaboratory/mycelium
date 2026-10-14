@@ -87,6 +87,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `description:`, `status:`, or `last_updated:` lines overwrite the topic's
   INDEX.md metadata. Frontmatter now opens only on line 1 and only when a
   later `---` closes it, matching the knowledge-map entry parser.
+- **No lost edit events under parallel subagents.** When many edit hooks for
+  one session queued on its lock, a waiter could catch the lock in the gap
+  between one owner leaving and the next arriving, read the missing timestamp
+  as an ancient lock, and leave a reap claim in the new owner's lock. The new
+  owner's release then failed and left an empty lock behind, and every hook
+  still waiting gave up and silently dropped its file from the session's
+  activity list. A missing timestamp no longer counts as age, and release now
+  waits out a transient claim instead of leaving the lock behind.
 - **Fenced example headings are no longer counted as entries.** An entry that
   documents the entry format inside a code fence (```` ```markdown ````
   followed by `### [2026-10-03] Title`) was counted as a real entry. That
@@ -99,6 +107,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headings inside fences are ignored too. Existing projects need no
   migration; the next index refresh corrects the counts. An entry ID can
   shift down where a fenced example used to sit before it.
+- **Findings crystallization ignores fenced example findings.** A topic file
+  that showed the finding format in a code fence (`## F-999 Example` with
+  `**Status:** robust`) produced a fake row in `FINDINGS_REGISTRY.md`, raised
+  the topic's strongest status in the cross-project `INDEX.md`, and cut the
+  real finding's section short at the example. `crystallize_findings.py` now
+  reads finding headings, `**Claim:**`/`**Status:**`/`**Implications:**`/
+  `**Tags:**` fields, Evidence Ledger rows, and Open Questions only outside
+  fences. Fenced lines still count as part of the finding's body. A registry
+  whose only rows came from fenced examples is rewritten with an empty table
+  rather than left stale, and a fence that never closes is reported on stderr
+  with its file and line, because every finding after it is skipped. The next
+  crystallization run corrects existing indexes, and no migration is needed.
+- **No phantom "KNOWLEDGE AUDIT DUE (497753h since last)".** SessionStart
+  read every line of `~/.mycelium/knowledge/.last-audit`, so a stamp an agent
+  wrote as two lines (timestamp, then `daily-audit`) failed validation, fell
+  back to epoch 0, and requested a global audit in every session. The hook now
+  reads only the first token of line 1. A stamp that is not an integer, or is
+  more than five minutes in the future, makes the audit due with the reason
+  stated (`timestamp unreadable` / `timestamp is in the future`) instead of a
+  computed epoch-0 age; previously a future stamp suppressed audits
+  indefinitely. The audit directive now gives a one-line `printf` command for
+  rewriting the stamp, and names the knowledge directory the hook actually
+  reads (honoring `MYCELIUM_KNOWLEDGE_DIR`) instead of `~/.mycelium/knowledge`.
+  An unreadable stamp file is reported as due rather than aborting
+  SessionStart. The knowledge-transfer `.last-run` check gets the same
+  treatment and now parses its `...Z` stamp as UTC, where it was read as local
+  time (a 26h-old run read as 18h on US Pacific time), and rejects impossible
+  dates such as `2026-02-31` on macOS as it already did on Linux.
 
 ## [0.8.2] - 2026-10-11
 
