@@ -114,6 +114,7 @@ def test_all_skills_have_codex_metadata():
         "codex-review",
         "core",
         "develop",
+        "harden",
         "ideas",
         "ingest",
         "lifecycle-audit",

@@ -154,3 +154,37 @@ def unclosed_fence_line(lines: Iterable[str]) -> int | None:
         if opened is not None:
             fence, opened_at = opened, lineno
     return opened_at
+
+
+def visible_lines(lines: Iterable[str]) -> Iterator[tuple[int, str, int]]:
+    """Yield (line number, text, indent column) for lines a reader sees.
+
+    Lines inside fenced code blocks (and the fence delimiters) and inside HTML
+    comments are skipped; inline comments are removed from the text. The
+    indent column is the visual column of the leading whitespace: four or
+    more marks an indented code block, which callers that look for fields
+    should skip. One shared reader keeps every consumer of a field choosing
+    the same line.
+    """
+    fence: Fence | None = None
+    in_comment = False
+    for lineno, raw in enumerate(lines, start=1):
+        line = raw.rstrip("\r\n")
+        if fence is not None:
+            if closes(line, fence):
+                fence = None
+            continue
+        if in_comment:
+            if "-->" in line:
+                in_comment = False
+            continue
+        opened = opening_fence(line)
+        if opened is not None:
+            fence = opened
+            continue
+        text = re.sub(r"<!--.*?-->", "", line)
+        if "<!--" in text:
+            in_comment = True
+            text = text[: text.index("<!--")]
+        indent = text[: len(text) - len(text.lstrip(" \t"))]
+        yield lineno, text, visual_column(indent)

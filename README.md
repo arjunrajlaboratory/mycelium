@@ -115,6 +115,7 @@ under the plugin name:
 - `/mycelium:ideas` or `$mycelium:ideas` — brainstorm with disciplinary personas
 - `/mycelium:ingest` or `$mycelium:ingest` — import new data with metadata and provenance
 - `/mycelium:review` or `$mycelium:review` — analysis-aware code review for PRs, commits, or working-tree changes
+- `/mycelium:harden` or `$mycelium:harden` — turn a learning's mitigation candidate into a test that proves it guards something, then mark the learning structural
 - `/mycelium:codex-review` or `$mycelium:codex-review` — address Codex review comments and audit the whole branch for the same error pattern in one pass
 - `/mycelium:transfer` or `$mycelium:transfer` — cross-pollinate learnings across sibling projects
 - `/mycelium:develop` or `$mycelium:develop` — change the Mycelium plugin itself with cross-host TDD, pattern sweeps, and the release checklist

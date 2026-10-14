@@ -31,7 +31,7 @@ This command is a thin router. The substantive workflow — the planning brief, 
 
 ## Post-action
 
-After the chosen convention pack's flow completes (or after a fallback draft is finalized), update the analysis manifest entry with the report status and the path to the PDF or HTML file. Log any decisions or learnings from the writing process to `.living/decisions.md` and `.living/learnings.md` per the core post-action protocol — particularly any new failure modes the sub-agent reviewers surfaced, so the next report can probe for them upfront.
+After the chosen convention pack's flow completes (or after a fallback draft is finalized), update the analysis manifest entry with the report status and the path to the PDF or HTML file. Log any decisions or learnings from the writing process to `.living/decisions.md` and `.living/learnings.md` per the core post-action protocol — particularly any new failure modes the sub-agent reviewers surfaced, so the next report can probe for them upfront. For each learning: Derive `mitigation_type` by the rule in `skills/core/templates/learning-entry.md`: `structural` if a shipped test, assertion, type constraint, frozenset, or schema validation enforces it; otherwise `convention` if a `.living/conventions.md` entry covers it; otherwise `ambient-awareness`.
 
 ## What this skill is NOT for
 

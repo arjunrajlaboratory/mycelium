@@ -61,7 +61,7 @@ For every step in a workflow:
 3. **Execute**: Write code following the skill's patterns, applying robust-analysis strict execution rules
 4. **Validate**: Check outputs against expected schema (row counts, types, distributions)
 5. **Persona check** (if assigned): Apply persona's anti-patterns as constraints
-6. **Record**: Log skill used, parameters, and any surprises to `.living/decisions.md` and `.living/learnings.md`
+6. **Record**: Log skill used, parameters, and any surprises to `.living/decisions.md` and `.living/learnings.md`. For each learning: Derive `mitigation_type` by the rule in `skills/core/templates/learning-entry.md`: `structural` if a shipped test, assertion, type constraint, frozenset, or schema validation enforces it; otherwise `convention` if a `.living/conventions.md` entry covers it; otherwise `ambient-awareness`.
 
 ## Source Verification
 

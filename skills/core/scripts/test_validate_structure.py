@@ -584,3 +584,158 @@ def test_other_living_files_are_not_subject_to_the_check(tmp_path: Path) -> None
         conventions_md="# Conventions\n\n## [2026-08-25] A convention\n\nbody\n",
     )
     assert _errors(target) == []
+
+
+# ---------------------------------------------------------------------------
+# Learnings without a valid mitigation_type
+# ---------------------------------------------------------------------------
+#
+# Whatever instruction led to a learning (the post-action directive, a
+# convention pack's checklist, a hand-written note), an entry with no valid
+# mitigation_type is skipped by harden and miscounted by detect_recurrence.
+# Validation checks the output, so no wording of an instruction can bypass it.
+
+
+def _mitigation_warnings(target_dir: Path) -> list[str]:
+    from validate_structure import check_learning_mitigation_types
+
+    result = ValidationResult()
+    check_learning_mitigation_types(target_dir, result)
+    assert result.errors == [], result.errors  # legacy repos must not fail
+    return result.warnings
+
+
+def test_untyped_and_invalid_learnings_are_reported(tmp_path: Path) -> None:
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] Typed\n\n**mitigation_type**: convention\n\n"
+            "### [2026-10-02] Untyped\n\n**Category**: gotcha\n\n"
+            "### [2026-10-03] Invalid\n\n**mitigation_type**: maybe-later\n\n"
+            "## [2025-01-01] Legacy untyped\n\n**Category**: tip\n"
+        ),
+    )
+    warnings = _mitigation_warnings(target)
+    assert len(warnings) == 1
+    assert "3 learnings" in warnings[0]
+    assert "Untyped" in warnings[0] and "Invalid" in warnings[0] and "Legacy untyped" in warnings[0]
+    assert "Typed" not in warnings[0].replace("Untyped", "")
+    # The warning carries the template's rule, so the fix needs no lookup.
+    assert "otherwise convention if a .living/conventions.md entry covers it" in warnings[0]
+
+
+def test_fully_typed_learnings_pass_quietly(tmp_path: Path) -> None:
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] A\n\n**mitigation_type**: structural\n\n"
+            "### [2026-10-02] B\n\n**mitigation_type**: ambient-awareness\n"
+            "\n```markdown\n### [2026-10-03] Example inside a fence\n```\n"
+        ),
+    )
+    assert _mitigation_warnings(target) == []
+
+
+def test_aliases_the_recurrence_parser_tolerates_are_not_valid(tmp_path: Path) -> None:
+    # detect_recurrence normalizes typos on purpose; validation must not, since
+    # harden filters on the literal value (Codex on #96).
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] Typo\n\n**mitigation_type**: structual\n\n"
+            "### [2026-10-02] Prefix\n\n**mitigation_type**: ambient-garbage\n\n"
+            "### [2026-10-03] Checklist\n\n**mitigation_type**: checklist\n"
+        ),
+    )
+    warnings = _mitigation_warnings(target)
+    assert len(warnings) == 1 and "3 learnings" in warnings[0]
+
+
+def test_fenced_example_inside_an_entry_does_not_hide_its_field(tmp_path: Path) -> None:
+    # A real entry whose body shows an example heading before its own field.
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] Headings in fences\n\n"
+            "**What happened**: an example like this broke parsing:\n\n"
+            "```markdown\n### [2026-01-01] Example\n```\n\n"
+            "**mitigation_type**: structural\n"
+        ),
+    )
+    assert _mitigation_warnings(target) == []
+
+
+def test_fenced_or_commented_field_does_not_count(tmp_path: Path) -> None:
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] Fenced field\n\n"
+            "```\n**mitigation_type**: structural\n```\n\n"
+            "### [2026-10-02] Commented field\n\n"
+            "<!--\n**mitigation_type**: convention\n-->\n"
+        ),
+    )
+    warnings = _mitigation_warnings(target)
+    assert len(warnings) == 1 and "2 learnings" in warnings[0]
+
+
+def test_field_spellings_match_the_recurrence_reader(tmp_path: Path) -> None:
+    # Validation and detect_recurrence must agree on what a field line is
+    # (one shared matcher); only the value check is stricter here.
+    import detect_recurrence
+
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] Plain\n\nmitigation_type: convention\n\n"
+            "### [2026-10-02] Bold colon inside\n\n**mitigation_type:** structural\n\n"
+            "### [2026-10-03] Quoted\n\n> **mitigation_type**: `ambient-awareness`\n"
+        ),
+    )
+    assert _mitigation_warnings(target) == []
+    for line in ("mitigation_type: convention", "**mitigation_type:** structural"):
+        assert detect_recurrence._MITIGATION_LINE_RE.match(line)
+
+
+def test_indented_code_field_does_not_count(tmp_path: Path) -> None:
+    # Four spaces or a tab make an indented code block in Markdown; an example
+    # field there is not the entry's type (Codex on #96). Fail toward a warning.
+    target = _living(
+        tmp_path,
+        learnings_md=(
+            "# Learnings\n\n"
+            "### [2026-10-01] Spaces\n\nExample:\n\n    **mitigation_type**: structural\n\n"
+            "### [2026-10-02] Tab\n\nExample:\n\n\t**mitigation_type**: structural\n\n"
+            "### [2026-10-03] Slightly indented\n\n  **mitigation_type**: convention\n"
+        ),
+    )
+    warnings = _mitigation_warnings(target)
+    assert len(warnings) == 1 and "2 learnings" in warnings[0]
+    assert "Slightly indented" not in warnings[0]
+
+
+_TRICKY_BODIES = {
+    "fenced example first": "```\nmitigation_type: structural\n```\n\n**mitigation_type**: ambient-awareness\n",
+    "indented example first": "Example:\n\n    mitigation_type: structural\n\n**mitigation_type**: ambient-awareness\n",
+    "commented example first": "<!-- mitigation_type: structural -->\n**mitigation_type**: ambient-awareness\n",
+    "multi-line comment first": "<!--\nmitigation_type: convention\n-->\n**mitigation_type**: ambient-awareness\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(_TRICKY_BODIES))
+def test_validator_and_recurrence_select_the_same_field(name: str) -> None:
+    # Two readers of one field must agree on which line is the field (Codex on
+    # #96); they may differ only in how strictly they judge its value.
+    import detect_recurrence
+    from validate_structure import learning_mitigation_types
+
+    body = _TRICKY_BODIES[name]
+    [(_, _, validated)] = learning_mitigation_types("### [2026-10-01] Entry\n\n" + body)
+    assert validated == "ambient-awareness"
+    assert detect_recurrence._extract_mitigation_type(body) == "ambient-awareness"
