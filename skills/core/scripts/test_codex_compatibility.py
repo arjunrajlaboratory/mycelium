@@ -3637,6 +3637,70 @@ def test_stop_lock_does_not_steal_recent_ownerless_publication(tmp_path):
     assert not (lock / "owner").exists()
 
 
+def test_lock_age_guard_treats_unreadable_mtime_as_recent(tmp_path):
+    # A contender that stats the lock path just after one owner's rmdir sees no
+    # mtime. That is a publication window for the next owner, not proof of age.
+    # Replay it: the lock vanishes before the real mtime helper runs, and the
+    # successor's ownerless lock appears right after.
+    state = tmp_path / ".mycelium"
+    lock = state / "mycelium-session.lock"
+    lock.mkdir(parents=True)
+    hook_lib = HOOKS_DIR / "mycelium-hook-lib.sh"
+    command = (
+        f'source "{hook_lib}"\n'
+        'eval "$(declare -f mycelium_file_mtime | sed \'1s/mycelium_file_mtime/real_mtime/\')"\n'
+        'mycelium_file_mtime() { rmdir "$1"; real_mtime "$1"; mkdir "$1"; }\n'
+        f'if mycelium_acquire_session_lock "{state}"; then\n'
+        '  printf "acquired\\n"\n'
+        "fi\n"
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        env={**os.environ, "MYCELIUM_SESSION_LOCK_MAX_ATTEMPTS": "3"},
+    )
+
+    assert result.stdout == ""
+    assert lock.is_dir()
+    assert not (lock / ".mycelium-reap.claim").exists()
+
+
+def test_lock_release_outlasts_a_transient_reaper_claim(tmp_path):
+    # A delayed reaper may briefly hold its claim inside the successor's lock.
+    # Releasing then must not leave an ownerless lock every waiter times out on.
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    lock = state / "mycelium-session.lock"
+    claim = lock / ".mycelium-reap.claim"
+    hook_lib = HOOKS_DIR / "mycelium-hook-lib.sh"
+    command = (
+        f'source "{hook_lib}"\n'
+        f'mycelium_acquire_session_lock "{state}" || exit 1\n'
+        f'mkdir "{claim}"\n'
+        f'( sleep 0.3; [[ -f "{lock}/owner" ]] && echo owner-kept; rmdir "{claim}" ) &\n'
+        "mycelium_release_session_lock\n"
+        "wait\n"
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    # The claimant must see a record other than the one it observed, so it
+    # withdraws instead of recovering the lock mid-release.
+    assert result.stdout == "owner-kept\n"
+    assert not lock.exists()
+
+
 def test_stop_fails_closed_when_live_lock_outlasts_retry_budget(tmp_path):
     repo = _repo(tmp_path)
     state = repo / ".mycelium"
