@@ -221,8 +221,15 @@ def test_reference_has_no_heading_only_discovery() -> None:
     assert "grep -n '^### .*" not in _text(REFERENCE)
 
 
-def test_reference_recall_commands_parse(tmp_path: Path) -> None:
-    """The documented flags are ones recall_lessons.py actually accepts."""
+def test_reference_recall_commands_run_with_multiword_values(tmp_path: Path) -> None:
+    """Each documented command, filled in as an agent would, runs and finds its entry.
+
+    Placeholders are replaced in the command *text*, then the line is split the
+    way a shell splits it, so a multiword value in an unquoted placeholder
+    becomes two words and fails exactly as it would for the agent. The log
+    holds an undated successor that links only positionally, which a date
+    cutoff would drop.
+    """
     import shlex
     import subprocess
     import sys
@@ -231,37 +238,49 @@ def test_reference_recall_commands_parse(tmp_path: Path) -> None:
     living.mkdir()
     (living / "decisions.md").write_text(
         "# Decision Log\n\n### [2026-05-01] Model choice\n\n"
-        "**Decision**: Use limma-voom.\n\n"
-        "### [2026-06-01] Back to plain counts\n\n"
+        "**Decision**: Use limma-voom after batch correction.\n\n"
+        "**Tags**: de model\n\n"
+        "### Back to plain counts\n\n"
         "**Decision**: This overturns the entry above.\n",
         encoding="utf-8",
     )
+    values = {
+        "<tag>": "de model",
+        "<term>": "batch correction",
+        "<synonym>": "limma voom",
+    }
     script = CORE / "scripts" / "recall_lessons.py"
     for command in _recall_commands():
-        placeholders = {
-            "<tag>": "none",
-            "<term>": "LIMMA",
-            "<synonym>": "voom",
-            "<oldest-date>": "2026-01-01",
-        }
-        args = [placeholders.get(a, a) for a in shlex.split(command[len(RECALL_ACCESSOR) :])]
+        text = command[len(RECALL_ACCESSOR) :]
+        for placeholder, value in values.items():
+            text = text.replace(placeholder, value)
+        args = shlex.split(text)
         assert not [a for a in args if a.startswith("<")], args
         args[args.index("--living-dir") + 1] = str(living)
         result = subprocess.run(
             [sys.executable, str(script), *args], capture_output=True, text=True
         )
-        assert result.returncode in (0, 1), (command, result.stderr)
-        if "LIMMA" in args:
-            assert "Model choice" in result.stdout
+        assert result.returncode == 0, (command, result.stderr)
+        if "--tag" in args or "batch correction" in args:
+            assert "Model choice" in result.stdout, command
         if "overturn" in args:
-            assert "Back to plain counts" in result.stdout
+            assert "Back to plain counts" in result.stdout, command
 
 
 def test_reference_follows_successors_and_relationship_wording() -> None:
     """A successor that never names the searched method is still fetched."""
     commands = _recall_commands()
     assert commands and all("--follow" in c for c in commands), commands
+    # A date cutoff drops undated entries, and a positional link
+    # ("the entry above") is often undated.
+    assert not [c for c in commands if "--since" in c], commands
     flat = _flat(REFERENCE)
-    assert "--since" in flat
     for word in ("supersede", "replace", "overturn", "revers", "entry above"):
         assert f"--term {word}" in flat or f"--term '{word}'" in flat, word
+
+
+def test_reference_orders_threads_by_file_position() -> None:
+    """recall sorts by date with undated entries last; D-N is append order."""
+    flat = _flat(REFERENCE)
+    assert "Work through each thread oldest first" not in flat
+    assert "file order" in flat and "`D-N`" in flat

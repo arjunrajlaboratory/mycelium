@@ -62,26 +62,28 @@ fields. Older entries predate them; read those by their text.
   - **By tag.** Find candidate tags in `.living/INDEX.md` (**By tag**), then:
 
     ```bash
-    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --follow --tag <tag>
+    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --follow --tag '<tag>'
     ```
 
   - **By text.** Many entries carry no tags, and a method may be named only in
     an entry's body. Search the full entry text for the method names and
     synonyms. Each `--term` is a case-insensitive literal, and repeated terms
-    match any of them:
+    match any of them. Keep each value in its quotes, so a multiword value
+    such as `batch correction` stays one argument:
 
     ```bash
-    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --follow --term <term> --term <synonym>
+    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --follow --term '<term>' --term '<synonym>'
     ```
 
   - **By relationship wording.** Some entries link to an earlier one without
     naming it ("supersedes the entry above", "reverses the earlier call").
     `--follow` cannot see those links. Fetch every entry that uses such
-    wording, from `<oldest-date>` (the date of the oldest thread entry found
-    so far) onward, and keep only those that refer to a thread entry:
+    wording, and keep only those that refer to a thread entry. Do not add a
+    `--since` cutoff: it drops undated entries, and a positional link is
+    often undated.
 
     ```bash
-    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --follow --since <oldest-date> --term supersede --term replace --term overturn --term revers --term amend --term addendum --term 'entry above'
+    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --follow --term supersede --term replace --term overturn --term revers --term amend --term addendum --term 'entry above'
     ```
 
   Every lookup prints whole entries. Use `--count-only` first if a thread
@@ -89,8 +91,11 @@ fields. Older entries predate them; read those by their text.
   `grep -n '^### ' .living/decisions.md`.
 - Read the body of every entry that could bind the task before resolving
   anything. A heading word such as "held" may be qualified in the body.
-- Work through each thread oldest first. `recall_lessons.py` prints newest
-  first.
+- Work through each thread in file order, which is the order entries were
+  appended. Use the `D-N` number in each result's `[decisions] D-N` line: it
+  counts entries from the top of the file. Do not order by the printed date.
+  `recall_lessons.py` sorts by date and puts undated entries last, so an
+  undated successor would look like the oldest entry.
 
 ## 2. Resolve by rule
 

@@ -241,7 +241,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 **Steps**:
 1. Identify the filter the user wants:
    - **Tag-based**: `--tag <tag>` (repeatable for ANY-match)
-   - **Text-based**: `--term <text>` (case-insensitive literal match on the entry's heading and body; repeatable for ANY-match). Reaches untagged entries.
+   - **Text-based**: `--term '<text>'` (case-insensitive literal match on the entry's heading and body; repeatable for ANY-match; keep the quotes so a multiword value stays one argument). Reaches untagged entries.
    - **Follow citations**: `--follow` also returns every later entry that cites a returned entry by heading title (such as a `**Supersedes**:` line), repeatedly, so a supersession chain comes back whole.
    - **ID-based**: `--id L-42` or `--id D-7` (repeatable)
    - **Date-based**: `--since YYYY-MM-DD`
