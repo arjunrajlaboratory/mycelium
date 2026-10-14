@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Decision supersession fields.** The decision template
+  (`skills/core/templates/decision-log-entry.md`) adds `Status` (`active`,
+  `provisional`, `held`, `shelved`, `rejected`), `Supersedes`, `Scope`,
+  `Revisit when`, and `Resolved-by`. `Supersedes` cites earlier entries by date
+  and exact heading title, never by a positional `D-N` ID, and older entries are
+  never edited to mark them replaced. A new `decision-status` mode in core,
+  with its rules in `skills/core/references/decision-status.md`, settles which
+  of several entries on one choice binds a task. Explicit supersession wins,
+  then a matching scope; anything else is contested and goes to the user, at
+  most three questions per session. The newest entry never wins by recency
+  alone. A confirmed answer is appended as a `Resolution:` entry. Core's
+  post-action step, the post-action directive, and the `decisions.md` header
+  written by `init` now point at the fields. Existing logs need no migration:
+  an entry without `Status` reads as `unknown`. Adapted from
+  [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
+  Manurung (MIT, issue #91).
+
+- **`recall_lessons.py --term`, and no silent cap.** `--term <text>`
+  (repeatable) matches a case-insensitive literal in an entry's heading or
+  body, so untagged entries can be found. `--max 0` returns every match. When
+  the default cap of 20 cuts a result, a note on stderr says how many matches
+  were shown. `--count-only` now reports the uncapped total; it used to count
+  after the cap and so never reported more than 20. `--follow` also returns
+  every later entry that cites a returned entry by heading title (as a
+  `**Supersedes**:` line does), repeatedly. A successor that names only the
+  new method still comes back with the old one.
+  - The decision-status guide fetches a thread with `--max 0 --follow`, by tag
+    and by `--term`.
+  - It also runs a third lookup for relationship wording ("supersedes the
+    entry above") that names no title.
+  - Together these mean rules 1–3 see the whole thread.
+
+## [0.9.0] - 2026-10-14
+
+### Added
+
 - **`harden` skill.** `/mycelium:harden` (`$mycelium:harden` on Codex) takes
   one learning that is still `ambient-awareness` but names a concrete
   `structural_mitigation_candidate`, writes that check as a test in the
@@ -69,37 +105,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Contrast levels that split into groups sharing no batch now block, not
     only single isolated levels.
 
-- **Decision supersession fields.** The decision template
-  (`skills/core/templates/decision-log-entry.md`) adds `Status` (`active`,
-  `provisional`, `held`, `shelved`, `rejected`), `Supersedes`, `Scope`,
-  `Revisit when`, and `Resolved-by`. `Supersedes` cites earlier entries by date
-  and exact heading title, never by a positional `D-N` ID, and older entries are
-  never edited to mark them replaced. A new `decision-status` mode in core,
-  with its rules in `skills/core/references/decision-status.md`, settles which
-  of several entries on one choice binds a task. Explicit supersession wins,
-  then a matching scope; anything else is contested and goes to the user, at
-  most three questions per session. The newest entry never wins by recency
-  alone. A confirmed answer is appended as a `Resolution:` entry. Core's
-  post-action step, the post-action directive, and the `decisions.md` header
-  written by `init` now point at the fields. Existing logs need no migration:
-  an entry without `Status` reads as `unknown`. Adapted from
-  [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
-  Manurung (MIT, issue #91).
-
-- **`recall_lessons.py --term`, and no silent cap.** `--term <text>`
-  (repeatable) matches a case-insensitive literal in an entry's heading or
-  body, so untagged entries can be found. `--max 0` returns every match. When
-  the default cap of 20 cuts a result, a note on stderr says how many matches
-  were shown. `--count-only` now reports the uncapped total; it used to count
-  after the cap and so never reported more than 20. `--follow` also returns
-  every later entry that cites a returned entry by heading title (as a
-  `**Supersedes**:` line does), repeatedly. A successor that names only the
-  new method still comes back with the old one.
-  - The decision-status guide fetches a thread with `--max 0 --follow`, by tag
-    and by `--term`.
-  - It also runs a third lookup for relationship wording ("supersedes the
-    entry above") that names no title.
-  - Together these mean rules 1–3 see the whole thread.
+- **Locked decisions and dead ends in the session handoff.** The handoff
+  template now ends "Key decisions made" with a `### Locked decisions`
+  subsection (choices the next session must not reopen without new evidence
+  or the user's agreement, cited by `.living/decisions.md` date and exact
+  heading) and "Blockers & surprises" with a `### Dead ends — do not redo`
+  subsection (approaches tried and abandoned, with the reason). The five
+  required `##` headings are unchanged, so existing handoffs and projects keep
+  working with no migration. Stop's completeness check no longer counts a
+  subheading as section content: a section that holds only subheadings is
+  treated as empty and gets the complete fallback. Adapted from the `handoff`
+  skill in [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by
+  Mikhael Manurung (MIT, issue #91).
 
 ### Fixed
 
@@ -167,6 +184,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   treatment and now parses its `...Z` stamp as UTC, where it was read as local
   time (a 26h-old run read as 18h on US Pacific time), and rejects impossible
   dates such as `2026-02-31` on macOS as it already did on Linux.
+- **Python 3.10 works again.** `init_repo.py` failed at import, and the
+  data-lineage Stop hook's status write raised `AttributeError`, because both
+  used `datetime.UTC`, which exists only from Python 3.11. Both now use
+  `datetime.timezone.utc`, matching the 3.10 floor in `CONTRIBUTING.md`, and
+  a sweep test keeps shipped code off the 3.11-only alias.
 
 ## [0.8.2] - 2026-10-11
 

@@ -39,6 +39,9 @@ _STALE_STOP_LINE = re.compile(
     r").*$",
     re.IGNORECASE,
 )
+# A subheading is structure, not content: a section holding only subheadings is
+# as empty as a section with no body at all.
+_MARKDOWN_HEADING = re.compile(r"^ {0,3}#{1,6}(?:\s|$)")
 
 
 def clean_handoff_body(content: str) -> str:
@@ -61,7 +64,10 @@ def handoff_has_complete_sections(content: str) -> bool:
                 continue
             for index, start in enumerate(positions):
                 end = positions[index + 1] if index + 1 < len(positions) else len(lines)
-                if not any(line.strip() for line in lines[start + 1 : end]):
+                if not any(
+                    line.strip() and not _MARKDOWN_HEADING.match(line)
+                    for line in lines[start + 1 : end]
+                ):
                     break
             else:
                 return True

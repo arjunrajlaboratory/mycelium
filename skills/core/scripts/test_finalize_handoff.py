@@ -6,6 +6,7 @@ import os
 import stat
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 from finalize_handoff import STATUS_BEGIN, finalize
@@ -216,3 +217,53 @@ def test_cli_rejects_post_cleanup_incomplete_handoff_without_writes(
     assert stat.S_IMODE(destination.stat().st_mode) == destination_mode
     assert {path.name for path in private.iterdir()} == private_entries
     assert {path.name for path in shared.iterdir()} == shared_entries
+
+
+def _documented_handoff_template() -> str:
+    skill = (Path(__file__).parents[1] / "SKILL.md").read_text()
+    start = skill.rindex("\n", 0, skill.index("SESSION RESUME — Last session")) + 1
+    end = skill.rindex("\n", 0, skill.index("```", start)) + 1
+    return textwrap.dedent(skill[start:end])
+
+
+def test_documented_template_is_complete_and_nests_continuity_subsections() -> None:
+    from finalize_handoff import handoff_is_complete_after_cleanup
+
+    template = _documented_handoff_template()
+    lines = template.splitlines()
+
+    assert handoff_is_complete_after_cleanup(template)
+    assert lines.index("## Key decisions made") < lines.index("### Locked decisions")
+    assert lines.index("### Locked decisions") < lines.index("## Blockers & surprises")
+    assert lines.index("## Blockers & surprises") < lines.index(
+        "### Dead ends — do not redo"
+    )
+    assert lines.index("### Dead ends — do not redo") < lines.index("## Current state")
+
+
+def test_handoff_with_continuity_subsections_is_preserved() -> None:
+    handoff = _complete_handoff().replace(
+        "## Key decisions made\n- Preserve complete authored handoffs.\n",
+        "## Key decisions made\n- Preserve complete authored handoffs.\n\n"
+        "### Locked decisions\n- Use DESeq2 (2026-10-14, Pick the DE method).\n",
+    ).replace(
+        "## Blockers & surprises\n- None.\n",
+        "## Blockers & surprises\n- None.\n\n"
+        "### Dead ends — do not redo\n- ComBat on counts: removed the effect.\n",
+    )
+
+    finalized = finalize(handoff, "2026-10-14T12:00:00-0400")
+
+    assert "### Locked decisions\n- Use DESeq2" in finalized
+    assert "### Dead ends — do not redo\n- ComBat on counts" in finalized
+
+
+def test_section_holding_only_subheadings_is_incomplete() -> None:
+    from finalize_handoff import handoff_is_complete_after_cleanup
+
+    handoff = _complete_handoff().replace(
+        "## Key decisions made\n- Preserve complete authored handoffs.\n",
+        "## Key decisions made\n\n### Locked decisions\n",
+    )
+
+    assert not handoff_is_complete_after_cleanup(handoff)
