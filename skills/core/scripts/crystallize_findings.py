@@ -73,7 +73,7 @@ def find_repo_root(start: Path) -> Path | None:
 def parse_topic_file(path: Path) -> dict:
     """Parse a topic file and extract metadata."""
     _require_regular_file(path)
-    content = path.read_text(encoding="utf-8", errors="replace")
+    content = path.read_text(encoding="utf-8-sig", errors="replace")
     lines = content.splitlines()
 
     # Parse frontmatter
@@ -82,23 +82,23 @@ def parse_topic_file(path: Path) -> dict:
     last_updated = ""
     status = "active"
 
-    in_frontmatter = False
-    for line in lines:
-        if line.strip() == "---":
-            if not in_frontmatter:
-                in_frontmatter = True
-                continue
-            else:
+    # Frontmatter exists only when line 1 is "---" and a later "---" closes
+    # it; a horizontal rule or fenced example elsewhere is body text.
+    frontmatter: list[str] = []
+    if lines and lines[0].strip() == "---":
+        for i, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                frontmatter = lines[1:i]
                 break
-        if in_frontmatter:
-            if line.startswith("topic:"):
-                topic = line.split(":", 1)[1].strip()
-            elif line.startswith("description:"):
-                description = line.split(":", 1)[1].strip()
-            elif line.startswith("last_updated:"):
-                last_updated = line.split(":", 1)[1].strip()
-            elif line.startswith("status:"):
-                status = line.split(":", 1)[1].strip()
+    for line in frontmatter:
+        if line.startswith("topic:"):
+            topic = line.split(":", 1)[1].strip()
+        elif line.startswith("description:"):
+            description = line.split(":", 1)[1].strip()
+        elif line.startswith("last_updated:"):
+            last_updated = line.split(":", 1)[1].strip()
+        elif line.startswith("status:"):
+            status = line.split(":", 1)[1].strip()
 
     # Count findings by ## F- headers
     finding_count = len([l for l in lines if l.startswith("## F-")])

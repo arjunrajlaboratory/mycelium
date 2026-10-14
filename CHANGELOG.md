@@ -80,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any row that links this session's log under another ID into the canonical
   row, keeping its authored Summary, Key Outputs, and Tags
   (`upsert_registry_row.py --log-link`).
+- **Findings topic metadata comes only from leading frontmatter.**
+  `crystallize_findings.py` treated the first `---` line anywhere in a topic
+  file as the start of frontmatter, so in a file without frontmatter a
+  horizontal rule or a fenced `---` example let later `topic:`,
+  `description:`, `status:`, or `last_updated:` lines overwrite the topic's
+  INDEX.md metadata. Frontmatter now opens only on line 1 and only when a
+  later `---` closes it, matching the knowledge-map entry parser.
 
 ## [0.8.2] - 2026-10-11
 
