@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-10-14
 
 ### Added
 
@@ -135,6 +135,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   treatment and now parses its `...Z` stamp as UTC, where it was read as local
   time (a 26h-old run read as 18h on US Pacific time), and rejects impossible
   dates such as `2026-02-31` on macOS as it already did on Linux.
+- **Python 3.10 works again.** `init_repo.py` failed at import, and the
+  data-lineage Stop hook's status write raised `AttributeError`, because both
+  used `datetime.UTC`, which exists only from Python 3.11. Both now use
+  `datetime.timezone.utc`, matching the 3.10 floor in `CONTRIBUTING.md`, and
+  a sweep test keeps shipped code off the 3.11-only alias.
 
 ## [0.8.2] - 2026-10-11
 
