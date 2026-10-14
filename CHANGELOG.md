@@ -91,9 +91,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   body, so untagged entries can be found. `--max 0` returns every match. When
   the default cap of 20 cuts a result, a note on stderr says how many matches
   were shown. `--count-only` now reports the uncapped total; it used to count
-  after the cap and so never reported more than 20. The decision-status
-  guide fetches a thread with `--max 0` by tag and by `--term`, so rules 1–3
-  see the whole thread.
+  after the cap and so never reported more than 20. `--follow` also returns
+  every later entry that cites a returned entry by heading title (as a
+  `**Supersedes**:` line does), repeatedly. A successor that names only the
+  new method still comes back with the old one.
+  - The decision-status guide fetches a thread with `--max 0 --follow`, by tag
+    and by `--term`.
+  - It also runs a third lookup for relationship wording ("supersedes the
+    entry above") that names no title.
+  - Together these mean rules 1–3 see the whole thread.
 
 ### Fixed
 

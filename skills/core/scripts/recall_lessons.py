@@ -6,13 +6,14 @@ context, fetch only the entries matching tag(s), text term(s), ID(s), or a
 date cutoff.
 
 Usage:
-    recall_lessons.py --living-dir <path> [--tag X]... [--term X]... [--id L-42]... [--since YYYY-MM-DD] [--file learnings|decisions|all] [--max N]
+    recall_lessons.py --living-dir <path> [--tag X]... [--term X]... [--id L-42]... [--since YYYY-MM-DD] [--follow] [--file learnings|decisions|all] [--max N]
 
 ANY-match semantics: if --tag is given multiple times, an entry matches
 if it carries ANY of the requested tags; likewise for --term, which matches
 a case-insensitive literal substring of the entry's full text (heading and
 body), so untagged entries are reachable. --id and --since further filter
-the result set.
+the result set. --follow then adds every later entry that cites a returned
+entry by heading title, repeatedly, so a supersession chain comes back whole.
 
 Results are newest first and capped at --max (default 20). A cut result says so
 on stderr; --max 0 returns every match, and --count-only always reports the
@@ -63,11 +64,17 @@ def recall(
     since: str | None = None,
     file_filter: str = "all",
     max_results: int = 20,
+    follow: bool = False,
 ) -> list[dict]:
     """Return matching entry records (with `text` field) per filter combination.
 
     Filters compose AND-style across types but ANY-match within
     `tags`/`ids`/`terms`. ``max_results`` of 0 returns every match.
+
+    ``follow`` then adds, until nothing new appears, every later entry in the
+    same file whose text cites a returned entry by its heading title (as a
+    ``**Supersedes**:`` line does), whatever its tags, terms, or date. A
+    successor that never names the searched method is still returned.
     """
     tags = tags or []
     ids = ids or []
@@ -89,6 +96,14 @@ def recall(
     for path, file_type, prefix in sources:
         header_prefix = "### " if file_type in ("learnings", "decisions") else "## "
         entries = gi.collect_entries(path, file_type, prefix)
+        texts: dict[str, str] = {}
+
+        def text_of(e: dict) -> str:
+            if e["id"] not in texts:
+                texts[e["id"]] = _slice_entry_text(path, header_prefix, e["line_no"])
+            return texts[e["id"]]
+
+        hits: list[dict] = []
         for e in entries:
             if id_set and e["id"] not in id_set:
                 continue
@@ -99,9 +114,15 @@ def recall(
             if since and not e["date"]:
                 # Entries without dates are excluded when --since is requested
                 continue
-            text = _slice_entry_text(path, header_prefix, e["line_no"])
+            text = text_of(e)
             if term_set and not any(t in text.casefold() for t in term_set):
                 continue
+            hits.append(e)
+
+        if follow:
+            hits = _follow_citations(entries, hits, text_of)
+
+        for e in hits:
             matched.append(
                 {
                     "id": e["id"],
@@ -109,12 +130,37 @@ def recall(
                     "date": e["date"],
                     "tags": e["tags"],
                     "file": file_type,
-                    "text": text,
+                    "text": text_of(e),
                 }
             )
 
     matched.sort(key=lambda r: (r["date"] or "0000-00-00"), reverse=True)
     return matched[:max_results] if max_results else matched
+
+
+def _follow_citations(entries: list[dict], hits: list[dict], text_of) -> list[dict]:
+    """Close ``hits`` over later entries that cite a member by heading title.
+
+    The logs are append-only, so a successor sits later in file order; an
+    earlier entry that happens to mention the title is not one. Matching is a
+    case-insensitive literal on the title, so a short title can pull in an
+    unrelated entry, which the reader discards; missing a successor is the
+    failure this guards against.
+    """
+    found = {e["id"] for e in hits}
+    frontier = list(hits)
+    while frontier:
+        cited = frontier.pop()
+        title = cited["title"].casefold()
+        if not title:
+            continue
+        for e in entries:
+            if e["id"] in found or e["line_no"] <= cited["line_no"]:
+                continue
+            if title in text_of(e).casefold():
+                found.add(e["id"])
+                frontier.append(e)
+    return [e for e in entries if e["id"] in found]
 
 
 def _format_match(record: dict) -> str:
@@ -151,6 +197,16 @@ def main() -> None:
         action="append",
         default=[],
         help="Match the entry with this ID (e.g. L-42, D-7). Repeatable.",
+    )
+    parser.add_argument(
+        "--follow",
+        action="store_true",
+        help=(
+            "Also return every later entry that cites a returned entry by its "
+            "heading title (e.g. a **Supersedes**: line), repeatedly, so a "
+            "whole supersession chain comes back. Ignores the other filters "
+            "for the entries it adds."
+        ),
     )
     parser.add_argument(
         "--since",
@@ -193,6 +249,7 @@ def main() -> None:
         since=args.since,
         file_filter=args.file,
         max_results=0,
+        follow=args.follow,
     )
 
     if args.count_only:

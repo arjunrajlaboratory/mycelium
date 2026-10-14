@@ -323,3 +323,67 @@ class TestNoSilentCap:
     def test_negative_max_is_a_usage_error(self, living_dir: Path) -> None:
         _seed(living_dir)
         assert _run(living_dir, "--max", "-1").returncode == 2
+
+
+class TestFollow:
+    """--follow adds later entries that cite a matched entry by heading title."""
+
+    def _seed_chain(self, living_dir: Path) -> None:
+        (living_dir / "decisions.md").write_text(
+            "# Decisions\n\n"
+            "### [2026-04-20] Earlier note on Model choice\n\n"
+            "**Decision**: Mentions Model choice but predates it.\n\n"
+            "### [2026-05-01] Model choice\n\n"
+            "**Decision**: Use limma-voom.\n\n"
+            "### [2026-05-02] Plot palette\n\n"
+            "**Decision**: Okabe-Ito.\n\n"
+            "### [2026-06-01] Switch differential-expression model\n\n"
+            "**Decision**: DESeq2.\n\n"
+            "**Supersedes**: [2026-05-01] Model choice\n\n"
+            "### [2026-07-01] Revert to edgeR\n\n"
+            "**Decision**: edgeR.\n\n"
+            "**Supersedes**: [2026-06-01] Switch differential-expression model\n",
+            encoding="utf-8",
+        )
+        (living_dir / "learnings.md").write_text(
+            "# Learnings\n\n"
+            "### [2026-08-01] Gotcha about Model choice\n\nBody.\n",
+            encoding="utf-8",
+        )
+
+    def test_follow_walks_the_whole_supersession_chain(self, living_dir: Path) -> None:
+        self._seed_chain(living_dir)
+        results = rl.recall(
+            living_dir, terms=["limma"], file_filter="decisions", follow=True
+        )
+        assert [r["title"] for r in results] == [
+            "Revert to edgeR",
+            "Switch differential-expression model",
+            "Model choice",
+        ]
+
+    def test_without_follow_the_successor_is_missed(self, living_dir: Path) -> None:
+        self._seed_chain(living_dir)
+        results = rl.recall(living_dir, terms=["limma"], file_filter="decisions")
+        assert [r["title"] for r in results] == ["Model choice"]
+
+    def test_follow_ignores_earlier_mentions_and_other_files(
+        self, living_dir: Path
+    ) -> None:
+        self._seed_chain(living_dir)
+        titles = {
+            r["title"]
+            for r in rl.recall(living_dir, terms=["limma"], file_filter="all", follow=True)
+        }
+        assert "Earlier note on Model choice" not in titles
+        assert "Gotcha about Model choice" not in titles
+        assert "Plot palette" not in titles
+
+    def test_cli_follow_flag(self, living_dir: Path) -> None:
+        self._seed_chain(living_dir)
+        result = _run(
+            living_dir, "--file", "decisions", "--max", "0", "--term", "limma", "--follow"
+        )
+        assert result.returncode == 0
+        assert "Revert to edgeR" in result.stdout
+        assert "Switch differential-expression model" in result.stdout

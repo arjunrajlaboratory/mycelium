@@ -49,14 +49,20 @@ fields. Older entries predate them; read those by their text.
 
 - Name the decision points the task depends on (for example batch correction,
   the DE model, a cohort filter).
-- Rules 1–3 below need the whole thread, so fetch it with two lookups and
-  pass `--max 0` to both. Without it, `recall_lessons.py` keeps only the 20
-  newest matches, which can drop the oldest entry or the start of a
-  supersession chain.
+- Rules 1–3 below need the whole thread, so fetch it with the lookups below.
+  Pass both flags to every lookup:
+  - `--max 0`: without it, `recall_lessons.py` keeps only the 20 newest
+    matches, which can drop the oldest entry or the start of a supersession
+    chain.
+  - `--follow`: this also returns every later entry that cites a found entry by
+    its heading title, as a `**Supersedes**:` line does, until no new entry
+    appears. A successor often names only the new method (`DESeq2`), so a
+    search for the old one (`limma`) misses it without `--follow`.
+- Run all three lookups and take the union.
   - **By tag.** Find candidate tags in `.living/INDEX.md` (**By tag**), then:
 
     ```bash
-    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --tag <tag>
+    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --follow --tag <tag>
     ```
 
   - **By text.** Many entries carry no tags, and a method may be named only in
@@ -65,11 +71,22 @@ fields. Older entries predate them; read those by their text.
     match any of them:
 
     ```bash
-    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --term <term> --term <synonym>
+    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --follow --term <term> --term <synonym>
     ```
 
-  Both print whole entries. Use `--count-only` first if a thread looks large.
-  For line numbers to cite, run `grep -n '^### ' .living/decisions.md`.
+  - **By relationship wording.** Some entries link to an earlier one without
+    naming it ("supersedes the entry above", "reverses the earlier call").
+    `--follow` cannot see those links. Fetch every entry that uses such
+    wording, from `<oldest-date>` (the date of the oldest thread entry found
+    so far) onward, and keep only those that refer to a thread entry:
+
+    ```bash
+    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --follow --since <oldest-date> --term supersede --term replace --term overturn --term revers --term amend --term addendum --term 'entry above'
+    ```
+
+  Every lookup prints whole entries. Use `--count-only` first if a thread
+  looks large. To get line numbers for citations, run
+  `grep -n '^### ' .living/decisions.md`.
 - Read the body of every entry that could bind the task before resolving
   anything. A heading word such as "held" may be qualified in the body.
 - Work through each thread oldest first. `recall_lessons.py` prints newest

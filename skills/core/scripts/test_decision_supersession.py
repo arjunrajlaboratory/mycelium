@@ -223,6 +223,7 @@ def test_reference_has_no_heading_only_discovery() -> None:
 
 def test_reference_recall_commands_parse(tmp_path: Path) -> None:
     """The documented flags are ones recall_lessons.py actually accepts."""
+    import shlex
     import subprocess
     import sys
 
@@ -230,17 +231,37 @@ def test_reference_recall_commands_parse(tmp_path: Path) -> None:
     living.mkdir()
     (living / "decisions.md").write_text(
         "# Decision Log\n\n### [2026-05-01] Model choice\n\n"
-        "**Decision**: Use limma-voom.\n",
+        "**Decision**: Use limma-voom.\n\n"
+        "### [2026-06-01] Back to plain counts\n\n"
+        "**Decision**: This overturns the entry above.\n",
         encoding="utf-8",
     )
     script = CORE / "scripts" / "recall_lessons.py"
     for command in _recall_commands():
-        args = command[len(RECALL_ACCESSOR) :].split()
-        args = [{"<tag>": "none", "<term>": "LIMMA", "<synonym>": "voom"}.get(a, a) for a in args]
+        placeholders = {
+            "<tag>": "none",
+            "<term>": "LIMMA",
+            "<synonym>": "voom",
+            "<oldest-date>": "2026-01-01",
+        }
+        args = [placeholders.get(a, a) for a in shlex.split(command[len(RECALL_ACCESSOR) :])]
+        assert not [a for a in args if a.startswith("<")], args
         args[args.index("--living-dir") + 1] = str(living)
         result = subprocess.run(
             [sys.executable, str(script), *args], capture_output=True, text=True
         )
         assert result.returncode in (0, 1), (command, result.stderr)
-        if "--term" in args:
+        if "LIMMA" in args:
             assert "Model choice" in result.stdout
+        if "overturn" in args:
+            assert "Back to plain counts" in result.stdout
+
+
+def test_reference_follows_successors_and_relationship_wording() -> None:
+    """A successor that never names the searched method is still fetched."""
+    commands = _recall_commands()
+    assert commands and all("--follow" in c for c in commands), commands
+    flat = _flat(REFERENCE)
+    assert "--since" in flat
+    for word in ("supersede", "replace", "overturn", "revers", "entry above"):
+        assert f"--term {word}" in flat or f"--term '{word}'" in flat, word
