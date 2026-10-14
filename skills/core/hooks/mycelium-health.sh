@@ -612,9 +612,35 @@ if [ -d "$LIVING_DIR" ]; then
   LEARNINGS_COUNT=0
   DECISIONS_COUNT=0
   CONVENTIONS_COUNT=0
-  [ -f "$LIVING_DIR/learnings.md" ]   && LEARNINGS_COUNT=$(grep -c '^### ' "$LIVING_DIR/learnings.md" 2>/dev/null || true)
-  [ -f "$LIVING_DIR/decisions.md" ]   && DECISIONS_COUNT=$(grep -c '^### ' "$LIVING_DIR/decisions.md" 2>/dev/null || true)
-  [ -f "$LIVING_DIR/conventions.md" ] && CONVENTIONS_COUNT=$(grep -c '^## ' "$LIVING_DIR/conventions.md" 2>/dev/null || true)
+  # Count with generate_index's parser so headings inside code fences
+  # (illustrative examples) are skipped, exactly as INDEX.md counts them.
+  # -I keeps the project directory off sys.path. A bare grep is the fallback.
+  _ENTRY_COUNTS=$(python3 -I - "$HERE/../scripts" "$LIVING_DIR" 2>/dev/null <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from generate_index import count_headers_and_topics
+
+living = Path(sys.argv[2])
+counts = []
+for name, file_type in (
+    ("learnings.md", "learnings"),
+    ("decisions.md", "decisions"),
+    ("conventions.md", "conventions"),
+):
+    path = living / name
+    counts.append(count_headers_and_topics(path, file_type)[0] if path.is_file() else 0)
+print(*counts)
+PY
+  ) || _ENTRY_COUNTS=""
+  if [[ "$_ENTRY_COUNTS" =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]]; then
+    read -r LEARNINGS_COUNT DECISIONS_COUNT CONVENTIONS_COUNT <<< "$_ENTRY_COUNTS"
+  else
+    [ -f "$LIVING_DIR/learnings.md" ]   && LEARNINGS_COUNT=$(grep -c '^### ' "$LIVING_DIR/learnings.md" 2>/dev/null || true)
+    [ -f "$LIVING_DIR/decisions.md" ]   && DECISIONS_COUNT=$(grep -c '^### ' "$LIVING_DIR/decisions.md" 2>/dev/null || true)
+    [ -f "$LIVING_DIR/conventions.md" ] && CONVENTIONS_COUNT=$(grep -c '^## ' "$LIVING_DIR/conventions.md" 2>/dev/null || true)
+  fi
   LEARNINGS_COUNT=${LEARNINGS_COUNT:-0}
   DECISIONS_COUNT=${DECISIONS_COUNT:-0}
   CONVENTIONS_COUNT=${CONVENTIONS_COUNT:-0}

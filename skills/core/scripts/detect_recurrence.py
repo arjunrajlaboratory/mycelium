@@ -126,10 +126,12 @@ def _slice_entry_text(path: Path, header_prefix: str, header_line_no: int) -> st
     """Return the entry block starting at header_line_no up to next header or EOF."""
     lines: list[str] = []
     with path.open(encoding="utf-8", errors="replace") as fh:
-        for n, raw in enumerate(fh, start=1):
+        # Track fences from the top of the file: a heading inside a fenced
+        # example belongs to the entry rather than ending it.
+        for n, (raw, fenced) in enumerate(fences.mark_fenced(fh), start=1):
             if n < header_line_no:
                 continue
-            if n > header_line_no and raw.startswith(header_prefix):
+            if n > header_line_no and not fenced and raw.startswith(header_prefix):
                 break
             lines.append(raw.rstrip("\n"))
     while lines and lines[-1].strip() == "":
@@ -184,10 +186,10 @@ def _collect_with_fallback(path: Path) -> list[dict]:
     legacy: list[dict] = []
     canonical_lines = {e["line_no"] for e in canonical}
     with path.open(encoding="utf-8", errors="replace") as fh:
-        for line_no, raw in enumerate(fh, start=1):
+        for line_no, (raw, fenced) in enumerate(fences.mark_fenced(fh), start=1):
             line = raw.rstrip()
-            if not line.startswith("## "):
-                continue
+            if fenced or not line.startswith("## "):
+                continue  # Fenced headings are examples, not entries
             title_part = line[3:].strip()
             if not _DATE_BRACKET_RE.match(title_part):
                 continue  # Skip non-date ## headers (section titles, etc.)

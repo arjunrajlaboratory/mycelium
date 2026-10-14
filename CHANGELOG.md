@@ -80,6 +80,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any row that links this session's log under another ID into the canonical
   row, keeping its authored Summary, Key Outputs, and Tags
   (`upsert_registry_row.py --log-link`).
+- **Fenced example headings are no longer counted as entries.** An entry that
+  documents the entry format inside a code fence (```` ```markdown ````
+  followed by `### [2026-10-03] Title`) was counted as a real entry. That
+  inflated `.living/INDEX.md` counts and the SessionStart `MYCELIUM SUMMARY`,
+  shifted every later `L-`/`D-` ID, added fake records to `detect_recurrence`
+  clusters, cut `recall_lessons` entry text off at the example, and split
+  knowledge-map entries at it. Every entry parser now skips fenced lines
+  through the shared CommonMark fence tracker (`markdown_fences.mark_fenced`),
+  as `validate_structure` already did. Tags lines and `## F-` finding
+  headings inside fences are ignored too. Existing projects need no
+  migration; the next index refresh corrects the counts. An entry ID can
+  shift down where a fenced example used to sit before it.
 - **No phantom "KNOWLEDGE AUDIT DUE (497753h since last)".** SessionStart
   read every line of `~/.mycelium/knowledge/.last-audit`, so a stamp an agent
   wrote as two lines (timestamp, then `daily-audit`) failed validation, fell
@@ -91,7 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indefinitely. The audit directive now gives a one-line `printf` command for
   rewriting the stamp, and names the knowledge directory the hook actually
   reads (honoring `MYCELIUM_KNOWLEDGE_DIR`) instead of `~/.mycelium/knowledge`.
-  An unreadable stamp file is reported as due rather than aborting SessionStart. The knowledge-transfer `.last-run` check gets the same
+  An unreadable stamp file is reported as due rather than aborting
+  SessionStart. The knowledge-transfer `.last-run` check gets the same
   treatment and now parses its `...Z` stamp as UTC, where it was read as local
   time (a 26h-old run read as 18h on US Pacific time), and rejects impossible
   dates such as `2026-02-31` on macOS as it already did on Linux.
