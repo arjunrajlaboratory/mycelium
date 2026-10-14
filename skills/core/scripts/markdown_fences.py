@@ -6,9 +6,9 @@ Several call sites need to know whether a line sits inside a fenced code block:
 - `validate_structure.py`, which must not mistake a heading inside a documented
   example for a real knowledge entry,
 - the entry parsers (`generate_index.py`, `detect_recurrence.py`,
-  `recall_lessons.py`, `knowledge_map/extract_entries.py`,
-  `knowledge_map/extract_logs.py`), which must not count or split on such a
-  heading either (via `mark_fenced`), and
+  `recall_lessons.py`, `crystallize_findings.py`,
+  `knowledge_map/extract_entries.py`, `knowledge_map/extract_logs.py`), which
+  must not count or split on such a heading either (via `mark_fenced`), and
 - `finalize_session_log.py`, which must not strip a machine-shaped footer that a
   human deliberately wrote inside a fence.
 

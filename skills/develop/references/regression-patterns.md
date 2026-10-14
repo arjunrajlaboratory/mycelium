@@ -414,9 +414,15 @@ unexpected live categories fail.
 `validate_structure` was fixed. `generate_index` (counts, `collect_entries`,
 snippets, `## F-` totals), `detect_recurrence`, `recall_lessons`, the
 SessionStart summary's `grep -c`, and the knowledge-map extractors all counted a
-fenced `### [date] Example` as an entry. Fixing one reader of a format does not
-fix its siblings: sweep every reader, and route each through
-`markdown_fences.mark_fenced` rather than a local fence loop or a bare grep.
+fenced `### [date] Example` as an entry. `crystallize_findings` then did the same
+with findings topics: a fenced `## F-999` became a `FINDINGS_REGISTRY.md` row
+and a fenced `**Status:** robust` raised the cross-project INDEX's strongest
+status. Fixing one reader of a format does not fix its siblings: sweep every
+reader, and route each through `markdown_fences.mark_fenced` rather than a local
+fence loop or a bare grep. A reader that skips fenced lines must also report an
+unclosed fence (`unclosed_fence_line`), or real structure after it disappears
+without a trace, and a derived file must be rewritten (not left alone) when
+the corrected parse finds nothing, or the old false rows persist.
 
 ## 22. Review orchestration assumes unlimited subagent capacity
 

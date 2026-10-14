@@ -100,6 +100,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headings inside fences are ignored too. Existing projects need no
   migration; the next index refresh corrects the counts. An entry ID can
   shift down where a fenced example used to sit before it.
+- **Findings crystallization ignores fenced example findings.** A topic file
+  that showed the finding format in a code fence (`## F-999 Example` with
+  `**Status:** robust`) produced a fake row in `FINDINGS_REGISTRY.md`, raised
+  the topic's strongest status in the cross-project `INDEX.md`, and cut the
+  real finding's section short at the example. `crystallize_findings.py` now
+  reads finding headings, `**Claim:**`/`**Status:**`/`**Implications:**`/
+  `**Tags:**` fields, Evidence Ledger rows, and Open Questions only outside
+  fences. Fenced lines still count as part of the finding's body. A registry
+  whose only rows came from fenced examples is rewritten with an empty table
+  rather than left stale, and a fence that never closes is reported on stderr
+  with its file and line, because every finding after it is skipped. The next
+  crystallization run corrects existing indexes, and no migration is needed.
 - **No phantom "KNOWLEDGE AUDIT DUE (497753h since last)".** SessionStart
   read every line of `~/.mycelium/knowledge/.last-audit`, so a stamp an agent
   wrote as two lines (timestamp, then `daily-audit`) failed validation, fell
