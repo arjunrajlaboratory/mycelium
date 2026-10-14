@@ -762,3 +762,28 @@ run the directive's command as written, then the finalizer, and require one
 row with the authored cells; seed a row under a guessed key that links the
 same log (bare and markdown-link forms) and require it to fold; require a
 row for a different log, including a suffix-sharing name, to survive.
+
+## 39. A missing timestamp is read as an ancient one
+
+**Failure:** A lock waiter stats the lock directory in the instant between one
+owner's `rmdir` and the next owner's `mkdir`. The mtime helper reports a
+missing path as `0`, so the age guard sees a 56-year-old lock and the waiter
+plants its reap claim inside the successor's fresh lock. That claim makes the
+successor's release `rmdir` fail, which leaves an ownerless lock with a fresh
+mtime; every remaining waiter spins out its retry budget and the fail-open
+PostToolUse hook drops its event with no stderr. Under heavy load the parallel
+child-event test lost paths this way.
+
+**Invariant:** A sentinel for "unknown" never satisfies a staleness threshold:
+an age guard acts only on a timestamp it actually read, and the generation it
+claims is the one whose owner and age it observed. Anything a contender places
+inside a guarded resource must not stop the owner from releasing it: release
+keeps its owner record until a transient claim drains, so the claimant
+withdraws, and only then removes the directory.
+
+**Regression evidence:** Force the mtime helper to report `0` against a recent
+ownerless lock and require that it is neither reaped nor claimed. Plant a reap
+claim that drains shortly after release begins and require the lock to be
+gone afterward, with the owner record still present while the claim was
+held. Under load, instrument reap and release paths and require no
+premature reap and no leaked lock across repeated parallel child-event runs.

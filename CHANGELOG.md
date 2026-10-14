@@ -80,6 +80,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any row that links this session's log under another ID into the canonical
   row, keeping its authored Summary, Key Outputs, and Tags
   (`upsert_registry_row.py --log-link`).
+- **No lost edit events under parallel subagents.** When many edit hooks for
+  one session queued on its lock, a waiter could catch the lock in the gap
+  between one owner leaving and the next arriving, read the missing timestamp
+  as an ancient lock, and leave a reap claim in the new owner's lock. The new
+  owner's release then failed and left an empty lock behind, and every hook
+  still waiting gave up and silently dropped its file from the session's
+  activity list. A missing timestamp no longer counts as age, and release now
+  waits out a transient claim instead of leaving the lock behind.
 - **Fenced example headings are no longer counted as entries.** An entry that
   documents the entry format inside a code fence (```` ```markdown ````
   followed by `### [2026-10-03] Title`) was counted as a real entry. That
