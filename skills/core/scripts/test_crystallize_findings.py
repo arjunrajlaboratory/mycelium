@@ -83,6 +83,89 @@ def test_linked_destination_fails_before_coordination_state_write(
     assert list(outside.iterdir()) == []
 
 
+def test_horizontal_rule_does_not_open_frontmatter(tmp_path: Path) -> None:
+    topic = tmp_path / "rules.md"
+    topic.write_text(
+        "# Rules\n\n"
+        "Intro paragraph.\n\n"
+        "---\n\n"
+        "description: x\n"
+        "status: retired\n"
+        "topic: hijacked\n"
+        "last_updated: 1999-01-01\n",
+        encoding="utf-8",
+    )
+
+    info = cf.parse_topic_file(topic)
+
+    assert info["topic"] == "rules"
+    assert info["description"] == ""
+    assert info["status"] == "active"
+    assert info["last_updated"] == ""
+
+
+def test_fenced_rule_does_not_open_frontmatter(tmp_path: Path) -> None:
+    topic = tmp_path / "format.md"
+    topic.write_text(
+        "# Topic file format\n\n"
+        "Example frontmatter:\n\n"
+        "```yaml\n"
+        "---\n"
+        "topic: example\n"
+        "description: Example description\n"
+        "status: superseded\n"
+        "last_updated: 2000-01-01\n"
+        "---\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    info = cf.parse_topic_file(topic)
+
+    assert info["topic"] == "format"
+    assert info["description"] == ""
+    assert info["status"] == "active"
+    assert info["last_updated"] == ""
+
+
+def test_unclosed_opening_rule_is_not_frontmatter(tmp_path: Path) -> None:
+    topic = tmp_path / "open.md"
+    topic.write_text(
+        "---\n\ndescription: x\nstatus: retired\n", encoding="utf-8"
+    )
+
+    info = cf.parse_topic_file(topic)
+
+    assert info["description"] == ""
+    assert info["status"] == "active"
+
+
+def test_leading_frontmatter_sets_metadata_and_stops_at_close(
+    tmp_path: Path,
+) -> None:
+    topic = tmp_path / "robustness.md"
+    topic.write_text(
+        _topic() + "\n---\n\ndescription: body text, not metadata\n",
+        encoding="utf-8",
+    )
+
+    info = cf.parse_topic_file(topic)
+
+    assert info["topic"] == "robustness"
+    assert info["description"] == "Robust cross-project behavior"
+    assert info["last_updated"] == "2026-08-02"
+    assert info["status"] == "active"
+    assert info["finding_count"] == 1
+
+
+def test_byte_order_mark_does_not_hide_frontmatter(tmp_path: Path) -> None:
+    topic = tmp_path / "robustness.md"
+    topic.write_text("﻿" + _topic(), encoding="utf-8")
+
+    info = cf.parse_topic_file(topic)
+
+    assert info["topic"] == "robustness"
+    assert info["description"] == "Robust cross-project behavior"
 # Regression pattern 21: a topic file that documents the finding format inside
 # a code fence must not have its example parsed as live structure. Each fenced
 # trap is placed so that reading it would change an asserted value: the fenced
