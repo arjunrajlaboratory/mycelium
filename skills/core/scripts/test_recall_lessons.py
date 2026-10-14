@@ -212,3 +212,178 @@ class TestCli:
             text=True,
         )
         assert result.returncode == 2
+
+
+def _run(living_dir: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT_DIR / "recall_lessons.py"),
+            "--living-dir",
+            str(living_dir),
+            *args,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _seed_many_decisions(living_dir: Path, n: int) -> None:
+    """n decisions on one tag, oldest first, one per day of 2026-01."""
+    blocks = [
+        f"### [2026-01-{i:02d}] Batch choice {i}\n**Tags**: [batch]\n\nBody {i}.\n"
+        for i in range(1, n + 1)
+    ]
+    (living_dir / "decisions.md").write_text(
+        "# Decisions\n\n" + "\n".join(blocks), encoding="utf-8"
+    )
+
+
+class TestTerm:
+    """--term finds entries by their text, so untagged entries are reachable."""
+
+    def _seed_untagged(self, living_dir: Path) -> None:
+        (living_dir / "decisions.md").write_text(
+            "# Decisions\n\n"
+            "### [2026-05-01] Model choice\n\n"
+            "**Decision**: Use LIMMA-voom for DE.\n\n"
+            "### [2026-05-02] Plot palette\n\n"
+            "**Decision**: Okabe-Ito.\n\n"
+            "### [2026-05-03] Switch to DESeq2\n\n"
+            "**Supersedes**: [2026-05-01] Model choice\n",
+            encoding="utf-8",
+        )
+
+    def test_term_matches_untagged_entry_body(self, living_dir: Path) -> None:
+        self._seed_untagged(living_dir)
+        results = rl.recall(living_dir, terms=["limma"])
+        assert [r["title"] for r in results] == ["Model choice"]
+
+    def test_terms_are_any_match_and_case_insensitive(self, living_dir: Path) -> None:
+        self._seed_untagged(living_dir)
+        results = rl.recall(living_dir, terms=["limma", "deseq2"])
+        assert {r["title"] for r in results} == {"Model choice", "Switch to DESeq2"}
+
+    def test_term_is_literal_not_a_regex(self, living_dir: Path) -> None:
+        self._seed_untagged(living_dir)
+        assert rl.recall(living_dir, terms=["limma.voom"]) == []
+        assert [r["title"] for r in rl.recall(living_dir, terms=["limma-voom"])] == [
+            "Model choice"
+        ]
+
+    def test_term_composes_with_tag(self, living_dir: Path) -> None:
+        _seed(living_dir)
+        results = rl.recall(living_dir, tags=["debugging"], terms=["Body of L-3"])
+        assert [r["id"] for r in results] == ["L-3"]
+
+    def test_cli_term_flag_is_repeatable(self, living_dir: Path) -> None:
+        self._seed_untagged(living_dir)
+        result = _run(living_dir, "--file", "decisions", "--term", "limma", "--term", "okabe")
+        assert result.returncode == 0
+        assert "Model choice" in result.stdout
+        assert "Plot palette" in result.stdout
+        assert "Switch to DESeq2" not in result.stdout
+
+
+class TestNoSilentCap:
+    """A capped result says so; --max 0 and --count-only see every match."""
+
+    def test_max_zero_returns_every_match(self, living_dir: Path) -> None:
+        _seed_many_decisions(living_dir, 25)
+        assert len(rl.recall(living_dir, tags=["batch"], max_results=0)) == 25
+
+    def test_cli_max_zero_includes_the_oldest_entry(self, living_dir: Path) -> None:
+        _seed_many_decisions(living_dir, 25)
+        result = _run(living_dir, "--tag", "batch", "--max", "0")
+        assert result.returncode == 0
+        assert "Batch choice 1\n" in result.stdout
+        assert result.stdout.count("[decisions] D-") == 25
+        assert "showing" not in result.stderr
+
+    def test_count_only_reports_the_uncapped_total(self, living_dir: Path) -> None:
+        _seed_many_decisions(living_dir, 25)
+        result = _run(living_dir, "--tag", "batch", "--count-only")
+        assert result.returncode == 0
+        assert result.stdout.strip() == "25 matches"
+
+    def test_truncation_is_announced(self, living_dir: Path) -> None:
+        _seed_many_decisions(living_dir, 25)
+        result = _run(living_dir, "--tag", "batch")
+        assert result.returncode == 0
+        assert result.stdout.count("[decisions] D-") == 20
+        assert "showing 20 of 25 matches" in result.stderr
+        assert "--max 0" in result.stderr
+
+    def test_no_note_when_nothing_is_cut(self, living_dir: Path) -> None:
+        _seed(living_dir)
+        result = _run(living_dir, "--tag", "debugging")
+        assert result.returncode == 0
+        assert result.stderr == ""
+
+    def test_negative_max_is_a_usage_error(self, living_dir: Path) -> None:
+        _seed(living_dir)
+        assert _run(living_dir, "--max", "-1").returncode == 2
+
+
+class TestFollow:
+    """--follow adds later entries that cite a matched entry by heading title."""
+
+    def _seed_chain(self, living_dir: Path) -> None:
+        (living_dir / "decisions.md").write_text(
+            "# Decisions\n\n"
+            "### [2026-04-20] Earlier note on Model choice\n\n"
+            "**Decision**: Mentions Model choice but predates it.\n\n"
+            "### [2026-05-01] Model choice\n\n"
+            "**Decision**: Use limma-voom.\n\n"
+            "### [2026-05-02] Plot palette\n\n"
+            "**Decision**: Okabe-Ito.\n\n"
+            "### [2026-06-01] Switch differential-expression model\n\n"
+            "**Decision**: DESeq2.\n\n"
+            "**Supersedes**: [2026-05-01] Model choice\n\n"
+            "### [2026-07-01] Revert to edgeR\n\n"
+            "**Decision**: edgeR.\n\n"
+            "**Supersedes**: [2026-06-01] Switch differential-expression model\n",
+            encoding="utf-8",
+        )
+        (living_dir / "learnings.md").write_text(
+            "# Learnings\n\n"
+            "### [2026-08-01] Gotcha about Model choice\n\nBody.\n",
+            encoding="utf-8",
+        )
+
+    def test_follow_walks_the_whole_supersession_chain(self, living_dir: Path) -> None:
+        self._seed_chain(living_dir)
+        results = rl.recall(
+            living_dir, terms=["limma"], file_filter="decisions", follow=True
+        )
+        assert [r["title"] for r in results] == [
+            "Revert to edgeR",
+            "Switch differential-expression model",
+            "Model choice",
+        ]
+
+    def test_without_follow_the_successor_is_missed(self, living_dir: Path) -> None:
+        self._seed_chain(living_dir)
+        results = rl.recall(living_dir, terms=["limma"], file_filter="decisions")
+        assert [r["title"] for r in results] == ["Model choice"]
+
+    def test_follow_ignores_earlier_mentions_and_other_files(
+        self, living_dir: Path
+    ) -> None:
+        self._seed_chain(living_dir)
+        titles = {
+            r["title"]
+            for r in rl.recall(living_dir, terms=["limma"], file_filter="all", follow=True)
+        }
+        assert "Earlier note on Model choice" not in titles
+        assert "Gotcha about Model choice" not in titles
+        assert "Plot palette" not in titles
+
+    def test_cli_follow_flag(self, living_dir: Path) -> None:
+        self._seed_chain(living_dir)
+        result = _run(
+            living_dir, "--file", "decisions", "--max", "0", "--term", "limma", "--follow"
+        )
+        assert result.returncode == 0
+        assert "Revert to edgeR" in result.stdout
+        assert "Switch differential-expression model" in result.stdout

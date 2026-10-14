@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Decision supersession fields.** The decision template
+  (`skills/core/templates/decision-log-entry.md`) adds `Status` (`active`,
+  `provisional`, `held`, `shelved`, `rejected`), `Supersedes`, `Scope`,
+  `Revisit when`, and `Resolved-by`. `Supersedes` cites earlier entries by date
+  and exact heading title, never by a positional `D-N` ID, and older entries are
+  never edited to mark them replaced. A new `decision-status` mode in core,
+  with its rules in `skills/core/references/decision-status.md`, settles which
+  of several entries on one choice binds a task. Explicit supersession wins,
+  then a matching scope. Next, entries that agree bind together: a
+  `rejected`, `shelved`, or `held` entry about a different option leaves the
+  active choice binding. Anything else is contested and goes to the user, at
+  most three questions per session. The newest entry never wins by recency
+  alone. A confirmed answer is appended as a `Resolution:` entry. Core's
+  post-action step, the post-action directive, and the `decisions.md` header
+  written by `init` now point at the fields. Existing logs need no migration:
+  an entry without `Status` reads as `unknown`. Adapted from
+  [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
+  Manurung (MIT, issue #91).
+
+- **`recall_lessons.py --term`, and no silent cap.** `--term <text>`
+  (repeatable) matches a case-insensitive literal in an entry's heading or
+  body, so untagged entries can be found. `--max 0` returns every match. When
+  the default cap of 20 cuts a result, a note on stderr says how many matches
+  were shown. `--count-only` now reports the uncapped total; it used to count
+  after the cap and so never reported more than 20. `--follow` also returns
+  every later entry that cites a returned entry by heading title (as a
+  `**Supersedes**:` line does), repeatedly. A successor that names only the
+  new method still comes back with the old one.
+  - The decision-status guide fetches a thread with `--max 0 --follow`, by tag
+    and by `--term`.
+  - It also runs a third lookup for relationship wording ("supersedes the
+    entry above") that names no title.
+  - Together these mean the resolution rules see the whole thread.
+
 ## [0.9.0] - 2026-10-14
 
 ### Added

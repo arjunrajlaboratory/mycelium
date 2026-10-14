@@ -487,8 +487,11 @@ def create_living_layer(target_dir: Path):
             "Append-only log of non-obvious decisions and their rationale.\n\n"
             "**Entry template:** copy from "
             "`skills/core/templates/decision-log-entry.md` "
-            "(includes Context, Decision, Alternatives considered, Rationale, "
-            "Consequences, Tags fields).\n"
+            "(includes Context, Decision, Status, Supersedes, Scope, "
+            "Revisit when, Resolved-by, Alternatives considered, Rationale, "
+            "Consequences, Tags fields). To settle which of several entries "
+            "on one choice still binds, see "
+            "`skills/core/references/decision-status.md`.\n"
         ),
         "learnings.md": (
             "# Learnings\n\n"
