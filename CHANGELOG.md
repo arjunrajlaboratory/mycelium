@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.1] - 2026-10-14
 
 ### Added
 
@@ -42,6 +42,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - It also runs a third lookup for relationship wording ("supersedes the
     entry above") that names no title.
   - Together these mean the resolution rules see the whole thread.
+
+- **Locked decisions and dead ends in the session handoff.** The handoff
+  template now ends "Key decisions made" with a `### Locked decisions`
+  subsection (choices the next session must not reopen without new evidence
+  or the user's agreement, cited by `.living/decisions.md` date and exact
+  heading) and "Blockers & surprises" with a `### Dead ends — do not redo`
+  subsection (approaches tried and abandoned, with the reason). The five
+  required `##` headings are unchanged, so existing handoffs and projects keep
+  working with no migration. Stop's completeness check no longer counts a
+  subheading as section content: a section that holds only subheadings is
+  treated as empty and gets the complete fallback. Adapted from the `handoff`
+  skill in [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by
+  Mikhael Manurung (MIT, issue #91).
 
 ## [0.9.0] - 2026-10-14
 
@@ -106,19 +119,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     cohort values counted toward `min_rows`.
   - Contrast levels that split into groups sharing no batch now block, not
     only single isolated levels.
-
-- **Locked decisions and dead ends in the session handoff.** The handoff
-  template now ends "Key decisions made" with a `### Locked decisions`
-  subsection (choices the next session must not reopen without new evidence
-  or the user's agreement, cited by `.living/decisions.md` date and exact
-  heading) and "Blockers & surprises" with a `### Dead ends — do not redo`
-  subsection (approaches tried and abandoned, with the reason). The five
-  required `##` headings are unchanged, so existing handoffs and projects keep
-  working with no migration. Stop's completeness check no longer counts a
-  subheading as section content: a section that holds only subheadings is
-  treated as empty and gets the complete fallback. Adapted from the `handoff`
-  skill in [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by
-  Mikhael Manurung (MIT, issue #91).
 
 ### Fixed
 
