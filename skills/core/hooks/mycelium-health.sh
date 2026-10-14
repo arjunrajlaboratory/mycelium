@@ -243,17 +243,47 @@ if [ "$FRESH_PRIMARY_SESSION" = true ] \
   rm -f "$STATE_DIR/mycelium-session-activity.tmp"
 fi
 
+# --- Scheduled-job stamp parsing (knowledge audit and transfer) ---
+# A stamp file's first whitespace-delimited token on line 1 is the stamp; any
+# later tokens or lines are labels. Agents have written the label on its own
+# line, so reading every line would turn a valid stamp into garbage. A CRLF
+# line ending is not part of the stamp.
+first_stamp_token() {
+  awk 'NR == 1 { sub(/\r$/, ""); print $1; exit }' "$1" 2>/dev/null
+}
+
+# Set STAMP_DUE_REASON to why a job stamped at epoch $1 is due, or to "" when
+# it ran within the last 24h. An unreadable or future stamp makes the job due
+# and says so: the job rewrites the stamp, which is the repair, whereas
+# computing an age from a fallback epoch reports a nonsense age (epoch 0 gives
+# ~500000h) and a far-future stamp would suppress the job forever. Five
+# minutes of future skew is tolerated as clock adjustment, not corruption.
+stamp_due_reason() {
+  local epoch="$1" age_suffix="$2" age_hours
+  STAMP_DUE_REASON=""
+  if [[ ! "$epoch" =~ ^[0-9]{1,18}$ ]]; then
+    STAMP_DUE_REASON="timestamp unreadable"
+    return
+  fi
+  epoch=$(( 10#$epoch ))
+  if [ "$epoch" -gt $(( NOW_TS + 300 )) ]; then
+    STAMP_DUE_REASON="timestamp is in the future"
+    return
+  fi
+  age_hours=$(( (NOW_TS - epoch) / 3600 ))
+  if [ "$age_hours" -ge 24 ]; then
+    STAMP_DUE_REASON="${age_hours}h ${age_suffix}"
+  fi
+}
+
 # --- Knowledge audit check (runs regardless of SOURCE) ---
 KNOWLEDGE_DIR=$(mycelium_knowledge_dir)
 if [ ! -d "$KNOWLEDGE_DIR" ]; then
   MESSAGES="${MESSAGES}KNOWLEDGE SYSTEM INIT: ~/.mycelium/knowledge/ does not exist. Create the directory and initialize domain files per the progressive disclosure spec. Run this silently as a background task.\n\n"
 elif [ -f "$KNOWLEDGE_DIR/.last-audit" ]; then
-  AUDIT_TS=$(awk '{print $1}' "$KNOWLEDGE_DIR/.last-audit")
-  [[ "$AUDIT_TS" =~ ^[0-9]{1,18}$ ]] || AUDIT_TS=0
-  NOW_TS=$(date +%s)
-  AUDIT_AGE_HOURS=$(( (NOW_TS - AUDIT_TS) / 3600 ))
-  if [ "$AUDIT_AGE_HOURS" -ge 24 ]; then
-    MESSAGES="${MESSAGES}KNOWLEDGE AUDIT DUE (${AUDIT_AGE_HOURS}h since last): Dispatch a background capable subagent (max_turns: 15) to run the knowledge audit. Tasks: (1) BACKFILL PROMOTIONS — scan last ~14 days of entries in every .living/learnings.md under this tree (use tail -120, never full files); for each transferable learning (pattern applies beyond single project — async, API, debugging, test, env, etc.) that is NOT already present in the matching ~/.mycelium/knowledge/{domain}.md file (grep for the learning's exact title — entries promoted inline will contain the same title), printf >> the entry as: ### Title (use the EXACT title from the learning entry) + **What**/**Evidence** (cite source project + date)/**When useful**/**Scope**/**Status: unreviewed**/**Last validated: YYYY-MM-DD**/**Promoted**: backfill by mycelium. (2) STALENESS — review existing entries in domain files; flag any with Last validated >90d old. (3) INDEX — if ~/.mycelium/knowledge/INDEX.md exists, regenerate it with current per-domain entry counts. (4) TIMESTAMP — overwrite ~/.mycelium/knowledge/.last-audit with: \$(date +%s) daily-audit. Report single-line summary of promotions added. Do this silently alongside your current task.\n\n"
+  stamp_due_reason "$(first_stamp_token "$KNOWLEDGE_DIR/.last-audit")" "since last"
+  if [ -n "$STAMP_DUE_REASON" ]; then
+    MESSAGES="${MESSAGES}KNOWLEDGE AUDIT DUE (${STAMP_DUE_REASON}): Dispatch a background capable subagent (max_turns: 15) to run the knowledge audit. Tasks: (1) BACKFILL PROMOTIONS — scan last ~14 days of entries in every .living/learnings.md under this tree (use tail -120, never full files); for each transferable learning (pattern applies beyond single project — async, API, debugging, test, env, etc.) that is NOT already present in the matching ~/.mycelium/knowledge/{domain}.md file (grep for the learning's exact title — entries promoted inline will contain the same title), printf >> the entry as: ### Title (use the EXACT title from the learning entry) + **What**/**Evidence** (cite source project + date)/**When useful**/**Scope**/**Status: unreviewed**/**Last validated: YYYY-MM-DD**/**Promoted**: backfill by mycelium. (2) STALENESS — review existing entries in domain files; flag any with Last validated >90d old. (3) INDEX — if ~/.mycelium/knowledge/INDEX.md exists, regenerate it with current per-domain entry counts. (4) TIMESTAMP — overwrite ~/.mycelium/knowledge/.last-audit with exactly one line by running: printf '%s daily-audit\\n' \"\$(date +%s)\" > ~/.mycelium/knowledge/.last-audit. Report single-line summary of promotions added. Do this silently alongside your current task.\n\n"
   fi
 else
   echo "$(date +%s) auto-initialized" > "$KNOWLEDGE_DIR/.last-audit"
@@ -287,11 +317,27 @@ if [ -n "$META_PROJECT" ]; then
     TRANSFER_STALE=true
     TRANSFER_AGE_MSG="never run"
   else
-    TRANSFER_TS=$(date -jf "%Y-%m-%dT%H:%M:%SZ" "$(cat "$TRANSFER_LAST_RUN")" +%s 2>/dev/null || date -d "$(cat "$TRANSFER_LAST_RUN")" +%s 2>/dev/null || echo "0")
-    TRANSFER_AGE_HOURS=$(( (NOW_TS - TRANSFER_TS) / 3600 ))
-    if [ "$TRANSFER_AGE_HOURS" -ge 24 ]; then
+    # The transfer skill writes `date -u +%Y-%m-%dT%H:%M:%SZ`. Parse only that
+    # shape, as UTC (BSD `date -jf` otherwise reads it as local time), and
+    # leave TRANSFER_TS empty on failure so stamp_due_reason reports it. BSD
+    # date normalizes impossible fields (Feb 31 becomes Mar 3) where GNU date
+    # rejects them, so require the epoch to format back to the same stamp.
+    TRANSFER_TS=""
+    TRANSFER_STAMP=$(first_stamp_token "$TRANSFER_LAST_RUN")
+    if [[ "$TRANSFER_STAMP" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+      if TRANSFER_TS=$(date -u -jf "%Y-%m-%dT%H:%M:%SZ" "$TRANSFER_STAMP" +%s 2>/dev/null); then
+        TRANSFER_ROUNDTRIP=$(date -u -r "$TRANSFER_TS" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || TRANSFER_ROUNDTRIP=""
+      elif TRANSFER_TS=$(date -u -d "$TRANSFER_STAMP" +%s 2>/dev/null); then
+        TRANSFER_ROUNDTRIP=$(date -u -d "@$TRANSFER_TS" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || TRANSFER_ROUNDTRIP=""
+      else
+        TRANSFER_ROUNDTRIP=""
+      fi
+      [ "$TRANSFER_ROUNDTRIP" = "$TRANSFER_STAMP" ] || TRANSFER_TS=""
+    fi
+    stamp_due_reason "$TRANSFER_TS" "since last run"
+    if [ -n "$STAMP_DUE_REASON" ]; then
       TRANSFER_STALE=true
-      TRANSFER_AGE_MSG="${TRANSFER_AGE_HOURS}h since last run"
+      TRANSFER_AGE_MSG="$STAMP_DUE_REASON"
     fi
   fi
 

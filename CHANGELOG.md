@@ -80,6 +80,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any row that links this session's log under another ID into the canonical
   row, keeping its authored Summary, Key Outputs, and Tags
   (`upsert_registry_row.py --log-link`).
+- **No phantom "KNOWLEDGE AUDIT DUE (497753h since last)".** SessionStart
+  read every line of `~/.mycelium/knowledge/.last-audit`, so a stamp an agent
+  wrote as two lines (timestamp, then `daily-audit`) failed validation, fell
+  back to epoch 0, and requested a global audit in every session. The hook now
+  reads only the first token of line 1. A stamp that is not an integer, or is
+  more than five minutes in the future, makes the audit due with the reason
+  stated (`timestamp unreadable` / `timestamp is in the future`) instead of a
+  computed epoch-0 age; previously a future stamp suppressed audits
+  indefinitely. The audit directive now gives a one-line `printf` command for
+  rewriting the stamp. The knowledge-transfer `.last-run` check gets the same
+  treatment and now parses its `...Z` stamp as UTC, where it was read as local
+  time (a 26h-old run read as 18h on US Pacific time), and rejects impossible
+  dates such as `2026-02-31` on macOS as it already did on Linux.
 
 ## [0.8.2] - 2026-10-11
 
