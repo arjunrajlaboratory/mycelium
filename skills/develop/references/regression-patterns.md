@@ -594,15 +594,16 @@ durable resume pointer advertises an incomplete handoff as accepted.
 publish, using one shared cleanup-and-validation implementation. A preserved
 authored handoff contains every heading in one supported five-section schema
 exactly once, in that schema's order, with at least one nonblank body line per
-section after obsolete lifecycle prose is removed. Any absent, stale, empty,
+section after obsolete lifecycle prose is removed. A subheading is structure,
+not body: a section holding only `###` subsections is empty. Any absent, stale, empty,
 duplicated, misordered, or cleanup-emptied structure receives the deterministic
 complete fallback before accepted publication; the finalizer enforces the same
 contract before its first write.
 
 **Regression evidence:** Exercise canonical and legacy complete handoffs as
-preservation positives. Exercise an empty body, reordered headings, a duplicate
-heading, and a section whose only body line is removed by lifecycle cleanup as
-negatives; require one ordered, nonempty canonical set in the accepted durable
+preservation positives. Exercise an empty body, a body of subheadings only, reordered
+headings, a duplicate heading, and a section whose only body line is removed by
+lifecycle cleanup as negatives; require one ordered, nonempty canonical set in the accepted durable
 handoff. Invoke finalization directly on the cleanup-emptied case and require
 the private source and shared destination to remain byte-identical.
 

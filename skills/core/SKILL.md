@@ -340,8 +340,14 @@ For analysis, report generation, idea brainstorming, and code review, direct the
    ## Key decisions made
    - [Decision]: [rationale] (see .living/decisions.md for full context)
 
+   ### Locked decisions
+   - [Decision the next session must not reopen without new evidence or the user's agreement] ([decisions.md date and exact heading])
+
    ## Blockers & surprises
    - [Resolved/Unresolved]: [what happened, resolution or current status]
+
+   ### Dead ends — do not redo
+   - [Approach tried and abandoned]: [why it failed, with the evidence or path]
 
    ## Current state
    - Branch: X | Tests: N passing | [environment notes]
@@ -350,6 +356,8 @@ For analysis, report generation, idea brainstorming, and code review, direct the
    ## Next steps
    - [Actionable items with specific commands where relevant]
    ```
+
+   Keep exactly these five `##` headings, in this order, with at least one bullet in each section. A `###` heading on its own is not content. Stop replaces a handoff that breaks this shape with a generic fallback, losing what you wrote. Under **Locked decisions**, list choices the user confirmed or that later work builds on, citing each `.living/decisions.md` entry by date and exact heading. Under **Dead ends — do not redo**, list approaches tried and abandoned this session with the reason, so the next session does not retry them. Write `- None.` under a subsection that has nothing to record. (These two subsections are adapted from the `handoff` skill in Mikhael Manurung's [mycelium-extra](https://github.com/mdmanurung/mycelium-extra), MIT.)
 
    **Full-session coverage**: Run `git log --since=<session-start-timestamp>` and `git diff --stat` to capture all work since session start. If crystallization fires multiple times in a session, each write rebuilds the summary covering the entire session (cumulative, not incremental). The summary should get more expansive as the session progresses.
 

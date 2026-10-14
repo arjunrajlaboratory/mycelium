@@ -173,8 +173,8 @@ hook, filesystem, or lifecycle boundaries.
       do not enter an infinite retry loop.
 - [ ] Stop preserves the authored content of a fresh, complete five-section
       handoff, where every required heading occurs exactly once in order and
-      every section has a nonblank body after obsolete lifecycle prose is
-      removed. Cleanup and completeness validation share one implementation,
+      every section has a nonblank, non-heading body line after obsolete
+      lifecycle prose is removed. Cleanup and completeness validation share one implementation,
       and the finalizer enforces that post-cleanup contract before writing. It
       atomically publishes an authoritative accepted-status block; an absent,
       stale, malformed, partial, or cleanup-emptied handoff is replaced
