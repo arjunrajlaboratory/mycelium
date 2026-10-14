@@ -650,16 +650,16 @@ mycelium_release_directory_lock() {
     # record other than the one it observed and withdraws, so it can never
     # recover this lock and hand the path to a successor mid-release. Removing
     # the directory with a claim still inside would fail and leave an
-    # ownerless, freshly modified lock that every waiter outwaits.
+    # ownerless, freshly modified lock that every waiter outwaits. A failed
+    # rmdir is retried even when no claim remains: one may have drained
+    # between the rmdir and any check of it.
     while true; do
       while [[ -d "$lock_dir/$MYCELIUM_LOCK_REAP_CLAIM" ]] \
         && (( attempts++ < 200 )); do
         sleep 0.05
       done
       rm -f "$lock_dir/owner"
-      if rmdir "$lock_dir" 2>/dev/null \
-        || [[ ! -d "$lock_dir/$MYCELIUM_LOCK_REAP_CLAIM" ]] \
-        || (( attempts >= 200 )); then
+      if rmdir "$lock_dir" 2>/dev/null || (( attempts++ >= 200 )); then
         break
       fi
     done

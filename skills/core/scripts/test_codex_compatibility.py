@@ -3701,6 +3701,40 @@ def test_lock_release_outlasts_a_transient_reaper_claim(tmp_path):
     assert not lock.exists()
 
 
+def test_lock_release_retries_when_claim_drains_after_failed_rmdir(tmp_path):
+    # The claim can be present when release's rmdir runs and gone by the time
+    # release looks for it. Release must retry rather than treat that as done.
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    lock = state / "mycelium-session.lock"
+    failed_once = state / "rmdir-failed-once"
+    hook_lib = HOOKS_DIR / "mycelium-hook-lib.sh"
+    command = (
+        f'source "{hook_lib}"\n'
+        f'mycelium_acquire_session_lock "{state}" || exit 1\n'
+        "rmdir() {\n"
+        f'  if [[ "$1" == "{lock}" && ! -e "{failed_once}" ]]; then\n'
+        f'    : > "{failed_once}"\n'
+        "    return 1\n"
+        "  fi\n"
+        '  command rmdir "$@"\n'
+        "}\n"
+        "mycelium_release_session_lock\n"
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert failed_once.exists()
+    assert not lock.exists()
+
+
 def test_stop_fails_closed_when_live_lock_outlasts_retry_budget(tmp_path):
     repo = _repo(tmp_path)
     state = repo / ".mycelium"
