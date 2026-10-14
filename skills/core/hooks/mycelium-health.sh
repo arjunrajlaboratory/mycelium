@@ -247,9 +247,11 @@ fi
 # A stamp file's first whitespace-delimited token on line 1 is the stamp; any
 # later tokens or lines are labels. Agents have written the label on its own
 # line, so reading every line would turn a valid stamp into garbage. A CRLF
-# line ending is not part of the stamp.
+# line ending is not part of the stamp. An unreadable file yields an empty
+# token, which stamp_due_reason reports; awk's failure status must not reach
+# `set -e` through a bare assignment and abort SessionStart.
 first_stamp_token() {
-  awk 'NR == 1 { sub(/\r$/, ""); print $1; exit }' "$1" 2>/dev/null
+  awk 'NR == 1 { sub(/\r$/, ""); print $1; exit }' "$1" 2>/dev/null || true
 }
 
 # Set STAMP_DUE_REASON to why a job stamped at epoch $1 is due, or to "" when
@@ -283,7 +285,7 @@ if [ ! -d "$KNOWLEDGE_DIR" ]; then
 elif [ -f "$KNOWLEDGE_DIR/.last-audit" ]; then
   stamp_due_reason "$(first_stamp_token "$KNOWLEDGE_DIR/.last-audit")" "since last"
   if [ -n "$STAMP_DUE_REASON" ]; then
-    MESSAGES="${MESSAGES}KNOWLEDGE AUDIT DUE (${STAMP_DUE_REASON}): Dispatch a background capable subagent (max_turns: 15) to run the knowledge audit. Tasks: (1) BACKFILL PROMOTIONS — scan last ~14 days of entries in every .living/learnings.md under this tree (use tail -120, never full files); for each transferable learning (pattern applies beyond single project — async, API, debugging, test, env, etc.) that is NOT already present in the matching ~/.mycelium/knowledge/{domain}.md file (grep for the learning's exact title — entries promoted inline will contain the same title), printf >> the entry as: ### Title (use the EXACT title from the learning entry) + **What**/**Evidence** (cite source project + date)/**When useful**/**Scope**/**Status: unreviewed**/**Last validated: YYYY-MM-DD**/**Promoted**: backfill by mycelium. (2) STALENESS — review existing entries in domain files; flag any with Last validated >90d old. (3) INDEX — if ~/.mycelium/knowledge/INDEX.md exists, regenerate it with current per-domain entry counts. (4) TIMESTAMP — overwrite ~/.mycelium/knowledge/.last-audit with exactly one line by running: printf '%s daily-audit\\n' \"\$(date +%s)\" > ~/.mycelium/knowledge/.last-audit. Report single-line summary of promotions added. Do this silently alongside your current task.\n\n"
+    MESSAGES="${MESSAGES}KNOWLEDGE AUDIT DUE (${STAMP_DUE_REASON}): Dispatch a background capable subagent (max_turns: 15) to run the knowledge audit. Tasks: (1) BACKFILL PROMOTIONS — scan last ~14 days of entries in every .living/learnings.md under this tree (use tail -120, never full files); for each transferable learning (pattern applies beyond single project — async, API, debugging, test, env, etc.) that is NOT already present in the matching ${KNOWLEDGE_DIR}/{domain}.md file (grep for the learning's exact title — entries promoted inline will contain the same title), printf >> the entry as: ### Title (use the EXACT title from the learning entry) + **What**/**Evidence** (cite source project + date)/**When useful**/**Scope**/**Status: unreviewed**/**Last validated: YYYY-MM-DD**/**Promoted**: backfill by mycelium. (2) STALENESS — review existing entries in domain files; flag any with Last validated >90d old. (3) INDEX — if ${KNOWLEDGE_DIR}/INDEX.md exists, regenerate it with current per-domain entry counts. (4) TIMESTAMP — overwrite ${KNOWLEDGE_DIR}/.last-audit with exactly one line by running: printf '%s daily-audit\\n' \"\$(date +%s)\" > \"${KNOWLEDGE_DIR}/.last-audit\". Report single-line summary of promotions added. Do this silently alongside your current task.\n\n"
   fi
 else
   echo "$(date +%s) auto-initialized" > "$KNOWLEDGE_DIR/.last-audit"

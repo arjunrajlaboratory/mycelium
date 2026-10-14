@@ -89,7 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stated (`timestamp unreadable` / `timestamp is in the future`) instead of a
   computed epoch-0 age; previously a future stamp suppressed audits
   indefinitely. The audit directive now gives a one-line `printf` command for
-  rewriting the stamp. The knowledge-transfer `.last-run` check gets the same
+  rewriting the stamp, and names the knowledge directory the hook actually
+  reads (honoring `MYCELIUM_KNOWLEDGE_DIR`) instead of `~/.mycelium/knowledge`.
+  An unreadable stamp file is reported as due rather than aborting SessionStart. The knowledge-transfer `.last-run` check gets the same
   treatment and now parses its `...Z` stamp as UTC, where it was read as local
   time (a 26h-old run read as 18h on US Pacific time), and rejects impossible
   dates such as `2026-02-31` on macOS as it already did on Linux.

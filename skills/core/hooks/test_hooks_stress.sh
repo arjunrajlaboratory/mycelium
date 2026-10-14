@@ -868,7 +868,7 @@ echo "TEST 28: Fresh SessionStart clears recent reminder/activity leftovers"
 }
 
 # ---------------------------------------------------------------------------
-# Knowledge-audit and knowledge-transfer timestamp parsing (29-37)
+# Knowledge-audit and knowledge-transfer timestamp parsing (29-38)
 # ---------------------------------------------------------------------------
 
 # Run the health hook with HOME pointed at a temporary directory so the global
@@ -940,6 +940,9 @@ echo "TEST 31: Old one-line .last-audit → audit due with a real age"
   printf '%s daily-audit\n' "$(( $(date +%s) - 48 * 3600 ))" > "$LAST_AUDIT"
   run_health_hook_fake_home
   assert_audit due "48h-old .last-audit reports a 48h age" "AUDIT DUE (48h since last)"
+  # The directive must rewrite the stamp the hook actually reads.
+  assert_audit due "Audit directive rewrites the stamp in the resolved knowledge dir" \
+    "> \\\"$FAKE_HOME/.mycelium/knowledge/.last-audit\\\""
   cleanup_fake_home; cleanup_test_env
 }
 
@@ -1042,6 +1045,31 @@ echo "TEST 37: 26h-old UTC .last-run → transfer due regardless of local timezo
   else
     fail ".last-run age depends on local timezone" "$detail"
   fi
+  cleanup_fake_home; cleanup_test_env
+}
+
+echo ""
+echo "TEST 38: Unreadable stamp files → hook still succeeds and reports them as due"
+{
+  setup_test_env; setup_fake_home; make_meta_project
+  printf '%s\n' "$(( $(date +%s) - 3600 ))" > "$LAST_AUDIT"
+  printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LAST_RUN"
+  chmod 000 "$LAST_AUDIT" "$LAST_RUN"
+  if [ -r "$LAST_RUN" ]; then
+    # Running as root: permission bits do not make the file unreadable.
+    pass "Unreadable stamp case skipped (files remain readable as this user)"
+  else
+    run_health_hook_fake_home
+    if [ "$HH_EXIT" -eq 0 ] \
+      && echo "$HH_OUTPUT" | grep -qF "KNOWLEDGE AUDIT DUE (timestamp unreadable)" \
+      && echo "$HH_OUTPUT" | grep -qF "KNOWLEDGE TRANSFER DUE (timestamp unreadable)"; then
+      pass "Unreadable .last-audit and .last-run are due, and SessionStart still emits"
+    else
+      fail "Unreadable stamp files broke SessionStart" \
+        "exit=$HH_EXIT output=$(echo "$HH_OUTPUT" | head -c 200)"
+    fi
+  fi
+  chmod 644 "$LAST_AUDIT" "$LAST_RUN"
   cleanup_fake_home; cleanup_test_env
 }
 
