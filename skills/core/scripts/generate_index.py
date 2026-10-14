@@ -15,6 +15,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import markdown_fences as fences
 from mycelium_locks import atomic_write_text, durable_path_lock
 
 # ---------------------------------------------------------------------------
@@ -52,7 +53,10 @@ def count_headers_and_topics(path: Path, file_type: str) -> tuple[int, list[str]
     raw_headers: list[str] = []
 
     with path.open(encoding="utf-8", errors="replace") as fh:
-        for line in fh:
+        for line, fenced in fences.mark_fenced(fh):
+            # A heading inside a code fence is an illustrative example.
+            if fenced:
+                continue
             line = line.rstrip()
             if header_prefix:
                 if line.startswith(header_prefix):
@@ -69,6 +73,15 @@ def count_headers_and_topics(path: Path, file_type: str) -> tuple[int, list[str]
 
     keywords = _extract_keywords(raw_headers[:5])
     return count, keywords
+
+
+def count_finding_headings(content: str) -> int:
+    """Count ``## F-`` finding headings that sit outside code fences."""
+    return sum(
+        1
+        for line, fenced in fences.mark_fenced(content.splitlines())
+        if not fenced and line.startswith("## F-")
+    )
 
 
 # The bracketed forms `_extract_keywords` strips are *prefixes*: a date stamp and
@@ -249,10 +262,7 @@ def generate_index(living_dir: Path) -> str:
                 topic_files, key=lambda f: f.stat().st_mtime, reverse=True
             ):
                 content = tf.read_text(encoding="utf-8", errors="replace")
-                finding_count = len(
-                    [line for line in content.splitlines() if line.startswith("## F-")]
-                )
-                total_findings += finding_count
+                total_findings += count_finding_headings(content)
                 topic_names.append(tf.stem)
 
             topic_summary = ", ".join(topic_names[:5])
@@ -373,9 +383,7 @@ def _collect_rows(living_dir: Path) -> list[tuple[str, str, str, str]]:
                 topic_files, key=lambda f: f.stat().st_mtime, reverse=True
             ):
                 content = tf.read_text(encoding="utf-8", errors="replace")
-                total_findings += len(
-                    [ln for ln in content.splitlines() if ln.startswith("## F-")]
-                )
+                total_findings += count_finding_headings(content)
                 topic_names.append(tf.stem)
             topic_summary = ", ".join(topic_names[:5])
             if len(topic_names) > 5:
@@ -549,7 +557,10 @@ def collect_entries(path: Path, file_type: str, prefix: str) -> list[dict]:
     current: dict | None = None
 
     with path.open(encoding="utf-8", errors="replace") as fh:
-        for line_no, raw in enumerate(fh, start=1):
+        for line_no, (raw, fenced) in enumerate(fences.mark_fenced(fh), start=1):
+            # Headings and Tags lines inside a code fence are examples.
+            if fenced:
+                continue
             line = raw.rstrip()
             if line.startswith(header_prefix):
                 if current is not None:
@@ -808,9 +819,9 @@ def extract_entry_snippets(path: Path, file_type: str) -> list[tuple[str, str]]:
             entries.append((current_header, first_content or ""))
 
     with path.open(encoding="utf-8", errors="replace") as fh:
-        for raw_line in fh:
+        for raw_line, fenced in fences.mark_fenced(fh):
             line = raw_line.rstrip()
-            if line.startswith(header_prefix):
+            if not fenced and line.startswith(header_prefix):
                 _flush()
                 current_header = line[len(header_prefix) :].strip()
                 first_content = None
