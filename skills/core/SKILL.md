@@ -260,7 +260,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 **Purpose**: Settle which past decision binds the current task when the append-only decision log holds several entries on the same choice. The newest entry never wins by recency alone.
 
 **Steps**:
-1. Follow `skills/core/references/decision-status.md`: retrieve only the entries the task touches, then resolve each decision point by explicit supersession, then scope match, and treat anything else as contested.
+1. Follow `skills/core/references/decision-status.md`: retrieve only the entries the task touches, then resolve each decision point by explicit supersession, then scope match, then compatible entries (a `rejected`, `shelved`, or `held` entry about a different option leaves the active choice binding), and treat anything else as contested.
 2. Ask the user about contested points only — one question per message, at most three per session — quoting the competing entries by date and exact heading.
 3. After the user confirms, append a `Resolution:` entry with `**Supersedes**:` and `**Resolved-by**:` lines. Never edit an existing entry.
 

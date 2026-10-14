@@ -49,7 +49,7 @@ fields. Older entries predate them; read those by their text.
 
 - Name the decision points the task depends on (for example batch correction,
   the DE model, a cohort filter).
-- Rules 1–3 below need the whole thread, so fetch it with the lookups below.
+- Rules 1–4 below need the whole thread, so fetch it with the lookups below.
   Pass both flags to every lookup:
   - `--max 0`: without it, `recall_lessons.py` keeps only the 20 newest
     matches, which can drop the oldest entry or the start of a supersession
@@ -115,7 +115,17 @@ For each decision point, apply the first rule that fits:
    an entry that also has a `**Status**:` line or a `**Resolved-by**:` line.
    Older entries sometimes use "Scope" for something else, such as what a fix
    covered.
-3. **Contested.** If neither rule settles it, the thread is contested. Status
+3. **Compatible entries.** Entries on the same question do not conflict when
+   they agree on what binds. Suppose one `active` or `provisional` entry
+   chooses option A, and every other entry left after rules 1–2 is
+   `rejected`, `shelved`, or `held` about a different option B. Ruling out or
+   setting aside B is consistent with choosing A, so the entry choosing A
+   binds. They conflict, and the thread falls to rule 4, in either of these
+   cases:
+   - a later entry rejects, shelves, or holds the chosen option itself, or
+     pauses the whole choice;
+   - two entries are `active` for different options.
+4. **Contested.** If no rule settles it, the thread is contested. Status
    words are not interchangeable: `held`, `shelved`, `rejected`, and a
    superseded entry each leave different options open.
 
@@ -126,7 +136,7 @@ until the log or the user says so.
 
 - Ask only about a decision point that the task touches and that falls into one
   of these cases:
-  - two or more entries are still unresolved after rules 1–2;
+  - two or more entries are still unresolved after rules 1–3;
   - a premise an entry names has changed (new data, or a
     `**Revisit when**:` condition that now holds).
 - Ask one question per message, most consequential first. Quote the competing
@@ -175,7 +185,8 @@ End with a short table with one row per touched decision point. Give:
 
 - the decision point;
 - the binding entry (date, exact heading, line), or `contested`;
-- the rule that settled it (`supersedes`, `scope`, `user`, or `contested`);
+- the rule that settled it (`supersedes`, `scope`, `compatible`, `user`, or
+  `contested`);
 - what it means for the task.
 
 Below the table, list any entry you wrote and any contested point carried

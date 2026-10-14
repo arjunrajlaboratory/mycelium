@@ -163,6 +163,7 @@ def test_reference_states_the_resolution_rules() -> None:
     for phrase in (
         "Explicit supersession",
         "Scope match",
+        "Compatible entries",
         "Contested",
         "never wins by recency alone",
         "date and exact heading",
@@ -284,3 +285,39 @@ def test_reference_orders_threads_by_file_position() -> None:
     flat = _flat(REFERENCE)
     assert "Work through each thread oldest first" not in flat
     assert "file order" in flat and "`D-N`" in flat
+
+
+# ---------------------------------------------------------------------------
+# Compatible entries are not contested (Codex review on #105, 68113de)
+# ---------------------------------------------------------------------------
+
+
+def _rules_section() -> str:
+    text = _text(REFERENCE)
+    return text.split("## 2. Resolve by rule", 1)[1].split("\n## ", 1)[0]
+
+
+def test_compatible_entries_resolve_before_the_contested_fallback() -> None:
+    """Rejecting or shelving option B leaves an active choice of A binding."""
+    rules = re.findall(r"^(\d)\. \*\*([^*]+)\.\*\*", _rules_section(), re.M)
+    assert [name for _, name in rules] == [
+        "Explicit supersession",
+        "Scope match",
+        "Compatible entries",
+        "Contested",
+    ]
+    compatible = " ".join(_rules_section().split("**Compatible entries.**", 1)[1]
+                          .split("**Contested.**", 1)[0].split())
+    for status in ("`rejected`", "`shelved`", "`held`"):
+        assert status in compatible, status
+    # The live-test case stays contested: a pause on the chosen option itself.
+    assert "chosen option itself" in compatible
+
+
+def test_every_rule_reference_counts_four_rules() -> None:
+    flat = _flat(REFERENCE)
+    assert "Rules 1–4" in flat and "rules 1–3;" in flat
+    assert "Rules 1–3 below" not in flat and "rules 1–2;" not in flat
+    assert "`compatible`" in flat  # the report's rule column
+    core = _flat(CORE_SKILL)
+    assert "compatible" in core.split("## Mode: `decision-status`", 1)[1].split("## Mode:", 1)[0]

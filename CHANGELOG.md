@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never edited to mark them replaced. A new `decision-status` mode in core,
   with its rules in `skills/core/references/decision-status.md`, settles which
   of several entries on one choice binds a task. Explicit supersession wins,
-  then a matching scope; anything else is contested and goes to the user, at
+  then a matching scope. Next, entries that agree bind together: a
+  `rejected`, `shelved`, or `held` entry about a different option leaves the
+  active choice binding. Anything else is contested and goes to the user, at
   most three questions per session. The newest entry never wins by recency
   alone. A confirmed answer is appended as a `Resolution:` entry. Core's
   post-action step, the post-action directive, and the `decisions.md` header
@@ -39,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and by `--term`.
   - It also runs a third lookup for relationship wording ("supersedes the
     entry above") that names no title.
-  - Together these mean rules 1–3 see the whole thread.
+  - Together these mean the resolution rules see the whole thread.
 
 ## [0.9.0] - 2026-10-14
 
