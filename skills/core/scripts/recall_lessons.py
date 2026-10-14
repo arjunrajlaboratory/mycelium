@@ -26,6 +26,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR))
 
 import generate_index as gi  # noqa: E402
+import markdown_fences as fences  # noqa: E402
 
 
 def _slice_entry_text(path: Path, header_prefix: str, header_line_no: int) -> str:
@@ -33,10 +34,12 @@ def _slice_entry_text(path: Path, header_prefix: str, header_line_no: int) -> st
     not including the next header line or EOF."""
     lines: list[str] = []
     with path.open(encoding="utf-8", errors="replace") as fh:
-        for n, raw in enumerate(fh, start=1):
+        # Track fences from the top of the file: a heading inside a fenced
+        # example belongs to the entry rather than ending it.
+        for n, (raw, fenced) in enumerate(fences.mark_fenced(fh), start=1):
             if n < header_line_no:
                 continue
-            if n > header_line_no and raw.startswith(header_prefix):
+            if n > header_line_no and not fenced and raw.startswith(header_prefix):
                 break
             lines.append(raw.rstrip("\n"))
     # Trim trailing blanks

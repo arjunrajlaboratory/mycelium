@@ -8,6 +8,7 @@ Python 3.11+, stdlib only.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator
@@ -23,6 +24,13 @@ from graph_model import (
     StageSource,
     sha256_hash,
 )
+
+# markdown_fences lives one directory up, beside the core scripts.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+import markdown_fences as fences  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -140,8 +148,8 @@ def _clean_title(heading_text: str) -> str:
 
 def _parse_tags(body_lines: list[str]) -> list[str]:
     """Extract tags from a Tags:/``**Tags**:`` line if present."""
-    for line in body_lines:
-        m = _TAGS_LINE_RE.match(line.strip())
+    for line, fenced in fences.mark_fenced(body_lines):
+        m = None if fenced else _TAGS_LINE_RE.match(line.strip())
         if m:
             raw = m.group(1)
             tags = [t.strip().strip("*").strip() for t in re.split(r"[,;]", raw)]
@@ -373,9 +381,10 @@ def _parse_aggregate_sections(
             "line_end": end_line,
         }
 
-    for lineno, raw in enumerate(lines, start=1):
+    for lineno, (raw, fenced) in enumerate(fences.mark_fenced(lines), start=1):
         line = raw.rstrip("\n")
-        m = _HEADING_RE.match(line)
+        # A heading inside a code fence is an example and stays in the body.
+        m = None if fenced else _HEADING_RE.match(line)
         if m:
             heading_text = m.group(2).strip()
             if _is_entry_signature(heading_text):
@@ -439,8 +448,8 @@ def _parse_whole_file(
 
     # Find first heading
     heading_text = fpath.stem
-    for l in stripped[body_start:]:
-        m = _HEADING_RE.match(l)
+    for l, fenced in fences.mark_fenced(stripped[body_start:]):
+        m = None if fenced else _HEADING_RE.match(l)
         if m:
             heading_text = m.group(2).strip()
             break
@@ -506,8 +515,10 @@ def _parse_conventions(
                 }
             )
 
-        for lineno, line in enumerate(stripped, start=1):
-            m = _HEADING_RE.match(line)
+        for lineno, (line, fenced) in enumerate(
+            fences.mark_fenced(stripped), start=1
+        ):
+            m = None if fenced else _HEADING_RE.match(line)
             if m and len(m.group(1)) == level:
                 flush(lineno - 1)
                 current_heading = m.group(2).strip()

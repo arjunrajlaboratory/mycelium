@@ -437,6 +437,11 @@ hook, filesystem, or lifecycle boundaries.
       final report rather than draft prose.
 - [ ] The review-report validator ignores headings, finding-like text, and
       tables inside fenced Markdown code blocks.
+- [ ] Every `.living` entry parser (INDEX.md counts, SessionStart summary,
+      `collect_entries` IDs and tags, `detect_recurrence`, `recall_lessons`
+      slicing, knowledge-map extraction) skips lines that
+      `markdown_fences.mark_fenced` marks as fenced, matching
+      `validate_structure`.
 - [ ] Tally parsing is bounded to the `## Finding tally` section and ignores
       unrelated tables in later appendices.
 - [ ] All required category rows are validated, including zero-finding
@@ -476,6 +481,7 @@ exercise them.
 | Registry summary contains `|`, or the registry/lineage helper fails | Table cells remain valid; helper failure blocks Stop and preserves retry state without duplicate finalization. |
 | Registry finalization fails, then SessionStart resumes or compacts before Stop retries | The same unfinalized log and session ID remain active; the retry produces one final log and registry row. |
 | A review report contains category headings, `F99`, or tally rows inside a fenced evidence block | Fenced examples are ignored; live finding IDs and tallies still validate exactly. |
+| `learnings.md`, `decisions.md`, `conventions.md`, or a findings topic documents its own heading format inside a ``` or `~~~` fence | INDEX.md, the SessionStart summary, entry IDs, recurrence clusters, recall text, and knowledge-map entries count only the live headings; an entry's text runs past its fenced example. |
 | A required review category has no findings but claims a nonzero tally, or a later appendix has another four-column table | The false zero-category tally is rejected and the appendix table is ignored. |
 | The host has fewer subagent slots than review specialists | Specialists run in waves; capacity errors are retried or completed in-line, and all applicable axes appear exactly once. |
 | Interpreter or script paths concatenate quoted, bare, and escaped shell-word components | Python, R, and Jupyter reminders and lineage use the single decoded argv value. |

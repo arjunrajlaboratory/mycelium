@@ -629,6 +629,31 @@ echo "TEST 21: Entry counts correct in MYCELIUM SUMMARY (3 learnings, 2 decision
   cleanup_test_env
 }
 
+# ── TEST 21b: Fenced example headings are not counted in MYCELIUM SUMMARY ────
+echo ""
+echo "TEST 21b: Headings inside code fences are excluded from MYCELIUM SUMMARY counts"
+{
+  setup_test_env
+  # Each file holds one real entry plus a fenced example of the entry format.
+  printf '# Learnings\n\n### [2026-10-01] L1\n```markdown\n### [2026-10-03] Example\n```\n\n### [2026-10-02] L2\n' \
+    > "$TEST_DIR/.living/learnings.md"
+  printf '# Decisions\n\n### [2026-10-01] D1\n~~~\n### [2026-10-03] Example\n~~~\n' \
+    > "$TEST_DIR/.living/decisions.md"
+  printf '# Conventions\n\n## C1\n```\n## Example convention\n```\n' \
+    > "$TEST_DIR/.living/conventions.md"
+
+  HH_OUTPUT=$(cd "$TEST_DIR" && printf '%s' "$(health_json)" | bash "$HEALTH_HOOK" 2>/dev/null)
+
+  if echo "$HH_OUTPUT" | grep -q "2 learnings, 1 decisions, 1 conventions"; then
+    pass "MYCELIUM SUMMARY ignores fenced example headings"
+  else
+    SUMMARY_LINE=$(echo "$HH_OUTPUT" | grep -o "MYCELIUM SUMMARY[^\\\\]*" | head -1 || echo "not found")
+    fail "Count string '2 learnings, 1 decisions, 1 conventions' not found" \
+      "summary_fragment=$SUMMARY_LINE"
+  fi
+  cleanup_test_env
+}
+
 # ── TEST 22: QUICK REFERENCE-only INDEX is upgraded and injected
 echo ""
 echo "TEST 22: QUICK REFERENCE-only INDEX is upgraded with a KNOWLEDGE MAP"

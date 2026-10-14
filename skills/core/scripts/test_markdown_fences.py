@@ -167,3 +167,33 @@ def test_container_fence_round_trips() -> None:
 
 def test_no_lines_reports_nothing() -> None:
     assert fences.unclosed_fence_line([]) is None
+
+
+# ---------------------------------------------------------------------------
+# mark_fenced — per-line fence membership for structure parsers
+# ---------------------------------------------------------------------------
+
+
+def test_mark_fenced_marks_opener_content_and_closer() -> None:
+    lines = ["### real\n", "```md\n", "### example\n", "```\n", "### after\n"]
+    assert list(fences.mark_fenced(lines)) == [
+        ("### real\n", False),
+        ("```md\n", True),
+        ("### example\n", True),
+        ("```\n", True),
+        ("### after\n", False),
+    ]
+
+
+def test_mark_fenced_closes_on_crlf_closer() -> None:
+    lines = ["```\r\n", "### example\r\n", "```\r\n", "### after\r\n"]
+    assert [fenced for _, fenced in fences.mark_fenced(lines)] == [
+        True, True, True, False,
+    ]
+
+
+def test_mark_fenced_unclosed_fence_runs_to_end() -> None:
+    lines = ["### real", "~~~", "### example", "### still fenced"]
+    assert [fenced for _, fenced in fences.mark_fenced(lines)] == [
+        False, True, True, True,
+    ]
