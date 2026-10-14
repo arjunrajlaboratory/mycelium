@@ -335,6 +335,15 @@ Accumulate -> Crystallize -> Transfer -> Contribute
 
 This is how the ecosystem improves: individual projects learn, patterns are extracted, knowledge flows across projects, and the community benefits.
 
+## Companion Projects
+
+- **[mycelium-extra](https://github.com/mdmanurung/mycelium-extra)** by Mikhael Manurung. Use it to approve an analysis plan before it runs and to check the runs against that plan afterwards, enforced by hooks. Mycelium's own hooks record work and remind you to log it, but they never block a run. mycelium-extra adds:
+  - a planning skill (`grill`) that produces a sourced plan;
+  - an approval gate that blocks covered scripts and commands until you approve the plan by its hash, and pins the input files the plan reads;
+  - a `verify` skill that checks the record of what ran against the approved plan.
+
+  It works in Claude Code and Codex, alongside Mycelium or in an ordinary repository. Mycelium's `harden` skill and data contract check were adapted from it. See its [documentation](https://mdmanurung.github.io/mycelium-extra/).
+
 ## Repository Structure
 
 - **[`skills/`](skills/)** — Shared Claude/Codex skills. `core/` is the orchestrator; the other folders provide dedicated workflows.
