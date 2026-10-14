@@ -96,7 +96,7 @@ No domain conventions installed yet. Install with mycelium's `install-convention
 7. **Validate structure**: Run `python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/validate_structure.py" --target-dir .`
 8. **Crystallize conventions**: Review recent learnings — if 3+ entries share a pattern, promote to `.living/conventions.md` or a named convention pack. Then, for each newly cited learning: Derive `mitigation_type` by the rule in `skills/core/templates/learning-entry.md`: `structural` if a shipped test, assertion, type constraint, frozenset, or schema validation enforces it; otherwise `convention` if a `.living/conventions.md` entry covers it; otherwise `ambient-awareness`.
 9. **Convention feedback**: Note whether convention pack practices were helpful or had gaps
-10. **Session summary**: Write the complete five-section handoff to the exact path supplied by the current lifecycle context. Identified roots use `.mycelium/run/<host>/<session-id>/last-session.md`; legacy identity-free hosts use `.mycelium/last-session.md`
+10. **Session summary**: Write the complete five-section handoff to the exact path supplied by the current lifecycle context. Identified roots use `.mycelium/run/<host>/<session-id>/last-session.md`; legacy identity-free hosts use `.mycelium/last-session.md`. Inside the five sections, end Key decisions with a `### Locked decisions` subsection (choices not to reopen without new evidence) and Blockers with a `### Dead ends — do not redo` subsection (abandoned approaches and why)
 
 ### Automated Enforcement
 
