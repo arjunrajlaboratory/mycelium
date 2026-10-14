@@ -3,10 +3,11 @@ name: core
 description: >
   Initialize and maintain Mycelium living repositories. Use when the user
   mentions Mycelium, living repos, crystallizing learnings or findings,
-  recording decisions, installing conventions, tracking todo ideas, migrating
-  an older Mycelium project, or managing the .living knowledge layer. Do not use
-  for report writing, generic refactoring, brainstorming, git initialization,
-  or ordinary folder organization.
+  recording decisions or settling which past decision still binds, installing
+  conventions, tracking todo ideas, migrating an older Mycelium project, or
+  managing the .living knowledge layer. Do not use for report writing, generic
+  refactoring, brainstorming, git initialization, or ordinary folder
+  organization.
 ---
 
 # Mycelium — Living Repository Skill (Core)
@@ -250,6 +251,19 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 
 ---
 
+## Mode: `decision-status`
+
+**Trigger**: "which decision is current", "what did we decide about X", "is this decision still binding"; or a task depends on a choice that has two or more `.living/decisions.md` entries
+
+**Purpose**: Settle which past decision binds the current task when the append-only decision log holds several entries on the same choice. The newest entry never wins by recency alone.
+
+**Steps**:
+1. Follow `skills/core/references/decision-status.md`: retrieve only the entries the task touches, then resolve each decision point by explicit supersession, then scope match, and treat anything else as contested.
+2. Ask the user about contested points only — one question per message, at most three per session — quoting the competing entries by date and exact heading.
+3. After the user confirms, append a `Resolution:` entry with `**Supersedes**:` and `**Resolved-by**:` lines. Never edit an existing entry.
+
+---
+
 ## Mode: `migrate`
 
 **Trigger**: "migrate this repo", "upgrade mycelium", "this is an old repo"
@@ -322,7 +336,7 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 
 1. **Update manifests**: Update the relevant manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, etc.) with new/changed entries.
 2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder with current status, key findings, open questions.
-3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md` using the decision log template.
+3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md` using the decision log template. Set `**Status**:`. If the choice replaces an earlier entry, name that entry in `**Supersedes**:` by date and exact heading title, never by a positional `D-N` ID; never edit the earlier entry. If entries on the choice disagree, settle them with the `decision-status` mode first.
 4. **Log learnings**: If something unexpected was learned (gotcha, edge case, failure), append to `.living/learnings.md` using the learning entry template. **Required field**: set `mitigation_type` to one of `structural | convention | ambient-awareness` (see template comments for definitions). Also fill `structural_mitigation_candidate` with the concrete test or invariant that would catch it. Derive `mitigation_type` by the rule in `skills/core/templates/learning-entry.md`: `structural` if a shipped test, assertion, type constraint, frozenset, or schema validation enforces it; otherwise `convention` if a `.living/conventions.md` entry covers it; otherwise `ambient-awareness`. A candidate that has not shipped does not count; `$mycelium:harden` ships the test and then marks the entry `structural`. **Knowledge promotion**: If the learning is transferable (would help in any project), also append to the matching global domain file in `~/.mycelium/knowledge/{domain}.md` with `status: unreviewed`. Use the structured entry template with a `when_useful` trigger condition.
 5. **Log todos**: If future work is identified during the action, create detailed `todo/[item].md` files as needed and mutate `todo/TODO_REGISTRY.md` only through `skills/core/scripts/upsert_table_row.py` so concurrent rows are preserved.
 6. **Validate**: Run `skills/core/scripts/validate_structure.py` to confirm repo still conforms.

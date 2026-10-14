@@ -69,6 +69,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Contrast levels that split into groups sharing no batch now block, not
     only single isolated levels.
 
+- **Decision supersession fields.** The decision template
+  (`skills/core/templates/decision-log-entry.md`) adds `Status` (`active`,
+  `provisional`, `held`, `shelved`, `rejected`), `Supersedes`, `Scope`,
+  `Revisit when`, and `Resolved-by`. `Supersedes` cites earlier entries by date
+  and exact heading title, never by a positional `D-N` ID, and older entries are
+  never edited to mark them replaced. A new `decision-status` mode in core,
+  with its rules in `skills/core/references/decision-status.md`, settles which
+  of several entries on one choice binds a task. Explicit supersession wins,
+  then a matching scope; anything else is contested and goes to the user, at
+  most three questions per session. The newest entry never wins by recency
+  alone. A confirmed answer is appended as a `Resolution:` entry. Core's
+  post-action step, the post-action directive, and the `decisions.md` header
+  written by `init` now point at the fields. Existing logs need no migration:
+  an entry without `Status` reads as `unknown`. Adapted from
+  [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
+  Manurung (MIT, issue #91).
+
 ### Fixed
 
 - **One registry row per session.** The post-action directive asked the agent
