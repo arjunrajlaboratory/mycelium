@@ -893,6 +893,212 @@ echo "TEST 28: Fresh SessionStart clears recent reminder/activity leftovers"
 }
 
 # ---------------------------------------------------------------------------
+# Knowledge-audit and knowledge-transfer timestamp parsing (29-38)
+# ---------------------------------------------------------------------------
+
+# Run the health hook with HOME pointed at a temporary directory so the global
+# knowledge dir under test is $FAKE_HOME/.mycelium/knowledge, never the real one.
+# An optional TZ argument sets the hook's local timezone. The `|| HH_EXIT=$?`
+# keeps `set -e` from aborting the suite when the hook itself fails.
+run_health_hook_fake_home() {
+  local tz="${1:-${TZ:-}}"
+  HH_EXIT=0
+  HH_OUTPUT=$(cd "$TEST_DIR" && printf '%s' "$(health_json)" \
+    | env -u MYCELIUM_KNOWLEDGE_DIR HOME="$FAKE_HOME" ${tz:+TZ="$tz"} \
+      bash "$HEALTH_HOOK" 2>/dev/null) || HH_EXIT=$?
+}
+
+setup_fake_home() {
+  FAKE_HOME=$(mktemp -d)
+  mkdir -p "$FAKE_HOME/.mycelium/knowledge"
+  LAST_AUDIT="$FAKE_HOME/.mycelium/knowledge/.last-audit"
+}
+
+cleanup_fake_home() {
+  rm -rf "$FAKE_HOME"
+  unset FAKE_HOME LAST_AUDIT
+}
+
+# assert_audit <expect: due|not-due> <label> [required substring]
+assert_audit() {
+  local expect="$1" label="$2" needle="${3:-}"
+  local due=no
+  echo "$HH_OUTPUT" | grep -q "KNOWLEDGE AUDIT DUE" && due=yes
+  if [ "$expect" = not-due ] && [ "$due" = no ] && [ "$HH_EXIT" -eq 0 ]; then
+    pass "$label"
+  elif [ "$expect" = due ] && [ "$due" = yes ] && [ "$HH_EXIT" -eq 0 ] \
+    && ! echo "$HH_OUTPUT" | grep -qE "AUDIT DUE \([0-9]{5,}h" \
+    && { [ -z "$needle" ] || echo "$HH_OUTPUT" | grep -qF "$needle"; }; then
+    pass "$label"
+  else
+    fail "$label" "exit=$HH_EXIT output=$(echo "$HH_OUTPUT" | grep -o 'KNOWLEDGE AUDIT DUE[^:]*' || true)"
+  fi
+}
+
+echo ""
+echo "TEST 29: Recent two-line .last-audit (timestamp, then label) → audit not due"
+{
+  setup_test_env; setup_fake_home
+  printf '%s\ndaily-audit\n' "$(( $(date +%s) - 3600 ))" > "$LAST_AUDIT"
+  run_health_hook_fake_home
+  assert_audit not-due "Two-line recent .last-audit is parsed from line 1 only"
+  cleanup_fake_home; cleanup_test_env
+}
+
+echo ""
+echo "TEST 30: Recent one-line .last-audit → audit not due"
+{
+  setup_test_env; setup_fake_home
+  printf '%s daily-audit\n' "$(( $(date +%s) - 3600 ))" > "$LAST_AUDIT"
+  run_health_hook_fake_home
+  assert_audit not-due "Canonical one-line .last-audit is recent"
+  printf '%s\r\n' "$(( $(date +%s) - 3600 ))" > "$LAST_AUDIT"
+  run_health_hook_fake_home
+  assert_audit not-due "CRLF one-line .last-audit is recent"
+  cleanup_fake_home; cleanup_test_env
+}
+
+echo ""
+echo "TEST 31: Old one-line .last-audit → audit due with a real age"
+{
+  setup_test_env; setup_fake_home
+  printf '%s daily-audit\n' "$(( $(date +%s) - 48 * 3600 ))" > "$LAST_AUDIT"
+  run_health_hook_fake_home
+  assert_audit due "48h-old .last-audit reports a 48h age" "AUDIT DUE (48h since last)"
+  # The directive must rewrite the stamp the hook actually reads.
+  assert_audit due "Audit directive rewrites the stamp in the resolved knowledge dir" \
+    "> \\\"$FAKE_HOME/.mycelium/knowledge/.last-audit\\\""
+  cleanup_fake_home; cleanup_test_env
+}
+
+echo ""
+echo "TEST 32: Non-numeric .last-audit → audit due, reported as unreadable"
+{
+  setup_test_env; setup_fake_home
+  printf 'daily-audit 1791826296\n' > "$LAST_AUDIT"
+  run_health_hook_fake_home
+  assert_audit due "Non-numeric first token is unreadable, not epoch 0" "unreadable"
+  cleanup_fake_home; cleanup_test_env
+}
+
+echo ""
+echo "TEST 33: Future .last-audit timestamp → audit due, reported as in the future"
+{
+  setup_test_env; setup_fake_home
+  printf '%s daily-audit\n' "$(( $(date +%s) + 30 * 86400 ))" > "$LAST_AUDIT"
+  run_health_hook_fake_home
+  assert_audit due "Future timestamp cannot suppress audits indefinitely" "in the future"
+  cleanup_fake_home; cleanup_test_env
+}
+
+echo ""
+echo "TEST 34: Empty .last-audit → audit due, reported as unreadable"
+{
+  setup_test_env; setup_fake_home
+  : > "$LAST_AUDIT"
+  run_health_hook_fake_home
+  assert_audit due "Empty .last-audit is unreadable, not epoch 0" "unreadable"
+  cleanup_fake_home; cleanup_test_env
+}
+
+# Turn TEST_DIR into a meta-project (>=2 subprojects with .living/) so the
+# knowledge-transfer staleness check runs against its .last-run file.
+make_meta_project() {
+  mkdir -p "$TEST_DIR/sub-a/.living" "$TEST_DIR/sub-b/.living" \
+    "$TEST_DIR/.living/outputs/knowledge-transfers"
+  LAST_RUN="$TEST_DIR/.living/outputs/knowledge-transfers/.last-run"
+}
+
+echo ""
+echo "TEST 35: Recent .last-run (with a trailing extra line) → transfer not due"
+{
+  setup_test_env; setup_fake_home; make_meta_project
+  printf '%s\n' "$(( $(date +%s) - 3600 ))" > "$LAST_AUDIT"
+  printf '%s\nmanual-run\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LAST_RUN"
+  run_health_hook_fake_home
+  if [ "$HH_EXIT" -eq 0 ] && ! echo "$HH_OUTPUT" | grep -q "KNOWLEDGE TRANSFER DUE"; then
+    pass "Two-line recent .last-run is parsed from line 1 only, as UTC"
+  else
+    fail "Recent .last-run reported transfer due" \
+      "$(echo "$HH_OUTPUT" | grep -o 'KNOWLEDGE TRANSFER DUE[^:]*' || true)"
+  fi
+  cleanup_fake_home; cleanup_test_env
+}
+
+echo ""
+echo "TEST 36: Garbage and future .last-run → transfer due without an epoch-0 age"
+{
+  setup_test_env; setup_fake_home; make_meta_project
+  printf '%s\n' "$(( $(date +%s) - 3600 ))" > "$LAST_AUDIT"
+  ok=true; detail=""
+  for case in "not-a-date" "2026-02-31T00:00:00Z" "2026-10-12T25:61:00Z" \
+    "2099-01-01T00:00:00Z"; do
+    printf '%s\n' "$case" > "$LAST_RUN"
+    run_health_hook_fake_home
+    msg=$(echo "$HH_OUTPUT" | grep -o 'KNOWLEDGE TRANSFER DUE[^:]*' || true)
+    if [ "$HH_EXIT" -ne 0 ] || [ -z "$msg" ] \
+      || echo "$msg" | grep -qE "[0-9]{5,}h" \
+      || ! echo "$msg" | grep -qE "unreadable|in the future"; then
+      ok=false; detail="$detail [$case → exit=$HH_EXIT msg='$msg']"
+    fi
+  done
+  if [ "$ok" = true ]; then
+    pass "Invalid .last-run is due and says why"
+  else
+    fail "Invalid .last-run handling" "$detail"
+  fi
+  cleanup_fake_home; cleanup_test_env
+}
+
+echo ""
+echo "TEST 37: 26h-old UTC .last-run → transfer due regardless of local timezone"
+{
+  setup_test_env; setup_fake_home; make_meta_project
+  printf '%s\n' "$(( $(date +%s) - 3600 ))" > "$LAST_AUDIT"
+  printf '%s\n' "$(date -u -r "$(( $(date +%s) - 26 * 3600 ))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$(( $(date +%s) - 26 * 3600 ))" +%Y-%m-%dT%H:%M:%SZ)" > "$LAST_RUN"
+  ok=true; detail=""
+  for tz in UTC America/Los_Angeles Asia/Tokyo; do
+    run_health_hook_fake_home "$tz"
+    msg=$(echo "$HH_OUTPUT" | grep -o 'KNOWLEDGE TRANSFER DUE[^:]*' || true)
+    if [ "$HH_EXIT" -ne 0 ] || ! echo "$msg" | grep -qF "(26h since last run)"; then
+      ok=false; detail="$detail [TZ=$tz → msg='$msg']"
+    fi
+  done
+  if [ "$ok" = true ]; then
+    pass ".last-run 'Z' stamps are parsed as UTC"
+  else
+    fail ".last-run age depends on local timezone" "$detail"
+  fi
+  cleanup_fake_home; cleanup_test_env
+}
+
+echo ""
+echo "TEST 38: Unreadable stamp files → hook still succeeds and reports them as due"
+{
+  setup_test_env; setup_fake_home; make_meta_project
+  printf '%s\n' "$(( $(date +%s) - 3600 ))" > "$LAST_AUDIT"
+  printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LAST_RUN"
+  chmod 000 "$LAST_AUDIT" "$LAST_RUN"
+  if [ -r "$LAST_RUN" ]; then
+    # Running as root: permission bits do not make the file unreadable.
+    pass "Unreadable stamp case skipped (files remain readable as this user)"
+  else
+    run_health_hook_fake_home
+    if [ "$HH_EXIT" -eq 0 ] \
+      && echo "$HH_OUTPUT" | grep -qF "KNOWLEDGE AUDIT DUE (timestamp unreadable)" \
+      && echo "$HH_OUTPUT" | grep -qF "KNOWLEDGE TRANSFER DUE (timestamp unreadable)"; then
+      pass "Unreadable .last-audit and .last-run are due, and SessionStart still emits"
+    else
+      fail "Unreadable stamp files broke SessionStart" \
+        "exit=$HH_EXIT output=$(echo "$HH_OUTPUT" | head -c 200)"
+    fi
+  fi
+  chmod 644 "$LAST_AUDIT" "$LAST_RUN"
+  cleanup_fake_home; cleanup_test_env
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
