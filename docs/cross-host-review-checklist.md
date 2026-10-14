@@ -364,6 +364,9 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] A stale-lock reaper claims and revalidates the observed directory
       generation plus owner before deletion; it cannot remove a replacement
       owner's lock during the mkdir-to-owner publication window.
+- [ ] Staleness guards act only on timestamps actually read; an unreadable or
+      vanished lock mtime never counts as age, and a contender's transient
+      reap claim inside a lock cannot make the owner's release leave it behind.
 - [ ] `.mycelium`, `.living`, marker files, and output parents cannot redirect
       writes outside the project through symlinks.
 - [ ] Machine-local pointer refreshes reject existing links and use atomic
@@ -512,6 +515,7 @@ exercise them.
 | A review report is rendered from multiple specialist outputs | Same-root findings are deduplicated, IDs are globally consecutive, per-category/global tallies match the rendered headings, and cross-input schema/feature/label comparability was checked. |
 | An analysis composes existing data paths dynamically from `Path`, dictionaries, or loop variables | Unique filenames reachable from recognized I/O path arguments are recovered conservatively after execution; direction follows the call, while ambiguous or over-bound searches remain unresolved with an explicit warning. |
 | A recent lifecycle lock records an owner PID that has terminated | The next caller claims and revalidates that exact generation before recovering it; a recent ownerless lock is not mistaken for dead-owner proof, and a replacement owner's lock survives competing delayed reapers. |
+| A waiter stats the lock just after the prior owner's `rmdir`, or a delayed reaper's claim sits inside the lock when its owner releases | The missing mtime is not treated as age, so no claim lands in the successor's lock; release waits out any transient claim, leaving no ownerless lock for waiters to time out on and no dropped PostToolUse event. |
 | Jupyter receives `--show-config`, `--show-config-json`, or `--generate-config` before or after an apparent notebook, including after a shell redirection | No execution or lineage is attributed; terminal-looking text inside an ordinary option value, a redirection target, and an actual neighboring Jupyter command remain scoped correctly. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | A Claude or Codex hook config is valid JSON but has malformed event, group, handler, or command types | Initialization and migration reject it before changing guidance, runtime state, hooks, todo files, or the knowledge index. |

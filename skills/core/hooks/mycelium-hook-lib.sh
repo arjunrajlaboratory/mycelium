@@ -521,6 +521,10 @@ mycelium_refresh_work_cycle() {
   return 0
 }
 
+# Contenders claim reaping inside the lock directory itself; release must wait
+# for such a claim to drain before removing the directory.
+MYCELIUM_LOCK_REAP_CLAIM=".mycelium-reap.claim"
+
 mycelium_acquire_directory_lock() {
   local state_dir="$1"
   local lock_name="$2"
@@ -560,6 +564,10 @@ mycelium_acquire_directory_lock() {
     if [[ -L "$lock_dir" || ( -e "$lock_dir" && ! -d "$lock_dir" ) ]]; then
       return 1
     fi
+    # Capture the generation before observing its owner and age, so a claim
+    # cannot validate a successor against evidence gathered from its
+    # predecessor.
+    lock_inode_before=$(mycelium_file_inode "$lock_dir" 2>/dev/null || true)
     if [[ -f "$lock_dir/owner" && ! -L "$lock_dir/owner" ]]; then
       owner_record=$(cat "$lock_dir/owner" 2>/dev/null || true)
       read -r owner_pid owner_ts <<< "$owner_record" || true
@@ -580,11 +588,13 @@ mycelium_acquire_directory_lock() {
     # before deletion. Without that claim, two reapers can observe owner A as
     # dead, one can remove A's directory and let owner B acquire it, and the
     # delayed reaper can then delete B's newly created lock (an ABA race).
+    # An unreadable mtime (reported as 0) usually means the lock vanished
+    # between mkdir and stat, which is the next owner's publication window,
+    # so it never counts as age.
     if [[ "$owner_is_dead" == true ]] \
       || { [[ "$owner_is_live" != true && "$lock_mtime" =~ ^[0-9]+$ ]] \
-        && (( now_ts - lock_mtime > 300 )); }; then
-      lock_inode_before=$(mycelium_file_inode "$lock_dir" 2>/dev/null || true)
-      reap_claim="$lock_dir/.mycelium-reap.claim"
+        && (( lock_mtime > 0 && now_ts - lock_mtime > 300 )); }; then
+      reap_claim="$lock_dir/$MYCELIUM_LOCK_REAP_CLAIM"
       reap_allowed=false
       if [[ -n "$lock_inode_before" ]] \
         && mkdir "$reap_claim" 2>/dev/null; then
@@ -633,9 +643,26 @@ mycelium_acquire_directory_lock() {
 
 mycelium_release_directory_lock() {
   local lock_dir="$1"
+  local attempts=0
   if [[ -n "$lock_dir" && -d "$lock_dir" && ! -L "$lock_dir" ]]; then
-    rm -f "$lock_dir/owner"
-    rmdir "$lock_dir" 2>/dev/null || true
+    # A delayed reaper can hold its claim inside this lock while it revalidates.
+    # Keep the owner record until that claim drains: the reaper then sees a
+    # record other than the one it observed and withdraws, so it can never
+    # recover this lock and hand the path to a successor mid-release. Removing
+    # the directory with a claim still inside would fail and leave an
+    # ownerless, freshly modified lock that every waiter outwaits. A failed
+    # rmdir is retried even when no claim remains: one may have drained
+    # between the rmdir and any check of it.
+    while true; do
+      while [[ -d "$lock_dir/$MYCELIUM_LOCK_REAP_CLAIM" ]] \
+        && (( attempts++ < 200 )); do
+        sleep 0.05
+      done
+      rm -f "$lock_dir/owner"
+      if rmdir "$lock_dir" 2>/dev/null || (( attempts++ >= 200 )); then
+        break
+      fi
+    done
   fi
 }
 
