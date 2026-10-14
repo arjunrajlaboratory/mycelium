@@ -49,11 +49,27 @@ fields. Older entries predate them; read those by their text.
 
 - Name the decision points the task depends on (for example batch correction,
   the DE model, a cohort filter).
-- For each, find candidate tags in `.living/INDEX.md` (**By tag**) and fetch
-  the tagged entries with
-  `python3 skills/core/scripts/recall_lessons.py --living-dir .living --file decisions --tag <tag>`.
-- Many entries carry no tags, so also search headings for the method names:
-  `grep -n '^### .*<term>' .living/decisions.md`.
+- Rules 1–3 below need the whole thread, so fetch it with two lookups and
+  pass `--max 0` to both. Without it, `recall_lessons.py` keeps only the 20
+  newest matches, which can drop the oldest entry or the start of a
+  supersession chain.
+  - **By tag.** Find candidate tags in `.living/INDEX.md` (**By tag**), then:
+
+    ```bash
+    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --tag <tag>
+    ```
+
+  - **By text.** Many entries carry no tags, and a method may be named only in
+    an entry's body. Search the full entry text for the method names and
+    synonyms. Each `--term` is a case-insensitive literal, and repeated terms
+    match any of them:
+
+    ```bash
+    python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py" --living-dir .living --file decisions --max 0 --term <term> --term <synonym>
+    ```
+
+  Both print whole entries. Use `--count-only` first if a thread looks large.
+  For line numbers to cite, run `grep -n '^### ' .living/decisions.md`.
 - Read the body of every entry that could bind the task before resolving
   anything. A heading word such as "held" may be qualified in the body.
 - Work through each thread oldest first. `recall_lessons.py` prints newest

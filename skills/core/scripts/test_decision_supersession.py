@@ -186,3 +186,61 @@ def test_post_action_directive_names_the_template_and_supersedes() -> None:
     step = line.split("5. DECISIONS:", 1)[1].split("\\n", 1)[0]
     assert "skills/core/templates/decision-log-entry.md" in step
     assert "**Supersedes**" in step
+
+
+# ---------------------------------------------------------------------------
+# Retrieval returns the whole thread (Codex review on #105)
+# ---------------------------------------------------------------------------
+
+RECALL_ACCESSOR = (
+    'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/recall_lessons.py"'
+)
+
+
+def _recall_commands() -> list[str]:
+    return [
+        line.strip()
+        for line in _text(REFERENCE).splitlines()
+        if "recall_lessons.py" in line and "--living-dir" in line
+    ]
+
+
+def test_reference_fetches_threads_uncapped_from_the_project_root() -> None:
+    """Every recall command is runnable in a project and returns every match."""
+    commands = _recall_commands()
+    assert len(commands) >= 2
+    for command in commands:
+        assert command.startswith(RECALL_ACCESSOR), command
+        assert "--max 0" in command, command
+    assert any("--tag" in c for c in commands)
+    assert any("--term" in c for c in commands)
+
+
+def test_reference_has_no_heading_only_discovery() -> None:
+    """A heading grep misses an untagged entry named only in its body."""
+    assert "grep -n '^### .*" not in _text(REFERENCE)
+
+
+def test_reference_recall_commands_parse(tmp_path: Path) -> None:
+    """The documented flags are ones recall_lessons.py actually accepts."""
+    import subprocess
+    import sys
+
+    living = tmp_path / ".living"
+    living.mkdir()
+    (living / "decisions.md").write_text(
+        "# Decision Log\n\n### [2026-05-01] Model choice\n\n"
+        "**Decision**: Use limma-voom.\n",
+        encoding="utf-8",
+    )
+    script = CORE / "scripts" / "recall_lessons.py"
+    for command in _recall_commands():
+        args = command[len(RECALL_ACCESSOR) :].split()
+        args = [{"<tag>": "none", "<term>": "LIMMA", "<synonym>": "voom"}.get(a, a) for a in args]
+        args[args.index("--living-dir") + 1] = str(living)
+        result = subprocess.run(
+            [sys.executable, str(script), *args], capture_output=True, text=True
+        )
+        assert result.returncode in (0, 1), (command, result.stderr)
+        if "--term" in args:
+            assert "Model choice" in result.stdout

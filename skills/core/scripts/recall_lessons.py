@@ -2,14 +2,21 @@
 """Query .living/learnings.md and .living/decisions.md for matching entries.
 
 Cheap progressive-disclosure tool: instead of pulling whole files into
-context, fetch only the entries matching tag(s), ID(s), or a date cutoff.
+context, fetch only the entries matching tag(s), text term(s), ID(s), or a
+date cutoff.
 
 Usage:
-    recall_lessons.py --living-dir <path> [--tag X]... [--id L-42]... [--since YYYY-MM-DD] [--file learnings|decisions|all] [--max N]
+    recall_lessons.py --living-dir <path> [--tag X]... [--term X]... [--id L-42]... [--since YYYY-MM-DD] [--file learnings|decisions|all] [--max N]
 
 ANY-match semantics: if --tag is given multiple times, an entry matches
-if it carries ANY of the requested tags. --id and --since further filter
+if it carries ANY of the requested tags; likewise for --term, which matches
+a case-insensitive literal substring of the entry's full text (heading and
+body), so untagged entries are reachable. --id and --since further filter
 the result set.
+
+Results are newest first and capped at --max (default 20). A cut result says so
+on stderr; --max 0 returns every match, and --count-only always reports the
+uncapped total.
 
 Exit codes:
     0  matches found (or no filters supplied — prints all)
@@ -52,16 +59,19 @@ def recall(
     living_dir: Path,
     tags: list[str] | None = None,
     ids: list[str] | None = None,
+    terms: list[str] | None = None,
     since: str | None = None,
     file_filter: str = "all",
     max_results: int = 20,
 ) -> list[dict]:
     """Return matching entry records (with `text` field) per filter combination.
 
-    Filters compose AND-style across types but ANY-match within `tags`/`ids`.
+    Filters compose AND-style across types but ANY-match within
+    `tags`/`ids`/`terms`. ``max_results`` of 0 returns every match.
     """
     tags = tags or []
     ids = ids or []
+    term_set = [t.casefold() for t in terms or []]
     tag_set = {t.lower() for t in tags}
     id_set = set(ids)
 
@@ -90,6 +100,8 @@ def recall(
                 # Entries without dates are excluded when --since is requested
                 continue
             text = _slice_entry_text(path, header_prefix, e["line_no"])
+            if term_set and not any(t in text.casefold() for t in term_set):
+                continue
             matched.append(
                 {
                     "id": e["id"],
@@ -102,7 +114,7 @@ def recall(
             )
 
     matched.sort(key=lambda r: (r["date"] or "0000-00-00"), reverse=True)
-    return matched[:max_results]
+    return matched[:max_results] if max_results else matched
 
 
 def _format_match(record: dict) -> str:
@@ -124,6 +136,15 @@ def main() -> None:
         action="append",
         default=[],
         help="Match any entry carrying this tag. Repeatable.",
+    )
+    parser.add_argument(
+        "--term",
+        action="append",
+        default=[],
+        help=(
+            "Match any entry whose heading or body contains this text "
+            "(case-insensitive, literal). Repeatable."
+        ),
     )
     parser.add_argument(
         "--id",
@@ -148,7 +169,7 @@ def main() -> None:
         dest="max_results",
         type=int,
         default=20,
-        help="Maximum entries to return. Default: 20.",
+        help="Maximum entries to return, newest first; 0 returns all. Default: 20.",
     )
     parser.add_argument(
         "--count-only",
@@ -161,19 +182,31 @@ def main() -> None:
     living_dir: Path = args.living_dir.resolve()
     if not living_dir.is_dir():
         parser.error(f"--living-dir '{living_dir}' is not a directory.")
+    if args.max_results < 0:
+        parser.error("--max must be 0 (no limit) or a positive integer.")
 
-    matches = recall(
+    all_matches = recall(
         living_dir=living_dir,
         tags=args.tag,
         ids=args.id,
+        terms=args.term,
         since=args.since,
         file_filter=args.file,
-        max_results=args.max_results,
+        max_results=0,
     )
 
     if args.count_only:
-        print(f"{len(matches)} matches")
-        sys.exit(0 if matches else 1)
+        print(f"{len(all_matches)} matches")
+        sys.exit(0 if all_matches else 1)
+
+    matches = all_matches
+    if args.max_results and len(all_matches) > args.max_results:
+        matches = all_matches[: args.max_results]
+        print(
+            f"recall_lessons: showing {len(matches)} of {len(all_matches)} "
+            "matches, newest first; pass --max 0 for all.",
+            file=sys.stderr,
+        )
 
     if not matches:
         print("No matches.", file=sys.stderr)

@@ -86,6 +86,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
   Manurung (MIT, issue #91).
 
+- **`recall_lessons.py --term`, and no silent cap.** `--term <text>`
+  (repeatable) matches a case-insensitive literal in an entry's heading or
+  body, so untagged entries can be found. `--max 0` returns every match. When
+  the default cap of 20 cuts a result, a note on stderr says how many matches
+  were shown. `--count-only` now reports the uncapped total; it used to count
+  after the cap and so never reported more than 20. The decision-status
+  guide fetches a thread with `--max 0` by tag and by `--term`, so rules 1–3
+  see the whole thread.
+
 ### Fixed
 
 - **One registry row per session.** The post-action directive asked the agent
