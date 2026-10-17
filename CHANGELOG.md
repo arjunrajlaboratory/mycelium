@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The report skill draws competing hypotheses side by side.** The
+  `report-generator` pack (now version 0.5.2) asks for a schematic when a
+  section explains a complex concept, a multi-step analysis, or a choice
+  between competing hypotheses. For a test that discriminates between
+  explanations, one figure holds a panel per hypothesis, each with a sketch of
+  the mechanism and the data pattern it predicts, so the reader can see which
+  panel the result matches. The rule sits with the structured Results
+  "Discrimination" paragraph and the narrative "under the alternative"
+  sentence in the section guide, uses the HTML `data-sci-diagram` figure (or
+  TikZ or a registered vector schematic in TeX), and requires plain-word
+  hypothesis labels and no unregistered numbers in diagram text. The Phase 5
+  framing reviewer flags a section that weighs competing hypotheses without a
+  diagram or an explicit statement of what each predicts. The QC checklist's
+  structured-Results line now lists the Discrimination header it had omitted.
+  Refresh an installed pack with
+  `python skills/core/scripts/install_convention.py --name report-generator`.
+
 ## [0.9.1] - 2026-10-14
 
 ### Added

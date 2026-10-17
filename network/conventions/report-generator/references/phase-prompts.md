@@ -147,7 +147,12 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 > - Search for "confirmed", "verified", "established", "showed" used in a strong sense.
 > - For each, check whether the supporting evidence is a tested invariant across all relevant inputs, or one example. If one example, the prose must hedge ("for this one case"). Flag absent hedging.
 >
-> Return findings as a YAML list following the output contract above. Use `section: framing` on every finding. Use `severity: major` for standalone-test failures and missing-baseline findings; `severity: minor` for cross-document reference style, caveat-prominence questions of degree, and voice findings — except an archive-register or unparseable-jargon passage that reaches the abstract, which is `major` (the abstract is the most-read surface).
+> **Diagrams for competing hypotheses and complex concepts.**
+> - Flag a section that weighs competing hypotheses without an A/B diagram or an explicit statement of what each predicts. The fix is one figure with a panel per hypothesis, side by side, each showing a sketch of the mechanism and the data pattern it predicts (the shape of a curve, which estimate should be nonzero).
+> - For each such diagram, check that the hypotheses are labeled in plain words rather than "H1" / "H2" or a coined term, that every panel shows a prediction a reader could compare with the result, and that the prose reporting the result says which panel it matches.
+> - Flag a multi-step analysis or complex concept explained only in prose when a reader at the audience tier would have to hold several steps in mind at once; suggest a schematic. Flag a diagram that only decorates. Do not flag a missing diagram where a sentence is enough.
+>
+> Return findings as a YAML list following the output contract above. Use `section: framing` on every finding. Use `severity: major` for standalone-test failures and missing-baseline findings; `severity: minor` for cross-document reference style, caveat-prominence questions of degree, diagram findings, and voice findings — except an archive-register or unparseable-jargon passage that reaches the abstract, which is `major` (the abstract is the most-read surface), and a headline result that discriminates between hypotheses without saying what each predicts, which is `major`.
 
 ---
 

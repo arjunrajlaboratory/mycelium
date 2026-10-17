@@ -141,7 +141,8 @@ These checks verify the prose works for a skim reader and a careful reader simul
 
 - [ ] **Results section style** matches the Phase-0 choice (`policies.results_structure` in the manifest):
    - **Narrative** (DEFAULT): each result is prose with a self-explanatory subsection title that states the finding (caught by the Subsection title quality item above).
-   - **Structured**: each result carries explicit `\paragraph{Question}` / `\paragraph{Findings}` / `\paragraph{Interpretation}` headers consistently across the section.
+   - **Structured**: each result carries explicit `\paragraph{Question}` / `\paragraph{Discrimination}` / `\paragraph{Findings}` / `\paragraph{Interpretation}` headers consistently across the section.
+- [ ] **Competing hypotheses are drawn or spelled out.** A result that discriminates between explanations shows them side by side, one panel per hypothesis with a mechanism sketch and the data pattern it predicts, or states in words what each predicts; the prose says which panel the result matches. Hypotheses are labeled in plain words, diagrams explain rather than decorate, and diagram text holds no unregistered number.
 
 ### Conclusions discipline
 
