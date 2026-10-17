@@ -17,7 +17,7 @@ If the `Agent` tool is unavailable (e.g., the report skill is running from insid
 
 ---
 
-## Output contract (all three phases)
+## Output contract (all phases)
 
 Every finding has these fields:
 
@@ -270,6 +270,7 @@ The list above is permissive in scope but narrow in *kind*: you read the artifac
 > Hard limits on every replacement (a fix that breaks one is not a fix):
 > - Change wording only. Every number, value wrapper (`\SciVal{...}{...}`, `\SciText{...}{...}`, `<span data-sci-val="...">`) and its text, figure, table, and section reference, citation, and quoted data example appears in the replacement exactly as in the original.
 > - Keep the claim's strength. Do not add, remove, strengthen, or weaken a hedge ("may", "suggests", "is consistent with") or a caveat. Collapse a hedging stack to one hedge, never to none. Leave a booster whose measured basis is in the same sentence.
+> - Add nothing. Do not add a fact, figure or table reference, measured basis, or example the original sentence does not carry; a tic you can fix only by adding content is not yours to fix.
 > - Keep technical terms. Repeating the same term is correct; do not introduce synonyms.
 > - For a slide title, the replacement is still one declarative sentence making the same single point.
 > - If the only way to remove a tic would break one of these limits, do not flag it.

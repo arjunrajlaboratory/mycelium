@@ -12,7 +12,7 @@ The pass edits wording only. A replacement keeps, exactly as they were:
 - canonical and defined terms, and quoted data examples;
 - for a slide title, its single point and its one-sentence shape.
 
-If removing a tic would change any of these, leave the sentence alone. A sentence that is wrong, not just mannered, goes back to Phase 2.
+The pass also never adds content: no new fact, figure reference, measured basis, or example that the sentence did not already carry. Every *After* below is built only from its *Before*. If removing a tic would change any of these, leave the sentence alone. A sentence that is wrong, not just mannered, goes back to Phase 2.
 
 ## 1. Stock intensifiers and signposting
 
@@ -32,7 +32,7 @@ Tells: "not just X, but Y", "not merely X; Y", "X isn't about A, it's about B", 
 - *Before:* "Rather than a simple filter, the score is a calibrated probability."
 - *After:* "The score is a calibrated probability."
 - *Before:* "The model does not just fit the data; it predicts the held-out replicate."
-- *After:* "The model also predicts the held-out replicate."
+- *After:* "The model fits the data and predicts the held-out replicate."
 
 Fine when X is a live alternative the reader could hold: "Growth slowed rather than stopped" reports what the data ruled out.
 
@@ -40,8 +40,8 @@ Fine when X is a live alternative the reader could hold: "Growth slowed rather t
 
 Tells: more than one dash pair in a paragraph; asides set off by dashes for drama; lists of three adjectives or clauses where the third was added for rhythm.
 
-- *Before:* "The method is fast, accurate, and scalable — a rare combination — and it runs on a laptop."
-- *After:* "The method runs on a laptop and recovers all six known clones."
+- *Before:* "The method is fast and accurate — a rare combination — and it runs on a laptop."
+- *After:* "The method is fast and accurate, and it runs on a laptop."
 
 Use a comma, parentheses, or a second sentence instead of a dash pair. Keep a three-item list when there are three real items.
 
@@ -49,19 +49,19 @@ Use a comma, parentheses, or a second sentence instead of a dash pair. Keep a th
 
 Tells: "underscores", "highlights the power of", "a testament to", "paves the way", "opens new avenues", "sheds light on", "lays the groundwork for", "plays a pivotal role", "in the landscape of"; "serves as", "stands as", "leverages", "utilizes", "facilitates" where "is", "uses", or "lets" would do.
 
-- *Before:* "These results underscore the power of evidence-first calling and pave the way for clone tracing at scale."
-- *After:* "Evidence-first calling recovered all six known clones; the next step is to run it on the full cohort."
+- *Before:* "Evidence-first calling recovered all six known clones (Figure 2). These results underscore the power of the approach and pave the way for clone tracing at scale."
+- *After:* "Evidence-first calling recovered all six known clones (Figure 2)." (The second sentence adds no claim the first does not make.)
 - *Before:* "The panel serves as a validation set."
-- *After:* "The panel is the validation set."
+- *After:* "The panel is a validation set."
 
 ## 5. Vague boosters
 
 Tells: "robust", "comprehensive", "novel", "key", "critical", "powerful", "rich", "significant" (outside statistical significance), with no measured basis in the sentence.
 
 - *Before:* "We present a novel, robust pipeline for comprehensive clone calling."
-- *After:* "We present a pipeline for clone calling whose calls barely change across random seeds (Figure S2)."
-- *Before:* "Coverage is a key driver of call quality."
-- *After:* "Call quality falls as coverage falls (Figure 3)."
+- *After:* "We present a pipeline for clone calling."
+- *Before:* "Coverage is a key driver of call quality (Figure 3)."
+- *After:* "Coverage drives call quality (Figure 3)."
 
 Fine when the measured basis is in the same sentence: "robust to the seed: calls agree across all ten seeds". "Significant" is reserved for a named statistical test. The pass may delete a booster with no basis; it may not add a basis the report does not already state.
 
@@ -70,7 +70,7 @@ Fine when the measured basis is in the same sentence: "robust to the seed: calls
 Tells: two or more hedges on one claim: "may potentially suggest", "could possibly indicate", "appears to perhaps", "might be somewhat consistent with".
 
 - *Before:* "These data may potentially suggest a possible role for IL6."
-- *After:* "These data may indicate a role for IL6."
+- *After:* "These data suggest a role for IL6."
 
 Collapse the stack to one hedge that matches the evidence. Never remove the last hedge: that changes the claim.
 
@@ -101,7 +101,7 @@ Tells: an idea or process as the grammatical subject where a concrete actor was 
 - *Before:* "The application of the coverage filter resulted in the removal of low-quality cells."
 - *After:* "The coverage filter removed low-quality cells."
 - *Before:* "This finding demonstrates that the clones are stable."
-- *After:* "The clones were stable across both time points."
+- *After:* "The clones are stable."
 
 This is the Phase 2 concrete-subjects rule, a general rule rather than an exact one: a concept subject is fine when the concept is the topic (a definition, a named hypothesis).
 
