@@ -58,12 +58,14 @@ Tells: "underscores", "highlights the power of", "a testament to", "paves the wa
 
 ## 5. Emphasis boosters
 
-Tells: "key", "critical", "crucial", "powerful", "rich", "vital", used as emphasis rather than as a claim.
+Tells: "rich", "powerful", "truly", "highly", "very", "extremely", used as emphasis that ranks nothing and measures nothing.
 
-- *Before:* "Coverage is a key driver of call quality (Figure 3)."
-- *After:* "Coverage drives call quality (Figure 3)."
+- *Before:* "This rich dataset holds 4,000 cells from three donors."
+- *After:* "This dataset holds 4,000 cells from three donors."
+- *Before:* "The calls were highly consistent across seeds (Figure S2)."
+- *After:* "The calls were consistent across seeds (Figure S2)."
 
-Leave alone: words that make a claim about scope, performance, or priority ("novel", "robust", "comprehensive", "significant"). Whether such a claim is supported may depend on evidence elsewhere in the report, and judging that is the Phase 5 and Phase 6 reviewers' job, not this pass's. The pass removes emphasis only; it never deletes a claim, and it never adds a basis the report does not already state.
+Leave alone: words that make a claim about scope, performance, or priority ("novel", "robust", "comprehensive", "significant", and ranking words such as "key", "primary", "critical", "major"). Whether such a claim is supported may depend on evidence elsewhere in the report, and judging that is the Phase 5 and Phase 6 reviewers' job, not this pass's. The pass removes emphasis only; it never deletes a claim, and it never adds a basis the report does not already state.
 
 ## 6. Hedging stacks
 
