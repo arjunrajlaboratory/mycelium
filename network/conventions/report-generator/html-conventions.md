@@ -97,9 +97,21 @@ Leave the region between the two `sci-media` marker comments empty; `sync_html_r
 
 Text inside a diagram **is** prose and is linted, so a diagram cannot smuggle an unregistered number. Any other inline `<svg>` outside a registered figure is flagged as unregistered media; an icon in a button or link must say so with `data-sci-icon` (the template's icons do). Draw with `currentColor` so it reads in both themes. Use a diagram when a picture explains a mechanism faster than a paragraph — not to decorate.
 
+For a test between competing hypotheses, draw one panel per hypothesis side by side in a single diagram, each with a sketch of the mechanism and the data pattern it predicts, and label the hypotheses in plain words (section guide, *Diagrams for complex concepts and competing hypotheses*):
+
+```html
+<figure class="sci-figure wide" id="fig-hypotheses" data-sci-diagram>
+  <div class="sci-media"><svg viewBox="0 0 640 220" role="img" aria-label="Two explanations for slower growth and what each predicts">
+    <g><text x="160" y="20" text-anchor="middle" fill="currentColor">Cells divide less often</text><!-- mechanism sketch, then predicted pattern --></g>
+    <g transform="translate(320 0)"><text x="160" y="20" text-anchor="middle" fill="currentColor">More cells die</text><!-- … --></g>
+  </svg></div>
+  <figcaption>Two explanations for slower growth. Left: fewer divisions, death rate unchanged. Right: more deaths, divisions unchanged.</figcaption>
+</figure>
+```
+
 **Cross-references.** Write `<a class="xref" href="#fig-volcano">Figure</a>`; the runtime numbers figures and tables at load ("Figure 2", "Figure S1", "Table 1"). Do not type figure numbers: they go stale when figures move, and the linter does not catch them (it skips "Figure 2" as a structural reference).
 
-**Structured Results style.** When the brief chose structured Results, use `<h4>Question</h4>`, `<h4>Discrimination</h4>`, `<h4>Findings</h4>`, `<h4>Interpretation</h4>` inside each result section in place of the TeX `\paragraph{…}` headers (the section guide's four; Discrimination — what each competing hypothesis predicts — is the load-bearing one).
+**Structured Results style.** When the brief chose structured Results, use `<h4>Question</h4>`, `<h4>Discrimination</h4>`, `<h4>Findings</h4>`, `<h4>Interpretation</h4>` inside each result section in place of the TeX `\paragraph{…}` headers (the section guide's four; Discrimination — what each competing hypothesis predicts — is the load-bearing one, and the side-by-side hypothesis diagram, when there is one, goes under it).
 
 **Tables** use `<table class="sci-table">` with a `<caption>`, inside `<div class="table-wrap">` (give the wrapper the id you cross-reference); right-align numeric columns with `class="num"`. Captions and figure captions get their "Table 2." / "Figure S1." labels from the runtime, which numbers the cross-references too — do not type the label. A hand-written table's value cells are prose and use value spans.
 
