@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the Phase 7 gate, a blind sub-agent reads the whole report against a
   new catalogue of mannered-prose and AI-writing tics
   (`references/prose-tics.md`: stock intensifiers, rhetorical reversals, dash
-  rhythm and cadence triplets, grand flourishes, vague boosters, hedging
+  rhythm and cadence triplets, grand flourishes, emphasis boosters, hedging
   stacks, throat-clearing and recap sentences, elegant variation,
   concept-as-subject nominalizations, and colon-headline sentences, each with
   before/after pairs) and returns replacement sentences. The pass edits

@@ -56,25 +56,23 @@ Tells: "underscores", "highlights the power of", "a testament to", "paves the wa
 - *Before:* "The panel serves as a validation set."
 - *After:* "The panel is a validation set."
 
-## 5. Vague boosters
+## 5. Emphasis boosters
 
-Tells: "robust", "comprehensive", "novel", "key", "critical", "powerful", "rich", "significant" (outside statistical significance), with no measured basis in the sentence.
+Tells: "key", "critical", "crucial", "powerful", "rich", "vital", used as emphasis rather than as a claim.
 
-- *Before:* "We present a novel, robust pipeline for comprehensive clone calling."
-- *After:* "We present a pipeline for clone calling."
 - *Before:* "Coverage is a key driver of call quality (Figure 3)."
 - *After:* "Coverage drives call quality (Figure 3)."
 
-Fine when the measured basis is in the same sentence: "robust to the seed: calls agree across all ten seeds". "Significant" is reserved for a named statistical test. The pass may delete a booster with no basis; it may not add a basis the report does not already state.
+Leave alone: words that make a claim about scope, performance, or priority ("novel", "robust", "comprehensive", "significant"). Whether such a claim is supported may depend on evidence elsewhere in the report, and judging that is the Phase 5 and Phase 6 reviewers' job, not this pass's. The pass removes emphasis only; it never deletes a claim, and it never adds a basis the report does not already state.
 
 ## 6. Hedging stacks
 
 Tells: two or more hedges on one claim: "may potentially suggest", "could possibly indicate", "appears to perhaps", "might be somewhat consistent with".
 
 - *Before:* "These data may potentially suggest a possible role for IL6."
-- *After:* "These data suggest a role for IL6."
+- *After:* "These data may suggest a role for IL6."
 
-Collapse the stack to one hedge that matches the evidence. Never remove the last hedge: that changes the claim.
+Drop the words that repeat a hedge already there ("potentially" repeats "may"; "possible" repeats "suggest"), and keep the modal and the hedging verb, so the claim is no more certain than before. When you cannot tell which words are repeats, leave the sentence alone. Never remove the last hedge: that changes the claim.
 
 ## 7. Throat-clearing openers and recap closers
 

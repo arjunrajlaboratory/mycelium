@@ -269,7 +269,7 @@ The list above is permissive in scope but narrow in *kind*: you read the artifac
 >
 > Hard limits on every replacement (a fix that breaks one is not a fix):
 > - Change wording only. Every number, value wrapper (`\SciVal{...}{...}`, `\SciText{...}{...}`, `<span data-sci-val="...">`) and its text, figure, table, and section reference, citation, and quoted data example appears in the replacement exactly as in the original.
-> - Keep the claim's strength. Do not strengthen or weaken a claim, and do not add or remove a caveat. A hedged claim stays hedged: collapse a hedging stack ("may potentially suggest") to the one hedge that carries the same strength ("suggests"), never to none; the redundant hedge words are what you remove. Leave a booster whose measured basis is in the same sentence.
+> - Keep the claim's strength. Do not strengthen or weaken a claim, and do not add or remove a caveat. A hedged claim stays hedged: in a hedging stack, remove only the words that repeat a hedge already there ("may potentially suggest a possible role" becomes "may suggest a role"), and leave the sentence alone when you cannot do that without making the claim more certain. Remove emphasis words ("key", "critical"), never a claim: leave "novel", "robust", "comprehensive", and "significant" for the reviewers who can check them.
 > - Add nothing. Do not add a fact, figure or table reference, measured basis, or example the original sentence does not carry; a tic you can fix only by adding content is not yours to fix.
 > - Keep technical terms. Repeating the same term is correct; do not introduce synonyms.
 > - For a slide title, the replacement is still one declarative sentence making the same single point.
