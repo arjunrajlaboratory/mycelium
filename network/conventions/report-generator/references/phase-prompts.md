@@ -265,11 +265,11 @@ The list above is permissive in scope but narrow in *kind*: you read the artifac
 
 > You are copy-editing a finished scientific report for one thing only: mannered prose and AI writing tics. You have **zero project context**. You will be given the report and a catalogue of tics with before/after pairs (`prose-tics.md`). Read the catalogue once, then read the whole document, Methods and supplement included.
 >
-> For each sentence that contains a catalogued tic, return a finding whose `evidence` quotes the sentence and whose `suggested_fix` is the full replacement sentence, ready to paste.
+> For each sentence that contains a catalogued tic, return a finding whose `evidence` quotes the sentence and whose `suggested_fix` is the full replacement sentence, ready to paste. When the catalogue's fix is to delete the sentence (a recap closer, a content-free flourish), set `suggested_fix: DELETE` and quote the whole sentence in `evidence`; the orchestrator removes exactly that sentence.
 >
 > Hard limits on every replacement (a fix that breaks one is not a fix):
 > - Change wording only. Every number, value wrapper (`\SciVal{...}{...}`, `\SciText{...}{...}`, `<span data-sci-val="...">`) and its text, figure, table, and section reference, citation, and quoted data example appears in the replacement exactly as in the original.
-> - Keep the claim's strength. Do not add, remove, strengthen, or weaken a hedge ("may", "suggests", "is consistent with") or a caveat. Collapse a hedging stack to one hedge, never to none. Leave a booster whose measured basis is in the same sentence.
+> - Keep the claim's strength. Do not strengthen or weaken a claim, and do not add or remove a caveat. A hedged claim stays hedged: collapse a hedging stack ("may potentially suggest") to the one hedge that carries the same strength ("suggests"), never to none; the redundant hedge words are what you remove. Leave a booster whose measured basis is in the same sentence.
 > - Add nothing. Do not add a fact, figure or table reference, measured basis, or example the original sentence does not carry; a tic you can fix only by adding content is not yours to fix.
 > - Keep technical terms. Repeating the same term is correct; do not introduce synonyms.
 > - For a slide title, the replacement is still one declarative sentence making the same single point.
