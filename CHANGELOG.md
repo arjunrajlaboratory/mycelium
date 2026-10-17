@@ -25,24 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token, or cross-reference before the gate runs. In the HTML format it runs
   again over the slide deck before the Phase 9d gate.
 
-### Added
-
-- **A final prose pass for every report.** The `report-generator` pack adds
-  Phase 6.5: after the Phase 4–6 reviewer patches and before the Phase 7 gate,
-  a blind sub-agent reads the whole report against a new catalogue of
-  mannered-prose and AI-writing tics (`references/prose-tics.md`: stock
-  intensifiers, rhetorical reversals, dash rhythm and cadence triplets, grand
-  flourishes, emphasis boosters, hedging stacks, throat-clearing and recap
-  sentences, elegant variation, concept-as-subject nominalizations, and
-  colon-headline sentences, each with before/after pairs) and returns
-  replacement sentences, or `DELETE` for a sentence with no content. The pass
-  edits wording only and adds nothing: numbers, value wrappers, references,
-  caveats, and claim strength are unchanged, words that make a claim
-  ("novel", "robust", "key") are left to the reviewers who can check them, and
-  the orchestrator reverts any edit that changes a value wrapper, numeric
-  token, or cross-reference before the gate runs. In the HTML format it runs
-  again over the slide deck before the Phase 9d gate.
-
 ### Changed
 
 - **The report skill builds exposition from examples to abstractions.** A new
