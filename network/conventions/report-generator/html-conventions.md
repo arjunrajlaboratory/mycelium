@@ -75,6 +75,8 @@ For <span data-sci-text="diff-expr.contrast_phrase">treated versus control</span
 
 Every `<figure>` declares what it is — scitexlintr's `unfingerprinted-figure` rejects an undeclared one.
 
+An aggregate figure follows a concrete example of the record its marks represent, and names that record in its caption (marking it in the figure too, where you can) (`analysis-conventions.md` Phase 2, *examples before abstractions*).
+
 **Registered analysis figure** (from `figures[*]`):
 
 ```html

@@ -9,22 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The report skill builds exposition from examples to abstractions.** A new
+  Phase 2 drafting rule in the `report-generator` pack: before an aggregate
+  figure or statistic is first presented in the body, show a concrete record
+  from the data, with its identifier, as a short worked-example table, and
+  name it in the figure's caption, so a reader knows what kind of record each
+  mark is. Abstractions build up from one example to a small labeled set, the
+  full distribution, and then any model or fit; the abstract and conclusions
+  are exempt. Each example is chosen by a stated, reproducible rule ("the
+  median cell", "the top three by degree", or a seeded draw that names its
+  population and sampler), registered as the manifest entry's
+  `selection_rule`, and never hand-picked to flatter the result. The Phase 3
+  worked-example gate checks the anchoring, the Phase 5 framing reviewer flags
+  any aggregate figure whose marks have no prior example, and the Phase 6
+  re-verify recomputes each `selection_rule` against the provenance file to
+  confirm it picks the registered record.
 - **The report skill draws competing hypotheses side by side.** The
-  `report-generator` pack (now version 0.5.2) asks for a schematic when a
-  section explains a complex concept, a multi-step analysis, or a choice
-  between competing hypotheses. For a test that discriminates between
-  explanations, one figure holds a panel per hypothesis, each with a sketch of
-  the mechanism and the data pattern it predicts, so the reader can see which
-  panel the result matches. The rule sits with the structured Results
-  "Discrimination" paragraph and the narrative "under the alternative"
-  sentence in the section guide, uses the HTML `data-sci-diagram` figure (or
-  TikZ or a registered vector schematic in TeX), and requires plain-word
-  hypothesis labels and no unregistered numbers in diagram text. The Phase 5
-  framing reviewer flags a section that weighs competing hypotheses without a
-  diagram or an explicit statement of what each predicts. The QC checklist's
-  structured-Results line now lists the Discrimination header it had omitted.
-  Refresh an installed pack with
-  `python skills/core/scripts/install_convention.py --name report-generator`.
+  `report-generator` pack asks for a schematic when a section explains a
+  complex concept, a multi-step analysis, or a choice between competing
+  hypotheses. For a test that discriminates between explanations, one figure
+  holds a panel per hypothesis, each with a sketch of the mechanism and the
+  data pattern it predicts, so the reader can see which panel the result
+  matches. The rule sits with the structured Results "Discrimination"
+  paragraph and the narrative "under the alternative" sentence in the section
+  guide, uses the HTML `data-sci-diagram` figure (or TikZ, or a schematic
+  exported as PDF and registered, in TeX), and requires plain-word hypothesis
+  labels and no unregistered numbers in diagram text. The Phase 5 framing
+  reviewer, which now receives exported schematic images, flags a section that
+  weighs competing hypotheses without a diagram or an explicit statement of
+  what each predicts. The QC checklist's structured-Results line now lists the
+  Discrimination header it had omitted.
+
+The `report-generator` pack is now version 0.5.2. Refresh an installed pack
+with `python skills/core/scripts/install_convention.py --name report-generator`.
 
 ## [0.9.1] - 2026-10-14
 

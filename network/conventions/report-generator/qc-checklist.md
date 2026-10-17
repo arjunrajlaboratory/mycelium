@@ -105,6 +105,7 @@ These checks verify the prose works for a skim reader and a careful reader simul
 - [ ] **Every new aggregation analysis type** in the draft has one worked example with raw inputs traced to the aggregate. The example is a small inline figure or sparkline-style mini-table where possible (Tufte sparklines are a strong reference shape).
 - [ ] **Failure-mode worked examples** (cases where the analysis breaks) live in the supplement / appendix.
 - [ ] **No aggregate claim** rests on a single example without hedging.
+- [ ] **Every aggregate figure or statistic is anchored** by an earlier concrete example of the record its marks represent: quoted from the data with its identifier, named in the caption (or, for a prose-only statistic, in the surrounding text), and chosen by a stated rule (a seeded draw that names its population and sampler, "the median cell", "the top three by degree") registered as `selection_rule` and recomputed in Phase 6, never hand-picked. This applies at the first full presentation in the body; abstract, dek, and conclusion restatements are exempt. Abstractions build up from example to small labeled set to full distribution to model or fit. *Failure mode: a degree distribution shown to a reader who has never seen what one node and its neighbors look like.*
 
 ### Worked-example provenance
 

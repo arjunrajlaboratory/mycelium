@@ -148,12 +148,19 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 > - Search for "confirmed", "verified", "established", "showed" used in a strong sense.
 > - For each, check whether the supporting evidence is a tested invariant across all relevant inputs, or one example. If one example, the prose must hedge ("for this one case"). Flag absent hedging.
 >
+> **Examples before abstractions.**
+> - For every aggregate figure or summary statistic in the main text (a distribution, a rate, a fitted curve, an enrichment ratio), at its first full presentation in the body, check that an earlier passage showed at least one concrete record of the kind its marks represent, quoted from the data with its identifier, and that the caption names that record. For a statistic reported only in prose, with no figure or table, the example named in the same or the preceding paragraph is enough. You cannot see the figure image, so a mark that exists only inside the image does not count.
+> - Do not flag the abstract, dek, or conclusions for restating a headline number before its anchor: they summarize the body and need no anchor of their own.
+> - Flag any aggregate figure whose marks have not been anchored by a prior concrete example. Also flag an example whose selection rule (a seed, "the median", "the top three by X") is not stated next to it: without a rule, the reader cannot tell whether it was hand-picked to flatter the result.
+> - The order is example, then a small labeled set, then the full distribution, then any model or fit. Flag a fitted curve or model that appears before the reader has seen the data it fits.
+> - A supplement table or sensitivity sweep needs no anchor of its own when the main text already anchored the same kind of record.
+>
 > **Diagrams for competing hypotheses and complex concepts.**
 > - Flag a section that weighs competing hypotheses without an A/B diagram or an explicit statement of what each predicts. The fix is one figure with a panel per hypothesis, side by side, each showing a sketch of the mechanism and the data pattern it predicts (the shape of a curve, which estimate should be nonzero).
 > - For each such diagram, read it from the source (TikZ, inline SVG) or from the schematic image you were given, and check that the hypotheses are labeled in plain words rather than "H1" / "H2" or a coined term, that every panel shows a prediction a reader could compare with the result, and that the prose reporting the result says which panel it matches.
 > - Flag a multi-step analysis or complex concept explained only in prose when a reader at the audience tier would have to hold several steps in mind at once; suggest a schematic. Flag a diagram that only decorates. Do not flag a missing diagram where a sentence is enough.
 >
-> Return findings as a YAML list following the output contract above. Use `section: framing` on every finding. Use `severity: major` for standalone-test failures and missing-baseline findings; `severity: minor` for cross-document reference style, caveat-prominence questions of degree, diagram findings, and voice findings — except an archive-register or unparseable-jargon passage that reaches the abstract, which is `major` (the abstract is the most-read surface), and a headline result that discriminates between hypotheses without saying what each predicts, which is `major`.
+> Return findings as a YAML list following the output contract above. Use `section: framing` on every finding. Use `severity: major` for standalone-test failures and missing-baseline findings; `severity: minor` for cross-document reference style, caveat-prominence questions of degree, unanchored aggregate figures, diagram findings, and voice findings — except an archive-register or unparseable-jargon passage that reaches the abstract, which is `major` (the abstract is the most-read surface), an unanchored figure that carries the headline finding, which is `major`, and a headline result that discriminates between hypotheses without saying what each predicts, which is `major`.
 
 ---
 
@@ -215,6 +222,8 @@ The list above is permissive in scope but narrow in *kind*: you read the artifac
 >   - **No matching entry**: flag as **unsourced worked example** (severity: major). The table values are not registered with provenance, which means they may be confabulated.
 >   - **Matching entry exists**: verify every row in the rendered table equals the corresponding row in `manifest.worked_examples[*].rows[*]` — same `snp_id` / `role`, same `N`, same `Y`, same `alt_fraction`, same `covered` and `supports_target` flags. Any mismatch is a **fabricated worked-example value** (severity: major).
 >   - Verify the rendered aggregate (typically a fraction-of-supported-SNPs and a call) equals `manifest.worked_examples[*].aggregate`. Mismatch is major.
+> - If the table anchors an aggregate figure or statistic that follows it (Phase 2, *examples before abstractions*) and the entry has no `selection_rule`, flag an **unruled example** (severity: major): without a rule there is no way to tell it from a hand-picked record.
+> - When the entry has a `selection_rule`, recompute it against the provenance file (the column, statistic or ordering, seed, and tie-break it names) and confirm it selects the entry's `subject_id`. A different subject is a **misattributed example** (severity: major): the record is real, but it is not the one the stated rule picks. A rule too vague to recompute is a minor finding.
 > - This check exists because worked-example tables pass the visual sniff test and the Phase-3 presence gate even when the row values are invented. The manifest is the only thing that distinguishes a real trace from a plausible-looking confabulation.
 >
 > *Provenance-section completeness.*
