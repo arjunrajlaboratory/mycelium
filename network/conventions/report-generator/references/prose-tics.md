@@ -58,12 +58,12 @@ Tells: "underscores", "highlights the power of", "a testament to", "paves the wa
 
 ## 5. Emphasis boosters
 
-Tells: "rich", "powerful", "truly", used as emphasis that ranks nothing and measures nothing.
+Tells: "rich", "truly", "genuinely", used as emphasis that ranks nothing and measures nothing.
 
 - *Before:* "This rich dataset holds 4,000 cells from three donors."
 - *After:* "This dataset holds 4,000 cells from three donors."
 
-Leave alone: words that make a claim about scope, performance, or priority ("novel", "robust", "comprehensive", "significant", ranking words such as "key", "primary", "critical", "major", and degree words such as "highly" or "very"). Whether such a claim is supported may depend on evidence elsewhere in the report, and judging that is the Phase 5 and Phase 6 reviewers' job, not this pass's. The pass removes emphasis only; it never deletes a claim, and it never adds a basis the report does not already state.
+Leave alone: words that make a claim about scope, performance, or priority ("novel", "robust", "comprehensive", "powerful", "significant", ranking words such as "key", "primary", "critical", "major", and degree words such as "highly" or "very"). Whether such a claim is supported may depend on evidence elsewhere in the report, and judging that is the Phase 5 and Phase 6 reviewers' job, not this pass's. The pass removes emphasis only; it never deletes a claim, and it never adds a basis the report does not already state.
 
 ## 6. Hedging stacks
 
