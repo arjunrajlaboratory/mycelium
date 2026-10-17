@@ -173,7 +173,7 @@ python skills/core/scripts/sync_html_report.py [name]-report.html --manifest .ma
 ```
  Tell each reviewer to read only `<main>` — the text inside `<div id="deck">` is the slide deck, which Phase 9 reviews separately. In Phase 6, the "compiled PDF" input is the rendered page: give the reviewer the `.html` path and, when a browser is available, screenshots of each figure. Display-faithfulness checks compare each span's text to the manifest value through `unit` / `precision` / `display_html`, which scitexlintr already enforces; the reviewer's job there is the label next to the span.
 
-The Phase 6.5 final prose pass reads the same reviewer copy (`<main>` only) after the Phase 4–6 patches. Apply its edits to the report, not the copy.
+The Phase 6.5 final prose pass reads a reviewer copy too, but not the one the Phase 4–6 reviewers read: that copy predates their patches. Regenerate it with the same command once the Phase 4–6 patches have converged, and give the pass `<main>` only. The deck pass before 9d likewise reads a copy regenerated after 9c. Apply the edits to the report, not the copy.
 
 ---
 

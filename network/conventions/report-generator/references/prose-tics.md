@@ -49,8 +49,10 @@ Use a comma, parentheses, or a second sentence instead of a dash pair. Keep a th
 
 Tells: "underscores", "highlights the power of", "a testament to", "paves the way", "opens new avenues", "sheds light on", "lays the groundwork for", "plays a pivotal role", "in the landscape of"; "serves as", "stands as", "leverages", "utilizes", "facilitates" where "is", "uses", or "lets" would do.
 
-- *Before:* "Evidence-first calling recovered all six known clones (Figure 2). These results underscore the power of the approach and pave the way for clone tracing at scale."
-- *After:* "Evidence-first calling recovered all six known clones (Figure 2)." (The second sentence adds no claim the first does not make.)
+- *Before:* "Evidence-first calling recovered all six known clones (Figure 2), a testament to the power of the approach."
+- *After:* "Evidence-first calling recovered all six known clones (Figure 2)." (The flourish adds no claim.)
+- *Before:* "These results pave the way for clone tracing at scale."
+- *After:* "These results suggest the method could trace clones at scale." (The flourish goes; the claim about scale, and its forward-looking hedge, stay.)
 - *Before:* "The panel serves as a validation set."
 - *After:* "The panel is a validation set."
 

@@ -9,7 +9,7 @@ Each phase produces findings that flow back to Phase 2 (draft patches). Loop unt
 - **Phase 4:** "per page" budgets mean per ~500 words of main text. Captions include the runtime's "Figure N." label, which is not an acronym.
 - **Phase 5:** the skim surfaces are the masthead title and dek, the abstract, section headings, and figure captions.
 - **Phase 6:** there is no `build/report_values.tex` — scitexlintr already verifies every span's rendered text against `value` through `unit` / `precision` / `display_html`, so the display-faithfulness check reduces to "does a free-text `display_html` state a number that contradicts `value`". In place of `\includegraphics` paths, check each `figures[*].path` and `data[*].path` listed in the manifest (the Phase 6 input list below allows these wherever they live). A data block's `data-sha256` is the hash of that source file, not of the inlined payload. Registered tables (`data-sci-table`) are generated from their CSV; verify the caption and header describe the columns, not each cell. "The compiled PDF" is the rendered page — screenshots of each figure when a browser is available.
-- **Phase 6.5:** the report pass reads the reviewer copy's `<main>`; the deck pass (before Phase 9d) reads only the `<div id="deck">`. Apply the edits to the report, not the copy.
+- **Phase 6.5:** regenerate the reviewer copy first (after the Phase 4–6 patches for the report pass, after Phase 9c for the deck pass), so the pass never reads pre-patch prose. The report pass reads the copy's `<main>`; the deck pass reads only the `<div id="deck">`. Apply the edits to the report, not the copy.
 
 Phase 9 below applies to the HTML format only.
 
