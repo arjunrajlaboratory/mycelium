@@ -1,6 +1,6 @@
 # Phase prompts — sub-agent reviewers for report generation
 
-This file contains the full prompts dispatched to the sub-agents in Phases 4, 5, and 6 of the report-generator flow, plus the Phase 9 storyline reviewer for the HTML format's slide deck. Each prompt is designed to be **self-contained**: the sub-agent reads the draft `.tex` files and the named inputs only, with no inherited context from the parent session. That blind-read is the missing ingredient in self-declared consistency checks.
+This file contains the full prompts dispatched to the sub-agents in Phases 4, 5, and 6 of the report-generator flow and the Phase 6.5 final prose pass, plus the Phase 9 storyline reviewer for the HTML format's slide deck. Each prompt is designed to be **self-contained**: the sub-agent reads the draft `.tex` files and the named inputs only, with no inherited context from the parent session. That blind-read is the missing ingredient in self-declared consistency checks.
 
 Each phase produces findings that flow back to Phase 2 (draft patches). Loop until the sub-agent returns no findings.
 
@@ -9,6 +9,7 @@ Each phase produces findings that flow back to Phase 2 (draft patches). Loop unt
 - **Phase 4:** "per page" budgets mean per ~500 words of main text. Captions include the runtime's "Figure N." label, which is not an acronym.
 - **Phase 5:** the skim surfaces are the masthead title and dek, the abstract, section headings, and figure captions.
 - **Phase 6:** there is no `build/report_values.tex` — scitexlintr already verifies every span's rendered text against `value` through `unit` / `precision` / `display_html`, so the display-faithfulness check reduces to "does a free-text `display_html` state a number that contradicts `value`". In place of `\includegraphics` paths, check each `figures[*].path` and `data[*].path` listed in the manifest (the Phase 6 input list below allows these wherever they live). A data block's `data-sha256` is the hash of that source file, not of the inlined payload. Registered tables (`data-sci-table`) are generated from their CSV; verify the caption and header describe the columns, not each cell. "The compiled PDF" is the rendered page — screenshots of each figure when a browser is available.
+- **Phase 6.5:** regenerate the reviewer copy first (after the Phase 4–6 patches for the report pass, after Phase 9c for the deck pass), so the pass never reads pre-patch prose. The report pass reads the copy's `<main>`; the deck pass reads only the `<div id="deck">`. Apply the edits to the report, not the copy.
 
 Phase 9 below applies to the HTML format only.
 
@@ -16,7 +17,7 @@ If the `Agent` tool is unavailable (e.g., the report skill is running from insid
 
 ---
 
-## Output contract (all three phases)
+## Output contract (all phases)
 
 Every finding has these fields:
 
@@ -264,6 +265,37 @@ The list above is permissive in scope but narrow in *kind*: you read the artifac
 
 ---
 
+## Phase 6.5 — Final prose pass
+
+**Inputs to load:**
+
+- Every `.tex` source that contributes to the report, supplement included (the orchestrator passes the complete list). For the HTML deck pass, the deck only.
+- `references/prose-tics.md`, resolved relative to the convention pack root (the orchestrator passes the absolute path).
+
+**Do NOT load:**
+
+- The manifest, the planning brief, the memory cheatsheet, the analysis directory, `.living/`, the section guide, or earlier reviewer outputs. The pass judges wording and needs nothing else.
+
+**Prompt:**
+
+> You are copy-editing a finished scientific report for one thing only: mannered prose and AI writing tics. You have **zero project context**. You will be given the report and a catalogue of tics with before/after pairs (`prose-tics.md`). Read the catalogue once, then read the whole document, Methods and supplement included.
+>
+> For each sentence that contains a catalogued tic, return a finding whose `evidence` quotes the sentence and whose `suggested_fix` is the full replacement sentence, ready to paste. When the catalogue's fix is to delete the sentence (a recap closer, a content-free flourish), set `suggested_fix: DELETE` and quote the whole sentence in `evidence`; the orchestrator removes exactly that sentence.
+>
+> Hard limits on every replacement (a fix that breaks one is not a fix):
+> - Change wording only. Every number, value wrapper (`\SciVal{...}{...}`, `\SciText{...}{...}`, `<span data-sci-val="...">`) and its text, figure, table, and section reference, citation, and quoted data example appears in the replacement exactly as in the original.
+> - Keep the claim's strength. Do not strengthen or weaken a claim, and do not add or remove a caveat. A hedged claim stays hedged: in a hedging stack, remove only the words that repeat a hedge already there ("may potentially suggest a possible role" becomes "may suggest a role"), and leave the sentence alone when you cannot do that without making the claim more certain. Remove emphasis words ("rich", "truly"), never a claim: leave "novel", "robust", "comprehensive", "significant", ranking words such as "key" or "critical", and degree words such as "highly" for the reviewers who can check them.
+> - Add nothing. Do not add a fact, figure or table reference, measured basis, or example the original sentence does not carry; a tic you can fix only by adding content is not yours to fix.
+> - Keep technical terms. Repeating the same term is correct; do not introduce synonyms.
+> - For a slide title, the replacement is still one declarative sentence making the same single point.
+> - If the only way to remove a tic would break one of these limits, do not flag it.
+>
+> Flag the tic, not a style you would have preferred: a plain sentence you would phrase differently is not a finding. Use `section: style` on every finding, and `severity: minor` unless the tic sits in the title, the abstract, a section heading, or a slide title, which is `major`.
+>
+> Return a YAML list following the output contract above. If you find no tics, return an empty list and one line saying what you read.
+
+---
+
 ## Phase 9 — Blind storyline review (HTML format)
 
 **Inputs to load:**
@@ -308,7 +340,7 @@ Each sub-agent phase loops:
 3. Re-run the same sub-agent.
 4. Repeat until the sub-agent returns no findings.
 
-In practice, two iterations is typical. Three or more iterations on the same sub-agent is a signal that the manifest (Phase 1) or the planning brief (Phase 0) needs revision — the draft is being patched against findings that should have been prevented upstream. Flag this in the compile log. The Phase 9 storyline review is the exception: a deck often needs three or four rounds of title edits, each fixing something real; what matters there is that the restatement converges on the brief (see Phase 9).
+The Phase 6.5 prose pass does not loop: it runs once, and Phase 7 follows. In practice, two iterations is typical for the reviewers. Three or more iterations on the same sub-agent is a signal that the manifest (Phase 1) or the planning brief (Phase 0) needs revision — the draft is being patched against findings that should have been prevented upstream. Flag this in the compile log. The Phase 9 storyline review is the exception: a deck often needs three or four rounds of title edits, each fixing something real; what matters there is that the restatement converges on the brief (see Phase 9).
 
 ---
 
@@ -316,5 +348,5 @@ In practice, two iterations is typical. Three or more iterations on the same sub
 
 - **Sub-agents must not know the planning brief, the memory cheatsheet, or the analysis directory.** The point of phase-4/5/6 is the blind read. Honor the input list above strictly.
 - **One sub-agent per phase, not one sub-agent per checklist item.** Combining the checks in one prompt keeps the context small and lets the sub-agent share work (e.g., the regex pass for numeric tokens in Phase 6 is one pass, not one per check).
-- **Output is YAML, not Markdown.** This matters because the parent flow programmatically applies the findings — Markdown free-text is error-prone to parse. The orchestrator persists each phase's output to `analysis/[name]/reports/.review-plain-english.yaml`, `.review-framing.yaml`, and `.review-numerical.yaml` respectively (HTML format: the same names with an `-html` suffix, plus Phase 9's `.review-storyline.yaml`). The sub-agent returns the YAML body; the orchestrator owns the file.
+- **Output is YAML, not Markdown.** This matters because the parent flow programmatically applies the findings — Markdown free-text is error-prone to parse. The orchestrator persists each phase's output to `analysis/[name]/reports/.review-plain-english.yaml`, `.review-framing.yaml`, and `.review-numerical.yaml` respectively, and the Phase 6.5 pass to `.review-prose.yaml` (HTML format: the same names with an `-html` suffix, plus the deck pass's `.review-prose-deck.yaml` and Phase 9's `.review-storyline.yaml`). The sub-agent returns the YAML body; the orchestrator owns the file.
 - **Sub-agents err on the side of NOT flagging.** Each prompt says so; treat that line as load-bearing. False positives waste the drafter's time. A finding with `confidence: low` is fine; an invented finding is not.

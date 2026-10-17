@@ -7,6 +7,7 @@ Read this when the Phase-0 planning brief chose `format: html`. The HTML format 
 | 1 — Manifest | as written | adds `data[*]` for interactive figures and `display_html` where a TeX `display` override exists |
 | 2 — Draft | `.tex` template, `\SciVal` / `\SciText` | `assets/report-template.html`, value spans, declared figures |
 | 4–6 — Reviewers | read the `.tex` | read the `.html` report (not the deck) |
+| 6.5 — Final prose pass | reads the `.tex` | reads the `.html` report; runs again over the deck before 9d |
 | 7 — Gate | render macros → scitexlintr → pdflatex | sync → scitexlintr `--write` → scitexlintr → check → browser render |
 | 9 — Slides | — | ghost deck → blind storyline review → slides → re-run the Phase 7 gate |
 
@@ -186,6 +187,8 @@ python skills/core/scripts/sync_html_report.py [name]-report.html --manifest .ma
 ```
  Tell each reviewer to read only `<main>` — the text inside `<div id="deck">` is the slide deck, which Phase 9 reviews separately. In Phase 6, the "compiled PDF" input is the rendered page: give the reviewer the `.html` path and, when a browser is available, screenshots of each figure. Display-faithfulness checks compare each span's text to the manifest value through `unit` / `precision` / `display_html`, which scitexlintr already enforces; the reviewer's job there is the label next to the span.
 
+The Phase 6.5 final prose pass reads a reviewer copy too, but not the one the Phase 4–6 reviewers read: that copy predates their patches. Regenerate it with the same command once the Phase 4–6 patches have converged, and give the pass `<main>` only. The deck pass before 9d likewise reads a copy regenerated after 9c. Apply the edits to the report, not the copy.
+
 ---
 
 ## Phase 7 — Gate (HTML)
@@ -243,7 +246,7 @@ The deck needs no extra work for navigation: → / Space / PageDown / click adva
 
 ### 9d. Gate
 
-Re-run Phase 7 steps 1–6, now without `--report-only`, and write the compile log last. `check_html_report.py` enforces the slide count, the title-slide position, one sentence-shaped `<h2>` per slide, resolvable `data-source` and `data-fig-ref` targets, and one figure per slide (errors), plus body length above 45 words and duplicate titles (warnings). Then check layout in a browser: `SciReport.checkLayout()` (in the page console, or `page.evaluate` in Playwright) must return `[]` — it opens every slide and lists the numbers of any whose content overflows the stage — and click through the deck once to confirm Esc returns to the right section.
+First run the Phase 6.5 final prose pass over the deck (slide titles and body text only; a title edit keeps the title's single point and sentence shape). Then re-run Phase 7 steps 1–6, now without `--report-only`, and write the compile log last. `check_html_report.py` enforces the slide count, the title-slide position, one sentence-shaped `<h2>` per slide, resolvable `data-source` and `data-fig-ref` targets, and one figure per slide (errors), plus body length above 45 words and duplicate titles (warnings). Then check layout in a browser: `SciReport.checkLayout()` (in the page console, or `page.evaluate` in Playwright) must return `[]` — it opens every slide and lists the numbers of any whose content overflows the stage — and click through the deck once to confirm Esc returns to the right section.
 
 ---
 
@@ -257,6 +260,7 @@ An analysis can carry both a TeX and an HTML edition, so the HTML run's per-edit
 | 0.75 | `analysis/[name]/reports/.section-outline-html.md` |
 | 2 | `analysis/[name]/reports/[name]-report.html` |
 | 4–6 | `.review-plain-english-html.yaml`, `.review-framing-html.yaml`, `.review-numerical-html.yaml` |
+| 6.5 | `.review-prose-html.yaml` (report), `.review-prose-deck.yaml` (deck, before 9d) |
 | 7 | `analysis/[name]/reports/.compile-log-html.md` |
 | 9a | `analysis/[name]/reports/.ghost-deck.md` |
 | 9b | `analysis/[name]/reports/.review-storyline.yaml` |
