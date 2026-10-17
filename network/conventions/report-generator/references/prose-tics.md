@@ -52,7 +52,7 @@ Tells: "underscores", "highlights the power of", "a testament to", "paves the wa
 - *Before:* "Evidence-first calling recovered all six known clones (Figure 2), a testament to the power of the approach."
 - *After:* "Evidence-first calling recovered all six known clones (Figure 2)." (The flourish adds no claim.)
 - *Before:* "These results pave the way for clone tracing at scale."
-- *After:* "These results suggest the method could trace clones at scale." (The flourish goes; the claim about scale, and its forward-looking hedge, stay.)
+- *After:* "These results support trying the method for clone tracing at scale." (The flourish goes; the claim about scale stays, no stronger than before.)
 - *Before:* "The panel serves as a validation set."
 - *After:* "The panel is a validation set."
 
