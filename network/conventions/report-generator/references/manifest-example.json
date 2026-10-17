@@ -285,6 +285,7 @@
       "subject_kind": "cell",
       "provenance": "outputs/tables/module_call_per_cell.csv:row=c_017",
       "computed_at": "scripts/06_module_call.R:L88",
+      "selection_rule": "median of target_support_fraction over high-support cells in outputs/tables/module_call_per_cell.csv; ties to the lowest cell_id",
       "appears_in_sections": ["results.headline"],
       "rows": [
         {"snp_id": "X17.76565019G>A",  "role": "seed",    "N": 5, "Y": 3, "alt_fraction": 0.60, "covered": true,  "supports_target": true},
