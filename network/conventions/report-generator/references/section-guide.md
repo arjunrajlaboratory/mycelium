@@ -156,7 +156,7 @@ Each result carries explicit paragraph headers in the LaTeX:
 
 ```latex
 \paragraph{Question.} What specific question is this result addressing?
-\paragraph{Discrimination.} What would you expect under competing hypotheses?
+\paragraph{Discrimination.} What would you expect under competing hypotheses? (Draw it; see below.)
 \paragraph{Findings.} The actual data — figures, tables, statistics.
 \paragraph{Interpretation.} What does this mean for the question?
 ```
@@ -168,6 +168,20 @@ The structured style pays a visual-heaviness tax — every result is four paragr
 ### Subsection title quality (both styles)
 
 Regardless of which style is chosen, every Results subsection title should state a finding. "Evidence-first cell calling" is a topic; "Evidence-first calling trades recall for precision in a transparent way" is a finding. The Phase 5 sub-agent flags topic-only titles in Results (Methods, Provenance, and References titles are allowed to be topics).
+
+### Diagrams for complex concepts and competing hypotheses
+
+When a section explains a complex concept, a multi-step analysis, or a choice between competing hypotheses, draw a schematic rather than relying on prose alone. A diagram explains a mechanism or a prediction. It is not decoration, and a section that needs neither does not get one.
+
+**Competing hypotheses go side by side.** For a test that discriminates between explanations, lay out one panel per hypothesis (A/B, or A/B/C) in a single figure. Each panel shows two things: a small sketch of the mechanism, and the pattern that mechanism predicts in the data, such as the expected shape of a curve, which estimate should be nonzero, or which group should differ. The reader then sees which panel the observed result matches. For example, "treated cultures grow more slowly" could mean that cells divide less often or that more cells die. Panel A sketches a longer cell cycle and predicts fewer divisions per hour with an unchanged death rate; panel B sketches dying cells and predicts a higher death rate with divisions unchanged. The result that follows says which panel it matches.
+
+This diagram is the content of the structured style's **Discrimination** paragraph, and of the "under the alternative we'd expect..." sentence in the narrative style. When no diagram fits, state in words what each hypothesis predicts.
+
+Rules:
+
+- Label each hypothesis in plain words ("Cells divide less often"), not "H1" / "H2" or a coined term, and use the same label in the diagram, its caption, and the prose that interprets the result.
+- Draw predictions qualitatively: a rising line, a flat line, a bar at zero. Text inside a diagram is prose, so it carries no unregistered number.
+- HTML: a `data-sci-diagram` figure in inline SVG drawn with `currentColor`, so it reads in both themes (`html-conventions.md`). TeX: TikZ in the source (add `\usepackage{tikz}` to the preamble; the templates do not load it), whose node labels follow the same rules as prose, or a schematic exported as PDF (pdflatex cannot include SVG) and registered in `manifest.figures[*]` with its `sha256` like any figure; the orchestrator passes the exported file to the Phase 5 reviewer, which otherwise sees only the `\includegraphics` line.
 
 **Figures and tables**:
 - **Use the figures the analysis produced.** Before writing a result, check `outputs/figures/` (and any figure directory the analysis uses) for a plot that shows it, and integrate that figure with `\includegraphics`, a self-contained caption, and a `\ref{}`. A well-chosen figure communicates a result faster than a paragraph; integrating figures well is the in-house style's clearest advantage, and this skill should match it rather than defaulting to a figure-free archive. Register every figure you include in `manifest.figures[*]` with its `sha256` (Phase 1) so Phase 6 can verify freshness. Shipping zero figures should be a deliberate choice for a genuinely figure-free analysis, not the default outcome.
@@ -349,6 +363,8 @@ Example pattern:
 ```
 
 **Failure modes** (cases where the analysis breaks) get worked examples too, but those live in the supplement / appendix. The main text shows one healthy example per analysis type; the supplement shows the contrasting failure case.
+
+**Examples before abstractions.** Every aggregate figure or statistic is preceded by a concrete example of what one of its marks is. Before a histogram of genes detected per cell, show the median cell: its identifier, its total reads, and a few of its detected genes, and name it in the caption while marking its bar in the histogram. Before a plot of what the largest clusters are made of, show the single largest cluster and one of its member cells. The build-up runs example, then a small labeled set (the five cells nearest the median, say), then the full distribution, then any model or fit. The order governs the body; the abstract and conclusions state the headline number without waiting for its example. Each example is quoted from the data as a short worked-example table, registered in the manifest, and chosen by a stated rule ("the median cell by total reads", "the top three by degree", or a seeded draw that names its population, sampler, and seed); write the rule next to the example and register it as the entry's `selection_rule`, which Phase 6 recomputes. An example picked because it looks good teaches the reader the wrong distribution.
 
 The Phase-3 worked-example gate also catches the inverse failure (single-example-as-proof): "confirmed" / "verified" / "established" claims that rest on one example without hedging. Both failures share a root cause — sloppy handling of the relationship between concrete instances and general claims — so the same phase checks for both.
 
