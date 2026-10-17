@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A final prose pass for every report.** The `report-generator` pack (now
+  version 0.5.2) adds Phase 6.5: after the Phase 4–6 reviewer patches and
+  before the Phase 7 gate, a blind sub-agent reads the whole report against a
+  new catalogue of mannered-prose and AI-writing tics
+  (`references/prose-tics.md`: stock intensifiers, rhetorical reversals, dash
+  rhythm and cadence triplets, grand flourishes, vague boosters, hedging
+  stacks, throat-clearing and recap sentences, elegant variation,
+  concept-as-subject nominalizations, and colon-headline sentences, each with
+  before/after pairs) and returns replacement sentences. The pass edits
+  wording only: numbers, value wrappers, references, caveats, and claim
+  strength are unchanged, and the gate runs after it. In the HTML format it
+  runs again over the slide deck before the Phase 9d gate. Refresh an
+  installed pack with
+  `python skills/core/scripts/install_convention.py --name report-generator`.
+
 ## [0.9.1] - 2026-10-14
 
 ### Added

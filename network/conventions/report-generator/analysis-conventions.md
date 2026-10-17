@@ -12,7 +12,7 @@ The skill is organized as a **phase-based agentic flow**. Most phases are intern
 
 User-in-the-loop phases: Phase 0 (planning brief). Optionally Phase 8 (headline preview before opening the PDF or HTML report).
 
-Internal-only phases: 0.5 (memory), 0.75 (outline + main/supplement assignment), 1 (manifest), 2 (draft), 3 (worked-example gate), 4–6 (sub-agent reviewers), 7 (recompile), and — HTML format only — 9 (slides).
+Internal-only phases: 0.5 (memory), 0.75 (outline + main/supplement assignment), 1 (manifest), 2 (draft), 3 (worked-example gate), 4–6 (sub-agent reviewers), 6.5 (final prose pass), 7 (recompile), and — HTML format only — 9 (slides).
 
 **Format.** Phases 0–3 are format-independent, and Phases 4–6 differ only in what the reviewers read (the HTML reviewer copy instead of the `.tex`; see `references/phase-prompts.md`). With `format: html`, `html-conventions.md` replaces the TeX-specific parts of Phase 2 (template and value wrappers) and Phase 7 (the gate), and adds Phase 9 (slides), which runs after Phase 7 and before Phase 8. Where a passage below names `.tex`, `\SciVal`, `pdflatex`, or the PDF, read it as the HTML equivalent defined there.
 
@@ -319,7 +319,7 @@ Drafting order:
 
 Two standing prose rules apply from the first draft, not as a later polish pass:
 
-1. **No mannered prose.** No stock intensifiers ("Strikingly,", "Crucially,", "Notably,"), rhetorical reversals ("not merely X, but Y"), grand flourishes ("a testament to", "underscores the power of"), or elegant variation. Plain, direct sentences that repeat the canonical term are correct.
+1. **No mannered prose.** No stock intensifiers ("Strikingly,", "Crucially,", "Notably,"), rhetorical reversals ("not merely X, but Y"), grand flourishes ("a testament to", "underscores the power of"), or elegant variation. Plain, direct sentences that repeat the canonical term are correct. The full catalogue of tics, with before/after pairs, is `references/prose-tics.md`; Phase 6.5 applies it to the finished draft.
 2. **Concrete subjects, not ideas (general rule).** As a general — but not exact — rule, do not use ideas or concepts as grammatical subjects. Prefer the concrete actor: "Treated cells showed elevated IL6, which may reflect an inflammatory response," not "The observation of elevated IL6 in treated cells raises the possibility of an inflammatory response." Nominalization openers ("the fact that", "the observation that", "this finding demonstrates") are the tell; a concept subject is fine when the concept genuinely is the topic.
 
 Both rules have before/after pairs in the section guide's "Read it aloud" block, and Phase 5 re-checks them blind.
@@ -429,11 +429,25 @@ The full sub-agent prompt is in `references/phase-prompts.md`.
 
 ---
 
+## Phase 6.5 — Final prose pass (SUB-AGENT)
+
+After the Phase 4–6 findings are patched and before the Phase 7 gate, run one pass over the whole document whose only job is to remove mannered prose and AI writing tics. The standing prose rules (Phase 2) and the Phase 5 check catch most of these while drafting, but reviewer patches add new prose late, and a tic that survives into the finished report is the first thing a reader notices.
+
+Dispatch a sub-agent that reads only the report sources (every file, supplement included) and `references/prose-tics.md`, the catalogue of tics with before/after pairs. It returns findings in the shared output contract with `section: style`, each carrying the full replacement sentence in `suggested_fix`. The orchestrator applies them.
+
+The pass edits wording only. It must not change any number, value wrapper (`\SciVal` / `\SciText`) or its snapshot, figure, table, or section reference, citation, canonical term, quoted data example, caveat, or claim strength (a hedge stays a hedge; a booster keeps its measured basis). Decline any finding whose fix would change one of these; if the sentence is wrong rather than mannered, patch it in Phase 2 and re-run the reviewer that owns the problem. After applying, compare the draft's value wrappers, numeric tokens, and cross-references with those from before the pass: the lists must be identical, and any edit that changed them is reverted.
+
+Run the pass once; it does not loop. Phase 7 runs after it, so the gate re-checks every value in the edited draft. In the HTML format the pass runs twice: over the report here, and over the slide deck after Phase 9c, before the Phase 9d gate. Record the findings applied and declined in the compile log.
+
+The full sub-agent prompt is in `references/phase-prompts.md`.
+
+---
+
 ## Phase 7 — Recompile + re-run (INTERNAL)
 
 **HTML format:** run the HTML gate in `html-conventions.md` Phase 7 instead of the steps below (sync figures and data, fill values, scitexlintr, `check_html_report.py`, render check, compile log), then Phase 9, then re-run that gate on the finished file.
 
-After the sub-agents pass:
+After the sub-agents pass and the Phase 6.5 prose pass is applied:
 
 1. **Record the linter version, then regenerate the LaTeX macros from the manifest.** `python skills/core/scripts/check_linter_versions.py --record analysis/[name]/reports/.manifest.json "scitexlintr>=0.2"` adds the installed version to the manifest's `linters` object, so the report states which linter certified it; it fails, recording nothing, if the linter is missing or below 0.2. Record first: it rewrites `.manifest.json`, so recording after the render would leave `build/report_values.tex` looking older than its manifest. Then run `python skills/core/scripts/render_report_values_tex.py analysis/[name]/reports/.manifest.json`. This writes `build/report_values.tex` with one `\newcommand` per `numbers[*]` entry plus the `\SciVal` / `\SciText` wrappers. Re-run this step every time `.manifest.json` changes.
 2. **Run scitexlintr on the draft.** `scitexlintr analysis/[name]/reports/[name]-report.tex --manifest=analysis/[name]/reports/.manifest.json`. The recompile gate **must not proceed** if error findings remain after waivers. Warnings are advisory by default: fix the ones that point to real drift risk, document intentional leftovers in the compile log, and promote them to blocking errors only when the team has stabilized that rule for the report type. Auto-fix snapshot drift with `--write` (typically interactively, not in the gate):
@@ -456,6 +470,7 @@ After the sub-agents pass:
    - Compile timestamp
    - Main-text page count and shape-budget status (`within` / `flagged` with reason)
    - Sub-agent reviewer verdicts (each: PASS / loop count to convergence)
+   - Final prose pass: findings applied and declined
    - Whether code was re-run since the last manifest snapshot
    - `scitexlintr` version (as recorded in the manifest's `linters`), exit code, error count after waivers (must be 0 for the gate to pass), and warning count/disposition
 
@@ -475,7 +490,7 @@ The preview is optional. Skip if the Phase-0 planning brief recorded a "skip-pre
 
 ## Phase 9 — Slides (HTML format only, INTERNAL + SUB-AGENT)
 
-After the report passes the Phase 7 gate, derive a 10–20 slide deck in the same file: a ghost deck of sentence titles (every title except the title slide is one declarative sentence — subject, verb, object — making exactly one point), a blind storyline review of those titles by a zero-context sub-agent, then the slides themselves, then the Phase 7 gate again. The full procedure is `html-conventions.md` Phase 9; the reviewer prompt is `references/phase-prompts.md` Phase 9.
+After the report passes the Phase 7 gate, derive a 10–20 slide deck in the same file: a ghost deck of sentence titles (every title except the title slide is one declarative sentence — subject, verb, object — making exactly one point), a blind storyline review of those titles by a zero-context sub-agent, then the slides themselves, then the Phase 6.5 prose pass over the deck, then the Phase 7 gate again. The full procedure is `html-conventions.md` Phase 9; the reviewer prompt is `references/phase-prompts.md` Phase 9.
 
 ---
 
@@ -492,6 +507,7 @@ After the report passes the Phase 7 gate, derive a 10–20 slide deck in the sam
 | 4 — Plain-English lint | no | `analysis/[name]/reports/.review-plain-english.yaml` (HTML: `-html` suffix) |
 | 5 — Framing critique | no | `analysis/[name]/reports/.review-framing.yaml` (HTML: `-html` suffix) |
 | 6 — Blind numerical re-verify | no | `analysis/[name]/reports/.review-numerical.yaml` (HTML: `-html` suffix) |
+| 6.5 — Final prose pass | no | `analysis/[name]/reports/.review-prose.yaml` (HTML: `-html` suffix; deck pass: `.review-prose-deck.yaml`) |
 | 7 — Recompile log | no | `analysis/[name]/reports/.compile-log.md` (HTML: `.compile-log-html.md`) |
 | 8 — Headline preview | optional | (in chat, not a file) |
 | 9a — Ghost deck (HTML) | no | `analysis/[name]/reports/.ghost-deck.md` |
@@ -581,7 +597,8 @@ These come up frequently in computational analysis reports:
 ## Cross-references inside this convention pack
 
 - `references/section-guide.md` — per-section craft (the writing guidance the draft step consumes); includes the results-structure (narrative vs structured) decision and the audience-tier acronym ladder.
-- `references/phase-prompts.md` — sub-agent prompts for Phases 4, 5, 6.
+- `references/phase-prompts.md` — sub-agent prompts for Phases 4, 5, 6, 6.5, and 9.
+- `references/prose-tics.md` — catalogue of mannered-prose and AI-writing tics with before/after pairs, used by the Phase 6.5 final prose pass.
 - `references/manifest-example.json` — fully-populated Phase-1 manifest example with `policies`, `worked_examples`, `numbers`, `terms`, and `figures` sections, to crib from when starting a new report.
 - `qc-checklist.md` — provenance / style checklist used in Phase 7 and surfaced to the user via `.compile-log.md`.
 - `assets/report-template-overview.tex` — overview shape.
