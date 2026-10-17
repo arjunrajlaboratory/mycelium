@@ -147,7 +147,13 @@ Findings are returned as a flat list. The Phase 6 sub-agent also returns a top-l
 > - Search for "confirmed", "verified", "established", "showed" used in a strong sense.
 > - For each, check whether the supporting evidence is a tested invariant across all relevant inputs, or one example. If one example, the prose must hedge ("for this one case"). Flag absent hedging.
 >
-> Return findings as a YAML list following the output contract above. Use `section: framing` on every finding. Use `severity: major` for standalone-test failures and missing-baseline findings; `severity: minor` for cross-document reference style, caveat-prominence questions of degree, and voice findings — except an archive-register or unparseable-jargon passage that reaches the abstract, which is `major` (the abstract is the most-read surface).
+> **Examples before abstractions.**
+> - For every aggregate figure or summary statistic in the main text (a distribution, a rate, a fitted curve, an enrichment ratio), check that an earlier passage showed at least one concrete record of the kind its marks represent, quoted from the data with its identifier, and that the figure or its caption marks or names that record.
+> - Flag any aggregate figure whose marks have not been anchored by a prior concrete example. Also flag an example whose selection rule (a seed, "the median", "the top three by X") is not stated next to it: without a rule, the reader cannot tell whether it was hand-picked to flatter the result.
+> - The order is example, then a small labeled set, then the full distribution, then any model or fit. Flag a fitted curve or model that appears before the reader has seen the data it fits.
+> - A supplement table or sensitivity sweep needs no anchor of its own when the main text already anchored the same kind of record.
+>
+> Return findings as a YAML list following the output contract above. Use `section: framing` on every finding. Use `severity: major` for standalone-test failures and missing-baseline findings; `severity: minor` for cross-document reference style, caveat-prominence questions of degree, unanchored aggregate figures, and voice findings — except an archive-register or unparseable-jargon passage that reaches the abstract, which is `major` (the abstract is the most-read surface), and an unanchored figure that carries the headline finding, which is `major`.
 
 ---
 

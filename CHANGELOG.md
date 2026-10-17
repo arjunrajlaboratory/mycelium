@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The report skill builds exposition from examples to abstractions.** A new
+  Phase 2 drafting rule in the `report-generator` pack (now version 0.5.2):
+  before any aggregate figure or statistic, show a concrete record from the
+  data, with its identifier, and mark or name it in the figure, so a reader
+  knows what kind of record each mark is. Abstractions build up from one
+  example to a small labeled set, the full distribution, and then any model
+  or fit. Each example is chosen by a stated, reproducible rule (a seed, "the
+  median cell", "the top three by degree") and registered in the manifest,
+  never hand-picked to flatter the result. The Phase 3 worked-example gate
+  checks the anchoring, the Phase 5 framing reviewer flags any aggregate
+  figure whose marks have no prior example, and the section guide and QC
+  checklist carry the rule. Refresh an installed pack with
+  `python skills/core/scripts/install_convention.py --name report-generator`.
+
 ## [0.9.1] - 2026-10-14
 
 ### Added
