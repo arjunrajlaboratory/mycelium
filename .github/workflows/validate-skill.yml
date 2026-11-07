@@ -7,7 +7,8 @@ name: Validate Skills and Conventions
 # macOS and Linux, and BSD/GNU differences in date, stat, sed, mktemp, and
 # shell behavior have produced real regressions. Baseline: Python 3.11,
 # Bash >= 4 (Homebrew bash on the macOS runners; verified by the suites'
-# own version checks), GNU coreutils on Linux and BSD userland on macOS.
+# own version checks), BSD userland on macOS, and on Linux the image's default
+# coreutils: uutils (Rust) since ubuntu-latest moved to 26.04, GNU before.
 
 on:
   pull_request:
