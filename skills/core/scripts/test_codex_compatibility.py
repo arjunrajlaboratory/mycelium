@@ -2035,15 +2035,27 @@ def test_documented_data_contract_command_opens_no_bookkeeping(tmp_path):
     assert "MYCELIUM POST-ACTION PROTOCOL" in result.stdout
 
 
-def test_documented_planning_probes_open_no_bookkeeping(tmp_path):
-    """Planning is read-only: its documented probes must not open post-action."""
+def test_documented_planning_probes_never_make_stop_block(tmp_path):
+    """Planning is read-only: a session of only its documented probes must
+    neither open post-action nor make Stop demand bookkeeping. The lineage
+    tracker may record the reads; that is provenance, not enforcement."""
     guide = (
         PLUGIN_ROOT / "skills" / "analyze" / "references" / "planning.md"
     ).read_text()
     probes = guide.split("## 4. Retrieve before asking", 1)[1].split("\n## ", 1)[0]
     commands = re.findall(r"```bash\n(.*?)\n```", probes, re.S)
-    assert len(commands) >= 2, commands
+    assert any(c.startswith("python3 -c") for c in commands), commands
+    assert any(c.startswith("Rscript -e") for c in commands), commands
     repo = _repo(tmp_path)
+    data = repo / "data" / "raw"
+    data.mkdir(parents=True)
+    (data / "samples.csv").write_text("sample,cohort\ns1,A\ns2,B\n")
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "planning-start"},
+    )
+    assert start.returncode == 0, start.stderr
     for command in commands:
         payload = {
             "cwd": str(repo),
@@ -2051,28 +2063,44 @@ def test_documented_planning_probes_open_no_bookkeeping(tmp_path):
             "tool_input": {"command": command},
             "tool_response": {"exit_code": 0},
         }
-        result = _run_hook("mycelium-post-action.sh", repo, payload)
-        assert result.returncode == 0, result.stderr
-        assert result.stdout == "", command
+        for hook in ("mycelium-post-action.sh", "mycelium-data-tracker.sh"):
+            result = _run_hook(hook, repo, payload)
+            assert result.returncode == 0, (hook, result.stderr)
+            assert result.stdout == "", (hook, command)
         assert not (repo / ".mycelium" / "mycelium-reminded.tmp").exists()
+    # The probes' reads are recorded, so Stop sees a lineage-only session.
+    assert (repo / ".mycelium" / "mycelium-data-events.tmp").stat().st_size > 0
 
-    # Paired positive: running a repository script by path is analysis, which
-    # is why the guide forbids it during planning.
+    stop = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "planning-stop"},
+    )
+    assert stop.returncode == 0, stop.stderr
+    assert '"block"' not in stop.stdout, stop.stdout
+
+    # Paired positives: running a repository script by path, or R with -e,
+    # is analysis, which is why the guide forbids both while planning.
     script = repo / "analysis" / "probe" / "run.py"
     script.parent.mkdir(parents=True)
     script.write_text("print('probe')\n")
-    result = _run_hook(
-        "mycelium-post-action.sh",
-        repo,
-        {
-            "cwd": str(repo),
-            "tool_name": "Bash",
-            "tool_input": {"command": "python3 analysis/probe/run.py"},
-            "tool_response": {"exit_code": 0},
-        },
-    )
-    assert result.returncode == 0, result.stderr
-    assert "MYCELIUM POST-ACTION PROTOCOL" in result.stdout
+    for command in (
+        "python3 analysis/probe/run.py",
+        "R -e 'print(nrow(read.csv(\"data/raw/samples.csv\")))'",
+    ):
+        result = _run_hook(
+            "mycelium-post-action.sh",
+            repo,
+            {
+                "cwd": str(repo),
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_response": {"exit_code": 0},
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert "MYCELIUM POST-ACTION PROTOCOL" in result.stdout, command
+        (repo / ".mycelium" / "mycelium-reminded.tmp").unlink()
 
 
 def test_conventional_layout_user_script_is_still_analysis(tmp_path):

@@ -22,11 +22,12 @@ list: ask the user only under the rules in `skills/analyze/references/planning.m
 
 What the Check column means:
 
-- `data-contract-check (<kind>)` or `scilintr (<rule>)`: a check mycelium ships
-  that catches the mode as described.
-- `partial: <check> (<what it covers>)`: the check covers only the part in
-  brackets. The plan's guard covers the rest, and the plan must not cite the
-  check for more.
+- `partial: <check> (<what it covers>)`: a check mycelium ships
+  (`data-contract-check` with a kind, `scilintr` with a rule, or
+  `register_value` with `scitexlintr`) covers only the part in brackets. No
+  shipped check covers a whole mode: these checks read the sample table or the
+  code statically, not what the analysis did. The plan's guard covers the rest,
+  and the plan must not cite the check for more.
 - `review: <checklist>`: a `$mycelium:review` checklist looks for it after the
   code is written. It is not an automatic check, so the plan still names its own
   guard.
@@ -51,7 +52,7 @@ Never write that a check runs when the Check column says `none`, `review`, or
 
 | Failure mode | How it shows up | Guard the plan must name | Check |
 | --- | --- | --- | --- |
-| Invented columns or levels | Code uses a column name or factor level taken from the request or from memory, not from the file | A header probe or data contract confirms every column and level the code uses | data-contract-check (`schema`, `cohort`) |
+| Invented columns or levels | Code uses a column name or factor level taken from the request or from memory, not from the file | A header probe or data contract confirms every column and level the code uses | partial: data-contract-check (`schema`, `cohort`: the columns and levels the contract declares exist in the table, not that the code uses only those) |
 | Silent row loss | Missing-value handling, `dropna`, or an inner join removes samples without a count | Log row counts before and after every filter and join; name the expected n | partial: scilintr (`unannotated-filter`, `unannotated-missingness`: a filter or drop with no logged count) |
 | Join duplication | A many-to-many join multiplies rows; a cell or sample appears twice | Assert key uniqueness on both sides and the row count after the join | partial: scilintr (`unchecked-merge`: a merge without `validate=`); partial: data-contract-check (`unit_of_replication`: repeated units in the sample table, not joins in the code) |
 | Identifier mismatch | Sample IDs differ between tables in case, prefixes, or separators, so a join matches a subset | Report the overlap (matched, left-only, right-only) before joining | none |
@@ -75,7 +76,7 @@ Never write that a check runs when the Check column says `none`, `review`, or
 | Wrong layer or assay | Tests run on scaled or log values when counts were needed, or the reverse | Name the layer at each downstream call | partial: scilintr (`ambiguous-layer-access`: `adata.X` with no named layer); cross-ref: Input and matrix state |
 | Formula is not the model | The design formula reads as intended but expands otherwise (`~ age + age^2` in R adds no squared term without `I(age^2)`), or a term is dropped as aliased | Print the design matrix's column names and rank before fitting and compare them with the plan; a rank-deficient design stops the run | partial: scilintr (`hardcoded-design-formula`: a literal formula in code, not how it expands); cross-ref: Model or test |
 | Memory blow-up | A sparse matrix densified, or a whole object copied, crashing or truncating a job | Estimate object size; keep sparse operations sparse; name the machine size | none |
-| Swallowed errors | `try`/`except: pass`, `tryCatch` returning `NULL`, or a trailing `\|\| true` hides a failing step | No blanket error suppression; a failure stops the run | scilintr (`broad-exception`, `silent-pass`, `warning-suppression`) |
+| Swallowed errors | `try`/`except: pass`, `tryCatch` returning `NULL`, or a trailing `\|\| true` hides a failing step | No blanket error suppression; a failure stops the run; the runner script fails on any failed step (`set -euo pipefail` in `run.sh`) | partial: scilintr (`broad-exception`, `silent-pass`, `warning-suppression`: Python and R code, not shell runners such as `\|\| true` in `run.sh`) |
 
 ## Statistics and inference
 

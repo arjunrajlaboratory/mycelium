@@ -20,10 +20,10 @@ Decide whether to offer:
 
 - **New analysis**: offer.
 - **Existing analysis**: read the `**Planning**:` line in its documentation
-  file. If it reads `discussed` or `skipped`, do not offer again. Reruns,
-  debugging, and follow-ups to the same question never get the offer. Offer
-  only when the line is absent or `pending` and the request adds a new
-  question or method.
+  file. If it reads `discussed` or `skipped`, do not offer again. Otherwise
+  (absent or `pending`), offer only for new work on the analysis: a new
+  question, or a new method for its question. Reruns, debugging, and
+  parameter changes never get the offer.
 
 Ask once, in plain text, before any planning question. Do not use a
 host-specific question tool, so the offer reads the same in Claude Code and
@@ -45,10 +45,14 @@ that does not decline. "skip", "no" or "just run it" skips it.
 ## 2. If the user skips
 
 Go straight to the analysis and ask no planning questions. Still write a short
-plan, from repository evidence and labelled defaults only, in the format of
-section 7 with no `user` rows. Show it as you start, and do not wait for a
-reply. Record `**Planning**: skipped YYYY-MM-DD` (section 8). The data contract
-check at step 6 of analyze still runs.
+plan, from repository evidence and labelled defaults, in the format of
+section 7. A choice the user already stated in the request keeps its `user`
+source; do not ask about anything else. Each other choice the user would own
+becomes a labelled default (`default: planning skipped; <reason>`), and the
+most consequential of them goes first under Main risk, so the user can
+correct it later. Show the plan as you start, and do not wait for a reply.
+Record `**Planning**: skipped YYYY-MM-DD` (section 8). The data contract check
+at step 6 of analyze still runs.
 
 ## 3. Ask for the question
 
@@ -80,7 +84,12 @@ Read narrowly, in this order:
 - `.living/learnings.md` for gotchas about these data or methods.
 
 When a data property matters (columns, factor levels, sample counts), check it
-with a read-only inline probe that writes nothing, such as:
+with a read-only probe that writes nothing. Use only these forms, which
+Mycelium's lifecycle hooks treat as reads rather than analysis runs: `head`,
+`wc`, or `rg` on a file; `python3 -c '...'`; `Rscript -e '...'`; or a heredoc
+piped to `python3 -` or `Rscript -`. Prefix the repository's environment
+runner when it documents one (`conda run -n <env> python3 -c '...'`). Do not
+use `R -e`, which Mycelium counts as an analysis run. For example:
 
 ```bash
 head -1 data/raw/samples.csv
@@ -89,6 +98,13 @@ head -1 data/raw/samples.csv
 ```bash
 python3 -c 'import csv; r = list(csv.DictReader(open("data/raw/samples.csv"))); print(len(r), sorted({x["cohort"] for x in r}))'
 ```
+
+```bash
+Rscript -e 'd <- read.csv("data/raw/samples.csv"); print(nrow(d)); print(table(d$cohort))'
+```
+
+The data-lineage hook may record which files a probe read. That is
+provenance: it asks nothing of you and never blocks Stop.
 
 Use the interpreter or environment the repository documents. If a probe fails,
 do not debug it: mark the property unverified and make checking it the plan's
@@ -133,7 +149,10 @@ Word the `Recommended:` line so that "yes" accepts it. After each answer, ask
 whether any remaining user-owned choice would change the plan; if none would,
 stop. At the limit, turn the remaining user-owned choices into labelled
 defaults: the confirmation step is where the user overrides them. If the user
-says "good enough", stop and write the plan.
+says "good enough", stop asking and write the plan. If the user says "just run
+it" partway through, stop asking, show the plan with the remaining user-owned
+choices as labelled defaults, and go ahead without waiting; record it as
+`discussed`.
 
 ## 7. Present the plan and wait
 

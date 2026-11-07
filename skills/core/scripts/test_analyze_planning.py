@@ -92,12 +92,22 @@ def test_offer_is_made_once_per_analysis_from_a_recorded_field() -> None:
     offer = " ".join(_section(PLANNING, "## 1. Offer the discussion").split())
     assert f"`{field}`" in offer
     assert "reruns" in offer.lower() and "debugging" in offer
+    # SKILL.md and the guide agree on what new work earns an offer on an
+    # existing analysis: a new question or a new method, never a rerun.
+    for text in (offer, _flat(ANALYZE)):
+        assert "a new method for its question" in text
+    assert "`pending`" in offer
 
 
 def test_skip_still_yields_a_sourced_plan_and_the_contract_check_runs() -> None:
     skip = " ".join(_section(PLANNING, "## 2. If the user skips").split())
     assert "repository evidence and labelled defaults" in skip
     assert "do not wait" in skip
+    # Choices the request already states stay user-sourced; the rest become
+    # defaults the user can find and correct.
+    assert "keeps its `user` source" in skip
+    assert "`default: planning skipped; <reason>`" in skip
+    assert "Main risk" in skip
     # The data contract check runs whichever way the user chose.
     assert "runs either way" in _flat(ANALYZE)
 
@@ -119,6 +129,8 @@ def test_every_decision_is_sourced_and_every_fact_tagged() -> None:
 def test_questions_are_capped_and_asked_one_per_message() -> None:
     planning = _flat(PLANNING)
     assert "At most 5 questions" in planning
+    # Bailing out partway still ends in a shown, recorded plan.
+    assert '"just run it" partway through' in planning
     assert "one per message" in planning
     assert "Recommended:" in planning
     # The opening question is asked without drafted options, to avoid anchoring.
@@ -130,6 +142,9 @@ def test_questions_are_capped_and_asked_one_per_message() -> None:
 def test_planning_is_read_only_until_the_user_confirms() -> None:
     planning = _flat(PLANNING)
     assert "Never run a repository script by path" in planning
+    # Probe forms are limited to those the hooks treat as reads; `R -e` is not.
+    assert "Do not use `R -e`" in planning
+    assert "never blocks Stop" in planning
     assert "post-action" in planning
     assert "wait for the user to confirm" in planning
 
@@ -181,6 +196,19 @@ def test_failure_modes_cite_only_checks_that_ship() -> None:
     assert reviews, "expected at least one review checklist citation"
     for review in reviews:
         assert (REVIEW_DIR / f"{review}.md").is_file(), review
+    # No shipped check covers a whole mode, so every citation is qualified.
+    # An unqualified one is how two overclaims slipped in during review.
+    rows = [line for line in text.splitlines() if line.startswith("| ")]
+    checks = [row.rstrip(" |").rsplit(" | ", 1)[1] for row in rows]
+    for check in checks:
+        if check in {"Check", "---"}:
+            continue
+        for part in check.split("; "):
+            assert part.startswith(("partial: ", "none", "cross-ref: ", "review: ")), check
+    # scilintr lints Python and R, not shell runners: a row that names shell
+    # suppression can credit it only in part.
+    swallowed = next(line for line in text.splitlines() if line.startswith("| Swallowed errors"))
+    assert "partial: scilintr" in swallowed and "run.sh" in swallowed
     # Code-level failures are the review checklist's job; point there.
     assert "skills/core/references/review/llm-failure-modes.md" in text
 
