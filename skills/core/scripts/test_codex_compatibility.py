@@ -2046,6 +2046,19 @@ def test_documented_planning_probes_never_make_stop_block(tmp_path):
     commands = re.findall(r"```bash\n(.*?)\n```", probes, re.S)
     assert any(c.startswith("python3 -c") for c in commands), commands
     assert any(c.startswith("Rscript -e") for c in commands), commands
+    # Every other form the guide's prose allows, each named there.
+    allowed = " ".join(probes.split())
+    extra = {
+        "`wc`": "wc -l data/raw/samples.csv",
+        "`rg`": "rg -n cohort data/raw/samples.csv",
+        "`python3 -`": "python3 - <<'EOF'\nimport csv\nprint(sum(1 for _ in open('data/raw/samples.csv')))\nEOF",
+        "`Rscript -`": "Rscript - <<'EOF'\nprint(nrow(read.csv('data/raw/samples.csv')))\nEOF",
+        "`conda run -n <env> python3 -c '...'`": "conda run -n analysis python3 -c 'print(open(\"data/raw/samples.csv\").readline())'",
+    }
+    for named, command in extra.items():
+        assert named in allowed, named
+        commands.append(command)
+    commands.append("conda run -n analysis Rscript -e 'print(nrow(read.csv(\"data/raw/samples.csv\")))'")
     repo = _repo(tmp_path)
     data = repo / "data" / "raw"
     data.mkdir(parents=True)

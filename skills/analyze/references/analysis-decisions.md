@@ -31,9 +31,11 @@ stated default; ask the user only under the rules in
 
 ## Declaring a data check in the plan
 
-When a row rests on a property of the sample table, make the plan's Check
-column name a data contract check (analyze step 6), with the value taken from
-the plan's source. The checker supports five kinds:
+When a statistical test or model's validity rests on a property of the
+sample table (the cases analyze step 6 covers), make that row's Check column
+name a data contract check, with the value taken from the plan's source.
+Exploratory plots and tables that hold no samples get no contract; name a
+manual check instead. The checker supports five kinds:
 
 | Row | Check kind | What it confirms |
 | --- | --- | --- |

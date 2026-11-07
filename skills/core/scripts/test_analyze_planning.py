@@ -129,6 +129,9 @@ def test_every_decision_is_sourced_and_every_fact_tagged() -> None:
 def test_questions_are_capped_and_asked_one_per_message() -> None:
     planning = _flat(PLANNING)
     assert "At most 5 questions" in planning
+    # Deciding whether to continue is the agent's job; asking would spend the
+    # user's question budget on process.
+    assert "decide for yourself (do not ask the user)" in planning
     # Bailing out partway still ends in a shown, recorded plan.
     assert '"just run it" partway through' in planning
     assert "one per message" in planning
@@ -147,6 +150,16 @@ def test_planning_is_read_only_until_the_user_confirms() -> None:
     assert "never blocks Stop" in planning
     assert "post-action" in planning
     assert "wait for the user to confirm" in planning
+
+
+def test_contract_rows_follow_the_contract_guides_applicability() -> None:
+    # The contract guide skips exploratory plots; the plan must not promise a
+    # check that step 6 will never run.
+    declaring = " ".join(_section(DECISIONS, "## Declaring a data check").split())
+    assert "statistical test or model" in declaring
+    assert "Exploratory plots" in declaring
+    guide = _flat(PLUGIN_ROOT / "skills" / "core" / "references" / "data-contract-check.md")
+    assert "Skip it for exploratory plots" in guide
 
 
 def test_coverage_list_names_every_pre_run_decision_point() -> None:

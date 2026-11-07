@@ -145,9 +145,9 @@ Options: (a) donor, with pseudobulk per donor (b) sample
 Recommended: (a), because the samples within a donor are not independent.
 ```
 
-Word the `Recommended:` line so that "yes" accepts it. After each answer, ask
-whether any remaining user-owned choice would change the plan; if none would,
-stop. At the limit, turn the remaining user-owned choices into labelled
+Word the `Recommended:` line so that "yes" accepts it. After each answer,
+decide for yourself (do not ask the user) whether any remaining user-owned
+choice would change the plan; if none would, stop asking. At the limit, turn the remaining user-owned choices into labelled
 defaults: the confirmation step is where the user overrides them. If the user
 says "good enough", stop asking and write the plan. If the user says "just run
 it" partway through, stop asking, show the plan with the remaining user-owned
