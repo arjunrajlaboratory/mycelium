@@ -36,10 +36,12 @@ sample table (the cases analyze step 6 covers), make that row's Check column
 name a data contract check, with the value taken from the plan's source.
 Exploratory plots and tables that hold no samples get no contract; name a
 manual check instead. `unit_of_replication` allows at most one row per unit in
-each cell of the design, so run it on the per-unit table (one row per donor and
-condition). An observation table that keeps repeated measurements per unit for a
-mixed model would fail it by design; there the model's grouping term is the
-check. The checker supports five kinds:
+each cell of the design, where `within` names the repeated-measure columns. Run
+it on the table at the level the model observes: for repeated measures such as
+one row per participant per visit, keep that table and set `within` to the visit
+column, so a duplicated visit or an under-replicated group still blocks. Rows
+below that level with nothing to tell them apart (many cells per donor) fail it
+by design; check those on the per-unit table (one row per donor and condition). The checker supports five kinds:
 
 | Row | Check kind | What it confirms |
 | --- | --- | --- |

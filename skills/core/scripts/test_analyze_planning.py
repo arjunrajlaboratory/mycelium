@@ -248,6 +248,10 @@ def test_inherited_scientific_rows_hold_for_their_edge_cases() -> None:
     # on the per-unit table, not on observations a mixed model keeps.
     declaring = " ".join(_section(DECISIONS, "## Declaring a data check").split())
     assert "per-unit table" in declaring
+    # Codex P2: `within` covers repeated measures such as visits, so a
+    # longitudinal table keeps the check instead of dropping it.
+    assert "`within`" in declaring and "visit" in declaring
+    assert "the model's grouping term is the check" not in declaring
 
 
 def test_contract_rows_follow_the_contract_guides_applicability() -> None:
