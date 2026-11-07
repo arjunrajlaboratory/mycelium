@@ -137,6 +137,19 @@ _JUPYTER_OPTIONS = (
     rf"(?:(?:{_JUPYTER_VALUE_OPTION}|{_JUPYTER_FLAG_OPTION}|"
     rf"{_JUPYTER_ASSIGNED_OPTION})\s+)*"
 )
+# R's own startup grammar (`R --help`) differs from Rscript's: it accepts the
+# short flags -q and -s and the separated-value forms `--encoding ENC` and
+# `-g TYPE`. Two options may never precede a payload: `--args` ends option
+# parsing (a later -e/-f is an argument, not code), and `-d`/`--debugger`
+# hands the remaining argv to a debugger. Short clusters such as `-qs` are not
+# R syntax (R warns and ignores them), so they are not modeled here.
+_R_OPTION = (
+    r"(?:-[qs]"
+    r"|--(?!(?:args|debugger|encoding|file|help|version)(?:=|\s|$))\S+"
+    rf"|--encoding(?:=|\s+){_SHELL_WORD}"
+    rf"|-g\s+{_SHELL_WORD})"
+)
+_R_OPTIONS = rf"(?:{_R_OPTION}\s+)*"
 _INLINE_SOURCE_WORD = rf"(?P<source_word>{_SHELL_WORD})(?=$|[\s|&;()<>])"
 
 RX_PYTHON_C = re.compile(
@@ -151,6 +164,11 @@ RX_PYTHON_SCRIPT_PATH = re.compile(
 )
 RX_R_E = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+"
+    rf"{_R_OPTIONS}-e\s+{_INLINE_SOURCE_WORD}",
+    re.DOTALL,
+)
+RX_RSCRIPT_E = re.compile(
+    rf"(?<![A-Za-z0-9_.-])(?P<rscript_exe>{_R_SCRIPT_EXE})\s+"
     rf"{_NONTERMINAL_LONG_OPTIONS}-e\s+{_INLINE_SOURCE_WORD}",
     re.DOTALL,
 )
@@ -158,6 +176,26 @@ RX_R_SCRIPT_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<rscript_exe>{_R_SCRIPT_EXE})\s+"
     rf"{_NONTERMINAL_LONG_OPTIONS}(?P<path>{_R_SCRIPT_PATH})"
 )
+# `R -f FILE` / `R --file=FILE`; R rejects the separated `--file FILE` form.
+RX_R_FILE_PATH = re.compile(
+    rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+"
+    rf"{_R_OPTIONS}(?:-f\s+|--file=)(?P<path>{_R_SCRIPT_PATH})"
+)
+# `R CMD BATCH [options] infile [outfile]`: BATCH stops option parsing at the
+# first non-option word, so only options before the input can be terminal.
+# It forwards every other `-*` word to R one word at a time (only -d/-g take
+# a value), so a separated value can never be mistaken for the input here.
+_R_BATCH_OPTION = (
+    r"(?:-[qs]"
+    r"|--(?!(?:args|debugger|file|help|version)(?:=|\s|$))\S+)"
+)
+RX_R_CMD_BATCH_PATH = re.compile(
+    rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+CMD\s+BATCH\s+"
+    rf"(?:{_R_BATCH_OPTION}\s+)*(?P<path>{_R_SCRIPT_PATH})"
+)
+# R itself (unlike Rscript) reads its whole argv up to `--args`, so a terminal
+# or debugger option after the payload still applies to these two forms.
+_R_ARGV_SCANNED_PATTERNS = frozenset({RX_R_E, RX_R_FILE_PATH})
 RX_JUPYTER_SCRIPT_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<jupyter_exe>{_JUPYTER_EXE})\s+"
     rf"(?:nbconvert|execute)\s+{_JUPYTER_OPTIONS}"
@@ -445,7 +483,10 @@ ANALYSIS_PATTERNS = (
     RX_PYTHON_M,
     RX_PYTHON_SCRIPT_PATH,
     RX_R_E,
+    RX_RSCRIPT_E,
     RX_R_SCRIPT_PATH,
+    RX_R_FILE_PATH,
+    RX_R_CMD_BATCH_PATH,
     RX_JUPYTER_SCRIPT_PATH,
 )
 
@@ -454,7 +495,10 @@ _PATTERN_EXECUTABLES = {
     RX_PYTHON_M: ("python_exe", re.compile(_PYTHON_EXE_NAME)),
     RX_PYTHON_SCRIPT_PATH: ("python_exe", re.compile(_PYTHON_EXE_NAME)),
     RX_R_E: ("r_exe", re.compile(r"R")),
+    RX_RSCRIPT_E: ("rscript_exe", re.compile(r"Rscript")),
     RX_R_SCRIPT_PATH: ("rscript_exe", re.compile(r"Rscript")),
+    RX_R_FILE_PATH: ("r_exe", re.compile(r"R")),
+    RX_R_CMD_BATCH_PATH: ("r_exe", re.compile(r"R")),
     RX_JUPYTER_SCRIPT_PATH: ("jupyter_exe", re.compile(r"jupyter")),
 }
 
@@ -969,6 +1013,41 @@ def _jupyter_match_has_terminal_option(command: str, offset: int) -> bool:
     return any(
         token.split("=", 1)[0] in _JUPYTER_TERMINAL_OPTIONS for token in tokens
     )
+
+
+_R_TERMINAL_OPTIONS = {"-h", "--help", "--version"}
+_R_SEPARATED_VALUE_OPTIONS = {"-e", "-f", "-g", "-d", "--encoding"}
+
+
+def _r_match_is_rejected(command: str, offset: int) -> bool:
+    """Whether R's full argv (up to `--args`) prevents the matched payload.
+
+    R honors `--help`/`--version` and `-d` wherever they appear before
+    `--args`, and refuses to combine `-e` with `-f`/`--file`. Option values
+    are skipped so an expression that merely contains `--version` stays code.
+    """
+    fragment = _simple_command_suffix(command, offset)
+    if fragment is None:
+        return True
+    tokens = _simple_command_argv(fragment)
+    if tokens is None or not tokens:
+        return True
+    has_expression = has_file = False
+    index = 1  # tokens[0] is the R executable itself
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--args":
+            break
+        if token in _R_TERMINAL_OPTIONS:
+            return True
+        if token == "-d" or token.startswith("--debugger="):
+            return True
+        if token == "-e":
+            has_expression = True
+        elif token == "-f" or token.startswith("--file="):
+            has_file = True
+        index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
+    return has_expression and has_file
 
 
 _CWD_AFFECTING_BUILTINS = {"pushd", "popd", "source", ".", "eval"}
@@ -2505,47 +2584,39 @@ def _detect_scripts_with_cwd(
     *,
     bash_exit: int | None = None,
     require_execution_evidence: bool = False,
-    include_python_inline: bool = True,
+    include_inline: bool = True,
 ) -> list[tuple[Path | None, str | None, Path | None]]:
+    """Return (script_path, inline_source, effective_cwd) detections.
+
+    ``include_inline=False`` drops inline one-liners (``python -c``,
+    ``R -e``, ``Rscript -e``) for the post-action check; lineage keeps them.
+    """
     out: list[tuple[Path | None, str | None, Path | None]] = []
     seen_paths: set[Path] = set()
     seen_inline: set[tuple[str, Path | None]] = set()
-    for m in RX_PYTHON_C.finditer(bash_cmd):
-        if not _match_has_expected_executable(m, RX_PYTHON_C):
-            continue
-        if not include_python_inline:
-            continue
-        effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
-        if effective_cwd is None:
-            continue
-        if require_execution_evidence and not _match_is_proven_executed(
-            bash_cmd, m.start(), bash_exit, cwd
-        ):
-            continue
-        src = _decode_shell_word(m.group("source_word"))
-        if src is None:
-            continue
-        identity = (src, effective_cwd)
-        if identity not in seen_inline:
-            out.append((None, src, effective_cwd))
-            seen_inline.add(identity)
-    for m in RX_R_E.finditer(bash_cmd):
-        if not _match_has_expected_executable(m, RX_R_E):
-            continue
-        effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
-        if effective_cwd is None:
-            continue
-        if require_execution_evidence and not _match_is_proven_executed(
-            bash_cmd, m.start(), bash_exit, cwd
-        ):
-            continue
-        src = _decode_shell_word(m.group("source_word"))
-        if src is None:
-            continue
-        identity = (src, effective_cwd)
-        if identity not in seen_inline:
-            out.append((None, src, effective_cwd))
-            seen_inline.add(identity)
+    inline_patterns = (RX_PYTHON_C, RX_R_E, RX_RSCRIPT_E) if include_inline else ()
+    for pattern in inline_patterns:
+        for m in pattern.finditer(bash_cmd):
+            if not _match_has_expected_executable(m, pattern):
+                continue
+            if pattern in _R_ARGV_SCANNED_PATTERNS and _r_match_is_rejected(
+                bash_cmd, m.start()
+            ):
+                continue
+            effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
+            if effective_cwd is None:
+                continue
+            if require_execution_evidence and not _match_is_proven_executed(
+                bash_cmd, m.start(), bash_exit, cwd
+            ):
+                continue
+            src = _decode_shell_word(m.group("source_word"))
+            if src is None:
+                continue
+            identity = (src, effective_cwd)
+            if identity not in seen_inline:
+                out.append((None, src, effective_cwd))
+                seen_inline.add(identity)
     for m in RX_PYTHON_M.finditer(bash_cmd):
         if not _match_has_expected_executable(m, RX_PYTHON_M):
             continue
@@ -2567,10 +2638,16 @@ def _detect_scripts_with_cwd(
     for pattern in (
         RX_PYTHON_SCRIPT_PATH,
         RX_R_SCRIPT_PATH,
+        RX_R_FILE_PATH,
+        RX_R_CMD_BATCH_PATH,
         RX_JUPYTER_SCRIPT_PATH,
     ):
         for m in pattern.finditer(bash_cmd):
             if not _match_has_expected_executable(m, pattern):
+                continue
+            if pattern in _R_ARGV_SCANNED_PATTERNS and _r_match_is_rejected(
+                bash_cmd, m.start()
+            ):
                 continue
             if (
                 pattern is RX_JUPYTER_SCRIPT_PATH
@@ -3359,7 +3436,8 @@ def main() -> int:
         action="store_true",
         help=(
             "Exit 0 only for a proven analysis that should open a Mycelium "
-            "bookkeeping cycle; excludes Python inline, tooling modules, and "
+            "bookkeeping cycle; excludes inline one-liners (python -c, R/Rscript "
+            "-e), tooling modules, and "
             "managed utility scripts."
         ),
     )
@@ -3380,7 +3458,7 @@ def main() -> int:
         cwd,
         bash_exit=args.bash_exit,
         require_execution_evidence=True,
-        include_python_inline=not args.check_post_action,
+        include_inline=not args.check_post_action,
     )
     if args.check_execution or args.check_post_action:
         return 0 if detections else 1

@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Inline R one-liners no longer depend on which startup flag was typed.**
+  The post-action check exempted only Python `-c`, so `R -e` and
+  `R --vanilla -e` opened a bookkeeping cycle, while `R -q -e` and
+  `R --vanilla -q -e` looked exempt only because the R `-e` pattern borrowed
+  Rscript's long-option-only grammar and could not parse `-q` at all, which
+  also hid them from data lineage. The detector now parses R's own startup
+  grammar (`-q`, `-s`, `--encoding ENC`, `-g TYPE`, `--args`, `-d`), and the
+  post-action check exempts every inline form (`python -c`, `R -e`,
+  `Rscript -e`) while lineage still records them, including `Rscript -e`,
+  which was previously not detected at all. Script runs `R -f script.R`,
+  `R --file=script.R`, and `R CMD BATCH script.R` are now detected and open the
+  post-action cycle like `Rscript script.R`. R honors `--help`/`--version`
+  and `-d` anywhere before `--args`, so `R -e … --version` and
+  `R -f script.R --help` no longer count as executions. Existing projects need
+  no migration.
+
 ## [0.9.2] - 2026-10-17
 
 ### Added

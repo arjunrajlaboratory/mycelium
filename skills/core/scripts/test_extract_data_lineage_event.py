@@ -2522,7 +2522,7 @@ def test_main_retains_python_module_execution_as_unresolved_lineage(
 
 
 def _runner_detections(command: str, cwd: Path, bash_exit: int | None = 0):
-    """Post-action view: detections proven to execute, inline Python excluded."""
+    """Post-action view: detections proven to execute, inline one-liners excluded."""
     return [
         (script, inline)
         for script, inline, _ in lineage_event._detect_scripts_with_cwd(
@@ -2530,7 +2530,7 @@ def _runner_detections(command: str, cwd: Path, bash_exit: int | None = 0):
             cwd,
             bash_exit=bash_exit,
             require_execution_evidence=True,
-            include_python_inline=False,
+            include_inline=False,
         )
     ]
 
@@ -2818,7 +2818,7 @@ def _runner_cwds(command: str, cwd: Path):
             cwd,
             bash_exit=0,
             require_execution_evidence=True,
-            include_python_inline=False,
+            include_inline=False,
         )
     ]
 
@@ -3410,3 +3410,155 @@ def test_runner_snakemake_conflicting_profiles_keep_the_run(
     assert _runner_detections("snakemake --profile hpc", tmp_path) == [
         (tmp_path / "Snakefile", None)
     ]
+
+
+# ---------- R command-line grammar: inline, file, and BATCH forms ----------
+
+
+def _run_check(tmp_path: Path, command: str, mode: str) -> int:
+    import subprocess
+
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-11-06T00:00:00",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            "0",
+            mode,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.stderr == "", result.stderr
+    return result.returncode
+
+
+_R_INLINE_ONE_LINERS = [
+    "R -e 'print(1)'",
+    "R --vanilla -e 'print(1)'",
+    "R --vanilla -q -e 'print(1)'",
+    "R -q -e 'print(1)'",
+    "R -s -e 'print(1)'",
+    "R --no-echo --quiet -e 'print(1)'",
+    "R -q --vanilla -s -e 'print(1)'",
+    "R --encoding UTF-8 -e 'print(1)'",
+    "R --encoding=UTF-8 -q -e 'print(1)'",
+    "R -e 'print(1)' --args a b",
+    "R -q -e 'print(1)' --args --version",
+    "R -e 'x <- 1' -e 'print(x)'",
+    "/usr/local/bin/R -q -e 'print(1)'",
+    "Rscript -e 'print(1)'",
+    "Rscript --vanilla -e 'print(1)'",
+    "Rscript -e 'print(1)' --version",
+    "python3 -c 'print(1)'",
+]
+
+_R_SCRIPT_RUNS = [
+    "Rscript script.R",
+    "Rscript --vanilla script.R",
+    "R -f script.R",
+    "R --vanilla -q -f script.R",
+    "R -s --file=script.R",
+    'R -s --file="script.R" --args a b',
+    "R -f script.R --args --help",
+    "R CMD BATCH script.R",
+    "R CMD BATCH --vanilla --no-timing script.R script.Rout",
+    "R CMD BATCH -q --no-save script.R",
+    "R -q -e 'print(1)' && Rscript script.R",
+]
+
+
+@pytest.mark.parametrize("command", _R_INLINE_ONE_LINERS)
+def test_post_action_exempts_every_inline_r_one_liner(
+    tmp_path: Path, command: str
+) -> None:
+    """`R [opts] -e` is a one-liner like `Rscript -e` and `python -c`, whatever
+    startup options precede the expression or trail it."""
+    assert _run_check(tmp_path, command, "--check-post-action") == 1, command
+
+
+@pytest.mark.parametrize("command", _R_SCRIPT_RUNS)
+def test_post_action_fires_for_r_script_runs(tmp_path: Path, command: str) -> None:
+    (tmp_path / "script.R").write_text("read.csv('input.csv')\n")
+    assert _run_check(tmp_path, command, "--check-post-action") == 0, command
+
+
+@pytest.mark.parametrize("command", _R_INLINE_ONE_LINERS[:-1])
+def test_inline_r_one_liners_are_still_recorded_as_lineage(
+    tmp_path: Path, command: str
+) -> None:
+    """Exempting one-liners from post-action must not hide them from lineage:
+    short startup options before `-e` are parsed, not a reason to drop it."""
+    assert _run_check(tmp_path, command, "--check-execution") == 0, command
+    detections = detect_scripts(command, tmp_path)
+    assert detections and all(script is None for script, _ in detections), command
+
+
+@pytest.mark.parametrize(
+    "command,expected_source",
+    [
+        ("R -q -e \"read.csv('x.csv')\"", "read.csv('x.csv')"),
+        ("R --vanilla -s -e \"read.csv('x.csv')\" --args 1", "read.csv('x.csv')"),
+        ("R --encoding UTF-8 -e \"read.csv('x.csv')\"", "read.csv('x.csv')"),
+        ("Rscript -e \"read.csv('x.csv')\"", "read.csv('x.csv')"),
+        ("Rscript --vanilla -e \"read.csv('x.csv')\"", "read.csv('x.csv')"),
+    ],
+)
+def test_inline_r_source_is_the_expression_not_an_option_value(
+    command: str, expected_source: str
+) -> None:
+    assert detect_scripts(command, Path("/tmp")) == [(None, expected_source)]
+
+
+@pytest.mark.parametrize("command", _R_SCRIPT_RUNS[:-1])
+def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> None:
+    (tmp_path / "script.R").write_text("read.csv('input.csv')\n")
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "script.R", None)]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Terminal options stop R anywhere before `--args`, even after the payload.
+        "R -e 'print(1)' --version",
+        "R -q -e 'print(1)' -h",
+        "R -f script.R --help",
+        "R --file=script.R --version",
+        # `--args` ends option parsing: a later `-e`/`-f` is never run.
+        "R --args -e 'print(1)'",
+        "R --args -f script.R",
+        # `-d` hands the remaining argv to a debugger.
+        "R -d lldb -e 'print(1)'",
+        "R -e 'print(1)' -d lldb",
+        "R --debugger=gdb -f script.R",
+        # R refuses to combine an expression with an input file.
+        "R -e 'print(1)' -f script.R",
+        # Spellings R rejects or misreads.
+        "R --file script.R",
+        "Rscript -q script.R",
+        "Rscript -q -e 'print(1)'",
+        # Non-executing R CMD tools and mere mentions.
+        "R CMD INSTALL pkg",
+        "R CMD BATCH --help script.R",
+        "R CMD BATCH -v script.R",
+        "R CMD BATCH -d lldb script.R",
+        "R CMD BATCH --args script.R",
+        "R CMD check pkg_1.0.tar.gz",
+        "echo \"R -q -e 'print(1)'\"",
+        "echo 'R -f script.R'",
+        "MyR -f script.R",
+    ],
+)
+def test_r_non_executing_forms_record_nothing(tmp_path: Path, command: str) -> None:
+    (tmp_path / "script.R").write_text("read.csv('input.csv')\n")
+    assert detect_scripts(command, tmp_path) == [], command
+    assert _run_check(tmp_path, command, "--check-execution") == 1, command
+    assert _run_check(tmp_path, command, "--check-post-action") == 1, command

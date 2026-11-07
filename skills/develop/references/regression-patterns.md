@@ -794,3 +794,24 @@ claim that drains shortly after release begins and require the lock to be
 gone afterward, with the owner record still present while the claim was
 held. Under load, instrument reap and release paths and require no
 premature reap and no leaked lock across repeated parallel child-event runs.
+
+## 40. A policy or grammar is implemented for one member of its class
+
+**Failure:** The post-action check exempted "inline one-liners" by skipping
+Python `-c` only, so `R -e` opened a bookkeeping cycle. The R `-e` regex
+borrowed Rscript's long-option-only grammar, so `R -q -e` never matched at
+all: it looked exempt, but only because lineage could not see it either. Two
+defects in opposite directions made the behavior depend on which startup flag
+the agent happened to type.
+
+**Invariant:** State a policy over the class the documentation names (every
+inline form, every interpreter) and enumerate that class in one place. Parse
+each interpreter with its own argv grammar — short flags, separated values,
+end-of-options markers, and options it honors after the payload — rather than
+reusing a sibling's. An exemption must come from the policy, never from a
+parse failure that also drops the event elsewhere.
+
+**Regression evidence:** For each member of the class, pair the exempt or
+detected form with option variants before and after the payload, and assert
+both consumers (post-action and lineage) separately, so a form that vanishes
+from both cannot pass as exempt.
