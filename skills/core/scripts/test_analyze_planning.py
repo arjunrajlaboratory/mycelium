@@ -202,6 +202,9 @@ def test_unit_of_replication_follows_the_assigned_unit() -> None:
     )
     assert "otherwise the donor is" not in row
     assert "independently assigned" in row
+    # Codex P2: observational contrasts assign nothing; the participant is the
+    # independently sampled unit.
+    assert "independently sampled" in row
     assert "mixed model" in row and "aggregat" in row
     # Codex P2: aggregating to the assigned unit leaves the levels above it
     # (wells from one donor) correlated, so they still need a term.
@@ -226,12 +229,25 @@ def test_inherited_scientific_rows_hold_for_their_edge_cases() -> None:
     model = next(l for l in decisions.splitlines() if l.startswith("| Model or test |"))
     assert "no colliders or mediators" not in model
     assert "direct effect" in model
+    # Codex P2: collider and mediator rules are for causal estimands; a
+    # predictive model picks features by availability and leakage.
+    assert "causal estimand" in model and "prediction time" in model
     modes = FAILURE_MODES.read_text(encoding="utf-8")
     seeds = next(l for l in modes.splitlines() if l.startswith("| Non-determinism |"))
     assert "inside each worker" not in seeds
     assert "`future.seed = TRUE`" in seeds and "L'Ecuyer-CMRG" in seeds
     scores = next(l for l in modes.splitlines() if l.startswith("| Score read as probability |"))
     assert "over-representation" in scores and "GSEA" in scores
+    # Round 7: many-to-one joins repeat keys on one side by design.
+    join = next(l for l in modes.splitlines() if l.startswith("| Join duplication |"))
+    assert "both sides" not in join and "intended cardinality" in join
+    # Round 7: penalized models tolerate rank deficiency.
+    formula = next(l for l in modes.splitlines() if l.startswith("| Formula is not the model |"))
+    assert "unpenalized" in formula
+    # Round 7: unit_of_replication blocks repeated rows per unit, so it runs
+    # on the per-unit table, not on observations a mixed model keeps.
+    declaring = " ".join(_section(DECISIONS, "## Declaring a data check").split())
+    assert "per-unit table" in declaring
 
 
 def test_contract_rows_follow_the_contract_guides_applicability() -> None:
