@@ -198,7 +198,8 @@ The Check column names what actually checks the row: a data contract kind, a
 inspect; `skills/analyze/references/planning-failure-modes.md` says what each
 check covers. When nothing checks a row, write `none` or the manual step.
 
-Tag every fact the plan rests on:
+Tag every fact the plan rests on, one fact per line, each with its own tag, so
+the user can find and check each `agent-asserted` one:
 
 - `[human-stated]`: the user said it in this conversation.
 - `[agent-derived: <path>]`: you read it in that file or probe output.

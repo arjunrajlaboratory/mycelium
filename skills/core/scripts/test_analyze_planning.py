@@ -166,6 +166,13 @@ def test_probe_results_never_become_contract_expectations() -> None:
     assert "never from a first look at the data" in _flat(ANALYZE)
 
 
+def test_each_fact_carries_its_own_tag() -> None:
+    # Live Codex run: the plan summarised provenance in one sentence, so no
+    # single agent-asserted fact could be found and checked.
+    plan = " ".join(_section(PLANNING, "## 7. Present the plan and wait").split())
+    assert "one fact per line, each with its own tag" in plan
+
+
 def test_plan_never_puts_words_in_the_users_mouth() -> None:
     # Codex P2 on #114: on a skip the user may never have stated a claim.
     plan = " ".join(_section(PLANNING, "## 7. Present the plan and wait").split())
@@ -200,6 +207,14 @@ def test_unit_of_replication_follows_the_assigned_unit() -> None:
     # (wells from one donor) correlated, so they still need a term.
     assert "after aggregating" in row
     assert "blocking term or random effect" in row
+    # Codex P1 on #114: in a pooled screen the guide can be the condition;
+    # blocking on it would absorb the effect being estimated.
+    assert "never the condition being tested" in row
+    # Codex P1 (CLI round 5): the mixed-model random effect belongs on the
+    # assigned unit the measurements share, never on the cell itself.
+    assert "random effect for the assigned unit" in row
+    assert "`(1 | donor)`" in row
+    assert "never one for each cell or replicate" in row
 
 
 def test_contract_rows_follow_the_contract_guides_applicability() -> None:
