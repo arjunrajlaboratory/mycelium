@@ -148,6 +148,14 @@ def test_questions_are_capped_and_asked_one_per_message() -> None:
     assert "Ask only for these two things" in opening
 
 
+def test_plan_check_column_cites_tools_only_for_what_they_inspect() -> None:
+    # Live test: a plan named "scilintr" as the check for its choice of test,
+    # which scilintr does not inspect.
+    plan = " ".join(_section(PLANNING, "## 7. Present the plan and wait").split())
+    assert "Never cite a tool for something it does not inspect" in plan
+    assert "planning-failure-modes.md" in plan
+
+
 def test_planning_is_read_only_until_the_user_confirms() -> None:
     planning = _flat(PLANNING)
     assert "Never run a repository script by path" in planning

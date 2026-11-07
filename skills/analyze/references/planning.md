@@ -182,6 +182,11 @@ Parked: <item> — returns when <condition>
 Decisions to record: <user answers and defaults to log once work begins>
 ```
 
+The Check column names what actually checks the row: a data contract kind, a
+`scilintr` rule, or a manual step. Never cite a tool for something it does not
+inspect; `skills/analyze/references/planning-failure-modes.md` says what each
+check covers. When nothing checks a row, write `none` or the manual step.
+
 Tag every fact the plan rests on:
 
 - `[human-stated]`: the user said it in this conversation.
