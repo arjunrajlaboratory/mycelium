@@ -102,12 +102,16 @@ def test_offer_is_made_once_per_analysis_from_a_recorded_field() -> None:
 def test_skip_still_yields_a_sourced_plan_and_the_contract_check_runs() -> None:
     skip = " ".join(_section(PLANNING, "## 2. If the user skips").split())
     assert "repository evidence and labelled defaults" in skip
-    assert "do not wait" in skip
+    assert "do not wait" in skip.lower()
     # Choices the request already states stay user-sourced; the rest become
     # defaults the user can find and correct.
     assert "keeps its `user` source" in skip
     assert "`default: planning skipped; <reason>`" in skip
     assert "Main risk" in skip
+    # Live test: a skip-path agent wrote the plan into the doc after the run,
+    # so the user never saw the defaults first. The plan is the first message.
+    assert "Your first message after the skip is the plan" in skip
+    assert "before you create a file or run anything" in skip
     # The data contract check runs whichever way the user chose.
     assert "runs either way" in _flat(ANALYZE)
 
@@ -140,6 +144,8 @@ def test_questions_are_capped_and_asked_one_per_message() -> None:
     opening = " ".join(_section(PLANNING, "## 3. Ask for the question").split())
     assert "own words" in opening
     assert "no drafted options" in opening
+    # Live test: the agent added a sub-question with drafted example answers.
+    assert "Ask only for these two things" in opening
 
 
 def test_planning_is_read_only_until_the_user_confirms() -> None:
@@ -150,6 +156,18 @@ def test_planning_is_read_only_until_the_user_confirms() -> None:
     assert "never blocks Stop" in planning
     assert "post-action" in planning
     assert "wait for the user to confirm" in planning
+
+
+def test_unit_of_replication_follows_the_assigned_unit() -> None:
+    # Codex P1 on #114: a cell-versus-donor rule pseudoreplicates pooled
+    # perturbation screens and has no answer for designs without donors.
+    row = next(
+        line for line in DECISIONS.read_text(encoding="utf-8").splitlines()
+        if line.startswith("| Unit of replication |")
+    )
+    assert "otherwise the donor is" not in row
+    assert "independently assigned" in row
+    assert "mixed model" in row and "aggregat" in row
 
 
 def test_contract_rows_follow_the_contract_guides_applicability() -> None:

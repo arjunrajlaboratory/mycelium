@@ -46,11 +46,13 @@ that does not decline. "skip", "no" or "just run it" skips it.
 
 Go straight to the analysis and ask no planning questions. Still write a short
 plan, from repository evidence and labelled defaults, in the format of
-section 7. A choice the user already stated in the request keeps its `user`
+section 7. Your first message after the skip is the plan, sent before you
+create a file or run anything, so the user sees the defaults before the
+results. A choice the user already stated in the request keeps its `user`
 source; do not ask about anything else. Each other choice the user would own
 becomes a labelled default (`default: planning skipped; <reason>`), and the
 most consequential of them goes first under Main risk, so the user can
-correct it later. Show the plan as you start, and do not wait for a reply.
+correct it later. Do not wait for a reply.
 Record `**Planning**: skipped YYYY-MM-DD` (section 8). The data contract check
 at step 6 of analyze still runs.
 
@@ -58,7 +60,8 @@ at step 6 of analyze still runs.
 
 Ask the user for the question in their own words and the result they hope to
 claim, in one message, with no drafted options or examples: a drafted answer
-anchors the user to it. Open with one sentence restating only what the user
+anchors the user to it. Ask only for these two things; save anything else for
+section 6. Open with one sentence restating only what the user
 has already said. If the request already states the question or the claim in
 the user's words, quote it and ask only for the missing part; if it states
 both, skip this question. This message counts toward the limit of 5.
