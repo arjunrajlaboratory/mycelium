@@ -11,8 +11,10 @@ Use this guide at step 3 of `$mycelium:analyze`. It turns a request into a
 short plan where every consequential choice says where it came from, so the
 user can correct a wrong assumption before anything runs rather than after.
 
-Nothing in sections 3–7 writes a file or runs analysis code. The plan is
-recorded (section 8) only after the user confirms it or skips the discussion.
+Nothing in sections 3–7 writes to the project (analysis folders, manifests,
+`.living/`) or runs analysis code. A session handoff that a lifecycle hook asks
+for is bookkeeping, not analysis; write it as usual. The plan is recorded
+(section 8) only after the user confirms it or skips the discussion.
 
 ## 1. Offer the discussion
 
@@ -109,6 +111,13 @@ Rscript -e 'd <- read.csv("data/raw/samples.csv"); print(nrow(d)); print(table(d
 The data-lineage hook may record which files a probe read. That is
 provenance: it asks nothing of you and never blocks Stop.
 
+A probe's output is an observation, not a source for an expectation. Tag it
+`[agent-derived: probe of <file>]`. It can confirm or contradict what the
+manifest, a decision, or the user says, and a contradiction is worth raising.
+But a value you only learned by probing the table (its row count, its levels)
+cannot become the plan's expectation for that table, or the data contract
+would check the data against itself and always pass.
+
 Use the interpreter or environment the repository documents. If a probe fails,
 do not debug it: mark the property unverified and make checking it the plan's
 first step. **Never run a repository script by path** while planning
@@ -160,7 +169,9 @@ choices as labelled defaults, and go ahead without waiting; record it as
 ## 7. Present the plan and wait
 
 Keep the prose under 150 words. The table and the lines below do not count
-toward it.
+toward it. Quote the question and the claim only in words the user actually
+wrote; if the user did not state one (a skip can leave the claim unstated),
+write `not stated`, and never write words for the user.
 
 ```text
 > Question (user's words): "<answer>"
@@ -208,5 +219,7 @@ After the user confirms or skips:
 - Log each user answer, and each default the user confirmed, to
   `.living/decisions.md` with the decision template. Cite earlier entries by
   date and exact heading.
-- Take the data contract's values (analyze step 6) from the plan's rows, not
-  from a first look at the data.
+- Take the data contract's values (analyze step 6) from plan rows sourced to
+  the user, a decision, the manifest, or a stated default, never from a probe
+  of the table the contract checks. Where the plan has no such source for a
+  value, leave that check out of the contract and say so.

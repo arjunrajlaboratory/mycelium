@@ -156,8 +156,28 @@ def test_plan_check_column_cites_tools_only_for_what_they_inspect() -> None:
     assert "planning-failure-modes.md" in plan
 
 
+def test_probe_results_never_become_contract_expectations() -> None:
+    # Codex P1 on #114: a value read from the table and copied into the
+    # contract checks the data against itself and always passes.
+    planning = _flat(PLANNING)
+    assert "A probe's output is an observation, not a source" in planning
+    record = " ".join(_section(PLANNING, "## 8. Record").split())
+    assert "never from a probe of the table the contract checks" in record
+    assert "never from a first look at the data" in _flat(ANALYZE)
+
+
+def test_plan_never_puts_words_in_the_users_mouth() -> None:
+    # Codex P2 on #114: on a skip the user may never have stated a claim.
+    plan = " ".join(_section(PLANNING, "## 7. Present the plan and wait").split())
+    assert "`not stated`" in plan
+    assert "never write words for the user" in plan
+
+
 def test_planning_is_read_only_until_the_user_confirms() -> None:
     planning = _flat(PLANNING)
+    # Live Codex run: the agent wrote the session handoff SessionStart asked
+    # for. That is lifecycle bookkeeping, which the read-only rule allows.
+    assert "session handoff" in planning
     assert "Never run a repository script by path" in planning
     # Probe forms are limited to those the hooks treat as reads; `R -e` is not.
     assert "Do not use `R -e`" in planning
@@ -176,6 +196,10 @@ def test_unit_of_replication_follows_the_assigned_unit() -> None:
     assert "otherwise the donor is" not in row
     assert "independently assigned" in row
     assert "mixed model" in row and "aggregat" in row
+    # Codex P2: aggregating to the assigned unit leaves the levels above it
+    # (wells from one donor) correlated, so they still need a term.
+    assert "after aggregating" in row
+    assert "blocking term or random effect" in row
 
 
 def test_contract_rows_follow_the_contract_guides_applicability() -> None:
