@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Concurrent session starts no longer share one session log on Ubuntu
+  26.04.** Mycelium's SessionStart/Stop lifecycle locks relied on `mkdir`
+  failing for every contender but one. On Ubuntu 26.04, `/usr/bin/mkdir` is
+  uutils coreutils 0.10.0, which exits 0 without `-p` when it loses a
+  creation race and the directory exists afterwards. Two root tasks starting
+  together could then both hold the repository lock, allocate the same
+  `.living/log/<date>-NNN-<project>.md`, and overwrite each other's log; two
+  stale-lock reapers could both claim one lock. Lock acquisition and reap
+  claims now create their directory through the `mkdir(2)` system call
+  directly (`mycelium_mkdir_exclusive`), independent of which coreutils is
+  installed. The on-disk lock layout is unchanged, so existing projects need
+  no migration.
+
 ## [0.9.2] - 2026-10-17
 
 ### Added
