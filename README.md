@@ -110,7 +110,7 @@ Work normally — analyze data, write code, build algorithms. Claude exposes the
 actions as `/mycelium:*` commands; Codex namespaces the same shared skills
 under the plugin name:
 
-- `/mycelium:analyze` or `$mycelium:analyze` — start or continue an analysis (routes to installed conventions)
+- `/mycelium:analyze` or `$mycelium:analyze` — start or continue an analysis (offers a short planning discussion first, then routes to installed conventions)
 - `/mycelium:report` or `$mycelium:report` — generate a structured report
 - `/mycelium:ideas` or `$mycelium:ideas` — brainstorm with disciplinary personas
 - `/mycelium:ingest` or `$mycelium:ingest` — import new data with metadata and provenance
