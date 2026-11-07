@@ -214,7 +214,24 @@ def test_unit_of_replication_follows_the_assigned_unit() -> None:
     # assigned unit the measurements share, never on the cell itself.
     assert "random effect for the assigned unit" in row
     assert "`(1 | donor)`" in row
-    assert "never one for each cell or replicate" in row
+    # Round 6: a nested effect for repeated measures of one cell is fine in
+    # addition; it must not replace the assigned-unit effect.
+    assert "in place of the assigned-unit effect" in row
+
+
+def test_inherited_scientific_rows_hold_for_their_edge_cases() -> None:
+    # Codex CLI round 6 found four rows (most inherited from upstream) whose
+    # blanket rules are wrong for a common design.
+    decisions = DECISIONS.read_text(encoding="utf-8")
+    model = next(l for l in decisions.splitlines() if l.startswith("| Model or test |"))
+    assert "no colliders or mediators" not in model
+    assert "direct effect" in model
+    modes = FAILURE_MODES.read_text(encoding="utf-8")
+    seeds = next(l for l in modes.splitlines() if l.startswith("| Non-determinism |"))
+    assert "inside each worker" not in seeds
+    assert "`future.seed = TRUE`" in seeds and "L'Ecuyer-CMRG" in seeds
+    scores = next(l for l in modes.splitlines() if l.startswith("| Score read as probability |"))
+    assert "over-representation" in scores and "GSEA" in scores
 
 
 def test_contract_rows_follow_the_contract_guides_applicability() -> None:
