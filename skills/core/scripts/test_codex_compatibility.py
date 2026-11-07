@@ -2035,6 +2035,46 @@ def test_documented_data_contract_command_opens_no_bookkeeping(tmp_path):
     assert "MYCELIUM POST-ACTION PROTOCOL" in result.stdout
 
 
+def test_documented_planning_probes_open_no_bookkeeping(tmp_path):
+    """Planning is read-only: its documented probes must not open post-action."""
+    guide = (
+        PLUGIN_ROOT / "skills" / "analyze" / "references" / "planning.md"
+    ).read_text()
+    probes = guide.split("## 4. Retrieve before asking", 1)[1].split("\n## ", 1)[0]
+    commands = re.findall(r"```bash\n(.*?)\n```", probes, re.S)
+    assert len(commands) >= 2, commands
+    repo = _repo(tmp_path)
+    for command in commands:
+        payload = {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": {"exit_code": 0},
+        }
+        result = _run_hook("mycelium-post-action.sh", repo, payload)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "", command
+        assert not (repo / ".mycelium" / "mycelium-reminded.tmp").exists()
+
+    # Paired positive: running a repository script by path is analysis, which
+    # is why the guide forbids it during planning.
+    script = repo / "analysis" / "probe" / "run.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("print('probe')\n")
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": "python3 analysis/probe/run.py"},
+            "tool_response": {"exit_code": 0},
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert "MYCELIUM POST-ACTION PROTOCOL" in result.stdout
+
+
 def test_conventional_layout_user_script_is_still_analysis(tmp_path):
     """Codex P2 on PR #70: a path shape alone must not suppress bookkeeping.
 

@@ -1,0 +1,203 @@
+"""Contract tests for the planning discussion in the analyze skill.
+
+analyze offers an opt-in planning discussion before the first run. Its guide
+and coverage lists live under skills/analyze/references/. The analysis
+documentation template records whether the discussion happened, so the offer
+is made once per analysis. These tests pin the decisions recorded for
+recommendation 3 of the mycelium-extra review (issue #91).
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import data_contract_check
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[3]
+ANALYZE = PLUGIN_ROOT / "skills" / "analyze" / "SKILL.md"
+REFERENCES = PLUGIN_ROOT / "skills" / "analyze" / "references"
+PLANNING = REFERENCES / "planning.md"
+DECISIONS = REFERENCES / "analysis-decisions.md"
+FAILURE_MODES = REFERENCES / "planning-failure-modes.md"
+TEMPLATE = PLUGIN_ROOT / "skills" / "core" / "templates" / "analysis-readme.md"
+SCILINTR_GUIDE = PLUGIN_ROOT / "skills" / "core" / "references" / "scilintr-guide.md"
+REVIEW_DIR = PLUGIN_ROOT / "skills" / "core" / "references" / "review"
+
+
+def _flat(path: Path) -> str:
+    return " ".join(path.read_text(encoding="utf-8").split())
+
+
+def _steps(path: Path) -> list[str]:
+    """Top-level numbered steps of a SKILL.md, in order."""
+    return re.findall(r"^\d+\. (.+)$", path.read_text(encoding="utf-8"), re.M)
+
+
+def _section(path: Path, heading: str) -> str:
+    text = path.read_text(encoding="utf-8")
+    body = text.split(heading, 1)[1]
+    return re.split(r"^## ", body, maxsplit=1, flags=re.M)[0]
+
+
+def test_analyze_offers_planning_before_creating_or_running_anything() -> None:
+    steps = _steps(ANALYZE)
+    planning = next(i for i, s in enumerate(steps) if "planning discussion" in s)
+    create = next(i for i, s in enumerate(steps) if s.startswith("**New analysis**"))
+    contract = next(i for i, s in enumerate(steps) if "data assumptions" in s)
+    assert planning < create < contract
+    assert "skills/analyze/references/planning.md" in _flat(ANALYZE)
+    for reference in (PLANNING, DECISIONS, FAILURE_MODES):
+        assert reference.is_file()
+
+
+def test_step_numbers_cited_by_the_guides_match_analyze() -> None:
+    steps = _steps(ANALYZE)
+    planning_step = 1 + next(i for i, s in enumerate(steps) if "planning discussion" in s)
+    contract_step = 1 + next(i for i, s in enumerate(steps) if "data assumptions" in s)
+    assert f"step {planning_step} of `$mycelium:analyze`" in _flat(PLANNING)
+    # Every other analyze step a guide cites is the data contract step.
+    for path in (PLANNING, DECISIONS):
+        cited = re.findall(r"step (\d+) of analyze|analyze step (\d+)", _flat(path))
+        numbers = {int(a or b) for a, b in cited}
+        assert numbers == {contract_step}, (path.name, numbers)
+
+
+def test_opt_in_question_defaults_to_yes_and_skip_asks_nothing_more() -> None:
+    planning = _flat(PLANNING)
+    offer = " ".join(_section(PLANNING, "## 1. Offer the discussion").split())
+    # The offer says what the discussion involves before the user chooses.
+    assert "5 questions" in offer
+    assert "one at a time" in offer
+    assert "confirm before anything runs" in offer
+    # Yes is the recommended default, so a bare reply starts it.
+    assert "(recommended)" in offer
+    for reply in ("yes", "ok", "go ahead"):
+        assert f'"{reply}"' in offer
+    # A skip goes straight to the analysis with no planning questions.
+    assert "ask no planning questions" in planning
+    # Plain text so Claude Code and Codex behave the same.
+    assert "plain text" in offer
+    assert "host-specific question tool" in offer
+
+
+def test_offer_is_made_once_per_analysis_from_a_recorded_field() -> None:
+    template = TEMPLATE.read_text(encoding="utf-8")
+    planning = PLANNING.read_text(encoding="utf-8")
+    field = "**Planning**:"
+    assert field in template
+    # The record step writes exactly the values the offer step reads back.
+    for value in ("discussed YYYY-MM-DD", "skipped YYYY-MM-DD"):
+        assert f"`{field} {value}`" in planning
+    offer = " ".join(_section(PLANNING, "## 1. Offer the discussion").split())
+    assert f"`{field}`" in offer
+    assert "reruns" in offer.lower() and "debugging" in offer
+
+
+def test_skip_still_yields_a_sourced_plan_and_the_contract_check_runs() -> None:
+    skip = " ".join(_section(PLANNING, "## 2. If the user skips").split())
+    assert "repository evidence and labelled defaults" in skip
+    assert "do not wait" in skip
+    # The data contract check runs whichever way the user chose.
+    assert "runs either way" in _flat(ANALYZE)
+
+
+def test_every_decision_is_sourced_and_every_fact_tagged() -> None:
+    planning = _flat(PLANNING)
+    for source in ("`repo: <path>`", "`default: <reason>`", "`user`"):
+        assert source in planning
+    assert "drop it" in planning
+    for tag in (
+        "`[human-stated]`",
+        "`[agent-derived: <path>]`",
+        "`[agent-asserted: <source>]`",
+    ):
+        assert tag in planning
+    assert "Fact count:" in planning
+
+
+def test_questions_are_capped_and_asked_one_per_message() -> None:
+    planning = _flat(PLANNING)
+    assert "At most 5 questions" in planning
+    assert "one per message" in planning
+    assert "Recommended:" in planning
+    # The opening question is asked without drafted options, to avoid anchoring.
+    opening = " ".join(_section(PLANNING, "## 3. Ask for the question").split())
+    assert "own words" in opening
+    assert "no drafted options" in opening
+
+
+def test_planning_is_read_only_until_the_user_confirms() -> None:
+    planning = _flat(PLANNING)
+    assert "Never run a repository script by path" in planning
+    assert "post-action" in planning
+    assert "wait for the user to confirm" in planning
+
+
+def test_coverage_list_names_every_pre_run_decision_point() -> None:
+    decisions = DECISIONS.read_text(encoding="utf-8")
+    rows = re.findall(r"^\| ([^|]+?) \|", decisions, re.M)
+    points = {row for row in rows if row not in {"Decision point", "---"}}
+    assert {
+        "Estimand and claim type",
+        "Unit of replication",
+        "Cohort and exclusions",
+        "Input and matrix state",
+        "Reference and identifiers",
+        "QC thresholds",
+        "Normalization and transformation",
+        "Batch versus biology",
+        "Annotation",
+        "Model or test",
+        "Multiplicity",
+        "Leakage and circularity",
+        "Validation and sensitivity",
+        "Outputs and reporting",
+    } <= points
+
+
+def test_failure_modes_cite_only_checks_that_ship() -> None:
+    # Upstream cites data-contract kinds and tools mycelium does not have.
+    # A plan must never claim a check runs when it does not.
+    text = FAILURE_MODES.read_text(encoding="utf-8")
+
+    def cited(tool: str) -> set[str]:
+        # "tool (`a`, `b`: what it covers)": every name before the colon.
+        names: set[str] = set()
+        for inside in re.findall(rf"{tool} \(([^)]*)\)", text):
+            names |= set(re.findall(r"`([^`]+)`", inside.split(":", 1)[0]))
+        return names
+
+    kinds = cited("data-contract-check")
+    assert {"schema", "cohort", "unit_of_replication"} <= kinds
+    shipped = set(data_contract_check.KIND_KEYS)
+    assert kinds <= shipped, kinds - shipped
+    guide = SCILINTR_GUIDE.read_text(encoding="utf-8")
+    rules = cited("scilintr")
+    assert len(rules) >= 5, rules
+    for rule in rules:
+        assert f"`{rule}`" in guide, rule
+    reviews = set(re.findall(r"review: `([^`]+)`", text))
+    assert reviews, "expected at least one review checklist citation"
+    for review in reviews:
+        assert (REVIEW_DIR / f"{review}.md").is_file(), review
+    # Code-level failures are the review checklist's job; point there.
+    assert "skills/core/references/review/llm-failure-modes.md" in text
+
+
+def test_port_drops_mycelium_extra_only_machinery_and_credits_the_author() -> None:
+    for path in (PLANNING, DECISIONS, FAILURE_MODES):
+        text = _flat(path)
+        for absent in (
+            ".mycelium-extra",
+            "approval gate",
+            "approve plan",
+            "lucid-coder",
+            "plot-first",
+            "track-changes",
+            "biology-skills",
+            "`verify`",
+        ):
+            assert absent not in text, (path.name, absent)
+        assert "Mikhael Manurung" in text
+        assert "mycelium-extra" in text

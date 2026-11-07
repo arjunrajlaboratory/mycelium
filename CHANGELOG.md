@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A planning discussion before an analysis runs.** `analyze` now asks once,
+  before the first run of a new analysis, whether the user wants a short
+  planning discussion. It's at most 5 questions, one at a time, each with the
+  evidence found and a recommended answer, and it ends in a plan the user
+  confirms before anything runs. Yes is the default. A skip goes straight to the
+  analysis with no more questions, though the agent still shows a short plan
+  built from repository evidence and labelled defaults. Every choice in the plan
+  names its source (`repo: <path>`, `default: <reason>`, or the user), and every
+  fact carries a tag saying whether the user stated it, the agent read it in a
+  named file, or the agent assumed it. Planning stays read-only: it uses inline
+  probes, which do not trigger post-action bookkeeping, and never runs a
+  repository script. The analysis documentation template gains a `## Plan`
+  section whose `**Planning**:` line records whether the discussion happened or
+  was skipped, so follow-up runs of the same analysis are not asked again. Two
+  coverage lists ship with it under `skills/analyze/references/`: the decisions
+  a plan must settle before a run, and the planning mistakes a plan must guard
+  against. Each guard names only checks mycelium actually ships
+  (`data-contract-check` kinds, `scilintr` rules, `register_value`); anything
+  else is marked as a manual step or a `$mycelium:review` item. The data
+  contract check now takes its values from the confirmed plan and runs whether
+  or not the user planned. Adapted from the `grill` skill in
+  [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
+  Manurung (MIT, issue #91).
+
 ## [0.9.2] - 2026-10-17
 
 ### Added
