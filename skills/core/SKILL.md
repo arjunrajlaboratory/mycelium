@@ -336,6 +336,8 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 
 **This is what makes the repo "living." Execute after ANY significant action** (analysis step, data ingestion, algorithm implementation, report generation):
 
+The session log the post-action hook names (`.living/log/<date>-<nnn>-<project>.md`) is hook-owned and append-only: append to it; never rewrite it (Stop needs its header). Rewriting it with a whole-file write drops the YAML frontmatter Stop finalizes, and Stop then blocks until the header is restored.
+
 1. **Update manifests**: Update the relevant manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, etc.) with new/changed entries.
 2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder with current status, key findings, open questions.
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md` using the decision log template. Set `**Status**:`. If the choice replaces an earlier entry, name that entry in `**Supersedes**:` by date and exact heading title, never by a positional `D-N` ID; never edit the earlier entry. If entries on the choice disagree, settle them with the `decision-status` mode first.

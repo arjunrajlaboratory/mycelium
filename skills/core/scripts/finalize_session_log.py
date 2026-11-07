@@ -19,6 +19,17 @@ import tempfile
 import markdown_fences as fences
 
 
+# Exit status the Stop hook maps to a header-specific block message. A
+# frontmatter defect is the one finalization failure the agent itself causes
+# (usually by rewriting the hook-owned log) and can repair, so it must reach
+# the agent as a one-line cause instead of a traceback in a sidecar file.
+FRONTMATTER_EXIT_STATUS = 3
+
+
+class FrontmatterError(ValueError):
+    """The session log's YAML header is missing or malformed."""
+
+
 # Only the machine-emitted footer syntax is machine-owned: an HH:MM time and
 # numeric duration/file-count exactly as this module writes them. Authored
 # headings that merely resemble the footer, and examples inside Markdown code
@@ -81,7 +92,7 @@ def _replace_frontmatter_field(frontmatter: str, field: str, value: str) -> str:
     pattern = re.compile(rf"^{re.escape(field)}:.*$", re.MULTILINE)
     updated, replacements = pattern.subn(f"{field}: {value}", frontmatter)
     if replacements != 1:
-        raise ValueError(
+        raise FrontmatterError(
             f"expected exactly one {field!r} field in session frontmatter; "
             f"found {replacements}"
         )
@@ -98,10 +109,10 @@ def _completed_log(
     changed_paths: list[str],
 ) -> str:
     if not original.startswith("---\n"):
-        raise ValueError("session log is missing opening YAML frontmatter")
+        raise FrontmatterError("session log is missing opening YAML frontmatter")
     closing = original.find("\n---\n", 4)
     if closing < 0:
-        raise ValueError("session log is missing closing YAML frontmatter")
+        raise FrontmatterError("session log is missing closing YAML frontmatter")
 
     frontmatter_end = closing + len("\n---\n")
     frontmatter = original[:frontmatter_end]
@@ -203,14 +214,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.duration_minutes < 0 or args.files_changed < 0:
         raise ValueError("duration and file count must be non-negative")
     changed_paths = [line for line in sys.stdin.read().splitlines() if line]
-    finalize_session_log(
-        args.log_path,
-        ended=args.ended,
-        duration_minutes=args.duration_minutes,
-        files_changed=args.files_changed,
-        end_time=args.end_time,
-        changed_paths=changed_paths,
-    )
+    try:
+        finalize_session_log(
+            args.log_path,
+            ended=args.ended,
+            duration_minutes=args.duration_minutes,
+            files_changed=args.files_changed,
+            end_time=args.end_time,
+            changed_paths=changed_paths,
+        )
+    except FrontmatterError as error:
+        # One line, no traceback: Stop quotes it verbatim in its block reason.
+        print(" ".join(str(error).split()), file=sys.stderr)
+        return FRONTMATTER_EXIT_STATUS
     return 0
 
 
