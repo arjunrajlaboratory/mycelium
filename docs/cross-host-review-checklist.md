@@ -85,6 +85,9 @@ hook, filesystem, or lifecycle boundaries.
 
 ## 3. Installation, Upgrade, and Migration
 
+- [ ] Selecting a virtual-environment interpreter preserves its invocation
+      path, `sys.prefix`, packages, and child interpreter resolution; validating
+      the executable target must not replace the selected environment.
 - [ ] A fresh repository initializes successfully for each supported host.
 - [ ] Re-running initialization is idempotent.
 - [ ] Dry-run migration performs no writes.
@@ -120,9 +123,21 @@ hook, filesystem, or lifecycle boundaries.
       never mistaken for a live current session.
 - [ ] The documented install, update, trust, restart, and migration instructions
       match the current Claude Code and Codex interfaces.
+- [ ] Native-host setup instructions identify the installed package, selected
+      interpreter and intended workspace, and distinguish initializer-owned
+      steps from remaining user choices. Execute the documented commands in an
+      isolated existing Git project; do not infer model compliance from that pass.
 
 ## 4. Lifecycle State Machine
 
+- [ ] Multiple positive native tools completed before the next model invocation
+      retain all mandatory guidance. Pending reminders are keyed by event ID,
+      survive restart/legacy migration, and clear only on individual native
+      acknowledgement; duplicate events and negative controls cannot erase or
+      resurrect other messages.
+- [ ] A finalizer attempt is durable before dispatch. If its result is lost,
+      an identity-bound acceptance receipt permits reconciliation without
+      redispatch; absence of a marker alone cannot fabricate acceptance.
 - [ ] SessionStart handles fresh, resumed, cleared, compacted, and stale-crash
       sessions.
 - [ ] Session identifiers and log names are unique under rapid or concurrent
@@ -292,6 +307,9 @@ hook, filesystem, or lifecycle boundaries.
 
 ## 7. Data Lineage Integrity
 
+- [ ] An in-progress native command cannot publish preexisting output hashes
+      as completed execution provenance. Terminal evidence reconciles the same
+      command once, and missing completion evidence remains unresolved.
 - [ ] Exactly one lineage manifest is produced for an accepted session that
       executed tracked analysis.
 - [ ] Raw events accumulate across a blocked Stop and are not discarded before
@@ -300,15 +318,15 @@ hook, filesystem, or lifecycle boundaries.
       only final-state content is available.
 - [ ] Missing or unresolved scripts remain visible with warnings rather than
       being silently omitted.
-- [ ] Repository-assisted lineage recovery never duplicates a direct relative
-      path, never aliases an absolute or URL input by basename, and reports
-      fallback detection only when it contributes a new unambiguous path.
-- [ ] Recovery candidates data-flow into recognized reader/writer path
-      arguments, derive direction from that call, bypass repository discovery
-      when static I/O is complete, reject runtime branch selection and
-      partially resolved concatenation, require an actual supported import for
-      reader aliases, reject every locally rebound alias form, and fail
-      unresolved at a fixed entry bound.
+- [ ] Lineage records a path only when the literal scanner identifies the
+      full static path in a recognized reader/writer argument, with direction
+      taken from that call. A direct path is recorded exactly once, and an
+      absolute or URL input is never aliased to repository data by basename.
+- [ ] Dynamic `Path`/dictionary/loop composition, CLI-bound paths, runtime
+      branch selection, partially resolved concatenation, unproven custom
+      readers, and locally rebound reader aliases stay unresolved with a
+      lineage warning. No repository search, unique-basename match, or shell
+      replay substitutes for missing runtime evidence.
 - [ ] Event append, extraction, manifest writing, and status-sentinel updates
       are locked or atomic as appropriate.
 - [ ] Concurrent events and Stop attempts do not lose, duplicate, or split a
@@ -454,11 +472,22 @@ hook, filesystem, or lifecycle boundaries.
 
 ## Required Adversarial Regression Matrix
 
+For Antigravity packaging, verify file modes alongside bytes, include generator
+and effective host guidance in source identity, and keep the selected interpreter
+path separate. A permission-only repair must preserve the old package and refuse
+changed content, extra files, links and malformed ownership.
+
 These cases are mandatory because ordinary happy-path tests are unlikely to
 exercise them.
 
 | Case | Expected result |
 | --- | --- |
+| Two positive native commands finish in one invocation, followed by partial acknowledgement | Mandatory first-command guidance and later context both survive; only the acknowledged ID is removed, including after restart. |
+| An owned Antigravity hook loses its executable bit | Doctor and ordinary install fail; explicit permission repair retains the old package and restores a working hook. |
+| Only the Antigravity package generator, guidance or source permission mode changes | The development source digest changes; a different selected Python path alone does not change source identity. |
+| An async native command overwrites an existing output after its first hook | No output snapshot is finalized while RUNNING; matching terminal evidence produces one action with the final observed hash, while unavailable completion remains unresolved. |
+| A Stop result is lost after the real finalizer completes | The adapter reconciles an identity-bound acceptance receipt without dispatching again; a missing or mismatched receipt retains an uncertain outcome. |
+| The selected Python launcher is a venv symlink | Both the generated hook and its child python3 preserve the selected environment and can import its packages. |
 | `.mycelium` or `.living` is a symlink outside the project | The hook refuses the unsafe state and writes nothing outside the project. |
 | Session work updates `.living` within the same timestamp second | A valid update is accepted. |
 | Session work updates an existing finding file | The content change is detected even if the parent directory mtime is unchanged. |
@@ -476,9 +505,9 @@ exercise them.
 | A second identified root SessionStart arrives while the first root is live | Both roots receive distinct host-scoped run directories, markers, logs, baselines, lineage, and Stop enforcement; neither can mutate or clean the other's state. |
 | A session ID is numeric, Boolean, object/list-valued, `.`, or `..` | SessionStart creates no runtime directory, log, or shared file; a present invalid value never aliases another namespace or downgrades to legacy state. |
 | A module docstring or non-I/O call contains `ghost.csv`, or a reader consumes a file under `results/` | The unrelated literal is ignored, and the actual reader path is classified as input regardless of directory name. |
-| A dynamic I/O path uses a conditional expression, or a user helper is named `read_csv` | Recovery remains unresolved instead of recording both runtime branches or treating the unproven helper as data I/O; an explicitly imported supported reader remains eligible. |
-| A supported-looking reader alias is rebound by assignment, loop, context manager, unpacking, exception handling, walrus, comprehension, or pattern matching; or a runtime prefix is concatenated with a literal filename | Recovery remains unresolved; only an unshadowed supported import and a fully static `+` expression can contribute lineage. |
-| A script's direct reader/writer literals are already resolved | Repository fallback is not invoked; dynamic discovery has a fixed fail-safe entry bound. |
+| A dynamic I/O path uses a conditional expression, or a user helper is named `read_csv` | Lineage remains unresolved instead of recording both runtime branches or treating the unproven helper as data I/O; a full static path passed to an explicitly imported supported reader is still recorded. |
+| A supported-looking reader alias is rebound by assignment, loop, context manager, unpacking, exception handling, walrus, comprehension, or pattern matching; or a runtime prefix is concatenated with a literal filename | Lineage remains unresolved; only an unshadowed supported import and a fully static `+` expression can contribute a path. |
+| A script's reader/writer paths are fully static, or a dynamic path's filename matches one or more repository files | Static paths are recorded without any repository query; the dynamic path is never resolved by repository search or basename match and stays unresolved with a warning. |
 | Active-log marker points outside `.living/log` | PostToolUse omits the unsafe log directive; Stop still enforces outstanding work and never reveals or follows the path. |
 | A dirty or untracked file is rewritten with the same size and restored mtime | Session accounting detects the content change. |
 | `true && python failed.py` exits nonzero, or Python is a pipeline component | The provably executed analysis is recorded; an unknown failed AND prefix remains omitted. |
@@ -518,7 +547,7 @@ exercise them.
 | The agent upserts its registry row under a guessed session ID that links the session's own log | Stop leaves exactly one row with the canonical session ID and the agent's authored Summary, Key Outputs, and Tags; a row for any other log survives. |
 | Stop finalizes a registry row already enriched by the agent | Date, branch, duration, file count, status, and log link become factual final values while Summary, Key Outputs, and Tags remain authored and byte-equivalent at the cell level. |
 | A review report is rendered from multiple specialist outputs | Same-root findings are deduplicated, IDs are globally consecutive, per-category/global tallies match the rendered headings, and cross-input schema/feature/label comparability was checked. |
-| An analysis composes existing data paths dynamically from `Path`, dictionaries, or loop variables | Unique filenames reachable from recognized I/O path arguments are recovered conservatively after execution; direction follows the call, while ambiguous or over-bound searches remain unresolved with an explicit warning. |
+| An analysis composes existing data paths dynamically from `Path`, dictionaries, or loop variables | The event is `unresolved` with empty inputs/outputs and a lineage warning that Stop promotes to the manifest's `extraction_warnings`; no unique-basename recovery or repository search is attempted, even when exactly one matching file exists. |
 | A recent lifecycle lock records an owner PID that has terminated | The next caller claims and revalidates that exact generation before recovering it; a recent ownerless lock is not mistaken for dead-owner proof, and a replacement owner's lock survives competing delayed reapers. |
 | A waiter stats the lock just after the prior owner's `rmdir`, or a delayed reaper's claim sits inside the lock when its owner releases | The missing mtime is not treated as age, so no claim lands in the successor's lock; release waits out any transient claim, leaving no ownerless lock for waiters to time out on and no dropped PostToolUse event. |
 | `/usr/bin/mkdir` reports success for a lost creation race (uutils coreutils 0.10.0 on Ubuntu 26.04) and two lock contenders or two distinct-root SessionStarts race | Lock holders' critical sections never overlap, competing dead-owner reapers do not both claim, and each root receives its own session log. |

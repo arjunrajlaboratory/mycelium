@@ -1,6 +1,8 @@
 # Real-Host Lifecycle Audit Protocol
 
-Use this protocol to produce comparable evidence across Claude Code and Codex.
+Use this protocol to produce comparable evidence across Claude Code, Codex,
+Antigravity IDE and the Antigravity App. Use the applicable Antigravity
+profile for native capture and receipt verification.
 Adapt only the target path and harmless positive script; preserve the positive
 versus negative distinction.
 

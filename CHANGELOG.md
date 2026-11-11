@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Development previews for the standalone Antigravity App and Antigravity IDE.
+  Both package the eleven base Mycelium skills and use native hooks and the
+  host's selected model.
+- An Antigravity installer with dry runs, file and permission verification,
+  atomic replacement, and retained backups. The App profile installs per
+  workspace. See the README for installation and setup.
+- Native App 2.31.0 tracking for verified sandboxed commands and supported edits,
+  including bounded recovery of missed edit callbacks at Stop.
+
+### Fixed
+
+- Antigravity keeps running commands pending until matching terminal evidence
+  arrives. It retains each undelivered reminder and reconciles accepted Stop
+  receipts when a finalizer response is lost.
+- Antigravity hook launchers preserve the selected Python virtual environment.
+  Knowledge indexing uses the built-in offline summaries and concept labels.
+- Shared lineage preserves execution-time missing and unknown file facts and
+  leaves dynamic I/O paths unresolved.
+- Stop-hook source resolution works in macOS system Bash 3.2.
+
 ## [0.9.3] - 2026-11-07
 
 ### Added

@@ -59,10 +59,10 @@ Design notes:
 - The extractor is FORGIVING. Missing fields default to safe values. Invalid
   JSON lines are logged as warnings and skipped. Files that no longer exist
   on disk are recorded with sha256=null and a `_missing` marker.
-- The extractor will COMPUTE SHAs when an event has them missing, for
-  standalone-testing use. In production (events written by the tracker hook),
-  SHAs should already be populated — computed at execution time, not at
-  Stop time, for fidelity across iterative edit-run-edit-run cycles.
+- Legacy bare paths and omitted script-hash fields may be enriched for
+  standalone use. Captured records (including explicit null hashes, sizes,
+  missing markers and size-limit markers) are preserved without reading later
+  file contents. Production snapshots describe execution time, not Stop time.
 - Files >100 MB get path+size only (sha256: null, _skipped_too_large: true).
 """
 
@@ -133,8 +133,10 @@ def n_rows_if_tabular(path: Path) -> int | None:
 
 
 def enrich_file_record(rec: dict[str, Any]) -> dict[str, Any]:
-    """Fill in sha256/n_rows for a file record if missing and file exists on disk."""
+    """Enrich legacy bare paths; preserve captured facts, including absence."""
     out = dict(rec)
+    if any(key in out for key in ("sha256", "size_bytes", "_missing", "_skipped_too_large")):
+        return out
     path_str = out.get("path")
     if not path_str:
         return out
@@ -188,7 +190,7 @@ def normalize_event(
         "seeds_detected": list(raw.get("seeds_detected") or []),
     }
 
-    if event["script"] and event["script_sha256"] is None:
+    if event["script"] and "script_sha256" not in raw:
         script_path = Path(event["script"])
         if script_path.exists():
             event["script_sha256"] = sha256_file(script_path)

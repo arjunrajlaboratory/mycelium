@@ -126,16 +126,11 @@ script). Inline `-c` scripts emit one event each; their `script` field is
 `null`, with the source embedded under `script_source` and identified by
 `script_sha256`.
 
-For dynamic `Path`/dictionary composition, a conservative repository fallback
-may recover a uniquely named existing file. Candidates must data-flow into the
-path argument of a recognized reader or writer, reader aliases must come from
-an actual supported import and remain unshadowed, and direction comes from that
-call rather than the file's directory. Expressions that choose among runtime
-branches or concatenate an unresolved operand remain unresolved; fully static
-string concatenation remains eligible. Directly resolved paths bypass the
-fallback entirely. Dynamic searches exclude runtime/vendor trees and stop at a
-fixed entry bound; ambiguity or a bound hit remains unresolved rather than
-guessing.
+Dynamic `Path`/dictionary composition and CLI-bound paths remain unresolved
+unless the literal scanner can identify the full path. Repository basename
+recovery has been removed: even a unique matching file can be an unrelated input
+or a stale output when the runtime directory differs. No repository search or
+shell replay substitutes for missing runtime evidence.
 
 When I/O is delegated through imports or no safe candidate can be recovered,
 the event uses `"io_detection": "unresolved"`, leaves `inputs` and `outputs`
@@ -143,6 +138,12 @@ empty, and adds a `lineage_warnings` entry. Stop-time consolidation promotes
 that warning to the manifest's `extraction_warnings` list. This preserves
 evidence that the script ran without implying that its lineage was fully
 captured.
+
+Finalization preserves captured file records, including missing markers,
+explicit null hashes, sizes, and size-limit markers. It does not add later
+hashes or row counts to an earlier snapshot. Standalone legacy events containing
+only a path can still be enriched, as can an omitted script-hash field; an
+explicitly unknown script hash stays unknown.
 
 ## Manifest schema (consolidated at Stop)
 

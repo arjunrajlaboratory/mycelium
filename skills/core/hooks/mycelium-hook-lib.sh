@@ -261,14 +261,18 @@ mycelium_select_session_state() {
   fi
   mycelium_valid_session_id "$host_session_id" || return 1
   host=$(mycelium_hook_host)
-  [[ "$host" == "claude" || "$host" == "codex" ]] || return 1
+  [[ "$host" == "claude" || "$host" == "codex" || "$host" == "antigravity-ide" \
+    || "$host" == "antigravity-app" ]] || return 1
 
   run_state="$shared_state/run/$host/$host_session_id"
 
   # Rolling-upgrade compatibility: a task started by the prior build may still
   # own the flat transaction. Route only an exact owner match there; another
   # root gets a new scoped transaction and cannot consume the old evidence.
-  if [[ ! -e "$run_state" && ! -L "$run_state" \
+  # Antigravity App never wrote the flat layout, and its session identities can
+  # equal another Antigravity host's, so it never adopts flat state.
+  if [[ "$host" != "antigravity-app" \
+    && ! -e "$run_state" && ! -L "$run_state" \
     && -f "$shared_state/active-session-log.tmp" \
     && ! -L "$shared_state/active-session-log.tmp" ]]; then
     flat_owner=$(mycelium_read_session_owner_id \
@@ -293,7 +297,7 @@ from pathlib import Path
 
 shared = Path(sys.argv[1]).resolve(strict=True)
 host, session_id, mode = sys.argv[2:]
-if host not in {"claude", "codex"}:
+if host not in {"claude", "codex", "antigravity-ide", "antigravity-app"}:
     raise SystemExit(1)
 if not session_id or len(session_id) > 200 or session_id in {".", ".."}:
     raise SystemExit(1)
@@ -790,7 +794,7 @@ mycelium_file_size() {
 
 mycelium_hook_host() {
   case "${MYCELIUM_HOOK_HOST:-}" in
-    codex|claude) printf '%s\n' "$MYCELIUM_HOOK_HOST" ;;
+    codex|claude|antigravity-ide|antigravity-app) printf '%s\n' "$MYCELIUM_HOOK_HOST" ;;
     *) printf '%s\n' "claude" ;;
   esac
 }

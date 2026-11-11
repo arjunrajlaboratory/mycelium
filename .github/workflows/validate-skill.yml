@@ -198,6 +198,10 @@ jobs:
         run: |
           pytest -q skills/core/scripts --ignore=skills/core/scripts/knowledge_map
 
+      - name: Test Antigravity package lifecycle (macOS)
+        run: |
+          pytest -q tools/test_antigravity_package.py tools/test_antigravity_app_package.py
+
       - name: Run hook compatibility tests (macOS)
         run: |
           bash skills/core/hooks/test_stop_hook.sh

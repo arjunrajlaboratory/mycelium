@@ -17,11 +17,25 @@
 # Input: JSON on stdin: {tool_input:{command}, cwd, agent_id?, agent_type?, ...}
 # Output: Silent (no stdout, no additionalContext).
 # Env override: MYCELIUM_DATA_HELPER may point at an alternate event extractor.
+# Strict capture: only the durable Antigravity adapters set
+# MYCELIUM_STRICT_CAPTURE=1 with MYCELIUM_HOOK_HOST=antigravity-ide or
+# antigravity-app. Then a
+# missing or failing extractor exits nonzero with its diagnostic on stderr so
+# the adapter can retain an unresolved outcome. Every other host keeps the
+# historical fail-open behavior; intentional no-ops still exit 0.
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/mycelium-hook-lib.sh"
+
+STRICT_CAPTURE=0
+if [[ "${MYCELIUM_STRICT_CAPTURE:-}" == "1" ]] \
+  && [[ "$(mycelium_hook_host)" == "antigravity-ide" || "$(mycelium_hook_host)" == "antigravity-app" ]]; then
+  STRICT_CAPTURE=1
+fi
+# The block below silences stderr; strict diagnostics use the original stream.
+exec 3>&2
 
 {
   INPUT=$(cat)
@@ -50,7 +64,13 @@ source "$HERE/mycelium-hook-lib.sh"
 
   # Locate the Python extractor helper. Default: sibling in skills/core/scripts/.
   HELPER="${MYCELIUM_DATA_HELPER:-$HERE/../scripts/extract_data_lineage_event.py}"
-  if [[ ! -f "$HELPER" ]]; then exit 0; fi
+  if [[ ! -f "$HELPER" ]]; then
+    if [[ "$STRICT_CAPTURE" == "1" ]]; then
+      printf 'Mycelium data capture failed: extractor not found: %s\n' "$HELPER" >&3
+      exit 70
+    fi
+    exit 0
+  fi
 
   TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   EVENTS_FILE="$STATE_DIR/mycelium-data-events.tmp"
@@ -70,6 +90,21 @@ source "$HERE/mycelium-hook-lib.sh"
   # protected appends. Shell `>>` is only atomic for writes <= PIPE_BUF, and
   # embedded script_source can push lines past that. Concurrent Bash tools
   # firing PostToolUse hooks in parallel would otherwise interleave bytes.
+  if [[ "$STRICT_CAPTURE" == "1" ]]; then
+    HELPER_STATUS=0
+    HELPER_ERR=$(python3 "$HELPER" \
+      --cwd "$SESSION_CWD" \
+      --ts "$TS" \
+      --bash-cmd "$COMMAND" \
+      --append-to "$EVENTS_FILE" \
+      ${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"} 2>&1 >/dev/null) || HELPER_STATUS=$?
+    if [[ "$HELPER_STATUS" != "0" ]]; then
+      printf 'Mycelium data capture failed: extractor exited %s: %s\n' \
+        "$HELPER_STATUS" "$(printf '%s' "$HELPER_ERR" | tail -c 1500)" >&3
+      exit 70
+    fi
+    exit 0
+  fi
   python3 "$HELPER" \
     --cwd "$SESSION_CWD" \
     --ts "$TS" \

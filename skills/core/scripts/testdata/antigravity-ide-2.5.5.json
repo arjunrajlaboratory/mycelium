@@ -1,0 +1,775 @@
+{
+  "profile": "Antigravity IDE 2.5.5 / macOS / extension 0.2.0",
+  "provenance": "Minimal native event fields with fixture identifiers and placeholder paths.",
+  "events": [
+    {
+      "event": "PreInvocation",
+      "payload": {
+        "artifactDirectoryPath": "@ARTIFACT@",
+        "conversationId": "a0000000-0000-4000-8000-000000000001",
+        "initialNumSteps": 1,
+        "invocationNum": 0,
+        "modelName": "gemini-3.8-flash-high",
+        "transcriptPath": "@ARTIFACT@/.system_generated/logs/transcript_full.jsonl",
+        "workspacePaths": [
+          "@ROOT@"
+        ]
+      },
+      "transcript": [
+        {
+          "step_index": 0,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        }
+      ]
+    },
+    {
+      "event": "PostToolUse",
+      "payload": {
+        "artifactDirectoryPath": "@ARTIFACT@",
+        "conversationId": "a0000000-0000-4000-8000-000000000001",
+        "error": "",
+        "modelName": "gemini-3.8-flash-high",
+        "stepIdx": 8,
+        "toolCall": {
+          "args": {
+            "CommandLine": "python3 probe_sum.py",
+            "Cwd": "@ROOT@",
+            "WaitMsBeforeAsync": 5000,
+            "toolAction": "Running sum check",
+            "toolSummary": "Execute probe sum check"
+          },
+          "name": "run_command"
+        },
+        "transcriptPath": "@ARTIFACT@/.system_generated/logs/transcript_full.jsonl",
+        "workspacePaths": [
+          "@ROOT@"
+        ]
+      },
+      "transcript": [
+        {
+          "step_index": 0,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 1,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 2,
+          "source": "SYSTEM",
+          "type": "CONVERSATION_HISTORY",
+          "status": "DONE"
+        },
+        {
+          "step_index": 3,
+          "source": "SYSTEM",
+          "type": "KNOWLEDGE_ARTIFACTS",
+          "status": "DONE"
+        },
+        {
+          "step_index": 4,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 5,
+          "source": "MODEL",
+          "type": "VIEW_FILE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 6,
+          "source": "SYSTEM",
+          "type": "CHECKPOINT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 7,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 8,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "DONE",
+          "exit_code": 0
+        }
+      ]
+    },
+    {
+      "event": "Stop",
+      "payload": {
+        "artifactDirectoryPath": "@ARTIFACT@",
+        "conversationId": "a0000000-0000-4000-8000-000000000001",
+        "error": "",
+        "executionNum": 0,
+        "fullyIdle": true,
+        "modelName": "gemini-3.8-flash-high",
+        "terminationReason": "NO_TOOL_CALL",
+        "transcriptPath": "@ARTIFACT@/.system_generated/logs/transcript_full.jsonl",
+        "workspacePaths": [
+          "@ROOT@"
+        ]
+      },
+      "transcript": [
+        {
+          "step_index": 0,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 1,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 2,
+          "source": "SYSTEM",
+          "type": "CONVERSATION_HISTORY",
+          "status": "DONE"
+        },
+        {
+          "step_index": 3,
+          "source": "SYSTEM",
+          "type": "KNOWLEDGE_ARTIFACTS",
+          "status": "DONE"
+        },
+        {
+          "step_index": 4,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 5,
+          "source": "MODEL",
+          "type": "VIEW_FILE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 6,
+          "source": "SYSTEM",
+          "type": "CHECKPOINT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 7,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 8,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "DONE",
+          "exit_code": 0
+        },
+        {
+          "step_index": 9,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        }
+      ]
+    },
+    {
+      "event": "PreInvocation",
+      "payload": {
+        "artifactDirectoryPath": "@ARTIFACT@",
+        "conversationId": "a0000000-0000-4000-8000-000000000001",
+        "initialNumSteps": 11,
+        "invocationNum": 0,
+        "modelName": "claude-sonnet-4-6",
+        "transcriptPath": "@ARTIFACT@/.system_generated/logs/transcript_full.jsonl",
+        "workspacePaths": [
+          "@ROOT@"
+        ]
+      },
+      "transcript": [
+        {
+          "step_index": 0,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 1,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 2,
+          "source": "SYSTEM",
+          "type": "CONVERSATION_HISTORY",
+          "status": "DONE"
+        },
+        {
+          "step_index": 3,
+          "source": "SYSTEM",
+          "type": "KNOWLEDGE_ARTIFACTS",
+          "status": "DONE"
+        },
+        {
+          "step_index": 4,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 5,
+          "source": "MODEL",
+          "type": "VIEW_FILE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 6,
+          "source": "SYSTEM",
+          "type": "CHECKPOINT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 7,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 8,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "DONE",
+          "exit_code": 0
+        },
+        {
+          "step_index": 9,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 10,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        }
+      ]
+    },
+    {
+      "event": "PostToolUse",
+      "payload": {
+        "artifactDirectoryPath": "@ARTIFACT@",
+        "conversationId": "a0000000-0000-4000-8000-000000000001",
+        "error": "",
+        "modelName": "claude-sonnet-4-6",
+        "stepIdx": 13,
+        "toolCall": {
+          "args": {
+            "CommandLine": "python3 -c \"raise SystemExit(7)\"",
+            "Cwd": "@ROOT@",
+            "WaitMsBeforeAsync": 5000,
+            "toolAction": "Running SystemExit(7) command",
+            "toolSummary": "Run exit-7 command"
+          },
+          "name": "run_command"
+        },
+        "transcriptPath": "@ARTIFACT@/.system_generated/logs/transcript_full.jsonl",
+        "workspacePaths": [
+          "@ROOT@"
+        ]
+      },
+      "transcript": [
+        {
+          "step_index": 0,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 1,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 2,
+          "source": "SYSTEM",
+          "type": "CONVERSATION_HISTORY",
+          "status": "DONE"
+        },
+        {
+          "step_index": 3,
+          "source": "SYSTEM",
+          "type": "KNOWLEDGE_ARTIFACTS",
+          "status": "DONE"
+        },
+        {
+          "step_index": 4,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 5,
+          "source": "MODEL",
+          "type": "VIEW_FILE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 6,
+          "source": "SYSTEM",
+          "type": "CHECKPOINT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 7,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 8,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "DONE",
+          "exit_code": 0
+        },
+        {
+          "step_index": 9,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 10,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 11,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 12,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 13,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "DONE",
+          "exit_code": 7
+        }
+      ]
+    },
+    {
+      "event": "Stop",
+      "payload": {
+        "artifactDirectoryPath": "@ARTIFACT@",
+        "conversationId": "a0000000-0000-4000-8000-000000000001",
+        "error": "",
+        "executionNum": 0,
+        "fullyIdle": false,
+        "modelName": "claude-sonnet-4-6",
+        "terminationReason": "TERMINAL_CUSTOM_HOOK",
+        "transcriptPath": "@ARTIFACT@/.system_generated/logs/transcript_full.jsonl",
+        "workspacePaths": [
+          "@ROOT@"
+        ]
+      },
+      "transcript": [
+        {
+          "step_index": 0,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 1,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 2,
+          "source": "SYSTEM",
+          "type": "CONVERSATION_HISTORY",
+          "status": "DONE"
+        },
+        {
+          "step_index": 3,
+          "source": "SYSTEM",
+          "type": "KNOWLEDGE_ARTIFACTS",
+          "status": "DONE"
+        },
+        {
+          "step_index": 4,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 5,
+          "source": "MODEL",
+          "type": "VIEW_FILE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 6,
+          "source": "SYSTEM",
+          "type": "CHECKPOINT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 7,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 8,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "DONE",
+          "exit_code": 0
+        },
+        {
+          "step_index": 9,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 10,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 11,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 12,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 13,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "DONE",
+          "exit_code": 7
+        },
+        {
+          "step_index": 14,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 15,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        }
+      ]
+    },
+    {
+      "event": "PostToolUse",
+      "payload": {
+        "artifactDirectoryPath": "@ARTIFACT@",
+        "conversationId": "a0000000-0000-4000-8000-000000000001",
+        "error": "",
+        "modelName": "claude-sonnet-4-6",
+        "stepIdx": 16,
+        "toolCall": {
+          "args": {
+            "CommandLine": "python3 -c \"import time; time.sleep(2); print(12345)\"",
+            "Cwd": "@ROOT@",
+            "WaitMsBeforeAsync": 0,
+            "toolAction": "Running sleep-print command async",
+            "toolSummary": "Run async print command"
+          },
+          "name": "run_command"
+        },
+        "transcriptPath": "@ARTIFACT@/.system_generated/logs/transcript_full.jsonl",
+        "workspacePaths": [
+          "@ROOT@"
+        ]
+      },
+      "transcript": [
+        {
+          "step_index": 0,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 1,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 2,
+          "source": "SYSTEM",
+          "type": "CONVERSATION_HISTORY",
+          "status": "DONE"
+        },
+        {
+          "step_index": 3,
+          "source": "SYSTEM",
+          "type": "KNOWLEDGE_ARTIFACTS",
+          "status": "DONE"
+        },
+        {
+          "step_index": 4,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 5,
+          "source": "MODEL",
+          "type": "VIEW_FILE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 6,
+          "source": "SYSTEM",
+          "type": "CHECKPOINT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 7,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 8,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "DONE",
+          "exit_code": 0
+        },
+        {
+          "step_index": 9,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 10,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 11,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 12,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 13,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "DONE",
+          "exit_code": 7
+        },
+        {
+          "step_index": 14,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 15,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 16,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "RUNNING"
+        }
+      ]
+    },
+    {
+      "event": "Stop",
+      "payload": {
+        "artifactDirectoryPath": "@ARTIFACT@",
+        "conversationId": "a0000000-0000-4000-8000-000000000001",
+        "error": "",
+        "executionNum": 0,
+        "fullyIdle": true,
+        "modelName": "claude-sonnet-4-6",
+        "terminationReason": "TERMINAL_CUSTOM_HOOK",
+        "transcriptPath": "@ARTIFACT@/.system_generated/logs/transcript_full.jsonl",
+        "workspacePaths": [
+          "@ROOT@"
+        ]
+      },
+      "transcript": [
+        {
+          "step_index": 0,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 1,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 2,
+          "source": "SYSTEM",
+          "type": "CONVERSATION_HISTORY",
+          "status": "DONE"
+        },
+        {
+          "step_index": 3,
+          "source": "SYSTEM",
+          "type": "KNOWLEDGE_ARTIFACTS",
+          "status": "DONE"
+        },
+        {
+          "step_index": 4,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 5,
+          "source": "MODEL",
+          "type": "VIEW_FILE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 6,
+          "source": "SYSTEM",
+          "type": "CHECKPOINT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 7,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 8,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "DONE",
+          "exit_code": 0
+        },
+        {
+          "step_index": 9,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 10,
+          "source": "USER_EXPLICIT",
+          "type": "USER_INPUT",
+          "status": "DONE"
+        },
+        {
+          "step_index": 11,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 12,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 13,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "DONE",
+          "exit_code": 7
+        },
+        {
+          "step_index": 14,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 15,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 16,
+          "source": "MODEL",
+          "type": "RUN_COMMAND",
+          "status": "RUNNING"
+        },
+        {
+          "step_index": 17,
+          "source": "SYSTEM_SDK",
+          "type": "EPHEMERAL_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 18,
+          "source": "SYSTEM",
+          "type": "SYSTEM_MESSAGE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 19,
+          "source": "MODEL",
+          "type": "PLANNER_RESPONSE",
+          "status": "DONE"
+        },
+        {
+          "step_index": 20,
+          "source": "MODEL",
+          "type": "GENERIC",
+          "status": "DONE"
+        }
+      ]
+    }
+  ]
+}

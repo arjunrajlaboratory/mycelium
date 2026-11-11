@@ -2,7 +2,7 @@
 name: lifecycle-audit
 description: >
   Run a black-box Mycelium lifecycle smoke test through a real Claude Code or
-  Codex CLI task. Use after plugin installation, hook, SessionStart,
+  Codex CLI task, or an Antigravity IDE or App conversation. Use after plugin installation, hook, SessionStart,
   PostToolUse, Stop, activity tracking, handoff, or data-lineage changes; when
   automatic hooks appear not to fire; or before merging cross-host lifecycle
   work. Verify installed-build identity, natural dispatch, state transitions,
@@ -14,10 +14,13 @@ description: >
 
 Resolve bundled paths relative to the Mycelium plugin root, two directories
 above this `SKILL.md`. Read `references/audit-protocol.md` completely before
-launching a host process.
+launching a host process. For Antigravity IDE, also read
+`references/antigravity-ide.md` completely; for the Antigravity App, read
+`references/antigravity-app.md` completely. Preserve the canonical probes while
+using that host's native event and evidence profile.
 
 This is a black-box integration audit. A manually invoked hook can diagnose hook
-logic, but it cannot prove that Claude Code or Codex discovered, trusted, and
+logic, but it cannot prove that the selected host discovered, trusted, and
 dispatched the hook.
 
 ## 1. Fix the audit boundary
@@ -27,8 +30,9 @@ dispatched the hook.
 - Use a disposable initialized repository when possible. If using a real
   analytical project, capture a baseline and prohibit scientific code, data,
   output, report, and pre-existing `.living` edits.
-- Confirm the requested CLI is installed. Inspect its current help rather than
-  guessing flags.
+- Confirm the requested host is installed. For a CLI, inspect current help
+  rather than guessing flags; for Antigravity use the actual IDE or App under
+  test and its own native tools.
 - Freeze the source checkout and installed artifact for the entire host run.
   Do not edit, reinstall, or replace an exercised hook while its process may be
   reading it.
@@ -55,7 +59,7 @@ audit is needed, create a fresh disposable repository.
 
 ## 3. Launch one genuinely fresh host task
 
-Run the host CLI from the exact target root. Do not invoke any Mycelium hook
+Launch the host task from the exact target root. Do not invoke any Mycelium hook
 script in the task or immediately afterward. Use the canonical child-task
 prompt in `references/child-task-prompt.md` — every probe it carries is
 required, including the nested-subagent probe, which may be marked N/A only
