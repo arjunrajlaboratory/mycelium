@@ -31,7 +31,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest pyyaml
+          # The Antigravity lineage tests execute pandas scripts in subprocesses.
+          pip install pytest pyyaml pandas
           # data_contract_check reads .h5ad obs through h5py; its tests skip without it.
           pip install h5py
 
@@ -181,7 +182,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest pyyaml
+          # The Antigravity lineage tests execute pandas scripts in subprocesses.
+          pip install pytest pyyaml pandas
 
       - name: Test init and validate scripts (macOS)
         run: |
