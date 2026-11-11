@@ -114,6 +114,9 @@ _CMUX_CLAUDE = "/Applications/cmux.app/Contents/Resources/bin/claude"
 
 def _resolve_agent_cli(explicit_bin: str | None = None) -> tuple[list[str], str] | None:
     """Return a command prefix and provider name for Claude or Codex."""
+    if (os.environ.get("MYCELIUM_HOOK_HOST") in {"antigravity-ide", "antigravity-app"} or
+            (Path(__file__).resolve().parents[4] / ".antigravity-host").is_file()):
+        return None
     if explicit_bin:
         prefix = [explicit_bin]
     elif os.environ.get("MYCELIUM_AGENT_CLI", "").strip():

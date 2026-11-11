@@ -177,6 +177,15 @@ mycelium_cleanup_accepted_scoped_state() {
   # directory.
   rm -f "$STATE_DIR/last-session.md"
   rm -f "$STATE_DIR/mycelium-read-access.log"
+  # This IDE can lose the hook response after finalization. Publish an
+  # identity-bound receipt only after all acceptance effects have completed;
+  # the native adapter can reconcile it without dispatching Stop again.
+  local antigravity_host
+  antigravity_host=$(mycelium_hook_host)
+  if [[ "$antigravity_host" == "antigravity-ide" || "$antigravity_host" == "antigravity-app" ]]; then
+    python3 "$HERE/../scripts/antigravity_hooks.py" --record-accepted-stop \
+      "$REPO_ROOT" "$HOST_SESSION_ID" "$antigravity_host"
+  fi
   mycelium_release_session_lock
   rmdir "$STATE_DIR" 2>/dev/null || true
 }

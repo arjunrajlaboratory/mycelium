@@ -65,6 +65,32 @@ def test_n_rows_missing_file_returns_none(tmp_path: Path) -> None:
 # ---------- enrich_file_record ----------
 
 
+def test_captured_missing_file_stays_missing_after_later_creation(tmp_path: Path) -> None:
+    from extract_data_lineage_event import file_record
+    target = tmp_path / "later.csv"
+    captured = file_record(str(target), tmp_path)
+    target.write_text("value\n42\n")
+    assert enrich_file_record(captured) == captured
+
+
+def test_captured_file_is_not_enriched_from_later_bytes(tmp_path: Path) -> None:
+    from extract_data_lineage_event import file_record
+    target = tmp_path / "changed.csv"
+    target.write_text("value\n1\n")
+    captured = file_record(str(target), tmp_path)
+    target.write_text("value\n1\n2\n3\n")
+    assert enrich_file_record(captured) == captured
+
+
+def test_captured_unknown_hash_stays_unknown(tmp_path: Path) -> None:
+    target = tmp_path / "later.csv"
+    target.write_text("value\n42\n")
+    captured = {"path": str(target), "sha256": None}
+    assert enrich_file_record(captured) == captured
+    raw = {"ts": "2026-09-14T00:00:00Z", "script": str(target), "script_sha256": None}
+    assert normalize_event(raw, [], 0)["script_sha256"] is None
+
+
 def test_enrich_computes_sha_when_missing(tmp_path: Path) -> None:
     p = tmp_path / "f.bin"
     p.write_bytes(b"data")

@@ -1110,8 +1110,8 @@ def test_dynamic_or_imported_io_is_retained_as_unresolved(tmp_path: Path) -> Non
     assert "resolve paths dynamically" in event["lineage_warnings"][0]
 
 
-def test_dynamic_literal_filenames_are_recovered_from_repository(tmp_path: Path) -> None:
-    """Existing uniquely named data files recover Path-composed I/O."""
+def test_path_composition_stays_unresolved_without_evaluation(tmp_path: Path) -> None:
+    """Composed paths are unresolved until their complete location can be proven."""
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     raw = tmp_path / "data" / "raw" / "sample.h5ad"
     output = tmp_path / "analysis" / "demo" / "outputs" / "summary.csv"
@@ -1141,10 +1141,10 @@ def test_dynamic_literal_filenames_are_recovered_from_repository(tmp_path: Path)
     event = build_event_for_detection((script, None), args, tmp_path, "abc123")
 
     assert event is not None
-    assert event["io_detection"] == "static+repository"
-    assert [item["path"] for item in event["inputs"]] == [str(raw)]
-    assert [item["path"] for item in event["outputs"]] == [str(output)]
-    assert event["lineage_warnings"] == []
+    assert event["io_detection"] == "unresolved"
+    assert [item["path"] for item in event["inputs"]] == []
+    assert [item["path"] for item in event["outputs"]] == []
+    assert event["lineage_warnings"]
 
 
 def test_dynamic_literal_recovery_rejects_ambiguous_basenames(tmp_path: Path) -> None:
@@ -1341,7 +1341,7 @@ def test_repository_recovery_rejects_unproven_custom_reader(
     assert event["inputs"] == []
 
 
-def test_repository_recovery_accepts_imported_unqualified_reader(
+def test_unqualified_reader_does_not_prove_dynamic_directory(
     tmp_path: Path,
 ) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -1364,8 +1364,8 @@ def test_repository_recovery_accepts_imported_unqualified_reader(
     event = build_event_for_detection((script, None), args, tmp_path, "abc123")
 
     assert event is not None
-    assert event["io_detection"] == "static+repository"
-    assert [item["path"] for item in event["inputs"]] == [str(sample)]
+    assert event["io_detection"] == "unresolved"
+    assert [item["path"] for item in event["inputs"]] == []
 
 
 def test_repository_recovery_rejects_runtime_filename_concatenation(
@@ -1410,7 +1410,7 @@ def test_repository_recovery_rejects_runtime_filename_concatenation(
         ("frame.to_csv('sample' + '.csv')\n", "outputs"),
     ],
 )
-def test_repository_recovery_accepts_static_filename_concatenation(
+def test_concatenated_filename_does_not_prove_repository_location(
     tmp_path: Path, source: str, expected_key: str
 ) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -1430,8 +1430,8 @@ def test_repository_recovery_accepts_static_filename_concatenation(
     event = build_event_for_detection((script, None), args, tmp_path, "abc123")
 
     assert event is not None
-    assert event["io_detection"] == "static+repository"
-    assert [item["path"] for item in event[expected_key]] == [str(sample)]
+    assert event["io_detection"] == "unresolved"
+    assert [item["path"] for item in event[expected_key]] == []
 
 
 @pytest.mark.parametrize(
@@ -1450,7 +1450,7 @@ def test_repository_recovery_accepts_static_filename_concatenation(
         ),
     ],
 )
-def test_repository_recovery_takes_direction_from_io_expression(
+def test_io_direction_does_not_prove_dynamic_directory(
     tmp_path: Path, source: str, relative_path: str, expected_key: str
 ) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -1470,9 +1470,9 @@ def test_repository_recovery_takes_direction_from_io_expression(
     event = build_event_for_detection((script, None), args, tmp_path, "abc123")
 
     assert event is not None
-    assert event["io_detection"] == "static+repository"
+    assert event["io_detection"] == "unresolved"
     other_key = "outputs" if expected_key == "inputs" else "inputs"
-    assert [item["path"] for item in event[expected_key]] == [str(recovered)]
+    assert [item["path"] for item in event[expected_key]] == []
     assert event[other_key] == []
 
 
@@ -1504,7 +1504,7 @@ def test_resolved_literal_io_does_not_search_repository(
     assert [item["path"] for item in event["inputs"]] == [str(raw)]
 
 
-def test_dynamic_repository_recovery_fails_safe_at_scan_bound(
+def test_dynamic_io_never_searches_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -1513,7 +1513,9 @@ def test_dynamic_repository_recovery_fails_safe_at_scan_bound(
     raw.write_text("x\n")
     script = tmp_path / "run.py"
     script.write_text("pd.read_csv(ROOT / 'sample.csv')\n")
-    monkeypatch.setattr(lineage_event, "_REPOSITORY_SCAN_ENTRY_LIMIT", 1)
+    def unexpected_scan(*args, **kwargs):
+        raise AssertionError("Dynamic I/O must not search for matching files")
+    monkeypatch.setattr(lineage_event.os, "scandir", unexpected_scan)
     args = argparse.Namespace(
         ts="2026-08-02T12:00:00Z",
         agent_id="",
@@ -3410,3 +3412,29 @@ def test_runner_snakemake_conflicting_profiles_keep_the_run(
     assert _runner_detections("snakemake --profile hpc", tmp_path) == [
         (tmp_path / "Snakefile", None)
     ]
+
+
+def test_executed_external_cli_io_does_not_capture_repository_decoys(tmp_path: Path) -> None:
+    repo = tmp_path / 'repo'
+    external = tmp_path / 'external'
+    repo.mkdir()
+    external.mkdir()
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    (repo / 'input.csv').write_text('value\n999\n')
+    (repo / 'result.csv').write_text('stale\n999\n')
+    (external / 'input.csv').write_text('value\n42\n')
+    script = repo / 'run.py'
+    script.write_text('import sys\nfrom pathlib import Path\nimport pandas as pd\n'
+                      'pd.read_csv(Path(sys.argv[1]) / "input.csv").to_csv('
+                      'Path(sys.argv[1]) / "result.csv", index=False)\n')
+    outcome = subprocess.run([sys.executable, str(script), str(external)], cwd=repo,
+                             capture_output=True, text=True)
+    assert outcome.returncode == 0, outcome.stderr
+    assert (external / 'result.csv').read_text() == 'value\n42\n'
+    args = argparse.Namespace(ts='2026-09-14T00:00:00Z', agent_id='', agent_type='',
+                              bash_cmd=f'python run.py {external}', bash_exit=0)
+    event = build_event_for_detection((script, None), args, repo, None)
+    assert event['inputs'] == []
+    assert event['outputs'] == []
+    assert event['io_detection'] == 'unresolved'
+    assert event['lineage_warnings']

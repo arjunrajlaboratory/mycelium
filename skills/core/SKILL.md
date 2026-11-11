@@ -39,10 +39,19 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 
 **Purpose**: Scaffold a new or existing repo into a mycelium-enabled living repository.
 
+**Antigravity IDE or App**: Use the short, executable sequence in
+`skills/core/references/antigravity-init.md` for an authorized initial scaffold.
+The shared initializer already creates the structure, manifests, guidance,
+core convention packs and skillpacks directory listed below; do those once.
+An existing Git repository without `.living/` can use this scaffold without
+moving its existing files. Use restructure mode when relocation is requested,
+and preserve its migration-review requirement. Complete the remaining knowledge
+and optional domain steps below after the base scaffold succeeds.
+
 **Steps**:
 1. Check if repo already has mycelium structure (look for `.living/` directory).
-2. **New repo**: Run full scaffold using `skills/core/scripts/init_repo.py`.
-3. **Existing repo**: Run in restructure mode — audit current structure, propose migration plan, ask user to confirm before proceeding.
+2. **No living layer yet**: Run the scaffold using `skills/core/scripts/init_repo.py`. An existing Git repository can be initialized while leaving its current data and scripts in place.
+3. **Relocation or migration requested**: Audit current structure in restructure mode, propose the migration plan, and obtain any required confirmation before moving files. Existing `.living/` content remains authoritative; do not delete it to rerun the initializer.
 4. **Auto-install core convention packs**: Scan `network/conventions/*/CONVENTION_PACK.yaml` for packs with `core: true` and install each one using `skills/core/scripts/install_convention.py`. Currently the core packs are `robust-analysis`, `report-generator`, and `idea-generator`. These provide batteries-included practices every repo should have.
 5. **Set up skillpacks directory**: Create `skillpacks/` with `.gitignore` and `README.md`. This is where external skill repos (bioSkills, scientific-agent-skills, Autonomous-Science) are cloned for use by the `skill-bridge` convention. The repos are inert reference libraries — never installed as agent skill packs. Prompt the user to clone the repos:
    ```bash

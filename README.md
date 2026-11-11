@@ -76,9 +76,42 @@ claude --plugin-dir /path/to/mycelium
 
 Replace `/path/to/mycelium` with the actual path where you cloned it. This loads the plugin for a single session only.
 
+**Antigravity App (development preview, separate from the IDE):**
+
+The standalone App package is installed into one Git project at a time:
+
+```bash
+python3 tools/antigravity.py install --profile app \
+  --destination /absolute/project/.agents/plugins/mycelium --python /absolute/python3
+python3 tools/antigravity.py doctor --profile app \
+  --destination /absolute/project/.agents/plugins/mycelium
+```
+
+Open the project in the App under the Default permission mode, start a new
+conversation, and ask it to set up Mycelium. Then rerun `doctor` with
+`--workspace /absolute/project` to confirm opt-in. The App's step-record format
+is pinned to App 2.31.0. See the [App section](docs/antigravity-ide.md#standalone-antigravity-app-separate-profile)
+for updates, removal and limitations.
+
+**Antigravity IDE (development preview):**
+
+From a checkout of this branch, with Python 3.11 or newer:
+
+```bash
+python3 tools/antigravity.py install --dry-run
+python3 tools/antigravity.py install
+python3 tools/antigravity.py doctor
+```
+
+Open a new Antigravity IDE conversation after installation. The native package
+contains the eleven base Mycelium skills and lifecycle hooks. It uses the model
+selected in the IDE; it does not require another coding-agent CLI or provider
+key. See [installation, model support, and validation status](docs/antigravity-ide.md)
+for workspace installation, updates, removal, and the limits of this preview.
+
 ### 2. Initialize your project
 
-Open Claude Code or Codex in any project directory and say:
+Open your coding agent in a project directory and say:
 
 > "Set up mycelium" or "Initialize living repo"
 
