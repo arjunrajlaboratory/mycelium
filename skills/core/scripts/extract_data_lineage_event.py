@@ -1152,11 +1152,16 @@ def _r_command_suffix(command: str, offset: int) -> str | None:
     if unquoted is not None:
         for match in _R_ARGS_WORD_RX.finditer(unquoted, offset):
             start = match.start()
-            if start > offset and command[start - 1] in " \t\n":
-                fragment = _simple_command_suffix(command[:start], offset)
-                if fragment is not None:
-                    return fragment + "--args"
-                break
+            if start <= offset or command[start - 1] not in " \t\n":
+                continue
+            if command[offset:start].rstrip()[-1:] in {"<", ">"}:
+                continue  # a redirection target, not an argument
+            fragment = _simple_command_suffix(command[:start], offset)
+            # Use the cut only when the scan reached it: a `;`, `&&`, `|` or
+            # newline in between means `--args` belongs to a later command.
+            if fragment is not None and offset + len(fragment) == start:
+                return fragment + "--args"
+            break
     return _simple_command_suffix(command, offset)
 
 

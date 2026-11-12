@@ -3619,6 +3619,10 @@ def test_r_non_executing_forms_record_nothing(tmp_path: Path, command: str) -> N
         # Words after `--args` are R's arguments, whatever shell syntax they use.
         ("R --no-save -e 'a' --args $(date)", "a"),
         ("R -e 'a' -e 'b' --args \"$(date)\" -e c", "a\nb"),
+        # An `--args` in a neighboring command or a redirection target is not R's.
+        ("R -e 'print(1)'; printf %s --args", "print(1)"),
+        ("R -e 'print(1)' && echo --args", "print(1)"),
+        ("R -e 'a' > --args", "a"),
     ],
 )
 def test_inline_r_source_keeps_every_expression(
