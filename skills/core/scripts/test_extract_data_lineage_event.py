@@ -3690,3 +3690,27 @@ def test_batch_with_exported_options_is_unresolved(tmp_path: Path) -> None:
     detections = detect_scripts(command, tmp_path)
     assert len(detections) == 1 and detections[0][0] is None, detections
     assert "R_BATCH_OPTIONS" in detections[0][1]
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        "env -i PATH=/usr/bin:/bin",
+        "env -u R_BATCH_OPTIONS",
+        "env --unset=R_BATCH_OPTIONS",
+        "exec -c",
+    ],
+)
+def test_batch_ignores_inherited_options_cleared_by_a_wrapper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrapper: str
+) -> None:
+    monkeypatch.setenv("R_BATCH_OPTIONS", "--file=other.R")
+    for name in ("first.R", "other.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    assert detect_scripts(f"{wrapper} R CMD BATCH first.R", tmp_path) == [
+        (tmp_path / "first.R", None)
+    ]
+    # Without a clearing wrapper the inherited option still applies.
+    assert detect_scripts("R CMD BATCH first.R", tmp_path) == [
+        (tmp_path / "other.R", None)
+    ]

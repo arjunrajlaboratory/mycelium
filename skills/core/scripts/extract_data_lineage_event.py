@@ -1184,6 +1184,36 @@ def _readable_argv(
 _BATCH_UNRESOLVED = "unresolved"
 
 
+def _prefix_drops_inherited_variable(prefix: list[str], name: str) -> bool:
+    """Whether a wrapper in the prefix clears the inherited value of `name`:
+    `env -i`/`env -`/`env --ignore-environment`, `env -u NAME`/`--unset=NAME`,
+    or `exec -c` (bash's exec with an empty environment)."""
+    index = 0
+    while index < len(prefix):
+        token = prefix[index]
+        if token in {"env", "exec"}:
+            index += 1
+            while index < len(prefix) and prefix[index].startswith("-"):
+                flag = prefix[index]
+                if flag == "--":
+                    break
+                if token == "env":
+                    if flag in {"-", "-i", "--ignore-environment"}:
+                        return True
+                    if flag in {"-u", "--unset"} and index + 1 < len(prefix):
+                        if prefix[index + 1] == name:
+                            return True
+                        index += 1
+                    elif flag in {f"-u{name}", f"--unset={name}"}:
+                        return True
+                elif not flag.startswith("--") and "c" in flag[1:]:
+                    return True
+                index += 1
+            continue
+        index += 1
+    return False
+
+
 def _r_batch_input_word(
     command: str, match: re.Match[str]
 ) -> tuple[str, str] | None:
@@ -1245,12 +1275,22 @@ def _r_batch_input_word(
     # script R reads is recorded as unresolved rather than guessed.
     prefix = _current_command_prefix(command[: match.start()]) or []
     batch_options = _runner_environment(command, prefix).get("R_BATCH_OPTIONS")
-    if "R_BATCH_OPTIONS" in command and not any(
-        token.startswith("R_BATCH_OPTIONS=") for token in prefix
-    ):
-        batch_options = None
-    if batch_options is None and "R_BATCH_OPTIONS" in command:
-        return (_BATCH_UNRESOLVED, effective)
+    if _prefix_drops_inherited_variable(prefix, "R_BATCH_OPTIONS"):
+        # Only this command's own assignments survive the cleared environment.
+        batch_options = ""
+        for token in prefix:
+            if token.startswith("R_BATCH_OPTIONS="):
+                value = token.split("=", 1)[1]
+                batch_options = None if any(c in value for c in "$`") else value
+        if batch_options is None:
+            return (_BATCH_UNRESOLVED, effective)
+    else:
+        if "R_BATCH_OPTIONS" in command and not any(
+            token.startswith("R_BATCH_OPTIONS=") for token in prefix
+        ):
+            batch_options = None
+        if batch_options is None and "R_BATCH_OPTIONS" in command:
+            return (_BATCH_UNRESOLVED, effective)
     words = in_words[1:] + " ".join(forwarded).split() + (batch_options or "").split()
     index = 0
     while index < len(words):
