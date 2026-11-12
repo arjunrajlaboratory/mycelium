@@ -113,7 +113,8 @@ _JUPYTER_SCRIPT_PATH = _shell_path_pattern(r"\.ipynb")
 # These interpreters accept many long startup options, but help/version forms
 # stop before any later source path or expression. Keep the generic option
 # support while excluding terminal forms and their value/help-all variants.
-_NONTERMINAL_LONG_OPTION = r"--(?!(?:help(?:-all)?|version)(?:=|\s|$))\S+"
+# `--args` ends Rscript's own options, so a later `-e`/file is an argument.
+_NONTERMINAL_LONG_OPTION = r"--(?!(?:args|help(?:-all)?|version)(?:=|\s|$))\S+"
 _NONTERMINAL_LONG_OPTIONS = rf"(?:{_NONTERMINAL_LONG_OPTION}\s+)*"
 _JUPYTER_VALUE_OPTION_NAME = (
     r"(?:-o|--(?:config|format|log-level|nbformat|output|output-dir|post|"
@@ -195,10 +196,12 @@ RX_R_FILE_PATH = re.compile(
 # -h/--help/-v/--version, and forwards every other `-*` word to R one word at
 # a time (-d/-g take a value). `--args` is forwarded like any other word: R
 # ignores what follows it, but BATCH still feeds the input file to R. -d and
-# --debugger would run the input under a debugger, so they never match.
+# --debugger would run the input under a debugger, and a forwarded
+# --print-home makes R print R_HOME instead, so none of them match.
 _R_BATCH_OPTION = (
     rf"(?:-g\s+{_SHELL_WORD}"
-    r"|-(?!(?:[dhgv]|-|-help|-version|-debugger(?:=\S*)?)(?:\s|$))\S+)"
+    r"|-(?!(?:[dhgv]|-|-help|-version|-print-home|-debugger(?:=\S*)?)"
+    r"(?:\s|$))\S+)"
 )
 RX_R_CMD_BATCH_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+{_R_OPTIONS}CMD\s+BATCH\s+"
@@ -878,8 +881,10 @@ def _simple_command_suffix(command: str, offset: int) -> str | None:
     """Return one simple command from offset, respecting shell quoting."""
     quote: str | None = None
     index = offset
+    word_start = True
     while index < len(command):
         char = command[index]
+        at_word_start, word_start = word_start, False
         if quote is None:
             if char == "\\":
                 if index + 1 >= len(command):
@@ -888,11 +893,14 @@ def _simple_command_suffix(command: str, offset: int) -> str | None:
                 continue
             if char in {"'", '"'}:
                 quote = char
+            elif char in " \t":
+                word_start = True
             elif char in ";\n)":
                 break
-            elif char == "#" and (index == offset or command[index - 1] in " \t"):
+            elif char == "#" and at_word_start:
                 # An unquoted word-initial `#` comments out the rest of the
                 # line, so its text (parens, apostrophes) is not shell syntax.
+                # An escaped space (`a\ #b`) keeps `#` inside the word.
                 break
             elif char == "(":
                 # Process substitutions and other nested shell structures can
@@ -1082,6 +1090,38 @@ def _r_match_is_rejected(command: str, offset: int) -> bool:
             has_file = True
         index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
     return has_expression and has_file
+
+
+def _r_inline_expressions(command: str, offset: int, rscript: bool) -> str | None:
+    """Every `-e` expression of one R/Rscript command, in execution order.
+
+    R collects `-e` anywhere before `--args`; Rscript reads consecutive
+    `-e EXPR` pairs and stops at the first other word. Returns None when the
+    argv cannot be read, so the caller keeps the single matched expression.
+    """
+    fragment = _simple_command_suffix(command, offset)
+    if fragment is None:
+        return None
+    tokens = _simple_command_argv(fragment)
+    if not tokens:
+        return None
+    expressions: list[str] = []
+    index = 1  # tokens[0] is the executable itself
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-e" and index + 1 < len(tokens):
+            expressions.append(tokens[index + 1])
+            index += 2
+            continue
+        if token == "--args":
+            break
+        if rscript:
+            if expressions:
+                break  # Rscript stops at the first word after its -e pairs
+            index += 1
+            continue
+        index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
+    return "\n".join(expressions) if expressions else None
 
 
 _CWD_AFFECTING_BUILTINS = {"pushd", "popd", "source", ".", "eval"}
@@ -2647,6 +2687,13 @@ def _detect_scripts_with_cwd(
             src = _decode_shell_word(m.group("source_word"))
             if src is None:
                 continue
+            if pattern in (RX_R_E, RX_RSCRIPT_E):
+                src = (
+                    _r_inline_expressions(
+                        bash_cmd, m.start(), rscript=pattern is RX_RSCRIPT_E
+                    )
+                    or src
+                )
             identity = (src, effective_cwd)
             if identity not in seen_inline:
                 out.append((None, src, effective_cwd))

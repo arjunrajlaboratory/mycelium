@@ -3573,6 +3573,9 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         "R CMD BATCH -v script.R",
         "R CMD BATCH -d lldb script.R",
         "R CMD BATCH --debugger=lldb script.R",
+        "R CMD BATCH --print-home script.R",
+        "Rscript --args -e 'print(1)'",
+        "Rscript --vanilla --args script.R",
         "R CMD check pkg_1.0.tar.gz",
         "echo \"R -q -e 'print(1)'\"",
         "echo 'R -f script.R'",
@@ -3584,3 +3587,33 @@ def test_r_non_executing_forms_record_nothing(tmp_path: Path, command: str) -> N
     assert detect_scripts(command, tmp_path) == [], command
     assert _run_check(tmp_path, command, "--check-execution") == 1, command
     assert _run_check(tmp_path, command, "--check-post-action") == 1, command
+
+
+@pytest.mark.parametrize(
+    "command,expected_source",
+    [
+        # Rscript runs consecutive -e pairs; R runs every -e before --args.
+        (
+            "Rscript -e 'library(utils)' -e \"read.csv('x.csv')\"",
+            "library(utils)\nread.csv('x.csv')",
+        ),
+        (
+            "R -q -e 'library(utils)' --vanilla -e \"read.csv('x.csv')\" --args -e z",
+            "library(utils)\nread.csv('x.csv')",
+        ),
+        # Rscript stops at the first word after its -e pairs (checked on R 4.6).
+        ("Rscript -e 'a' --vanilla -e 'b'", "a"),
+    ],
+)
+def test_inline_r_source_keeps_every_expression(
+    command: str, expected_source: str
+) -> None:
+    assert detect_scripts(command, Path("/tmp")) == [(None, expected_source)]
+
+
+def test_escaped_space_before_hash_is_not_a_comment(tmp_path: Path) -> None:
+    """`run\\ #1.sh` is one word: `#` there does not start a comment."""
+    (tmp_path / "run #1.sh").write_text("echo hi\n")
+    assert detect_scripts("bash run\\ #1.sh", tmp_path) == [
+        (tmp_path / "run #1.sh", None)
+    ]
