@@ -1143,8 +1143,10 @@ def _r_command_suffix(command: str, offset: int) -> str | None:
                 continue
             if command[match.end() : match.end() + 1] not in {"", " ", "\t", "\n"}:
                 continue  # `--args'x'` is the one word `--argsx`, not `--args`
-            if command[offset:start].rstrip()[-1:] in {"<", ">"}:
-                continue  # a redirection target, not an argument
+            if command[offset:start].rstrip()[-1:] in {"<", ">", "|", "&"}:
+                # A redirection target (`>`, `>>`, `>|`, `>&`, `<&` ...), not
+                # an argument; a bare `|` or `&` would end the command anyway.
+                continue
             fragment = _simple_command_suffix(command[:start], offset)
             # Use the cut only when the scan reached it: a `;`, `&&`, `|` or
             # newline in between means `--args` belongs to a later command.
@@ -1191,6 +1193,16 @@ _BATCH_UNRESOLVED = "unresolved"
 _ENV_VALUE_OPTIONS = {"-C", "--chdir", "-S", "--split-string", "-P", "-a", "--argv0"}
 # A word whose value the shell computes ($VAR, $(...), `...`) is unknown here.
 _SHELL_EXPANSION_MARKERS = ("$", "`")
+
+
+def _has_shell_expansion(word: str) -> bool:
+    return any(marker in word for marker in _SHELL_EXPANSION_MARKERS)
+
+
+def _ifs_split(text: str) -> list[str]:
+    """Field splitting with the shell's default IFS (space, tab, newline),
+    not Python's Unicode whitespace."""
+    return [field for field in re.split(r"[ \t\n]+", text) if field]
 
 
 def _prefix_variable_value(
@@ -1299,7 +1311,7 @@ def _r_batch_input_word(
         return None
     # BATCH runs `R -f ${in} ${opts}` with both unquoted, so each splits into
     # words: R reads the first word of the input, the rest become arguments.
-    in_words = infile.split()
+    in_words = _ifs_split(infile)
     if not in_words:
         return None
     effective = in_words[0]
@@ -1311,7 +1323,7 @@ def _r_batch_input_word(
     batch_options = _prefix_variable_value(command, prefix, "R_BATCH_OPTIONS")
     if batch_options is None:
         return (_BATCH_UNRESOLVED, effective)
-    words = in_words[1:] + " ".join(forwarded).split() + batch_options.split()
+    words = in_words[1:] + _ifs_split(" ".join(forwarded)) + _ifs_split(batch_options)
     index = 0
     while index < len(words):
         word = words[index]
@@ -1326,7 +1338,7 @@ def _r_batch_input_word(
         elif word.startswith("--file="):
             effective = word[len("--file=") :]
         index += 2 if word in _R_SEPARATED_VALUE_OPTIONS else 1
-    if any(m in effective for m in _SHELL_EXPANSION_MARKERS):
+    if _has_shell_expansion(effective) or any(map(_has_shell_expansion, words)):
         return (_BATCH_UNRESOLVED, effective)
     if not re.fullmatch(r".+\.[Rr]", effective):
         return None
@@ -1353,12 +1365,15 @@ def _r_effective_file_word(
         token = tokens[index]
         if token == "--args":
             break
+        if _has_shell_expansion(token):
+            complete = False  # `$OPTS` may expand to another --file=
+            break
         if token == "-f" and index + 1 < len(tokens):
             last = tokens[index + 1]
         elif token.startswith("--file="):
             last = token[len("--file=") :]
         index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
-    if last is not None and any(m in last for m in _SHELL_EXPANSION_MARKERS):
+    if last is not None and _has_shell_expansion(last):
         # `--file="$SCRIPT"`: the shell picks the file; keep the run unresolved.
         return (_BATCH_UNRESOLVED, last)
     if not complete:
@@ -1399,6 +1414,10 @@ def _r_match_is_rejected(command: str, offset: int) -> bool:
         token = tokens[index]
         if token == "--args":
             break
+        if _has_shell_expansion(token):
+            # `$ARGS` may expand to `--args` (or anything): what follows is
+            # unknown, so keep the proven payload rather than reject it.
+            return False
         if token in _R_TERMINAL_OPTIONS:
             return True
         if token in _R_DEBUGGER_OPTIONS or token.startswith("--debugger="):

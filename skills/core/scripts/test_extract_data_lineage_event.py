@@ -3730,6 +3730,8 @@ def test_batch_ignores_inherited_options_cleared_by_a_wrapper(
         # The shell picks the file: record the run, not a literal `$SCRIPT`.
         'R -f first.R --file="$SCRIPT"',
         "R -f first.R --file=`pick`",
+        # A variable among R's options may expand to another --file=.
+        "OPTS=--file=second.R; R -f first.R $OPTS",
     ],
 )
 def test_r_file_run_with_unreadable_later_words_is_unresolved(
@@ -3759,3 +3761,29 @@ def test_batch_file_override_from_a_variable_is_unresolved(tmp_path: Path) -> No
     (tmp_path / "first.R").write_text("print(1)\n")
     detections = detect_scripts('R CMD BATCH --file="$SCRIPT" first.R', tmp_path)
     assert len(detections) == 1 and detections[0][0] is None, detections
+
+
+def test_expansion_among_r_options_keeps_the_payload() -> None:
+    """`$ARGS` may expand to `--args`, so `-e` with a later `-f` is not
+    proven to be R's refused combination."""
+    assert detect_scripts(
+        "ARGS=--args; R -e 'print(1)' $ARGS -f script.R", Path("/tmp")
+    ) == [(None, "print(1)")]
+
+
+@pytest.mark.parametrize("operator", [">|", ">&", ">>", "&>", "<"])
+def test_args_as_a_redirection_target_is_not_the_boundary(
+    tmp_path: Path, operator: str
+) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    command = f"R -f first.R {operator} --args --file=second.R"
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "second.R", None)]
+
+
+def test_batch_input_keeps_a_nonbreaking_space(tmp_path: Path) -> None:
+    name = "sample\u00a01.R"
+    (tmp_path / name).write_text("print(1)\n")
+    assert detect_scripts(f"R CMD BATCH '{name}'", tmp_path) == [
+        (tmp_path / name, None)
+    ]
