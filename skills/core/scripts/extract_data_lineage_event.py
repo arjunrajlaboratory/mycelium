@@ -113,8 +113,11 @@ _JUPYTER_SCRIPT_PATH = _shell_path_pattern(r"\.ipynb")
 # These interpreters accept many long startup options, but help/version forms
 # stop before any later source path or expression. Keep the generic option
 # support while excluding terminal forms and their value/help-all variants.
-# `--args` ends Rscript's own options, so a later `-e`/file is an argument.
-_NONTERMINAL_LONG_OPTION = r"--(?!(?:args|help(?:-all)?|version)(?:=|\s|$))\S+"
+# `--args` ends Rscript's own options, so a later `-e`/file is an argument;
+# `--print-home` makes Rscript print R_HOME and exit.
+_NONTERMINAL_LONG_OPTION = (
+    r"--(?!(?:args|help(?:-all)?|print-home|version)(?:=|\s|$))\S+"
+)
 _NONTERMINAL_LONG_OPTIONS = rf"(?:{_NONTERMINAL_LONG_OPTION}\s+)*"
 _JUPYTER_VALUE_OPTION_NAME = (
     r"(?:-o|--(?:config|format|log-level|nbformat|output|output-dir|post|"
@@ -1172,13 +1175,17 @@ def _r_match_is_rejected(command: str, offset: int) -> bool:
     debugger options wherever they appear before `--args`, and refuses to
     combine `-e` with `-f`/`--file`. Option values are skipped so an
     expression that merely contains `--version` stays code.
+
+    Shell syntax this scan cannot read (process substitution, say) keeps the
+    match: the regex already proved the payload, and dropping it would lose
+    lineage the plain pattern records.
     """
     fragment = _r_command_suffix(command, offset)
     if fragment is None:
-        return True
+        return False
     tokens = _simple_command_argv(fragment)
-    if tokens is None or not tokens:
-        return True
+    if not tokens:
+        return False
     has_expression = has_file = False
     index = 1  # tokens[0] is the R executable itself
     while index < len(tokens):

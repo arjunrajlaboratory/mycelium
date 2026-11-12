@@ -3585,6 +3585,8 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         "R -f script.R \\\n  --version",
         "Rscript --args -e 'print(1)'",
         "Rscript --vanilla --args script.R",
+        "Rscript --print-home -e 'print(1)'",
+        "Rscript --vanilla --print-home script.R",
         "R CMD check pkg_1.0.tar.gz",
         "echo \"R -q -e 'print(1)'\"",
         "echo 'R -f script.R'",
@@ -3623,6 +3625,8 @@ def test_r_non_executing_forms_record_nothing(tmp_path: Path, command: str) -> N
         ("R -e 'print(1)'; printf %s --args", "print(1)"),
         ("R -e 'print(1)' && echo --args", "print(1)"),
         ("R -e 'a' > --args", "a"),
+        # Shell syntax the argv scan cannot read keeps the proven payload.
+        ("R -e 'print(1)' > >(cat)", "print(1)"),
     ],
 )
 def test_inline_r_source_keeps_every_expression(
