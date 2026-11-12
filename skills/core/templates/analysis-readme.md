@@ -13,6 +13,13 @@
 <!-- One of: draft, active, complete, archived -->
 **Status**: draft
 
+## Plan
+
+<!-- Written by the analyze planning discussion (skills/analyze/references/planning.md).
+     One of: pending, discussed YYYY-MM-DD, skipped YYYY-MM-DD.
+     Paste the confirmed (or skipped-path) plan below the line. -->
+**Planning**: pending
+
 ## Datasets
 
 <!-- Reference entries from data/DATA_MANIFEST.md -->

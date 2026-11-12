@@ -525,6 +525,23 @@ mycelium_refresh_work_cycle() {
 # for such a claim to drain before removing the directory.
 MYCELIUM_LOCK_REAP_CLAIM=".mycelium-reap.claim"
 
+# Create one directory and succeed only if this call created it. Lock
+# acquisition and reap claims depend on mkdir(2) failing with EEXIST for every
+# contender but one, so this must not delegate to the mkdir utility: uutils
+# coreutils 0.10.0 (the default /usr/bin/mkdir on Ubuntu 26.04) exits 0 without
+# -p when its create fails but the path is a directory afterwards, so a
+# contender that loses the creation race also believes it won. Python's
+# os.mkdir is the bare system call. -I keeps the untrusted checkout's cwd and
+# PYTHON* environment out of the interpreter; -S skips site initialization.
+# An existing path fails fast without starting an interpreter, so waiting on a
+# held lock costs no more per attempt than before; that check only ever
+# reports what a slightly earlier EEXIST would have, and the system call
+# remains the sole arbiter of who created the directory.
+mycelium_mkdir_exclusive() {
+  [[ ! -e "$1" && ! -L "$1" ]] || return 1
+  python3 -I -S -c 'import os, sys; os.mkdir(sys.argv[1])' "$1" 2>/dev/null
+}
+
 mycelium_acquire_directory_lock() {
   local state_dir="$1"
   local lock_name="$2"
@@ -554,7 +571,7 @@ mycelium_acquire_directory_lock() {
     && "$lock_name" != ".." \
     && "$lock_name" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
   local lock_dir="$state_dir/$lock_name"
-  while ! mkdir "$lock_dir" 2>/dev/null; do
+  while ! mycelium_mkdir_exclusive "$lock_dir"; do
     attempts=$((attempts + 1))
     owner_pid=""
     owner_ts=""
@@ -597,7 +614,7 @@ mycelium_acquire_directory_lock() {
       reap_claim="$lock_dir/$MYCELIUM_LOCK_REAP_CLAIM"
       reap_allowed=false
       if [[ -n "$lock_inode_before" ]] \
-        && mkdir "$reap_claim" 2>/dev/null; then
+        && mycelium_mkdir_exclusive "$reap_claim"; then
         lock_inode_after=$(mycelium_file_inode "$lock_dir" 2>/dev/null || true)
         current_owner_record=""
         if [[ -f "$lock_dir/owner" && ! -L "$lock_dir/owner" ]]; then

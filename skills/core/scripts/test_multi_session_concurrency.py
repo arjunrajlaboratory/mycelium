@@ -6,12 +6,39 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import time
 
 import pytest
 
-from test_codex_compatibility import _repo, _run_claude_hook, _run_hook
+from test_codex_compatibility import HOOKS_DIR, _repo, _run_claude_hook, _run_hook
+
+
+def _non_exclusive_mkdir_path(tmp_path: Path) -> str:
+    """Return a PATH whose `mkdir` reproduces uutils coreutils 0.10.0.
+
+    Ubuntu 26.04 ships uutils as /usr/bin/mkdir. Without -p it pre-checks for
+    an existing path, calls mkdir(2), and then treats any failure as success
+    when the path is a directory afterwards, so a contender that loses the
+    creation race still exits 0. The pre-check-to-create window is widened
+    here so contenders started together reliably overlap in it.
+    """
+    real_mkdir = shutil.which("mkdir")
+    assert real_mkdir
+    shim_dir = tmp_path / "uutils-0.10-bin"
+    shim_dir.mkdir()
+    shim = shim_dir / "mkdir"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        f'real="{real_mkdir}"\n'
+        'if [[ "$#" -ne 1 || "$1" == -* ]]; then exec "$real" "$@"; fi\n'
+        'if [[ -e "$1" ]]; then echo "mkdir: $1: File exists" >&2; exit 1; fi\n'
+        "sleep 0.5\n"
+        '"$real" "$1" 2>/dev/null || [[ -d "$1" ]]\n'
+    )
+    shim.chmod(0o755)
+    return f"{shim_dir}{os.pathsep}{os.environ['PATH']}"
 
 
 def _run_state(repo: Path, host: str, session_id: str) -> Path:
@@ -59,6 +86,83 @@ def test_distinct_concurrent_codex_roots_get_independent_transactions(tmp_path):
     ]
     assert len(set(marker_paths)) == 2
     assert len(_session_logs(repo)) == 2
+
+
+def test_distinct_roots_get_distinct_logs_when_mkdir_is_not_exclusive(tmp_path):
+    """Lifecycle serialization must not depend on the mkdir utility's exit status."""
+    repo = _repo(tmp_path)
+    extra_env = {"PATH": _non_exclusive_mkdir_path(tmp_path)}
+    payloads = [
+        {"cwd": str(repo), "source": "startup", "session_id": session_id}
+        for session_id in ("codex-root-a", "codex-root-b")
+    ]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda payload: _run_hook(
+                    "mycelium-health.sh", repo, payload, extra_env=extra_env
+                ),
+                payloads,
+            )
+        )
+
+    assert all(result.returncode == 0 for result in results)
+    marker_paths = [
+        Path(
+            (_run_state(repo, "codex", session_id) / "active-session-log.tmp")
+            .read_text()
+            .splitlines()[0]
+        )
+        for session_id in ("codex-root-a", "codex-root-b")
+    ]
+    assert len(set(marker_paths)) == 2
+    assert len(_session_logs(repo)) == 2
+
+
+@pytest.mark.parametrize("initial_owner", ["none", "dead"])
+def test_directory_lock_excludes_contenders_when_mkdir_is_not_exclusive(
+    tmp_path, initial_owner
+):
+    """Acquisition and dead-owner reap claims stay exclusive under uutils mkdir."""
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    lock = state / "mycelium-stop.lock"
+    if initial_owner == "dead":
+        lock.mkdir()
+        (lock / "owner").write_text(f"999999999 {int(time.time())}\n")
+    events = tmp_path / "events.log"
+    hook_lib = HOOKS_DIR / "mycelium-hook-lib.sh"
+    command = (
+        f'source "{hook_lib}"\n'
+        f'mycelium_acquire_stop_lock "{state}" || exit 3\n'
+        f'printf "enter %s\\n" "$1" >> "{events}"\n'
+        "sleep 0.4\n"
+        f'printf "exit %s\\n" "$1" >> "{events}"\n'
+        "mycelium_release_stop_lock\n"
+    )
+    env = {**os.environ, "PATH": _non_exclusive_mkdir_path(tmp_path)}
+
+    contenders = [
+        subprocess.Popen(
+            ["bash", "-c", command, "contender", name],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for name in ("a", "b")
+    ]
+    outcomes = [process.communicate(timeout=60) for process in contenders]
+
+    assert [process.returncode for process in contenders] == [0, 0], outcomes
+    lines = events.read_text().splitlines()
+    assert len(lines) == 4
+    # Each holder must leave before the other enters.
+    first = lines[0].split()[1]
+    second = "b" if first == "a" else "a"
+    assert lines == [f"enter {first}", f"exit {first}", f"enter {second}", f"exit {second}"]
+    assert not lock.exists()
 
 
 def test_repeated_start_for_same_root_reuses_one_transaction(tmp_path):
