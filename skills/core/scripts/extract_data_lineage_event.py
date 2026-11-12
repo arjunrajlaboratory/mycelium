@@ -1152,6 +1152,9 @@ def _r_command_suffix(command: str, offset: int) -> str | None:
     return _simple_command_suffix(command, offset)
 
 
+_WHITESPACE_RUN_RX = re.compile(r"\s+")
+
+
 def _r_batch_input_word(command: str, match: re.Match[str]) -> str | None:
     """The script R reads for an `R CMD BATCH` match, or None if none runs.
 
@@ -1163,17 +1166,19 @@ def _r_batch_input_word(command: str, match: re.Match[str]) -> str | None:
     the last `-f`/`--file=` before `--args`.
     """
     fragment = _simple_command_suffix(command, match.start())
-    if fragment is None:
-        # Unreadable shell syntax later in the command (say `$(date).Rout` as
-        # the output file) cannot change the words before it: read the longest
-        # readable prefix that ends at a word boundary.
-        for boundary in reversed(
-            [m.start() for m in re.finditer(r"\s+", command, match.start())]
-        ):
-            fragment = _simple_command_suffix(command[:boundary], match.start())
-            if fragment is not None:
-                break
     tokens = _simple_command_argv(fragment) if fragment is not None else None
+    if not tokens:
+        # Unreadable shell syntax later in the command (say `$(date).Rout` as
+        # the output file, or `> >(cat)`) cannot change the words before it:
+        # read the longest prefix, ending at a word boundary, that tokenizes.
+        boundaries = [
+            m.start() for m in _WHITESPACE_RUN_RX.finditer(command, match.start())
+        ]
+        for boundary in reversed(boundaries):
+            fragment = _simple_command_suffix(command[:boundary], match.start())
+            tokens = _simple_command_argv(fragment) if fragment is not None else None
+            if tokens:
+                break
     if not tokens:
         return None
     try:
@@ -1212,7 +1217,16 @@ def _r_batch_input_word(command: str, match: re.Match[str]) -> str | None:
     if not in_words:
         return None
     effective = in_words[0]
-    words = in_words[1:] + " ".join(forwarded).split()
+    # BATCH appends $R_BATCH_OPTIONS (unquoted) after its own options; take it
+    # from the hook's environment plus this command's prefix assignments. An
+    # unknown value (set by `export` or an expansion) is left out.
+    prefix = _current_command_prefix(command[: match.start()]) or []
+    batch_options = _runner_environment(command, prefix).get("R_BATCH_OPTIONS")
+    if "R_BATCH_OPTIONS" in command and not any(
+        token.startswith("R_BATCH_OPTIONS=") for token in prefix
+    ):
+        batch_options = None
+    words = in_words[1:] + " ".join(forwarded).split() + (batch_options or "").split()
     index = 0
     while index < len(words):
         word = words[index]
