@@ -200,12 +200,20 @@ RX_R_FILE_PATH = re.compile(
 # --print-home makes R print R_HOME instead, so none of them match.
 _R_BATCH_OPTION = (
     rf"(?:-g\s+{_SHELL_WORD}"
-    r"|-(?!(?:[dhgv]|-|-help|-version|-print-home|-debugger(?:=\S*)?)"
+    r"|-(?!(?:[dhgv]|-|-args|-help|-version|-print-home|-debugger(?:=\S*)?)"
     r"(?:\s|$))\S+)"
+)
+# After a forwarded `--args`, R ignores the rest, so only BATCH's own
+# help/version words still stop the run (-d/-g still consume a value).
+_R_BATCH_OPTION_AFTER_ARGS = (
+    rf"(?:-[dg]\s+{_SHELL_WORD}"
+    r"|-(?!(?:[hv]|-|-help|-version)(?:\s|$))\S+)"
 )
 RX_R_CMD_BATCH_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+{_R_OPTIONS}CMD\s+BATCH\s+"
-    rf"(?:{_R_BATCH_OPTION}\s+)*(?:--\s+)?(?P<path>{_R_SCRIPT_PATH})"
+    rf"(?:{_R_BATCH_OPTION}\s+)*"
+    rf"(?:--args\s+(?:{_R_BATCH_OPTION_AFTER_ARGS}\s+)*)?"
+    rf"(?:--\s+)?(?P<path>{_R_SCRIPT_PATH})"
 )
 # R itself (unlike Rscript) reads its whole argv up to `--args`, so a terminal
 # or debugger option after the payload still applies to these two forms.
@@ -989,8 +997,33 @@ def _blank_io_numbers(fragment: str) -> str:
     return "".join(out)
 
 
+def _join_line_continuations(fragment: str) -> str:
+    """Remove backslash-newline pairs the shell removes (not in single quotes)."""
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(fragment):
+        char = fragment[index]
+        if quote != "'" and char == "\\" and index + 1 < len(fragment):
+            if fragment[index + 1] == "\n":
+                index += 2
+                continue
+            out.append(fragment[index : index + 2])
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def _simple_command_argv(fragment: str) -> list[str] | None:
     """Tokenize argv while consuming shell redirection operators and targets."""
+    fragment = _join_line_continuations(fragment)
     fragment = _strip_unquoted_shell_comments(_blank_io_numbers(fragment))
     if fragment is None:
         return None

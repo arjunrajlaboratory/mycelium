@@ -3486,6 +3486,7 @@ _R_SCRIPT_RUNS = [
     "R -f script.R # (run)",
     "R -f script.R # it's the run",
     "R CMD BATCH --args script.R",
+    "R CMD BATCH --args --print-home script.R",
     "R CMD BATCH -- script.R",
     "R CMD BATCH -g X11 --vanilla script.R",
     "R --vanilla CMD BATCH script.R",
@@ -3574,6 +3575,8 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         "R CMD BATCH -d lldb script.R",
         "R CMD BATCH --debugger=lldb script.R",
         "R CMD BATCH --print-home script.R",
+        "R CMD BATCH --args --version script.R",
+        "R -f script.R \\\n  --version",
         "Rscript --args -e 'print(1)'",
         "Rscript --vanilla --args script.R",
         "R CMD check pkg_1.0.tar.gz",
@@ -3603,6 +3606,8 @@ def test_r_non_executing_forms_record_nothing(tmp_path: Path, command: str) -> N
         ),
         # Rscript stops at the first word after its -e pairs (checked on R 4.6).
         ("Rscript -e 'a' --vanilla -e 'b'", "a"),
+        # A backslash-newline continuation is removed by the shell.
+        ("R -q -e 'a' \\\n  --args foo", "a"),
     ],
 )
 def test_inline_r_source_keeps_every_expression(

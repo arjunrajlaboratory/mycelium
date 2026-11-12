@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--help`/`--version`/`--print-home`/`RHOME`/`CMD` and `-d`/`--debugger`
   anywhere before `--args`, so `R -e … --version`, `R -f script.R --help`, and
   `R -f script.R RHOME` no longer count as executions, and neither do
-  `R CMD BATCH --print-home` or `Rscript --args -e …`. Lineage records every
+  `R CMD BATCH --print-home` or `Rscript --args -e …`; a forwarded
+  `R CMD BATCH --args …` still runs the script. Lineage records every
   `-e` expression of a multi-expression R or Rscript one-liner, not just the
   first. A trailing shell comment containing a parenthesis or apostrophe no
   longer hides an R run. The
