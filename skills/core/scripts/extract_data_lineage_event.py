@@ -200,7 +200,8 @@ RX_R_FILE_PATH = re.compile(
 # does to decide whether it runs and which file R actually reads.
 RX_R_CMD_BATCH_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+{_R_OPTIONS}CMD\s+BATCH\s+"
-    rf"(?:\S+\s+)*?(?P<path>{_R_SCRIPT_PATH})"
+    # Never cross a command boundary (`;`, `&&`, `|`, newline) to find a path.
+    rf"(?:[^\s;&|]+[ \t]+)*?(?P<path>{_R_SCRIPT_PATH})"
 )
 # R itself (unlike Rscript) reads its whole argv up to `--args`, so a terminal
 # or debugger option after the payload still applies to these two forms.
@@ -1286,6 +1287,13 @@ def _r_batch_input_word(
     infile: str | None = None
     while index < len(tokens):
         token = tokens[index]
+        if _has_shell_expansion(token):
+            # `"$OPTS ..."` may expand to anything, --args or the input
+            # included: keep the run, but do not guess the script.
+            matched = _shlex_words(match.group("path"))
+            if matched and len(matched) == 1:
+                return (_BATCH_UNRESOLVED, matched[0])
+            return None
         if token in {"-h", "--help", "-v", "--version"}:
             return None
         if token == "--":
@@ -1449,8 +1457,8 @@ def _r_inline_expressions(command: str, offset: int, rscript: bool) -> str | Non
             expressions.append(tokens[index + 1])
             index += 2
             continue
-        if token == "--args":
-            break
+        if token == "--args" or _has_shell_expansion(token):
+            break  # `$ARGS` may expand to --args: later -e may never run
         if rscript:
             if expressions:
                 break  # Rscript stops at the first word after its -e pairs

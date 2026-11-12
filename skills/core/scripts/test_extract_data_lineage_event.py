@@ -3637,6 +3637,8 @@ def test_r_non_executing_forms_record_nothing(tmp_path: Path, command: str) -> N
         ("R -e 'a' > --args", "a"),
         # Shell syntax the argv scan cannot read keeps the proven payload.
         ("R -e 'print(1)' > >(cat)", "print(1)"),
+        # `$ARGS` may expand to --args: a later -e may never run.
+        ("ARGS=--args; R -e 'print(1)' $ARGS -e 'stop(1)'", "print(1)"),
     ],
 )
 def test_inline_r_source_keeps_every_expression(
@@ -3787,3 +3789,20 @@ def test_batch_input_keeps_a_nonbreaking_space(tmp_path: Path) -> None:
     assert detect_scripts(f"R CMD BATCH '{name}'", tmp_path) == [
         (tmp_path / name, None)
     ]
+
+
+def test_batch_candidate_does_not_cross_command_boundaries(tmp_path: Path) -> None:
+    (tmp_path / "script.R").write_text("print(1)\n")
+    for joiner in ("&&", ";", "||", "\n"):
+        command = f"R CMD BATCH --help {joiner} R CMD BATCH script.R"
+        assert detect_scripts(command, tmp_path) == [
+            (tmp_path / "script.R", None)
+        ], command
+
+
+def test_batch_option_expansion_is_unresolved(tmp_path: Path) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    command = 'OPTS=--args; R CMD BATCH "$OPTS --file=second.R" first.R'
+    detections = detect_scripts(command, tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None, detections
