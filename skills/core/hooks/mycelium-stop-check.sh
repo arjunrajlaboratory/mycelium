@@ -556,15 +556,31 @@ LAST_SESSION_EOF
           exit 0
         fi
       fi
-      if [ ! -f "$FINALIZE_LOG_SCRIPT" ] \
-        || ! printf '%s' "$SESSION_CHANGED_FILES" \
+      _FINALIZE_LOG_STATUS=0
+      if [ ! -f "$FINALIZE_LOG_SCRIPT" ]; then
+        _FINALIZE_LOG_STATUS=127
+      else
+        printf '%s' "$SESSION_CHANGED_FILES" \
           | python3 "$FINALIZE_LOG_SCRIPT" \
             --log-path "$LOG_PATH" \
             --ended "$ENDED" \
             --duration-minutes "$DURATION_MIN" \
             --files-changed "$FILES_CHANGED" \
             --end-time "$END_TIME_SHORT" \
-            >/dev/null 2>"$LOG_DIR/.finalize_session_log.err"; then
+            >/dev/null 2>"$LOG_DIR/.finalize_session_log.err" \
+          || _FINALIZE_LOG_STATUS=$?
+      fi
+      if [ "$_FINALIZE_LOG_STATUS" -eq 3 ]; then
+        # Status 3 is the finalizer's frontmatter-defect contract: the agent
+        # rewrote or truncated the hook-owned log header. Name the log and the
+        # cause in the block itself so the agent can repair it without reading
+        # hook source or the .err sidecar.
+        _FRONTMATTER_CAUSE=$(head -n 1 "$LOG_DIR/.finalize_session_log.err" 2>/dev/null \
+          | tr -d '\r' | cut -c 1-200 || true)
+        mycelium_emit_stop_block \
+          "STOP BLOCKED — session log ${LOG_PATH#"$REPO_ROOT"/} lost its YAML frontmatter (${_FRONTMATTER_CAUSE:-header is missing or malformed}); restore the header block (session_id, project, branch, started, ended, duration_minutes, files_changed) or append to the log instead of rewriting it, then retry Stop."
+        exit 0
+      elif [ "$_FINALIZE_LOG_STATUS" -ne 0 ]; then
         mycelium_emit_stop_block \
           "STOP BLOCKED — session log finalization failed. The active log and session baselines were preserved; inspect the helper installation, then retry Stop."
         exit 0

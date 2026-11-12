@@ -36,6 +36,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer hides an R run. The
   planning guide now lists `R -e '...'` among its read-only probes. Existing
   projects need no migration.
+- **Stop names a destroyed session-log header instead of hiding it in a
+  sidecar file.** When an agent rewrote the hook-owned session log
+  (`.living/log/<date>-<nnn>-<project>.md`) with a whole-file write, the YAML
+  frontmatter Stop finalizes was lost and Stop blocked with "inspect the helper
+  installation", leaving the real cause only in
+  `.living/log/.finalize_session_log.err`. `finalize_session_log.py` now exits
+  with status 3 and a one-line cause for a missing or malformed header, and the
+  Stop block says which log lost its YAML frontmatter, why, and how to repair
+  it: restore the header block (`session_id`, `project`, `branch`, `started`,
+  `ended`, `duration_minutes`, `files_changed`) or append to the log instead of
+  rewriting it. Retrying Stop after restoring the header finalizes normally and
+  keeps the agent's entries. Other finalization failures keep their existing
+  message. Stop does not rebuild a lost header itself: the original values
+  (branch at start, session id) cannot all be recovered reliably, and a silent
+  repair would also hide that earlier log entries were overwritten.
+- **Session-log guidance says the log is append-only.** The post-action
+  `SESSION LOG UPDATE` directive, the core skill's post-action protocol, and
+  the `MYCELIUM.md` template now say "append to it; never rewrite it (Stop
+  needs its header)", and the stale-log SessionStart notice asks for an
+  appended summary rather than an edit. Existing projects pick up the directive
+  and the Stop message from the plugin with no migration. An existing
+  `MYCELIUM.md` keeps its current post-action wording, because re-running init
+  refreshes only its managed Automated Enforcement section and session-summary
+  line; new projects get the new line.
 
 ## [0.9.3] - 2026-11-07
 
