@@ -1164,9 +1164,15 @@ def _r_batch_input_word(command: str, match: re.Match[str]) -> str | None:
     """
     fragment = _simple_command_suffix(command, match.start())
     if fragment is None:
-        # Unreadable shell syntax after the input (say `$(date).Rout` as the
-        # output file) cannot change which input BATCH reads.
-        fragment = _simple_command_suffix(command[: match.end("path")], match.start())
+        # Unreadable shell syntax later in the command (say `$(date).Rout` as
+        # the output file) cannot change the words before it: read the longest
+        # readable prefix that ends at a word boundary.
+        for boundary in reversed(
+            [m.start() for m in re.finditer(r"\s+", command, match.start())]
+        ):
+            fragment = _simple_command_suffix(command[:boundary], match.start())
+            if fragment is not None:
+                break
     tokens = _simple_command_argv(fragment) if fragment is not None else None
     if not tokens:
         return None
@@ -1198,10 +1204,15 @@ def _r_batch_input_word(command: str, match: re.Match[str]) -> str | None:
             continue
         infile = token
         break
-    if infile is None or not re.fullmatch(r".+\.[Rr]", infile):
+    if infile is None:
         return None
-    effective = infile
-    words = " ".join(forwarded).split()  # $opts is expanded unquoted
+    # BATCH runs `R -f ${in} ${opts}` with both unquoted, so each splits into
+    # words: R reads the first word of the input, the rest become arguments.
+    in_words = infile.split()
+    if not in_words:
+        return None
+    effective = in_words[0]
+    words = in_words[1:] + " ".join(forwarded).split()
     index = 0
     while index < len(words):
         word = words[index]
@@ -1209,13 +1220,15 @@ def _r_batch_input_word(command: str, match: re.Match[str]) -> str | None:
             break
         if word in _R_DEBUGGER_OPTIONS or word.startswith("--debugger="):
             return None
-        if word == "--print-home":
+        if word in _R_TERMINAL_OPTIONS:
             return None
         if word == "-f" and index + 1 < len(words):
             effective = words[index + 1]
         elif word.startswith("--file="):
             effective = word[len("--file=") :]
         index += 2 if word in _R_SEPARATED_VALUE_OPTIONS else 1
+    if not re.fullmatch(r".+\.[Rr]", effective):
+        return None
     return shlex.quote(effective)
 
 
