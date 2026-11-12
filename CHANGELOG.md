@@ -15,15 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `R --vanilla -q -e` looked exempt only because the R `-e` pattern borrowed
   Rscript's long-option-only grammar and could not parse `-q` at all, which
   also hid them from data lineage. The detector now parses R's own startup
-  grammar (`-q`, `-s`, `--encoding ENC`, `-g TYPE`, `--args`, `-d`), and the
+  grammar (`-q`, `-s`, ignored short clusters such as `-qs`, separated values
+  such as `--encoding ENC`, `--gui TYPE`, and `--max-ppsize N`, `--args`, `-d`),
+  checked against R 4.6, and the
   post-action check exempts every inline form (`python -c`, `R -e`,
   `Rscript -e`) while lineage still records them, including `Rscript -e`,
   which was previously not detected at all. Script runs `R -f script.R`,
-  `R --file=script.R`, and `R CMD BATCH script.R` are now detected and open the
-  post-action cycle like `Rscript script.R`. R honors `--help`/`--version`
-  and `-d` anywhere before `--args`, so `R -e … --version` and
-  `R -f script.R --help` no longer count as executions. Existing projects need
-  no migration.
+  `R --file=script.R`, and `R CMD BATCH script.R` (including
+  `R --vanilla CMD BATCH`, `R CMD BATCH --args`, and `R CMD BATCH --`) are now
+  detected and open the post-action cycle like `Rscript script.R`. R honors
+  `--help`/`--version`/`--print-home`/`RHOME`/`CMD` and `-d`/`--debugger`
+  anywhere before `--args`, so `R -e … --version`, `R -f script.R --help`, and
+  `R -f script.R RHOME` no longer count as executions. A trailing shell comment
+  containing a parenthesis or apostrophe no longer hides an R run. The
+  planning guide now lists `R -e '...'` among its read-only probes. Existing
+  projects need no migration.
 
 ## [0.9.3] - 2026-11-07
 

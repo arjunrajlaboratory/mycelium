@@ -137,16 +137,24 @@ _JUPYTER_OPTIONS = (
     rf"(?:(?:{_JUPYTER_VALUE_OPTION}|{_JUPYTER_FLAG_OPTION}|"
     rf"{_JUPYTER_ASSIGNED_OPTION})\s+)*"
 )
-# R's own startup grammar (`R --help`) differs from Rscript's: it accepts the
-# short flags -q and -s and the separated-value forms `--encoding ENC` and
-# `-g TYPE`. Two options may never precede a payload: `--args` ends option
-# parsing (a later -e/-f is an argument, not code), and `-d`/`--debugger`
-# hands the remaining argv to a debugger. Short clusters such as `-qs` are not
-# R syntax (R warns and ignores them), so they are not modeled here.
+# R's own startup grammar differs from Rscript's. The `R` front-end script
+# takes separated values for -g/--gui and --arch (and -e/-f/-d), and the R
+# binary for --encoding and the memory/connection limits; both accept either
+# `--opt=VALUE` or `--opt VALUE`. R warns about and ignores any other unknown
+# option, short clusters such as `-qs` included, and still runs. Options that
+# may never precede a payload: `--args` ends option parsing (a later -e/-f is
+# an argument, not code), `-d`/`--debugger` hands the run to a debugger,
+# `--print-home` only prints R_HOME, and `-h`/`--help`/`--version` exit.
+_R_VALUE_LONG_OPTION_NAME = (
+    r"--(?:arch|encoding|gui|max-connections|max-nsize|max-ppsize|max-vsize|"
+    r"min-nsize|min-vsize)"
+)
 _R_OPTION = (
-    r"(?:-[qs]"
-    r"|--(?!(?:args|debugger|encoding|file|help|version)(?:=|\s|$))\S+"
-    rf"|--encoding(?:=|\s+){_SHELL_WORD}"
+    r"(?:-(?![defgh](?:\s|$))[A-Za-z][A-Za-z0-9]*(?=\s|$)"
+    r"|--(?!(?:args|arch|debugger|encoding|file|gui|help|max-connections|"
+    r"max-nsize|max-ppsize|max-vsize|min-nsize|min-vsize|print-home|version)"
+    r"(?:=|\s|$))\S+"
+    rf"|{_R_VALUE_LONG_OPTION_NAME}(?:=|\s+){_SHELL_WORD}"
     rf"|-g\s+{_SHELL_WORD})"
 )
 _R_OPTIONS = rf"(?:{_R_OPTION}\s+)*"
@@ -181,17 +189,20 @@ RX_R_FILE_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+"
     rf"{_R_OPTIONS}(?:-f\s+|--file=)(?P<path>{_R_SCRIPT_PATH})"
 )
-# `R CMD BATCH [options] infile [outfile]`: BATCH stops option parsing at the
-# first non-option word, so only options before the input can be terminal.
-# It forwards every other `-*` word to R one word at a time (only -d/-g take
-# a value), so a separated value can never be mistaken for the input here.
+# `R [options] CMD BATCH [options] [--] infile [outfile]`: the R front end
+# hands everything after CMD to Rcmd, so R options may precede CMD. BATCH
+# stops option parsing at `--` or the first non-option word, exits on
+# -h/--help/-v/--version, and forwards every other `-*` word to R one word at
+# a time (-d/-g take a value). `--args` is forwarded like any other word: R
+# ignores what follows it, but BATCH still feeds the input file to R. -d and
+# --debugger would run the input under a debugger, so they never match.
 _R_BATCH_OPTION = (
-    r"(?:-[qs]"
-    r"|--(?!(?:args|debugger|file|help|version)(?:=|\s|$))\S+)"
+    rf"(?:-g\s+{_SHELL_WORD}"
+    r"|-(?!(?:[dhgv]|-|-help|-version|-debugger(?:=\S*)?)(?:\s|$))\S+)"
 )
 RX_R_CMD_BATCH_PATH = re.compile(
-    rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+CMD\s+BATCH\s+"
-    rf"(?:{_R_BATCH_OPTION}\s+)*(?P<path>{_R_SCRIPT_PATH})"
+    rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+{_R_OPTIONS}CMD\s+BATCH\s+"
+    rf"(?:{_R_BATCH_OPTION}\s+)*(?:--\s+)?(?P<path>{_R_SCRIPT_PATH})"
 )
 # R itself (unlike Rscript) reads its whole argv up to `--args`, so a terminal
 # or debugger option after the payload still applies to these two forms.
@@ -879,6 +890,10 @@ def _simple_command_suffix(command: str, offset: int) -> str | None:
                 quote = char
             elif char in ";\n)":
                 break
+            elif char == "#" and (index == offset or command[index - 1] in " \t"):
+                # An unquoted word-initial `#` comments out the rest of the
+                # line, so its text (parens, apostrophes) is not shell syntax.
+                break
             elif char == "(":
                 # Process substitutions and other nested shell structures can
                 # rejoin the same simple command after their closing paren.
@@ -1015,16 +1030,35 @@ def _jupyter_match_has_terminal_option(command: str, offset: int) -> bool:
     )
 
 
-_R_TERMINAL_OPTIONS = {"-h", "--help", "--version"}
-_R_SEPARATED_VALUE_OPTIONS = {"-e", "-f", "-g", "-d", "--encoding"}
+# Words the R front end or binary honors anywhere before `--args`: they exit
+# (help, version, R_HOME), hand off to Rcmd (CMD), or run a debugger.
+_R_TERMINAL_OPTIONS = {"-h", "--help", "--version", "--print-home", "RHOME", "CMD"}
+_R_DEBUGGER_OPTIONS = {"-d", "--debugger"}
+_R_SEPARATED_VALUE_OPTIONS = {
+    "-e",
+    "-f",
+    "-g",
+    "-d",
+    "--debugger",
+    "--arch",
+    "--encoding",
+    "--gui",
+    "--max-connections",
+    "--max-nsize",
+    "--max-ppsize",
+    "--max-vsize",
+    "--min-nsize",
+    "--min-vsize",
+}
 
 
 def _r_match_is_rejected(command: str, offset: int) -> bool:
     """Whether R's full argv (up to `--args`) prevents the matched payload.
 
-    R honors `--help`/`--version` and `-d` wherever they appear before
-    `--args`, and refuses to combine `-e` with `-f`/`--file`. Option values
-    are skipped so an expression that merely contains `--version` stays code.
+    R honors `--help`/`--version`/`--print-home`/`RHOME`/`CMD` and the
+    debugger options wherever they appear before `--args`, and refuses to
+    combine `-e` with `-f`/`--file`. Option values are skipped so an
+    expression that merely contains `--version` stays code.
     """
     fragment = _simple_command_suffix(command, offset)
     if fragment is None:
@@ -1040,7 +1074,7 @@ def _r_match_is_rejected(command: str, offset: int) -> bool:
             break
         if token in _R_TERMINAL_OPTIONS:
             return True
-        if token == "-d" or token.startswith("--debugger="):
+        if token in _R_DEBUGGER_OPTIONS or token.startswith("--debugger="):
             return True
         if token == "-e":
             has_expression = True

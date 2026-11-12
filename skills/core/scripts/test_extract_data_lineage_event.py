@@ -3451,6 +3451,13 @@ _R_INLINE_ONE_LINERS = [
     "R -q --vanilla -s -e 'print(1)'",
     "R --encoding UTF-8 -e 'print(1)'",
     "R --encoding=UTF-8 -q -e 'print(1)'",
+    # Separated-value options and short clusters R accepts (checked on R 4.6).
+    "R --max-ppsize 10000 -e 'print(1)'",
+    "R --gui X11 -q -e 'print(1)'",
+    "R -qs -e 'print(1)'",
+    # A trailing comment is not shell syntax, whatever it contains.
+    "R -e 'print(1)' # (quick check)",
+    "R -e 'print(1)' # it's fine",
     "R -e 'print(1)' --args a b",
     "R -q -e 'print(1)' --args --version",
     "R -e 'x <- 1' -e 'print(x)'",
@@ -3472,6 +3479,16 @@ _R_SCRIPT_RUNS = [
     "R CMD BATCH script.R",
     "R CMD BATCH --vanilla --no-timing script.R script.Rout",
     "R CMD BATCH -q --no-save script.R",
+    # Real R 4.6 runs each of these.
+    "R --max-ppsize 10000 -f script.R",
+    "R --min-vsize 10M --gui X11 -f script.R",
+    "R -qs -f script.R",
+    "R -f script.R # (run)",
+    "R -f script.R # it's the run",
+    "R CMD BATCH --args script.R",
+    "R CMD BATCH -- script.R",
+    "R CMD BATCH -g X11 --vanilla script.R",
+    "R --vanilla CMD BATCH script.R",
     "R -q -e 'print(1)' && Rscript script.R",
 ]
 
@@ -3539,6 +3556,11 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         "R -d lldb -e 'print(1)'",
         "R -e 'print(1)' -d lldb",
         "R --debugger=gdb -f script.R",
+        "R -f script.R --debugger lldb",
+        # These only print R_HOME, or hand the rest to Rcmd.
+        "R --print-home -f script.R",
+        "R -f script.R RHOME",
+        "R -f script.R CMD INSTALL pkg",
         # R refuses to combine an expression with an input file.
         "R -e 'print(1)' -f script.R",
         # Spellings R rejects or misreads.
@@ -3550,7 +3572,7 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         "R CMD BATCH --help script.R",
         "R CMD BATCH -v script.R",
         "R CMD BATCH -d lldb script.R",
-        "R CMD BATCH --args script.R",
+        "R CMD BATCH --debugger=lldb script.R",
         "R CMD check pkg_1.0.tar.gz",
         "echo \"R -q -e 'print(1)'\"",
         "echo 'R -f script.R'",

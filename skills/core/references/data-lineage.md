@@ -187,8 +187,9 @@ list. Repeated invocations of the same inline source collapse to one entry.
 - `python` / `python3` (script path or `-c` inline)
 - `Rscript` (script path or `-e` inline)
 - `R … -e "…"` (inline), `R … -f script.R` / `R … --file=script.R`, and
-  `R CMD BATCH script.R`, with R's own startup options (`-q`, `-s`,
-  `--encoding ENC`, …) before the payload; `--help`/`--version` or `-d`
+  `R [options] CMD BATCH [options] script.R`, with R's own startup options
+  (`-q`, `-s`, `--encoding ENC`, `--max-ppsize N`, …) before the payload;
+  `--help`/`--version`/`--print-home`/`RHOME`/`CMD` or `-d`/`--debugger`
   anywhere before `--args` means R never runs the payload
 - `jupyter nbconvert|execute notebook.ipynb`
 - `conda run … python …`
