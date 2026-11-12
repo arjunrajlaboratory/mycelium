@@ -25,6 +25,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `R -f script.R --help` no longer count as executions. Existing projects need
   no migration.
 
+## [0.9.3] - 2026-11-07
+
+### Added
+
+- **A planning discussion before an analysis runs.** `analyze` now asks once,
+  before the first run of a new analysis, whether the user wants a short
+  planning discussion. It's at most 5 questions, one at a time, each with the
+  evidence found and a recommended answer, and it ends in a plan the user
+  confirms before anything runs. Yes is the default. A skip goes straight to the
+  analysis with no more questions, though the agent still shows a short plan:
+  choices the request already stated stay attributed to the user, and the
+  rest become labelled defaults with the riskiest one flagged. Every choice in the plan
+  names its source (`repo: <path>`, `default: <reason>`, or the user), and every
+  fact carries a tag saying whether the user stated it, the agent read it in a
+  named file, or the agent assumed it. Planning stays read-only. Its probes are
+  limited to forms Mycelium's hooks treat as reads (`head`, `python3 -c`,
+  `Rscript -e`, stdin heredocs), never a repository script or `R -e`, so a
+  planning session never makes Stop demand bookkeeping; a test runs the
+  documented probes through the real hooks to prove it. The analysis documentation template gains a `## Plan`
+  section whose `**Planning**:` line records whether the discussion happened or
+  was skipped, so follow-up runs of the same analysis are not asked again. Two
+  coverage lists ship with it under `skills/analyze/references/`: the decisions
+  a plan must settle before a run, and the planning mistakes a plan must guard
+  against. Guards cite only checks mycelium ships (`data-contract-check` kinds,
+  `scilintr` rules, `register_value` with `scitexlintr`), and each citation is
+  marked partial and names the part it covers, since none of them sees what the
+  analysis actually did. Everything else is a manual step or a
+  `$mycelium:review` item. The data
+  contract check now takes its values from the confirmed plan and runs whether
+  or not the user planned. Adapted from the `grill` skill in
+  [mycelium-extra](https://github.com/mdmanurung/mycelium-extra) by Mikhael
+  Manurung (MIT, issue #91).
+
+### Fixed
+
+- **Concurrent session starts no longer share one session log on Ubuntu
+  26.04.** Mycelium's SessionStart/Stop lifecycle locks relied on `mkdir`
+  failing for every contender but one. On Ubuntu 26.04, `/usr/bin/mkdir` is
+  uutils coreutils 0.10.0, which exits 0 without `-p` when it loses a
+  creation race and the directory exists afterwards. Two root tasks starting
+  together could then both hold the repository lock, allocate the same
+  `.living/log/<date>-NNN-<project>.md`, and overwrite each other's log; two
+  stale-lock reapers could both claim one lock. Lock acquisition and reap
+  claims now create their directory through the `mkdir(2)` system call
+  directly (`mycelium_mkdir_exclusive`), independent of which coreutils is
+  installed. The on-disk lock layout is unchanged, so existing projects need
+  no migration.
+
 ## [0.9.2] - 2026-10-17
 
 ### Added

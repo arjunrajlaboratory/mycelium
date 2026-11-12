@@ -795,7 +795,35 @@ gone afterward, with the owner record still present while the claim was
 held. Under load, instrument reap and release paths and require no
 premature reap and no leaked lock across repeated parallel child-event runs.
 
-## 40. A policy or grammar is implemented for one member of its class
+## 40. A utility's exit status stands in for a kernel guarantee
+
+**Failure:** Directory locks treat `mkdir`'s exit status as an atomic
+test-and-set. That holds only while the utility reports `mkdir(2)` faithfully.
+uutils coreutils 0.10.0, the default `/usr/bin/mkdir` on Ubuntu 26.04 (GitHub's
+`ubuntu-latest` from late October 2026), pre-checks the path and then accepts
+any failed create when the path is a directory afterwards, even without `-p`.
+Two SessionStarts both "acquired" the repository lock and allocated the same
+session log; two dead-owner reapers could both claim one lock. macOS and GNU
+Linux CI kept passing, and the Linux job began failing on an unchanged commit
+when the runner image moved.
+
+**Invariant:** Where correctness depends on a kernel primitive's exclusivity
+(`mkdir`, `O_EXCL`, `link`, `rename` without replacement), invoke the
+primitive directly rather than through a userland utility whose error handling
+can soften it. Keep the guarantee in one helper (`mycelium_mkdir_exclusive`)
+and route every mutex-style call through it. A plain create-if-missing call
+that is not a mutex may keep using the utility.
+
+**Regression evidence:** Put a `mkdir` shim on `PATH` that reproduces the
+non-exclusive behavior with a widened race window, then require mutually
+exclusive critical sections for concurrent lock holders (free lock and
+dead-owner reap) and distinct logs for concurrent distinct-root
+SessionStarts. When CI breaks on an unchanged commit, compare the runner image
+and the provenance of `mkdir`, `stat`, `date`, and `mktemp` (`--version`,
+`dpkg -S`) between the last green and first red runs before suspecting
+Mycelium.
+
+## 41. A policy or grammar is implemented for one member of its class
 
 **Failure:** The post-action check exempted "inline one-liners" by skipping
 Python `-c` only, so `R -e` opened a bookkeeping cycle. The R `-e` regex

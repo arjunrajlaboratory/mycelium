@@ -365,6 +365,10 @@ hook, filesystem, or lifecycle boundaries.
       byte-exact or refuses conservatively; a divergence can cost a redundant
       reminder, never a suppressed event, deleted authored content, or a
       crashed hook.
+- [ ] Mutex-style directory creation (lock acquisition and reap claims) goes
+      through `mycelium_mkdir_exclusive`, which calls `mkdir(2)` directly; no
+      lock trusts the exit status of the `mkdir` utility, which uutils
+      coreutils 0.10.0 reports as success for a lost creation race.
 - [ ] Lock acquisition has bounded failure behavior; a recorded dead owner is
       recoverable before that bound, while a recent ownerless lock retains a
       publication-race grace period.
@@ -399,7 +403,8 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Shell scripts pass `bash -n` and run under the project's minimum supported
       Bash version.
 - [ ] `stat`, `date`, `sed`, `mktemp`, hashing, and locking behavior is tested on
-      both macOS and Linux where it differs.
+      both macOS and Linux where it differs, including the uutils (Rust)
+      coreutils that Ubuntu 26.04 and `ubuntu-latest` ship as the default.
 - [ ] Python availability and version requirements produce actionable errors;
       hooks do not assume a `python` alias exists when only `python3` is present.
 - [ ] Missing helpers, missing optional dependencies, invalid JSON, malformed
@@ -524,6 +529,7 @@ exercise them.
 | An analysis composes existing data paths dynamically from `Path`, dictionaries, or loop variables | Unique filenames reachable from recognized I/O path arguments are recovered conservatively after execution; direction follows the call, while ambiguous or over-bound searches remain unresolved with an explicit warning. |
 | A recent lifecycle lock records an owner PID that has terminated | The next caller claims and revalidates that exact generation before recovering it; a recent ownerless lock is not mistaken for dead-owner proof, and a replacement owner's lock survives competing delayed reapers. |
 | A waiter stats the lock just after the prior owner's `rmdir`, or a delayed reaper's claim sits inside the lock when its owner releases | The missing mtime is not treated as age, so no claim lands in the successor's lock; release waits out any transient claim, leaving no ownerless lock for waiters to time out on and no dropped PostToolUse event. |
+| `/usr/bin/mkdir` reports success for a lost creation race (uutils coreutils 0.10.0 on Ubuntu 26.04) and two lock contenders or two distinct-root SessionStarts race | Lock holders' critical sections never overlap, competing dead-owner reapers do not both claim, and each root receives its own session log. |
 | Jupyter receives `--show-config`, `--show-config-json`, or `--generate-config` before or after an apparent notebook, including after a shell redirection | No execution or lineage is attributed; terminal-looking text inside an ordinary option value, a redirection target, and an actual neighboring Jupyter command remain scoped correctly. |
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | A Claude or Codex hook config is valid JSON but has malformed event, group, handler, or command types | Initialization and migration reject it before changing guidance, runtime state, hooks, todo files, or the knowledge index. |
