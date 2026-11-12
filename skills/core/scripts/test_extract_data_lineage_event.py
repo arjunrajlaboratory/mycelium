@@ -3590,6 +3590,8 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         "R CMD BATCH --no-timing",
         # A terminal option before `--args` still wins over a trailing $(...).
         "R -f script.R --version --args $(date)",
+        # `--args'x'` is the single word `--argsx`, not the --args boundary.
+        "R --vanilla -f script.R --args'ignored' --print-home",
         "R -f script.R \\\n  --version",
         "Rscript --args -e 'print(1)'",
         "Rscript --vanilla --args script.R",
@@ -3740,3 +3742,10 @@ def test_prefix_assignment_then_env_unset_runs_the_input(tmp_path: Path) -> None
     (tmp_path / "script.R").write_text("print(1)\n")
     command = "R_BATCH_OPTIONS=--version env -u R_BATCH_OPTIONS R CMD BATCH script.R"
     assert detect_scripts(command, tmp_path) == [(tmp_path / "script.R", None)]
+
+
+def test_quoted_suffix_on_args_is_not_the_boundary(tmp_path: Path) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    command = "R --vanilla -f first.R --args'ignored' --file=second.R"
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "second.R", None)]

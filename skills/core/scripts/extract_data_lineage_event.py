@@ -1141,6 +1141,8 @@ def _r_command_suffix(command: str, offset: int) -> str | None:
             start = match.start()
             if start <= offset or command[start - 1] not in " \t\n":
                 continue
+            if command[match.end() : match.end() + 1] not in {"", " ", "\t", "\n"}:
+                continue  # `--args'x'` is the one word `--argsx`, not `--args`
             if command[offset:start].rstrip()[-1:] in {"<", ">"}:
                 continue  # a redirection target, not an argument
             fragment = _simple_command_suffix(command[:start], offset)
