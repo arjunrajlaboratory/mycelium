@@ -1187,6 +1187,12 @@ def _readable_argv(
 _BATCH_UNRESOLVED = "unresolved"
 
 
+# env options that take a separated value (GNU and BSD spellings).
+_ENV_VALUE_OPTIONS = {"-C", "--chdir", "-S", "--split-string", "-P", "-a", "--argv0"}
+# A word whose value the shell computes ($VAR, $(...), `...`) is unknown here.
+_SHELL_EXPANSION_MARKERS = ("$", "`")
+
+
 def _prefix_variable_value(
     command: str, prefix: list[str], name: str
 ) -> str | None:
@@ -1219,7 +1225,9 @@ def _prefix_variable_value(
             if flag == "--":
                 break
             if wrapper == "env":
-                if flag in {"-i", "--ignore-environment"}:
+                if flag in _ENV_VALUE_OPTIONS:
+                    index += 1  # `env -C DIR`, `-S STRING`, ...: skip the value
+                elif flag in {"-i", "--ignore-environment"}:
                     value = ""
                 elif flag in {"-u", "--unset"} and index < len(prefix):
                     if prefix[index] == name:
@@ -1318,6 +1326,8 @@ def _r_batch_input_word(
         elif word.startswith("--file="):
             effective = word[len("--file=") :]
         index += 2 if word in _R_SEPARATED_VALUE_OPTIONS else 1
+    if any(m in effective for m in _SHELL_EXPANSION_MARKERS):
+        return (_BATCH_UNRESOLVED, effective)
     if not re.fullmatch(r".+\.[Rr]", effective):
         return None
     return ("path", shlex.quote(effective))
@@ -1348,6 +1358,9 @@ def _r_effective_file_word(
         elif token.startswith("--file="):
             last = token[len("--file=") :]
         index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
+    if last is not None and any(m in last for m in _SHELL_EXPANSION_MARKERS):
+        # `--file="$SCRIPT"`: the shell picks the file; keep the run unresolved.
+        return (_BATCH_UNRESOLVED, last)
     if not complete:
         # Words past unreadable syntax may override the file or stop R.
         words = _shlex_words(matched) if last is None else [last]

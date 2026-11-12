@@ -3698,6 +3698,7 @@ def test_batch_with_exported_options_is_unresolved(tmp_path: Path) -> None:
         "env -i PATH=/usr/bin:/bin",
         "/usr/bin/env -i PATH=/usr/bin:/bin",
         "R_BATCH_OPTIONS=--version env -u R_BATCH_OPTIONS",
+        "R_BATCH_OPTIONS=--version env -C . -u R_BATCH_OPTIONS",
         "env -u R_BATCH_OPTIONS",
         "env --unset=R_BATCH_OPTIONS",
         "exec -c",
@@ -3726,6 +3727,9 @@ def test_batch_ignores_inherited_options_cleared_by_a_wrapper(
         "R -f first.R --file=second.R > >(tee run.log)",
         "R -f first.R $(printf ignored) --file=second.R",
         "R -f first.R $(printf ignored) --print-home",
+        # The shell picks the file: record the run, not a literal `$SCRIPT`.
+        'R -f first.R --file="$SCRIPT"',
+        "R -f first.R --file=`pick`",
     ],
 )
 def test_r_file_run_with_unreadable_later_words_is_unresolved(
@@ -3749,3 +3753,9 @@ def test_quoted_suffix_on_args_is_not_the_boundary(tmp_path: Path) -> None:
         (tmp_path / name).write_text("print(1)\n")
     command = "R --vanilla -f first.R --args'ignored' --file=second.R"
     assert detect_scripts(command, tmp_path) == [(tmp_path / "second.R", None)]
+
+
+def test_batch_file_override_from_a_variable_is_unresolved(tmp_path: Path) -> None:
+    (tmp_path / "first.R").write_text("print(1)\n")
+    detections = detect_scripts('R CMD BATCH --file="$SCRIPT" first.R', tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None, detections
