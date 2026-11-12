@@ -3580,6 +3580,8 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         "R CMD BATCH --debugger=lldb script.R",
         "R CMD BATCH --print-home script.R",
         "R CMD BATCH --args --version script.R",
+        'R CMD BATCH "--debugger=lldb" script.R',
+        "R CMD BATCH --no-timing",
         # A terminal option before `--args` still wins over a trailing $(...).
         "R -f script.R --version --args $(date)",
         "R -f script.R \\\n  --version",
@@ -3652,6 +3654,10 @@ def test_escaped_space_before_hash_is_not_a_comment(tmp_path: Path) -> None:
         "R -f first.R -f second.R --args -f third.R",
         # BATCH appends a forwarded --file= after `-f infile`.
         "R CMD BATCH --file=second.R first.R",
+        'R CMD BATCH "--file=second.R" first.R',
+        "R CMD BATCH '--args x=1' second.R",
+        'R CMD BATCH "--vanilla --args x=1" -- second.R out.Rout',
+        "R CMD BATCH second.R $(date +%F).Rout",
     ],
 )
 def test_r_records_the_file_r_actually_runs(tmp_path: Path, command: str) -> None:

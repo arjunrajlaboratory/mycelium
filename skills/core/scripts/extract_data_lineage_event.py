@@ -194,29 +194,13 @@ RX_R_FILE_PATH = re.compile(
     rf"{_R_OPTIONS}(?:-f\s+|--file=)(?P<path>{_R_SCRIPT_PATH})"
 )
 # `R [options] CMD BATCH [options] [--] infile [outfile]`: the R front end
-# hands everything after CMD to Rcmd, so R options may precede CMD. BATCH
-# stops option parsing at `--` or the first non-option word, exits on
-# -h/--help/-v/--version, and forwards every other `-*` word to R one word at
-# a time (-d/-g take a value). `--args` is forwarded like any other word: R
-# ignores what follows it, but BATCH still feeds the input file to R. -d and
-# --debugger would run the input under a debugger, and a forwarded
-# --print-home makes R print R_HOME instead, so none of them match.
-_R_BATCH_OPTION = (
-    rf"(?:-g\s+{_SHELL_WORD}"
-    r"|-(?!(?:[dhgv]|-|-args|-help|-version|-print-home|-debugger(?:=\S*)?)"
-    r"(?:\s|$))\S+)"
-)
-# After a forwarded `--args`, R ignores the rest, so only BATCH's own
-# help/version words still stop the run (-d/-g still consume a value).
-_R_BATCH_OPTION_AFTER_ARGS = (
-    rf"(?:-[dg]\s+{_SHELL_WORD}"
-    r"|-(?!(?:[hv]|-|-help|-version)(?:\s|$))\S+)"
-)
+# hands everything after CMD to Rcmd, so R options may precede CMD. This
+# pattern only locates a BATCH call with an R-script-shaped word after it;
+# `_r_batch_input_word` then reads the decoded argv the way R's BATCH script
+# does to decide whether it runs and which file R actually reads.
 RX_R_CMD_BATCH_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+{_R_OPTIONS}CMD\s+BATCH\s+"
-    rf"(?:{_R_BATCH_OPTION}\s+)*"
-    rf"(?:--args\s+(?:{_R_BATCH_OPTION_AFTER_ARGS}\s+)*)?"
-    rf"(?:--\s+)?(?P<path>{_R_SCRIPT_PATH})"
+    rf"(?:\S+\s+)*?(?P<path>{_R_SCRIPT_PATH})"
 )
 # R itself (unlike Rscript) reads its whole argv up to `--args`, so a terminal
 # or debugger option after the payload still applies to these two forms.
@@ -1168,7 +1152,71 @@ def _r_command_suffix(command: str, offset: int) -> str | None:
     return _simple_command_suffix(command, offset)
 
 
-_R_BATCH_FILE_OVERRIDE_RX = re.compile(rf"(?:^|\s)--file=(?P<path>{_SHELL_WORD})")
+def _r_batch_input_word(command: str, match: re.Match[str]) -> str | None:
+    """The script R reads for an `R CMD BATCH` match, or None if none runs.
+
+    Mirrors R's BATCH script (R 4.6): it exits on -h/--help/-v/--version,
+    drops --no-timing, ends options at `--` or the first non-option word (the
+    input), forwards -d/-g with their value and every other `-*` word, then
+    runs `R -f INPUT $opts` with $opts unquoted, so a quoted `"--args x=1"`
+    splits into words. R then honors a forwarded debugger or --print-home and
+    the last `-f`/`--file=` before `--args`.
+    """
+    fragment = _simple_command_suffix(command, match.start())
+    if fragment is None:
+        # Unreadable shell syntax after the input (say `$(date).Rout` as the
+        # output file) cannot change which input BATCH reads.
+        fragment = _simple_command_suffix(command[: match.end("path")], match.start())
+    tokens = _simple_command_argv(fragment) if fragment is not None else None
+    if not tokens:
+        return None
+    try:
+        index = next(
+            i + 2
+            for i in range(len(tokens) - 1)
+            if tokens[i] == "CMD" and tokens[i + 1] == "BATCH"
+        )
+    except StopIteration:
+        return None
+    forwarded: list[str] = []
+    infile: str | None = None
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"-h", "--help", "-v", "--version"}:
+            return None
+        if token == "--":
+            infile = tokens[index + 1] if index + 1 < len(tokens) else None
+            break
+        if token in {"-d", "-g"}:
+            forwarded.extend(tokens[index : index + 2])
+            index += 2
+            continue
+        if token.startswith("-"):
+            if token != "--no-timing":
+                forwarded.append(token)
+            index += 1
+            continue
+        infile = token
+        break
+    if infile is None or not re.fullmatch(r".+\.[Rr]", infile):
+        return None
+    effective = infile
+    words = " ".join(forwarded).split()  # $opts is expanded unquoted
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word == "--args":
+            break
+        if word in _R_DEBUGGER_OPTIONS or word.startswith("--debugger="):
+            return None
+        if word == "--print-home":
+            return None
+        if word == "-f" and index + 1 < len(words):
+            effective = words[index + 1]
+        elif word.startswith("--file="):
+            effective = word[len("--file=") :]
+        index += 2 if word in _R_SEPARATED_VALUE_OPTIONS else 1
+    return shlex.quote(effective)
 
 
 def _r_effective_file_word(command: str, match: re.Match[str]) -> str:
@@ -1179,11 +1227,6 @@ def _r_effective_file_word(command: str, match: re.Match[str]) -> str:
     `--file=` overrides the input file. Falls back to the matched word.
     """
     matched = match.group("path")
-    if match.re is RX_R_CMD_BATCH_PATH:
-        options = command[match.start() : match.start("path")]
-        options = re.split(r"\s--args(?:\s|$)", options, maxsplit=1)[0]
-        overrides = list(_R_BATCH_FILE_OVERRIDE_RX.finditer(options))
-        return overrides[-1].group("path") if overrides else matched
     fragment = _r_command_suffix(command, match.start())
     tokens = _simple_command_argv(fragment) if fragment is not None else None
     if not tokens:
@@ -2898,8 +2941,12 @@ def _detect_scripts_with_cwd(
             ):
                 continue
             path_word = m.group("path")
-            if pattern in (RX_R_FILE_PATH, RX_R_CMD_BATCH_PATH):
+            if pattern is RX_R_FILE_PATH:
                 path_word = _r_effective_file_word(bash_cmd, m)
+            elif pattern is RX_R_CMD_BATCH_PATH:
+                path_word = _r_batch_input_word(bash_cmd, m)
+                if path_word is None:
+                    continue
             try:
                 path_words = shlex.split(path_word, comments=False, posix=True)
             except ValueError:
