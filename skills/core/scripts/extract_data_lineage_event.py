@@ -1139,6 +1139,27 @@ _R_SEPARATED_VALUE_OPTIONS = {
 }
 
 
+_R_ARGS_WORD_RX = re.compile(r"--args(?=\s|$)")
+
+
+def _r_command_suffix(command: str, offset: int) -> str | None:
+    """The R command from offset, cut before an unquoted `--args` word.
+
+    R ignores every word after `--args`, so trailing arguments such as
+    `--args $(date)` must not make an otherwise readable command unsupported.
+    """
+    unquoted = _unquoted_shell_text(command)
+    if unquoted is not None:
+        for match in _R_ARGS_WORD_RX.finditer(unquoted, offset):
+            start = match.start()
+            if start > offset and command[start - 1] in " \t\n":
+                fragment = _simple_command_suffix(command[:start], offset)
+                if fragment is not None:
+                    return fragment + "--args"
+                break
+    return _simple_command_suffix(command, offset)
+
+
 def _r_match_is_rejected(command: str, offset: int) -> bool:
     """Whether R's full argv (up to `--args`) prevents the matched payload.
 
@@ -1147,7 +1168,7 @@ def _r_match_is_rejected(command: str, offset: int) -> bool:
     combine `-e` with `-f`/`--file`. Option values are skipped so an
     expression that merely contains `--version` stays code.
     """
-    fragment = _simple_command_suffix(command, offset)
+    fragment = _r_command_suffix(command, offset)
     if fragment is None:
         return True
     tokens = _simple_command_argv(fragment)
@@ -1178,7 +1199,7 @@ def _r_inline_expressions(command: str, offset: int, rscript: bool) -> str | Non
     `-e EXPR` pairs and stops at the first other word. Returns None when the
     argv cannot be read, so the caller keeps the single matched expression.
     """
-    fragment = _simple_command_suffix(command, offset)
+    fragment = _r_command_suffix(command, offset)
     if fragment is None:
         return None
     tokens = _simple_command_argv(fragment)

@@ -3490,6 +3490,7 @@ _R_SCRIPT_RUNS = [
     # Quoted or escaped punctuation is an argument, not shell syntax.
     "R -f script.R --args ')' '>' \\;",
     "R -f script.R \\\n# it's a comment line",
+    "R -f script.R --args $(date +%F)",
     "R CMD BATCH -- script.R",
     "R CMD BATCH -g X11 --vanilla script.R",
     "R --vanilla CMD BATCH script.R",
@@ -3579,6 +3580,8 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         "R CMD BATCH --debugger=lldb script.R",
         "R CMD BATCH --print-home script.R",
         "R CMD BATCH --args --version script.R",
+        # A terminal option before `--args` still wins over a trailing $(...).
+        "R -f script.R --version --args $(date)",
         "R -f script.R \\\n  --version",
         "Rscript --args -e 'print(1)'",
         "Rscript --vanilla --args script.R",
@@ -3613,6 +3616,9 @@ def test_r_non_executing_forms_record_nothing(tmp_path: Path, command: str) -> N
         ("R -q -e 'a' \\\n  --args foo", "a"),
         ("R -e 'print(1)' --args ')' \"<\"", "print(1)"),
         ("R -q -e 'a' \\\n# it's a probe", "a"),
+        # Words after `--args` are R's arguments, whatever shell syntax they use.
+        ("R --no-save -e 'a' --args $(date)", "a"),
+        ("R -e 'a' -e 'b' --args \"$(date)\" -e c", "a\nb"),
     ],
 )
 def test_inline_r_source_keeps_every_expression(
