@@ -3641,3 +3641,20 @@ def test_escaped_space_before_hash_is_not_a_comment(tmp_path: Path) -> None:
     assert detect_scripts("bash run\\ #1.sh", tmp_path) == [
         (tmp_path / "run #1.sh", None)
     ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R runs the last file option before --args (checked on R 4.6).
+        "R -q -f first.R --file=second.R",
+        "R -f first.R -f second.R",
+        "R -f first.R -f second.R --args -f third.R",
+        # BATCH appends a forwarded --file= after `-f infile`.
+        "R CMD BATCH --file=second.R first.R",
+    ],
+)
+def test_r_records_the_file_r_actually_runs(tmp_path: Path, command: str) -> None:
+    for name in ("first.R", "second.R", "third.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "second.R", None)]

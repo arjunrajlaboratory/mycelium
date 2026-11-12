@@ -1168,6 +1168,49 @@ def _r_command_suffix(command: str, offset: int) -> str | None:
     return _simple_command_suffix(command, offset)
 
 
+_R_BATCH_FILE_OVERRIDE_RX = re.compile(rf"(?:^|\s)--file=(?P<path>{_SHELL_WORD})")
+
+
+def _r_effective_file_word(command: str, match: re.Match[str]) -> str:
+    """The script word R actually runs for an `R -f`/`R CMD BATCH` match.
+
+    R honors the last `-f`/`--file=` before `--args` (checked on R 4.6), and
+    BATCH appends its forwarded options after `-f infile`, so a forwarded
+    `--file=` overrides the input file. Falls back to the matched word.
+    """
+    matched = match.group("path")
+    if match.re is RX_R_CMD_BATCH_PATH:
+        options = command[match.start() : match.start("path")]
+        options = re.split(r"\s--args(?:\s|$)", options, maxsplit=1)[0]
+        overrides = list(_R_BATCH_FILE_OVERRIDE_RX.finditer(options))
+        return overrides[-1].group("path") if overrides else matched
+    fragment = _r_command_suffix(command, match.start())
+    tokens = _simple_command_argv(fragment) if fragment is not None else None
+    if not tokens:
+        return matched
+    last: str | None = None
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--args":
+            break
+        if token == "-f" and index + 1 < len(tokens):
+            last = tokens[index + 1]
+        elif token.startswith("--file="):
+            last = token[len("--file=") :]
+        index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
+    if last is None or [last] == _shlex_words(matched):
+        return matched
+    return shlex.quote(last)
+
+
+def _shlex_words(word: str) -> list[str] | None:
+    try:
+        return shlex.split(word, comments=False, posix=True)
+    except ValueError:
+        return None
+
+
 def _r_match_is_rejected(command: str, offset: int) -> bool:
     """Whether R's full argv (up to `--args`) prevents the matched payload.
 
@@ -2854,8 +2897,11 @@ def _detect_scripts_with_cwd(
                 bash_cmd, m.start(), bash_exit, cwd
             ):
                 continue
+            path_word = m.group("path")
+            if pattern in (RX_R_FILE_PATH, RX_R_CMD_BATCH_PATH):
+                path_word = _r_effective_file_word(bash_cmd, m)
             try:
-                path_words = shlex.split(m.group("path"), comments=False, posix=True)
+                path_words = shlex.split(path_word, comments=False, posix=True)
             except ValueError:
                 continue
             if len(path_words) != 1:
