@@ -565,7 +565,9 @@ def _strip_unquoted_shell_comments(command: str) -> str | None:
         char = command[index]
         if quote is None:
             if char == "\\":
-                at_word_start = False
+                # A line continuation vanishes and keeps the word-start state.
+                if command[index + 1 : index + 2] != "\n":
+                    at_word_start = False
                 index += 2
                 continue
             if char in {"'", '"'}:
@@ -897,6 +899,10 @@ def _simple_command_suffix(command: str, offset: int) -> str | None:
             if char == "\\":
                 if index + 1 >= len(command):
                     return None
+                if command[index + 1] == "\n":
+                    # A line continuation vanishes: `\<newline># ...` still
+                    # starts a word, so that `#` begins a comment.
+                    word_start = at_word_start
                 index += 2
                 continue
             if char in {"'", '"'}:
@@ -1021,12 +1027,52 @@ def _join_line_continuations(fragment: str) -> str:
     return "".join(out)
 
 
+_SHELL_PUNCTUATION = ";&|()<>\n"
+# Private-use stand-ins for quoted or escaped shell punctuation, so the
+# tokenizer cannot mistake a literal `')'` or `\>` argument for an operator.
+_PUNCTUATION_SHIELD = {char: chr(0xE000 + ord(char)) for char in _SHELL_PUNCTUATION}
+_PUNCTUATION_UNSHIELD = str.maketrans(
+    {shield: char for char, shield in _PUNCTUATION_SHIELD.items()}
+)
+
+
+def _shield_quoted_punctuation(fragment: str) -> str:
+    """Replace shell punctuation that is quoted or escaped with stand-ins."""
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(fragment):
+        char = fragment[index]
+        if quote is None and char == "\\" and index + 1 < len(fragment):
+            following = fragment[index + 1]
+            out.append("\\" + _PUNCTUATION_SHIELD.get(following, following))
+            index += 2
+            continue
+        if quote == '"' and char == "\\" and index + 1 < len(fragment):
+            out.append(fragment[index : index + 2])
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            out.append(char)
+        elif quote is not None:
+            out.append(_PUNCTUATION_SHIELD.get(char, char))
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def _simple_command_argv(fragment: str) -> list[str] | None:
     """Tokenize argv while consuming shell redirection operators and targets."""
     fragment = _join_line_continuations(fragment)
     fragment = _strip_unquoted_shell_comments(_blank_io_numbers(fragment))
     if fragment is None:
         return None
+    fragment = _shield_quoted_punctuation(fragment)
     try:
         lexer = shlex.shlex(
             fragment,
@@ -1052,7 +1098,7 @@ def _simple_command_argv(fragment: str) -> list[str] | None:
             # command. Any other control operator is unsupported structure.
             return None
         else:
-            argv.append(token)
+            argv.append(token.translate(_PUNCTUATION_UNSHIELD))
     if consume_redirection_target:
         return None
     return argv

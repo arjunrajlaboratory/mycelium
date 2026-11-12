@@ -3487,6 +3487,9 @@ _R_SCRIPT_RUNS = [
     "R -f script.R # it's the run",
     "R CMD BATCH --args script.R",
     "R CMD BATCH --args --print-home script.R",
+    # Quoted or escaped punctuation is an argument, not shell syntax.
+    "R -f script.R --args ')' '>' \\;",
+    "R -f script.R \\\n# it's a comment line",
     "R CMD BATCH -- script.R",
     "R CMD BATCH -g X11 --vanilla script.R",
     "R --vanilla CMD BATCH script.R",
@@ -3608,6 +3611,8 @@ def test_r_non_executing_forms_record_nothing(tmp_path: Path, command: str) -> N
         ("Rscript -e 'a' --vanilla -e 'b'", "a"),
         # A backslash-newline continuation is removed by the shell.
         ("R -q -e 'a' \\\n  --args foo", "a"),
+        ("R -e 'print(1)' --args ')' \"<\"", "print(1)"),
+        ("R -q -e 'a' \\\n# it's a probe", "a"),
     ],
 )
 def test_inline_r_source_keeps_every_expression(
