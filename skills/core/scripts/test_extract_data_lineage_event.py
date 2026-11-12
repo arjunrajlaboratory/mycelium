@@ -3672,8 +3672,6 @@ def test_escaped_space_before_hash_is_not_a_comment(tmp_path: Path) -> None:
         # BATCH appends $R_BATCH_OPTIONS after its own options.
         "R_BATCH_OPTIONS=--file=second.R R CMD BATCH first.R",
         "env R_BATCH_OPTIONS='--vanilla --file=second.R' R CMD BATCH first.R",
-        # Unreadable trailing syntax keeps the readable argv, overrides included.
-        "R -f first.R --file=second.R > >(tee run.log)",
     ],
 )
 def test_r_records_the_file_r_actually_runs(tmp_path: Path, command: str) -> None:
@@ -3696,6 +3694,8 @@ def test_batch_with_exported_options_is_unresolved(tmp_path: Path) -> None:
     "wrapper",
     [
         "env -i PATH=/usr/bin:/bin",
+        "/usr/bin/env -i PATH=/usr/bin:/bin",
+        "R_BATCH_OPTIONS=--version env -u R_BATCH_OPTIONS",
         "env -u R_BATCH_OPTIONS",
         "env --unset=R_BATCH_OPTIONS",
         "exec -c",
@@ -3714,3 +3714,29 @@ def test_batch_ignores_inherited_options_cleared_by_a_wrapper(
     assert detect_scripts("R CMD BATCH first.R", tmp_path) == [
         (tmp_path / "other.R", None)
     ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Words past unreadable syntax may override the file or stop R, so the
+        # run is kept but the script is not guessed.
+        "R -f first.R --file=second.R > >(tee run.log)",
+        "R -f first.R $(printf ignored) --file=second.R",
+        "R -f first.R $(printf ignored) --print-home",
+    ],
+)
+def test_r_file_run_with_unreadable_later_words_is_unresolved(
+    tmp_path: Path, command: str
+) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    detections = detect_scripts(command, tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None, detections
+    assert detections[0][1].startswith("# R -f "), detections
+
+
+def test_prefix_assignment_then_env_unset_runs_the_input(tmp_path: Path) -> None:
+    (tmp_path / "script.R").write_text("print(1)\n")
+    command = "R_BATCH_OPTIONS=--version env -u R_BATCH_OPTIONS R CMD BATCH script.R"
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "script.R", None)]

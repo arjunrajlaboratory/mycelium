@@ -1157,13 +1157,14 @@ _WHITESPACE_RUN_RX = re.compile(r"\s+")
 
 def _readable_argv(
     command: str, offset: int, *, cut_at_r_args: bool = False
-) -> list[str] | None:
-    """Argv of the simple command at offset, or of its longest readable prefix.
+) -> tuple[list[str], bool] | None:
+    """(argv, complete) for the simple command at offset.
 
-    Unreadable shell syntax later in the command (say `$(date).Rout`, or a
-    `> >(tee log)` redirection) cannot change the words before it, so when the
-    whole command does not tokenize, read the longest prefix ending at a word
-    boundary that does. `cut_at_r_args` first stops at R's own `--args`.
+    When the whole command does not tokenize (say `$(date).Rout`, or a
+    `> >(tee log)` redirection), return the longest prefix ending at a word
+    boundary that does, with complete=False: the words before the unreadable
+    syntax are exact, but later words (another `--file=`, `--print-home`) are
+    unknown. `cut_at_r_args` first stops at R's own `--args`.
     """
     if cut_at_r_args:
         fragment = _r_command_suffix(command, offset)
@@ -1171,47 +1172,64 @@ def _readable_argv(
         fragment = _simple_command_suffix(command, offset)
     tokens = _simple_command_argv(fragment) if fragment is not None else None
     if tokens:
-        return tokens
+        return tokens, True
     boundaries = [m.start() for m in _WHITESPACE_RUN_RX.finditer(command, offset)]
     for boundary in reversed(boundaries):
         fragment = _simple_command_suffix(command[:boundary], offset)
         tokens = _simple_command_argv(fragment) if fragment is not None else None
         if tokens:
-            return tokens
+            return tokens, False
     return None
 
 
 _BATCH_UNRESOLVED = "unresolved"
 
 
-def _prefix_drops_inherited_variable(prefix: list[str], name: str) -> bool:
-    """Whether a wrapper in the prefix clears the inherited value of `name`:
-    `env -i`/`env -`/`env --ignore-environment`, `env -u NAME`/`--unset=NAME`,
-    or `exec -c` (bash's exec with an empty environment)."""
+def _prefix_variable_value(
+    command: str, prefix: list[str], name: str
+) -> str | None:
+    """The value of `name` the command after `prefix` sees, or None if unknown.
+
+    Starts from the hook's environment, then applies the prefix in execution
+    order: `NAME=value` assignments (literal values only), `env -i`/
+    `--ignore-environment`, `env -u NAME`/`--unset=NAME`, and `exec -c`.
+    Wrapper names may be path-qualified (`/usr/bin/env`). A mention of `name`
+    elsewhere in the command (`export NAME=...`) makes the inherited value
+    unknown.
+    """
+    outside = command.count(name) - sum(token.count(name) for token in prefix)
+    value: str | None = None if outside > 0 else os.environ.get(name, "")
     index = 0
     while index < len(prefix):
         token = prefix[index]
-        if token in {"env", "exec"}:
-            index += 1
-            while index < len(prefix) and prefix[index].startswith("-"):
-                flag = prefix[index]
-                if flag == "--":
-                    break
-                if token == "env":
-                    if flag in {"-", "-i", "--ignore-environment"}:
-                        return True
-                    if flag in {"-u", "--unset"} and index + 1 < len(prefix):
-                        if prefix[index + 1] == name:
-                            return True
-                        index += 1
-                    elif flag in {f"-u{name}", f"--unset={name}"}:
-                        return True
-                elif not flag.startswith("--") and "c" in flag[1:]:
-                    return True
-                index += 1
-            continue
         index += 1
-    return False
+        if _ASSIGNMENT_RX.match(token):
+            key, assigned = token.split("=", 1)
+            if key == name:
+                value = None if any(c in assigned for c in "$`") else assigned
+            continue
+        wrapper = os.path.basename(token)
+        if wrapper not in {"env", "exec"}:
+            continue
+        while index < len(prefix) and prefix[index].startswith("-"):
+            flag = prefix[index]
+            index += 1
+            if flag == "--":
+                break
+            if wrapper == "env":
+                if flag in {"-i", "--ignore-environment"}:
+                    value = ""
+                elif flag in {"-u", "--unset"} and index < len(prefix):
+                    if prefix[index] == name:
+                        value = ""
+                    index += 1
+                elif flag in {f"-u{name}", f"--unset={name}"}:
+                    value = ""
+            elif flag == "-a" and index < len(prefix):
+                index += 1  # exec -a NAME
+            elif not flag.startswith("--") and "c" in flag[1:]:
+                value = ""
+    return value
 
 
 def _r_batch_input_word(
@@ -1230,9 +1248,10 @@ def _r_batch_input_word(
     Returns ("path", quoted word), ("unresolved", input word) when
     R_BATCH_OPTIONS was set in a way this scan cannot read, or None.
     """
-    tokens = _readable_argv(command, match.start())
-    if not tokens:
+    readable = _readable_argv(command, match.start())
+    if readable is None:
         return None
+    tokens, complete = readable
     try:
         index = next(
             i + 2
@@ -1262,6 +1281,11 @@ def _r_batch_input_word(
         infile = token
         break
     if infile is None:
+        if not complete:
+            # The input lies past unreadable syntax: BATCH may well run it.
+            matched = _shlex_words(match.group("path"))
+            if matched and len(matched) == 1:
+                return (_BATCH_UNRESOLVED, matched[0])
         return None
     # BATCH runs `R -f ${in} ${opts}` with both unquoted, so each splits into
     # words: R reads the first word of the input, the rest become arguments.
@@ -1274,24 +1298,10 @@ def _r_batch_input_word(
     # value set any other way (`export`, an expansion) is unknown, so the
     # script R reads is recorded as unresolved rather than guessed.
     prefix = _current_command_prefix(command[: match.start()]) or []
-    batch_options = _runner_environment(command, prefix).get("R_BATCH_OPTIONS")
-    if _prefix_drops_inherited_variable(prefix, "R_BATCH_OPTIONS"):
-        # Only this command's own assignments survive the cleared environment.
-        batch_options = ""
-        for token in prefix:
-            if token.startswith("R_BATCH_OPTIONS="):
-                value = token.split("=", 1)[1]
-                batch_options = None if any(c in value for c in "$`") else value
-        if batch_options is None:
-            return (_BATCH_UNRESOLVED, effective)
-    else:
-        if "R_BATCH_OPTIONS" in command and not any(
-            token.startswith("R_BATCH_OPTIONS=") for token in prefix
-        ):
-            batch_options = None
-        if batch_options is None and "R_BATCH_OPTIONS" in command:
-            return (_BATCH_UNRESOLVED, effective)
-    words = in_words[1:] + " ".join(forwarded).split() + (batch_options or "").split()
+    batch_options = _prefix_variable_value(command, prefix, "R_BATCH_OPTIONS")
+    if batch_options is None:
+        return (_BATCH_UNRESOLVED, effective)
+    words = in_words[1:] + " ".join(forwarded).split() + batch_options.split()
     index = 0
     while index < len(words):
         word = words[index]
@@ -1311,7 +1321,9 @@ def _r_batch_input_word(
     return ("path", shlex.quote(effective))
 
 
-def _r_effective_file_word(command: str, match: re.Match[str]) -> str:
+def _r_effective_file_word(
+    command: str, match: re.Match[str]
+) -> tuple[str, str] | None:
     """The script word R actually runs for an `R -f`/`R CMD BATCH` match.
 
     R honors the last `-f`/`--file=` before `--args` (checked on R 4.6), and
@@ -1319,9 +1331,10 @@ def _r_effective_file_word(command: str, match: re.Match[str]) -> str:
     `--file=` overrides the input file. Falls back to the matched word.
     """
     matched = match.group("path")
-    tokens = _readable_argv(command, match.start(), cut_at_r_args=True)
-    if not tokens:
-        return matched
+    readable = _readable_argv(command, match.start(), cut_at_r_args=True)
+    if readable is None:
+        return ("path", matched)
+    tokens, complete = readable
     last: str | None = None
     index = 1
     while index < len(tokens):
@@ -1333,9 +1346,13 @@ def _r_effective_file_word(command: str, match: re.Match[str]) -> str:
         elif token.startswith("--file="):
             last = token[len("--file=") :]
         index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
+    if not complete:
+        # Words past unreadable syntax may override the file or stop R.
+        words = _shlex_words(matched) if last is None else [last]
+        return (_BATCH_UNRESOLVED, words[0]) if words and len(words) == 1 else None
     if last is None or [last] == _shlex_words(matched):
-        return matched
-    return shlex.quote(last)
+        return ("path", matched)
+    return ("path", shlex.quote(last))
 
 
 def _shlex_words(word: str) -> list[str] | None:
@@ -1357,9 +1374,10 @@ def _r_match_is_rejected(command: str, offset: int) -> bool:
     match: the regex already proved the payload, and dropping it would lose
     lineage the plain pattern records.
     """
-    tokens = _readable_argv(command, offset, cut_at_r_args=True)
-    if not tokens:
+    readable = _readable_argv(command, offset, cut_at_r_args=True)
+    if readable is None:
         return False
+    tokens, _ = readable
     has_expression = has_file = False
     index = 1  # tokens[0] is the R executable itself
     while index < len(tokens):
@@ -1385,9 +1403,10 @@ def _r_inline_expressions(command: str, offset: int, rscript: bool) -> str | Non
     `-e EXPR` pairs and stops at the first other word. Returns None when the
     argv cannot be read, so the caller keeps the single matched expression.
     """
-    tokens = _readable_argv(command, offset, cut_at_r_args=True)
-    if not tokens:
+    readable = _readable_argv(command, offset, cut_at_r_args=True)
+    if readable is None:
         return None
+    tokens, _ = readable
     expressions: list[str] = []
     index = 1  # tokens[0] is the executable itself
     while index < len(tokens):
@@ -3026,17 +3045,20 @@ def _detect_scripts_with_cwd(
             ):
                 continue
             path_word = m.group("path")
-            if pattern is RX_R_FILE_PATH:
-                path_word = _r_effective_file_word(bash_cmd, m)
-            elif pattern is RX_R_CMD_BATCH_PATH:
-                batch = _r_batch_input_word(bash_cmd, m)
-                if batch is None:
+            if pattern in (RX_R_FILE_PATH, RX_R_CMD_BATCH_PATH):
+                resolved = (
+                    _r_effective_file_word(bash_cmd, m)
+                    if pattern is RX_R_FILE_PATH
+                    else _r_batch_input_word(bash_cmd, m)
+                )
+                if resolved is None:
                     continue
-                kind, path_word = batch
+                kind, path_word = resolved
                 if kind == _BATCH_UNRESOLVED:
+                    form = "R -f" if pattern is RX_R_FILE_PATH else "R CMD BATCH"
                     source = (
-                        f"# R CMD BATCH {path_word}: R_BATCH_OPTIONS is set "
-                        "in the shell, so the script R reads is unknown"
+                        f"# {form} {path_word}: shell syntax or R_BATCH_OPTIONS "
+                        "this scan cannot read may change the script R reads"
                     )
                     identity = (source, effective_cwd)
                     if identity not in seen_inline:
