@@ -3584,6 +3584,9 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         'R CMD BATCH "--vanilla --help" script.R',
         'R CMD BATCH "--vanilla --version" script.R',
         "R_BATCH_OPTIONS=--version R CMD BATCH script.R",
+        # R refuses -e alongside BATCH's own -f (checked on R 4.6).
+        'R CMD BATCH "-e print(1)" script.R',
+        "R_BATCH_OPTIONS='-e 1' R CMD BATCH script.R",
         "R CMD BATCH --no-timing",
         # A terminal option before `--args` still wins over a trailing $(...).
         "R -f script.R --version --args $(date)",
@@ -3669,9 +3672,21 @@ def test_escaped_space_before_hash_is_not_a_comment(tmp_path: Path) -> None:
         # BATCH appends $R_BATCH_OPTIONS after its own options.
         "R_BATCH_OPTIONS=--file=second.R R CMD BATCH first.R",
         "env R_BATCH_OPTIONS='--vanilla --file=second.R' R CMD BATCH first.R",
+        # Unreadable trailing syntax keeps the readable argv, overrides included.
+        "R -f first.R --file=second.R > >(tee run.log)",
     ],
 )
 def test_r_records_the_file_r_actually_runs(tmp_path: Path, command: str) -> None:
     for name in ("first.R", "second.R", "third.R"):
         (tmp_path / name).write_text("print(1)\n")
     assert detect_scripts(command, tmp_path) == [(tmp_path / "second.R", None)]
+
+
+def test_batch_with_exported_options_is_unresolved(tmp_path: Path) -> None:
+    """`export R_BATCH_OPTIONS=...` can change or cancel the run; record the
+    run without guessing which script R read."""
+    (tmp_path / "first.R").write_text("print(1)\n")
+    command = "export R_BATCH_OPTIONS=--file=second.R; R CMD BATCH first.R"
+    detections = detect_scripts(command, tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None, detections
+    assert "R_BATCH_OPTIONS" in detections[0][1]
