@@ -4081,3 +4081,12 @@ def test_batch_forwarded_stop_options_beat_unresolved(
 ) -> None:
     (tmp_path / "first.R").write_text("print(1)\n")
     assert detect_scripts(command, tmp_path) == []
+
+
+def test_batch_after_unreadable_startup_value_is_unresolved(tmp_path: Path) -> None:
+    """A nested `${...}` the reader cannot follow before `CMD BATCH` still
+    leaves a run, so it must not vanish from lineage and the post-action
+    check."""
+    (tmp_path / "script.R").write_text("print(1)\n")
+    command = 'R --encoding "${ENC:-$DEFAULT_ENC}" CMD BATCH script.R'
+    _assert_unresolved(detect_scripts(command, tmp_path), "script.R")

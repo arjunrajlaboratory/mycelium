@@ -1508,11 +1508,12 @@ def _r_batch_script(command: str, match: re.Match[str]) -> _RWord | None:
         and getattr(words.get(index + 1), "text", None) == "BATCH"
     ):
         index += 1
-    if word is None:
-        return None
-    index += 2
     matched_word = match.group("path")
     matched = _RWord(_decode_shell_word(matched_word) or matched_word, False)
+    if word is None:
+        # `CMD BATCH` past syntax the reader cannot follow still runs.
+        return None if words.complete else matched
+    index += 2
     forwarded: list[str] = []
     infile: _RWord | None = None
     while (word := words.get(index)) is not None:
