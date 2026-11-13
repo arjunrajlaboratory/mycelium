@@ -204,14 +204,19 @@ entry.
   (`-q`, `-s`, `--encoding ENC`, `--max-ppsize N`, …) before the payload;
   `--help`/`--version`/`--print-home`/`RHOME`/`CMD` or `-d`/`--debugger`
   anywhere before `--args` means R never runs the payload. R's argv is read
-  word by word up to `--args`; a word the shell computes (a `$` or backtick
-  outside single quotes) or shell syntax the reader cannot follow ends what
-  can be read. Words before it still decide the run, and `-e` expressions
-  before it are recorded, but an `R -f`/`R CMD BATCH` run's script becomes
-  unresolved because a later word could name another file. `R CMD BATCH` also
-  reads `$R_BATCH_OPTIONS`, which is not modelled: a BATCH command that
-  mentions it anywhere is unresolved, and otherwise the variable is ignored
-  (the hook's own environment is not the agent shell's).
+  word by word up to `--args`, with line continuations joined and
+  redirections (including `"${LOG}"` targets) dropped. A word the shell
+  computes (a `$` or backtick outside single quotes) is unknown. Inside
+  double quotes (`-f "$D/a.R"`, `--encoding "$ENC"`) it is still one word
+  and reading continues past it; unquoted, or where an option belongs, it
+  ends what can be read, as does shell syntax the reader cannot follow.
+  Known `-e` expressions are recorded and computed ones never are; an
+  `R -f`/`R CMD BATCH` run's script is unresolved when its file word is
+  computed or a later unreadable word could name another file. `R CMD BATCH`
+  also reads `$R_BATCH_OPTIONS`, which is not modelled: a BATCH command that
+  mentions it anywhere is unresolved unless its own options already stop R,
+  and otherwise the variable is ignored (the hook's own environment is not
+  the agent shell's).
 - `jupyter nbconvert|execute notebook.ipynb`
 - `conda run … python …`
 - `uv run … python …`

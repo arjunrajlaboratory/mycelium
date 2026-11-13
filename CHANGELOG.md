@@ -21,10 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `R_BATCH_OPTIONS` from prefix assignments, `env -i`/`-u`, `exec -c`, or the
   hook's own environment, which is not the agent shell's: a BATCH command that
   mentions `R_BATCH_OPTIONS` is unresolved, and otherwise the variable is
-  ignored. One rule now governs `$`/backtick words in every R form: they end
-  the readable argv, so `-e` expressions before them are kept and a script
-  after them is unresolved; a `$` inside single quotes (`R -f 'cost$x.R'`) is
-  literal. The R reader scans only its own simple command, so long scripts of
+  ignored. One rule now governs `$`/backtick words in every R form: a
+  double-quoted one (`-f "$D/a.R"`) is one unknown word and reading goes on,
+  while an unquoted one ends the readable argv, so a script after it is
+  unresolved; a computed `-e` value is never recorded as source, and a `$`
+  inside single quotes (`R -f 'cost$x.R'`) is literal. The R reader scans only its own simple command, so long scripts of
   `R -e` probes no longer rescan the whole command per match. Which common R
   commands count as analysis runs is unchanged; existing event logs and
   projects need no migration.

@@ -3696,7 +3696,10 @@ def test_r_records_the_file_r_actually_runs(tmp_path: Path, command: str) -> Non
 
 
 def _assert_unresolved(detections: list, candidate: str) -> None:
-    assert detections == [(UnresolvedScript(candidate), None)], detections
+    assert [
+        (type(script), getattr(script, "candidate", None), inline)
+        for script, inline in detections
+    ] == [(UnresolvedScript, candidate, None)], detections
 
 
 @pytest.mark.parametrize(
@@ -3758,8 +3761,9 @@ def test_batch_ignores_the_hook_process_batch_options(
         # A process substitution is a pipe, not a file R can name.
         ("R -f first.R -f <(cat second.R)", "<(cat second.R)"),
         ("R -f first.R -f <(cat)", "<(cat)"),
-        # A computed value before the file option still leaves a run.
-        ('R --encoding "$ENC" -f first.R', "first.R"),
+        # An unquoted computed value before the file option may split into
+        # more words, so it still leaves an unresolved run.
+        ("R --encoding $ENC -f first.R", "first.R"),
     ],
 )
 def test_r_file_run_with_unreadable_later_words_is_unresolved(
@@ -3915,7 +3919,7 @@ def test_batch_option_expansion_is_unresolved(tmp_path: Path) -> None:
     for name in ("first.R", "second.R"):
         (tmp_path / name).write_text("print(1)\n")
     command = 'OPTS=--args; R CMD BATCH "$OPTS --file=second.R" first.R'
-    _assert_unresolved(detect_scripts(command, tmp_path), "$OPTS --file=second.R")
+    _assert_unresolved(detect_scripts(command, tmp_path), "first.R")
 
 
 @pytest.mark.parametrize(
@@ -3938,3 +3942,142 @@ def test_single_quoted_dollar_is_not_an_expansion(
         assert detections == [(tmp_path / "cost$model.R", None)]
     else:
         assert detections == [(None, "df$x")]
+
+
+# ---------- PR #121 review regressions ----------
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # A fully double-quoted computed value is exactly one word, so the
+        # words after it are still read (R 4.6 behavior per review).
+        ('R -f "$D/a.R" --version', []),
+        ("R -f \"$D/a.R\" -e 'x'", []),
+        ('R --encoding "$ENC" -f first.R --version', []),
+        ('R -f "$D/a.R" -f second.R', ["second.R"]),
+        ('R --encoding "$ENC" -f first.R', ["first.R"]),
+        ('R -e "$CODE" -f first.R', []),
+        ('R -e "$CODE" --version', []),
+        ("R -e 'print(1)' -g \"$G\" --version", []),
+        ('R -e "df$x" CMD BATCH first.R', []),
+    ],
+)
+def test_quoted_computed_value_is_one_unknown_word(
+    tmp_path: Path, command: str, expected: list[str]
+) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    assert detect_scripts(command, tmp_path) == [
+        (tmp_path / name, None) for name in expected
+    ]
+
+
+def test_quoted_computed_file_value_stays_unresolved(tmp_path: Path) -> None:
+    _assert_unresolved(detect_scripts('R -f "$D/a.R"', tmp_path), "$D/a.R")
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('R -f first.R > "${LOG}"', ["first.R"]),
+        ("R -f first.R > ${LOG}", ["first.R"]),
+        ('R -f first.R 2>"${LOG:-x.log}"', ["first.R"]),
+        ('R -f first.R >"${LOG}" --version', []),
+    ],
+)
+def test_braced_redirection_target_does_not_hide_later_words(
+    tmp_path: Path, command: str, expected: list[str]
+) -> None:
+    (tmp_path / "first.R").write_text("print(1)\n")
+    assert detect_scripts(command, tmp_path) == [
+        (tmp_path / name, None) for name in expected
+    ]
+
+
+@pytest.mark.parametrize(
+    ("command", "source"),
+    [
+        (
+            "LOG=/dev/stdout; Rscript -e 'cat(1)' >\"${LOG}\" -e 'cat(2)'",
+            "cat(1)\ncat(2)",
+        ),
+        # `&>` takes no descriptor: bash passes the `2` (or `{fd}`) as an
+        # argument, so Rscript stops collecting expressions there.
+        ("Rscript -e '1' 2&>/dev/null -e 'stop(9)'", "1"),
+        ("Rscript -e '1' {fd}&>/dev/null -e 'stop(9)'", "1"),
+        ("Rscript -e '1' 2&>>/dev/null -e 'stop(9)'", "1"),
+        # Bash joins a continuation before it reads operators: `2\<nl>>&1`
+        # is the redirection `2>&1`.
+        ("Rscript -e 'cat(1)' 2\\\n>&1 -e 'cat(2)'", "cat(1)\ncat(2)"),
+        ("Rscript -e 'cat(1)' {fd}\\\n>/dev/null -e 'cat(2)'", "cat(1)\ncat(2)"),
+    ],
+)
+def test_rscript_redirection_forms(command: str, source: str) -> None:
+    assert detect_scripts(command, Path("/tmp")) == [(None, source)]
+
+
+def _unresolved_event(command: str, cwd: Path) -> dict:
+    [detection] = detect_scripts(command, cwd)
+    args = argparse.Namespace(
+        ts="2026-11-13T00:00:00Z", agent_id=None, agent_type=None,
+        bash_cmd=command, bash_exit=0,
+    )
+    return build_event_for_detection(detection, args, cwd, "abc123")
+
+
+def test_unresolved_r_file_message_does_not_blame_batch_options(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "first.R").write_text("print(1)\n")
+    [warning] = _unresolved_event("R -f first.R $(printf x)", tmp_path)[
+        "lineage_warnings"
+    ]
+    assert "R_BATCH_OPTIONS" not in warning
+    assert "first.R" in warning and "'first.R'" not in warning
+
+
+def test_unresolved_batch_message_names_batch_options(tmp_path: Path) -> None:
+    (tmp_path / "first.R").write_text("print(1)\n")
+    [warning] = _unresolved_event(
+        "R_BATCH_OPTIONS=-q R CMD BATCH first.R", tmp_path
+    )["lineage_warnings"]
+    assert "R_BATCH_OPTIONS" in warning and "first.R" in warning
+
+
+@pytest.mark.parametrize(
+    "command", ["Rscript first.R", "R -f first.R", "Rscript -e 'print(1)'"]
+)
+def test_resolved_event_has_no_script_candidate(tmp_path: Path, command: str) -> None:
+    (tmp_path / "first.R").write_text("print(1)\n")
+    [detection] = detect_scripts(command, tmp_path)
+    args = argparse.Namespace(
+        ts="2026-11-13T00:00:00Z", agent_id=None, agent_type=None,
+        bash_cmd=command, bash_exit=0,
+    )
+    event = build_event_for_detection(detection, args, tmp_path, "abc123")
+    assert "script_candidate" in event and event["script_candidate"] is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    ['R -e "$CODE"', "R -e $CODE", 'Rscript -e "$CODE"', "R -q -e `cat x.R`"],
+)
+def test_computed_expression_is_never_recorded_as_source(command: str) -> None:
+    assert detect_scripts(command, Path("/tmp")) == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Forwarded stop options are proven whatever R_BATCH_OPTIONS adds.
+        "R_BATCH_OPTIONS=-q R CMD BATCH -e first.R",
+        "R_BATCH_OPTIONS=-q R CMD BATCH --print-home first.R",
+        'R CMD BATCH -e "$IN"',
+    ],
+)
+def test_batch_forwarded_stop_options_beat_unresolved(
+    tmp_path: Path, command: str
+) -> None:
+    (tmp_path / "first.R").write_text("print(1)\n")
+    assert detect_scripts(command, tmp_path) == []
