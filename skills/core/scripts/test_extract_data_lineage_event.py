@@ -3778,6 +3778,8 @@ def test_r_file_run_with_unreadable_later_words_is_unresolved(
         ("R -f first.R > >(tee run.log) --file=second.R", "second.R"),
         ("R -f first.R &> run_$(date).log", "first.R"),
         ("R CMD BATCH first.R > batch_$(date).log", "first.R"),
+        # A line continuation before the target is not the target.
+        ("R -f first.R > \\\n  --file=second.R", "first.R"),
     ],
 )
 def test_unreadable_redirection_target_keeps_the_r_script(
@@ -3807,6 +3809,44 @@ def test_unresolved_r_run_event_names_the_candidate_without_hashing(
     assert event["io_detection"] == "unresolved"
     assert event["inputs"] == [] and event["outputs"] == []
     assert event["lineage_warnings"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A comment or `${...}` inside a substitution target has quoting this
+        # scan does not model, so the later words stay unknown.
+        "R -f first.R > $(echo log # )\n) --file=second.R",
+        'R -f first.R > $(echo "${x:-")"}") --file=second.R',
+        # `case` patterns and heredocs carry unbalanced parentheses.
+        "R -f first.R >$(case x in x) echo /dev/null;; e\\\nsac) --file=second.R",
+        "R -f first.R >$(case x in x) esac) --file=second.R",
+        "R -f first.R >$(cat <\\\n<EOF\n(\nEOF\n) --file=second.R",
+    ],
+)
+def test_unmodelled_redirection_target_stays_unresolved(
+    tmp_path: Path, command: str
+) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    _assert_unresolved(detect_scripts(command, tmp_path), "first.R")
+
+
+@pytest.mark.parametrize(
+    ("command", "script"),
+    [
+        ("python a\\.py", "a.py"),
+        ("Rscript a\\.R", "a.R"),
+        ("jupyter execute a\\.ipynb", "a.ipynb"),
+        ("\\python a.py", "a.py"),
+        ("/venv/bin/\\python a.py", "a.py"),
+        ("Rscript b.R \\  python", "b.R"),
+    ],
+)
+def test_escaped_ordinary_characters_still_match(
+    tmp_path: Path, command: str, script: str
+) -> None:
+    assert detect_scripts(command, tmp_path) == [(tmp_path / script, None)]
 
 
 def test_backslash_runs_do_not_backtrack_exponentially() -> None:
