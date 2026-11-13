@@ -47,10 +47,21 @@ EMBED_LIMIT_BYTES = 100 * 1024
 # --- Script-path / inline-source extraction ---
 _SHELL_DOUBLE_QUOTED_COMPONENT = r'"(?:\\.|[^"\\])*"'
 _SHELL_SINGLE_QUOTED_COMPONENT = r"'[^']*'"
-# A backslash is either an escape (`\\.`) or, only before a newline or the
-# end, a bare character; letting both alternatives match `\x` made runs of
-# backslashes backtrack exponentially (`R ` + 40 backslashes hung the hook).
-_SHELL_BARE_COMPONENT = r"(?:\\.|\\(?=\n|$)|[^\s|&;()<>\"'\\])"
+# An escape pairs a backslash with whitespace, shell punctuation, or another
+# backslash; before any other character, a newline, or the end, the
+# backslash may stand alone. `(?=.)` keeps `\` + newline an escape only in
+# DOTALL patterns, as `\\.` was. Unlike the old `\\.|[^...]`, an escaped
+# backslash (`\\`) can no longer also escape the next character (`\\ a.py`
+# as one word), which the shell never does; only `\` + newline (DOTALL) has
+# two parses, the second of which ends the word. Letting both alternatives
+# match every `\x` made runs
+# of backslashes backtrack exponentially (`R ` + 40 backslashes hung the
+# hook), while consuming `\.` as one atom would hide the dot in `a\.py` from
+# the extension match.
+_SHELL_BARE_COMPONENT = (
+    r"(?:\\(?=.)[\s|&;()<>\"'\\]"
+    r"|\\(?=[^\s|&;()<>\"'\\]|\n|$)|[^\s|&;()<>\"'\\])"
+)
 _SHELL_WORD_COMPONENT = (
     rf"(?:{_SHELL_DOUBLE_QUOTED_COMPONENT}|{_SHELL_SINGLE_QUOTED_COMPONENT}"
     rf"|{_SHELL_BARE_COMPONENT})"
@@ -1164,9 +1175,15 @@ _WHITESPACE_RUN_RX = re.compile(r"\s+")
 
 
 def _scan_shell_group(command: str, index: int, closer: str) -> int | None:
-    """Offset just past `closer`, skipping nested quotes and substitutions."""
+    """Offset just past `closer`, skipping nested quotes and substitutions.
+
+    Returns None (unknown) for a comment or a `${...}` expansion inside,
+    whose quoting rules this scan does not model.
+    """
     while index < len(command):
         char = command[index]
+        if char == "#" or (char == "$" and command[index + 1 : index + 2] == "{"):
+            return None
         if char == closer:
             return index + 1
         if char == "\\":
@@ -1212,6 +1229,12 @@ def _shell_word_end(command: str, index: int) -> int | None:
             if following != "(":
                 break
             next_index = _scan_shell_group(command, index + 2, ")")
+        elif char == "$" and following == "{":
+            return None
+        elif char == "\\" and following == "\n":
+            if index == start:
+                return None  # the caller skips continuations before a word
+            next_index = index + 2
         elif char == "$" and following == "(":
             next_index = _scan_shell_group(command, index + 2, ")")
         elif char == "`":
@@ -1278,8 +1301,13 @@ def _blank_redirection_targets(command: str, offset: int) -> str:
                 target = index
                 while target < len(command) and command[target] in "<>&|":
                     target += 1
-                while target < len(command) and command[target] in " \t":
-                    target += 1
+                while target < len(command):
+                    if command[target] in " \t":
+                        target += 1
+                    elif command[target : target + 2] == "\\\n":
+                        target += 2  # a line continuation is not the target
+                    else:
+                        break
                 end = _shell_word_end(command, target)
                 if end is None:
                     return command

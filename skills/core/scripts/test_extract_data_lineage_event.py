@@ -3756,6 +3756,8 @@ def test_r_file_run_with_unreadable_later_words_is_unresolved(
         ("R -f first.R > >(tee run.log) --file=second.R", "second.R"),
         ("R -f first.R &> run_$(date).log", "first.R"),
         ("R CMD BATCH first.R > batch_$(date).log", "first.R"),
+        # A line continuation before the target is not the target.
+        ("R -f first.R > \\\n  --file=second.R", "first.R"),
     ],
 )
 def test_unreadable_redirection_target_keeps_the_r_script(
@@ -3772,6 +3774,41 @@ def test_unresolved_r_file_message_does_not_blame_batch_options(
     detections = detect_scripts("R -f first.R $(printf x)", tmp_path)
     assert len(detections) == 1 and detections[0][0] is None, detections
     assert "R_BATCH_OPTIONS" not in detections[0][1]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A comment or `${...}` inside a substitution target has quoting this
+        # scan does not model, so the later words stay unknown.
+        "R -f first.R > $(echo log # )\n) --file=second.R",
+        'R -f first.R > $(echo "${x:-")"}") --file=second.R',
+    ],
+)
+def test_unmodelled_redirection_target_stays_unresolved(
+    tmp_path: Path, command: str
+) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    detections = detect_scripts(command, tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None, detections
+
+
+@pytest.mark.parametrize(
+    ("command", "script"),
+    [
+        ("python a\\.py", "a.py"),
+        ("Rscript a\\.R", "a.R"),
+        ("jupyter execute a\\.ipynb", "a.ipynb"),
+        ("\\python a.py", "a.py"),
+        ("/venv/bin/\\python a.py", "a.py"),
+        ("Rscript b.R \\  python", "b.R"),
+    ],
+)
+def test_escaped_ordinary_characters_still_match(
+    tmp_path: Path, command: str, script: str
+) -> None:
+    assert detect_scripts(command, tmp_path) == [(tmp_path / script, None)]
 
 
 def test_backslash_runs_do_not_backtrack_exponentially() -> None:
