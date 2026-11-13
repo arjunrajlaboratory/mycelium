@@ -33,7 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lineage records the script R actually reads. Lineage records every
   `-e` expression of a multi-expression R or Rscript one-liner, not just the
   first. A trailing shell comment containing a parenthesis or apostrophe no
-  longer hides an R run. The
+  longer hides an R run, and neither does a redirection target the scan
+  cannot read (`R -f script.R > run_$(date +%s).log`). A run of backslashes
+  in a command no longer makes the shell-word regex backtrack exponentially
+  and stall the hook. The
   planning guide now lists `R -e '...'` among its read-only probes. Existing
   projects need no migration.
 - **Stop names a destroyed session-log header instead of hiding it in a

@@ -3726,7 +3726,6 @@ def test_batch_ignores_inherited_options_cleared_by_a_wrapper(
     [
         # Words past unreadable syntax may override the file or stop R, so the
         # run is kept but the script is not guessed.
-        "R -f first.R --file=second.R > >(tee run.log)",
         "R -f first.R $(printf ignored) --file=second.R",
         "R -f first.R $(printf ignored) --print-home",
         # The shell picks the file: record the run, not a literal `$SCRIPT`.
@@ -3744,6 +3743,45 @@ def test_r_file_run_with_unreadable_later_words_is_unresolved(
     detections = detect_scripts(command, tmp_path)
     assert len(detections) == 1 and detections[0][0] is None, detections
     assert detections[0][1].startswith("# R -f "), detections
+
+
+@pytest.mark.parametrize(
+    ("command", "script"),
+    [
+        # A redirection target never reaches argv, so a target the scanner
+        # cannot tokenize must not make the script unresolved.
+        ("R -f first.R > run_$(date +%s).log", "first.R"),
+        ("R -f first.R 2> >(tee err.log) --vanilla", "first.R"),
+        ("R -f first.R --file=second.R > >(tee run.log)", "second.R"),
+        ("R -f first.R > >(tee run.log) --file=second.R", "second.R"),
+        ("R -f first.R &> run_$(date).log", "first.R"),
+        ("R CMD BATCH first.R > batch_$(date).log", "first.R"),
+    ],
+)
+def test_unreadable_redirection_target_keeps_the_r_script(
+    tmp_path: Path, command: str, script: str
+) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    assert detect_scripts(command, tmp_path) == [(tmp_path / script, None)]
+
+
+def test_unresolved_r_file_message_does_not_blame_batch_options(
+    tmp_path: Path,
+) -> None:
+    detections = detect_scripts("R -f first.R $(printf x)", tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None, detections
+    assert "R_BATCH_OPTIONS" not in detections[0][1]
+
+
+def test_backslash_runs_do_not_backtrack_exponentially() -> None:
+    """Both bare-word alternatives used to match a backslash, so `R ` plus
+    40 backslashes took hours to reject."""
+    import time
+
+    started = time.monotonic()
+    assert not is_analysis("R " + "\\" * 40 + "x")
+    assert time.monotonic() - started < 2
 
 
 def test_prefix_assignment_then_env_unset_runs_the_input(tmp_path: Path) -> None:

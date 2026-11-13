@@ -47,7 +47,10 @@ EMBED_LIMIT_BYTES = 100 * 1024
 # --- Script-path / inline-source extraction ---
 _SHELL_DOUBLE_QUOTED_COMPONENT = r'"(?:\\.|[^"\\])*"'
 _SHELL_SINGLE_QUOTED_COMPONENT = r"'[^']*'"
-_SHELL_BARE_COMPONENT = r"(?:\\.|[^\s|&;()<>\"'])"
+# A backslash is either an escape (`\\.`) or, only before a newline or the
+# end, a bare character; letting both alternatives match `\x` made runs of
+# backslashes backtrack exponentially (`R ` + 40 backslashes hung the hook).
+_SHELL_BARE_COMPONENT = r"(?:\\.|\\(?=\n|$)|[^\s|&;()<>\"'\\])"
 _SHELL_WORD_COMPONENT = (
     rf"(?:{_SHELL_DOUBLE_QUOTED_COMPONENT}|{_SHELL_SINGLE_QUOTED_COMPONENT}"
     rf"|{_SHELL_BARE_COMPONENT})"
@@ -1160,6 +1163,135 @@ def _r_command_suffix(command: str, offset: int) -> str | None:
 _WHITESPACE_RUN_RX = re.compile(r"\s+")
 
 
+def _scan_shell_group(command: str, index: int, closer: str) -> int | None:
+    """Offset just past `closer`, skipping nested quotes and substitutions."""
+    while index < len(command):
+        char = command[index]
+        if char == closer:
+            return index + 1
+        if char == "\\":
+            index += 2
+            continue
+        next_index: int | None
+        if closer == "`":
+            next_index = index + 1
+        elif closer == '"':
+            if char == "$" and command[index + 1 : index + 2] == "(":
+                next_index = _scan_shell_group(command, index + 2, ")")
+            elif char == "`":
+                next_index = _scan_shell_group(command, index + 1, "`")
+            else:
+                next_index = index + 1
+        elif char == "'":
+            end = command.find("'", index + 1)
+            next_index = None if end < 0 else end + 1
+        elif char == '"':
+            next_index = _scan_shell_group(command, index + 1, '"')
+        elif char == "`":
+            next_index = _scan_shell_group(command, index + 1, "`")
+        elif char == "(":
+            next_index = _scan_shell_group(command, index + 1, ")")
+        else:
+            next_index = index + 1
+        if next_index is None:
+            return None
+        index = next_index
+    return None
+
+
+def _shell_word_end(command: str, index: int) -> int | None:
+    """End offset of the shell word at index, substitutions included."""
+    start = index
+    while index < len(command):
+        char = command[index]
+        following = command[index + 1 : index + 2]
+        next_index: int | None
+        if char in " \t\n;&|)":
+            break
+        if char in "<>":
+            if following != "(":
+                break
+            next_index = _scan_shell_group(command, index + 2, ")")
+        elif char == "$" and following == "(":
+            next_index = _scan_shell_group(command, index + 2, ")")
+        elif char == "`":
+            next_index = _scan_shell_group(command, index + 1, "`")
+        elif char == '"':
+            next_index = _scan_shell_group(command, index + 1, '"')
+        elif char == "'":
+            end = command.find("'", index + 1)
+            next_index = None if end < 0 else end + 1
+        elif char == "\\":
+            next_index = index + 2
+        elif char == "(":
+            return None
+        else:
+            next_index = index + 1
+        if next_index is None:
+            return None
+        index = next_index
+    index = min(index, len(command))
+    return index if index > start else None
+
+
+def _blank_redirection_targets(command: str, offset: int) -> str:
+    """Replace each redirection target of the simple command at offset with a
+    same-length placeholder word.
+
+    A target never becomes an argument, but one the scanner cannot tokenize
+    (`> run_$(date).log`, `2> >(tee err)`) would otherwise make every later
+    word unknown. Returns the command unchanged if a target does not close.
+    """
+    out = list(command)
+    quote: str | None = None
+    index = offset
+    try:
+        while index < len(command):
+            char = command[index]
+            if quote == "'":
+                if char == "'":
+                    quote = None
+                index += 1
+                continue
+            if quote == '"':
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == '"':
+                    quote = None
+                index += 1
+                continue
+            if char == "\\":
+                index += 2
+                continue
+            if char in {"'", '"'}:
+                quote = char
+            elif char in ";\n(":
+                break
+            elif char == "|" and (index == offset or command[index - 1] != ">"):
+                break
+            elif char == "&" and command[index + 1 : index + 2] != ">" and (
+                index == offset or command[index - 1] not in "<>"
+            ):
+                break
+            elif char in "<>":
+                target = index
+                while target < len(command) and command[target] in "<>&|":
+                    target += 1
+                while target < len(command) and command[target] in " \t":
+                    target += 1
+                end = _shell_word_end(command, target)
+                if end is None:
+                    return command
+                out[target:end] = "_" * (end - target)
+                index = end
+                continue
+            index += 1
+    except RecursionError:
+        return command
+    return "".join(out)
+
+
 def _readable_argv(
     command: str, offset: int, *, cut_at_r_args: bool = False
 ) -> tuple[list[str], bool] | None:
@@ -1169,8 +1301,10 @@ def _readable_argv(
     `> >(tee log)` redirection), return the longest prefix ending at a word
     boundary that does, with complete=False: the words before the unreadable
     syntax are exact, but later words (another `--file=`, `--print-home`) are
-    unknown. `cut_at_r_args` first stops at R's own `--args`.
+    unknown. `cut_at_r_args` first stops at R's own `--args`. Redirection
+    targets are blanked first, since they never reach argv.
     """
+    command = _blank_redirection_targets(command, offset)
     if cut_at_r_args:
         fragment = _r_command_suffix(command, offset)
     else:
@@ -3097,10 +3231,13 @@ def _detect_scripts_with_cwd(
                     continue
                 kind, path_word = resolved
                 if kind == _BATCH_UNRESOLVED:
-                    form = "R -f" if pattern is RX_R_FILE_PATH else "R CMD BATCH"
+                    if pattern is RX_R_FILE_PATH:
+                        form, cause = "R -f", "shell syntax"
+                    else:
+                        form, cause = "R CMD BATCH", "shell syntax or R_BATCH_OPTIONS"
                     source = (
-                        f"# {form} {path_word}: shell syntax or R_BATCH_OPTIONS "
-                        "this scan cannot read may change the script R reads"
+                        f"# {form} {path_word}: {cause} this scan cannot read "
+                        "may change the script R reads"
                     )
                     identity = (source, effective_cwd)
                     if identity not in seen_inline:
