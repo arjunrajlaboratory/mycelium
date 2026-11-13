@@ -3783,6 +3783,10 @@ def test_unresolved_r_file_message_does_not_blame_batch_options(
         # scan does not model, so the later words stay unknown.
         "R -f first.R > $(echo log # )\n) --file=second.R",
         'R -f first.R > $(echo "${x:-")"}") --file=second.R',
+        # `case` patterns and heredocs carry unbalanced parentheses.
+        "R -f first.R >$(case x in x) echo /dev/null;; e\\\nsac) --file=second.R",
+        "R -f first.R >$(case x in x) esac) --file=second.R",
+        "R -f first.R >$(cat <\\\n<EOF\n(\nEOF\n) --file=second.R",
     ],
 )
 def test_unmodelled_redirection_target_stays_unresolved(

@@ -1178,11 +1178,25 @@ def _scan_shell_group(command: str, index: int, closer: str) -> int | None:
     """Offset just past `closer`, skipping nested quotes and substitutions.
 
     Returns None (unknown) for a comment or a `${...}` expansion inside,
-    whose quoting rules this scan does not model.
+    whose quoting rules this scan does not model, and, inside `(...)`, for
+    anything beyond one simple pipeline on one line (a newline, `;`, a line
+    continuation, or `case`, whose patterns and heredocs carry unbalanced
+    parentheses). Ordinary targets like `$(date +%s)` and `>(tee log)` pass.
     """
     while index < len(command):
         char = command[index]
-        if char == "#" or (char == "$" and command[index + 1 : index + 2] == "{"):
+        following = command[index + 1 : index + 2]
+        if char == "#" or (char == "$" and following == "{"):
+            return None
+        if closer == ")" and (
+            char in "\n;"
+            or (char == "\\" and following == "\n")
+            or (
+                command.startswith("case", index)
+                and command[index - 1 : index] in {"", " ", "\t", "(", "|", "&"}
+                and command[index + 4 : index + 5] in {"", " ", "\t"}
+            )
+        ):
             return None
         if char == closer:
             return index + 1
