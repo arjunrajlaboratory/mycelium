@@ -1127,7 +1127,9 @@ _R_SEPARATED_VALUE_OPTIONS = {
     "--max-connections", "--max-nsize", "--max-ppsize", "--max-vsize",
     "--min-nsize", "--min-vsize",
 }
-_REDIRECTION_OPERATOR_RX = re.compile(r"\d*(?:&>>?|<<<|<<-?|<>|>>|>\||>&|<&|>|<)")
+_REDIRECTION_OPERATOR_RX = re.compile(
+    r"(?:\d+|\{[A-Za-z_][A-Za-z0-9_]*\})?(?:&>>?|<<<|<<-?|<>|>>|>\||>&|<&|>|<)"
+)
 
 
 class _RWord(NamedTuple):
@@ -1298,6 +1300,7 @@ def _walk_r_argv(words: list[_RWord], complete: bool, *, rscript: bool) -> _RArg
     """
     expressions: list[str] = []
     file: _RWord | None = None
+    has_expression = False  # `-e`, even one missing its value
     index = 1  # words[0] is the executable itself
     while index < len(words):
         word = words[index]
@@ -1310,26 +1313,30 @@ def _walk_r_argv(words: list[_RWord], complete: bool, *, rscript: bool) -> _RArg
         if text == "--args":
             complete = True
             break
-        value = words[index + 1] if index + 1 < len(words) else None
-        if rscript:
-            if text == "-e" and value is not None:
-                expressions.append(value.text)
-                index += 2
-                continue
+        takes_value = text in _R_SEPARATED_VALUE_OPTIONS
+        value = words[index + 1] if takes_value and index + 1 < len(words) else None
+        if rscript and text != "-e":
             if expressions:
                 break
             index += 1
             continue
-        if text in _R_STOP_WORDS or text.startswith("--debugger="):
+        if not rscript and (text in _R_STOP_WORDS or text.startswith("--debugger=")):
             return _RArgv(expressions, file, True, True)
-        if text == "-e" and value is not None:
-            expressions.append(value.text)
+        if text == "-e":
+            has_expression = True
+            if value is not None:
+                expressions.append(value.text)
         elif text == "-f" and value is not None:
             file = value
         elif text.startswith("--file="):
             file = _RWord(text[len("--file=") :], True)
-        index += 2 if text in _R_SEPARATED_VALUE_OPTIONS else 1
-    stopped = not rscript and bool(expressions) and file is not None
+        if value is not None and not value.known:
+            # A computed value is kept as written, but an unquoted one may
+            # split into more words, so nothing after it is known.
+            complete = False
+            break
+        index += 2 if takes_value else 1
+    stopped = not rscript and has_expression and file is not None
     return _RArgv(expressions, file, stopped, complete)
 
 
@@ -1390,6 +1397,8 @@ def _r_batch_script(command: str, match: re.Match[str]) -> _RWord | None:
             infile = words[index + 1] if index + 1 < len(words) else None
             break
         if word.text in {"-d", "-g"}:
+            if not all(w.known for w in words[index : index + 2]):
+                return matched  # BATCH splits a computed value unquoted
             forwarded.extend(w.text for w in words[index : index + 2])
             index += 2
             continue

@@ -3586,6 +3586,8 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         'R CMD BATCH "--vanilla --version" script.R',
         # R refuses -e alongside BATCH's own -f (checked on R 4.6).
         'R CMD BATCH "-e print(1)" script.R',
+        # BATCH forwards a bare -e, which R refuses alongside -f.
+        "R CMD BATCH -e script.R",
         "R CMD BATCH --no-timing",
         # A terminal option before `--args` still wins over a trailing $(...).
         "R -f script.R --version --args $(date)",
@@ -3636,6 +3638,9 @@ def test_r_non_executing_forms_record_nothing(tmp_path: Path, command: str) -> N
         ("R -e 'a' > --args", "a"),
         # Shell syntax the argv scan cannot read keeps the proven payload.
         ("R -e 'print(1)' > >(cat)", "print(1)"),
+        # Named file descriptors are redirection syntax, not argv words.
+        ("Rscript -e 'a' {fd}>&1 -e 'b'", "a\nb"),
+        ("R -e 'a' {log}>run.log -e 'b'", "a\nb"),
         # `$ARGS` may expand to --args: a later -e may never run.
         ("ARGS=--args; R -e 'print(1)' $ARGS -e 'stop(1)'", "print(1)"),
     ],
@@ -3731,6 +3736,15 @@ def test_batch_ignores_the_hook_process_batch_options(
         ('R -f "$DIR/run.R"', "$DIR/run.R"),
         # A variable among R's options may expand to another --file=.
         ("OPTS=--file=second.R; R -f first.R $OPTS", "first.R"),
+        # A computed option value may split into words that override a
+        # later --file= (`actual.R --args`), so the scan stops there.
+        (
+            "R -f first.R -f $(printf 'a.R --args') --file=second.R",
+            "$(printf 'a.R --args')",
+        ),
+        # BATCH forwards -g/-d values unquoted, so a computed one may add
+        # `--file=`.
+        ('R CMD BATCH -g "$GUI" first.R', "first.R"),
     ],
 )
 def test_r_file_run_with_unreadable_later_words_is_unresolved(
