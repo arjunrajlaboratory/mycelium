@@ -1209,7 +1209,8 @@ def _scan_shell_group(command: str, index: int, closer: str) -> int | None:
     while index < len(command):
         char = command[index]
         following = command[index + 1 : index + 2]
-        if char == "#" or (char == "$" and following == "{"):
+        # `#` inside double quotes is literal text, not a comment.
+        if (char == "#" and closer != '"') or (char == "$" and following == "{"):
             return None
         if closer == ")" and (
             char in "\n;"

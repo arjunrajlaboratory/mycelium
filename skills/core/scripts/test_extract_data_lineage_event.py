@@ -3588,6 +3588,7 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         'R CMD BATCH "-e print(1)" script.R',
         # BATCH forwards a bare -e, which R refuses alongside -f.
         "R CMD BATCH -e script.R",
+        'R -e "print(1) # note" --version',
         # R exits when -e or -f lacks its value.
         "R -e 1 -f",
         # R refuses -e with -f even when the expression is computed.
@@ -3646,6 +3647,8 @@ def test_r_non_executing_forms_record_nothing(tmp_path: Path, command: str) -> N
         # Named file descriptors are redirection syntax, not argv words.
         ("Rscript -e 'a' {fd}>&1 -e 'b'", "a\nb"),
         ("R -e 'a' {log}>run.log -e 'b'", "a\nb"),
+        # A `#` inside double quotes is literal, not a comment.
+        ('R -e "print(1) # note" -e "print(2)"', "print(1) # note\nprint(2)"),
         # A computed expression is not presented as executed R source.
         ("R -e 'print(1)' -e $(cat analysis.R)", "print(1)"),
         # `$ARGS` may expand to --args: a later -e may never run.
