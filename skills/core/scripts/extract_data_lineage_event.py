@@ -1147,6 +1147,26 @@ class UnresolvedScript(NamedTuple):
     candidate: str
 
 
+def _decode_r_word(raw: str) -> str | None:
+    """Decode one shell word, including the `\\$` and `\\`` that bash
+    unescapes inside double quotes but shlex leaves alone."""
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char == "\\" and quote != "'":
+            pair = raw[index : index + 2]
+            out.append(pair[1:] if quote == '"' and pair[1:] in {"$", "`"} else pair)
+            index += 2
+            continue
+        if char in "'\"" and quote in (None, char):
+            quote = None if quote else char
+        out.append(char)
+        index += 1
+    return _decode_shell_word("".join(out))
+
+
 def _is_expanded_word(raw: str) -> bool:
     """Whether the shell computes part of raw: `$` or backtick outside '...'."""
     quote: str | None = None
@@ -1273,7 +1293,7 @@ def _r_words(command: str, offset: int) -> tuple[list[_RWord], bool]:
                 return words, False
             raw = _join_line_continuations(command[index:end])
             index = end
-            decoded = _decode_shell_word(raw)
+            decoded = _decode_r_word(raw)
             if _is_expanded_word(raw):
                 words.append(_RWord(raw if decoded is None else decoded, False))
             elif decoded is not None:
@@ -1326,7 +1346,8 @@ def _walk_r_argv(words: list[_RWord], complete: bool, *, rscript: bool) -> _RArg
         ):
             return _RArgv(expressions, file, True, True)
         if text == "-e" and value is not None:
-            expressions.append(value.text)
+            if value.known:  # a computed expression is not recorded as source
+                expressions.append(value.text)
         elif text == "-f" and value is not None:
             file = value
         elif text.startswith("--file="):

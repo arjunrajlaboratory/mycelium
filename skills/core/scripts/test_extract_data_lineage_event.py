@@ -3644,6 +3644,8 @@ def test_r_non_executing_forms_record_nothing(tmp_path: Path, command: str) -> N
         # Named file descriptors are redirection syntax, not argv words.
         ("Rscript -e 'a' {fd}>&1 -e 'b'", "a\nb"),
         ("R -e 'a' {log}>run.log -e 'b'", "a\nb"),
+        # A computed expression is not presented as executed R source.
+        ("R -e 'print(1)' -e $(cat analysis.R)", "print(1)"),
         # `$ARGS` may expand to --args: a later -e may never run.
         ("ARGS=--args; R -e 'print(1)' $ARGS -e 'stop(1)'", "print(1)"),
     ],
@@ -3875,6 +3877,8 @@ def test_batch_option_expansion_is_unresolved(tmp_path: Path) -> None:
         ("R -f 'cost$model.R'", "path"),
         # One expansion rule for every R form: a computed word ends the argv.
         ("R -q -e 'df$x' $F -f script.R", "inline"),
+        # Inside double quotes, bash removes the backslash of `\\$`.
+        ('R -f "cost\\$model.R"', "path"),
     ],
 )
 def test_single_quoted_dollar_is_not_an_expansion(
