@@ -16,6 +16,7 @@ from extract_data_lineage_event import (  # noqa: E402
     detect_script,
     detect_scripts,
     is_analysis,
+    UnresolvedScript,
     scan_source,
     write_events,
 )
@@ -3583,10 +3584,8 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         'R CMD BATCH "--debugger=lldb" script.R',
         'R CMD BATCH "--vanilla --help" script.R',
         'R CMD BATCH "--vanilla --version" script.R',
-        "R_BATCH_OPTIONS=--version R CMD BATCH script.R",
         # R refuses -e alongside BATCH's own -f (checked on R 4.6).
         'R CMD BATCH "-e print(1)" script.R',
-        "R_BATCH_OPTIONS='-e 1' R CMD BATCH script.R",
         "R CMD BATCH --no-timing",
         # A terminal option before `--args` still wins over a trailing $(...).
         "R -f script.R --version --args $(date)",
@@ -3673,9 +3672,6 @@ def test_escaped_space_before_hash_is_not_a_comment(tmp_path: Path) -> None:
         'R CMD BATCH "second.R first.R"',
         "env R CMD BATCH second.R $(date).Rout",
         "R CMD BATCH second.R > >(cat)",
-        # BATCH appends $R_BATCH_OPTIONS after its own options.
-        "R_BATCH_OPTIONS=--file=second.R R CMD BATCH first.R",
-        "env R_BATCH_OPTIONS='--vanilla --file=second.R' R CMD BATCH first.R",
     ],
 )
 def test_r_records_the_file_r_actually_runs(tmp_path: Path, command: str) -> None:
@@ -3684,65 +3680,65 @@ def test_r_records_the_file_r_actually_runs(tmp_path: Path, command: str) -> Non
     assert detect_scripts(command, tmp_path) == [(tmp_path / "second.R", None)]
 
 
-def test_batch_with_exported_options_is_unresolved(tmp_path: Path) -> None:
-    """`export R_BATCH_OPTIONS=...` can change or cancel the run; record the
-    run without guessing which script R read."""
-    (tmp_path / "first.R").write_text("print(1)\n")
-    command = "export R_BATCH_OPTIONS=--file=second.R; R CMD BATCH first.R"
-    detections = detect_scripts(command, tmp_path)
-    assert len(detections) == 1 and detections[0][0] is None, detections
-    assert "R_BATCH_OPTIONS" in detections[0][1]
-
-
-@pytest.mark.parametrize(
-    "wrapper",
-    [
-        "env -i PATH=/usr/bin:/bin",
-        "/usr/bin/env -i PATH=/usr/bin:/bin",
-        "R_BATCH_OPTIONS=--version env -u R_BATCH_OPTIONS",
-        "R_BATCH_OPTIONS=--version env -C . -u R_BATCH_OPTIONS",
-        "env -u R_BATCH_OPTIONS",
-        "env --unset=R_BATCH_OPTIONS",
-        "exec -c",
-    ],
-)
-def test_batch_ignores_inherited_options_cleared_by_a_wrapper(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrapper: str
-) -> None:
-    monkeypatch.setenv("R_BATCH_OPTIONS", "--file=other.R")
-    for name in ("first.R", "other.R"):
-        (tmp_path / name).write_text("print(1)\n")
-    assert detect_scripts(f"{wrapper} R CMD BATCH first.R", tmp_path) == [
-        (tmp_path / "first.R", None)
-    ]
-    # Without a clearing wrapper the inherited option still applies.
-    assert detect_scripts("R CMD BATCH first.R", tmp_path) == [
-        (tmp_path / "other.R", None)
-    ]
+def _assert_unresolved(detections: list, candidate: str) -> None:
+    assert detections == [(UnresolvedScript(candidate), None)], detections
 
 
 @pytest.mark.parametrize(
     "command",
     [
+        # BATCH appends $R_BATCH_OPTIONS, which this scan does not model: any
+        # mention keeps the run but leaves its script unresolved.
+        "R_BATCH_OPTIONS=--file=second.R R CMD BATCH script.R",
+        "env R_BATCH_OPTIONS='--vanilla --file=second.R' R CMD BATCH script.R",
+        "export R_BATCH_OPTIONS=--file=second.R; R CMD BATCH script.R",
+        "R_BATCH_OPTIONS=--version R CMD BATCH script.R",
+        "R_BATCH_OPTIONS='-e 1' R CMD BATCH script.R",
+        "R_BATCH_OPTIONS=--version env -u R_BATCH_OPTIONS R CMD BATCH script.R",
+    ],
+)
+def test_batch_that_mentions_batch_options_is_unresolved(
+    tmp_path: Path, command: str
+) -> None:
+    for name in ("script.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    _assert_unresolved(detect_scripts(command, tmp_path), "script.R")
+    assert _run_check(tmp_path, command, "--check-post-action") == 0, command
+
+
+def test_batch_ignores_the_hook_process_batch_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook's own environment is not the agent shell's, so it is not read."""
+    monkeypatch.setenv("R_BATCH_OPTIONS", "--file=other.R")
+    for name in ("first.R", "other.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    assert detect_scripts("R CMD BATCH first.R", tmp_path) == [
+        (tmp_path / "first.R", None)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("command", "candidate"),
+    [
         # Words past unreadable syntax may override the file or stop R, so the
         # run is kept but the script is not guessed.
-        "R -f first.R $(printf ignored) --file=second.R",
-        "R -f first.R $(printf ignored) --print-home",
-        # The shell picks the file: record the run, not a literal `$SCRIPT`.
-        'R -f first.R --file="$SCRIPT"',
-        "R -f first.R --file=`pick`",
+        ("R -f first.R $(printf ignored) --file=second.R", "first.R"),
+        ("R -f first.R $(printf ignored) --print-home", "first.R"),
+        # The shell picks the file: record the run, not a guessed file.
+        ('R -f first.R --file="$SCRIPT"', "$SCRIPT"),
+        ("R -f first.R --file=`pick`", "`pick`"),
+        ('R -f "$DIR/run.R"', "$DIR/run.R"),
         # A variable among R's options may expand to another --file=.
-        "OPTS=--file=second.R; R -f first.R $OPTS",
+        ("OPTS=--file=second.R; R -f first.R $OPTS", "first.R"),
     ],
 )
 def test_r_file_run_with_unreadable_later_words_is_unresolved(
-    tmp_path: Path, command: str
+    tmp_path: Path, command: str, candidate: str
 ) -> None:
     for name in ("first.R", "second.R"):
         (tmp_path / name).write_text("print(1)\n")
-    detections = detect_scripts(command, tmp_path)
-    assert len(detections) == 1 and detections[0][0] is None, detections
-    assert detections[0][1].startswith("# R -f "), detections
+    _assert_unresolved(detect_scripts(command, tmp_path), candidate)
 
 
 @pytest.mark.parametrize(
@@ -3766,12 +3762,25 @@ def test_unreadable_redirection_target_keeps_the_r_script(
     assert detect_scripts(command, tmp_path) == [(tmp_path / script, None)]
 
 
-def test_unresolved_r_file_message_does_not_blame_batch_options(
+def test_unresolved_r_run_event_names_the_candidate_without_hashing(
     tmp_path: Path,
 ) -> None:
-    detections = detect_scripts("R -f first.R $(printf x)", tmp_path)
-    assert len(detections) == 1 and detections[0][0] is None, detections
-    assert "R_BATCH_OPTIONS" not in detections[0][1]
+    """An uncertain script is not read or hashed: the event keeps the run,
+    the candidate file word, and a warning, never a hash of prose."""
+    (tmp_path / "first.R").write_text("read.csv('input.csv')\n")
+    command = "R -f first.R $(printf x)"
+    [detection] = detect_scripts(command, tmp_path)
+    args = argparse.Namespace(
+        ts="2026-11-13T00:00:00Z", agent_id=None, agent_type=None,
+        bash_cmd=command, bash_exit=0,
+    )
+    event = build_event_for_detection(detection, args, tmp_path, "abc123")
+    assert event["script"] is None
+    assert event["script_candidate"] == "first.R"
+    assert event["script_sha256"] is None and event["script_source"] is None
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == [] and event["outputs"] == []
+    assert event["lineage_warnings"]
 
 
 def test_backslash_runs_do_not_backtrack_exponentially() -> None:
@@ -3784,12 +3793,6 @@ def test_backslash_runs_do_not_backtrack_exponentially() -> None:
     assert time.monotonic() - started < 2
 
 
-def test_prefix_assignment_then_env_unset_runs_the_input(tmp_path: Path) -> None:
-    (tmp_path / "script.R").write_text("print(1)\n")
-    command = "R_BATCH_OPTIONS=--version env -u R_BATCH_OPTIONS R CMD BATCH script.R"
-    assert detect_scripts(command, tmp_path) == [(tmp_path / "script.R", None)]
-
-
 def test_quoted_suffix_on_args_is_not_the_boundary(tmp_path: Path) -> None:
     for name in ("first.R", "second.R"):
         (tmp_path / name).write_text("print(1)\n")
@@ -3799,8 +3802,9 @@ def test_quoted_suffix_on_args_is_not_the_boundary(tmp_path: Path) -> None:
 
 def test_batch_file_override_from_a_variable_is_unresolved(tmp_path: Path) -> None:
     (tmp_path / "first.R").write_text("print(1)\n")
-    detections = detect_scripts('R CMD BATCH --file="$SCRIPT" first.R', tmp_path)
-    assert len(detections) == 1 and detections[0][0] is None, detections
+    _assert_unresolved(
+        detect_scripts('R CMD BATCH --file="$SCRIPT" first.R', tmp_path), "first.R"
+    )
 
 
 def test_expansion_among_r_options_keeps_the_payload() -> None:
@@ -3842,5 +3846,24 @@ def test_batch_option_expansion_is_unresolved(tmp_path: Path) -> None:
     for name in ("first.R", "second.R"):
         (tmp_path / name).write_text("print(1)\n")
     command = 'OPTS=--args; R CMD BATCH "$OPTS --file=second.R" first.R'
+    _assert_unresolved(detect_scripts(command, tmp_path), "$OPTS --file=second.R")
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # A `$` in single quotes is literal, so the word is known.
+        ("R -f 'cost$model.R'", "path"),
+        # One expansion rule for every R form: a computed word ends the argv.
+        ("R -q -e 'df$x' $F -f script.R", "inline"),
+    ],
+)
+def test_single_quoted_dollar_is_not_an_expansion(
+    tmp_path: Path, command: str, expected: str
+) -> None:
+    (tmp_path / "cost$model.R").write_text("print(1)\n")
     detections = detect_scripts(command, tmp_path)
-    assert len(detections) == 1 and detections[0][0] is None, detections
+    if expected == "path":
+        assert detections == [(tmp_path / "cost$model.R", None)]
+    else:
+        assert detections == [(None, "df$x")]

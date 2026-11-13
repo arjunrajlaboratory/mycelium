@@ -94,6 +94,7 @@ the Stop check accepts the session.
   "script": "analysis/foo.py",
   "script_sha256": "ab12...",
   "script_source": "...",
+  "script_candidate": null,
   "git_sha": "c3d4...",
   "inputs":  [{"path", "sha256", "size_bytes", "n_rows"?}],
   "outputs": [{"path", "sha256", "size_bytes"}],
@@ -125,6 +126,16 @@ A `python a.py && python b.py` chain emits **two** events (one per detected
 script). Inline `-c` scripts emit one event each; their `script` field is
 `null`, with the source embedded under `script_source` and identified by
 `script_sha256`.
+
+`script_candidate` is `null` except for an R script run (`R -f`,
+`R --file=`, `R CMD BATCH`) whose script cannot be named with certainty:
+shell syntax the scan cannot read (`R -f a.R $OPTS`, `--file="$SCRIPT"`) or
+`R_BATCH_OPTIONS` may change which file R reads. The run is still recorded,
+with `script`, `script_sha256`, and `script_source` all `null`,
+`script_candidate` holding the file word as the command wrote it (unexpanded,
+so it may be `$SCRIPT`), empty `inputs`/`outputs`, `io_detection:
+"unresolved"`, and a `lineage_warnings` entry. The candidate is never read or
+hashed, since R may have run a different file.
 
 For dynamic `Path`/dictionary composition, a conservative repository fallback
 may recover a uniquely named existing file. Candidates must data-flow into the
@@ -179,7 +190,9 @@ codes: an unknown exit is neither a success nor a failure.
 
 `scripts_executed` uses the script path when present, falling back to
 `(inline <sha-prefix>)` so inline-only sessions still produce a populated
-list. Repeated invocations of the same inline source collapse to one entry.
+list, and to `(unresolved <candidate>)` for an R run whose script is
+uncertain. Repeated invocations of the same inline source collapse to one
+entry.
 
 ## Detection coverage
 
@@ -190,7 +203,15 @@ list. Repeated invocations of the same inline source collapse to one entry.
   `R [options] CMD BATCH [options] script.R`, with R's own startup options
   (`-q`, `-s`, `--encoding ENC`, `--max-ppsize N`, …) before the payload;
   `--help`/`--version`/`--print-home`/`RHOME`/`CMD` or `-d`/`--debugger`
-  anywhere before `--args` means R never runs the payload
+  anywhere before `--args` means R never runs the payload. R's argv is read
+  word by word up to `--args`; a word the shell computes (a `$` or backtick
+  outside single quotes) or shell syntax the reader cannot follow ends what
+  can be read. Words before it still decide the run, and `-e` expressions
+  before it are recorded, but an `R -f`/`R CMD BATCH` run's script becomes
+  unresolved because a later word could name another file. `R CMD BATCH` also
+  reads `$R_BATCH_OPTIONS`, which is not modelled: a BATCH command that
+  mentions it anywhere is unresolved, and otherwise the variable is ignored
+  (the hook's own environment is not the agent shell's).
 - `jupyter nbconvert|execute notebook.ipynb`
 - `conda run … python …`
 - `uv run … python …`

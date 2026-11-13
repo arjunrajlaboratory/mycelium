@@ -439,6 +439,24 @@ def test_scripts_executed_includes_inline_with_sha_label() -> None:
     assert m["summary"]["scripts_executed"] == ["(inline ab12cd34ef56)"]
 
 
+def test_scripts_executed_labels_an_unresolved_r_run_by_its_candidate() -> None:
+    """An R run with an uncertain script has no hash; it is listed by the
+    file word the command named, and the field survives normalization."""
+    raw = {
+        "ts": "2026-11-13T12:00:00Z",
+        "bash_cmd": "R -f first.R $OPTS",
+        "script": None,
+        "script_sha256": None,
+        "script_source": None,
+        "script_candidate": "first.R",
+        "io_detection": "unresolved",
+    }
+    event = normalize_event(raw, [], 0)
+    assert event is not None and event["script_candidate"] == "first.R"
+    m = build_manifest([event], "sid", "/repo", [])
+    assert m["summary"]["scripts_executed"] == ["(unresolved first.R)"]
+
+
 def test_scripts_executed_mixes_named_and_inline() -> None:
     events = [
         {
