@@ -1300,7 +1300,6 @@ def _walk_r_argv(words: list[_RWord], complete: bool, *, rscript: bool) -> _RArg
     """
     expressions: list[str] = []
     file: _RWord | None = None
-    has_expression = False  # `-e`, even one missing its value
     index = 1  # words[0] is the executable itself
     while index < len(words):
         word = words[index]
@@ -1320,12 +1319,14 @@ def _walk_r_argv(words: list[_RWord], complete: bool, *, rscript: bool) -> _RArg
                 break
             index += 1
             continue
-        if not rscript and (text in _R_STOP_WORDS or text.startswith("--debugger=")):
+        if not rscript and (
+            text in _R_STOP_WORDS
+            or text.startswith("--debugger=")
+            or (text in {"-e", "-f"} and value is None)  # R exits: value required
+        ):
             return _RArgv(expressions, file, True, True)
-        if text == "-e":
-            has_expression = True
-            if value is not None:
-                expressions.append(value.text)
+        if text == "-e" and value is not None:
+            expressions.append(value.text)
         elif text == "-f" and value is not None:
             file = value
         elif text.startswith("--file="):
@@ -1336,7 +1337,7 @@ def _walk_r_argv(words: list[_RWord], complete: bool, *, rscript: bool) -> _RArg
             complete = False
             break
         index += 2 if takes_value else 1
-    stopped = not rscript and has_expression and file is not None
+    stopped = not rscript and bool(expressions) and file is not None
     return _RArgv(expressions, file, stopped, complete)
 
 
@@ -1345,14 +1346,20 @@ def _r_inline_argv(command: str, offset: int, *, rscript: bool) -> _RArgv:
     return _walk_r_argv(words, complete, rscript=rscript)
 
 
-def _r_file_script(command: str, offset: int) -> _RWord | None:
+def _r_file_script(command: str, match: re.Match[str]) -> _RWord | None:
     """The script an `R -f`/`R --file=` run reads, or None if R never runs it.
 
     Returns an unknown word when unknown words may override the file.
     """
-    argv = _r_inline_argv(command, offset, rscript=False)
-    if argv.stopped or argv.file is None:
+    argv = _r_inline_argv(command, match.start(), rscript=False)
+    if argv.stopped:
         return None
+    if argv.file is None:
+        if argv.complete:
+            return None
+        # A computed word before the matched `-f` (`--encoding "$E"`).
+        matched_word = match.group("path")
+        return _RWord(_decode_shell_word(matched_word) or matched_word, False)
     return argv.file if argv.complete else argv.file._replace(known=False)
 
 
@@ -3033,7 +3040,7 @@ def _detect_scripts_with_cwd(
                 continue
             r_script = None
             if pattern is RX_R_FILE_PATH:
-                r_script = _r_file_script(bash_cmd, m.start())
+                r_script = _r_file_script(bash_cmd, m)
             elif pattern is RX_R_CMD_BATCH_PATH:
                 r_script = _r_batch_script(bash_cmd, m)
             if pattern in (RX_R_FILE_PATH, RX_R_CMD_BATCH_PATH) and r_script is None:
