@@ -216,6 +216,13 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Python `-c` and R `-e` source is parsed as one complete shell word, then
       decoded with shell semantics; escaped quotes and adjacent quoted
       components cannot truncate the source before a data reference.
+- [ ] Each interpreter's startup options are parsed with that interpreter's
+      own grammar, not one borrowed from a sibling: `R -q -e`, `R -s -f`, and
+      `R CMD BATCH -q` are detected, while R's argv-wide terminal options
+      (`--version` after `-e`) and `--args`/`-d` boundaries are honored. The
+      post-action one-liner exemption covers every inline form (`python -c`,
+      `R -e`, `Rscript -e`) whatever options surround it, without hiding those
+      forms from lineage.
 - [ ] Common environment/package wrappers such as `uv`, `conda`, `poetry`, and
       `/usr/bin/env`, plus execution wrappers such as `time`, `exec`, `nice`,
       and `timeout`, are detected (including nested forms) without confusing
@@ -496,6 +503,7 @@ exercise them.
 | `time`, `exec`, `nice`, and `timeout` wrap or nest around an interpreter | Real executions are captured, while malformed options and an unrelated wrapped command containing interpreter text are rejected. |
 | Jupyter uses `--to notebook input.ipynb` or `--output converted.ipynb input.ipynb` | Option arity is honored and only `input.ipynb` is attributed; an unknown separated-value option fails conservatively. |
 | Python/R inline source contains escaped quotes or adjacent quoted components | The complete shell word is decoded and later data references remain visible. |
+| `R -e`, `R -q -e`, `R --vanilla -q -e`, `R -e … --args`, `Rscript -e`, and `python -c` run; or `R -f script.R`, `R --file=script.R`, `R CMD BATCH script.R`, and `Rscript script.R` run | Every inline one-liner is exempt from the post-action check yet still recorded as lineage; every script run opens the post-action cycle and records its script. `R -e … --version`, `R --args -e …`, `R -d lldb -e …`, and `R -f script.R RHOME` record nothing. |
 | `--help`/`--version` or `-h`/`-V` precedes an apparent interpreter payload | No execution or lineage is attributed, including terminal short-option clusters and adjacent R/Jupyter forms. |
 | Atomic session-log replacement fails after registry/context preparation | Stop blocks, frontmatter remains unaccepted with no footer, active state survives resume/compact, and one retry produces one footer. |
 | The agent writes a fresh five-section private `last-session.md` before Stop | Stop validates the post-cleanup body, preserves authored content, adds/updates its authoritative accepted-status block, and removes stale standalone "Stop pending" lines. A missing, stale, partial, or cleanup-emptied handoff receives an atomic five-section fallback instead; direct finalizer rejection leaves both source and destination unchanged. Accepted Stop atomically publishes the complete file to shared `.mycelium/last-session.md`; blocked Stop does not. |

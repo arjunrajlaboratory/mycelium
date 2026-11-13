@@ -186,8 +186,9 @@ def test_planning_is_read_only_until_the_user_confirms() -> None:
     # for. That is lifecycle bookkeeping, which the read-only rule allows.
     assert "session handoff" in planning
     assert "Never run a repository script by path" in planning
-    # Probe forms are limited to those the hooks treat as reads; `R -e` is not.
-    assert "Do not use `R -e`" in planning
+    # Probe forms are limited to those the hooks treat as reads. Since #117
+    # every inline one-liner, `R -e` included, is a read for post-action.
+    assert "`R -e '...'`" in planning
     assert "never blocks Stop" in planning
     assert "post-action" in planning
     assert "wait for the user to confirm" in planning

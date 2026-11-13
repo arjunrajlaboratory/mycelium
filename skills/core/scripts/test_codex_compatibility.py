@@ -2094,6 +2094,7 @@ def test_documented_planning_probes_never_make_stop_block(tmp_path):
         "`rg`": "rg -n cohort data/raw/samples.csv",
         "`python3 -`": "python3 - <<'EOF'\nimport csv\nprint(sum(1 for _ in open('data/raw/samples.csv')))\nEOF",
         "`Rscript -`": "Rscript - <<'EOF'\nprint(nrow(read.csv('data/raw/samples.csv')))\nEOF",
+        "`R -e '...'`": "R -e 'print(nrow(read.csv(\"data/raw/samples.csv\")))'",
         "`conda run -n <env> python3 -c '...'`": "conda run -n analysis python3 -c 'print(open(\"data/raw/samples.csv\").readline())'",
     }
     for named, command in extra.items():
@@ -2133,14 +2134,16 @@ def test_documented_planning_probes_never_make_stop_block(tmp_path):
     assert stop.returncode == 0, stop.stderr
     assert '"block"' not in stop.stdout, stop.stdout
 
-    # Paired positives: running a repository script by path, or R with -e,
-    # is analysis, which is why the guide forbids both while planning.
+    # Paired positives: running a repository script by path, with python or
+    # with R's -f, is analysis, which is why the guide forbids it while
+    # planning. (`R -e` is an inline read since #117, like `Rscript -e`.)
     script = repo / "analysis" / "probe" / "run.py"
     script.parent.mkdir(parents=True)
     script.write_text("print('probe')\n")
+    (script.parent / "run.R").write_text("print('probe')\n")
     for command in (
         "python3 analysis/probe/run.py",
-        "R -e 'print(nrow(read.csv(\"data/raw/samples.csv\")))'",
+        "R -f analysis/probe/run.R",
     ):
         result = _run_hook(
             "mycelium-post-action.sh",

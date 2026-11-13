@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Inline R one-liners no longer depend on which startup flag was typed.**
+  The post-action check exempted only Python `-c`, so `R -e` and
+  `R --vanilla -e` opened a bookkeeping cycle, while `R -q -e` and
+  `R --vanilla -q -e` looked exempt only because the R `-e` pattern borrowed
+  Rscript's long-option-only grammar and could not parse `-q` at all, which
+  also hid them from data lineage. The detector now parses R's own startup
+  grammar (`-q`, `-s`, ignored short clusters such as `-qs`, separated values
+  such as `--encoding ENC`, `--gui TYPE`, and `--max-ppsize N`, `--args`, `-d`),
+  checked against R 4.6, and the
+  post-action check exempts every inline form (`python -c`, `R -e`,
+  `Rscript -e`) while lineage still records them, including `Rscript -e`,
+  which was previously not detected at all. Script runs `R -f script.R`,
+  `R --file=script.R`, and `R CMD BATCH script.R` (including
+  `R --vanilla CMD BATCH`, `R CMD BATCH --args`, and `R CMD BATCH --`) are now
+  detected and open the post-action cycle like `Rscript script.R`. R honors
+  `--help`/`--version`/`--print-home`/`RHOME`/`CMD` and `-d`/`--debugger`
+  anywhere before `--args`, so `R -e … --version`, `R -f script.R --help`, and
+  `R -f script.R RHOME` no longer count as executions, and neither do
+  `R CMD BATCH --print-home` or `Rscript --args -e …`; a forwarded
+  `R CMD BATCH --args …` (including the quoted `"--args x=1"` idiom) still
+  runs the script. When file options repeat, or BATCH forwards `--file=`,
+  lineage records the script R actually reads. Lineage records every
+  `-e` expression of a multi-expression R or Rscript one-liner, not just the
+  first. A trailing shell comment containing a parenthesis or apostrophe no
+  longer hides an R run, and neither does a redirection target the scan
+  cannot read (`R -f script.R > run_$(date +%s).log`). A run of backslashes
+  in a command no longer makes the shell-word regex backtrack exponentially
+  and stall the hook. The
+  planning guide now lists `R -e '...'` among its read-only probes. Existing
+  projects need no migration.
 - **Stop names a destroyed session-log header instead of hiding it in a
   sidecar file.** When an agent rewrote the hook-owned session log
   (`.living/log/<date>-<nnn>-<project>.md`) with a whole-file write, the YAML

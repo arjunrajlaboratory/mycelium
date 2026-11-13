@@ -47,7 +47,21 @@ EMBED_LIMIT_BYTES = 100 * 1024
 # --- Script-path / inline-source extraction ---
 _SHELL_DOUBLE_QUOTED_COMPONENT = r'"(?:\\.|[^"\\])*"'
 _SHELL_SINGLE_QUOTED_COMPONENT = r"'[^']*'"
-_SHELL_BARE_COMPONENT = r"(?:\\.|[^\s|&;()<>\"'])"
+# An escape pairs a backslash with whitespace, shell punctuation, or another
+# backslash; before any other character, a newline, or the end, the
+# backslash may stand alone. `(?=.)` keeps `\` + newline an escape only in
+# DOTALL patterns, as `\\.` was. Unlike the old `\\.|[^...]`, an escaped
+# backslash (`\\`) can no longer also escape the next character (`\\ a.py`
+# as one word), which the shell never does; only `\` + newline (DOTALL) has
+# two parses, the second of which ends the word. Letting both alternatives
+# match every `\x` made runs
+# of backslashes backtrack exponentially (`R ` + 40 backslashes hung the
+# hook), while consuming `\.` as one atom would hide the dot in `a\.py` from
+# the extension match.
+_SHELL_BARE_COMPONENT = (
+    r"(?:\\(?=.)[\s|&;()<>\"'\\]"
+    r"|\\(?=[^\s|&;()<>\"'\\]|\n|$)|[^\s|&;()<>\"'\\])"
+)
 _SHELL_WORD_COMPONENT = (
     rf"(?:{_SHELL_DOUBLE_QUOTED_COMPONENT}|{_SHELL_SINGLE_QUOTED_COMPONENT}"
     rf"|{_SHELL_BARE_COMPONENT})"
@@ -113,7 +127,11 @@ _JUPYTER_SCRIPT_PATH = _shell_path_pattern(r"\.ipynb")
 # These interpreters accept many long startup options, but help/version forms
 # stop before any later source path or expression. Keep the generic option
 # support while excluding terminal forms and their value/help-all variants.
-_NONTERMINAL_LONG_OPTION = r"--(?!(?:help(?:-all)?|version)(?:=|\s|$))\S+"
+# `--args` ends Rscript's own options, so a later `-e`/file is an argument;
+# `--print-home` makes Rscript print R_HOME and exit.
+_NONTERMINAL_LONG_OPTION = (
+    r"--(?!(?:args|help(?:-all)?|print-home|version)(?:=|\s|$))\S+"
+)
 _NONTERMINAL_LONG_OPTIONS = rf"(?:{_NONTERMINAL_LONG_OPTION}\s+)*"
 _JUPYTER_VALUE_OPTION_NAME = (
     r"(?:-o|--(?:config|format|log-level|nbformat|output|output-dir|post|"
@@ -137,6 +155,27 @@ _JUPYTER_OPTIONS = (
     rf"(?:(?:{_JUPYTER_VALUE_OPTION}|{_JUPYTER_FLAG_OPTION}|"
     rf"{_JUPYTER_ASSIGNED_OPTION})\s+)*"
 )
+# R's own startup grammar differs from Rscript's. The `R` front-end script
+# takes separated values for -g/--gui and --arch (and -e/-f/-d), and the R
+# binary for --encoding and the memory/connection limits; both accept either
+# `--opt=VALUE` or `--opt VALUE`. R warns about and ignores any other unknown
+# option, short clusters such as `-qs` included, and still runs. Options that
+# may never precede a payload: `--args` ends option parsing (a later -e/-f is
+# an argument, not code), `-d`/`--debugger` hands the run to a debugger,
+# `--print-home` only prints R_HOME, and `-h`/`--help`/`--version` exit.
+_R_VALUE_LONG_OPTION_NAME = (
+    r"--(?:arch|encoding|gui|max-connections|max-nsize|max-ppsize|max-vsize|"
+    r"min-nsize|min-vsize)"
+)
+_R_OPTION = (
+    r"(?:-(?![defgh](?:\s|$))[A-Za-z][A-Za-z0-9]*(?=\s|$)"
+    r"|--(?!(?:args|arch|debugger|encoding|file|gui|help|max-connections|"
+    r"max-nsize|max-ppsize|max-vsize|min-nsize|min-vsize|print-home|version)"
+    r"(?:=|\s|$))\S+"
+    rf"|{_R_VALUE_LONG_OPTION_NAME}(?:=|\s+){_SHELL_WORD}"
+    rf"|-g\s+{_SHELL_WORD})"
+)
+_R_OPTIONS = rf"(?:{_R_OPTION}\s+)*"
 _INLINE_SOURCE_WORD = rf"(?P<source_word>{_SHELL_WORD})(?=$|[\s|&;()<>])"
 
 RX_PYTHON_C = re.compile(
@@ -151,6 +190,11 @@ RX_PYTHON_SCRIPT_PATH = re.compile(
 )
 RX_R_E = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+"
+    rf"{_R_OPTIONS}-e\s+{_INLINE_SOURCE_WORD}",
+    re.DOTALL,
+)
+RX_RSCRIPT_E = re.compile(
+    rf"(?<![A-Za-z0-9_.-])(?P<rscript_exe>{_R_SCRIPT_EXE})\s+"
     rf"{_NONTERMINAL_LONG_OPTIONS}-e\s+{_INLINE_SOURCE_WORD}",
     re.DOTALL,
 )
@@ -158,6 +202,24 @@ RX_R_SCRIPT_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<rscript_exe>{_R_SCRIPT_EXE})\s+"
     rf"{_NONTERMINAL_LONG_OPTIONS}(?P<path>{_R_SCRIPT_PATH})"
 )
+# `R -f FILE` / `R --file=FILE`; R rejects the separated `--file FILE` form.
+RX_R_FILE_PATH = re.compile(
+    rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+"
+    rf"{_R_OPTIONS}(?:-f\s+|--file=)(?P<path>{_R_SCRIPT_PATH})"
+)
+# `R [options] CMD BATCH [options] [--] infile [outfile]`: the R front end
+# hands everything after CMD to Rcmd, so R options may precede CMD. This
+# pattern only locates a BATCH call with an R-script-shaped word after it;
+# `_r_batch_input_word` then reads the decoded argv the way R's BATCH script
+# does to decide whether it runs and which file R actually reads.
+RX_R_CMD_BATCH_PATH = re.compile(
+    rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+{_R_OPTIONS}CMD\s+BATCH\s+"
+    # Never cross a command boundary (`;`, `&&`, `|`, newline) to find a path.
+    rf"(?:[^\s;&|]+[ \t]+)*?(?P<path>{_R_SCRIPT_PATH})"
+)
+# R itself (unlike Rscript) reads its whole argv up to `--args`, so a terminal
+# or debugger option after the payload still applies to these two forms.
+_R_ARGV_SCANNED_PATTERNS = frozenset({RX_R_E, RX_R_FILE_PATH})
 RX_JUPYTER_SCRIPT_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<jupyter_exe>{_JUPYTER_EXE})\s+"
     rf"(?:nbconvert|execute)\s+{_JUPYTER_OPTIONS}"
@@ -445,7 +507,10 @@ ANALYSIS_PATTERNS = (
     RX_PYTHON_M,
     RX_PYTHON_SCRIPT_PATH,
     RX_R_E,
+    RX_RSCRIPT_E,
     RX_R_SCRIPT_PATH,
+    RX_R_FILE_PATH,
+    RX_R_CMD_BATCH_PATH,
     RX_JUPYTER_SCRIPT_PATH,
 )
 
@@ -454,7 +519,10 @@ _PATTERN_EXECUTABLES = {
     RX_PYTHON_M: ("python_exe", re.compile(_PYTHON_EXE_NAME)),
     RX_PYTHON_SCRIPT_PATH: ("python_exe", re.compile(_PYTHON_EXE_NAME)),
     RX_R_E: ("r_exe", re.compile(r"R")),
+    RX_RSCRIPT_E: ("rscript_exe", re.compile(r"Rscript")),
     RX_R_SCRIPT_PATH: ("rscript_exe", re.compile(r"Rscript")),
+    RX_R_FILE_PATH: ("r_exe", re.compile(r"R")),
+    RX_R_CMD_BATCH_PATH: ("r_exe", re.compile(r"R")),
     RX_JUPYTER_SCRIPT_PATH: ("jupyter_exe", re.compile(r"jupyter")),
 }
 
@@ -499,7 +567,9 @@ def _strip_unquoted_shell_comments(command: str) -> str | None:
         char = command[index]
         if quote is None:
             if char == "\\":
-                at_word_start = False
+                # A line continuation vanishes and keeps the word-start state.
+                if command[index + 1 : index + 2] != "\n":
+                    at_word_start = False
                 index += 2
                 continue
             if char in {"'", '"'}:
@@ -823,17 +893,30 @@ def _simple_command_suffix(command: str, offset: int) -> str | None:
     """Return one simple command from offset, respecting shell quoting."""
     quote: str | None = None
     index = offset
+    word_start = True
     while index < len(command):
         char = command[index]
+        at_word_start, word_start = word_start, False
         if quote is None:
             if char == "\\":
                 if index + 1 >= len(command):
                     return None
+                if command[index + 1] == "\n":
+                    # A line continuation vanishes: `\<newline># ...` still
+                    # starts a word, so that `#` begins a comment.
+                    word_start = at_word_start
                 index += 2
                 continue
             if char in {"'", '"'}:
                 quote = char
+            elif char in " \t":
+                word_start = True
             elif char in ";\n)":
+                break
+            elif char == "#" and at_word_start:
+                # An unquoted word-initial `#` comments out the rest of the
+                # line, so its text (parens, apostrophes) is not shell syntax.
+                # An escaped space (`a\ #b`) keeps `#` inside the word.
                 break
             elif char == "(":
                 # Process substitutions and other nested shell structures can
@@ -922,11 +1005,76 @@ def _blank_io_numbers(fragment: str) -> str:
     return "".join(out)
 
 
+def _join_line_continuations(fragment: str) -> str:
+    """Remove backslash-newline pairs the shell removes (not in single quotes)."""
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(fragment):
+        char = fragment[index]
+        if quote != "'" and char == "\\" and index + 1 < len(fragment):
+            if fragment[index + 1] == "\n":
+                index += 2
+                continue
+            out.append(fragment[index : index + 2])
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+_SHELL_PUNCTUATION = ";&|()<>\n"
+# Private-use stand-ins for quoted or escaped shell punctuation, so the
+# tokenizer cannot mistake a literal `')'` or `\>` argument for an operator.
+_PUNCTUATION_SHIELD = {char: chr(0xE000 + ord(char)) for char in _SHELL_PUNCTUATION}
+_PUNCTUATION_UNSHIELD = str.maketrans(
+    {shield: char for char, shield in _PUNCTUATION_SHIELD.items()}
+)
+
+
+def _shield_quoted_punctuation(fragment: str) -> str:
+    """Replace shell punctuation that is quoted or escaped with stand-ins."""
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(fragment):
+        char = fragment[index]
+        if quote is None and char == "\\" and index + 1 < len(fragment):
+            following = fragment[index + 1]
+            out.append("\\" + _PUNCTUATION_SHIELD.get(following, following))
+            index += 2
+            continue
+        if quote == '"' and char == "\\" and index + 1 < len(fragment):
+            out.append(fragment[index : index + 2])
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            out.append(char)
+        elif quote is not None:
+            out.append(_PUNCTUATION_SHIELD.get(char, char))
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def _simple_command_argv(fragment: str) -> list[str] | None:
     """Tokenize argv while consuming shell redirection operators and targets."""
+    fragment = _join_line_continuations(fragment)
     fragment = _strip_unquoted_shell_comments(_blank_io_numbers(fragment))
     if fragment is None:
         return None
+    fragment = _shield_quoted_punctuation(fragment)
     try:
         lexer = shlex.shlex(
             fragment,
@@ -952,7 +1100,7 @@ def _simple_command_argv(fragment: str) -> list[str] | None:
             # command. Any other control operator is unsupported structure.
             return None
         else:
-            argv.append(token)
+            argv.append(token.translate(_PUNCTUATION_UNSHIELD))
     if consume_redirection_target:
         return None
     return argv
@@ -969,6 +1117,531 @@ def _jupyter_match_has_terminal_option(command: str, offset: int) -> bool:
     return any(
         token.split("=", 1)[0] in _JUPYTER_TERMINAL_OPTIONS for token in tokens
     )
+
+
+# Words the R front end or binary honors anywhere before `--args`: they exit
+# (help, version, R_HOME), hand off to Rcmd (CMD), or run a debugger.
+_R_TERMINAL_OPTIONS = {"-h", "--help", "--version", "--print-home", "RHOME", "CMD"}
+_R_DEBUGGER_OPTIONS = {"-d", "--debugger"}
+_R_SEPARATED_VALUE_OPTIONS = {
+    "-e",
+    "-f",
+    "-g",
+    "-d",
+    "--debugger",
+    "--arch",
+    "--encoding",
+    "--gui",
+    "--max-connections",
+    "--max-nsize",
+    "--max-ppsize",
+    "--max-vsize",
+    "--min-nsize",
+    "--min-vsize",
+}
+
+
+_R_ARGS_WORD_RX = re.compile(r"--args(?=\s|$)")
+
+
+def _r_command_suffix(command: str, offset: int) -> str | None:
+    """The R command from offset, cut before an unquoted `--args` word.
+
+    R ignores every word after `--args`, so trailing arguments such as
+    `--args $(date)` must not make an otherwise readable command unsupported.
+    """
+    unquoted = _unquoted_shell_text(command)
+    if unquoted is not None:
+        for match in _R_ARGS_WORD_RX.finditer(unquoted, offset):
+            start = match.start()
+            if start <= offset or command[start - 1] not in " \t\n":
+                continue
+            if command[match.end() : match.end() + 1] not in {"", " ", "\t", "\n"}:
+                continue  # `--args'x'` is the one word `--argsx`, not `--args`
+            if command[offset:start].rstrip()[-1:] in {"<", ">", "|", "&"}:
+                # A redirection target (`>`, `>>`, `>|`, `>&`, `<&` ...), not
+                # an argument; a bare `|` or `&` would end the command anyway.
+                continue
+            fragment = _simple_command_suffix(command[:start], offset)
+            # Use the cut only when the scan reached it: a `;`, `&&`, `|` or
+            # newline in between means `--args` belongs to a later command.
+            if fragment is not None and offset + len(fragment) == start:
+                return fragment + "--args"
+            break
+    return _simple_command_suffix(command, offset)
+
+
+_WHITESPACE_RUN_RX = re.compile(r"\s+")
+
+
+def _scan_shell_group(command: str, index: int, closer: str) -> int | None:
+    """Offset just past `closer`, skipping nested quotes and substitutions.
+
+    Returns None (unknown) for a comment or a `${...}` expansion inside,
+    whose quoting rules this scan does not model, and, inside `(...)`, for
+    anything beyond one simple pipeline on one line (a newline, `;`, a line
+    continuation, or `case`, whose patterns and heredocs carry unbalanced
+    parentheses). Ordinary targets like `$(date +%s)` and `>(tee log)` pass.
+    """
+    while index < len(command):
+        char = command[index]
+        following = command[index + 1 : index + 2]
+        if char == "#" or (char == "$" and following == "{"):
+            return None
+        if closer == ")" and (
+            char in "\n;"
+            or (char == "\\" and following == "\n")
+            or (
+                command.startswith("case", index)
+                and command[index - 1 : index] in {"", " ", "\t", "(", "|", "&"}
+                and command[index + 4 : index + 5] in {"", " ", "\t"}
+            )
+        ):
+            return None
+        if char == closer:
+            return index + 1
+        if char == "\\":
+            index += 2
+            continue
+        next_index: int | None
+        if closer == "`":
+            next_index = index + 1
+        elif closer == '"':
+            if char == "$" and command[index + 1 : index + 2] == "(":
+                next_index = _scan_shell_group(command, index + 2, ")")
+            elif char == "`":
+                next_index = _scan_shell_group(command, index + 1, "`")
+            else:
+                next_index = index + 1
+        elif char == "'":
+            end = command.find("'", index + 1)
+            next_index = None if end < 0 else end + 1
+        elif char == '"':
+            next_index = _scan_shell_group(command, index + 1, '"')
+        elif char == "`":
+            next_index = _scan_shell_group(command, index + 1, "`")
+        elif char == "(":
+            next_index = _scan_shell_group(command, index + 1, ")")
+        else:
+            next_index = index + 1
+        if next_index is None:
+            return None
+        index = next_index
+    return None
+
+
+def _shell_word_end(command: str, index: int) -> int | None:
+    """End offset of the shell word at index, substitutions included."""
+    start = index
+    while index < len(command):
+        char = command[index]
+        following = command[index + 1 : index + 2]
+        next_index: int | None
+        if char in " \t\n;&|)":
+            break
+        if char in "<>":
+            if following != "(":
+                break
+            next_index = _scan_shell_group(command, index + 2, ")")
+        elif char == "$" and following == "{":
+            return None
+        elif char == "\\" and following == "\n":
+            if index == start:
+                return None  # the caller skips continuations before a word
+            next_index = index + 2
+        elif char == "$" and following == "(":
+            next_index = _scan_shell_group(command, index + 2, ")")
+        elif char == "`":
+            next_index = _scan_shell_group(command, index + 1, "`")
+        elif char == '"':
+            next_index = _scan_shell_group(command, index + 1, '"')
+        elif char == "'":
+            end = command.find("'", index + 1)
+            next_index = None if end < 0 else end + 1
+        elif char == "\\":
+            next_index = index + 2
+        elif char == "(":
+            return None
+        else:
+            next_index = index + 1
+        if next_index is None:
+            return None
+        index = next_index
+    index = min(index, len(command))
+    return index if index > start else None
+
+
+def _blank_redirection_targets(command: str, offset: int) -> str:
+    """Replace each redirection target of the simple command at offset with a
+    same-length placeholder word.
+
+    A target never becomes an argument, but one the scanner cannot tokenize
+    (`> run_$(date).log`, `2> >(tee err)`) would otherwise make every later
+    word unknown. Returns the command unchanged if a target does not close.
+    """
+    out = list(command)
+    quote: str | None = None
+    index = offset
+    try:
+        while index < len(command):
+            char = command[index]
+            if quote == "'":
+                if char == "'":
+                    quote = None
+                index += 1
+                continue
+            if quote == '"':
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == '"':
+                    quote = None
+                index += 1
+                continue
+            if char == "\\":
+                index += 2
+                continue
+            if char in {"'", '"'}:
+                quote = char
+            elif char in ";\n(":
+                break
+            elif char == "|" and (index == offset or command[index - 1] != ">"):
+                break
+            elif char == "&" and command[index + 1 : index + 2] != ">" and (
+                index == offset or command[index - 1] not in "<>"
+            ):
+                break
+            elif char in "<>":
+                target = index
+                while target < len(command) and command[target] in "<>&|":
+                    target += 1
+                while target < len(command):
+                    if command[target] in " \t":
+                        target += 1
+                    elif command[target : target + 2] == "\\\n":
+                        target += 2  # a line continuation is not the target
+                    else:
+                        break
+                end = _shell_word_end(command, target)
+                if end is None:
+                    return command
+                out[target:end] = "_" * (end - target)
+                index = end
+                continue
+            index += 1
+    except RecursionError:
+        return command
+    return "".join(out)
+
+
+def _readable_argv(
+    command: str, offset: int, *, cut_at_r_args: bool = False
+) -> tuple[list[str], bool] | None:
+    """(argv, complete) for the simple command at offset.
+
+    When the whole command does not tokenize (say `$(date).Rout`, or a
+    `> >(tee log)` redirection), return the longest prefix ending at a word
+    boundary that does, with complete=False: the words before the unreadable
+    syntax are exact, but later words (another `--file=`, `--print-home`) are
+    unknown. `cut_at_r_args` first stops at R's own `--args`. Redirection
+    targets are blanked first, since they never reach argv.
+    """
+    command = _blank_redirection_targets(command, offset)
+    if cut_at_r_args:
+        fragment = _r_command_suffix(command, offset)
+    else:
+        fragment = _simple_command_suffix(command, offset)
+    tokens = _simple_command_argv(fragment) if fragment is not None else None
+    if tokens:
+        return tokens, True
+    boundaries = [m.start() for m in _WHITESPACE_RUN_RX.finditer(command, offset)]
+    for boundary in reversed(boundaries):
+        fragment = _simple_command_suffix(command[:boundary], offset)
+        tokens = _simple_command_argv(fragment) if fragment is not None else None
+        if tokens:
+            return tokens, False
+    return None
+
+
+_BATCH_UNRESOLVED = "unresolved"
+
+
+# env options that take a separated value (GNU and BSD spellings).
+_ENV_VALUE_OPTIONS = {"-C", "--chdir", "-S", "--split-string", "-P", "-a", "--argv0"}
+# A word whose value the shell computes ($VAR, $(...), `...`) is unknown here.
+_SHELL_EXPANSION_MARKERS = ("$", "`")
+
+
+def _has_shell_expansion(word: str) -> bool:
+    return any(marker in word for marker in _SHELL_EXPANSION_MARKERS)
+
+
+def _ifs_split(text: str) -> list[str]:
+    """Field splitting with the shell's default IFS (space, tab, newline),
+    not Python's Unicode whitespace."""
+    return [field for field in re.split(r"[ \t\n]+", text) if field]
+
+
+def _prefix_variable_value(
+    command: str, prefix: list[str], name: str
+) -> str | None:
+    """The value of `name` the command after `prefix` sees, or None if unknown.
+
+    Starts from the hook's environment, then applies the prefix in execution
+    order: `NAME=value` assignments (literal values only), `env -i`/
+    `--ignore-environment`, `env -u NAME`/`--unset=NAME`, and `exec -c`.
+    Wrapper names may be path-qualified (`/usr/bin/env`). A mention of `name`
+    elsewhere in the command (`export NAME=...`) makes the inherited value
+    unknown.
+    """
+    outside = command.count(name) - sum(token.count(name) for token in prefix)
+    value: str | None = None if outside > 0 else os.environ.get(name, "")
+    index = 0
+    while index < len(prefix):
+        token = prefix[index]
+        index += 1
+        if _ASSIGNMENT_RX.match(token):
+            key, assigned = token.split("=", 1)
+            if key == name:
+                value = None if any(c in assigned for c in "$`") else assigned
+            continue
+        wrapper = os.path.basename(token)
+        if wrapper not in {"env", "exec"}:
+            continue
+        while index < len(prefix) and prefix[index].startswith("-"):
+            flag = prefix[index]
+            index += 1
+            if flag == "--":
+                break
+            if wrapper == "env":
+                if flag in _ENV_VALUE_OPTIONS:
+                    index += 1  # `env -C DIR`, `-S STRING`, ...: skip the value
+                elif flag in {"-i", "--ignore-environment"}:
+                    value = ""
+                elif flag in {"-u", "--unset"} and index < len(prefix):
+                    if prefix[index] == name:
+                        value = ""
+                    index += 1
+                elif flag in {f"-u{name}", f"--unset={name}"}:
+                    value = ""
+            elif flag == "-a" and index < len(prefix):
+                index += 1  # exec -a NAME
+            elif not flag.startswith("--") and "c" in flag[1:]:
+                value = ""
+    return value
+
+
+def _r_batch_input_word(
+    command: str, match: re.Match[str]
+) -> tuple[str, str] | None:
+    """The script R reads for an `R CMD BATCH` match, or None if none runs.
+
+    Mirrors R's BATCH script (R 4.6): it exits on -h/--help/-v/--version,
+    drops --no-timing, ends options at `--` or the first non-option word (the
+    input), forwards -d/-g with their value and every other `-*` word, then
+    runs `R -f INPUT $opts` with $opts unquoted, so a quoted `"--args x=1"`
+    splits into words. R then honors a forwarded debugger or --print-home,
+    refuses a forwarded `-e` (BATCH always passes `-f`), and reads the last
+    `-f`/`--file=` before `--args`.
+
+    Returns ("path", quoted word), ("unresolved", input word) when
+    R_BATCH_OPTIONS was set in a way this scan cannot read, or None.
+    """
+    readable = _readable_argv(command, match.start())
+    if readable is None:
+        return None
+    tokens, complete = readable
+    try:
+        index = next(
+            i + 2
+            for i in range(len(tokens) - 1)
+            if tokens[i] == "CMD" and tokens[i + 1] == "BATCH"
+        )
+    except StopIteration:
+        return None
+    forwarded: list[str] = []
+    infile: str | None = None
+    while index < len(tokens):
+        token = tokens[index]
+        if _has_shell_expansion(token):
+            # `"$OPTS ..."` may expand to anything, --args or the input
+            # included: keep the run, but do not guess the script.
+            matched = _shlex_words(match.group("path"))
+            if matched and len(matched) == 1:
+                return (_BATCH_UNRESOLVED, matched[0])
+            return None
+        if token in {"-h", "--help", "-v", "--version"}:
+            return None
+        if token == "--":
+            infile = tokens[index + 1] if index + 1 < len(tokens) else None
+            break
+        if token in {"-d", "-g"}:
+            forwarded.extend(tokens[index : index + 2])
+            index += 2
+            continue
+        if token.startswith("-"):
+            if token != "--no-timing":
+                forwarded.append(token)
+            index += 1
+            continue
+        infile = token
+        break
+    if infile is None:
+        if not complete:
+            # The input lies past unreadable syntax: BATCH may well run it.
+            matched = _shlex_words(match.group("path"))
+            if matched and len(matched) == 1:
+                return (_BATCH_UNRESOLVED, matched[0])
+        return None
+    # BATCH runs `R -f ${in} ${opts}` with both unquoted, so each splits into
+    # words: R reads the first word of the input, the rest become arguments.
+    in_words = _ifs_split(infile)
+    if not in_words:
+        return None
+    effective = in_words[0]
+    # BATCH appends $R_BATCH_OPTIONS (unquoted) after its own options; take it
+    # from the hook's environment plus this command's prefix assignments. A
+    # value set any other way (`export`, an expansion) is unknown, so the
+    # script R reads is recorded as unresolved rather than guessed.
+    prefix = _current_command_prefix(command[: match.start()]) or []
+    batch_options = _prefix_variable_value(command, prefix, "R_BATCH_OPTIONS")
+    if batch_options is None:
+        return (_BATCH_UNRESOLVED, effective)
+    words = in_words[1:] + _ifs_split(" ".join(forwarded)) + _ifs_split(batch_options)
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word == "--args":
+            break
+        if word in _R_DEBUGGER_OPTIONS or word.startswith("--debugger="):
+            return None
+        if word in _R_TERMINAL_OPTIONS or word == "-e":
+            return None
+        if word == "-f" and index + 1 < len(words):
+            effective = words[index + 1]
+        elif word.startswith("--file="):
+            effective = word[len("--file=") :]
+        index += 2 if word in _R_SEPARATED_VALUE_OPTIONS else 1
+    if _has_shell_expansion(effective) or any(map(_has_shell_expansion, words)):
+        return (_BATCH_UNRESOLVED, effective)
+    if not re.fullmatch(r".+\.[Rr]", effective):
+        return None
+    return ("path", shlex.quote(effective))
+
+
+def _r_effective_file_word(
+    command: str, match: re.Match[str]
+) -> tuple[str, str] | None:
+    """The script word R actually runs for an `R -f`/`R CMD BATCH` match.
+
+    R honors the last `-f`/`--file=` before `--args` (checked on R 4.6), and
+    BATCH appends its forwarded options after `-f infile`, so a forwarded
+    `--file=` overrides the input file. Falls back to the matched word.
+    """
+    matched = match.group("path")
+    readable = _readable_argv(command, match.start(), cut_at_r_args=True)
+    if readable is None:
+        return ("path", matched)
+    tokens, complete = readable
+    last: str | None = None
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--args":
+            break
+        if _has_shell_expansion(token):
+            complete = False  # `$OPTS` may expand to another --file=
+            break
+        if token == "-f" and index + 1 < len(tokens):
+            last = tokens[index + 1]
+        elif token.startswith("--file="):
+            last = token[len("--file=") :]
+        index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
+    if last is not None and _has_shell_expansion(last):
+        # `--file="$SCRIPT"`: the shell picks the file; keep the run unresolved.
+        return (_BATCH_UNRESOLVED, last)
+    if not complete:
+        # Words past unreadable syntax may override the file or stop R.
+        words = _shlex_words(matched) if last is None else [last]
+        return (_BATCH_UNRESOLVED, words[0]) if words and len(words) == 1 else None
+    if last is None or [last] == _shlex_words(matched):
+        return ("path", matched)
+    return ("path", shlex.quote(last))
+
+
+def _shlex_words(word: str) -> list[str] | None:
+    try:
+        return shlex.split(word, comments=False, posix=True)
+    except ValueError:
+        return None
+
+
+def _r_match_is_rejected(command: str, offset: int) -> bool:
+    """Whether R's full argv (up to `--args`) prevents the matched payload.
+
+    R honors `--help`/`--version`/`--print-home`/`RHOME`/`CMD` and the
+    debugger options wherever they appear before `--args`, and refuses to
+    combine `-e` with `-f`/`--file`. Option values are skipped so an
+    expression that merely contains `--version` stays code.
+
+    Shell syntax this scan cannot read (process substitution, say) keeps the
+    match: the regex already proved the payload, and dropping it would lose
+    lineage the plain pattern records.
+    """
+    readable = _readable_argv(command, offset, cut_at_r_args=True)
+    if readable is None:
+        return False
+    tokens, _ = readable
+    has_expression = has_file = False
+    index = 1  # tokens[0] is the R executable itself
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--args":
+            break
+        if _has_shell_expansion(token):
+            # `$ARGS` may expand to `--args` (or anything): what follows is
+            # unknown, so keep the proven payload rather than reject it.
+            return False
+        if token in _R_TERMINAL_OPTIONS:
+            return True
+        if token in _R_DEBUGGER_OPTIONS or token.startswith("--debugger="):
+            return True
+        if token == "-e":
+            has_expression = True
+        elif token == "-f" or token.startswith("--file="):
+            has_file = True
+        index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
+    return has_expression and has_file
+
+
+def _r_inline_expressions(command: str, offset: int, rscript: bool) -> str | None:
+    """Every `-e` expression of one R/Rscript command, in execution order.
+
+    R collects `-e` anywhere before `--args`; Rscript reads consecutive
+    `-e EXPR` pairs and stops at the first other word. Returns None when the
+    argv cannot be read, so the caller keeps the single matched expression.
+    """
+    readable = _readable_argv(command, offset, cut_at_r_args=True)
+    if readable is None:
+        return None
+    tokens, _ = readable
+    expressions: list[str] = []
+    index = 1  # tokens[0] is the executable itself
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-e" and index + 1 < len(tokens):
+            expressions.append(tokens[index + 1])
+            index += 2
+            continue
+        if token == "--args" or _has_shell_expansion(token):
+            break  # `$ARGS` may expand to --args: later -e may never run
+        if rscript:
+            if expressions:
+                break  # Rscript stops at the first word after its -e pairs
+            index += 1
+            continue
+        index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
+    return "\n".join(expressions) if expressions else None
 
 
 _CWD_AFFECTING_BUILTINS = {"pushd", "popd", "source", ".", "eval"}
@@ -2505,47 +3178,46 @@ def _detect_scripts_with_cwd(
     *,
     bash_exit: int | None = None,
     require_execution_evidence: bool = False,
-    include_python_inline: bool = True,
+    include_inline: bool = True,
 ) -> list[tuple[Path | None, str | None, Path | None]]:
+    """Return (script_path, inline_source, effective_cwd) detections.
+
+    ``include_inline=False`` drops inline one-liners (``python -c``,
+    ``R -e``, ``Rscript -e``) for the post-action check; lineage keeps them.
+    """
     out: list[tuple[Path | None, str | None, Path | None]] = []
     seen_paths: set[Path] = set()
     seen_inline: set[tuple[str, Path | None]] = set()
-    for m in RX_PYTHON_C.finditer(bash_cmd):
-        if not _match_has_expected_executable(m, RX_PYTHON_C):
-            continue
-        if not include_python_inline:
-            continue
-        effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
-        if effective_cwd is None:
-            continue
-        if require_execution_evidence and not _match_is_proven_executed(
-            bash_cmd, m.start(), bash_exit, cwd
-        ):
-            continue
-        src = _decode_shell_word(m.group("source_word"))
-        if src is None:
-            continue
-        identity = (src, effective_cwd)
-        if identity not in seen_inline:
-            out.append((None, src, effective_cwd))
-            seen_inline.add(identity)
-    for m in RX_R_E.finditer(bash_cmd):
-        if not _match_has_expected_executable(m, RX_R_E):
-            continue
-        effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
-        if effective_cwd is None:
-            continue
-        if require_execution_evidence and not _match_is_proven_executed(
-            bash_cmd, m.start(), bash_exit, cwd
-        ):
-            continue
-        src = _decode_shell_word(m.group("source_word"))
-        if src is None:
-            continue
-        identity = (src, effective_cwd)
-        if identity not in seen_inline:
-            out.append((None, src, effective_cwd))
-            seen_inline.add(identity)
+    inline_patterns = (RX_PYTHON_C, RX_R_E, RX_RSCRIPT_E) if include_inline else ()
+    for pattern in inline_patterns:
+        for m in pattern.finditer(bash_cmd):
+            if not _match_has_expected_executable(m, pattern):
+                continue
+            if pattern in _R_ARGV_SCANNED_PATTERNS and _r_match_is_rejected(
+                bash_cmd, m.start()
+            ):
+                continue
+            effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
+            if effective_cwd is None:
+                continue
+            if require_execution_evidence and not _match_is_proven_executed(
+                bash_cmd, m.start(), bash_exit, cwd
+            ):
+                continue
+            src = _decode_shell_word(m.group("source_word"))
+            if src is None:
+                continue
+            if pattern in (RX_R_E, RX_RSCRIPT_E):
+                src = (
+                    _r_inline_expressions(
+                        bash_cmd, m.start(), rscript=pattern is RX_RSCRIPT_E
+                    )
+                    or src
+                )
+            identity = (src, effective_cwd)
+            if identity not in seen_inline:
+                out.append((None, src, effective_cwd))
+                seen_inline.add(identity)
     for m in RX_PYTHON_M.finditer(bash_cmd):
         if not _match_has_expected_executable(m, RX_PYTHON_M):
             continue
@@ -2567,10 +3239,16 @@ def _detect_scripts_with_cwd(
     for pattern in (
         RX_PYTHON_SCRIPT_PATH,
         RX_R_SCRIPT_PATH,
+        RX_R_FILE_PATH,
+        RX_R_CMD_BATCH_PATH,
         RX_JUPYTER_SCRIPT_PATH,
     ):
         for m in pattern.finditer(bash_cmd):
             if not _match_has_expected_executable(m, pattern):
+                continue
+            if pattern in _R_ARGV_SCANNED_PATTERNS and _r_match_is_rejected(
+                bash_cmd, m.start()
+            ):
                 continue
             if (
                 pattern is RX_JUPYTER_SCRIPT_PATH
@@ -2584,8 +3262,32 @@ def _detect_scripts_with_cwd(
                 bash_cmd, m.start(), bash_exit, cwd
             ):
                 continue
+            path_word = m.group("path")
+            if pattern in (RX_R_FILE_PATH, RX_R_CMD_BATCH_PATH):
+                resolved = (
+                    _r_effective_file_word(bash_cmd, m)
+                    if pattern is RX_R_FILE_PATH
+                    else _r_batch_input_word(bash_cmd, m)
+                )
+                if resolved is None:
+                    continue
+                kind, path_word = resolved
+                if kind == _BATCH_UNRESOLVED:
+                    if pattern is RX_R_FILE_PATH:
+                        form, cause = "R -f", "shell syntax"
+                    else:
+                        form, cause = "R CMD BATCH", "shell syntax or R_BATCH_OPTIONS"
+                    source = (
+                        f"# {form} {path_word}: {cause} this scan cannot read "
+                        "may change the script R reads"
+                    )
+                    identity = (source, effective_cwd)
+                    if identity not in seen_inline:
+                        out.append((None, source, effective_cwd))
+                        seen_inline.add(identity)
+                    continue
             try:
-                path_words = shlex.split(m.group("path"), comments=False, posix=True)
+                path_words = shlex.split(path_word, comments=False, posix=True)
             except ValueError:
                 continue
             if len(path_words) != 1:
@@ -3359,7 +4061,8 @@ def main() -> int:
         action="store_true",
         help=(
             "Exit 0 only for a proven analysis that should open a Mycelium "
-            "bookkeeping cycle; excludes Python inline, tooling modules, and "
+            "bookkeeping cycle; excludes inline one-liners (python -c, R/Rscript "
+            "-e), tooling modules, and "
             "managed utility scripts."
         ),
     )
@@ -3380,7 +4083,7 @@ def main() -> int:
         cwd,
         bash_exit=args.bash_exit,
         require_execution_evidence=True,
-        include_python_inline=not args.check_post_action,
+        include_inline=not args.check_post_action,
     )
     if args.check_execution or args.check_post_action:
         return 0 if detections else 1

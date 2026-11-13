@@ -2522,7 +2522,7 @@ def test_main_retains_python_module_execution_as_unresolved_lineage(
 
 
 def _runner_detections(command: str, cwd: Path, bash_exit: int | None = 0):
-    """Post-action view: detections proven to execute, inline Python excluded."""
+    """Post-action view: detections proven to execute, inline one-liners excluded."""
     return [
         (script, inline)
         for script, inline, _ in lineage_event._detect_scripts_with_cwd(
@@ -2530,7 +2530,7 @@ def _runner_detections(command: str, cwd: Path, bash_exit: int | None = 0):
             cwd,
             bash_exit=bash_exit,
             require_execution_evidence=True,
-            include_python_inline=False,
+            include_inline=False,
         )
     ]
 
@@ -2818,7 +2818,7 @@ def _runner_cwds(command: str, cwd: Path):
             cwd,
             bash_exit=0,
             require_execution_evidence=True,
-            include_python_inline=False,
+            include_inline=False,
         )
     ]
 
@@ -3410,3 +3410,478 @@ def test_runner_snakemake_conflicting_profiles_keep_the_run(
     assert _runner_detections("snakemake --profile hpc", tmp_path) == [
         (tmp_path / "Snakefile", None)
     ]
+
+
+# ---------- R command-line grammar: inline, file, and BATCH forms ----------
+
+
+def _run_check(tmp_path: Path, command: str, mode: str) -> int:
+    import subprocess
+
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(extractor),
+            "--cwd",
+            str(tmp_path),
+            "--ts",
+            "2026-11-06T00:00:00",
+            "--bash-cmd",
+            command,
+            "--bash-exit",
+            "0",
+            mode,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.stderr == "", result.stderr
+    return result.returncode
+
+
+_R_INLINE_ONE_LINERS = [
+    "R -e 'print(1)'",
+    "R --vanilla -e 'print(1)'",
+    "R --vanilla -q -e 'print(1)'",
+    "R -q -e 'print(1)'",
+    "R -s -e 'print(1)'",
+    "R --no-echo --quiet -e 'print(1)'",
+    "R -q --vanilla -s -e 'print(1)'",
+    "R --encoding UTF-8 -e 'print(1)'",
+    "R --encoding=UTF-8 -q -e 'print(1)'",
+    # Separated-value options and short clusters R accepts (checked on R 4.6).
+    "R --max-ppsize 10000 -e 'print(1)'",
+    "R --gui X11 -q -e 'print(1)'",
+    "R -qs -e 'print(1)'",
+    # A trailing comment is not shell syntax, whatever it contains.
+    "R -e 'print(1)' # (quick check)",
+    "R -e 'print(1)' # it's fine",
+    "R -e 'print(1)' --args a b",
+    "R -q -e 'print(1)' --args --version",
+    "R -e 'x <- 1' -e 'print(x)'",
+    "/usr/local/bin/R -q -e 'print(1)'",
+    "Rscript -e 'print(1)'",
+    "Rscript --vanilla -e 'print(1)'",
+    "Rscript -e 'print(1)' --version",
+    "python3 -c 'print(1)'",
+]
+
+_R_SCRIPT_RUNS = [
+    "Rscript script.R",
+    "Rscript --vanilla script.R",
+    "R -f script.R",
+    "R --vanilla -q -f script.R",
+    "R -s --file=script.R",
+    'R -s --file="script.R" --args a b',
+    "R -f script.R --args --help",
+    "R CMD BATCH script.R",
+    "R CMD BATCH --vanilla --no-timing script.R script.Rout",
+    "R CMD BATCH -q --no-save script.R",
+    # Real R 4.6 runs each of these.
+    "R --max-ppsize 10000 -f script.R",
+    "R --min-vsize 10M --gui X11 -f script.R",
+    "R -qs -f script.R",
+    "R -f script.R # (run)",
+    "R -f script.R # it's the run",
+    "R CMD BATCH --args script.R",
+    "R CMD BATCH --args --print-home script.R",
+    # Quoted or escaped punctuation is an argument, not shell syntax.
+    "R -f script.R --args ')' '>' \\;",
+    "R -f script.R \\\n# it's a comment line",
+    "R -f script.R --args $(date +%F)",
+    "R CMD BATCH -- script.R",
+    "R CMD BATCH -g X11 --vanilla script.R",
+    "R --vanilla CMD BATCH script.R",
+    "R -q -e 'print(1)' && Rscript script.R",
+]
+
+
+@pytest.mark.parametrize("command", _R_INLINE_ONE_LINERS)
+def test_post_action_exempts_every_inline_r_one_liner(
+    tmp_path: Path, command: str
+) -> None:
+    """`R [opts] -e` is a one-liner like `Rscript -e` and `python -c`, whatever
+    startup options precede the expression or trail it."""
+    assert _run_check(tmp_path, command, "--check-post-action") == 1, command
+
+
+@pytest.mark.parametrize("command", _R_SCRIPT_RUNS)
+def test_post_action_fires_for_r_script_runs(tmp_path: Path, command: str) -> None:
+    (tmp_path / "script.R").write_text("read.csv('input.csv')\n")
+    assert _run_check(tmp_path, command, "--check-post-action") == 0, command
+
+
+@pytest.mark.parametrize("command", _R_INLINE_ONE_LINERS[:-1])
+def test_inline_r_one_liners_are_still_recorded_as_lineage(
+    tmp_path: Path, command: str
+) -> None:
+    """Exempting one-liners from post-action must not hide them from lineage:
+    short startup options before `-e` are parsed, not a reason to drop it."""
+    assert _run_check(tmp_path, command, "--check-execution") == 0, command
+    detections = detect_scripts(command, tmp_path)
+    assert detections and all(script is None for script, _ in detections), command
+
+
+@pytest.mark.parametrize(
+    "command,expected_source",
+    [
+        ("R -q -e \"read.csv('x.csv')\"", "read.csv('x.csv')"),
+        ("R --vanilla -s -e \"read.csv('x.csv')\" --args 1", "read.csv('x.csv')"),
+        ("R --encoding UTF-8 -e \"read.csv('x.csv')\"", "read.csv('x.csv')"),
+        ("Rscript -e \"read.csv('x.csv')\"", "read.csv('x.csv')"),
+        ("Rscript --vanilla -e \"read.csv('x.csv')\"", "read.csv('x.csv')"),
+    ],
+)
+def test_inline_r_source_is_the_expression_not_an_option_value(
+    command: str, expected_source: str
+) -> None:
+    assert detect_scripts(command, Path("/tmp")) == [(None, expected_source)]
+
+
+@pytest.mark.parametrize("command", _R_SCRIPT_RUNS[:-1])
+def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> None:
+    (tmp_path / "script.R").write_text("read.csv('input.csv')\n")
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "script.R", None)]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Terminal options stop R anywhere before `--args`, even after the payload.
+        "R -e 'print(1)' --version",
+        "R -q -e 'print(1)' -h",
+        "R -f script.R --help",
+        "R --file=script.R --version",
+        # `--args` ends option parsing: a later `-e`/`-f` is never run.
+        "R --args -e 'print(1)'",
+        "R --args -f script.R",
+        # `-d` hands the remaining argv to a debugger.
+        "R -d lldb -e 'print(1)'",
+        "R -e 'print(1)' -d lldb",
+        "R --debugger=gdb -f script.R",
+        "R -f script.R --debugger lldb",
+        # These only print R_HOME, or hand the rest to Rcmd.
+        "R --print-home -f script.R",
+        "R -f script.R RHOME",
+        "R -f script.R CMD INSTALL pkg",
+        # R refuses to combine an expression with an input file.
+        "R -e 'print(1)' -f script.R",
+        # Spellings R rejects or misreads.
+        "R --file script.R",
+        "Rscript -q script.R",
+        "Rscript -q -e 'print(1)'",
+        # Non-executing R CMD tools and mere mentions.
+        "R CMD INSTALL pkg",
+        "R CMD BATCH --help script.R",
+        "R CMD BATCH -v script.R",
+        "R CMD BATCH -d lldb script.R",
+        "R CMD BATCH --debugger=lldb script.R",
+        "R CMD BATCH --print-home script.R",
+        "R CMD BATCH --args --version script.R",
+        'R CMD BATCH "--debugger=lldb" script.R',
+        'R CMD BATCH "--vanilla --help" script.R',
+        'R CMD BATCH "--vanilla --version" script.R',
+        "R_BATCH_OPTIONS=--version R CMD BATCH script.R",
+        # R refuses -e alongside BATCH's own -f (checked on R 4.6).
+        'R CMD BATCH "-e print(1)" script.R',
+        "R_BATCH_OPTIONS='-e 1' R CMD BATCH script.R",
+        "R CMD BATCH --no-timing",
+        # A terminal option before `--args` still wins over a trailing $(...).
+        "R -f script.R --version --args $(date)",
+        # `--args'x'` is the single word `--argsx`, not the --args boundary.
+        "R --vanilla -f script.R --args'ignored' --print-home",
+        "R -f script.R \\\n  --version",
+        "Rscript --args -e 'print(1)'",
+        "Rscript --vanilla --args script.R",
+        "Rscript --print-home -e 'print(1)'",
+        "Rscript --vanilla --print-home script.R",
+        "R CMD check pkg_1.0.tar.gz",
+        "echo \"R -q -e 'print(1)'\"",
+        "echo 'R -f script.R'",
+        "MyR -f script.R",
+    ],
+)
+def test_r_non_executing_forms_record_nothing(tmp_path: Path, command: str) -> None:
+    (tmp_path / "script.R").write_text("read.csv('input.csv')\n")
+    assert detect_scripts(command, tmp_path) == [], command
+    assert _run_check(tmp_path, command, "--check-execution") == 1, command
+    assert _run_check(tmp_path, command, "--check-post-action") == 1, command
+
+
+@pytest.mark.parametrize(
+    "command,expected_source",
+    [
+        # Rscript runs consecutive -e pairs; R runs every -e before --args.
+        (
+            "Rscript -e 'library(utils)' -e \"read.csv('x.csv')\"",
+            "library(utils)\nread.csv('x.csv')",
+        ),
+        (
+            "R -q -e 'library(utils)' --vanilla -e \"read.csv('x.csv')\" --args -e z",
+            "library(utils)\nread.csv('x.csv')",
+        ),
+        # Rscript stops at the first word after its -e pairs (checked on R 4.6).
+        ("Rscript -e 'a' --vanilla -e 'b'", "a"),
+        # A backslash-newline continuation is removed by the shell.
+        ("R -q -e 'a' \\\n  --args foo", "a"),
+        ("R -e 'print(1)' --args ')' \"<\"", "print(1)"),
+        ("R -q -e 'a' \\\n# it's a probe", "a"),
+        # Words after `--args` are R's arguments, whatever shell syntax they use.
+        ("R --no-save -e 'a' --args $(date)", "a"),
+        ("R -e 'a' -e 'b' --args \"$(date)\" -e c", "a\nb"),
+        # An `--args` in a neighboring command or a redirection target is not R's.
+        ("R -e 'print(1)'; printf %s --args", "print(1)"),
+        ("R -e 'print(1)' && echo --args", "print(1)"),
+        ("R -e 'a' > --args", "a"),
+        # Shell syntax the argv scan cannot read keeps the proven payload.
+        ("R -e 'print(1)' > >(cat)", "print(1)"),
+        # `$ARGS` may expand to --args: a later -e may never run.
+        ("ARGS=--args; R -e 'print(1)' $ARGS -e 'stop(1)'", "print(1)"),
+    ],
+)
+def test_inline_r_source_keeps_every_expression(
+    command: str, expected_source: str
+) -> None:
+    assert detect_scripts(command, Path("/tmp")) == [(None, expected_source)]
+
+
+def test_escaped_space_before_hash_is_not_a_comment(tmp_path: Path) -> None:
+    """`run\\ #1.sh` is one word: `#` there does not start a comment."""
+    (tmp_path / "run #1.sh").write_text("echo hi\n")
+    assert detect_scripts("bash run\\ #1.sh", tmp_path) == [
+        (tmp_path / "run #1.sh", None)
+    ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # R runs the last file option before --args (checked on R 4.6).
+        "R -q -f first.R --file=second.R",
+        "R -f first.R -f second.R",
+        "R -f first.R -f second.R --args -f third.R",
+        # BATCH appends a forwarded --file= after `-f infile`.
+        "R CMD BATCH --file=second.R first.R",
+        'R CMD BATCH "--file=second.R" first.R',
+        "R CMD BATCH '--args x=1' second.R",
+        'R CMD BATCH "--vanilla --args x=1" -- second.R out.Rout',
+        "R CMD BATCH second.R $(date +%F).Rout",
+        "R CMD BATCH --file=second.R first.R $(date +%F).Rout",
+        # BATCH expands its input unquoted: R reads the first word.
+        'R CMD BATCH "second.R first.R"',
+        "env R CMD BATCH second.R $(date).Rout",
+        "R CMD BATCH second.R > >(cat)",
+        # BATCH appends $R_BATCH_OPTIONS after its own options.
+        "R_BATCH_OPTIONS=--file=second.R R CMD BATCH first.R",
+        "env R_BATCH_OPTIONS='--vanilla --file=second.R' R CMD BATCH first.R",
+    ],
+)
+def test_r_records_the_file_r_actually_runs(tmp_path: Path, command: str) -> None:
+    for name in ("first.R", "second.R", "third.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "second.R", None)]
+
+
+def test_batch_with_exported_options_is_unresolved(tmp_path: Path) -> None:
+    """`export R_BATCH_OPTIONS=...` can change or cancel the run; record the
+    run without guessing which script R read."""
+    (tmp_path / "first.R").write_text("print(1)\n")
+    command = "export R_BATCH_OPTIONS=--file=second.R; R CMD BATCH first.R"
+    detections = detect_scripts(command, tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None, detections
+    assert "R_BATCH_OPTIONS" in detections[0][1]
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        "env -i PATH=/usr/bin:/bin",
+        "/usr/bin/env -i PATH=/usr/bin:/bin",
+        "R_BATCH_OPTIONS=--version env -u R_BATCH_OPTIONS",
+        "R_BATCH_OPTIONS=--version env -C . -u R_BATCH_OPTIONS",
+        "env -u R_BATCH_OPTIONS",
+        "env --unset=R_BATCH_OPTIONS",
+        "exec -c",
+    ],
+)
+def test_batch_ignores_inherited_options_cleared_by_a_wrapper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrapper: str
+) -> None:
+    monkeypatch.setenv("R_BATCH_OPTIONS", "--file=other.R")
+    for name in ("first.R", "other.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    assert detect_scripts(f"{wrapper} R CMD BATCH first.R", tmp_path) == [
+        (tmp_path / "first.R", None)
+    ]
+    # Without a clearing wrapper the inherited option still applies.
+    assert detect_scripts("R CMD BATCH first.R", tmp_path) == [
+        (tmp_path / "other.R", None)
+    ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Words past unreadable syntax may override the file or stop R, so the
+        # run is kept but the script is not guessed.
+        "R -f first.R $(printf ignored) --file=second.R",
+        "R -f first.R $(printf ignored) --print-home",
+        # The shell picks the file: record the run, not a literal `$SCRIPT`.
+        'R -f first.R --file="$SCRIPT"',
+        "R -f first.R --file=`pick`",
+        # A variable among R's options may expand to another --file=.
+        "OPTS=--file=second.R; R -f first.R $OPTS",
+    ],
+)
+def test_r_file_run_with_unreadable_later_words_is_unresolved(
+    tmp_path: Path, command: str
+) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    detections = detect_scripts(command, tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None, detections
+    assert detections[0][1].startswith("# R -f "), detections
+
+
+@pytest.mark.parametrize(
+    ("command", "script"),
+    [
+        # A redirection target never reaches argv, so a target the scanner
+        # cannot tokenize must not make the script unresolved.
+        ("R -f first.R > run_$(date +%s).log", "first.R"),
+        ("R -f first.R 2> >(tee err.log) --vanilla", "first.R"),
+        ("R -f first.R --file=second.R > >(tee run.log)", "second.R"),
+        ("R -f first.R > >(tee run.log) --file=second.R", "second.R"),
+        ("R -f first.R &> run_$(date).log", "first.R"),
+        ("R CMD BATCH first.R > batch_$(date).log", "first.R"),
+        # A line continuation before the target is not the target.
+        ("R -f first.R > \\\n  --file=second.R", "first.R"),
+    ],
+)
+def test_unreadable_redirection_target_keeps_the_r_script(
+    tmp_path: Path, command: str, script: str
+) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    assert detect_scripts(command, tmp_path) == [(tmp_path / script, None)]
+
+
+def test_unresolved_r_file_message_does_not_blame_batch_options(
+    tmp_path: Path,
+) -> None:
+    detections = detect_scripts("R -f first.R $(printf x)", tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None, detections
+    assert "R_BATCH_OPTIONS" not in detections[0][1]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A comment or `${...}` inside a substitution target has quoting this
+        # scan does not model, so the later words stay unknown.
+        "R -f first.R > $(echo log # )\n) --file=second.R",
+        'R -f first.R > $(echo "${x:-")"}") --file=second.R',
+        # `case` patterns and heredocs carry unbalanced parentheses.
+        "R -f first.R >$(case x in x) echo /dev/null;; e\\\nsac) --file=second.R",
+        "R -f first.R >$(case x in x) esac) --file=second.R",
+        "R -f first.R >$(cat <\\\n<EOF\n(\nEOF\n) --file=second.R",
+    ],
+)
+def test_unmodelled_redirection_target_stays_unresolved(
+    tmp_path: Path, command: str
+) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    detections = detect_scripts(command, tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None, detections
+
+
+@pytest.mark.parametrize(
+    ("command", "script"),
+    [
+        ("python a\\.py", "a.py"),
+        ("Rscript a\\.R", "a.R"),
+        ("jupyter execute a\\.ipynb", "a.ipynb"),
+        ("\\python a.py", "a.py"),
+        ("/venv/bin/\\python a.py", "a.py"),
+        ("Rscript b.R \\  python", "b.R"),
+    ],
+)
+def test_escaped_ordinary_characters_still_match(
+    tmp_path: Path, command: str, script: str
+) -> None:
+    assert detect_scripts(command, tmp_path) == [(tmp_path / script, None)]
+
+
+def test_backslash_runs_do_not_backtrack_exponentially() -> None:
+    """Both bare-word alternatives used to match a backslash, so `R ` plus
+    40 backslashes took hours to reject."""
+    import time
+
+    started = time.monotonic()
+    assert not is_analysis("R " + "\\" * 40 + "x")
+    assert time.monotonic() - started < 2
+
+
+def test_prefix_assignment_then_env_unset_runs_the_input(tmp_path: Path) -> None:
+    (tmp_path / "script.R").write_text("print(1)\n")
+    command = "R_BATCH_OPTIONS=--version env -u R_BATCH_OPTIONS R CMD BATCH script.R"
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "script.R", None)]
+
+
+def test_quoted_suffix_on_args_is_not_the_boundary(tmp_path: Path) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    command = "R --vanilla -f first.R --args'ignored' --file=second.R"
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "second.R", None)]
+
+
+def test_batch_file_override_from_a_variable_is_unresolved(tmp_path: Path) -> None:
+    (tmp_path / "first.R").write_text("print(1)\n")
+    detections = detect_scripts('R CMD BATCH --file="$SCRIPT" first.R', tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None, detections
+
+
+def test_expansion_among_r_options_keeps_the_payload() -> None:
+    """`$ARGS` may expand to `--args`, so `-e` with a later `-f` is not
+    proven to be R's refused combination."""
+    assert detect_scripts(
+        "ARGS=--args; R -e 'print(1)' $ARGS -f script.R", Path("/tmp")
+    ) == [(None, "print(1)")]
+
+
+@pytest.mark.parametrize("operator", [">|", ">&", ">>", "&>", "<"])
+def test_args_as_a_redirection_target_is_not_the_boundary(
+    tmp_path: Path, operator: str
+) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    command = f"R -f first.R {operator} --args --file=second.R"
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "second.R", None)]
+
+
+def test_batch_input_keeps_a_nonbreaking_space(tmp_path: Path) -> None:
+    name = "sample\u00a01.R"
+    (tmp_path / name).write_text("print(1)\n")
+    assert detect_scripts(f"R CMD BATCH '{name}'", tmp_path) == [
+        (tmp_path / name, None)
+    ]
+
+
+def test_batch_candidate_does_not_cross_command_boundaries(tmp_path: Path) -> None:
+    (tmp_path / "script.R").write_text("print(1)\n")
+    for joiner in ("&&", ";", "||", "\n"):
+        command = f"R CMD BATCH --help {joiner} R CMD BATCH script.R"
+        assert detect_scripts(command, tmp_path) == [
+            (tmp_path / "script.R", None)
+        ], command
+
+
+def test_batch_option_expansion_is_unresolved(tmp_path: Path) -> None:
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    command = 'OPTS=--args; R CMD BATCH "$OPTS --file=second.R" first.R'
+    detections = detect_scripts(command, tmp_path)
+    assert len(detections) == 1 and detections[0][0] is None, detections
