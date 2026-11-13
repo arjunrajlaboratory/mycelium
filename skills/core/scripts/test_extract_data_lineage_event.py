@@ -3590,6 +3590,8 @@ def test_r_script_runs_record_the_script_path(tmp_path: Path, command: str) -> N
         "R CMD BATCH -e script.R",
         # R exits when -e or -f lacks its value.
         "R -e 1 -f",
+        # R refuses -e with -f even when the expression is computed.
+        'R -f script.R -e "$CODE"',
         "R -f script.R -e",
         "R CMD BATCH --no-timing",
         # A terminal option before `--args` still wins over a trailing $(...).
@@ -3750,6 +3752,9 @@ def test_batch_ignores_the_hook_process_batch_options(
         # BATCH forwards -g/-d values unquoted, so a computed one may add
         # `--file=`.
         ('R CMD BATCH -g "$GUI" first.R', "first.R"),
+        # A process substitution is a pipe, not a file R can name.
+        ("R -f first.R -f <(cat second.R)", "<(cat second.R)"),
+        ("R -f first.R -f <(cat)", "<(cat)"),
         # A computed value before the file option still leaves a run.
         ('R --encoding "$ENC" -f first.R', "first.R"),
     ],

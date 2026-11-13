@@ -1180,6 +1180,8 @@ def _is_expanded_word(raw: str) -> bool:
             quote = None if quote else char
         elif char in "$`" and quote != "'":
             return True
+        elif char in "<>" and raw[index + 1 : index + 2] == "(" and quote is None:
+            return True  # a process substitution names a pipe, not a file
         index += 1
     return False
 
@@ -1320,6 +1322,7 @@ def _walk_r_argv(words: list[_RWord], complete: bool, *, rscript: bool) -> _RArg
     """
     expressions: list[str] = []
     file: _RWord | None = None
+    has_expression = False  # computed expressions are not recorded, but count
     index = 1  # words[0] is the executable itself
     while index < len(words):
         word = words[index]
@@ -1342,10 +1345,12 @@ def _walk_r_argv(words: list[_RWord], complete: bool, *, rscript: bool) -> _RArg
         if not rscript and (
             text in _R_STOP_WORDS
             or text.startswith("--debugger=")
-            or (text in {"-e", "-f"} and value is None)  # R exits: value required
+            # R exits when -e/-f has no value (not merely an unreadable one).
+            or (text in {"-e", "-f"} and value is None and complete)
         ):
             return _RArgv(expressions, file, True, True)
         if text == "-e" and value is not None:
+            has_expression = True
             if value.known:  # a computed expression is not recorded as source
                 expressions.append(value.text)
         elif text == "-f" and value is not None:
@@ -1358,7 +1363,7 @@ def _walk_r_argv(words: list[_RWord], complete: bool, *, rscript: bool) -> _RArg
             complete = False
             break
         index += 2 if takes_value else 1
-    stopped = not rscript and bool(expressions) and file is not None
+    stopped = not rscript and has_expression and file is not None
     return _RArgv(expressions, file, stopped, complete)
 
 
