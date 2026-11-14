@@ -30,7 +30,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import bisect
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -39,7 +41,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Generator, NamedTuple
+from typing import Generator, Iterator, NamedTuple
 
 SIZE_LIMIT_BYTES = 100 * 1024 * 1024
 EMBED_LIMIT_BYTES = 100 * 1024
@@ -511,6 +513,93 @@ ANALYSIS_PATTERNS = (
     RX_JUPYTER_SCRIPT_PATH,
 )
 
+# --- Linear-time candidate scanning ---
+# Every analysis and runner pattern has the shape
+#   (?<![A-Za-z0-9_.-]) (?P<exe> COMPONENT* ENDING (?=boundary)) TAIL
+# A quoted component can span whitespace, so from a start inside a run of
+# quoted words (`"$x" "$x" ...`) the leading COMPONENT* reaches the end of the
+# run, and `finditer` repeats that walk from every start: quadratic, and
+# 5,000 such words took ~58 s inside a hook that runs on every shell command.
+# `_scan_word_pattern` yields exactly what `finditer` yields but skips starts
+# that provably cannot match. If an attempt at `i` (lookbehind satisfied)
+# fails, an attempt at any later component boundary `j` of a parse from `i`
+# fails too: every word `j` can form, prefixed by the components between `i`
+# and `j`, is a word `i` can form, and TAIL does not depend on the start.
+_WORD_LOOKBEHIND = "(?<![A-Za-z0-9_.-])(?P<"
+_LOOKBEHIND_BLOCKED = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
+)
+_WORD_COMPONENT_RX = {
+    False: re.compile(_SHELL_WORD_COMPONENT),
+    True: re.compile(_SHELL_WORD_COMPONENT, re.DOTALL),
+}
+
+
+@functools.lru_cache(maxsize=4)
+def _double_quote_closes(text: str, dotall: bool) -> tuple[int, ...]:
+    """``closes[j]``: the quote closing a ``"`` component whose body starts at j.
+
+    Mirrors ``_SHELL_DOUBLE_QUOTED_COMPONENT``: a backslash pairs with the next
+    character (not a newline unless DOTALL), and -1 means unterminated.
+    """
+    n = len(text)
+    closes = [-1] * (n + 2)
+    for j in range(n - 1, -1, -1):
+        char = text[j]
+        if char == '"':
+            closes[j] = j
+        elif char == "\\":
+            if j + 1 < n and (dotall or text[j + 1] != "\n"):
+                closes[j] = closes[j + 2]
+        else:
+            closes[j] = closes[j + 1]
+    return tuple(closes)
+
+
+def _scan_word_pattern(pattern: re.Pattern, text: str) -> Iterator[re.Match[str]]:
+    """Yield ``pattern.finditer(text)``'s matches without its quadratic retries.
+
+    Only for patterns built as ``_WORD_LOOKBEHIND`` + a
+    ``_shell_word_ending_pattern`` word (see the block comment above).
+    """
+    n = len(text)
+    dotall = bool(pattern.flags & re.DOTALL)
+    component = _WORD_COMPONENT_RX[dotall]
+    dead = bytearray(n + 1)
+    # A start at `"` whose component closes at a quote where an earlier,
+    # failed `"` start also closed can only form a subset of that start's
+    # words: its body is a suffix of the earlier body on the same parse.
+    dead_closes: set[int] = set()
+    pos = 0
+    while pos <= n:
+        if dead[pos] or (pos and text[pos - 1] in _LOOKBEHIND_BLOCKED):
+            pos += 1
+            continue
+        close = -1
+        if pos < n and text[pos] == '"':
+            close = _double_quote_closes(text, dotall)[pos + 1]
+            if close < 0 or close in dead_closes:
+                # An unterminated `"` starts no component, and no ending
+                # alternative begins with one.
+                pos += 1
+                continue
+        match = pattern.match(text, pos)
+        if match is not None:
+            yield match
+            pos = match.end() if match.end() > pos else pos + 1
+            continue
+        if close >= 0:
+            dead_closes.add(close)
+        cursor = pos
+        while not dead[cursor]:
+            dead[cursor] = 1
+            step = component.match(text, cursor)
+            if step is None:
+                break
+            cursor = step.end()
+        pos += 1
+
+
 _PATTERN_EXECUTABLES = {
     RX_PYTHON_C: ("python_exe", re.compile(_PYTHON_EXE_NAME)),
     RX_PYTHON_M: ("python_exe", re.compile(_PYTHON_EXE_NAME)),
@@ -597,6 +686,7 @@ def _strip_unquoted_shell_comments(command: str) -> str | None:
     return None if quote is not None else "".join(masked)
 
 
+@functools.lru_cache(maxsize=4)
 def _unquoted_shell_text(command: str) -> str | None:
     """Mask quoted arguments while preserving unquoted shell structure.
 
@@ -716,11 +806,11 @@ def is_analysis(bash_cmd: str) -> bool:
     return any(
         _match_has_expected_executable(match, pattern)
         for pattern in ANALYSIS_PATTERNS
-        for match in pattern.finditer(bash_cmd)
+        for match in _scan_word_pattern(pattern, bash_cmd)
     ) or any(
         _runner_word(match) is not None
         for pattern in RUNNER_PATTERNS
-        for match in pattern.finditer(bash_cmd)
+        for match in _scan_word_pattern(pattern, bash_cmd)
     )
 
 
@@ -1526,7 +1616,7 @@ def _literal_batch_options(command: str, offset: int) -> str | None:
     """The literal `R_BATCH_OPTIONS=...` value assigned on the command at
     offset itself, or None when its prefix has anything but assignments or
     the value is computed."""
-    prefix = _current_command_prefix(command[:offset])
+    prefix = _command_prefix_before(command, offset)
     if not prefix or not all(_ASSIGNMENT_RX.match(token) for token in prefix):
         return None
     values = [t.split("=", 1)[1] for t in prefix if t.startswith("R_BATCH_OPTIONS=")]
@@ -1731,28 +1821,241 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
     return True
 
 
-def _effective_cwd_state(
-    bash_cmd: str, offset: int, initial_cwd: Path
-) -> tuple[Path, bool]:
-    """Resolve preceding ``cd`` commands and report cwd-provenance fidelity.
+# The punctuation ``_shell_tokens`` hands to shlex (redirections are words).
+_SHELL_TOKEN_PUNCTUATION = frozenset(";&|()\n")
 
-    Returns the inferred cwd plus a flag that is True only when every
-    completed segment in the prefix was fully modeled. The flag is
-    deliberately conservative — an unmodeled builtin inside an already
-    closed subshell also clears it — because its only consumer is the
-    accessor trust decision, where a false negative merely costs a
-    redundant reminder.
+
+def _shell_token_cuts(command: str) -> list[int]:
+    """Offsets where ``_shell_tokens`` restarts cleanly.
+
+    A cut follows a whole unquoted, uncommented punctuation run, so the
+    comment stripper and the lexer are both between words, outside any
+    quote, at a word start. For every ``offset`` at or after a cut ``c``,
+    ``_shell_tokens(command[:offset])`` equals the tokens of ``command[:c]``
+    followed by those of ``command[c:offset]``.
     """
-    tokens = _shell_tokens(bash_cmd[:offset])
-    if tokens is None:
-        return initial_cwd, False
+    cuts: list[int] = []
+    quote: str | None = None
+    at_word_start = True
+    after_punctuation = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote is None:
+            if char in _SHELL_TOKEN_PUNCTUATION:
+                after_punctuation = True
+                at_word_start = True
+                index += 1
+                continue
+            if after_punctuation:
+                cuts.append(index)
+                after_punctuation = False
+            if char == "\\":
+                if command[index + 1 : index + 2] != "\n":
+                    at_word_start = False
+                index += 2
+                continue
+            if char in {"'", '"'}:
+                quote = char
+                at_word_start = False
+                index += 1
+                continue
+            if char == "#" and at_word_start:
+                newline = command.find("\n", index)
+                index = len(command) if newline < 0 else newline
+                continue
+            at_word_start = char.isspace()
+            index += 1
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if char == '"':
+            quote = None
+        index += 1
+    return cuts
 
-    cwd = initial_cwd
-    fully_modeled = True
-    subshell_states: list[tuple[Path, bool, bool]] = []
-    segment: list[str] = []
-    segment_is_conditional = False
-    chain_has_or = False
+
+class _PrefixFolds:
+    """Answer token folds over ``command[:offset]`` for many offsets.
+
+    Each match used to re-tokenize its whole prefix, so a command with many
+    interpreter calls (800 ``R -e`` lines) cost quadratic time. A fold's
+    state is cached at each ``_shell_token_cuts`` cut, and a query tokenizes
+    only the tail from the last cut, giving the same tokens in the same order.
+    """
+
+    def __init__(self, command: str) -> None:
+        self.command = command
+        self.cuts = _shell_token_cuts(command)
+        self.segments: list[list[str] | None] = []
+        self.states: dict[object, list[object]] = {}
+        self.depth_index: _DepthIndex | None = None
+
+    def _segment(self, index: int) -> list[str] | None:
+        """Tokens between cut ``index - 1`` (or 0) and cut ``index`` (or the end)."""
+        while len(self.segments) <= index:
+            k = len(self.segments)
+            start = self.cuts[k - 1] if k else 0
+            end = self.cuts[k] if k < len(self.cuts) else len(self.command)
+            self.segments.append(_shell_tokens(self.command[start:end]))
+        return self.segments[index]
+
+    def fold(self, offset: int, key: object, initial, step) -> object | None:
+        """Fold ``step`` over the prefix tokens; ``None`` if they don't lex."""
+        count = bisect.bisect_right(self.cuts, offset)
+        states = self.states.setdefault(key, [initial()])
+        while len(states) <= count:
+            k = len(states) - 1
+            tokens = self._segment(k)
+            if tokens is None:
+                # Unreachable for a clean cut; stay exact regardless.
+                tokens = _shell_tokens(self.command[:offset])
+                return None if tokens is None else step(initial(), tokens)
+            states.append(step(states[-1], tokens))
+        start = self.cuts[count - 1] if count else 0
+        tail = _shell_tokens(self.command[start:offset])
+        if tail is None:
+            return None
+        return step(states[count], tail)
+
+    def _depth_index(self) -> _DepthIndex:
+        """Index the control tokens of every segment by absolute paren depth."""
+        if self.depth_index is None:
+            raw_before: list[int] = []
+            stoppers: dict[int, list[int]] = {}
+            operators: dict[tuple[str, int], list[int]] = {}
+            last_unlexed = -1
+            raw = 0
+            for k in range(len(self.cuts) + 1):
+                raw_before.append(raw)
+                tokens = self._segment(k)
+                if tokens is None:
+                    last_unlexed = k
+                    continue
+                for token in tokens:
+                    if token == "(":
+                        raw += 1
+                    elif token == ")":
+                        stoppers.setdefault(raw, []).append(k)
+                        raw -= 1
+                    elif token in {";", "\n", "&"}:
+                        stoppers.setdefault(raw, []).append(k)
+                    elif token in {"&&", "||"}:
+                        operators.setdefault((token, raw), []).append(k)
+            self.depth_index = _DepthIndex(
+                raw_before, stoppers, operators, raw, last_unlexed
+            )
+        return self.depth_index
+
+    def list_operators_after(self, offset: int) -> list[str] | None | object:
+        """Fast ``_top_level_control_context(command[offset:])`` for a caller.
+
+        Returns ``None`` where the context reports a later list or ambiguity,
+        else operators equal as a set to the context's, or ``_UNANSWERED``
+        when the shortcut does not apply. Lexing ``command[offset:]`` on its
+        own matches the whole-command lexing from ``offset`` on when the
+        prefix lexes cleanly, ``offset`` is outside a comment, and the first
+        character cannot start a comment or a line continuation; the suffix
+        then splits at the same cuts. Relative to ``offset``, a token is at
+        depth 0 exactly when its absolute depth equals ``base`` below, and
+        the context is unusable once any ``;``, newline, ``&`` or ``)`` sits
+        there or the parentheses do not balance.
+        """
+        char = self.command[offset : offset + 1]
+        if not char or char in "#\\" or char.isspace():
+            return _UNANSWERED
+        after = bisect.bisect_right(self.cuts, offset)
+        if after == len(self.cuts):
+            return _UNANSWERED
+        start = self.cuts[after - 1] if after else 0
+        masked = _strip_unquoted_shell_comments(self.command[start : offset + 1])
+        if masked is None or masked[-1] != char:
+            return _UNANSWERED
+        if _shell_tokens(self.command[start:offset]) is None:
+            return _UNANSWERED
+        piece = _shell_tokens(self.command[offset : self.cuts[after]])
+        if piece is None:
+            return _UNANSWERED
+        state = _fold_control_context(_CONTROL_FOLD_INITIAL, piece)
+        if state.later_list or state.current_list_ambiguous or state.malformed:
+            return None
+        index = self._depth_index()
+        rest = after + 1
+        if index.last_unlexed >= rest:
+            return None
+        base = index.raw_before[rest] - state.depth
+        if index.final_raw != base:
+            return None
+        stoppers = index.stoppers.get(base)
+        if stoppers and stoppers[-1] >= rest:
+            return None
+        operators = list(state.operators)
+        for operator in ("&&", "||"):
+            found = index.operators.get((operator, base))
+            if found and found[-1] >= rest:
+                operators.append(operator)
+        return operators
+
+
+class _DepthIndex(NamedTuple):
+    # raw_before[k]: unclamped paren depth before segment k.
+    raw_before: list[int]
+    # Segments holding a list-ending token (`;`, newline, `&`) at a depth, or
+    # a `)` that closes back below it; both end a suffix's usable context.
+    stoppers: dict[int, list[int]]
+    # Segments holding `&&` / `||` at a depth.
+    operators: dict[tuple[str, int], list[int]]
+    final_raw: int
+    last_unlexed: int
+
+
+_UNANSWERED = object()
+
+
+@functools.lru_cache(maxsize=4)
+def _prefix_folds(command: str) -> _PrefixFolds:
+    return _PrefixFolds(command)
+
+
+# A checkpoint is cached after every shell operator, so fold states must not
+# copy histories: a stack is a cons list ``(top, rest)`` (``None`` when empty)
+# that later states share, and operator histories are reduced to the
+# summaries their callers read. Otherwise a 6,000-command ``&&`` chain kept
+# 6,000 growing copies (quadratic memory).
+def _cons_items(cons: object) -> list:
+    """The cons list's items, bottom first."""
+    items = []
+    while cons is not None:
+        items.append(cons[0])
+        cons = cons[1]
+    items.reverse()
+    return items
+
+
+class _CwdFoldState(NamedTuple):
+    cwd: Path
+    fully_modeled: bool
+    # Cons list of (cwd, segment_is_conditional, chain_has_or) per open "(".
+    subshell_states: object
+    segment: tuple[str, ...]
+    segment_is_conditional: bool
+    chain_has_or: bool
+
+
+def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
+    """Advance ``_effective_cwd_state``'s walk over ``tokens``."""
+    cwd = state.cwd
+    fully_modeled = state.fully_modeled
+    subshell_states = state.subshell_states
+    segment = list(state.segment)
+    segment_is_conditional = state.segment_is_conditional
+    chain_has_or = state.chain_has_or
 
     def complete_segment() -> None:
         nonlocal fully_modeled
@@ -1790,15 +2093,50 @@ def _effective_cwd_state(
         elif token == "(":
             complete_segment()
             segment = []
-            subshell_states.append((cwd, segment_is_conditional, chain_has_or))
+            subshell_states = (
+                (cwd, segment_is_conditional, chain_has_or),
+                subshell_states,
+            )
         elif token == ")":
             complete_segment()
             segment = []
-            if subshell_states:
-                cwd, segment_is_conditional, chain_has_or = subshell_states.pop()
+            if subshell_states is not None:
+                (cwd, segment_is_conditional, chain_has_or), subshell_states = (
+                    subshell_states
+                )
         else:
             segment.append(token)
-    return cwd, fully_modeled
+    return _CwdFoldState(
+        cwd,
+        fully_modeled,
+        subshell_states,
+        tuple(segment),
+        segment_is_conditional,
+        chain_has_or,
+    )
+
+
+def _effective_cwd_state(
+    bash_cmd: str, offset: int, initial_cwd: Path
+) -> tuple[Path, bool]:
+    """Resolve preceding ``cd`` commands and report cwd-provenance fidelity.
+
+    Returns the inferred cwd plus a flag that is True only when every
+    completed segment in the prefix was fully modeled. The flag is
+    deliberately conservative — an unmodeled builtin inside an already
+    closed subshell also clears it — because its only consumer is the
+    accessor trust decision, where a false negative merely costs a
+    redundant reminder.
+    """
+    state = _prefix_folds(bash_cmd).fold(
+        offset,
+        ("cwd", initial_cwd),
+        lambda: _CwdFoldState(initial_cwd, True, None, (), False, False),
+        _fold_cwd_state,
+    )
+    if state is None:
+        return initial_cwd, False
+    return state.cwd, state.fully_modeled
 
 
 def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
@@ -1807,17 +2145,24 @@ def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
     return cwd
 
 
-def _top_level_control_context(fragment: str) -> tuple[list[str], bool, bool]:
-    """Return current-list operators, whether a later list exists, and ambiguity."""
-    tokens = _shell_tokens(fragment)
-    if tokens is None:
-        return [], False, True
+class _ControlFoldState(NamedTuple):
+    depth: int
+    # The current list's distinct top-level operators (`&&`, `||`), first-seen
+    # order: callers only ask whether there are any and whether all agree.
+    operators: tuple[str, ...]
+    later_list: bool
+    current_list_ambiguous: bool
+    malformed: bool
 
-    depth = 0
-    operators: list[str] = []
-    later_list = False
-    current_list_ambiguous = False
-    malformed = False
+
+_CONTROL_FOLD_INITIAL = _ControlFoldState(0, (), False, False, False)
+
+
+def _fold_control_context(
+    state: _ControlFoldState, tokens: list[str]
+) -> _ControlFoldState:
+    """Advance ``_top_level_control_context``'s walk over ``tokens``."""
+    depth, operators, later_list, current_list_ambiguous, malformed = state
     for token in tokens:
         if token == "(":
             depth += 1
@@ -1827,19 +2172,108 @@ def _top_level_control_context(fragment: str) -> tuple[list[str], bool, bool]:
             else:
                 depth -= 1
         elif depth == 0 and token in {";", "\n"}:
-            operators = []
+            operators = ()
             later_list = True
             # A completed list is an execution boundary. Unsupported control
             # operators in an earlier list cannot make the next list's first
             # command conditional or uncertain.
             current_list_ambiguous = False
         elif depth == 0 and token in {"&&", "||"}:
-            operators.append(token)
+            if token not in operators:
+                operators += (token,)
         elif depth == 0 and token == "&":
             current_list_ambiguous = True
-    if depth:
-        malformed = True
-    return operators, later_list, current_list_ambiguous or malformed
+    return _ControlFoldState(
+        depth, operators, later_list, current_list_ambiguous, malformed
+    )
+
+
+def _finish_control_context(
+    state: _ControlFoldState | None,
+) -> tuple[list[str], bool, bool]:
+    if state is None:
+        return [], False, True
+    malformed = state.malformed or bool(state.depth)
+    return list(state.operators), state.later_list, (
+        state.current_list_ambiguous or malformed
+    )
+
+
+def _top_level_control_context(fragment: str) -> tuple[list[str], bool, bool]:
+    """Return current-list operators, whether a later list exists, and ambiguity.
+
+    The operators are the distinct ``&&``/``||`` of the current list.
+    """
+    tokens = _shell_tokens(fragment)
+    if tokens is None:
+        return _finish_control_context(None)
+    return _finish_control_context(
+        _fold_control_context(_CONTROL_FOLD_INITIAL, tokens)
+    )
+
+
+def _control_context_before(bash_cmd: str, offset: int) -> tuple[list[str], bool, bool]:
+    """``_top_level_control_context(bash_cmd[:offset])`` from cached folds."""
+    return _finish_control_context(
+        _prefix_folds(bash_cmd).fold(
+            offset,
+            "control",
+            lambda: _CONTROL_FOLD_INITIAL,
+            _fold_control_context,
+        )
+    )
+
+
+class _CommandPrefixFoldState(NamedTuple):
+    malformed: bool  # an unmatched ``)`` made the prefix unreadable
+    # The innermost current-command segment as a cons list, last token on
+    # top, and whether its context is dynamic (inside a command substitution).
+    segment: object
+    dynamic: bool
+    # Cons list of (segment, dynamic) for each enclosing open ``(``.
+    outer: object
+
+
+_COMMAND_PREFIX_FOLD_INITIAL = _CommandPrefixFoldState(False, None, False, None)
+
+
+def _fold_command_prefix(
+    state: _CommandPrefixFoldState, tokens: list[str]
+) -> _CommandPrefixFoldState:
+    """Advance ``_current_command_prefix``'s walk over ``tokens``."""
+    if state.malformed:
+        return state
+    # Keep one current-command segment per subshell depth. The fragment ends at
+    # the candidate, so a legitimate command inside ``( ... )`` necessarily
+    # has an unmatched opening parenthesis here. Command substitutions remain
+    # conservative because their child context is marked dynamic.
+    _, segment, dynamic, outer = state
+    for token in tokens:
+        if token == "(":
+            command_substitution = segment is not None and segment[0].endswith("$")
+            outer = ((segment, dynamic), outer)
+            segment = None
+            dynamic = dynamic or command_substitution
+        elif token == ")":
+            if outer is None:
+                return _CommandPrefixFoldState(True, None, False, None)
+            (segment, dynamic), outer = outer
+            # A completed compound command is not an execution wrapper for a
+            # later token in the same simple command.
+            segment = ("__mycelium_compound_command__", segment)
+        elif token in {";", "\n", "&&", "||", "|", "&"}:
+            segment = None
+        else:
+            segment = (token, segment)
+    return _CommandPrefixFoldState(False, segment, dynamic, outer)
+
+
+def _finish_command_prefix(
+    state: _CommandPrefixFoldState | None,
+) -> list[str] | None:
+    if state is None or state.malformed or state.dynamic:
+        return None
+    return _cons_items(state.segment)
 
 
 def _current_command_prefix(fragment: str) -> list[str] | None:
@@ -1847,35 +2281,21 @@ def _current_command_prefix(fragment: str) -> list[str] | None:
     tokens = _shell_tokens(fragment)
     if tokens is None:
         return None
+    return _finish_command_prefix(
+        _fold_command_prefix(_COMMAND_PREFIX_FOLD_INITIAL, tokens)
+    )
 
-    # Keep one current-command segment per subshell depth. The fragment ends at
-    # the candidate, so a legitimate command inside ``( ... )`` necessarily
-    # has an unmatched opening parenthesis here. Command substitutions remain
-    # conservative because their child context is marked dynamic.
-    segments: list[list[str]] = [[]]
-    dynamic_contexts = [False]
-    for token in tokens:
-        if token == "(":
-            command_substitution = bool(
-                segments[-1] and segments[-1][-1].endswith("$")
-            )
-            segments.append([])
-            dynamic_contexts.append(dynamic_contexts[-1] or command_substitution)
-        elif token == ")":
-            if len(segments) == 1:
-                return None
-            segments.pop()
-            dynamic_contexts.pop()
-            # A completed compound command is not an execution wrapper for a
-            # later token in the same simple command.
-            segments[-1].append("__mycelium_compound_command__")
-        elif token in {";", "\n", "&&", "||", "|", "&"}:
-            segments[-1] = []
-        else:
-            segments[-1].append(token)
-    if dynamic_contexts[-1]:
-        return None
-    return segments[-1]
+
+def _command_prefix_before(bash_cmd: str, offset: int) -> list[str] | None:
+    """``_current_command_prefix(bash_cmd[:offset])`` from cached folds."""
+    return _finish_command_prefix(
+        _prefix_folds(bash_cmd).fold(
+            offset,
+            "command_prefix",
+            lambda: _COMMAND_PREFIX_FOLD_INITIAL,
+            _fold_command_prefix,
+        )
+    )
 
 
 _ASSIGNMENT_RX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
@@ -2179,7 +2599,7 @@ def _command_effective_cwd(
     bash_cmd: str, offset: int, initial_cwd: Path
 ) -> Path | None:
     """Return the candidate command cwd, or ``None`` if execution is unproven."""
-    prefix = _current_command_prefix(bash_cmd[:offset])
+    prefix = _command_prefix_before(bash_cmd, offset)
     if prefix is None:
         return None
     base_cwd = _effective_cwd(bash_cmd, offset, initial_cwd)
@@ -2202,144 +2622,205 @@ def _simple_command_status(segment: list[str], cwd: Path) -> bool | None:
     return status
 
 
-def _or_prefix_is_proven_failed(fragment: str, initial_cwd: Path) -> bool:
-    """Prove that every alternative before a pure-OR candidate failed."""
-    tokens = _shell_tokens(fragment)
-    if tokens is None:
-        return False
+def _touches_cwd(segment: list[str]) -> bool:
+    stripped = _strip_assignments(segment)
+    return bool(stripped) and Path(stripped[0]).name in {
+        "cd", "pushd", "popd", "source", ".", "eval"
+    }
 
-    cwd = initial_cwd
-    segment: list[str] = []
-    alternatives: list[list[str]] = []
-    operators: list[str] = []
-    depth = 0
 
-    def finish_completed_list() -> bool:
-        nonlocal cwd, segment, alternatives, operators
-        parts = alternatives + [segment]
-        if len(parts) == 1 and not operators:
-            status, target = _simple_cd_status(parts[0], cwd)
-            if status is True:
-                cwd = target
-        elif any(
-            _strip_assignments(part)[:1]
-            and Path(_strip_assignments(part)[0]).name
-            in {"cd", "pushd", "popd", "source", ".", "eval"}
-            for part in parts
-        ):
-            # A completed conditional list may have changed the parent shell's
-            # cwd, but the one overall status supplied to this hook cannot say
-            # which branch ran. Refuse to infer a later relative fallback.
-            return False
-        segment = []
-        alternatives = []
-        operators = []
-        return True
+class _OrFoldState(NamedTuple):
+    failed: bool
+    cwd: Path
+    segment: tuple[str, ...]
+    # The current list's completed alternatives, summarized: the final
+    # status check reads them with the cwd they were completed under, which
+    # only a completed list (that also clears them) can change.
+    alternatives: int
+    alternatives_failed: bool
+    alternatives_touch_cwd: bool
+    operators_are_or: bool
 
+
+def _fold_or_prefix(state: _OrFoldState, tokens: list[str]) -> _OrFoldState:
+    """Advance the pure-OR proof over ``tokens``."""
+    if state.failed:
+        return state
+    cwd = state.cwd
+    segment = list(state.segment)
+    alternatives = state.alternatives
+    alternatives_failed = state.alternatives_failed
+    alternatives_touch_cwd = state.alternatives_touch_cwd
+    operators_are_or = state.operators_are_or
     for token in tokens:
-        if token == "(":
-            depth += 1
-            if depth == 1:
-                return False
-        elif token == ")":
-            if depth == 0:
-                return False
-            depth -= 1
-        elif depth == 0 and token in {";", "\n"}:
-            if not finish_completed_list():
-                return False
-        elif depth == 0 and token in {"&&", "||", "|", "&"}:
-            alternatives.append(segment)
-            operators.append(token)
+        if token in {"(", ")"}:
+            return state._replace(failed=True)
+        if token in {";", "\n"}:
+            if not alternatives:
+                status, target = _simple_cd_status(segment, cwd)
+                if status is True:
+                    cwd = target
+            elif alternatives_touch_cwd or _touches_cwd(segment):
+                # A completed conditional list may have changed the parent
+                # shell's cwd, but the one overall status supplied to this
+                # hook cannot say which branch ran. Refuse to infer a later
+                # relative fallback.
+                return state._replace(failed=True)
+            segment = []
+            alternatives = 0
+            alternatives_failed = True
+            alternatives_touch_cwd = False
+            operators_are_or = True
+        elif token in {"&&", "||", "|", "&"}:
+            alternatives += 1
+            alternatives_failed = (
+                alternatives_failed and _simple_command_status(segment, cwd) is False
+            )
+            alternatives_touch_cwd = alternatives_touch_cwd or _touches_cwd(segment)
+            operators_are_or = operators_are_or and token == "||"
             segment = []
         else:
             segment.append(token)
-    if depth or any(operator != "||" for operator in operators):
-        return False
+    return _OrFoldState(
+        False,
+        cwd,
+        tuple(segment),
+        alternatives,
+        alternatives_failed,
+        alternatives_touch_cwd,
+        operators_are_or,
+    )
 
-    # ``segment`` is the wrapper/assignment prefix of the candidate itself;
-    # only the completed alternatives before its final || determine whether it
-    # ran. Each must have a statically known failure status.
-    if not alternatives:
-        return False
-    return all(_simple_command_status(part, cwd) is False for part in alternatives)
+
+def _or_prefix_is_proven_failed(
+    bash_cmd: str, offset: int, initial_cwd: Path
+) -> bool:
+    """Prove that every alternative before a pure-OR candidate failed.
+
+    ``segment`` ends as the wrapper/assignment prefix of the candidate itself;
+    only the completed alternatives before its final || determine whether it
+    ran. Each must have a statically known failure status.
+    """
+    return _or_fold_proves(
+        _prefix_folds(bash_cmd).fold(
+            offset,
+            ("or", initial_cwd),
+            lambda: _OrFoldState(False, initial_cwd, (), 0, True, False, True),
+            _fold_or_prefix,
+        )
+    )
 
 
-def _and_prefix_is_proven_successful(fragment: str, initial_cwd: Path) -> bool:
+def _or_fold_proves(state: _OrFoldState | None) -> bool:
+    return (
+        state is not None
+        and not state.failed
+        and state.operators_are_or
+        and state.alternatives > 0
+        and state.alternatives_failed
+    )
+
+
+class _AndFoldState(NamedTuple):
+    failed: bool
+    saw_operator: bool
+    segment: tuple[str, ...]
+    cwd: Path
+
+
+def _fold_and_prefix(state: _AndFoldState, tokens: list[str]) -> _AndFoldState:
+    """Advance the pure-AND proof over ``tokens``."""
+    if state.failed:
+        return state
+    saw_operator = state.saw_operator
+    segment = list(state.segment)
+    cwd = state.cwd
+    for token in tokens:
+        if token in {"(", ")", ";", "\n", "||", "|", "&"}:
+            return state._replace(failed=True)
+        if token == "&&":
+            saw_operator = True
+            if _simple_command_status(segment, cwd) is not True:
+                return state._replace(failed=True)
+            _, cwd = _simple_cd_status(segment, cwd)
+            segment = []
+        else:
+            segment.append(token)
+    return _AndFoldState(False, saw_operator, tuple(segment), cwd)
+
+
+def _and_prefix_is_proven_successful(
+    bash_cmd: str, offset: int, initial_cwd: Path
+) -> bool:
     """Prove that every simple command before a pure-AND candidate succeeded."""
-    tokens = _shell_tokens(fragment)
-    if tokens is None:
-        return False
+    return _and_fold_proves(
+        _prefix_folds(bash_cmd).fold(
+            offset,
+            ("and", initial_cwd),
+            lambda: _AndFoldState(False, False, (), initial_cwd),
+            _fold_and_prefix,
+        )
+    )
 
-    cwd = initial_cwd
-    segment: list[str] = []
-    completed: list[list[str]] = []
-    operators: list[str] = []
-    depth = 0
-    for token in tokens:
-        if token == "(":
-            depth += 1
-            if depth == 1:
-                return False
-        elif token == ")":
-            if depth == 0:
-                return False
-            depth -= 1
-        elif depth == 0 and token in {";", "\n", "||", "|", "&"}:
-            return False
-        elif depth == 0 and token == "&&":
-            completed.append(segment)
-            operators.append(token)
-            status, target = _simple_cd_status(segment, cwd)
-            if status is True:
-                cwd = target
-            segment = []
-        else:
-            segment.append(token)
-    if depth or not operators:
-        return False
-    cwd = initial_cwd
-    for part in completed:
-        status = _simple_command_status(part, cwd)
-        if status is not True:
-            return False
-        _, cwd = _simple_cd_status(part, cwd)
-    return True
+
+def _and_fold_proves(state: _AndFoldState | None) -> bool:
+    return state is not None and not state.failed and state.saw_operator
+
+
+def _list_operators_after(bash_cmd: str, offset: int) -> list[str] | None:
+    """Operators after ``offset`` in its AND-OR list; ``None`` if unusable."""
+    operators = _prefix_folds(bash_cmd).list_operators_after(offset)
+    if operators is not _UNANSWERED:
+        return operators
+    operators, has_later_list, ambiguous = _top_level_control_context(
+        bash_cmd[offset:]
+    )
+    return None if has_later_list or ambiguous else operators
+
+
+# Whole-command views every candidate match consults: cache them per command
+# instead of rescanning the command once per match.
+@functools.lru_cache(maxsize=4)
+def _command_without_comments(bash_cmd: str) -> str | None:
+    return _strip_unquoted_shell_comments(bash_cmd)
+
+
+@functools.lru_cache(maxsize=4)
+def _has_unsupported_shell_structure(bash_cmd: str) -> bool:
+    unquoted_shell = _unquoted_shell_text(bash_cmd)
+    return unquoted_shell is None or bool(
+        RX_UNSUPPORTED_SHELL_STRUCTURE.search(unquoted_shell)
+    )
 
 
 def _match_is_proven_executed(
     bash_cmd: str, offset: int, bash_exit: int | None, initial_cwd: Path
 ) -> bool:
     """Conservatively decide whether a textual script match actually ran."""
-    command_without_comments = _strip_unquoted_shell_comments(bash_cmd)
+    command_without_comments = _command_without_comments(bash_cmd)
     if command_without_comments is None:
         return False
     if command_without_comments[offset : offset + 1] != bash_cmd[offset : offset + 1]:
         return False
-    unquoted_shell = _unquoted_shell_text(bash_cmd)
-    if unquoted_shell is None or RX_UNSUPPORTED_SHELL_STRUCTURE.search(
-        unquoted_shell
-    ):
+    if _has_unsupported_shell_structure(bash_cmd):
         return False
     if _command_effective_cwd(bash_cmd, offset, initial_cwd) is None:
         return False
-    before_ops, _, before_ambiguous = _top_level_control_context(bash_cmd[:offset])
+    before_ops, _, before_ambiguous = _control_context_before(bash_cmd, offset)
     if before_ambiguous:
         return False
     if not before_ops:
         # The first command in an AND-OR list always executes.
         return True
-    after_ops, has_later_list, after_ambiguous = _top_level_control_context(
-        bash_cmd[offset:]
-    )
-    if has_later_list or after_ambiguous:
+    after_ops = _list_operators_after(bash_cmd, offset)
+    if after_ops is None:
         # The overall exit status belongs to a later list or an unsupported
         # compound construct, so it cannot prove this conditional branch ran.
         return False
     all_ops = before_ops + after_ops
     if all(operator == "&&" for operator in all_ops):
         return bash_exit == 0 or _and_prefix_is_proven_successful(
-            bash_cmd[:offset], initial_cwd
+            bash_cmd, offset, initial_cwd
         )
     if all(operator == "||" for operator in all_ops):
         # A nonzero final status proves every OR alternative ran and failed.
@@ -2347,7 +2828,7 @@ def _match_is_proven_executed(
         # still proven to run when every preceding alternative has a known
         # failure (notably ``cd missing || python a.py``).
         return (bash_exit is not None and bash_exit != 0) or _or_prefix_is_proven_failed(
-            bash_cmd[:offset], initial_cwd
+            bash_cmd, offset, initial_cwd
         )
     return False
 
@@ -3095,7 +3576,7 @@ def _detect_runners(
     """
     out: list[tuple[Path | None, str | None, Path | None]] = []
     for pattern in RUNNER_PATTERNS:
-        for m in pattern.finditer(bash_cmd):
+        for m in _scan_word_pattern(pattern, bash_cmd):
             word = _runner_word(m)
             if word is None:
                 continue
@@ -3112,7 +3593,7 @@ def _detect_runners(
             argv = _simple_command_argv(fragment)
             if not argv or argv[0] != word:
                 continue
-            prefix = _current_command_prefix(bash_cmd[: m.start()]) or []
+            prefix = _command_prefix_before(bash_cmd, m.start()) or []
             run = _runner_detection(
                 argv, effective_cwd, _runner_environment(bash_cmd, prefix)
             )
@@ -3164,7 +3645,7 @@ def _detect_scripts_with_cwd(
     seen_inline: set[tuple[str, Path | None]] = set()
     inline_patterns = (RX_PYTHON_C, RX_R_E, RX_RSCRIPT_E) if include_inline else ()
     for pattern in inline_patterns:
-        for m in pattern.finditer(bash_cmd):
+        for m in _scan_word_pattern(pattern, bash_cmd):
             if not _match_has_expected_executable(m, pattern):
                 continue
             r_argv = None
@@ -3196,7 +3677,7 @@ def _detect_scripts_with_cwd(
             if identity not in seen_inline:
                 out.append((None, src, effective_cwd))
                 seen_inline.add(identity)
-    for m in RX_PYTHON_M.finditer(bash_cmd):
+    for m in _scan_word_pattern(RX_PYTHON_M, bash_cmd):
         if not _match_has_expected_executable(m, RX_PYTHON_M):
             continue
         effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
@@ -3221,7 +3702,7 @@ def _detect_scripts_with_cwd(
         RX_R_CMD_BATCH_PATH,
         RX_JUPYTER_SCRIPT_PATH,
     ):
-        for m in pattern.finditer(bash_cmd):
+        for m in _scan_word_pattern(pattern, bash_cmd):
             if not _match_has_expected_executable(m, pattern):
                 continue
             r_script = None

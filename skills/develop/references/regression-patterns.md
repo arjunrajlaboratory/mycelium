@@ -843,3 +843,33 @@ parse failure that also drops the event elsewhere.
 detected form with option variants before and after the payload, and assert
 both consumers (post-action and lineage) separately, so a form that vanishes
 from both cannot pass as exempt.
+
+## 42. A hot-path scan repeats linear work per start or per match
+
+**Failure:** The lineage detector runs on every shell command with no hook
+timeout. Its shell-word regexes begin with a variable-length repetition that
+a quoted component can stretch across whitespace, so `finditer` re-walked a
+run of quoted words from every start position: `R -f a.R --args` plus 5,000
+`"$x"` words took about 58 s. Separately, each candidate match re-tokenized
+the whole command before it (and, for AND/OR lists, after it), so 800
+`R -q -e` lines or a 1,000-command `&&` chain took seconds. Each scan was
+correct; only its repetition was quadratic, and short test commands never
+showed it. PR #117 had already fixed an exponential case in the same regex.
+
+**Invariant:** In a hook path, every scan is linear in the command, or its
+cost is bounded with a documented fallback. A per-start or per-match helper
+must not re-read text an earlier start or match already read: skip starts
+that provably cannot match, and resume prefix folds from cached checkpoints.
+Each fast path must be exactly equivalent to the plain computation it
+replaces, not an approximation. A cache of per-checkpoint states must stay
+linear in memory too: share stacks between states and keep summaries rather
+than copying histories. The first version of this fix copied the operator
+history into every checkpoint, so a 6,000-command `&&` chain held about
+150 MB.
+
+**Regression evidence:** Timing tests with generous bounds on long
+quoted-word runs, quote and escape runs, many-line commands, and long
+`&&`/`||` chains; a `tracemalloc` peak bound on long chains and deep
+nesting; and deterministic fuzz tests that compare each
+fast path with the plain computation (pruned scan against `finditer`,
+cached prefix folds against whole-prefix tokenization).
