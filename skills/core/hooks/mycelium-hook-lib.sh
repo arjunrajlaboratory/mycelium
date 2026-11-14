@@ -912,6 +912,18 @@ import io
 import sys
 
 raw = sys.stdin.buffer.read()
+# The extra frames here shift the Python recursion limit by a few levels, so
+# a payload that could nest anywhere near it is left to the separate
+# decoders. Every bracket a decoder can meet, including inside JSON held in
+# JSON strings, is a literal bracket or a backslash-u escape of one in the
+# raw bytes.
+lowered = raw.lower()
+nesting_bound = (
+    raw.count(b"[") + raw.count(b"{")
+    + lowered.count(b"u005b") + lowered.count(b"u007b")
+)
+if nesting_bound >= sys.getrecursionlimit() - 200:
+    raise SystemExit(0)
 in_encoding, in_errors = sys.stdin.encoding, sys.stdin.errors
 out_encoding, out_errors = sys.stdout.encoding, sys.stdout.errors
 real_stdin, real_stdout, real_argv = sys.stdin, sys.stdout, sys.argv
@@ -959,6 +971,7 @@ MYCELIUM__PC_READY=false
 MYCELIUM__PC_OUT=""
 MYCELIUM__PC_STATUS=0
 MYCELIUM__PC_VAR=""
+MYCELIUM__PC_SLOT_VARS=""
 
 # Slot names are fixed decoder kinds plus dotted payload paths.
 mycelium__payload_slot_ok() {
@@ -968,8 +981,10 @@ mycelium__payload_slot_ok() {
 # Sets MYCELIUM__PC_VAR to the variable prefix that stores SLOT.
 mycelium__payload_slot_var() {
   local slot="$1"
-  slot="${slot//:/_C_}"
-  slot="${slot//./_D_}"
+  # Escape `_` first so every `_` in the result starts a pair: injective.
+  slot="${slot//_/_U}"
+  slot="${slot//:/_C}"
+  slot="${slot//./_D}"
   MYCELIUM__PC_VAR="MYCELIUM__PC_SLOT_$slot"
 }
 
@@ -984,6 +999,10 @@ mycelium_payload_preload() {
   local slot="" body="" path="" status="" output="" var=""
 
   MYCELIUM__PC_READY=false
+  for var in $MYCELIUM__PC_SLOT_VARS; do
+    unset "${var}_S" "${var}_O"
+  done
+  MYCELIUM__PC_SLOT_VARS=""
   for slot in "$@"; do
     mycelium__payload_slot_ok "$slot" || continue
     path="${slot#*:}"
@@ -995,6 +1014,7 @@ mycelium_payload_preload() {
     mycelium__payload_slot_var "$slot"
     var="$MYCELIUM__PC_VAR"
     printf -v "${var}_S" '%s' ""
+    MYCELIUM__PC_SLOT_VARS="$MYCELIUM__PC_SLOT_VARS $var"
     if [[ "${slot%%:*}" == exit ]]; then
       argv+=("$slot" "$body" "" 0)
     else

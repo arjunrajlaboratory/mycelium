@@ -64,6 +64,16 @@ PAYLOADS: list[bytes] = [
     b'{"cwd": "\xff\xfe invalid utf-8"}',
     b'{"cwd": "dup", "cwd": "last"}',
     b'{"session_id": "x", "cwd": NaN, "agent_type": Infinity}',
+    # Nesting at the edge of the recursion limit: the preload process has a
+    # few more frames than `python3 -c`, so it must not answer these.
+    *(
+        b'{"cwd": "ok", "session_id": "s1", "extra": '
+        + b"[" * depth + b"0" + b"]" * depth + b"}"
+        for depth in (985, 990, 992, 995)
+    ),
+    json.dumps(
+        {"cwd": "ok", "tool_response": json.dumps([[[[{"exit_code": 4}]]]] * 300)}
+    ).encode(),
 ]
 
 COMPARE = r"""
@@ -119,6 +129,45 @@ def test_cached_decoders_match_separate_decoders(tmp_path, bash, index):
         assert cached == direct, (slot.decode(), cached, direct)
 
 
+def _pythons() -> list[str]:
+    found: list[str] = []
+    candidates = ["/usr/bin/python3", shutil.which("python3")]
+    candidates += [shutil.which(f"python3.{minor}") for minor in range(9, 16)]
+    for candidate in candidates:
+        if not candidate or not Path(candidate).exists():
+            continue
+        real = str(Path(candidate).resolve())
+        if real not in found:
+            found.append(real)
+    return found
+
+
+@pytest.mark.parametrize("python", _pythons())
+def test_deep_nesting_matches_on_every_installed_python(tmp_path, python):
+    """The recursion boundary moved by a level on Python 3.9 and 3.11."""
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    (shim_dir / "python3").symlink_to(python)
+    env = os.environ.copy()
+    env["PATH"] = f"{shim_dir}{os.pathsep}{env['PATH']}"
+    for depth in range(984, 1000):
+        payload_file = tmp_path / f"deep-{depth}.json"
+        payload_file.write_bytes(
+            b'{"cwd": "ok", "session_id": "s1", "extra": '
+            + b"[" * depth + b"0" + b"]" * depth + b"}"
+        )
+        result = subprocess.run(
+            ["bash", "-c", COMPARE, "compare", str(LIB), str(payload_file),
+             "get:cwd", "opt:session_id", "exit:"],
+            capture_output=True,
+            check=True,
+            env=env,
+        )
+        for line in result.stdout.splitlines():
+            slot, _hit, cached, direct = line.split(b"\t")
+            assert cached == direct, (python, depth, slot, cached, direct)
+
+
 def test_cache_answers_ordinary_fields_without_new_interpreters(tmp_path):
     payload_file = tmp_path / "payload.json"
     payload_file.write_bytes(PAYLOADS[0])
@@ -149,6 +198,38 @@ mycelium_json_get cwd '{"cwd": "/second"}'
         check=True,
     )
     assert result.stdout == "/second\n"
+
+
+def _probe(script: str) -> str:
+    return subprocess.run(
+        ["bash", "-c", "set -euo pipefail\nsource \"$1\"\n" + script, "probe", str(LIB)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
+def test_a_second_preload_drops_every_earlier_answer():
+    out = _probe(
+        """
+mycelium_payload_preload '{"source":"first"}' get:source
+p='{"cwd":"new","source":"second"}'
+mycelium_payload_preload "$p" get:cwd
+mycelium_json_get source "$p"
+"""
+    )
+    assert out == "second\n"
+
+
+def test_distinct_paths_never_share_a_cache_entry():
+    out = _probe(
+        """
+p='{"a":{"b":"nested"},"a_D_b":"literal","a_Db":"other","a_U_Db":"third"}'
+mycelium_payload_preload "$p" get:a.b get:a_D_b get:a_Db get:a_U_Db
+for path in a.b a_D_b a_Db a_U_Db; do mycelium_json_get "$path" "$p"; done
+"""
+    )
+    assert out == "nested\nliteral\nother\nthird\n"
 
 
 def _python_shim(tmp_path: Path) -> tuple[dict[str, str], Path]:
