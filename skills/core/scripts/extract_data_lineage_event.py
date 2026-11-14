@@ -39,7 +39,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import Generator, NamedTuple
 
 SIZE_LIMIT_BYTES = 100 * 1024 * 1024
 EMBED_LIMIT_BYTES = 100 * 1024
@@ -210,16 +210,13 @@ RX_R_FILE_PATH = re.compile(
 # `R [options] CMD BATCH [options] [--] infile [outfile]`: the R front end
 # hands everything after CMD to Rcmd, so R options may precede CMD. This
 # pattern only locates a BATCH call with an R-script-shaped word after it;
-# `_r_batch_input_word` then reads the decoded argv the way R's BATCH script
-# does to decide whether it runs and which file R actually reads.
+# `_r_batch_script` then reads the argv the way R's BATCH script does to
+# decide whether it runs and which file R actually reads.
 RX_R_CMD_BATCH_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+{_R_OPTIONS}CMD\s+BATCH\s+"
     # Never cross a command boundary (`;`, `&&`, `|`, newline) to find a path.
     rf"(?:[^\s;&|]+[ \t]+)*?(?P<path>{_R_SCRIPT_PATH})"
 )
-# R itself (unlike Rscript) reads its whole argv up to `--args`, so a terminal
-# or debugger option after the payload still applies to these two forms.
-_R_ARGV_SCANNED_PATTERNS = frozenset({RX_R_E, RX_R_FILE_PATH})
 RX_JUPYTER_SCRIPT_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<jupyter_exe>{_JUPYTER_EXE})\s+"
     rf"(?:nbconvert|execute)\s+{_JUPYTER_OPTIONS}"
@@ -1119,74 +1116,142 @@ def _jupyter_match_has_terminal_option(command: str, offset: int) -> bool:
     )
 
 
+# --- R command lines ---
+#
+# One rule covers every R form. R's argv is read word by word, redirections
+# dropped, up to `--args` (R ignores every later word). A word the shell
+# computes -- one with a `$` or backtick outside single quotes -- is an
+# unknown word. When the expansion sits inside double quotes (`"$D/a.R"`) it
+# is still exactly one word, so reading goes on past it; an unquoted one may
+# split into any number of words, and it, an unknown word where an option
+# belongs, or shell syntax this reader cannot follow ends the readable argv:
+# the words before it are exact and the rest are unknown. Unknown words never
+# reject a run; only a proven stop word (help, version, R_HOME, CMD, a
+# debugger) or `-e` together with `-f` does. Known `-e` expressions are
+# recorded, computed ones never are, and the script of an `R -f`/`R CMD BATCH`
+# run is unresolved when its file word is unknown or later words could name a
+# different file.
+
 # Words the R front end or binary honors anywhere before `--args`: they exit
 # (help, version, R_HOME), hand off to Rcmd (CMD), or run a debugger.
-_R_TERMINAL_OPTIONS = {"-h", "--help", "--version", "--print-home", "RHOME", "CMD"}
-_R_DEBUGGER_OPTIONS = {"-d", "--debugger"}
-_R_SEPARATED_VALUE_OPTIONS = {
-    "-e",
-    "-f",
-    "-g",
-    "-d",
-    "--debugger",
-    "--arch",
-    "--encoding",
-    "--gui",
-    "--max-connections",
-    "--max-nsize",
-    "--max-ppsize",
-    "--max-vsize",
-    "--min-nsize",
-    "--min-vsize",
+_R_STOP_WORDS = {
+    "-h", "--help", "--version", "--print-home", "RHOME", "CMD", "-d", "--debugger",
 }
+_R_SEPARATED_VALUE_OPTIONS = {
+    "-e", "-f", "-g", "-d", "--debugger", "--arch", "--encoding", "--gui",
+    "--max-connections", "--max-nsize", "--max-ppsize", "--max-vsize",
+    "--min-nsize", "--min-vsize",
+}
+# `&>` and `&>>` take no descriptor: bash passes the `2` of `2&>f` as a word.
+_REDIRECTION_OPERATOR_RX = re.compile(
+    r"(?:\d+|\{[A-Za-z_][A-Za-z0-9_]*\})?(?P<op><<<|<<-?|<>|>>|>\||>&|<&|>|<)"
+    r"|&>>?"
+)
+# What may follow a `$` that starts an expansion (a name, positional or
+# special parameter, `${`, `$(`, `$[`); any other `$` is a literal character. Outside
+# double quotes `$'...'` and `$"..."` also start one.
+_EXPANSION_START_RX = re.compile(r"[A-Za-z0-9_@*#?$!{(\[-]")
+# `${NAME}`, `${NAME:-default}` and the like with no quotes, escapes, or
+# nesting inside: the only braced expansions whose extent this scan follows.
+_SIMPLE_BRACED_RX = re.compile(r"\$\{[^{}'\"\\`$\n]*\}")
 
 
-_R_ARGS_WORD_RX = re.compile(r"--args(?=\s|$)")
+class _RWord(NamedTuple):
+    text: str  # the word after quote removal (as written if it cannot be)
+    known: bool  # False when the shell computes part of it
+    splits: bool = False  # computed outside quotes: may become 0 or 2+ words
 
 
-def _r_command_suffix(command: str, offset: int) -> str | None:
-    """The R command from offset, cut before an unquoted `--args` word.
+class UnresolvedScript(NamedTuple):
+    """An R script run whose script this scan cannot name with certainty.
 
-    R ignores every word after `--args`, so trailing arguments such as
-    `--args $(date)` must not make an otherwise readable command unsupported.
+    ``candidate`` is the file word as written on the command line; shell
+    syntax (or, for ``R CMD BATCH``, ``R_BATCH_OPTIONS``) may make R read a
+    different file.
     """
-    unquoted = _unquoted_shell_text(command)
-    if unquoted is not None:
-        for match in _R_ARGS_WORD_RX.finditer(unquoted, offset):
-            start = match.start()
-            if start <= offset or command[start - 1] not in " \t\n":
-                continue
-            if command[match.end() : match.end() + 1] not in {"", " ", "\t", "\n"}:
-                continue  # `--args'x'` is the one word `--argsx`, not `--args`
-            if command[offset:start].rstrip()[-1:] in {"<", ">", "|", "&"}:
-                # A redirection target (`>`, `>>`, `>|`, `>&`, `<&` ...), not
-                # an argument; a bare `|` or `&` would end the command anyway.
-                continue
-            fragment = _simple_command_suffix(command[:start], offset)
-            # Use the cut only when the scan reached it: a `;`, `&&`, `|` or
-            # newline in between means `--args` belongs to a later command.
-            if fragment is not None and offset + len(fragment) == start:
-                return fragment + "--args"
-            break
-    return _simple_command_suffix(command, offset)
+
+    candidate: str
+    batch: bool = False  # an `R CMD BATCH` run rather than `R -f`
 
 
-_WHITESPACE_RUN_RX = re.compile(r"\s+")
+def _decode_r_word(raw: str) -> str | None:
+    """Decode one shell word, including the `\\$` and `\\`` that bash
+    unescapes inside double quotes but shlex leaves alone."""
+    out: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char == "\\" and quote != "'":
+            pair = raw[index : index + 2]
+            out.append(pair[1:] if quote == '"' and pair[1:] in {"$", "`"} else pair)
+            index += 2
+            continue
+        if char in "'\"" and quote in (None, char):
+            quote = None if quote else char
+        out.append(char)
+        index += 1
+    return _decode_shell_word("".join(out))
+
+
+def _expansion(raw: str) -> tuple[bool, bool]:
+    """(computed, splits) for one shell word.
+
+    Computed: an expansion (a `$` that starts one, a backtick, or a process
+    substitution) outside '...'. Splits: a `$` expansion or backtick outside
+    any quotes, so the shell may make the word into zero or several words. A
+    process substitution is one word (a pipe path).
+    """
+    computed = False
+    quote: str | None = None
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if char in "'\"" and quote in (None, char):
+            quote = None if quote else char
+        elif quote != "'" and (
+            char == "`"
+            or (
+                char == "$"
+                and (
+                    _EXPANSION_START_RX.match(raw, index + 1)
+                    or (quote is None and raw[index + 1 : index + 2] in {"'", '"'})
+                )
+            )
+        ):
+            if quote is None:
+                return True, True
+            computed = True
+        elif char in "<>" and raw[index + 1 : index + 2] == "(" and quote is None:
+            computed = True
+        index += 1
+    return computed, False
 
 
 def _scan_shell_group(command: str, index: int, closer: str) -> int | None:
     """Offset just past `closer`, skipping nested quotes and substitutions.
 
-    Returns None (unknown) for a comment or a `${...}` expansion inside,
-    whose quoting rules this scan does not model, and, inside `(...)`, for
-    anything beyond one simple pipeline on one line (a newline, `;`, a line
-    continuation, or `case`, whose patterns and heredocs carry unbalanced
-    parentheses). Ordinary targets like `$(date +%s)` and `>(tee log)` pass.
+    Returns None (unknown) for a comment or a `${...}` expansion with quotes
+    or nesting inside, whose quoting rules this scan does not model, and,
+    inside `(...)`, for anything beyond one simple pipeline on one line (a
+    newline, `;`, a line continuation, or `case`, whose patterns and heredocs
+    carry unbalanced parentheses). Ordinary targets like `$(date +%s)`,
+    `>(tee log)` and `"${LOG}"` pass.
     """
     while index < len(command):
         char = command[index]
         following = command[index + 1 : index + 2]
-        if char == "#" or (char == "$" and following == "{"):
+        if char == "$" and following == "{":
+            braced = _SIMPLE_BRACED_RX.match(command, index)
+            if braced is None:
+                return None
+            index = braced.end()
+            continue
+        # `#` inside double quotes is literal text, not a comment.
+        if char == "#" and closer != '"':
             return None
         if closer == ")" and (
             char in "\n;"
@@ -1231,7 +1296,10 @@ def _scan_shell_group(command: str, index: int, closer: str) -> int | None:
 
 
 def _shell_word_end(command: str, index: int) -> int | None:
-    """End offset of the shell word at index, substitutions included."""
+    """End offset of the shell word at index, substitutions included.
+
+    The command must already have its line continuations joined.
+    """
     start = index
     while index < len(command):
         char = command[index]
@@ -1244,11 +1312,8 @@ def _shell_word_end(command: str, index: int) -> int | None:
                 break
             next_index = _scan_shell_group(command, index + 2, ")")
         elif char == "$" and following == "{":
-            return None
-        elif char == "\\" and following == "\n":
-            if index == start:
-                return None  # the caller skips continuations before a word
-            next_index = index + 2
+            braced = _SIMPLE_BRACED_RX.match(command, index)
+            next_index = None if braced is None else braced.end()
         elif char == "$" and following == "(":
             next_index = _scan_shell_group(command, index + 2, ")")
         elif char == "`":
@@ -1271,109 +1336,184 @@ def _shell_word_end(command: str, index: int) -> int | None:
     return index if index > start else None
 
 
-def _blank_redirection_targets(command: str, offset: int) -> str:
-    """Replace each redirection target of the simple command at offset with a
-    same-length placeholder word.
-
-    A target never becomes an argument, but one the scanner cannot tokenize
-    (`> run_$(date).log`, `2> >(tee err)`) would otherwise make every later
-    word unknown. Returns the command unchanged if a target does not close.
-    """
-    out = list(command)
+def _quoted_delimiter_end(command: str, index: int) -> int | None:
+    """End of a heredoc delimiter that starts with a quote. Bash never
+    expands a delimiter, so `$` and backticks inside it are plain text."""
     quote: str | None = None
+    while index < len(command) and (quote or command[index] not in " \t\n;&|()<>"):
+        char = command[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if char in "'\"" and quote in (None, char):
+            quote = None if quote else char
+        index += 1
+    return None if quote or index > len(command) else index
+
+
+def _r_words(command: str, offset: int) -> Generator[_RWord, None, bool]:
+    """Yield the words of the simple command at offset, redirections dropped.
+
+    The generator returns True when it read to the end of the command and
+    False when it stopped at syntax it cannot follow, such as a subshell.
+    A heredoc's body starts after the newline, where the command ends, so its
+    delimiter is skipped like any redirection target. Words are decoded only
+    as a caller asks for them.
+    """
     index = offset
+    if command.find("\\\n", offset) >= 0:
+        # Bash joins line continuations before it reads words or operators,
+        # so `2\<newline>>&1` is the redirection `2>&1`.
+        command, index = _join_line_continuations(command[offset:]), 0
     try:
-        while index < len(command):
-            char = command[index]
-            if quote == "'":
-                if char == "'":
-                    quote = None
+        while True:
+            while command[index : index + 1] in {" ", "\t"}:
                 index += 1
-                continue
-            if quote == '"':
-                if char == "\\":
-                    index += 2
-                    continue
-                if char == '"':
-                    quote = None
-                index += 1
-                continue
-            if char == "\\":
-                index += 2
-                continue
-            if char in {"'", '"'}:
-                quote = char
-            elif char in ";\n(":
-                break
-            elif char == "|" and (index == offset or command[index - 1] != ">"):
-                break
-            elif char == "&" and command[index + 1 : index + 2] != ">" and (
-                index == offset or command[index - 1] not in "<>"
-            ):
-                break
-            elif char in "<>":
-                target = index
-                while target < len(command) and command[target] in "<>&|":
-                    target += 1
-                while target < len(command):
-                    if command[target] in " \t":
-                        target += 1
-                    elif command[target : target + 2] == "\\\n":
-                        target += 2  # a line continuation is not the target
-                    else:
-                        break
-                end = _shell_word_end(command, target)
+            if index >= len(command) or command[index] in ";\n|)#":
+                return True
+            operator = None
+            if not command.startswith(("<(", ">("), index):
+                operator = _REDIRECTION_OPERATOR_RX.match(command, index)
+            if operator is not None:
+                index = operator.end()
+                while command[index : index + 1] in {" ", "\t"}:
+                    index += 1
+                if operator.group("op") in {"<<", "<<-"} and command[
+                    index : index + 1
+                ] in {"'", '"'}:
+                    end = _quoted_delimiter_end(command, index)
+                else:
+                    end = _shell_word_end(command, index)
                 if end is None:
-                    return command
-                out[target:end] = "_" * (end - target)
+                    return False
                 index = end
                 continue
-            index += 1
+            if command[index] == "&":
+                return True
+            end = _shell_word_end(command, index)
+            if end is None:
+                return False
+            raw = command[index:end]
+            index = end
+            computed, splits = _expansion(raw)
+            decoded = _decode_r_word(raw)
+            if computed:
+                yield _RWord(raw if decoded is None else decoded, False, splits)
+            elif decoded is not None:
+                yield _RWord(decoded, True)
+            else:
+                return False
     except RecursionError:
-        return command
-    return "".join(out)
+        return False
 
 
-def _readable_argv(
-    command: str, offset: int, *, cut_at_r_args: bool = False
-) -> tuple[list[str], bool] | None:
-    """(argv, complete) for the simple command at offset.
+def _known_words(texts: list[str]) -> Generator[_RWord, None, bool]:
+    yield from (_RWord(text, True) for text in texts)
+    return True
 
-    When the whole command does not tokenize (say `$(date).Rout`, or a
-    `> >(tee log)` redirection), return the longest prefix ending at a word
-    boundary that does, with complete=False: the words before the unreadable
-    syntax are exact, but later words (another `--file=`, `--print-home`) are
-    unknown. `cut_at_r_args` first stops at R's own `--args`. Redirection
-    targets are blanked first, since they never reach argv.
+
+class _Words:
+    """Words read from a word generator only as far as a caller looks."""
+
+    def __init__(self, source: Generator[_RWord, None, bool]) -> None:
+        self._source = source
+        self._read: list[_RWord] = []
+        self.complete: bool | None = None  # set once the source is exhausted
+
+    def get(self, index: int) -> _RWord | None:
+        while index >= len(self._read) and self.complete is None:
+            try:
+                self._read.append(next(self._source))
+            except StopIteration as stop:
+                self.complete = bool(stop.value)
+        return self._read[index] if index < len(self._read) else None
+
+
+class _RArgv(NamedTuple):
+    expressions: list[str]  # every known `-e` value, in order
+    file: _RWord | None  # the last `-f`/`--file=` value
+    stopped: bool  # a stop word, or `-e` with `-f`: the payload never runs
+    complete: bool  # False when unknown words may follow
+
+
+def _walk_r_argv(words: _Words, *, rscript: bool) -> _RArgv:
+    """Read R's (or Rscript's) options from words 1.. by the rule above.
+
+    R honors stop words and the last `-f`/`--file=` anywhere before `--args`
+    (checked on R 4.6). Rscript reads consecutive `-e EXPR` pairs and stops at
+    the first other word; its stop words are left to its regex.
     """
-    command = _blank_redirection_targets(command, offset)
-    if cut_at_r_args:
-        fragment = _r_command_suffix(command, offset)
+    expressions: list[str] = []
+    file: _RWord | None = None
+    has_expression = False  # computed expressions are not recorded, but count
+    complete = False
+    index = 1  # word 0 is the executable itself
+    while (word := words.get(index)) is not None:
+        text = word.text
+        if not word.known:
+            # Where an option belongs, an unknown word may be one that takes
+            # the next word as its value, so nothing after it is known. Only
+            # a quoted `--file="$F"` is certain to be one word and the file.
+            if rscript or not text.startswith("--file="):
+                break
+            file = _RWord(text[len("--file=") :], False)
+            if word.splits:
+                break
+            index += 1
+            continue
+        if text == "--args":
+            complete = True
+            break
+        takes_value = text in _R_SEPARATED_VALUE_OPTIONS
+        value = words.get(index + 1) if takes_value else None
+        if rscript and text != "-e":
+            if has_expression:
+                break
+            index += 1
+            continue
+        if not rscript and (
+            text in _R_STOP_WORDS
+            or text.startswith("--debugger=")
+            # R exits when -e/-f has no value (not merely an unreadable one).
+            or (text in {"-e", "-f"} and value is None and words.complete)
+        ):
+            return _RArgv(expressions, file, True, True)
+        if text == "-e" and value is not None:
+            has_expression = True
+            if value.known:  # a computed expression is not recorded as source
+                expressions.append(value.text)
+        elif text == "-f" and value is not None:
+            file = value
+        elif text.startswith("--file="):
+            file = _RWord(text[len("--file=") :], True)
+        if value is not None and value.splits:
+            break  # an unquoted computed value may split into more words
+        index += 2 if takes_value else 1
     else:
-        fragment = _simple_command_suffix(command, offset)
-    tokens = _simple_command_argv(fragment) if fragment is not None else None
-    if tokens:
-        return tokens, True
-    boundaries = [m.start() for m in _WHITESPACE_RUN_RX.finditer(command, offset)]
-    for boundary in reversed(boundaries):
-        fragment = _simple_command_suffix(command[:boundary], offset)
-        tokens = _simple_command_argv(fragment) if fragment is not None else None
-        if tokens:
-            return tokens, False
-    return None
+        complete = bool(words.complete)
+    stopped = not rscript and has_expression and file is not None
+    return _RArgv(expressions, file, stopped, complete)
 
 
-_BATCH_UNRESOLVED = "unresolved"
+def _r_inline_argv(command: str, offset: int, *, rscript: bool) -> _RArgv:
+    return _walk_r_argv(_Words(_r_words(command, offset)), rscript=rscript)
 
 
-# env options that take a separated value (GNU and BSD spellings).
-_ENV_VALUE_OPTIONS = {"-C", "--chdir", "-S", "--split-string", "-P", "-a", "--argv0"}
-# A word whose value the shell computes ($VAR, $(...), `...`) is unknown here.
-_SHELL_EXPANSION_MARKERS = ("$", "`")
+def _r_file_script(command: str, match: re.Match[str]) -> _RWord | None:
+    """The script an `R -f`/`R --file=` run reads, or None if R never runs it.
 
-
-def _has_shell_expansion(word: str) -> bool:
-    return any(marker in word for marker in _SHELL_EXPANSION_MARKERS)
+    Returns an unknown word when unknown words may override the file.
+    """
+    argv = _r_inline_argv(command, match.start(), rscript=False)
+    if argv.stopped:
+        return None
+    if argv.file is None:
+        if argv.complete:
+            return None
+        # An unknown word before the matched `-f` (`$OPTS -f a.R`).
+        matched_word = match.group("path")
+        return _RWord(_decode_shell_word(matched_word) or matched_word, False)
+    return argv.file if argv.complete else argv.file._replace(known=False)
 
 
 def _ifs_split(text: str) -> list[str]:
@@ -1382,266 +1522,97 @@ def _ifs_split(text: str) -> list[str]:
     return [field for field in re.split(r"[ \t\n]+", text) if field]
 
 
-def _prefix_variable_value(
-    command: str, prefix: list[str], name: str
-) -> str | None:
-    """The value of `name` the command after `prefix` sees, or None if unknown.
-
-    Starts from the hook's environment, then applies the prefix in execution
-    order: `NAME=value` assignments (literal values only), `env -i`/
-    `--ignore-environment`, `env -u NAME`/`--unset=NAME`, and `exec -c`.
-    Wrapper names may be path-qualified (`/usr/bin/env`). A mention of `name`
-    elsewhere in the command (`export NAME=...`) makes the inherited value
-    unknown.
-    """
-    outside = command.count(name) - sum(token.count(name) for token in prefix)
-    value: str | None = None if outside > 0 else os.environ.get(name, "")
-    index = 0
-    while index < len(prefix):
-        token = prefix[index]
-        index += 1
-        if _ASSIGNMENT_RX.match(token):
-            key, assigned = token.split("=", 1)
-            if key == name:
-                value = None if any(c in assigned for c in "$`") else assigned
-            continue
-        wrapper = os.path.basename(token)
-        if wrapper not in {"env", "exec"}:
-            continue
-        while index < len(prefix) and prefix[index].startswith("-"):
-            flag = prefix[index]
-            index += 1
-            if flag == "--":
-                break
-            if wrapper == "env":
-                if flag in _ENV_VALUE_OPTIONS:
-                    index += 1  # `env -C DIR`, `-S STRING`, ...: skip the value
-                elif flag in {"-i", "--ignore-environment"}:
-                    value = ""
-                elif flag in {"-u", "--unset"} and index < len(prefix):
-                    if prefix[index] == name:
-                        value = ""
-                    index += 1
-                elif flag in {f"-u{name}", f"--unset={name}"}:
-                    value = ""
-            elif flag == "-a" and index < len(prefix):
-                index += 1  # exec -a NAME
-            elif not flag.startswith("--") and "c" in flag[1:]:
-                value = ""
-    return value
+def _literal_batch_options(command: str, offset: int) -> str | None:
+    """The literal `R_BATCH_OPTIONS=...` value assigned on the command at
+    offset itself, or None when its prefix has anything but assignments or
+    the value is computed."""
+    prefix = _current_command_prefix(command[:offset])
+    if not prefix or not all(_ASSIGNMENT_RX.match(token) for token in prefix):
+        return None
+    values = [t.split("=", 1)[1] for t in prefix if t.startswith("R_BATCH_OPTIONS=")]
+    if not values or re.search(r"[$`]", values[-1]):
+        return None
+    return values[-1]
 
 
-def _r_batch_input_word(
-    command: str, match: re.Match[str]
-) -> tuple[str, str] | None:
+def _r_batch_script(command: str, match: re.Match[str]) -> _RWord | None:
     """The script R reads for an `R CMD BATCH` match, or None if none runs.
 
     Mirrors R's BATCH script (R 4.6): it exits on -h/--help/-v/--version,
     drops --no-timing, ends options at `--` or the first non-option word (the
     input), forwards -d/-g with their value and every other `-*` word, then
-    runs `R -f INPUT $opts` with $opts unquoted, so a quoted `"--args x=1"`
-    splits into words. R then honors a forwarded debugger or --print-home,
-    refuses a forwarded `-e` (BATCH always passes `-f`), and reads the last
-    `-f`/`--file=` before `--args`.
-
-    Returns ("path", quoted word), ("unresolved", input word) when
-    R_BATCH_OPTIONS was set in a way this scan cannot read, or None.
+    runs `R -f INPUT $opts $R_BATCH_OPTIONS` with all three unquoted, so each
+    splits into words. R then reads that argv by the rule above. A literal
+    `R_BATCH_OPTIONS=...` assignment on this command itself is read exactly.
+    Any other mention of the variable (export, `env`, a computed value) is
+    not modelled: the run is unresolved unless the options already stop R.
+    Otherwise the variable is ignored.
     """
-    readable = _readable_argv(command, match.start())
-    if readable is None:
-        return None
-    tokens, complete = readable
-    try:
-        index = next(
-            i + 2
-            for i in range(len(tokens) - 1)
-            if tokens[i] == "CMD" and tokens[i + 1] == "BATCH"
-        )
-    except StopIteration:
-        return None
+    words = _Words(_r_words(command, match.start()))
+    index = 0
+    while (word := words.get(index)) is not None and not (
+        word.known
+        and word.text == "CMD"
+        and getattr(words.get(index + 1), "text", None) == "BATCH"
+    ):
+        index += 1
+    matched_word = match.group("path")
+    matched = _RWord(_decode_shell_word(matched_word) or matched_word, False)
+    if word is None:
+        # `CMD BATCH` past syntax the reader cannot follow still runs.
+        return None if words.complete else matched
+    index += 2
     forwarded: list[str] = []
-    infile: str | None = None
-    while index < len(tokens):
-        token = tokens[index]
-        if _has_shell_expansion(token):
-            # `"$OPTS ..."` may expand to anything, --args or the input
-            # included: keep the run, but do not guess the script.
-            matched = _shlex_words(match.group("path"))
-            if matched and len(matched) == 1:
-                return (_BATCH_UNRESOLVED, matched[0])
+    infile: _RWord | None = None
+    while (word := words.get(index)) is not None:
+        if word.text in {"-d", "-g"} and word.known:
+            value = words.get(index + 1)
+            if value is None or value.known:
+                forwarded.extend(w.text for w in (word, value) if w is not None)
+                index += 2
+                continue
+            word = value  # BATCH splits a computed value unquoted
+        if not word.known:
+            # `$OPTS` may expand to anything, the input included: name the
+            # first R-script-shaped word after it as the likely input.
+            while (later := words.get(index)) is not None:
+                if later.known and re.fullmatch(r"[^-].*\.[Rr]", later.text):
+                    return later._replace(known=False)
+                index += 1
+            return matched
+        if word.text in {"-h", "--help", "-v", "--version"}:
             return None
-        if token in {"-h", "--help", "-v", "--version"}:
-            return None
-        if token == "--":
-            infile = tokens[index + 1] if index + 1 < len(tokens) else None
+        if word.text == "--":
+            infile = words.get(index + 1)
             break
-        if token in {"-d", "-g"}:
-            forwarded.extend(tokens[index : index + 2])
-            index += 2
-            continue
-        if token.startswith("-"):
-            if token != "--no-timing":
-                forwarded.append(token)
+        if word.text.startswith("-"):
+            if word.text != "--no-timing":
+                forwarded.append(word.text)
             index += 1
             continue
-        infile = token
+        infile = word
         break
     if infile is None:
-        if not complete:
-            # The input lies past unreadable syntax: BATCH may well run it.
-            matched = _shlex_words(match.group("path"))
-            if matched and len(matched) == 1:
-                return (_BATCH_UNRESOLVED, matched[0])
-        return None
-    # BATCH runs `R -f ${in} ${opts}` with both unquoted, so each splits into
-    # words: R reads the first word of the input, the rest become arguments.
-    in_words = _ifs_split(infile)
+        # Input past unreadable syntax: BATCH may well run it.
+        return None if words.complete else matched
+    if not infile.known:
+        return infile
+    in_words = _ifs_split(infile.text)
     if not in_words:
         return None
-    effective = in_words[0]
-    # BATCH appends $R_BATCH_OPTIONS (unquoted) after its own options; take it
-    # from the hook's environment plus this command's prefix assignments. A
-    # value set any other way (`export`, an expansion) is unknown, so the
-    # script R reads is recorded as unresolved rather than guessed.
-    prefix = _current_command_prefix(command[: match.start()]) or []
-    batch_options = _prefix_variable_value(command, prefix, "R_BATCH_OPTIONS")
-    if batch_options is None:
-        return (_BATCH_UNRESOLVED, effective)
-    words = in_words[1:] + _ifs_split(" ".join(forwarded)) + _ifs_split(batch_options)
-    index = 0
-    while index < len(words):
-        word = words[index]
-        if word == "--args":
-            break
-        if word in _R_DEBUGGER_OPTIONS or word.startswith("--debugger="):
-            return None
-        if word in _R_TERMINAL_OPTIONS or word == "-e":
-            return None
-        if word == "-f" and index + 1 < len(words):
-            effective = words[index + 1]
-        elif word.startswith("--file="):
-            effective = word[len("--file=") :]
-        index += 2 if word in _R_SEPARATED_VALUE_OPTIONS else 1
-    if _has_shell_expansion(effective) or any(map(_has_shell_expansion, words)):
-        return (_BATCH_UNRESOLVED, effective)
-    if not re.fullmatch(r".+\.[Rr]", effective):
+    batch_options = _literal_batch_options(command, match.start())
+    r_argv = ["R", "-f", *in_words, *_ifs_split(" ".join(forwarded))]
+    argv = _walk_r_argv(
+        _Words(_known_words([*r_argv, *_ifs_split(batch_options or "")])),
+        rscript=False,
+    )
+    if argv.stopped or argv.file is None:
         return None
-    return ("path", shlex.quote(effective))
-
-
-def _r_effective_file_word(
-    command: str, match: re.Match[str]
-) -> tuple[str, str] | None:
-    """The script word R actually runs for an `R -f`/`R CMD BATCH` match.
-
-    R honors the last `-f`/`--file=` before `--args` (checked on R 4.6), and
-    BATCH appends its forwarded options after `-f infile`, so a forwarded
-    `--file=` overrides the input file. Falls back to the matched word.
-    """
-    matched = match.group("path")
-    readable = _readable_argv(command, match.start(), cut_at_r_args=True)
-    if readable is None:
-        return ("path", matched)
-    tokens, complete = readable
-    last: str | None = None
-    index = 1
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "--args":
-            break
-        if _has_shell_expansion(token):
-            complete = False  # `$OPTS` may expand to another --file=
-            break
-        if token == "-f" and index + 1 < len(tokens):
-            last = tokens[index + 1]
-        elif token.startswith("--file="):
-            last = token[len("--file=") :]
-        index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
-    if last is not None and _has_shell_expansion(last):
-        # `--file="$SCRIPT"`: the shell picks the file; keep the run unresolved.
-        return (_BATCH_UNRESOLVED, last)
-    if not complete:
-        # Words past unreadable syntax may override the file or stop R.
-        words = _shlex_words(matched) if last is None else [last]
-        return (_BATCH_UNRESOLVED, words[0]) if words and len(words) == 1 else None
-    if last is None or [last] == _shlex_words(matched):
-        return ("path", matched)
-    return ("path", shlex.quote(last))
-
-
-def _shlex_words(word: str) -> list[str] | None:
-    try:
-        return shlex.split(word, comments=False, posix=True)
-    except ValueError:
+    if batch_options is None and "R_BATCH_OPTIONS" in command:
+        return _RWord(in_words[0], False)
+    if not re.fullmatch(r".+\.[Rr]", argv.file.text):
         return None
-
-
-def _r_match_is_rejected(command: str, offset: int) -> bool:
-    """Whether R's full argv (up to `--args`) prevents the matched payload.
-
-    R honors `--help`/`--version`/`--print-home`/`RHOME`/`CMD` and the
-    debugger options wherever they appear before `--args`, and refuses to
-    combine `-e` with `-f`/`--file`. Option values are skipped so an
-    expression that merely contains `--version` stays code.
-
-    Shell syntax this scan cannot read (process substitution, say) keeps the
-    match: the regex already proved the payload, and dropping it would lose
-    lineage the plain pattern records.
-    """
-    readable = _readable_argv(command, offset, cut_at_r_args=True)
-    if readable is None:
-        return False
-    tokens, _ = readable
-    has_expression = has_file = False
-    index = 1  # tokens[0] is the R executable itself
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "--args":
-            break
-        if _has_shell_expansion(token):
-            # `$ARGS` may expand to `--args` (or anything): what follows is
-            # unknown, so keep the proven payload rather than reject it.
-            return False
-        if token in _R_TERMINAL_OPTIONS:
-            return True
-        if token in _R_DEBUGGER_OPTIONS or token.startswith("--debugger="):
-            return True
-        if token == "-e":
-            has_expression = True
-        elif token == "-f" or token.startswith("--file="):
-            has_file = True
-        index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
-    return has_expression and has_file
-
-
-def _r_inline_expressions(command: str, offset: int, rscript: bool) -> str | None:
-    """Every `-e` expression of one R/Rscript command, in execution order.
-
-    R collects `-e` anywhere before `--args`; Rscript reads consecutive
-    `-e EXPR` pairs and stops at the first other word. Returns None when the
-    argv cannot be read, so the caller keeps the single matched expression.
-    """
-    readable = _readable_argv(command, offset, cut_at_r_args=True)
-    if readable is None:
-        return None
-    tokens, _ = readable
-    expressions: list[str] = []
-    index = 1  # tokens[0] is the executable itself
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "-e" and index + 1 < len(tokens):
-            expressions.append(tokens[index + 1])
-            index += 2
-            continue
-        if token == "--args" or _has_shell_expansion(token):
-            break  # `$ARGS` may expand to --args: later -e may never run
-        if rscript:
-            if expressions:
-                break  # Rscript stops at the first word after its -e pairs
-            index += 1
-            continue
-        index += 2 if token in _R_SEPARATED_VALUE_OPTIONS else 1
-    return "\n".join(expressions) if expressions else None
+    return argv.file
 
 
 _CWD_AFFECTING_BUILTINS = {"pushd", "popd", "source", ".", "eval"}
@@ -3179,24 +3150,30 @@ def _detect_scripts_with_cwd(
     bash_exit: int | None = None,
     require_execution_evidence: bool = False,
     include_inline: bool = True,
-) -> list[tuple[Path | None, str | None, Path | None]]:
+) -> list[tuple[Path | UnresolvedScript | None, str | None, Path | None]]:
     """Return (script_path, inline_source, effective_cwd) detections.
 
-    ``include_inline=False`` drops inline one-liners (``python -c``,
-    ``R -e``, ``Rscript -e``) for the post-action check; lineage keeps them.
+    ``script_path`` is an ``UnresolvedScript`` for an R script run whose
+    script cannot be named with certainty. ``include_inline=False`` drops
+    inline one-liners (``python -c``, ``R -e``, ``Rscript -e``) for the
+    post-action check; lineage keeps them.
     """
-    out: list[tuple[Path | None, str | None, Path | None]] = []
+    out: list[tuple[Path | UnresolvedScript | None, str | None, Path | None]] = []
     seen_paths: set[Path] = set()
+    seen_unresolved: set[tuple[UnresolvedScript, Path]] = set()
     seen_inline: set[tuple[str, Path | None]] = set()
     inline_patterns = (RX_PYTHON_C, RX_R_E, RX_RSCRIPT_E) if include_inline else ()
     for pattern in inline_patterns:
         for m in pattern.finditer(bash_cmd):
             if not _match_has_expected_executable(m, pattern):
                 continue
-            if pattern in _R_ARGV_SCANNED_PATTERNS and _r_match_is_rejected(
-                bash_cmd, m.start()
-            ):
-                continue
+            r_argv = None
+            if pattern in (RX_R_E, RX_RSCRIPT_E):
+                r_argv = _r_inline_argv(
+                    bash_cmd, m.start(), rscript=pattern is RX_RSCRIPT_E
+                )
+                if r_argv.stopped:
+                    continue
             effective_cwd = _command_effective_cwd(bash_cmd, m.start(), cwd)
             if effective_cwd is None:
                 continue
@@ -3204,16 +3181,17 @@ def _detect_scripts_with_cwd(
                 bash_cmd, m.start(), bash_exit, cwd
             ):
                 continue
-            src = _decode_shell_word(m.group("source_word"))
+            source_word = m.group("source_word")
+            if r_argv is not None:
+                if not r_argv.expressions and _expansion(source_word)[0]:
+                    continue  # a computed expression is never recorded
+                src = _decode_r_word(source_word)
+            else:
+                src = _decode_shell_word(source_word)
             if src is None:
                 continue
-            if pattern in (RX_R_E, RX_RSCRIPT_E):
-                src = (
-                    _r_inline_expressions(
-                        bash_cmd, m.start(), rscript=pattern is RX_RSCRIPT_E
-                    )
-                    or src
-                )
+            if r_argv is not None and r_argv.expressions:
+                src = "\n".join(r_argv.expressions)
             identity = (src, effective_cwd)
             if identity not in seen_inline:
                 out.append((None, src, effective_cwd))
@@ -3246,9 +3224,12 @@ def _detect_scripts_with_cwd(
         for m in pattern.finditer(bash_cmd):
             if not _match_has_expected_executable(m, pattern):
                 continue
-            if pattern in _R_ARGV_SCANNED_PATTERNS and _r_match_is_rejected(
-                bash_cmd, m.start()
-            ):
+            r_script = None
+            if pattern is RX_R_FILE_PATH:
+                r_script = _r_file_script(bash_cmd, m)
+            elif pattern is RX_R_CMD_BATCH_PATH:
+                r_script = _r_batch_script(bash_cmd, m)
+            if pattern in (RX_R_FILE_PATH, RX_R_CMD_BATCH_PATH) and r_script is None:
                 continue
             if (
                 pattern is RX_JUPYTER_SCRIPT_PATH
@@ -3263,29 +3244,19 @@ def _detect_scripts_with_cwd(
             ):
                 continue
             path_word = m.group("path")
-            if pattern in (RX_R_FILE_PATH, RX_R_CMD_BATCH_PATH):
-                resolved = (
-                    _r_effective_file_word(bash_cmd, m)
-                    if pattern is RX_R_FILE_PATH
-                    else _r_batch_input_word(bash_cmd, m)
-                )
-                if resolved is None:
-                    continue
-                kind, path_word = resolved
-                if kind == _BATCH_UNRESOLVED:
-                    if pattern is RX_R_FILE_PATH:
-                        form, cause = "R -f", "shell syntax"
-                    else:
-                        form, cause = "R CMD BATCH", "shell syntax or R_BATCH_OPTIONS"
-                    source = (
-                        f"# {form} {path_word}: {cause} this scan cannot read "
-                        "may change the script R reads"
+            if r_script is not None:
+                if not r_script.known:
+                    unresolved_key = (
+                        UnresolvedScript(
+                            r_script.text, pattern is RX_R_CMD_BATCH_PATH
+                        ),
+                        effective_cwd,
                     )
-                    identity = (source, effective_cwd)
-                    if identity not in seen_inline:
-                        out.append((None, source, effective_cwd))
-                        seen_inline.add(identity)
+                    if unresolved_key not in seen_unresolved:
+                        out.append((unresolved_key[0], None, effective_cwd))
+                        seen_unresolved.add(unresolved_key)
                     continue
+                path_word = shlex.quote(r_script.text)
             try:
                 path_words = shlex.split(path_word, comments=False, posix=True)
             except ValueError:
@@ -3344,11 +3315,15 @@ def _detect_scripts_with_cwd(
     return out
 
 
-def detect_scripts(bash_cmd: str, cwd: Path) -> list[tuple[Path | None, str | None]]:
+def detect_scripts(
+    bash_cmd: str, cwd: Path
+) -> list[tuple[Path | UnresolvedScript | None, str | None]]:
     """Return every (script_path, inline_source) detection in the command.
 
     A `python a.py && python b.py` chain yields two tuples; mixed inline and
-    file-based forms work too. Each tuple has exactly one non-None field.
+    file-based forms work too. Each tuple has exactly one non-None field;
+    ``script_path`` is an ``UnresolvedScript`` when an R run's script is
+    uncertain.
     Deduped by identity (same path or same inline source appears once).
     """
     return [
@@ -3905,7 +3880,7 @@ def get_git_sha(cwd: Path) -> str | None:
 
 
 def build_event_for_detection(
-    detection: tuple[Path | None, str | None],
+    detection: tuple[Path | UnresolvedScript | None, str | None],
     args: argparse.Namespace,
     cwd: Path | None,
     git_sha: str | None,
@@ -3918,6 +3893,28 @@ def build_event_for_detection(
     Returns None only if the script is unreadable or the detection is empty.
     """
     script_path, inline_source = detection
+    if isinstance(script_path, UnresolvedScript):
+        # The run happened, but R may have read a file other than the one
+        # named, so nothing is read, hashed, or scanned.
+        return _event_dict(
+            args,
+            None,
+            None,
+            None,
+            git_sha,
+            inputs=[],
+            outputs=[],
+            io_detection="unresolved",
+            lineage_warnings=[
+                "R ran a script, but shell syntax"
+                + (" or R_BATCH_OPTIONS" if script_path.batch else "")
+                + " may have changed which one; the command names "
+                + f"{script_path.candidate}."
+            ],
+            filters=[],
+            seeds=[],
+            script_candidate=script_path.candidate,
+        )
     source = ""
     script_sha: str | None = None
     script_source_embed: str | None = None
@@ -4002,6 +3999,7 @@ def _event_dict(
     lineage_warnings: list[str],
     filters: list[str],
     seeds: list[int],
+    script_candidate: str | None = None,
 ) -> dict:
     return {
         "ts": args.ts,
@@ -4013,6 +4011,7 @@ def _event_dict(
         "script": str(script_path) if script_path else None,
         "script_sha256": script_sha,
         "script_source": script_source_embed,
+        "script_candidate": script_candidate,
         "git_sha": git_sha,
         "inputs": inputs,
         "outputs": outputs,
