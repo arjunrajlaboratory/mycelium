@@ -865,11 +865,17 @@ replaces, not an approximation. A cache of per-checkpoint states must stay
 linear in memory too: share stacks between states and keep summaries rather
 than copying histories. The first version of this fix copied the operator
 history into every checkpoint, so a 6,000-command `&&` chain held about
-150 MB.
+150 MB. Pruning start positions does not help inside one `match()` call, so
+check each pattern's own repetitions as well: two alternatives that accept
+the same word (`--output=x` as a known value option and as a generic
+`--name=value`) double the work per repetition, and a lazy word loop that
+retries a path at every whitespace split re-reads a word containing escaped
+blanks once per split.
 
 **Regression evidence:** Timing tests with generous bounds on long
 quoted-word runs, quote and escape runs, many-line commands, and long
 `&&`/`||` chains; a `tracemalloc` peak bound on long chains and deep
 nesting; and deterministic fuzz tests that compare each
 fast path with the plain computation (pruned scan against `finditer`,
-cached prefix folds against whole-prefix tokenization).
+cached prefix folds against whole-prefix tokenization, each rewritten
+regex against its previous version).

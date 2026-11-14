@@ -135,10 +135,11 @@ _NONTERMINAL_LONG_OPTION = (
     r"--(?!(?:args|help(?:-all)?|print-home|version)(?:=|\s|$))\S+"
 )
 _NONTERMINAL_LONG_OPTIONS = rf"(?:{_NONTERMINAL_LONG_OPTION}\s+)*"
-_JUPYTER_VALUE_OPTION_NAME = (
-    r"(?:-o|--(?:config|format|log-level|nbformat|output|output-dir|post|"
-    r"reveal-prefix|template|template-file|theme|to|writer))"
+_JUPYTER_VALUE_LONG_OPTION_NAMES = (
+    r"(?:config|format|log-level|nbformat|output|output-dir|post|"
+    r"reveal-prefix|template|template-file|theme|to|writer)"
 )
+_JUPYTER_VALUE_OPTION_NAME = rf"(?:-o|--{_JUPYTER_VALUE_LONG_OPTION_NAMES})"
 _JUPYTER_VALUE_OPTION = (
     rf"{_JUPYTER_VALUE_OPTION_NAME}(?:={_SHELL_WORD}|\s+{_SHELL_WORD})"
 )
@@ -150,8 +151,12 @@ _JUPYTER_FLAG_OPTION = (
 # Traitlets accepts arbitrary configurable options in --Class.name=value form.
 # Unknown separated-value options are rejected conservatively because their
 # arity is unknowable here and an .ipynb-looking value is not the input file.
+# The known value options are excluded here because `_JUPYTER_VALUE_OPTION`
+# already consumes `--output=x` identically: two alternatives for one word
+# made each option double the backtracking (14 options took seconds).
 _JUPYTER_ASSIGNED_OPTION = (
-    rf"--(?!(?:help(?:-all)?|version)=)[^=\s]+={_SHELL_WORD}"
+    rf"--(?!(?:help(?:-all)?|version|{_JUPYTER_VALUE_LONG_OPTION_NAMES})=)"
+    rf"[^=\s]+={_SHELL_WORD}"
 )
 _JUPYTER_OPTIONS = (
     rf"(?:(?:{_JUPYTER_VALUE_OPTION}|{_JUPYTER_FLAG_OPTION}|"
@@ -214,10 +219,22 @@ RX_R_FILE_PATH = re.compile(
 # pattern only locates a BATCH call with an R-script-shaped word after it;
 # `_r_batch_script` then reads the argv the way R's BATCH script does to
 # decide whether it runs and which file R actually reads.
+# One whitespace-split step (`[^\s;&|]+[ \t]+`) that shell lexing reads as
+# whole word components ending in an escaped blank, as in `a\ `: the word
+# after it continues the same shell word. A path attempt there would rescan
+# the rest of that word, which the attempt one step earlier already failed
+# on, so `R CMD BATCH a\ a\ ...` went quadratic. The attempt is skipped
+# rather than the step, which keeps every match identical.
+_BATCH_CONTINUED_STEP = (
+    r"""(?:[^\s|&;()<>"'\\]|\\[()<>"'\\]|\\(?=[^\s|&;()<>"'\\])"""
+    r"""|"(?:\\[^\s;&|]|[^"\\\s;&|])*"|'[^'\s;&|]*')*"""
+    r"\\[ \t](?![ \t])"
+)
 RX_R_CMD_BATCH_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<r_exe>{_R_EXE})\s+{_R_OPTIONS}CMD\s+BATCH\s+"
     # Never cross a command boundary (`;`, `&&`, `|`, newline) to find a path.
-    rf"(?:[^\s;&|]+[ \t]+)*?(?P<path>{_R_SCRIPT_PATH})"
+    rf"(?:(?:{_BATCH_CONTINUED_STEP})*(?!{_BATCH_CONTINUED_STEP})[^\s;&|]+[ \t]+)*?"
+    rf"(?P<path>{_R_SCRIPT_PATH})"
 )
 RX_JUPYTER_SCRIPT_PATH = re.compile(
     rf"(?<![A-Za-z0-9_.-])(?P<jupyter_exe>{_JUPYTER_EXE})\s+"
@@ -871,7 +888,9 @@ def _simple_cd_status(segment: list[str], cwd: Path) -> tuple[bool | None, Path]
         options_done = True
     if len(arguments) != 1 or arguments[0] == "-" or "$" in arguments[0]:
         return None, cwd
-    target = Path(os.path.expanduser(arguments[0]))
+    target = _expanded_static_path(arguments[0])
+    if target is None:
+        return None, cwd
     if not target.is_absolute():
         target = cwd / target
     if physical:
@@ -909,9 +928,24 @@ def _physical_cd_target(target: Path) -> Path | None:
             continue
         try:
             resolved = Path(os.path.realpath(resolved / part, strict=True))
-        except OSError:
+        except (OSError, ValueError):
             return None
     return resolved
+
+
+def _expanded_static_path(value: str) -> Path | None:
+    """Expand `~` in a command-derived path, or ``None`` if no OS call can take it.
+
+    A NUL byte makes `os.path.expanduser`, `realpath` and `os.access` raise
+    ValueError rather than OSError; such a word is never a path the shell
+    could have used, so callers treat it as unknown instead of crashing.
+    """
+    if "\x00" in value:
+        return None
+    try:
+        return Path(os.path.expanduser(value))
+    except (OSError, ValueError):
+        return None
 
 
 def _apply_cd(segment: list[str], cwd: Path) -> Path:
@@ -2325,7 +2359,9 @@ def _resolve_wrapper_directory(value: str, cwd: Path) -> Path | None:
     """Resolve a static wrapper cwd, rejecting dynamic or unusable targets."""
     if not value or any(marker in value for marker in ("$", "`")):
         return None
-    target = Path(os.path.expanduser(value))
+    target = _expanded_static_path(value)
+    if target is None:
+        return None
     if not target.is_absolute():
         target = cwd / target
     target = Path(os.path.abspath(target))

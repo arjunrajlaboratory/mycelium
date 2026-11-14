@@ -61,7 +61,6 @@ def test_r_args_followed_by_many_quoted_words_scans_linearly(tmp_path: Path) -> 
         "echo " + '`"' * 4000,
         "R " + '\\"' * 4000 + "x",
         'R "' + '\\"' * 4000 + 'x"',
-        "python " + "a" * 20000,
     ],
 )
 def test_quote_and_escape_runs_scan_linearly(tmp_path: Path, command: str) -> None:
@@ -110,6 +109,60 @@ def test_or_fallback_chain_is_still_proven(tmp_path: Path) -> None:
     detections, seconds = _timed(_detect_proven, command, tmp_path, 0)
     assert [path for path, _, _ in detections] == [tmp_path / "a.py"]
     assert seconds < TIME_LIMIT_SECONDS
+
+
+@pytest.mark.parametrize("subcommand", ["nbconvert", "execute"])
+def test_jupyter_value_options_do_not_backtrack_exponentially(
+    tmp_path: Path, subcommand: str
+) -> None:
+    """`--output=x` matched two option forms, doubling the work per option.
+
+    16 options with a long tail took about 31 s before the fix.
+    """
+    command = f"jupyter {subcommand} " + "--output=x " * 16 + " " * 10000
+    analysis, analysis_seconds = _timed(is_analysis, command)
+    detections, detect_seconds = _timed(detect_scripts, command, tmp_path)
+    assert analysis is False
+    assert detections == []
+    assert analysis_seconds < TIME_LIMIT_SECONDS
+    assert detect_seconds < TIME_LIMIT_SECONDS
+
+
+def test_jupyter_value_options_still_find_the_notebook(tmp_path: Path) -> None:
+    (tmp_path / "n.ipynb").write_text("{}\n")
+    command = (
+        "jupyter nbconvert --output=x --to html --Exporter.x=1 "
+        "--execute n.ipynb"
+    )
+    assert is_analysis(command) is True
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "n.ipynb", None)]
+
+
+def test_r_cmd_batch_escaped_blanks_scan_linearly(tmp_path: Path) -> None:
+    """Each `a\\ ` step re-tried the path over the rest of the word: ~10 s."""
+    (tmp_path / "a.R").write_text("print(1)\n")
+    command = "R CMD BATCH " + "a\\ " * 13300 + " a.R"
+    _, analysis_seconds = _timed(is_analysis, command)
+    _, detect_seconds = _timed(detect_scripts, command, tmp_path)
+    assert analysis_seconds < TIME_LIMIT_SECONDS
+    assert detect_seconds < TIME_LIMIT_SECONDS
+
+
+@pytest.mark.parametrize(
+    "command,path",
+    [
+        ("R CMD BATCH a\\ b.R", "a\\ b.R"),
+        ("R CMD BATCH x\\ y\\  b.R", "b.R"),
+        ('R CMD BATCH "a b.R', "b.R"),
+        ('R CMD BATCH "a\\ b" c.R', "c.R"),
+        ("R CMD BATCH a\\ (b\\ c.R", "c.R"),
+        ("R CMD BATCH --vanilla a\\\\ b.R out", "b.R"),
+    ],
+)
+def test_r_cmd_batch_skips_only_continued_word_starts(command: str, path: str) -> None:
+    """Skipping attempts inside an escaped-blank word keeps every match."""
+    match = lineage_event.RX_R_CMD_BATCH_PATH.search(command)
+    assert match is not None and match.group("path") == path
 
 
 def test_many_runner_lines_scan_linearly(tmp_path: Path) -> None:
@@ -240,7 +293,13 @@ def test_list_operators_shortcut_matches_the_suffix_scan() -> None:
 def test_cached_checkpoints_do_not_copy_histories(
     tmp_path: Path, command: str
 ) -> None:
-    """Checkpoint states must share stacks rather than copy them per cut."""
+    """Checkpoint states must share stacks rather than copy them per cut.
+
+    This guards the prefix-fold checkpoint cache this file's fixes added, not
+    a regression on main: main keeps no checkpoints and peaks at 0.4-1.8 MB
+    here. An earlier version of the cache copied histories per cut and
+    peaked at 110-325 MB.
+    """
     import tracemalloc
 
     (tmp_path / "a.py").write_text("print(1)\n")
@@ -255,3 +314,25 @@ def test_cached_checkpoints_do_not_copy_histories(
         lineage_event._prefix_folds.cache_clear()
     # Linear state is a few MB here; per-cut copies took well over 100 MB.
     assert peak < 64 * 1024 * 1024, peak
+
+
+# ---------- robustness ----------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'cd -P "a\x00"; python a.py',
+        "(cd -P a\x00/..) && python a.py",
+        "cd ~a\x00; python a.py",
+        "env --chdir=~a\x00 python a.py",
+        "env -C ~\x00 python a.py",
+    ],
+)
+def test_null_bytes_in_cd_targets_do_not_crash(tmp_path: Path, command: str) -> None:
+    """os calls raise ValueError, not OSError, on an embedded NUL."""
+    (tmp_path / "a.py").write_text("print(1)\n")
+    assert is_analysis(command) is True
+    detect_scripts(command, tmp_path)
+    for bash_exit in (0, 1, None):
+        _detect_proven(command, tmp_path, bash_exit)

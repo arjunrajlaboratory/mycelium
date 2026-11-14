@@ -275,8 +275,12 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Command scanning stays linear in the command length: no regex retries
       a variable-length shell word from every start position, and no
       per-match proof re-reads the whole command before or after its match.
-      Timing tests with generous bounds pin long quoted-word runs,
-      many-line commands, and long `&&`/`||` chains.
+      Within one pattern, no repeated group has two alternatives that accept
+      the same word. Timing tests with generous bounds pin long quoted-word
+      runs, many-line commands, long `&&`/`||` chains, repeated Jupyter
+      options, and `R CMD BATCH` with escaped blanks.
+- [ ] Command-derived paths reach `os` calls only after a NUL check:
+      `expanduser`, `realpath` and `os.access` raise ValueError, not OSError.
 - [ ] Inferred paths are canonicalized and proven to remain within the project
       before they are trusted or written.
 - [ ] `apply_patch` activity is recorded only after a successful tool result,
