@@ -272,6 +272,11 @@ hook, filesystem, or lifecycle boundaries.
       suffixes such as `"analysis.py".bak`, `"a.R".bak`, and
       `"a.ipynb".bak` cannot be attributed to the shorter quoted filename,
       while adjacent shell redirections remain valid word boundaries.
+- [ ] Command scanning stays linear in the command length: no regex retries
+      a variable-length shell word from every start position, and no
+      per-match proof re-reads the whole command before or after its match.
+      Timing tests with generous bounds pin long quoted-word runs,
+      many-line commands, and long `&&`/`||` chains.
 - [ ] Inferred paths are canonicalized and proven to remain within the project
       before they are trusted or written.
 - [ ] `apply_patch` activity is recorded only after a successful tool result,
@@ -502,6 +507,7 @@ exercise them.
 | `env -C sub`, `conda run --cwd sub`, or `uv run --directory sub` wraps an analysis command | Scripts and data paths resolve relative to the wrapper-selected directory; missing or dynamic directories are rejected. |
 | `time`, `exec`, `nice`, and `timeout` wrap or nest around an interpreter | Real executions are captured, while malformed options and an unrelated wrapped command containing interpreter text are rejected. |
 | Jupyter uses `--to notebook input.ipynb` or `--output converted.ipynb input.ipynb` | Option arity is honored and only `input.ipynb` is attributed; an unknown separated-value option fails conservatively. |
+| A command holds thousands of quoted words after an interpreter, thousands of interpreter lines, or a 1,500-command `&&`/`||` chain | Detection finishes in well under a second and matches the plain (unpruned, uncached) scan exactly. |
 | Python/R inline source contains escaped quotes or adjacent quoted components | The complete shell word is decoded and later data references remain visible. |
 | `R -e`, `R -q -e`, `R --vanilla -q -e`, `R -e … --args`, `Rscript -e`, and `python -c` run; or `R -f script.R`, `R --file=script.R`, `R CMD BATCH script.R`, and `Rscript script.R` run | Every inline one-liner is exempt from the post-action check yet still recorded as lineage; every script run opens the post-action cycle and records its script. `R -e … --version`, `R --args -e …`, `R -d lldb -e …`, and `R -f script.R RHOME` record nothing. |
 | `--help`/`--version` or `-h`/`-V` precedes an apparent interpreter payload | No execution or lineage is attributed, including terminal short-option clusters and adjacent R/Jupyter forms. |

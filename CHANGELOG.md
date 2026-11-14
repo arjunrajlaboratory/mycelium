@@ -39,6 +39,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and stall the hook. The
   planning guide now lists `R -e '...'` among its read-only probes. Existing
   projects need no migration.
+- **The lineage hook scans each command in linear time.** The detector runs
+  on every shell command the agent executes, and hooks.json sets no timeout,
+  but several of its scans were quadratic in the command length. Every
+  interpreter and runner pattern re-walked a run of quoted words from each
+  start position (`R -f a.R --args` followed by 5,000 `"$x"` words took about
+  58 s), and every candidate match re-tokenized the whole command before it to
+  prove it ran and find its working directory (800 `R -q -e` lines took
+  several seconds; a 1,000-command `&&` chain took about 12 s). The patterns
+  now skip start positions that provably cannot match, and the prefix proofs
+  resume from cached checkpoints after each shell operator, so those inputs
+  take well under a second. Which commands are detected, and with which
+  scripts, sources, and working directories, is unchanged: a differential
+  fuzz of 32,000 generated commands against the previous detector showed no
+  differences. Existing projects need no migration.
 - **Stop names a destroyed session-log header instead of hiding it in a
   sidecar file.** When an agent rewrote the hook-owned session log
   (`.living/log/<date>-<nnn>-<project>.md`) with a whole-file write, the YAML
