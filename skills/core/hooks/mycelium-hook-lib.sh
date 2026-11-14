@@ -912,18 +912,33 @@ import io
 import sys
 
 raw = sys.stdin.buffer.read()
-# The extra frames here shift the Python recursion limit by a few levels, so
-# a payload that could nest anywhere near it is left to the separate
-# decoders. Every bracket a decoder can meet, including inside JSON held in
-# JSON strings, is a literal bracket or a backslash-u escape of one in the
-# raw bytes.
-lowered = raw.lower()
-nesting_bound = (
-    raw.count(b"[") + raw.count(b"{")
-    + lowered.count(b"u005b") + lowered.count(b"u007b")
-)
-if nesting_bound >= sys.getrecursionlimit() - 200:
-    raise SystemExit(0)
+
+
+# A body run through exec sits a few frames deeper than the same body run by
+# python3 -c, so deep JSON can hit the recursion limit here when it would
+# not on its own (the decoders swallow that error). Never the other way
+# round: this process has no more headroom. So note every RecursionError the
+# JSON decoder raises and leave those slots to the separate decoders.
+import json
+
+real_load, real_loads = json.load, json.loads
+recursion_hit = []
+
+
+def watched_load(*args, **kwargs):
+    try:
+        return real_load(*args, **kwargs)
+    except RecursionError:
+        recursion_hit.append(True)
+        raise
+
+
+def watched_loads(*args, **kwargs):
+    try:
+        return real_loads(*args, **kwargs)
+    except RecursionError:
+        recursion_hit.append(True)
+        raise
 in_encoding, in_errors = sys.stdin.encoding, sys.stdin.errors
 out_encoding, out_errors = sys.stdout.encoding, sys.stdout.errors
 real_stdin, real_stdout, real_argv = sys.stdin, sys.stdout, sys.argv
@@ -940,6 +955,8 @@ for index in range(0, len(args) - 3, 4):
     )
     sys.argv = ["-c", path] if has_path == "1" else ["-c"]
     status = 0
+    del recursion_hit[:]
+    json.load, json.loads = watched_load, watched_loads
     try:
         try:
             exec(compile(body, "<string>", "exec"), {"__name__": "__main__"})
@@ -957,7 +974,8 @@ for index in range(0, len(args) - 3, 4):
         continue
     finally:
         sys.stdin, sys.stdout, sys.argv = real_stdin, real_stdout, real_argv
-    if b"\0" in output or not 0 <= status <= 255:
+        json.load, json.loads = real_load, real_loads
+    if recursion_hit or b"\0" in output or not 0 <= status <= 255:
         continue
     records.append((slot, status, output))
 out = sys.stdout.buffer
@@ -997,7 +1015,13 @@ mycelium_payload_preload() {
   shift
   local -a argv=()
   local slot="" body="" path="" status="" output="" var=""
+  local IFS=$' \t\n'
+  local restore_nocasematch=false
 
+  if shopt -q nocasematch; then
+    restore_nocasematch=true
+    shopt -u nocasematch
+  fi
   MYCELIUM__PC_READY=false
   for var in $MYCELIUM__PC_SLOT_VARS; do
     unset "${var}_S" "${var}_O"
@@ -1021,7 +1045,10 @@ mycelium_payload_preload() {
       argv+=("$slot" "$body" "$path" 1)
     fi
   done
-  (( ${#argv[@]} > 0 )) || return 0
+  if (( ${#argv[@]} == 0 )); then
+    [[ "$restore_nocasematch" == false ]] || shopt -s nocasematch
+    return 0
+  fi
 
   while IFS= read -r -d '' slot     && IFS= read -r -d '' status     && IFS= read -r -d '' output; do
     mycelium__payload_slot_ok "$slot" || continue
@@ -1034,6 +1061,7 @@ mycelium_payload_preload() {
 
   MYCELIUM__PC_RAW="$raw"
   MYCELIUM__PC_READY=true
+  [[ "$restore_nocasematch" == false ]] || shopt -s nocasematch
   return 0
 }
 
@@ -1042,11 +1070,19 @@ mycelium_payload_preload() {
 mycelium__payload_cached() {
   local slot="$1"
   local payload="$2"
-  local var="" status_var="" output_var=""
+  local var="" status_var="" output_var="" same=false
 
-  [[ "$MYCELIUM__PC_READY" == true && "$payload" == "$MYCELIUM__PC_RAW" ]] \
-    || return 1
-  mycelium__payload_slot_ok "$slot" || return 1
+  [[ "$MYCELIUM__PC_READY" == true ]] || return 1
+  if shopt -q nocasematch; then
+    shopt -u nocasematch
+    [[ "$payload" == "$MYCELIUM__PC_RAW" ]] && mycelium__payload_slot_ok "$slot" \
+      && same=true
+    shopt -s nocasematch
+  else
+    [[ "$payload" == "$MYCELIUM__PC_RAW" ]] && mycelium__payload_slot_ok "$slot" \
+      && same=true
+  fi
+  [[ "$same" == true ]] || return 1
   mycelium__payload_slot_var "$slot"
   var="$MYCELIUM__PC_VAR"
   status_var="${var}_S"
@@ -1063,8 +1099,9 @@ mycelium_json_get() {
   local dotted_path="$1"
   if (( $# > 1 )); then
     if mycelium__payload_cached "get:$dotted_path" "$2"; then
-      printf '%s' "$MYCELIUM__PC_OUT"
-      return "$MYCELIUM__PC_STATUS"
+      # If stdout cannot take the answer, let the decoder meet the same
+      # stdout and report whatever it would.
+      printf '%s' "$MYCELIUM__PC_OUT" && return "$MYCELIUM__PC_STATUS"
     fi
     printf '%s' "$2" | python3 -c "$MYCELIUM__PY_JSON_GET" "$dotted_path"
     return
@@ -1078,8 +1115,7 @@ mycelium_json_get_optional_string() {
   local dotted_path="$1"
   if (( $# > 1 )); then
     if mycelium__payload_cached "opt:$dotted_path" "$2"; then
-      printf '%s' "$MYCELIUM__PC_OUT"
-      return "$MYCELIUM__PC_STATUS"
+      printf '%s' "$MYCELIUM__PC_OUT" && return "$MYCELIUM__PC_STATUS"
     fi
     printf '%s' "$2" \
       | python3 -c "$MYCELIUM__PY_JSON_OPTIONAL_STRING" "$dotted_path"
@@ -1092,8 +1128,7 @@ mycelium_json_get_optional_string() {
 mycelium_bash_exit() {
   if (( $# > 0 )); then
     if mycelium__payload_cached "exit:" "$1"; then
-      printf '%s' "$MYCELIUM__PC_OUT"
-      return "$MYCELIUM__PC_STATUS"
+      printf '%s' "$MYCELIUM__PC_OUT" && return "$MYCELIUM__PC_STATUS"
     fi
     printf '%s' "$1" | python3 -c "$MYCELIUM__PY_BASH_EXIT"
     return

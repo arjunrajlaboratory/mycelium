@@ -150,12 +150,25 @@ def test_deep_nesting_matches_on_every_installed_python(tmp_path, python):
     (shim_dir / "python3").symlink_to(python)
     env = os.environ.copy()
     env["PATH"] = f"{shim_dir}{os.pathsep}{env['PATH']}"
-    for depth in range(984, 1000):
-        payload_file = tmp_path / f"deep-{depth}.json"
-        payload_file.write_bytes(
-            b'{"cwd": "ok", "session_id": "s1", "extra": '
-            + b"[" * depth + b"0" + b"]" * depth + b"}"
+    payloads = {
+        f"deep-{depth}": b'{"cwd": "ok", "session_id": "s1", "extra": '
+        + b"[" * depth + b"0" + b"]" * depth + b"}"
+        for depth in range(984, 1000)
+    }
+    # Nesting hidden behind JSON held in a JSON string, with the escapes for
+    # the brackets themselves escaped again, so no byte count can see it.
+    for depth in (985, 991, 995):
+        inner = "[" * depth + '{"\\u0065xit_code":7}' + "]" * depth
+        hidden = json.dumps(inner).replace("[", "\\u005b").replace("{", "\\u007b")
+        payloads[f"hidden-{depth}"] = (
+            json.dumps({"cwd": "ok", "tool_response": hidden})
+            .replace("u005b", "\\u0075005b")
+            .replace("u007b", "\\u0075007b")
+            .encode()
         )
+    for name, payload in payloads.items():
+        payload_file = tmp_path / f"{name}.json"
+        payload_file.write_bytes(payload)
         result = subprocess.run(
             ["bash", "-c", COMPARE, "compare", str(LIB), str(payload_file),
              "get:cwd", "opt:session_id", "exit:"],
@@ -165,7 +178,7 @@ def test_deep_nesting_matches_on_every_installed_python(tmp_path, python):
         )
         for line in result.stdout.splitlines():
             slot, _hit, cached, direct = line.split(b"\t")
-            assert cached == direct, (python, depth, slot, cached, direct)
+            assert cached == direct, (python, name, slot, cached, direct)
 
 
 def test_cache_answers_ordinary_fields_without_new_interpreters(tmp_path):
@@ -219,6 +232,49 @@ mycelium_json_get source "$p"
 """
     )
     assert out == "second\n"
+
+
+def test_preload_clears_old_answers_whatever_ifs_is():
+    out = _probe(
+        """
+IFS=$'\\n\\t'
+mycelium_payload_preload '{"source":"old"}' get:source
+mycelium_payload_preload '{"source":"new"}' get:cwd
+mycelium_json_get source '{"source":"new"}'
+"""
+    )
+    assert out == "new\n"
+
+
+def test_cache_compares_payloads_case_sensitively():
+    out = _probe(
+        """
+shopt -s nocasematch
+mycelium_payload_preload '{"cwd":"lower"}' get:cwd
+mycelium_json_get cwd '{"cwd":"LOWER"}'
+shopt -q nocasematch && echo still-set
+"""
+    )
+    assert out == "LOWER\nstill-set\n"
+
+
+def test_cached_answer_meets_a_closed_stdout_like_the_decoder():
+    out = _probe(
+        """
+p='{"cwd":"x"}'
+mycelium_payload_preload "$p" get:cwd opt:cwd exit:
+for f in "mycelium_json_get cwd" "mycelium_json_get_optional_string cwd" "mycelium_bash_exit"; do
+  if $f "$p" >&- 2>/dev/null; then c=0; else c=$?; fi
+  if printf '%s' "$p" | $f >&- 2>/dev/null; then d=0; else d=$?; fi
+  echo "$c $d"
+done
+"""
+    )
+    lines = out.splitlines()
+    assert len(lines) == 3
+    for line in lines:
+        cached, direct = line.split()
+        assert cached == direct, out
 
 
 def test_distinct_paths_never_share_a_cache_entry():
