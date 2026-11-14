@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **An R run whose script is uncertain is recorded as such, not as a fake
+  inline script.** When shell syntax or `R_BATCH_OPTIONS` may change which
+  file `R -f` or `R CMD BATCH` reads, the lineage event used to carry a
+  diagnostic sentence in `script_source` and a `script_sha256` of that
+  sentence. It now has `script`, `script_source`, and `script_sha256` all
+  `null`, a new `script_candidate` field with the file word the command names,
+  `io_detection: "unresolved"`, and a warning; the Stop manifest lists it as
+  `(unresolved <candidate>)`. Every event now carries `script_candidate`
+  (`null` unless unresolved). `R CMD BATCH` no longer simulates
+  `R_BATCH_OPTIONS` from prefix assignments, `env -i`/`-u`, `exec -c`, or the
+  hook's own environment, which is not the agent shell's: only a literal
+  `R_BATCH_OPTIONS=...` assignment on the BATCH command itself is read, any
+  other mention leaves the run unresolved, and otherwise the variable is
+  ignored. One rule now governs `$`/backtick words in every R form: a
+  double-quoted one (`-f "$D/a.R"`) is one unknown word and reading goes on,
+  while an unquoted one ends the readable argv, so a script after it is
+  unresolved; a computed `-e` value is never recorded as source, and a `$`
+  inside single quotes (`R -f 'cost$x.R'`) is literal. The R reader scans only its own simple command, so long scripts of
+  `R -e` probes no longer rescan the whole command per match. Which common R
+  commands count as analysis runs is unchanged; existing event logs and
+  projects need no migration.
+
 ### Fixed
 
 - **Inline R one-liners no longer depend on which startup flag was typed.**
@@ -46,7 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   start position (`R -f a.R --args` followed by 5,000 `"$x"` words took about
   58 s), and every candidate match re-tokenized the whole command before it to
   prove it ran and find its working directory (800 `R -q -e` lines took
-  several seconds; a 1,000-command `&&` chain took about 12 s). The patterns
+  several seconds; a 1,000-command `&&` chain took about 16 s). The patterns
   now skip start positions that provably cannot match, and the prefix proofs
   resume from cached checkpoints after each shell operator, so those inputs
   take well under a second. Which commands are detected, and with which
