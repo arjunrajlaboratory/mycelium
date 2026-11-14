@@ -277,6 +277,47 @@ done
         assert cached == direct, out
 
 
+def test_cached_answer_meets_a_broken_pipe_like_the_decoder():
+    base = (
+        "set -euo pipefail\n"
+        f'source "{LIB}"\n'
+        "p='{\"cwd\":\"x\"}'\n"
+        "mycelium_payload_preload \"$p\" get:cwd opt:cwd exit:\n"
+    )
+    for cached, direct in (
+        ('mycelium_json_get cwd "$p"', 'printf "%s" "$p" | mycelium_json_get cwd'),
+        (
+            'mycelium_json_get_optional_string cwd "$p"',
+            'printf "%s" "$p" | mycelium_json_get_optional_string cwd',
+        ),
+    ):
+        codes = []
+        for call in (cached, direct):
+            reader, writer = os.pipe()
+            os.close(reader)
+            result = subprocess.run(
+                ["bash", "-c", base + call],
+                stdout=writer,
+                stderr=subprocess.DEVNULL,
+            )
+            os.close(writer)
+            codes.append(result.returncode)
+        assert codes[0] == codes[1], (cached, codes)
+
+
+def test_sourcing_the_library_again_keeps_old_answers_clearable():
+    out = _probe(
+        """
+mycelium_payload_preload '{"source":"old"}' get:source
+source "$1"
+p='{"source":"new"}'
+mycelium_payload_preload "$p" get:cwd
+mycelium_json_get source "$p"
+"""
+    )
+    assert out == "new\n"
+
+
 def test_distinct_paths_never_share_a_cache_entry():
     out = _probe(
         """

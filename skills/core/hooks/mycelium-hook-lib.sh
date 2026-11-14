@@ -989,7 +989,15 @@ MYCELIUM__PC_READY=false
 MYCELIUM__PC_OUT=""
 MYCELIUM__PC_STATUS=0
 MYCELIUM__PC_VAR=""
-MYCELIUM__PC_SLOT_VARS=""
+# Kept across a repeated `source` so the next preload can still clear them.
+MYCELIUM__PC_SLOT_VARS="${MYCELIUM__PC_SLOT_VARS-}"
+
+# Print the cached answer. A closed or failing stdout makes this fail rather
+# than kill the shell with SIGPIPE, so the caller can let the real decoder
+# meet the same stdout.
+mycelium__payload_write() {
+  ( trap '' PIPE; printf '%s' "$MYCELIUM__PC_OUT" ) 2>/dev/null
+}
 
 # Slot names are fixed decoder kinds plus dotted payload paths.
 mycelium__payload_slot_ok() {
@@ -1101,7 +1109,7 @@ mycelium_json_get() {
     if mycelium__payload_cached "get:$dotted_path" "$2"; then
       # If stdout cannot take the answer, let the decoder meet the same
       # stdout and report whatever it would.
-      printf '%s' "$MYCELIUM__PC_OUT" && return "$MYCELIUM__PC_STATUS"
+      mycelium__payload_write && return "$MYCELIUM__PC_STATUS"
     fi
     printf '%s' "$2" | python3 -c "$MYCELIUM__PY_JSON_GET" "$dotted_path"
     return
@@ -1115,7 +1123,7 @@ mycelium_json_get_optional_string() {
   local dotted_path="$1"
   if (( $# > 1 )); then
     if mycelium__payload_cached "opt:$dotted_path" "$2"; then
-      printf '%s' "$MYCELIUM__PC_OUT" && return "$MYCELIUM__PC_STATUS"
+      mycelium__payload_write && return "$MYCELIUM__PC_STATUS"
     fi
     printf '%s' "$2" \
       | python3 -c "$MYCELIUM__PY_JSON_OPTIONAL_STRING" "$dotted_path"
@@ -1128,7 +1136,7 @@ mycelium_json_get_optional_string() {
 mycelium_bash_exit() {
   if (( $# > 0 )); then
     if mycelium__payload_cached "exit:" "$1"; then
-      printf '%s' "$MYCELIUM__PC_OUT" && return "$MYCELIUM__PC_STATUS"
+      mycelium__payload_write && return "$MYCELIUM__PC_STATUS"
     fi
     printf '%s' "$1" | python3 -c "$MYCELIUM__PY_BASH_EXIT"
     return
