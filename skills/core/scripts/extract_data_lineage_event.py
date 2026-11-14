@@ -1148,9 +1148,9 @@ _REDIRECTION_OPERATOR_RX = re.compile(
     r"|&>>?"
 )
 # What may follow a `$` that starts an expansion (a name, positional or
-# special parameter, `${`, `$(`); any other `$` is a literal character. Outside
+# special parameter, `${`, `$(`, `$[`); any other `$` is a literal character. Outside
 # double quotes `$'...'` and `$"..."` also start one.
-_EXPANSION_START_RX = re.compile(r"[A-Za-z0-9_@*#?$!{(-]")
+_EXPANSION_START_RX = re.compile(r"[A-Za-z0-9_@*#?$!{(\[-]")
 # `${NAME}`, `${NAME:-default}` and the like with no quotes, escapes, or
 # nesting inside: the only braced expansions whose extent this scan follows.
 _SIMPLE_BRACED_RX = re.compile(r"\$\{[^{}'\"\\`$\n]*\}")
@@ -1336,6 +1336,21 @@ def _shell_word_end(command: str, index: int) -> int | None:
     return index if index > start else None
 
 
+def _quoted_delimiter_end(command: str, index: int) -> int | None:
+    """End of a heredoc delimiter that starts with a quote. Bash never
+    expands a delimiter, so `$` and backticks inside it are plain text."""
+    quote: str | None = None
+    while index < len(command) and (quote or command[index] not in " \t\n;&|()<>"):
+        char = command[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if char in "'\"" and quote in (None, char):
+            quote = None if quote else char
+        index += 1
+    return None if quote or index > len(command) else index
+
+
 def _r_words(command: str, offset: int) -> Generator[_RWord, None, bool]:
     """Yield the words of the simple command at offset, redirections dropped.
 
@@ -1363,7 +1378,12 @@ def _r_words(command: str, offset: int) -> Generator[_RWord, None, bool]:
                 index = operator.end()
                 while command[index : index + 1] in {" ", "\t"}:
                     index += 1
-                end = _shell_word_end(command, index)
+                if operator.group("op") in {"<<", "<<-"} and command[
+                    index : index + 1
+                ] in {"'", '"'}:
+                    end = _quoted_delimiter_end(command, index)
+                else:
+                    end = _shell_word_end(command, index)
                 if end is None:
                     return False
                 index = end

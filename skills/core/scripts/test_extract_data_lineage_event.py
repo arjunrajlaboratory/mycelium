@@ -4147,3 +4147,55 @@ def test_heredoc_does_not_hide_a_known_script(tmp_path: Path, command: str) -> N
 def test_heredoc_delimiter_line_still_reads_stop_words(tmp_path: Path) -> None:
     (tmp_path / "first.R").write_text("print(1)\n")
     assert detect_scripts("R -f first.R <<EOF --version\nx\nEOF", tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("command", "literal"),
+    [
+        # `$[expr]` is (deprecated) arithmetic expansion: bash expands it.
+        ('R -f "a$[1].R"', "a$[1].R"),
+        ("R -f a$[1].R", "a$[1].R"),
+        ('R --file="script$[1+1].R"', "script$[1+1].R"),
+        ('R CMD BATCH "a$[1].R"', "a$[1].R"),
+        # Special and positional parameters expand.
+        ('R -f "a$$.R"', "a$$.R"),
+        ('R -f "a$@.R"', "a$@.R"),
+        ('R -f "a$*.R"', "a$*.R"),
+        ('R -f "a$#.R"', "a$#.R"),
+        ('R -f "a$?.R"', "a$?.R"),
+        ('R -f "a$!.R"', "a$!.R"),
+        ('R -f "a$-b.R"', "a$-b.R"),
+        ('R -f "a$1.R"', "a$1.R"),
+    ],
+)
+def test_expanding_dollar_forms_never_resolve_to_a_literal_path(
+    tmp_path: Path, command: str, literal: str
+) -> None:
+    (tmp_path / literal).write_text("print(1)\n")
+    detections = detect_scripts(command, tmp_path)
+    assert detections and all(
+        isinstance(script, UnresolvedScript) for script, _ in detections
+    ), detections
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Rscript -e $'cat(1)'",
+        'Rscript -e $"cat(1)"',
+        'Rscript -e "x <- $[1+1]"',
+        'R -e "cat($1)"',
+        'R -e "cat($#)"',
+    ],
+)
+def test_expanding_dollar_forms_are_never_recorded_as_code(command: str) -> None:
+    assert detect_scripts(command, Path("/tmp")) == []
+
+
+def test_quoted_heredoc_delimiter_is_not_expanded(tmp_path: Path) -> None:
+    """A quoted heredoc delimiter is taken literally, so `$` inside it does
+    not make the later `--file=` unreadable."""
+    for name in ("first.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    command = 'R -f first.R <<"${EOF:-$DEFAULT}" --file=second.R\nx\n${EOF:-$DEFAULT}'
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "second.R", None)]
