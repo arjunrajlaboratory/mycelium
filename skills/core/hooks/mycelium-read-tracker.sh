@@ -16,9 +16,10 @@ source "$HERE/mycelium-hook-lib.sh"
 # Wrap everything in a guard — if anything fails, exit 0 silently
 {
   INPUT=$(cat)
+  mycelium_payload_preload "$INPUT" 'get:tool_input.file_path' 'get:cwd' 'opt:session_id'
 
   # Extract the file path from tool input
-  FILE_PATH=$(printf '%s' "$INPUT" | mycelium_json_get 'tool_input.file_path')
+  FILE_PATH=$(mycelium_json_get 'tool_input.file_path' "$INPUT")
   if [[ -z "$FILE_PATH" ]]; then
     exit 0
   fi
@@ -29,7 +30,7 @@ source "$HERE/mycelium-hook-lib.sh"
   fi
 
   # Find repo root — must be a git repo with .living/ present
-  SESSION_CWD=$(printf '%s' "$INPUT" | mycelium_json_get 'cwd')
+  SESSION_CWD=$(mycelium_json_get 'cwd' "$INPUT")
   [[ -z "$SESSION_CWD" ]] && SESSION_CWD=$(pwd)
   REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo "")
   if [[ -z "$REPO_ROOT" ]]; then

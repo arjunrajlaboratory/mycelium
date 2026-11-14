@@ -19,6 +19,8 @@ source "$HERE/mycelium-hook-lib.sh"
 
 INPUT=$(cat)
 
+mycelium_payload_preload "$INPUT" 'get:cwd' 'opt:session_id'
+
 # PostToolUse payloads describe attempted edits as well as successful ones.
 # Ignore an explicitly failed result; an absent status remains compatible with
 # Claude's Edit/Write payloads and older Codex versions.
@@ -106,7 +108,7 @@ fi
 
 # --- Repo and .living/ checks ---
 
-SESSION_CWD=$(printf '%s' "$INPUT" | mycelium_json_get 'cwd')
+SESSION_CWD=$(mycelium_json_get 'cwd' "$INPUT")
 if [[ -z "$SESSION_CWD" ]]; then
   SESSION_CWD=$(pwd)
 fi

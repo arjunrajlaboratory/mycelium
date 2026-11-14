@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -161,11 +162,24 @@ def check_changelog(repo: Path, version: str) -> str:
     return match.group(1)
 
 
+def parallel_pytest_args() -> list[str]:
+    """Spread the hook-heavy compatibility suite across cores when possible.
+
+    Most of its time is spent waiting on hook subprocesses, and every test
+    works in its own temporary repository, so pytest-xdist can run them side
+    by side. Without xdist the suite still runs, one test at a time.
+    """
+    if importlib.util.find_spec("xdist") is None:
+        return []
+    return ["-n", "auto", "--dist", "worksteal"]
+
+
 def ladder_commands(repo: Path, skip_knowledge_map: bool) -> list[list[str]]:
     # pytest's cache provider is disabled so .pytest_cache is never created
     # inside the candidate; bytecode goes to the runner's temp cache prefix.
     commands = [
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         *parallel_pytest_args(),
          "skills/core/scripts",
          "--ignore=skills/core/scripts/knowledge_map"],
     ]

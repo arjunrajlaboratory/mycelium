@@ -24,9 +24,10 @@ exec 2>/dev/null
 
 INPUT=$(cat)
 
-SESSION_CWD=$(printf '%s' "$INPUT" | mycelium_json_get 'cwd')
-HOST_SESSION_ID=$(printf '%s' "$INPUT" \
-  | mycelium_json_get_optional_string 'session_id') || exit 0
+mycelium_payload_preload "$INPUT" 'get:cwd' 'opt:session_id'
+
+SESSION_CWD=$(mycelium_json_get 'cwd' "$INPUT")
+HOST_SESSION_ID=$(mycelium_json_get_optional_string 'session_id' "$INPUT") || exit 0
 if [[ -z "$SESSION_CWD" ]] || [[ ! -d "$SESSION_CWD" ]]; then exit 0; fi
 
 REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo "")

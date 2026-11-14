@@ -25,11 +25,12 @@ source "$HERE/mycelium-hook-lib.sh"
 
 {
   INPUT=$(cat)
+  mycelium_payload_preload "$INPUT" 'get:tool_input.command' 'get:cwd' 'opt:session_id' 'get:agent_id' 'get:agent_type' 'exit:'
 
-  COMMAND=$(printf '%s' "$INPUT" | mycelium_json_get 'tool_input.command')
+  COMMAND=$(mycelium_json_get 'tool_input.command' "$INPUT")
   if [[ -z "$COMMAND" ]]; then exit 0; fi
 
-  SESSION_CWD=$(printf '%s' "$INPUT" | mycelium_json_get 'cwd')
+  SESSION_CWD=$(mycelium_json_get 'cwd' "$INPUT")
   if [[ -z "$SESSION_CWD" ]] || [[ ! -d "$SESSION_CWD" ]]; then exit 0; fi
 
   # Resolve REPO_ROOT from session cwd (not hook cwd — same lesson as the
@@ -39,9 +40,9 @@ source "$HERE/mycelium-hook-lib.sh"
   mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT" || exit 0
   trap mycelium_release_session_lock EXIT
 
-  AGENT_ID=$(printf '%s' "$INPUT" | mycelium_json_get 'agent_id')
-  AGENT_TYPE=$(printf '%s' "$INPUT" | mycelium_json_get 'agent_type')
-  BASH_EXIT=$(printf '%s' "$INPUT" | mycelium_bash_exit)
+  AGENT_ID=$(mycelium_json_get 'agent_id' "$INPUT")
+  AGENT_TYPE=$(mycelium_json_get 'agent_type' "$INPUT")
+  BASH_EXIT=$(mycelium_bash_exit "$INPUT")
   if [[ -z "$BASH_EXIT" && "$(mycelium_hook_host)" == "claude" ]]; then
     # Claude Code invokes this PostToolUse registration only for successful
     # Bash calls; failures use its separate failure event.

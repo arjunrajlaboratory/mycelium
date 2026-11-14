@@ -350,6 +350,34 @@ def test_ladder_pytest_commands_disable_the_cache_provider(
             assert "no:cacheprovider" in command
 
 
+def test_compatibility_suite_runs_in_parallel_only_when_xdist_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def suite(commands: list[list[str]]) -> list[str]:
+        return next(c for c in commands if "--ignore=skills/core/scripts/knowledge_map" in c)
+
+    repo = _repo(tmp_path)
+    real_find_spec = gate.importlib.util.find_spec
+    monkeypatch.setattr(
+        gate.importlib.util, "find_spec",
+        lambda name: object() if name == "xdist" else real_find_spec(name),
+    )
+    with_xdist = gate.ladder_commands(repo, skip_knowledge_map=True)
+    assert ["-n", "auto", "--dist", "worksteal"] == [
+        a for a in suite(with_xdist) if a in {"-n", "auto", "--dist", "worksteal"}
+    ]
+    # Only the hook-heavy suite is spread out; the small suites stay serial.
+    others = [c for c in with_xdist if "pytest" in " ".join(c) and c is not suite(with_xdist)]
+    assert all("-n" not in c for c in others)
+
+    monkeypatch.setattr(
+        gate.importlib.util, "find_spec",
+        lambda name: None if name == "xdist" else real_find_spec(name),
+    )
+    without_xdist = gate.ladder_commands(repo, skip_knowledge_map=True)
+    assert "-n" not in suite(without_xdist)
+
+
 def test_bytecode_prefix_is_outside_any_candidate() -> None:
     prefix = Path(gate._BYTECODE_PREFIX)
     assert prefix.is_dir()

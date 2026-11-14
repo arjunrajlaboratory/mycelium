@@ -19,8 +19,8 @@ source "$HERE/mycelium-hook-lib.sh"
 # outstanding Mycelium reminder: the state checks below naturally stop
 # blocking once .living/ has been updated, which is the recursion guard.
 INPUT=$(cat)
-HOST_SESSION_ID=$(printf '%s' "$INPUT" \
-  | mycelium_json_get_optional_string 'session_id') || exit 0
+mycelium_payload_preload "$INPUT" 'opt:session_id'
+HOST_SESSION_ID=$(mycelium_json_get_optional_string 'session_id' "$INPUT") || exit 0
 
 # Determine repo root early (used by both log finalization and .living/ checks)
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")

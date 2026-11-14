@@ -246,8 +246,7 @@ mycelium_select_session_state() {
   [[ -n "$shared_state" && -d "$shared_state" && ! -L "$shared_state" ]] \
     || return 1
   repo_root=$(cd "$repo_root" 2>/dev/null && pwd -P) || return 1
-  host_session_id=$(printf '%s' "$input" \
-    | mycelium_json_get_optional_string 'session_id') || return 1
+  host_session_id=$(mycelium_json_get_optional_string 'session_id' "$input") || return 1
 
   # Identity-free hosts retain the pre-0.7 flat transaction layout. Never map
   # an invalid nonempty identity onto that compatibility path.
@@ -350,8 +349,7 @@ mycelium_payload_owns_active_session() {
   local host_session_id=""
   local host_identified=false
 
-  host_session_id=$(printf '%s' "$input" \
-    | mycelium_json_get_optional_string 'session_id') || return 1
+  host_session_id=$(mycelium_json_get_optional_string 'session_id' "$input") || return 1
   if [[ -n "$host_session_id" ]]; then
     mycelium_valid_session_id "$host_session_id" || return 1
     host_identified=true
@@ -387,8 +385,7 @@ mycelium_prepare_post_tool_state() {
   local input="$2"
   local host_session_id=""
 
-  host_session_id=$(printf '%s' "$input" \
-    | mycelium_json_get_optional_string 'session_id') || return 1
+  host_session_id=$(mycelium_json_get_optional_string 'session_id' "$input") || return 1
   if [[ -n "$host_session_id" ]]; then
     # An identified payload cannot create markerless state. Validate the
     # existing transaction without mutating shared preparation state. The
@@ -795,9 +792,10 @@ mycelium_hook_host() {
   esac
 }
 
-mycelium_json_get() {
-  local dotted_path="$1"
-  python3 -c '
+# Payload decoders. Each body runs as `python3 -c BODY [PATH]` with the hook
+# payload on stdin. mycelium_payload_preload runs the same bodies in one
+# interpreter, so a hook pays for one Python start instead of one per field.
+MYCELIUM__PY_JSON_GET='
 import json, sys
 try:
     value = json.load(sys.stdin)
@@ -807,12 +805,9 @@ try:
         print(value)
 except Exception:
     pass
-' "$dotted_path"
-}
+'
 
-mycelium_json_get_optional_string() {
-  local dotted_path="$1"
-  python3 -c '
+MYCELIUM__PY_JSON_OPTIONAL_STRING='
 import json, sys
 
 missing = object()
@@ -830,11 +825,9 @@ if value is missing or value is None:
 if not isinstance(value, str):
     raise SystemExit(1)
 sys.stdout.write(value)
-' "$dotted_path"
-}
+'
 
-mycelium_bash_exit() {
-  python3 -c '
+MYCELIUM__PY_BASH_EXIT='
 import json, re, sys
 try:
     response = json.load(sys.stdin).get("tool_response")
@@ -908,6 +901,184 @@ if result is None:
 if result is not None:
     print(result)
 '
+
+# Runs several decoder bodies against one payload. argv holds
+# (slot, body, path-or-empty, has-path) quadruples; each body sees exactly the
+# stdin, argv, stdout encoding, and exit semantics of its own `python3 -c`.
+# A body that raises, exits with a non-integer, or writes a NUL byte is left
+# out, and its callers fall back to the separate interpreter.
+MYCELIUM__PY_PRELOAD='
+import io
+import sys
+
+raw = sys.stdin.buffer.read()
+in_encoding, in_errors = sys.stdin.encoding, sys.stdin.errors
+out_encoding, out_errors = sys.stdout.encoding, sys.stdout.errors
+real_stdin, real_stdout, real_argv = sys.stdin, sys.stdout, sys.argv
+records = []
+args = sys.argv[1:]
+for index in range(0, len(args) - 3, 4):
+    slot, body, path, has_path = args[index:index + 4]
+    captured = io.BytesIO()
+    sys.stdin = io.TextIOWrapper(
+        io.BytesIO(raw), encoding=in_encoding, errors=in_errors, newline="\n"
+    )
+    sys.stdout = io.TextIOWrapper(
+        captured, encoding=out_encoding, errors=out_errors, newline="\n"
+    )
+    sys.argv = ["-c", path] if has_path == "1" else ["-c"]
+    status = 0
+    try:
+        try:
+            exec(compile(body, "<string>", "exec"), {"__name__": "__main__"})
+        except SystemExit as stop:
+            code = stop.code
+            if code is None:
+                status = 0
+            elif isinstance(code, int) and not isinstance(code, bool):
+                status = code
+            else:
+                raise
+        sys.stdout.flush()
+        output = captured.getvalue()
+    except BaseException:
+        continue
+    finally:
+        sys.stdin, sys.stdout, sys.argv = real_stdin, real_stdout, real_argv
+    if b"\0" in output or not 0 <= status <= 255:
+        continue
+    records.append((slot, status, output))
+out = sys.stdout.buffer
+for slot, status, output in records:
+    out.write(slot.encode() + b"\0" + str(status).encode() + b"\0" + output + b"\0")
+out.flush()
+'
+
+MYCELIUM__PC_RAW=""
+MYCELIUM__PC_READY=false
+MYCELIUM__PC_OUT=""
+MYCELIUM__PC_STATUS=0
+MYCELIUM__PC_VAR=""
+
+# Slot names are fixed decoder kinds plus dotted payload paths.
+mycelium__payload_slot_ok() {
+  [[ "$1" =~ ^(get|opt|exit):[A-Za-z_][A-Za-z0-9_.]*$|^exit:$ ]]
+}
+
+# Sets MYCELIUM__PC_VAR to the variable prefix that stores SLOT.
+mycelium__payload_slot_var() {
+  local slot="$1"
+  slot="${slot//:/_C_}"
+  slot="${slot//./_D_}"
+  MYCELIUM__PC_VAR="MYCELIUM__PC_SLOT_$slot"
+}
+
+# Decode the named fields of one payload in a single Python process and keep
+# the exact stdout and exit status each decoder would have produced. Slots are
+# `get:PATH`, `opt:PATH`, or `exit:`. Never fails: any slot that cannot be
+# preloaded falls back to its own interpreter.
+mycelium_payload_preload() {
+  local raw="$1"
+  shift
+  local -a argv=()
+  local slot="" body="" path="" status="" output="" var=""
+
+  MYCELIUM__PC_READY=false
+  for slot in "$@"; do
+    mycelium__payload_slot_ok "$slot" || continue
+    path="${slot#*:}"
+    case "${slot%%:*}" in
+      get) body="$MYCELIUM__PY_JSON_GET" ;;
+      opt) body="$MYCELIUM__PY_JSON_OPTIONAL_STRING" ;;
+      exit) body="$MYCELIUM__PY_BASH_EXIT" ;;
+    esac
+    mycelium__payload_slot_var "$slot"
+    var="$MYCELIUM__PC_VAR"
+    printf -v "${var}_S" '%s' ""
+    if [[ "${slot%%:*}" == exit ]]; then
+      argv+=("$slot" "$body" "" 0)
+    else
+      argv+=("$slot" "$body" "$path" 1)
+    fi
+  done
+  (( ${#argv[@]} > 0 )) || return 0
+
+  while IFS= read -r -d '' slot     && IFS= read -r -d '' status     && IFS= read -r -d '' output; do
+    mycelium__payload_slot_ok "$slot" || continue
+    [[ "$status" =~ ^[0-9]+$ ]] || continue
+    mycelium__payload_slot_var "$slot"
+    var="$MYCELIUM__PC_VAR"
+    printf -v "${var}_O" '%s' "$output"
+    printf -v "${var}_S" '%s' "$status"
+  done < <(printf '%s' "$raw"     | python3 -c "$MYCELIUM__PY_PRELOAD" "${argv[@]}" 2>/dev/null)
+
+  MYCELIUM__PC_RAW="$raw"
+  MYCELIUM__PC_READY=true
+  return 0
+}
+
+# Succeeds, setting MYCELIUM__PC_OUT and MYCELIUM__PC_STATUS, when SLOT was
+# preloaded for exactly this payload.
+mycelium__payload_cached() {
+  local slot="$1"
+  local payload="$2"
+  local var="" status_var="" output_var=""
+
+  [[ "$MYCELIUM__PC_READY" == true && "$payload" == "$MYCELIUM__PC_RAW" ]] \
+    || return 1
+  mycelium__payload_slot_ok "$slot" || return 1
+  mycelium__payload_slot_var "$slot"
+  var="$MYCELIUM__PC_VAR"
+  status_var="${var}_S"
+  output_var="${var}_O"
+  [[ -n "${!status_var:-}" ]] || return 1
+  MYCELIUM__PC_STATUS="${!status_var}"
+  MYCELIUM__PC_OUT="${!output_var:-}"
+  return 0
+}
+
+# mycelium_json_get PATH [PAYLOAD]: print a scalar field. Reads the payload
+# from stdin unless it is passed as the second argument.
+mycelium_json_get() {
+  local dotted_path="$1"
+  if (( $# > 1 )); then
+    if mycelium__payload_cached "get:$dotted_path" "$2"; then
+      printf '%s' "$MYCELIUM__PC_OUT"
+      return "$MYCELIUM__PC_STATUS"
+    fi
+    printf '%s' "$2" | python3 -c "$MYCELIUM__PY_JSON_GET" "$dotted_path"
+    return
+  fi
+  python3 -c "$MYCELIUM__PY_JSON_GET" "$dotted_path"
+}
+
+# mycelium_json_get_optional_string PATH [PAYLOAD]: print a string field, or
+# nothing when it is absent or null; fail on malformed JSON or a non-string.
+mycelium_json_get_optional_string() {
+  local dotted_path="$1"
+  if (( $# > 1 )); then
+    if mycelium__payload_cached "opt:$dotted_path" "$2"; then
+      printf '%s' "$MYCELIUM__PC_OUT"
+      return "$MYCELIUM__PC_STATUS"
+    fi
+    printf '%s' "$2" \
+      | python3 -c "$MYCELIUM__PY_JSON_OPTIONAL_STRING" "$dotted_path"
+    return
+  fi
+  python3 -c "$MYCELIUM__PY_JSON_OPTIONAL_STRING" "$dotted_path"
+}
+
+# mycelium_bash_exit [PAYLOAD]: print the tool exit status, if any.
+mycelium_bash_exit() {
+  if (( $# > 0 )); then
+    if mycelium__payload_cached "exit:" "$1"; then
+      printf '%s' "$MYCELIUM__PC_OUT"
+      return "$MYCELIUM__PC_STATUS"
+    fi
+    printf '%s' "$1" | python3 -c "$MYCELIUM__PY_BASH_EXIT"
+    return
+  fi
+  python3 -c "$MYCELIUM__PY_BASH_EXIT"
 }
 
 mycelium_emit_context() {
