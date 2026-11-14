@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `(unresolved <candidate>)`. Every event now carries `script_candidate`
   (`null` unless unresolved). `R CMD BATCH` no longer simulates
   `R_BATCH_OPTIONS` from prefix assignments, `env -i`/`-u`, `exec -c`, or the
-  hook's own environment, which is not the agent shell's: a BATCH command that
-  mentions `R_BATCH_OPTIONS` is unresolved, and otherwise the variable is
+  hook's own environment, which is not the agent shell's: only a literal
+  `R_BATCH_OPTIONS=...` assignment on the BATCH command itself is read, any
+  other mention leaves the run unresolved, and otherwise the variable is
   ignored. One rule now governs `$`/backtick words in every R form: a
   double-quoted one (`-f "$D/a.R"`) is one unknown word and reading goes on,
   while an unquoted one ends the readable argv, so a script after it is

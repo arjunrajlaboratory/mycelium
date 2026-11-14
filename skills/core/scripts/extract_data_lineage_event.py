@@ -1147,6 +1147,10 @@ _REDIRECTION_OPERATOR_RX = re.compile(
     r"(?:\d+|\{[A-Za-z_][A-Za-z0-9_]*\})?(?P<op><<<|<<-?|<>|>>|>\||>&|<&|>|<)"
     r"|&>>?"
 )
+# What may follow a `$` that starts an expansion (a name, positional or
+# special parameter, `${`, `$(`); any other `$` is a literal character. Outside
+# double quotes `$'...'` and `$"..."` also start one.
+_EXPANSION_START_RX = re.compile(r"[A-Za-z0-9_@*#?$!{(-]")
 # `${NAME}`, `${NAME:-default}` and the like with no quotes, escapes, or
 # nesting inside: the only braced expansions whose extent this scan follows.
 _SIMPLE_BRACED_RX = re.compile(r"\$\{[^{}'\"\\`$\n]*\}")
@@ -1193,9 +1197,10 @@ def _decode_r_word(raw: str) -> str | None:
 def _expansion(raw: str) -> tuple[bool, bool]:
     """(computed, splits) for one shell word.
 
-    Computed: a `$`, backtick, or process substitution outside '...'. Splits:
-    a `$` or backtick outside any quotes, so the shell may make the word into
-    zero or several words. A process substitution is one word (a pipe path).
+    Computed: an expansion (a `$` that starts one, a backtick, or a process
+    substitution) outside '...'. Splits: a `$` expansion or backtick outside
+    any quotes, so the shell may make the word into zero or several words. A
+    process substitution is one word (a pipe path).
     """
     computed = False
     quote: str | None = None
@@ -1207,7 +1212,16 @@ def _expansion(raw: str) -> tuple[bool, bool]:
             continue
         if char in "'\"" and quote in (None, char):
             quote = None if quote else char
-        elif char in "$`" and quote != "'":
+        elif quote != "'" and (
+            char == "`"
+            or (
+                char == "$"
+                and (
+                    _EXPANSION_START_RX.match(raw, index + 1)
+                    or (quote is None and raw[index + 1 : index + 2] in {"'", '"'})
+                )
+            )
+        ):
             if quote is None:
                 return True, True
             computed = True
@@ -1326,8 +1340,10 @@ def _r_words(command: str, offset: int) -> Generator[_RWord, None, bool]:
     """Yield the words of the simple command at offset, redirections dropped.
 
     The generator returns True when it read to the end of the command and
-    False when it stopped at syntax it cannot follow, such as a subshell or
-    heredoc. Words are decoded only as a caller asks for them.
+    False when it stopped at syntax it cannot follow, such as a subshell.
+    A heredoc's body starts after the newline, where the command ends, so its
+    delimiter is skipped like any redirection target. Words are decoded only
+    as a caller asks for them.
     """
     index = offset
     if command.find("\\\n", offset) >= 0:
@@ -1344,8 +1360,6 @@ def _r_words(command: str, offset: int) -> Generator[_RWord, None, bool]:
             if not command.startswith(("<(", ">("), index):
                 operator = _REDIRECTION_OPERATOR_RX.match(command, index)
             if operator is not None:
-                if operator.group("op") in {"<<", "<<-"}:
-                    return False  # a heredoc
                 index = operator.end()
                 while command[index : index + 1] in {" ", "\t"}:
                     index += 1
@@ -1488,6 +1502,19 @@ def _ifs_split(text: str) -> list[str]:
     return [field for field in re.split(r"[ \t\n]+", text) if field]
 
 
+def _literal_batch_options(command: str, offset: int) -> str | None:
+    """The literal `R_BATCH_OPTIONS=...` value assigned on the command at
+    offset itself, or None when its prefix has anything but assignments or
+    the value is computed."""
+    prefix = _current_command_prefix(command[:offset])
+    if not prefix or not all(_ASSIGNMENT_RX.match(token) for token in prefix):
+        return None
+    values = [t.split("=", 1)[1] for t in prefix if t.startswith("R_BATCH_OPTIONS=")]
+    if not values or re.search(r"[$`]", values[-1]):
+        return None
+    return values[-1]
+
+
 def _r_batch_script(command: str, match: re.Match[str]) -> _RWord | None:
     """The script R reads for an `R CMD BATCH` match, or None if none runs.
 
@@ -1495,10 +1522,11 @@ def _r_batch_script(command: str, match: re.Match[str]) -> _RWord | None:
     drops --no-timing, ends options at `--` or the first non-option word (the
     input), forwards -d/-g with their value and every other `-*` word, then
     runs `R -f INPUT $opts $R_BATCH_OPTIONS` with all three unquoted, so each
-    splits into words. R then reads that argv by the rule above. This scan
-    does not model `R_BATCH_OPTIONS`: a command that mentions it is
-    unresolved unless the forwarded options already stop R, and otherwise
-    the variable is ignored.
+    splits into words. R then reads that argv by the rule above. A literal
+    `R_BATCH_OPTIONS=...` assignment on this command itself is read exactly.
+    Any other mention of the variable (export, `env`, a computed value) is
+    not modelled: the run is unresolved unless the options already stop R.
+    Otherwise the variable is ignored.
     """
     words = _Words(_r_words(command, match.start()))
     index = 0
@@ -1552,11 +1580,15 @@ def _r_batch_script(command: str, match: re.Match[str]) -> _RWord | None:
     in_words = _ifs_split(infile.text)
     if not in_words:
         return None
+    batch_options = _literal_batch_options(command, match.start())
     r_argv = ["R", "-f", *in_words, *_ifs_split(" ".join(forwarded))]
-    argv = _walk_r_argv(_Words(_known_words(r_argv)), rscript=False)
+    argv = _walk_r_argv(
+        _Words(_known_words([*r_argv, *_ifs_split(batch_options or "")])),
+        rscript=False,
+    )
     if argv.stopped or argv.file is None:
         return None
-    if "R_BATCH_OPTIONS" in command:
+    if batch_options is None and "R_BATCH_OPTIONS" in command:
         return _RWord(in_words[0], False)
     if not re.fullmatch(r".+\.[Rr]", argv.file.text):
         return None

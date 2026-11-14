@@ -213,10 +213,13 @@ entry.
   Known `-e` expressions are recorded and computed ones never are; an
   `R -f`/`R CMD BATCH` run's script is unresolved when its file word is
   computed or a later unreadable word could name another file. `R CMD BATCH`
-  also reads `$R_BATCH_OPTIONS`, which is not modelled: a BATCH command that
-  mentions it anywhere is unresolved unless its own options already stop R,
-  and otherwise the variable is ignored (the hook's own environment is not
-  the agent shell's).
+  also appends `$R_BATCH_OPTIONS`. A literal assignment on the BATCH command
+  itself (`R_BATCH_OPTIONS=--vanilla R CMD BATCH a.R`) is read exactly; any
+  other mention (an `export`, `env`, a computed value) is not modelled, so
+  the run is unresolved unless its options already stop R. Otherwise the
+  variable is ignored (the hook's own environment is not the agent shell's).
+  A heredoc's delimiter is skipped like any redirection target, and a `$`
+  that starts no expansion (`cat('$')`) is literal.
 - `jupyter nbconvert|execute notebook.ipynb`
 - `conda run … python …`
 - `uv run … python …`

@@ -3705,14 +3705,14 @@ def _assert_unresolved(detections: list, candidate: str) -> None:
 @pytest.mark.parametrize(
     "command",
     [
-        # BATCH appends $R_BATCH_OPTIONS, which this scan does not model: any
-        # mention keeps the run but leaves its script unresolved.
-        "R_BATCH_OPTIONS=--file=second.R R CMD BATCH script.R",
+        # BATCH appends $R_BATCH_OPTIONS. Only a literal assignment directly
+        # on the command is read; any other mention keeps the run but leaves
+        # its script unresolved.
         "env R_BATCH_OPTIONS='--vanilla --file=second.R' R CMD BATCH script.R",
         "export R_BATCH_OPTIONS=--file=second.R; R CMD BATCH script.R",
-        "R_BATCH_OPTIONS=--version R CMD BATCH script.R",
-        "R_BATCH_OPTIONS='-e 1' R CMD BATCH script.R",
         "R_BATCH_OPTIONS=--version env -u R_BATCH_OPTIONS R CMD BATCH script.R",
+        'R_BATCH_OPTIONS="$OPTS" R CMD BATCH script.R',
+        "R_BATCH_OPTIONS=-q; R CMD BATCH script.R",
     ],
 )
 def test_batch_that_mentions_batch_options_is_unresolved(
@@ -3960,7 +3960,6 @@ def test_single_quoted_dollar_is_not_an_expansion(
         ('R -e "$CODE" -f first.R', []),
         ('R -e "$CODE" --version', []),
         ("R -e 'print(1)' -g \"$G\" --version", []),
-        ('R -e "df$x" CMD BATCH first.R', []),
     ],
 )
 def test_quoted_computed_value_is_one_unknown_word(
@@ -4040,7 +4039,7 @@ def test_unresolved_r_file_message_does_not_blame_batch_options(
 def test_unresolved_batch_message_names_batch_options(tmp_path: Path) -> None:
     (tmp_path / "first.R").write_text("print(1)\n")
     [warning] = _unresolved_event(
-        "R_BATCH_OPTIONS=-q R CMD BATCH first.R", tmp_path
+        "export R_BATCH_OPTIONS=-q; R CMD BATCH first.R", tmp_path
     )["lineage_warnings"]
     assert "R_BATCH_OPTIONS" in warning and "first.R" in warning
 
@@ -4090,3 +4089,61 @@ def test_batch_after_unreadable_startup_value_is_unresolved(tmp_path: Path) -> N
     (tmp_path / "script.R").write_text("print(1)\n")
     command = 'R --encoding "${ENC:-$DEFAULT_ENC}" CMD BATCH script.R'
     _assert_unresolved(detect_scripts(command, tmp_path), "script.R")
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # A literal R_BATCH_OPTIONS assignment on the command itself is read
+        # exactly: BATCH appends it, unquoted, after the forwarded options.
+        ("R_BATCH_OPTIONS=--file=second.R R CMD BATCH script.R", ["second.R"]),
+        ("R_BATCH_OPTIONS=--vanilla R CMD BATCH script.R", ["script.R"]),
+        ("LANG=C R_BATCH_OPTIONS='--vanilla -q' R CMD BATCH script.R", ["script.R"]),
+        ("R_BATCH_OPTIONS=--version R CMD BATCH script.R", []),
+        ("R_BATCH_OPTIONS='-e 1' R CMD BATCH script.R", []),
+        ("R_BATCH_OPTIONS='--args --version' R CMD BATCH script.R", ["script.R"]),
+    ],
+)
+def test_batch_reads_a_literal_batch_options_prefix(
+    tmp_path: Path, command: str, expected: list[str]
+) -> None:
+    for name in ("script.R", "second.R"):
+        (tmp_path / name).write_text("print(1)\n")
+    assert detect_scripts(command, tmp_path) == [
+        (tmp_path / name, None) for name in expected
+    ]
+
+
+@pytest.mark.parametrize(
+    ("command", "source"),
+    [
+        # A `$` that starts no expansion is literal, as in bash.
+        ("Rscript -e \"cat('$')\"", "cat('$')"),
+        ("Rscript -e \"cat('a$ b')\"", "cat('a$ b')"),
+        ("R -e 'x' -e \"y$\"", "x\ny$"),
+        ("R -e \"paste0('$', 1)\"", "paste0('$', 1)"),
+    ],
+)
+def test_literal_dollar_is_not_an_expansion(command: str, source: str) -> None:
+    assert detect_scripts(command, Path("/tmp")) == [(None, source)]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The heredoc body starts after the newline; its delimiter is just a
+        # redirection target, so the rest of the line is still read.
+        "R -q -f first.R <<'EOF'\nyes\nEOF",
+        "R --vanilla --file=first.R <<-EOF\nx\nEOF",
+        "R CMD BATCH <<EOF first.R\nx\nEOF",
+        "R -f first.R <<EOF --vanilla\nx\nEOF",
+    ],
+)
+def test_heredoc_does_not_hide_a_known_script(tmp_path: Path, command: str) -> None:
+    (tmp_path / "first.R").write_text("print(1)\n")
+    assert detect_scripts(command, tmp_path) == [(tmp_path / "first.R", None)]
+
+
+def test_heredoc_delimiter_line_still_reads_stop_words(tmp_path: Path) -> None:
+    (tmp_path / "first.R").write_text("print(1)\n")
+    assert detect_scripts("R -f first.R <<EOF --version\nx\nEOF", tmp_path) == []
