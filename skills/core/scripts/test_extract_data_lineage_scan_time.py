@@ -222,3 +222,36 @@ def test_list_operators_shortcut_matches_the_suffix_scan() -> None:
             expected = None if later or ambiguous else set(ops)
             assert (None if fast is None else set(fast)) == expected, (command, offset)
     assert answered > 1000
+
+
+# ---------- memory ----------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "true && " * 6000 + "python a.py",
+        "true || " * 6000 + "python a.py",
+        "( " * 3000 + "python a.py" + " )" * 3000,
+        "(true) " * 6000 + "; python a.py",
+        "$( " * 3000 + "python a.py",
+    ],
+)
+def test_cached_checkpoints_do_not_copy_histories(
+    tmp_path: Path, command: str
+) -> None:
+    """Checkpoint states must share stacks rather than copy them per cut."""
+    import tracemalloc
+
+    (tmp_path / "a.py").write_text("print(1)\n")
+    lineage_event._prefix_folds.cache_clear()
+    tracemalloc.start()
+    try:
+        for bash_exit in (0, 1):
+            _detect_proven(command, tmp_path, bash_exit)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+        lineage_event._prefix_folds.cache_clear()
+    # Linear state is a few MB here; per-cut copies took well over 100 MB.
+    assert peak < 64 * 1024 * 1024, peak

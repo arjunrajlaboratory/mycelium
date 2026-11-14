@@ -2054,10 +2054,26 @@ def _prefix_folds(command: str) -> _PrefixFolds:
     return _PrefixFolds(command)
 
 
+# A checkpoint is cached after every shell operator, so fold states must not
+# copy histories: a stack is a cons list ``(top, rest)`` (``None`` when empty)
+# that later states share, and operator histories are reduced to the
+# summaries their callers read. Otherwise a 6,000-command ``&&`` chain kept
+# 6,000 growing copies (quadratic memory).
+def _cons_items(cons: object) -> list:
+    """The cons list's items, bottom first."""
+    items = []
+    while cons is not None:
+        items.append(cons[0])
+        cons = cons[1]
+    items.reverse()
+    return items
+
+
 class _CwdFoldState(NamedTuple):
     cwd: Path
     fully_modeled: bool
-    subshell_states: tuple[tuple[Path, bool, bool], ...]
+    # Cons list of (cwd, segment_is_conditional, chain_has_or) per open "(".
+    subshell_states: object
     segment: tuple[str, ...]
     segment_is_conditional: bool
     chain_has_or: bool
@@ -2067,7 +2083,7 @@ def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
     """Advance ``_effective_cwd_state``'s walk over ``tokens``."""
     cwd = state.cwd
     fully_modeled = state.fully_modeled
-    subshell_states = list(state.subshell_states)
+    subshell_states = state.subshell_states
     segment = list(state.segment)
     segment_is_conditional = state.segment_is_conditional
     chain_has_or = state.chain_has_or
@@ -2108,18 +2124,23 @@ def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
         elif token == "(":
             complete_segment()
             segment = []
-            subshell_states.append((cwd, segment_is_conditional, chain_has_or))
+            subshell_states = (
+                (cwd, segment_is_conditional, chain_has_or),
+                subshell_states,
+            )
         elif token == ")":
             complete_segment()
             segment = []
-            if subshell_states:
-                cwd, segment_is_conditional, chain_has_or = subshell_states.pop()
+            if subshell_states is not None:
+                (cwd, segment_is_conditional, chain_has_or), subshell_states = (
+                    subshell_states
+                )
         else:
             segment.append(token)
     return _CwdFoldState(
         cwd,
         fully_modeled,
-        tuple(subshell_states),
+        subshell_states,
         tuple(segment),
         segment_is_conditional,
         chain_has_or,
@@ -2141,7 +2162,7 @@ def _effective_cwd_state(
     state = _prefix_folds(bash_cmd).fold(
         offset,
         ("cwd", initial_cwd),
-        lambda: _CwdFoldState(initial_cwd, True, (), (), False, False),
+        lambda: _CwdFoldState(initial_cwd, True, None, (), False, False),
         _fold_cwd_state,
     )
     if state is None:
@@ -2157,6 +2178,8 @@ def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
 
 class _ControlFoldState(NamedTuple):
     depth: int
+    # The current list's distinct top-level operators (`&&`, `||`), first-seen
+    # order: callers only ask whether there are any and whether all agree.
     operators: tuple[str, ...]
     later_list: bool
     current_list_ambiguous: bool
@@ -2171,7 +2194,6 @@ def _fold_control_context(
 ) -> _ControlFoldState:
     """Advance ``_top_level_control_context``'s walk over ``tokens``."""
     depth, operators, later_list, current_list_ambiguous, malformed = state
-    operators_list = list(operators)
     for token in tokens:
         if token == "(":
             depth += 1
@@ -2181,18 +2203,19 @@ def _fold_control_context(
             else:
                 depth -= 1
         elif depth == 0 and token in {";", "\n"}:
-            operators_list = []
+            operators = ()
             later_list = True
             # A completed list is an execution boundary. Unsupported control
             # operators in an earlier list cannot make the next list's first
             # command conditional or uncertain.
             current_list_ambiguous = False
         elif depth == 0 and token in {"&&", "||"}:
-            operators_list.append(token)
+            if token not in operators:
+                operators += (token,)
         elif depth == 0 and token == "&":
             current_list_ambiguous = True
     return _ControlFoldState(
-        depth, tuple(operators_list), later_list, current_list_ambiguous, malformed
+        depth, operators, later_list, current_list_ambiguous, malformed
     )
 
 
@@ -2208,7 +2231,10 @@ def _finish_control_context(
 
 
 def _top_level_control_context(fragment: str) -> tuple[list[str], bool, bool]:
-    """Return current-list operators, whether a later list exists, and ambiguity."""
+    """Return current-list operators, whether a later list exists, and ambiguity.
+
+    The operators are the distinct ``&&``/``||`` of the current list.
+    """
     tokens = _shell_tokens(fragment)
     if tokens is None:
         return _finish_control_context(None)
@@ -2230,56 +2256,55 @@ def _control_context_before(bash_cmd: str, offset: int) -> tuple[list[str], bool
 
 
 class _CommandPrefixFoldState(NamedTuple):
-    # ``None`` once an unmatched ``)`` has made the prefix malformed.
-    segments: tuple[tuple[str, ...], ...] | None
-    dynamic_contexts: tuple[bool, ...]
+    malformed: bool  # an unmatched ``)`` made the prefix unreadable
+    # The innermost current-command segment as a cons list, last token on
+    # top, and whether its context is dynamic (inside a command substitution).
+    segment: object
+    dynamic: bool
+    # Cons list of (segment, dynamic) for each enclosing open ``(``.
+    outer: object
 
 
-_COMMAND_PREFIX_FOLD_INITIAL = _CommandPrefixFoldState(((),), (False,))
+_COMMAND_PREFIX_FOLD_INITIAL = _CommandPrefixFoldState(False, None, False, None)
 
 
 def _fold_command_prefix(
     state: _CommandPrefixFoldState, tokens: list[str]
 ) -> _CommandPrefixFoldState:
     """Advance ``_current_command_prefix``'s walk over ``tokens``."""
-    if state.segments is None:
+    if state.malformed:
         return state
     # Keep one current-command segment per subshell depth. The fragment ends at
     # the candidate, so a legitimate command inside ``( ... )`` necessarily
     # has an unmatched opening parenthesis here. Command substitutions remain
     # conservative because their child context is marked dynamic.
-    segments = [list(segment) for segment in state.segments]
-    dynamic_contexts = list(state.dynamic_contexts)
+    _, segment, dynamic, outer = state
     for token in tokens:
         if token == "(":
-            command_substitution = bool(
-                segments[-1] and segments[-1][-1].endswith("$")
-            )
-            segments.append([])
-            dynamic_contexts.append(dynamic_contexts[-1] or command_substitution)
+            command_substitution = segment is not None and segment[0].endswith("$")
+            outer = ((segment, dynamic), outer)
+            segment = None
+            dynamic = dynamic or command_substitution
         elif token == ")":
-            if len(segments) == 1:
-                return _CommandPrefixFoldState(None, ())
-            segments.pop()
-            dynamic_contexts.pop()
+            if outer is None:
+                return _CommandPrefixFoldState(True, None, False, None)
+            (segment, dynamic), outer = outer
             # A completed compound command is not an execution wrapper for a
             # later token in the same simple command.
-            segments[-1].append("__mycelium_compound_command__")
+            segment = ("__mycelium_compound_command__", segment)
         elif token in {";", "\n", "&&", "||", "|", "&"}:
-            segments[-1] = []
+            segment = None
         else:
-            segments[-1].append(token)
-    return _CommandPrefixFoldState(
-        tuple(tuple(segment) for segment in segments), tuple(dynamic_contexts)
-    )
+            segment = (token, segment)
+    return _CommandPrefixFoldState(False, segment, dynamic, outer)
 
 
 def _finish_command_prefix(
     state: _CommandPrefixFoldState | None,
 ) -> list[str] | None:
-    if state is None or state.segments is None or state.dynamic_contexts[-1]:
+    if state is None or state.malformed or state.dynamic:
         return None
-    return list(state.segments[-1])
+    return _cons_items(state.segment)
 
 
 def _current_command_prefix(fragment: str) -> list[str] | None:
