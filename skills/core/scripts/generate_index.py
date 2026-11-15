@@ -910,7 +910,12 @@ def _agent_cli_command() -> tuple[list[str], str]:
     override, Claude is preferred for backward compatibility and Codex is used
     when Claude is unavailable.
     """
-    if (os.environ.get("MYCELIUM_HOOK_HOST") in {"antigravity-ide", "antigravity-app"} or
+    # Antigravity uses its own selected model. The package marker covers the
+    # agent's native shell, which sets nothing; it never overrides an explicit
+    # Claude/Codex host or MYCELIUM_AGENT_CLI choice.
+    host = os.environ.get("MYCELIUM_HOOK_HOST")
+    if host in {"antigravity-ide", "antigravity-app"} or (
+            host not in {"claude", "codex"} and not os.environ.get("MYCELIUM_AGENT_CLI", "").strip() and
             (Path(__file__).resolve().parents[3] / ".antigravity-host").is_file()):
         raise FileNotFoundError("Antigravity uses its selected model; use --summary-heuristic or author the summary in Antigravity")
     override = os.environ.get("MYCELIUM_AGENT_CLI", "").strip()

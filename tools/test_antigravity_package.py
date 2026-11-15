@@ -1,6 +1,7 @@
 """Installation must preserve user files and package all base dependencies."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import subprocess
@@ -98,6 +99,48 @@ def test_shared_hooks_python3_is_the_selected_interpreter_not_its_neighbor(tmp_p
     result = subprocess.run(command, shell=True, cwd=target, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == [0, str(selected), ""]
+
+
+def load_installed(target, relative, name):
+    path = target / relative
+    sys.path.insert(0, str(path.parent))
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
+    return module
+
+
+@pytest.mark.parametrize("explicit", [{"MYCELIUM_HOOK_HOST": "claude"}, {"MYCELIUM_HOOK_HOST": "codex"},
+                                      {"MYCELIUM_AGENT_CLI": "/bin/echo"}])
+def test_package_marker_never_overrides_an_explicit_claude_or_codex_choice(tmp_path, monkeypatch, explicit):
+    """Regression: a Claude/Codex session that reaches the Antigravity package
+    (e.g. through the shared .mycelium/plugin-root pointer) kept its explicit
+    host or CLI override, instead of being forced offline by .antigravity-host."""
+    target = tmp_path / "plugins/mycelium"
+    package.install(target, python=Path(sys.executable))
+    assert (target / ".antigravity-host").is_file()
+    for key in ("MYCELIUM_HOOK_HOST", "MYCELIUM_AGENT_CLI"):
+        monkeypatch.delenv(key, raising=False)
+    index = load_installed(target, "skills/core/scripts/generate_index.py", "installed_generate_index")
+    labeler = load_installed(target, "skills/core/scripts/knowledge_map/concept_labeler.py", "installed_labeler")
+    with pytest.raises(FileNotFoundError, match="Antigravity"):  # Antigravity's own shell: offline
+        index._agent_cli_command()
+    assert labeler._resolve_agent_cli() is None
+    for key, value in explicit.items():
+        monkeypatch.setenv(key, value)
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    for name in ("claude", "codex"):
+        (fake / name).write_text("#!/bin/sh\n")
+        (fake / name).chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake) + os.pathsep + os.environ["PATH"])
+    command, _ = index._agent_cli_command()
+    assert command
+    assert labeler._resolve_agent_cli() is not None
+    assert labeler._resolve_agent_cli(explicit_bin="/bin/echo") == (["/bin/echo"], "claude")
 
 
 def test_native_package_contains_all_base_skills_and_no_personal_coordination(tmp_path):
