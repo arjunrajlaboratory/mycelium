@@ -185,14 +185,20 @@ def transcript_records(path):
     return records
 
 
-def run_hook(name, data, root, plugin, *, timeout=12, batch=False):
-    host = active_host()
+def hook_environment(host, plugin, *, batch=False):
+    """Environment for a shared base hook run by this adapter."""
     # Strict capture makes a failed lineage extractor a nonzero hook outcome.
     env = dict(os.environ, MYCELIUM_HOOK_HOST=host, MYCELIUM_PLUGIN_ROOT=str(plugin),
                MYCELIUM_STRICT_CAPTURE="1")
     env.pop(ACTIVITY_BATCH_ENV, None)
     if batch:
         env[ACTIVITY_BATCH_ENV] = "1"
+    return env
+
+
+def run_hook(name, data, root, plugin, *, timeout=12, batch=False):
+    host = active_host()
+    env = hook_environment(host, plugin, batch=batch)
     script = plugin / "skills/core/hooks" / name
     marker = root / ".mycelium/run" / host / data["session_id"] / "active-session-log.tmp"
     had_marker = marker.is_file()
