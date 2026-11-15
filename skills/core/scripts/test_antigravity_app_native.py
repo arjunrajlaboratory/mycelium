@@ -556,6 +556,31 @@ def test_failed_or_unverified_edit_is_not_tracked(native, tmp_path, case):
     assert state_of(repo).get("unresolved_commands", {}) == {}  # edits never block Stop
 
 
+# ---- Strictly read-only: no byte, file or lock of the App's store changes ------------------------
+
+def store_files(directory):
+    return {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in sorted(directory.iterdir())}
+
+
+@pytest.mark.parametrize("live_writer", [True, False])
+def test_store_reads_leave_every_app_file_byte_identical(native, live_writer):
+    """Regression: a mode=ro WAL reader still writes the App's -shm index (read
+    marks, or a new -shm when none exists). Reads must touch nothing."""
+    home, repo, payload, calls, db = native
+    target = str(repo / "notes.md")
+    db.put(5, command_payload(str(repo)))
+    db.put(7, edit_payload(target))
+    if not live_writer:
+        db.close()  # the App has exited: its -wal/-shm may or may not remain
+    directory = db.path.parent
+    before = store_files(directory)
+    assert store.command(CID, 5, COMMAND)["exit_code"] == 0
+    assert store.edit(CID, 7, "write_file", target)["path"] == target
+    assert [e["step"] for e in store.recover_edits(CID, -1, 10)["edits"]] == [7]
+    assert store.edit_shape_report()["status"] == "recognized"
+    assert store_files(directory) == before
+
+
 # ---- The FileEdit record type is an assumption: an unrecognised shape must be visible ----------
 
 SHAPE_CASES = {"other-type": dict(type_url="type.googleapis.com/exa.cortex.core.tools.FileWrite"),

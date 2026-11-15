@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including bounded recovery of missed edit callbacks at Stop. Edit tracking
   assumes an inferred `FileEdit` record type; an edit record of another shape
   is reported to the model and by `doctor --profile app` instead of being
-  dropped silently.
+  dropped silently. The App's conversation stores are read through a private
+  snapshot, so no App file (including SQLite's `-shm` index) is ever written.
 
 ### Changed
 

@@ -1,15 +1,17 @@
 """Read one Antigravity App 2.31.0 native step from the App's own conversation store.
 
 The App writes each conversation to ``~/.gemini/antigravity/conversations/<uuid>.db``
-(SQLite, ``PRAGMA user_version=1``, table ``steps``). This module opens that exact
-file read-only (``mode=ro``, never ``immutable``: committed WAL rows must be visible),
-sets ``query_only``, selects one row by native step index, and decodes only the few
-protobuf fields of the observed wire shape. It never decodes model text, rendered
+(SQLite, ``PRAGMA user_version=1``, table ``steps``). This module never opens the
+App's files with SQLite: even a ``mode=ro`` WAL reader writes the shared-memory
+(``-shm``) index and takes locks. It reads the database and its ``-wal`` with plain
+file reads into a private snapshot (retrying until both are unchanged across the
+copy), opens only that copy, with ``query_only``, so committed WAL rows are visible,
+selects rows by native step index, and decodes only the few protobuf fields of the
+observed wire shape. It never decodes model text, rendered
 output or stdout, and never executes anything. Tool arguments are parsed as one
 JSON object to compare their keys and paths; edit content in them is neither
-returned nor exposed. ``mode=ro`` with
-``query_only`` prevents database and WAL mutation; SQLite may still update the
-store's shared-memory (``-shm``) index, as any WAL reader does.
+returned nor exposed. No byte, file, or lock of the App's store is created or
+changed.
 
 Every outcome is one of: :class:`Pending` (the same native call has not reached a
 terminal state), :class:`Unverified` (anything else that is not exact evidence), or
@@ -20,8 +22,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import stat
+import tempfile
 import time
 
 STORE_ROOT = (".gemini", "antigravity", "conversations")
@@ -198,14 +202,61 @@ def _validate(path):
     return identity
 
 
+# A private snapshot is bounded and retried while the App is writing.
+MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024
+SNAPSHOT_ATTEMPTS = 5
+
+
+def _file_identity(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _snapshot(path, directory):
+    """Copy the store and its WAL with plain reads; both must be unchanged across the copy."""
+    wal = path.with_name(path.name + "-wal")
+    copy = Path(directory) / "store.db"
+    for _ in range(SNAPSHOT_ATTEMPTS):
+        before = (_file_identity(path), _file_identity(wal))
+        if before[0] is None:
+            raise Unverified("native store unavailable")
+        if before[0][2] + (before[1][2] if before[1] else 0) > MAX_SNAPSHOT_BYTES:
+            raise Unverified("native store exceeds the snapshot bound")
+        for stale in (copy, copy.with_name("store.db-wal"), copy.with_name("store.db-shm")):
+            stale.unlink(missing_ok=True)
+        try:
+            with open(path, "rb") as source, open(copy, "xb") as target:
+                shutil.copyfileobj(source, target)
+            if before[1] is not None:
+                with open(wal, "rb") as source, open(copy.with_name("store.db-wal"), "xb") as target:
+                    shutil.copyfileobj(source, target)
+        except FileNotFoundError:
+            continue
+        if (_file_identity(path), _file_identity(wal)) == before:
+            return copy
+    raise Unverified("native store kept changing during its snapshot")
+
+
 def _session(cid, work):
-    """Run work(connection) on one validated read-only, query-only connection to the exact store."""
+    """Run work(connection) on a query-only connection to a private snapshot of the exact store."""
     path = store_path(cid)
+    directory = None
     try:
         before = _validate(path)
-        connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1, isolation_level=None)
+        directory = tempfile.mkdtemp(prefix="mycelium-app-store-")
+        copy = _snapshot(path, directory)
+        connection = sqlite3.connect(copy.as_uri(), uri=True, timeout=1, isolation_level=None)
     except (OSError, sqlite3.Error) as error:
+        if directory:
+            shutil.rmtree(directory, ignore_errors=True)
         raise Unverified(f"native store unavailable ({type(error).__name__})") from error
+    except Unverified:
+        if directory:
+            shutil.rmtree(directory, ignore_errors=True)
+        raise
     try:
         connection.execute("PRAGMA query_only = ON")
         if connection.execute("PRAGMA query_only").fetchone() != (1,):
@@ -220,6 +271,7 @@ def _session(cid, work):
         raise Unverified(f"native store read failed ({type(error).__name__})") from error
     finally:
         connection.close()
+        shutil.rmtree(directory, ignore_errors=True)
     try:
         if _validate(path) != before:
             raise Unverified("native store changed identity during read")

@@ -503,6 +503,8 @@ exercise them.
 | Only the Antigravity package generator, guidance or source permission mode changes | The development source digest changes; a different selected Python path alone does not change source identity. |
 | An async native command overwrites an existing output after its first hook | No output snapshot is finalized while RUNNING; matching terminal evidence produces one action with the final observed hash, while unavailable completion remains unresolved. |
 | A Stop result is lost after the real finalizer completes | The adapter reconciles an identity-bound acceptance receipt without dispatching again; a missing or mismatched receipt retains an uncertain outcome. |
+| A native host's SQLite store is read while its writer is live, and after it exits | Every App file (database, `-wal`, `-shm`) is byte- and mtime-identical afterwards and no file is created: reads go through a private snapshot, because a `mode=ro` WAL reader still writes `-shm`. |
+| A Claude or Codex edit mentions an adapter-only field name, or reaches the Antigravity package through the shared plugin-root pointer | Host-specific modes are chosen from adapter-set environment, never payload text or a package marker that overrides an explicit host. |
 | The selected Python launcher is a venv symlink | Both the generated hook and its child python3 preserve the selected environment and can import its packages. |
 | `.mycelium` or `.living` is a symlink outside the project | The hook refuses the unsafe state and writes nothing outside the project. |
 | Session work updates `.living` within the same timestamp second | A valid update is accepted. |
