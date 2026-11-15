@@ -18,15 +18,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native App 2.31.0 tracking for verified sandboxed commands and supported edits,
   including bounded recovery of missed edit callbacks at Stop.
 
+### Changed
+
+- **An R run whose script is uncertain is recorded as such, not as a fake
+  inline script.** When shell syntax or `R_BATCH_OPTIONS` may change which
+  file `R -f` or `R CMD BATCH` reads, the lineage event used to carry a
+  diagnostic sentence in `script_source` and a `script_sha256` of that
+  sentence. It now has `script`, `script_source`, and `script_sha256` all
+  `null`, a new `script_candidate` field with the file word the command names,
+  `io_detection: "unresolved"`, and a warning; the Stop manifest lists it as
+  `(unresolved <candidate>)`. Every event now carries `script_candidate`
+  (`null` unless unresolved). `R CMD BATCH` no longer simulates
+  `R_BATCH_OPTIONS` from prefix assignments, `env -i`/`-u`, `exec -c`, or the
+  hook's own environment, which is not the agent shell's: only a literal
+  `R_BATCH_OPTIONS=...` assignment on the BATCH command itself is read, any
+  other mention leaves the run unresolved, and otherwise the variable is
+  ignored. One rule now governs `$`/backtick words in every R form: a
+  double-quoted one (`-f "$D/a.R"`) is one unknown word and reading goes on,
+  while an unquoted one ends the readable argv, so a script after it is
+  unresolved; a computed `-e` value is never recorded as source, and a `$`
+  inside single quotes (`R -f 'cost$x.R'`) is literal. The R reader scans only its own simple command, so long scripts of
+  `R -e` probes no longer rescan the whole command per match. Which common R
+  commands count as analysis runs is unchanged; existing event logs and
+  projects need no migration.
+
 ### Fixed
 
+- **Inline R one-liners no longer depend on which startup flag was typed.**
+  The post-action check exempted only Python `-c`, so `R -e` and
+  `R --vanilla -e` opened a bookkeeping cycle, while `R -q -e` and
+  `R --vanilla -q -e` looked exempt only because the R `-e` pattern borrowed
+  Rscript's long-option-only grammar and could not parse `-q` at all, which
+  also hid them from data lineage. The detector now parses R's own startup
+  grammar (`-q`, `-s`, ignored short clusters such as `-qs`, separated values
+  such as `--encoding ENC`, `--gui TYPE`, and `--max-ppsize N`, `--args`, `-d`),
+  checked against R 4.6, and the
+  post-action check exempts every inline form (`python -c`, `R -e`,
+  `Rscript -e`) while lineage still records them, including `Rscript -e`,
+  which was previously not detected at all. Script runs `R -f script.R`,
+  `R --file=script.R`, and `R CMD BATCH script.R` (including
+  `R --vanilla CMD BATCH`, `R CMD BATCH --args`, and `R CMD BATCH --`) are now
+  detected and open the post-action cycle like `Rscript script.R`. R honors
+  `--help`/`--version`/`--print-home`/`RHOME`/`CMD` and `-d`/`--debugger`
+  anywhere before `--args`, so `R -e … --version`, `R -f script.R --help`, and
+  `R -f script.R RHOME` no longer count as executions, and neither do
+  `R CMD BATCH --print-home` or `Rscript --args -e …`; a forwarded
+  `R CMD BATCH --args …` (including the quoted `"--args x=1"` idiom) still
+  runs the script. When file options repeat, or BATCH forwards `--file=`,
+  lineage records the script R actually reads. Lineage records every
+  `-e` expression of a multi-expression R or Rscript one-liner, not just the
+  first. A trailing shell comment containing a parenthesis or apostrophe no
+  longer hides an R run, and neither does a redirection target the scan
+  cannot read (`R -f script.R > run_$(date +%s).log`). A run of backslashes
+  in a command no longer makes the shell-word regex backtrack exponentially
+  and stall the hook. The
+  planning guide now lists `R -e '...'` among its read-only probes. Existing
+  projects need no migration.
+- **The lineage hook scans each command in linear time.** The detector runs on
+  every shell command the agent executes, and hooks.json sets no timeout, but
+  several of its scans were quadratic in the command length. Every interpreter
+  and runner pattern re-walked a run of quoted words from each start position
+  (`R -f a.R --args` followed by 5,000 `"$x"` words took about 58 s), and
+  every candidate match re-tokenized the whole command before it to prove it
+  ran and find its working directory (800 `R -q -e` lines took several
+  seconds; a 1,000-command `&&` chain took about 16 s). The patterns now skip
+  start positions that provably cannot match, and the prefix proofs resume
+  from cached checkpoints after each shell operator, so those inputs take well
+  under a second. Two patterns also backtracked within a single match:
+  `jupyter nbconvert` options of the `--output=x` form matched two option
+  forms, doubling the work per option (16 options took about 31 s), and
+  `R CMD BATCH` followed by escaped blanks (`a\ a\ ...`) took about 10 s at
+  40,000 characters. Both are now linear. A `cd` or `env -C` target
+  containing a NUL byte no longer crashes the hook. Which commands are
+  detected, and with which scripts, sources, and working directories, is
+  unchanged: a differential fuzz of 32,000 generated commands against the
+  previous detector showed no differences. Existing projects need no
+  migration.
+- **Stop names a destroyed session-log header instead of hiding it in a
+  sidecar file.** When an agent rewrote the hook-owned session log
+  (`.living/log/<date>-<nnn>-<project>.md`) with a whole-file write, the YAML
+  frontmatter Stop finalizes was lost and Stop blocked with "inspect the helper
+  installation", leaving the real cause only in
+  `.living/log/.finalize_session_log.err`. `finalize_session_log.py` now exits
+  with status 3 and a one-line cause for a missing or malformed header, and the
+  Stop block says which log lost its YAML frontmatter, why, and how to repair
+  it: restore the header block (`session_id`, `project`, `branch`, `started`,
+  `ended`, `duration_minutes`, `files_changed`) or append to the log instead of
+  rewriting it. Retrying Stop after restoring the header finalizes normally and
+  keeps the agent's entries. Other finalization failures keep their existing
+  message. Stop does not rebuild a lost header itself: the original values
+  (branch at start, session id) cannot all be recovered reliably, and a silent
+  repair would also hide that earlier log entries were overwritten.
+- **Session-log guidance says the log is append-only.** The post-action
+  `SESSION LOG UPDATE` directive, the core skill's post-action protocol, and
+  the `MYCELIUM.md` template now say "append to it; never rewrite it (Stop
+  needs its header)", and the stale-log SessionStart notice asks for an
+  appended summary rather than an edit. Existing projects pick up the directive
+  and the Stop message from the plugin with no migration. An existing
+  `MYCELIUM.md` keeps its current post-action wording, because re-running init
+  refreshes only its managed Automated Enforcement section and session-summary
+  line; new projects get the new line.
 - Antigravity keeps running commands pending until matching terminal evidence
   arrives. It retains each undelivered reminder and reconciles accepted Stop
   receipts when a finalizer response is lost.
 - Antigravity hook launchers preserve the selected Python virtual environment.
   Knowledge indexing uses the built-in offline summaries and concept labels.
-- Shared lineage preserves execution-time missing and unknown file facts and
-  leaves dynamic I/O paths unresolved.
 - Stop-hook source resolution works in macOS system Bash 3.2.
 
 ## [0.9.3] - 2026-11-07

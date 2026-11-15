@@ -472,9 +472,9 @@ owner, and active marker byte-stable.
 absolute copy of an already-recorded relative path, or maps an explicitly
 external absolute literal onto a same-named in-repository file.
 
-**Invariant:** Direct static attribution remains authoritative. Repository
-basename recovery is removed: uniqueness cannot establish the runtime directory,
-even when the filename flowed into an I/O expression. Retain unresolved I/O.
+**Invariant:** Repository recovery handles only eligible relative literals and
+merges by normalized path identity. Direct static attribution remains
+authoritative; fallback status is reported only when it adds a new path.
 
 **Regression evidence:** Cover a direct relative input that exists in the repo
 and an absolute external input whose basename also exists locally. Require one
@@ -491,15 +491,22 @@ as real data I/O. Trusting a familiar alias after any rebinding has the same
 effect, and retaining the literal half of runtime string concatenation can hash
 a decoy whose basename was never read.
 
-**Invariant:** An I/O call proves direction, not an unresolved directory. The
-former import/alias/branch restrictions did not make basename recovery sound.
-Keep composed and CLI-bound paths unresolved without full runtime identity;
-do not restore repository guessing for unambiguous-looking filenames.
+**Invariant:** Recovery candidates must data-flow into the path argument of a
+recognized reader or writer expression. Direction is semantic evidence from
+that call, never a directory-name heuristic. Runtime branch selection and
+ambiguous assignment flow are left unresolved rather than guessed. Reader
+aliases require an actual supported import and remain invalid after every AST
+binding form. String concatenation contributes only when the entire expression
+resolves statically; arbitrary functions and partial literals do not prove I/O.
 
-**Regression evidence:** Retain negative probes for docstring filenames, runtime
-branches, shadowed/imported/custom readers, concatenation and external paths.
-A real CLI reading and writing external files must never attribute local decoys,
-even if those are the only matching basenames in the repository.
+**Regression evidence:** Place a uniquely named `ghost.csv` in the repository
+and mention it only in a module docstring; require no lineage. Read a dynamic
+path under `results/` and write one under `data/`; require input/output direction
+to follow the calls. Pass a conditional path and a custom `read_csv` helper;
+require unresolved lineage, while retaining a supported imported reader. Rebind
+its conventional alias through assignment, loop, context manager, unpacking,
+exception handling, walrus, comprehension, and pattern matching, and combine a
+runtime prefix with a literal suffix; require every case to stay unresolved.
 
 ## 27. Resolved I/O triggers repository traversal
 
@@ -507,15 +514,15 @@ even if those are the only matching basenames in the repository.
 repository even when ordinary static extraction already resolved all I/O. Large
 scientific data trees then delay or time out a synchronous PostToolUse hook.
 
-**Invariant:** Lineage extraction never walks or queries the repository.
-Statically resolved I/O is recorded directly; dynamic I/O stays unresolved
-with a warning instead of an unbounded delay or partial guess.
+**Invariant:** Remove statically resolved call-path candidates before repository
+discovery and skip discovery when none remain. Dynamic discovery excludes
+runtime/vendor trees and has a fixed entry bound; hitting the bound yields
+unresolved lineage instead of an unbounded delay or partial guess.
 
 **Regression evidence:** Replace the repository-query primitive with a failing
 spy and process a direct `read_csv('data/raw/sample.csv')`; require the static
-event to succeed without invoking the spy. Process a dynamic
-`read_csv(ROOT / 'sample.csv')` against the same spy and require an unresolved
-event without any repository query.
+event to succeed without invoking the spy. Exercise the bound separately and
+require an unresolved result.
 
 ## 28. Global safety serialization is mistaken for multi-session support
 
@@ -816,14 +823,64 @@ and the provenance of `mkdir`, `stat`, `date`, and `mktemp` (`--version`,
 `dpkg -S`) between the last green and first red runs before suspecting
 Mycelium.
 
-## 41. Captured absence is enriched from later filesystem state
+## 41. A policy or grammar is implemented for one member of its class
 
-Preserve captured missing or unknown file facts through finalization. Only
-legacy bare paths are eligible for later enrichment. Exercise a file created
-after the execution snapshot and verify that the manifest retains the original
-observation.
+**Failure:** The post-action check exempted "inline one-liners" by skipping
+Python `-c` only, so `R -e` opened a bookkeeping cycle. The R `-e` regex
+borrowed Rscript's long-option-only grammar, so `R -q -e` never matched at
+all: it looked exempt, but only because lineage could not see it either. Two
+defects in opposite directions made the behavior depend on which startup flag
+the agent happened to type.
 
-## 42. Package identity omits file modes or the build recipe
+**Invariant:** State a policy over the class the documentation names (every
+inline form, every interpreter) and enumerate that class in one place. Parse
+each interpreter with its own argv grammar — short flags, separated values,
+end-of-options markers, and options it honors after the payload — rather than
+reusing a sibling's. An exemption must come from the policy, never from a
+parse failure that also drops the event elsewhere.
+
+**Regression evidence:** For each member of the class, pair the exempt or
+detected form with option variants before and after the payload, and assert
+both consumers (post-action and lineage) separately, so a form that vanishes
+from both cannot pass as exempt.
+
+## 42. A hot-path scan repeats linear work per start or per match
+
+**Failure:** The lineage detector runs on every shell command with no hook
+timeout. Its shell-word regexes begin with a variable-length repetition that
+a quoted component can stretch across whitespace, so `finditer` re-walked a
+run of quoted words from every start position: `R -f a.R --args` plus 5,000
+`"$x"` words took about 58 s. Separately, each candidate match re-tokenized
+the whole command before it (and, for AND/OR lists, after it), so 800
+`R -q -e` lines or a 1,000-command `&&` chain took seconds. Each scan was
+correct; only its repetition was quadratic, and short test commands never
+showed it. PR #117 had already fixed an exponential case in the same regex.
+
+**Invariant:** In a hook path, every scan is linear in the command, or its
+cost is bounded with a documented fallback. A per-start or per-match helper
+must not re-read text an earlier start or match already read: skip starts
+that provably cannot match, and resume prefix folds from cached checkpoints.
+Each fast path must be exactly equivalent to the plain computation it
+replaces, not an approximation. A cache of per-checkpoint states must stay
+linear in memory too: share stacks between states and keep summaries rather
+than copying histories. The first version of this fix copied the operator
+history into every checkpoint, so a 6,000-command `&&` chain held about
+150 MB. Pruning start positions does not help inside one `match()` call, so
+check each pattern's own repetitions as well: two alternatives that accept
+the same word (`--output=x` as a known value option and as a generic
+`--name=value`) double the work per repetition, and a lazy word loop that
+retries a path at every whitespace split re-reads a word containing escaped
+blanks once per split.
+
+**Regression evidence:** Timing tests with generous bounds on long
+quoted-word runs, quote and escape runs, many-line commands, and long
+`&&`/`||` chains; a `tracemalloc` peak bound on long chains and deep
+nesting; and deterministic fuzz tests that compare each
+fast path with the plain computation (pruned scan against `finditer`,
+cached prefix folds against whole-prefix tokenization, each rewritten
+regex against its previous version).
+
+## 43. Package identity omits file modes or the build recipe
 
 Package content hashes omit executable permissions, while resource-only digests
 omit the build recipe. Verify load-bearing modes before doctor/idempotent-install
@@ -831,7 +888,7 @@ success and include generator bytes and effective guidance in source identity.
 Permission repair must be explicit, content-verified, staged and backed up; it
 must not become an override for edited files, links or malformed ownership.
 
-## 43. Initialization guidance sends the agent back into implementation discovery
+## 44. Initialization guidance sends the agent back into implementation discovery
 
 A correct initializer can remain unexecuted when the skill describes its
 outputs as separate tasks without an explicit native invocation. Give the agent
@@ -841,7 +898,7 @@ Verify that exact documented sequence preserves user
 files and creates a valid project. This proves the recipe works offline, not
 that a selected model will follow it within a native invocation allowance.
 
-## 44. Batched delivery loses mandatory reminders
+## 45. Batched delivery loses mandatory reminders
 
 A singleton pending reminder loses earlier mandatory guidance when a native
 invocation completes several analysis commands. Persist reminders by event ID
@@ -849,7 +906,7 @@ until each is acknowledged, including restart and older singleton migration.
 Exercise two positives before delivery, partial acknowledgement, duplicate tool
 delivery and a negative neighbor; a one-positive-then-delivery test misses this.
 
-## 45. Native asynchronous execution and finalization boundaries
+## 46. Native asynchronous execution and finalization boundaries
 
 **Failure:** An early RUNNING hook snapshots the previous output, or a lost
 Stop response causes completed work to be dispatched again. Resolving a chosen

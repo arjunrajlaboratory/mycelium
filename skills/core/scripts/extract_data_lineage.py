@@ -46,6 +46,8 @@ Event shape (NDJSON, one line each) — produced by the tracker hook:
       "script": "analysis/foo.py",           # or null for `-c` inline
       "script_sha256": "ab12...",            # may be null → compute from disk
       "script_source": "...",                # embedded if <100KB else null
+      "script_candidate": null,              # R run with an uncertain script:
+                                             # the file word the command names
       "git_sha": "c3d4...",
       "inputs":  [{"path", "sha256", "n_rows"?}],
       "outputs": [{"path", "sha256", "n_rows"?}],
@@ -59,10 +61,10 @@ Design notes:
 - The extractor is FORGIVING. Missing fields default to safe values. Invalid
   JSON lines are logged as warnings and skipped. Files that no longer exist
   on disk are recorded with sha256=null and a `_missing` marker.
-- Legacy bare paths and omitted script-hash fields may be enriched for
-  standalone use. Captured records (including explicit null hashes, sizes,
-  missing markers and size-limit markers) are preserved without reading later
-  file contents. Production snapshots describe execution time, not Stop time.
+- The extractor will COMPUTE SHAs when an event has them missing, for
+  standalone-testing use. In production (events written by the tracker hook),
+  SHAs should already be populated — computed at execution time, not at
+  Stop time, for fidelity across iterative edit-run-edit-run cycles.
 - Files >100 MB get path+size only (sha256: null, _skipped_too_large: true).
 """
 
@@ -133,10 +135,8 @@ def n_rows_if_tabular(path: Path) -> int | None:
 
 
 def enrich_file_record(rec: dict[str, Any]) -> dict[str, Any]:
-    """Enrich legacy bare paths; preserve captured facts, including absence."""
+    """Fill in sha256/n_rows for a file record if missing and file exists on disk."""
     out = dict(rec)
-    if any(key in out for key in ("sha256", "size_bytes", "_missing", "_skipped_too_large")):
-        return out
     path_str = out.get("path")
     if not path_str:
         return out
@@ -180,6 +180,7 @@ def normalize_event(
         "script": raw.get("script"),
         "script_sha256": raw.get("script_sha256"),
         "script_source": raw.get("script_source"),
+        "script_candidate": raw.get("script_candidate"),
         "git_sha": raw.get("git_sha"),
         "inputs": [enrich_file_record(r) for r in (raw.get("inputs") or [])],
         "outputs": [enrich_file_record(r) for r in (raw.get("outputs") or [])],
@@ -190,7 +191,7 @@ def normalize_event(
         "seeds_detected": list(raw.get("seeds_detected") or []),
     }
 
-    if event["script"] and "script_sha256" not in raw:
+    if event["script"] and event["script_sha256"] is None:
         script_path = Path(event["script"])
         if script_path.exists():
             event["script_sha256"] = sha256_file(script_path)
@@ -230,12 +231,13 @@ def build_manifest(
         # Prefer the script path; fall back to a label for inline `-c` / `-e`
         # invocations so the summary records every action, not just file-backed
         # scripts. Inline label uses the script SHA so distinct inline snippets
-        # show as distinct entries.
-        entry = e["script"] or (
-            f"(inline {e.get('script_sha256', '')[:12]})"
-            if e.get("script_sha256")
-            else None
-        )
+        # show as distinct entries; an R run whose script is uncertain shows
+        # the file the command names.
+        entry = e["script"]
+        if not entry and e.get("script_sha256"):
+            entry = f"(inline {e['script_sha256'][:12]})"
+        elif not entry and e.get("script_candidate"):
+            entry = f"(unresolved {e['script_candidate']})"
         if entry and entry not in scripts_executed:
             scripts_executed.append(entry)
         wall = e.get("bash_wall_s")

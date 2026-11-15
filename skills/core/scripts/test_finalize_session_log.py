@@ -382,3 +382,70 @@ def test_finalizer_rejects_symlink(tmp_path):
         _finalize(link)
 
     assert "ended:\n" in target.read_text()
+
+
+_CLI_ARGS = [
+    "--ended",
+    "2026-08-01T18:42:00-0400",
+    "--duration-minutes",
+    "7",
+    "--files-changed",
+    "0",
+    "--end-time",
+    "18:42",
+]
+
+
+@pytest.mark.parametrize(
+    "content, detail",
+    [
+        ("## Session Log\n\n### Agent rewrote the log\n", "missing opening"),
+        ("---\nsession_id: 2026-08-01-001\nended:\n\n# Session\n", "missing closing"),
+        (
+            "---\nsession_id: 2026-08-01-001\nended:\nfiles_changed:\n---\n",
+            "'duration_minutes'",
+        ),
+        (
+            "---\nended:\nended:\nduration_minutes:\nfiles_changed:\n---\n",
+            "'ended'",
+        ),
+    ],
+)
+def test_cli_reports_frontmatter_defect_as_one_line_and_distinct_status(
+    tmp_path, monkeypatch, capsys, content, detail
+):
+    path = tmp_path / "session.md"
+    path.write_text(content)
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(""))
+
+    status = MODULE.main(["--log-path", str(path), *_CLI_ARGS])
+
+    assert status == MODULE.FRONTMATTER_EXIT_STATUS
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1 and err.endswith("\n")
+    assert detail in err
+    assert "Traceback" not in err
+    assert path.read_text() == content
+
+
+def test_cli_does_not_report_other_failures_as_frontmatter_defects(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "target.md"
+    _log(target)
+    link = tmp_path / "session.md"
+    os.symlink(target, link)
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(""))
+
+    with pytest.raises(ValueError, match="regular file"):
+        MODULE.main(["--log-path", str(link), *_CLI_ARGS])
+    assert "ended:\n" in target.read_text()
+
+
+def test_cli_finalizes_intact_log_with_status_zero(tmp_path, monkeypatch):
+    path = tmp_path / "session.md"
+    _log(path)
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(""))
+
+    assert MODULE.main(["--log-path", str(path), *_CLI_ARGS]) == 0
+    assert "### 18:42 — Session ended (7m, 0 files)" in path.read_text()

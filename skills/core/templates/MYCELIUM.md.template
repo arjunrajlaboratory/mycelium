@@ -87,6 +87,8 @@ No domain conventions installed yet. Install with mycelium's `install-convention
 
 **This is critical.** After completing any significant step:
 
+When the post-action hook asks for a session log entry, add it to the named `.living/log/` file: append to it; never rewrite it (Stop needs its header).
+
 1. **Update manifests**: Update the relevant manifest (`ANALYSIS_MANIFEST.md`, `DATA_MANIFEST.md`, etc.) with new/changed entries
 2. **Update documentation**: Update or create the UPPER_SNAKE_CASE.md file in the affected subfolder
 3. **Log decisions**: If a non-obvious choice was made, append to `.living/decisions.md`

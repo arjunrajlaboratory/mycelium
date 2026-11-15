@@ -91,10 +91,10 @@ Read narrowly, in this order:
 When a data property matters (columns, factor levels, sample counts), check it
 with a read-only probe that writes nothing. Use only these forms, which
 Mycelium's lifecycle hooks treat as reads rather than analysis runs: `head`,
-`wc`, or `rg` on a file; `python3 -c '...'`; `Rscript -e '...'`; or a heredoc
-piped to `python3 -` or `Rscript -`. Prefix the repository's environment
-runner when it documents one (`conda run -n <env> python3 -c '...'`). Do not
-use `R -e`, which Mycelium counts as an analysis run. For example:
+`wc`, or `rg` on a file; `python3 -c '...'`; `Rscript -e '...'` or
+`R -e '...'`; or a heredoc piped to `python3 -` or `Rscript -`. Prefix the
+repository's environment runner when it documents one
+(`conda run -n <env> python3 -c '...'`). For example:
 
 ```bash
 head -1 data/raw/samples.csv

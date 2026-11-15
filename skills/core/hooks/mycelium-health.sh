@@ -198,7 +198,7 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
     # transaction-scoped sentinel so the fresh root cannot mix old evidence or
     # inherit a completed work cycle.
     if [ -n "$_STALE_LOG" ] && [ -f "$_STALE_LOG" ] && ! grep -q "## Session Summary" "$_STALE_LOG"; then
-      MESSAGES="${MESSAGES}INCOMPLETE SESSION LOG: Previous session log at ${_STALE_LOG} was never finalized (likely a crashed session). Add a '## Session Summary' section and append a row to the registry, or delete it.\n\n"
+      MESSAGES="${MESSAGES}INCOMPLETE SESSION LOG: Previous session log at ${_STALE_LOG} was never finalized (likely a crashed session). Append a '## Session Summary' section (never rewrite the log; its header is hook-owned) and append a row to the registry, or delete it.\n\n"
     fi
     _ARCHIVE_FALLBACK="abandoned-$(date +%s)"
     if [ "${_SUPERSEDED_OWNER:-false}" = true ]; then

@@ -1058,6 +1058,47 @@ def test_codex_post_tool_use_uses_nested_context(tmp_path):
     assert (repo / ".mycelium" / "mycelium-reminded.tmp").is_file()
 
 
+def test_post_action_session_log_directive_is_append_only(tmp_path):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "append-only-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    log_path = Path(
+        (repo / ".mycelium" / "active-session-log.tmp").read_text().splitlines()[0]
+    )
+
+    result = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "tool_name": "Bash",
+            "tool_input": {"command": "python analysis.py"},
+            "turn_id": "append-only-post",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    directive = next(
+        line for line in context.splitlines() if line.startswith("SESSION LOG UPDATE:")
+    )
+    assert str(log_path) in directive
+    assert "append to it; never rewrite it (Stop needs its header)" in directive
+
+
+@pytest.mark.parametrize(
+    "guide", ["skills/core/SKILL.md", "skills/core/templates/MYCELIUM.md.template"]
+)
+def test_post_action_protocol_guidance_says_session_log_is_append_only(guide):
+    text = (HOOKS_DIR.parents[2] / guide).read_text()
+    protocol = text[text.index("Post-Action Hook Protocol") :]
+    assert "append to it; never rewrite it (Stop needs its header)" in protocol
+
+
 def test_claude_session_start_uses_nested_context(tmp_path):
     repo = _repo(tmp_path, living=False)
     result = _run_claude_hook(
@@ -2053,6 +2094,7 @@ def test_documented_planning_probes_never_make_stop_block(tmp_path):
         "`rg`": "rg -n cohort data/raw/samples.csv",
         "`python3 -`": "python3 - <<'EOF'\nimport csv\nprint(sum(1 for _ in open('data/raw/samples.csv')))\nEOF",
         "`Rscript -`": "Rscript - <<'EOF'\nprint(nrow(read.csv('data/raw/samples.csv')))\nEOF",
+        "`R -e '...'`": "R -e 'print(nrow(read.csv(\"data/raw/samples.csv\")))'",
         "`conda run -n <env> python3 -c '...'`": "conda run -n analysis python3 -c 'print(open(\"data/raw/samples.csv\").readline())'",
     }
     for named, command in extra.items():
@@ -2092,14 +2134,16 @@ def test_documented_planning_probes_never_make_stop_block(tmp_path):
     assert stop.returncode == 0, stop.stderr
     assert '"block"' not in stop.stdout, stop.stdout
 
-    # Paired positives: running a repository script by path, or R with -e,
-    # is analysis, which is why the guide forbids both while planning.
+    # Paired positives: running a repository script by path, with python or
+    # with R's -f, is analysis, which is why the guide forbids it while
+    # planning. (`R -e` is an inline read since #117, like `Rscript -e`.)
     script = repo / "analysis" / "probe" / "run.py"
     script.parent.mkdir(parents=True)
     script.write_text("print('probe')\n")
+    (script.parent / "run.R").write_text("print('probe')\n")
     for command in (
         "python3 analysis/probe/run.py",
-        "R -e 'print(nrow(read.csv(\"data/raw/samples.csv\")))'",
+        "R -f analysis/probe/run.R",
     ):
         result = _run_hook(
             "mycelium-post-action.sh",
@@ -3005,6 +3049,9 @@ def test_stop_preserves_transaction_when_atomic_log_finalization_fails(tmp_path)
     payload = json.loads(failed.stdout)
     assert payload["decision"] == "block"
     assert "session log finalization failed" in payload["reason"]
+    # A helper failure unrelated to the log's header keeps the generic
+    # message; only a frontmatter defect names the header as the cause.
+    assert "frontmatter" not in payload["reason"]
     assert active_marker.is_file()
     assert "ended:\n" in log_path.read_text()
     assert "Session ended" not in log_path.read_text()
@@ -3030,6 +3077,89 @@ def test_stop_preserves_transaction_when_atomic_log_finalization_fails(tmp_path)
     assert "ended:\n" not in finalized
     assert finalized.count("Session ended") == 1
     assert not active_marker.exists()
+
+
+@pytest.mark.parametrize(
+    "damage, detail",
+    [
+        ("drop_header", "missing opening YAML frontmatter"),
+        ("drop_closing", "missing closing YAML frontmatter"),
+        ("drop_field", "'duration_minutes'"),
+    ],
+)
+def test_stop_names_destroyed_session_log_frontmatter_and_retry_succeeds(
+    tmp_path, damage, detail
+):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "header-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    active_marker = state / "active-session-log.tmp"
+    log_path = Path(active_marker.read_text().splitlines()[0])
+    original = log_path.read_text()
+    header_end = original.index("\n---\n", 4) + len("\n---\n")
+    header, body = original[:header_end], original[header_end:]
+    (repo / "work.py").write_text("print('work')\n")
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\nSession logs are append-only.\n"
+    )
+
+    # An agent rewrites the hook-owned log with the Write tool.
+    rewritten_body = body + "\n### Agent notes\n- Rewrote the whole log.\n"
+    if damage == "drop_header":
+        damaged = rewritten_body
+    elif damage == "drop_closing":
+        damaged = header[: -len("---\n")] + rewritten_body
+    else:
+        damaged = header.replace("duration_minutes:\n", "") + rewritten_body
+    log_path.write_text(damaged)
+
+    failed = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "header-fail"},
+    )
+
+    assert failed.returncode == 0, failed.stderr
+    payload = json.loads(failed.stdout)
+    assert payload["decision"] == "block"
+    reason = payload["reason"]
+    assert "\n" not in reason
+    relative_log = log_path.relative_to(repo).as_posix()
+    assert f"session log {relative_log} lost its YAML frontmatter" in reason
+    assert detail in reason
+    assert (
+        "session_id, project, branch, started, ended, duration_minutes, "
+        "files_changed" in reason
+    )
+    assert "append to the log instead of rewriting it" in reason
+    assert "inspect the helper installation" not in reason
+    # Fail safe: nothing was published and the damaged log is untouched.
+    assert log_path.read_text() == damaged
+    assert active_marker.is_file()
+    assert "accepted by Stop" not in (state / "last-session.md").read_text()
+
+    # Restoring the header block lets the retried Stop finalize normally and
+    # keeps what the agent wrote.
+    log_path.write_text(header + rewritten_body)
+    retried = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": True, "turn_id": "header-retry"},
+    )
+
+    assert retried.returncode == 0, retried.stderr
+    assert '"decision": "block"' not in retried.stdout
+    finalized = log_path.read_text()
+    assert "ended:\n" not in finalized
+    assert finalized.count("Session ended") == 1
+    assert "- Rewrote the whole log." in finalized
+    assert not active_marker.exists()
+    assert not (repo / ".living" / "log" / ".finalize_session_log.err").exists()
 
 
 def test_stop_retries_ended_log_when_handoff_finalization_fails(tmp_path):

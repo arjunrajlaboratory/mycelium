@@ -79,7 +79,7 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
   # timestamp on line 2. Only the path belongs in the agent directive.
   if _ACTIVE_MARKER=$(mycelium_read_active_log_marker "$REPO_ROOT" "$ACTIVE_LOG_FILE"); then
     LOG_PATH=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '1p')
-    LOG_DIRECTIVE="SESSION LOG UPDATE: Append a 2-3 line timestamped entry to ${LOG_PATH} describing what you just did, the result, and any notable outputs. Format: ### HH:MM — <action title> followed by bullet points with Command, Result, and Output fields as applicable."
+    LOG_DIRECTIVE="SESSION LOG UPDATE: Append a 2-3 line timestamped entry to ${LOG_PATH} describing what you just did, the result, and any notable outputs. This log is append-only: append to it; never rewrite it (Stop needs its header). Format: ### HH:MM — <action title> followed by bullet points with Command, Result, and Output fields as applicable."
   fi
 fi
 

@@ -94,6 +94,7 @@ the Stop check accepts the session.
   "script": "analysis/foo.py",
   "script_sha256": "ab12...",
   "script_source": "...",
+  "script_candidate": null,
   "git_sha": "c3d4...",
   "inputs":  [{"path", "sha256", "size_bytes", "n_rows"?}],
   "outputs": [{"path", "sha256", "size_bytes"}],
@@ -126,11 +127,26 @@ script). Inline `-c` scripts emit one event each; their `script` field is
 `null`, with the source embedded under `script_source` and identified by
 `script_sha256`.
 
-Dynamic `Path`/dictionary composition and CLI-bound paths remain unresolved
-unless the literal scanner can identify the full path. Repository basename
-recovery has been removed: even a unique matching file can be an unrelated input
-or a stale output when the runtime directory differs. No repository search or
-shell replay substitutes for missing runtime evidence.
+`script_candidate` is `null` except for an R script run (`R -f`,
+`R --file=`, `R CMD BATCH`) whose script cannot be named with certainty:
+shell syntax the scan cannot read (`R -f a.R $OPTS`, `--file="$SCRIPT"`) or
+`R_BATCH_OPTIONS` may change which file R reads. The run is still recorded,
+with `script`, `script_sha256`, and `script_source` all `null`,
+`script_candidate` holding the file word as the command wrote it (unexpanded,
+so it may be `$SCRIPT`), empty `inputs`/`outputs`, `io_detection:
+"unresolved"`, and a `lineage_warnings` entry. The candidate is never read or
+hashed, since R may have run a different file.
+
+For dynamic `Path`/dictionary composition, a conservative repository fallback
+may recover a uniquely named existing file. Candidates must data-flow into the
+path argument of a recognized reader or writer, reader aliases must come from
+an actual supported import and remain unshadowed, and direction comes from that
+call rather than the file's directory. Expressions that choose among runtime
+branches or concatenate an unresolved operand remain unresolved; fully static
+string concatenation remains eligible. Directly resolved paths bypass the
+fallback entirely. Dynamic searches exclude runtime/vendor trees and stop at a
+fixed entry bound; ambiguity or a bound hit remains unresolved rather than
+guessing.
 
 When I/O is delegated through imports or no safe candidate can be recovered,
 the event uses `"io_detection": "unresolved"`, leaves `inputs` and `outputs`
@@ -138,12 +154,6 @@ empty, and adds a `lineage_warnings` entry. Stop-time consolidation promotes
 that warning to the manifest's `extraction_warnings` list. This preserves
 evidence that the script ran without implying that its lineage was fully
 captured.
-
-Finalization preserves captured file records, including missing markers,
-explicit null hashes, sizes, and size-limit markers. It does not add later
-hashes or row counts to an earlier snapshot. Standalone legacy events containing
-only a path can still be enriched, as can an omitted script-hash field; an
-explicitly unknown script hash stays unknown.
 
 ## Manifest schema (consolidated at Stop)
 
@@ -180,14 +190,36 @@ codes: an unknown exit is neither a success nor a failure.
 
 `scripts_executed` uses the script path when present, falling back to
 `(inline <sha-prefix>)` so inline-only sessions still produce a populated
-list. Repeated invocations of the same inline source collapse to one entry.
+list, and to `(unresolved <candidate>)` for an R run whose script is
+uncertain. Repeated invocations of the same inline source collapse to one
+entry.
 
 ## Detection coverage
 
 **Analysis invocation patterns detected** (matched anywhere in the command):
 - `python` / `python3` (script path or `-c` inline)
-- `Rscript` (script path)
-- `R … -e "…"` (inline)
+- `Rscript` (script path or `-e` inline)
+- `R … -e "…"` (inline), `R … -f script.R` / `R … --file=script.R`, and
+  `R [options] CMD BATCH [options] script.R`, with R's own startup options
+  (`-q`, `-s`, `--encoding ENC`, `--max-ppsize N`, …) before the payload;
+  `--help`/`--version`/`--print-home`/`RHOME`/`CMD` or `-d`/`--debugger`
+  anywhere before `--args` means R never runs the payload. R's argv is read
+  word by word up to `--args`, with line continuations joined and
+  redirections (including `"${LOG}"` targets) dropped. A word the shell
+  computes (a `$` or backtick outside single quotes) is unknown. Inside
+  double quotes (`-f "$D/a.R"`, `--encoding "$ENC"`) it is still one word
+  and reading continues past it; unquoted, or where an option belongs, it
+  ends what can be read, as does shell syntax the reader cannot follow.
+  Known `-e` expressions are recorded and computed ones never are; an
+  `R -f`/`R CMD BATCH` run's script is unresolved when its file word is
+  computed or a later unreadable word could name another file. `R CMD BATCH`
+  also appends `$R_BATCH_OPTIONS`. A literal assignment on the BATCH command
+  itself (`R_BATCH_OPTIONS=--vanilla R CMD BATCH a.R`) is read exactly; any
+  other mention (an `export`, `env`, a computed value) is not modelled, so
+  the run is unresolved unless its options already stop R. Otherwise the
+  variable is ignored (the hook's own environment is not the agent shell's).
+  A heredoc's delimiter is skipped like any redirection target, and a `$`
+  that starts no expansion (`cat('$')`) is literal.
 - `jupyter nbconvert|execute notebook.ipynb`
 - `conda run … python …`
 - `uv run … python …`

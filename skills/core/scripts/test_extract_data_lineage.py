@@ -65,32 +65,6 @@ def test_n_rows_missing_file_returns_none(tmp_path: Path) -> None:
 # ---------- enrich_file_record ----------
 
 
-def test_captured_missing_file_stays_missing_after_later_creation(tmp_path: Path) -> None:
-    from extract_data_lineage_event import file_record
-    target = tmp_path / "later.csv"
-    captured = file_record(str(target), tmp_path)
-    target.write_text("value\n42\n")
-    assert enrich_file_record(captured) == captured
-
-
-def test_captured_file_is_not_enriched_from_later_bytes(tmp_path: Path) -> None:
-    from extract_data_lineage_event import file_record
-    target = tmp_path / "changed.csv"
-    target.write_text("value\n1\n")
-    captured = file_record(str(target), tmp_path)
-    target.write_text("value\n1\n2\n3\n")
-    assert enrich_file_record(captured) == captured
-
-
-def test_captured_unknown_hash_stays_unknown(tmp_path: Path) -> None:
-    target = tmp_path / "later.csv"
-    target.write_text("value\n42\n")
-    captured = {"path": str(target), "sha256": None}
-    assert enrich_file_record(captured) == captured
-    raw = {"ts": "2026-09-14T00:00:00Z", "script": str(target), "script_sha256": None}
-    assert normalize_event(raw, [], 0)["script_sha256"] is None
-
-
 def test_enrich_computes_sha_when_missing(tmp_path: Path) -> None:
     p = tmp_path / "f.bin"
     p.write_bytes(b"data")
@@ -463,6 +437,24 @@ def test_scripts_executed_includes_inline_with_sha_label() -> None:
     ]
     m = build_manifest(events, "sid", "/repo", [])
     assert m["summary"]["scripts_executed"] == ["(inline ab12cd34ef56)"]
+
+
+def test_scripts_executed_labels_an_unresolved_r_run_by_its_candidate() -> None:
+    """An R run with an uncertain script has no hash; it is listed by the
+    file word the command named, and the field survives normalization."""
+    raw = {
+        "ts": "2026-11-13T12:00:00Z",
+        "bash_cmd": "R -f first.R $OPTS",
+        "script": None,
+        "script_sha256": None,
+        "script_source": None,
+        "script_candidate": "first.R",
+        "io_detection": "unresolved",
+    }
+    event = normalize_event(raw, [], 0)
+    assert event is not None and event["script_candidate"] == "first.R"
+    m = build_manifest([event], "sid", "/repo", [])
+    assert m["summary"]["scripts_executed"] == ["(unresolved first.R)"]
 
 
 def test_scripts_executed_mixes_named_and_inline() -> None:
