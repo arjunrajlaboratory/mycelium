@@ -13,7 +13,7 @@ source "$HERE/mycelium-hook-lib.sh"
 
 # Read stdin JSON
 INPUT=$(cat)
-mycelium_payload_preload "$INPUT" 'opt:session_id' 'get:source'
+mycelium_payload_preload "$INPUT" 'opt:session_id' 'get:source' 'cwd0:'
 HOST_SESSION_ID=$(mycelium_json_get_optional_string 'session_id' "$INPUT") || exit 0
 if [[ -n "$HOST_SESSION_ID" ]] \
   && ! mycelium_valid_session_id "$HOST_SESSION_ID"; then
@@ -26,7 +26,7 @@ SYSTEM_MESSAGE=""
 NOW_TS=$(date +%s)
 
 # Extract cwd from input
-CWD=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cwd', ''))" 2>/dev/null || echo "")
+CWD=$(mycelium_session_start_cwd "$INPUT")
 if [ -z "$CWD" ]; then
   CWD=$(pwd)
 fi
@@ -38,25 +38,21 @@ if [ -z "$REPO_ROOT" ]; then
   exit 0  # Not in a git repo
 fi
 
-mycelium_prepare_state_dir "$REPO_ROOT" bootstrap || exit 0
-
 # SessionStart and Stop both mutate the active-log ownership transaction.
 # Serialize them with the same repository-local lock so concurrent primary and
 # subagent starts cannot reserve separate logs or overwrite one another's
-# marker while Stop is finalizing the prior session.
-if ! mycelium_acquire_stop_lock "$MYCELIUM_SHARED_STATE_DIR"; then
-  exit 0
-fi
-if ! mycelium_prepare_state_dir "$REPO_ROOT"; then
-  mycelium_release_stop_lock
-  exit 0
-fi
-if ! mycelium_select_session_state "$REPO_ROOT" "$INPUT" create; then
-  mycelium_release_stop_lock
-  exit 0
-fi
-if ! mycelium_acquire_session_lock "$STATE_DIR"; then
-  mycelium_release_stop_lock
+# marker while Stop is finalizing the prior session. One state call bootstraps
+# the shared directory, takes the lifecycle lock, prepares shared state,
+# selects (creating) this root's run directory, takes its session lock, and
+# reads the active marker and owner token under both locks.
+if ! mycelium__state "$REPO_ROOT" "$INPUT" \
+  prepare:bootstrap lock:stop prepare:write select:create lock:session \
+  marker owner; then
+  # Ops 1-2 failed before the lifecycle lock was held; ops 3-5 failed while
+  # holding only that lock.
+  if (( MYCELIUM__STATE_FAILED > 2 )); then
+    mycelium_release_stop_lock
+  fi
   exit 0
 fi
 trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT
@@ -124,10 +120,10 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
   _STALE_OWNER_ID=""
   _DIFFERENT_ROOT_OWNER=false
   _SUPERSEDED_OWNER=false
-  if _ACTIVE_MARKER=$(mycelium_read_active_log_marker "$REPO_ROOT" "$ACTIVE_LOG_FILE"); then
-    _STALE_LOG=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '1p')
-    _STALE_OWNER_TS=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '2p')
-    _STALE_OWNER_FORMAT=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '3p')
+  if [[ "$MYCELIUM_MARKER_STATE" == valid ]]; then
+    _STALE_LOG="$MYCELIUM_MARKER_LOG"
+    _STALE_OWNER_TS="$MYCELIUM_MARKER_TS"
+    _STALE_OWNER_FORMAT="$MYCELIUM_MARKER_FORMAT"
   else
     _SHOULD_CLEAN=true
     MESSAGES="${MESSAGES}CORRUPT SESSION MARKER: Removed an invalid active-session marker without following its path. Session lifecycle state will be rebuilt safely.\n\n"
@@ -142,8 +138,9 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
     && "$SOURCE" == "startup" \
     && "$_STALE_OWNER_FORMAT" == "owner-id-v1" ]] \
     && mycelium_valid_session_id "$HOST_SESSION_ID"; then
-    if _STALE_OWNER_ID=$(mycelium_read_session_owner_id "$ACTIVE_OWNER_FILE") \
-      && [[ "$_STALE_OWNER_ID" != "$HOST_SESSION_ID" ]]; then
+    _STALE_OWNER_ID="$MYCELIUM_OWNER_ID"
+    if [[ "$MYCELIUM_OWNER_STATE" == valid \
+      && "$_STALE_OWNER_ID" != "$HOST_SESSION_ID" ]]; then
       _DIFFERENT_ROOT_OWNER=true
     fi
   fi
@@ -404,8 +401,7 @@ REGISTRY_EOF
     fi
     # JSON strings are valid YAML scalars and protect unusual but valid Git
     # branch names (for example, names beginning with a brace).
-    BRANCH_YAML=$(printf '%s' "$BRANCH" | python3 -c \
-      'import json,sys; print(json.dumps(sys.stdin.read()))')
+    BRANCH_YAML=$(mycelium_json_dumps_stdin "$BRANCH")
     STARTED=$(date +%Y-%m-%dT%H:%M:%S%z)
     TIME_SHORT=$(date +%H:%M)
 

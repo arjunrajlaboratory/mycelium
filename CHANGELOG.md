@@ -18,6 +18,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would raise or print a NUL byte falls back to its own interpreter. The
   PostToolUse activity tracker drops from 15 to 10 Python starts and the
   post-action hook from 20 to 13, about a quarter of their run time.
+- **Hooks run their state checks in one Python process per pass.** Shared
+  state preparation, private run selection, active-marker and owner-token
+  parsing, ownership authorization, and the first lock attempt used to start
+  one interpreter each, several times per event. They now run as ordered ops
+  in `skills/core/hooks/mycelium_hook_state.py` (started with `-I -S`), which
+  keeps each helper's checks, order, variable assignments, and fail-closed
+  results; a test runs every scenario against the previous helpers and
+  requires identical results. A PostToolUse event validates, takes its
+  session lock with one `mkdir(2)`, and revalidates inside the lock in that
+  single process; a held lock falls back to the unchanged bash wait-and-reap
+  loop and resumes the remaining checks in a new process. Small encoders
+  (hook JSON output, the Stop block reason, the branch scalar, plain
+  registry cells) skip the interpreter when their output is provably
+  byte-identical, and the edit-status and SessionStart cwd decoders join the
+  payload preload. Python starts per event: SessionStart 12 to 5, edit
+  tracker 11 to 4, analysis post-action 13 to 4, data tracker 9 to 3, read
+  tracker 8 to 2, blocked Stop 20 to 8. A marker or owner file holding a NUL
+  byte is now refused instead of read with the NUL dropped, and a repository
+  path that is not valid UTF-8 no longer silently disables the hooks.
 - **The compatibility test suite runs in parallel.** CI and
   `tools/release_gate.py` run `skills/core/scripts` with pytest-xdist
   (`-n auto --dist worksteal`) when it is installed; every test works in its

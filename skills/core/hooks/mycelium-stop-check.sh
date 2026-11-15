@@ -27,62 +27,64 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 if [ -z "$REPO_ROOT" ]; then
   exit 0
 fi
+# One state call runs the whole entry sequence below; a lock that is already
+# held falls back to the bash retry loop and resumes the remaining checks.
+#
+# An identified late Stop must not recreate a completed transaction, so it
+# resolves only an already-existing private run before normal shared setup.
+# Another Stop for the same root may complete while this one waits for the
+# repository lifecycle lock, and a duplicate may win the session lock first:
+# re-resolve without creating state after each lock. A missing marker at any
+# of those points means a harmless duplicate or late delivery.
 if [[ -n "$HOST_SESSION_ID" ]]; then
-  # An identified late Stop must not recreate a completed transaction. Resolve
-  # only an already-existing private run before doing normal shared setup.
-  mycelium_prepare_state_dir "$REPO_ROOT" read-only || exit 0
-  mycelium_select_session_state "$REPO_ROOT" "$INPUT" read-only || exit 0
-  if [[ ! -e "$STATE_DIR/active-session-log.tmp" \
-    && ! -L "$STATE_DIR/active-session-log.tmp" ]]; then
-    exit 0
-  fi
+  _STOP_OPS=(
+    prepare:read-only select:read-only require-marker
+    lock:stop
+    prepare:write
+    prepare:read-only select:read-only require-marker
+    lock:session
+    prepare:read-only select:read-only require-marker
+    marker owner
+  )
+  _STOP_LOCK_OP=4
+  _STOP_PREPARE_OP=5
+  _STOP_SESSION_LOCK_OP=9
 else
-  mycelium_prepare_state_dir "$REPO_ROOT" bootstrap || exit 0
-  mycelium_select_session_state "$REPO_ROOT" "$INPUT" read-only || exit 0
+  _STOP_OPS=(
+    prepare:bootstrap select:read-only
+    lock:stop
+    prepare:write
+    lock:session
+    marker owner
+  )
+  _STOP_LOCK_OP=3
+  _STOP_PREPARE_OP=4
+  _STOP_SESSION_LOCK_OP=5
 fi
-if ! mycelium_acquire_stop_lock "$MYCELIUM_SHARED_STATE_DIR"; then
-  # A concurrent owner may still fail or be interrupted, so accepting this Stop
-  # would bypass lifecycle enforcement. Preserve state and ask the host to retry.
-  mycelium_emit_stop_block \
-    "STOP BLOCKED — the lifecycle transaction lock remained busy. Active state was preserved; wait for the other lifecycle hook to finish, then retry Stop."
-  exit 0
-fi
-trap mycelium_release_stop_lock EXIT
-
-if ! mycelium_prepare_state_dir "$REPO_ROOT"; then
-  mycelium_emit_stop_block \
-    "STOP BLOCKED — shared lifecycle state preparation failed. Active state was preserved; repair the unsafe state and retry Stop."
-  exit 0
-fi
-
-# Another Stop for this same root may have completed while this process waited
-# for the repository-global lifecycle lock. Re-resolve without creating state;
-# a missing marker now means this is a harmless duplicate/late delivery.
-if [[ -n "$HOST_SESSION_ID" ]]; then
-  mycelium_prepare_state_dir "$REPO_ROOT" read-only || exit 0
-  mycelium_select_session_state "$REPO_ROOT" "$INPUT" read-only || exit 0
-  if [[ ! -e "$STATE_DIR/active-session-log.tmp" \
-    && ! -L "$STATE_DIR/active-session-log.tmp" ]]; then
-    exit 0
+if ! mycelium__state "$REPO_ROOT" "$INPUT" "${_STOP_OPS[@]}"; then
+  _STOP_FAILED="$MYCELIUM__STATE_FAILED"
+  if (( _STOP_FAILED > _STOP_SESSION_LOCK_OP )); then
+    mycelium_release_session_lock
   fi
-fi
-if ! mycelium_acquire_session_lock "$STATE_DIR"; then
-  mycelium_emit_stop_block \
-    "STOP BLOCKED — the session event lock remained busy. Active state was preserved; wait for the in-flight hook to finish, then retry Stop."
+  if (( _STOP_FAILED > _STOP_LOCK_OP )); then
+    mycelium_release_stop_lock
+  fi
+  if (( _STOP_FAILED == _STOP_LOCK_OP )); then
+    # A concurrent owner may still fail or be interrupted, so accepting this
+    # Stop would bypass lifecycle enforcement. Preserve state and ask the host
+    # to retry.
+    mycelium_emit_stop_block \
+      "STOP BLOCKED — the lifecycle transaction lock remained busy. Active state was preserved; wait for the other lifecycle hook to finish, then retry Stop."
+  elif (( _STOP_FAILED == _STOP_PREPARE_OP )); then
+    mycelium_emit_stop_block \
+      "STOP BLOCKED — shared lifecycle state preparation failed. Active state was preserved; repair the unsafe state and retry Stop."
+  elif (( _STOP_FAILED == _STOP_SESSION_LOCK_OP )); then
+    mycelium_emit_stop_block \
+      "STOP BLOCKED — the session event lock remained busy. Active state was preserved; wait for the in-flight hook to finish, then retry Stop."
+  fi
   exit 0
 fi
 trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT
-
-# Close the final selection-to-lock race as well. A duplicate Stop that won the
-# session lock first is accepted already and leaves this delivery with no work.
-if [[ -n "$HOST_SESSION_ID" ]]; then
-  mycelium_prepare_state_dir "$REPO_ROOT" read-only || exit 0
-  mycelium_select_session_state "$REPO_ROOT" "$INPUT" read-only || exit 0
-  if [[ ! -e "$STATE_DIR/active-session-log.tmp" \
-    && ! -L "$STATE_DIR/active-session-log.tmp" ]]; then
-    exit 0
-  fi
-fi
 
 HANDOFF_PATH="$STATE_DIR/last-session.md"
 
@@ -97,11 +99,11 @@ LOG_PATH=""
 OWNER_TS=""
 OWNER_FORMAT=""
 if [ -f "$ACTIVE_LOG_FILE" ]; then
-  if _ACTIVE_MARKER=$(mycelium_read_active_log_marker "$REPO_ROOT" "$ACTIVE_LOG_FILE"); then
+  if [[ "$MYCELIUM_MARKER_STATE" == valid ]]; then
     ACTIVE_MARKER_VALID=true
-    LOG_PATH=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '1p')
-    OWNER_TS=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '2p')
-    OWNER_FORMAT=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '3p')
+    LOG_PATH="$MYCELIUM_MARKER_LOG"
+    OWNER_TS="$MYCELIUM_MARKER_TS"
+    OWNER_FORMAT="$MYCELIUM_MARKER_FORMAT"
   else
     # Never trust a separate owner token when the marker it supposedly owns is
     # invalid. Remove both and continue to independent lifecycle enforcement.
@@ -112,7 +114,8 @@ fi
 if [[ "$ACTIVE_MARKER_VALID" == true \
   && ( "$OWNER_FORMAT" == "owner-id-v1" \
     || -e "$ACTIVE_OWNER_FILE" || -L "$ACTIVE_OWNER_FILE" ) ]]; then
-  if ! OWNER_SESSION_ID=$(mycelium_read_session_owner_id "$ACTIVE_OWNER_FILE") \
+  OWNER_SESSION_ID="$MYCELIUM_OWNER_ID"
+  if [[ "$MYCELIUM_OWNER_STATE" != valid ]] \
     || ! mycelium_valid_session_id "$HOST_SESSION_ID"; then
     mycelium_emit_stop_block \
       "STOP BLOCKED — active session ownership could not be validated. The primary lifecycle state was preserved; repair the owner marker or retry from its host session."
@@ -317,7 +320,7 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
           | while IFS= read -r changed_path; do basename "$changed_path"; done \
           | tr '\n' ',' | sed 's/,$//; s/,/, /g')
         REASON="STOP BLOCKED — ${FILES_CHANGED} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update ${HANDOFF_PATH}."
-        ESCAPED_REASON=$(printf '%s' "$REASON" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
+        ESCAPED_REASON=$(mycelium_json_dumps_stdin "$REASON" 2>/dev/null)
         printf '{"decision": "block", "reason": %s}\n' "$ESCAPED_REASON"
         exit 0
       fi
@@ -710,5 +713,5 @@ fi
 # Block: work happened but .living/ was never updated
 REASON="STOP BLOCKED — ${FILE_COUNT} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update ${HANDOFF_PATH}."
 
-ESCAPED_REASON=$(printf '%s' "$REASON" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null)
+ESCAPED_REASON=$(mycelium_json_dumps_stdin "$REASON" 2>/dev/null)
 printf '{"decision": "block", "reason": %s}\n' "$ESCAPED_REASON"

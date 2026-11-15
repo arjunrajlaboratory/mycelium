@@ -32,9 +32,9 @@ if [[ -z "$SESSION_CWD" ]] || [[ ! -d "$SESSION_CWD" ]]; then exit 0; fi
 
 REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo "")
 if [[ -z "$REPO_ROOT" ]] || [[ ! -d "$REPO_ROOT/.living" ]]; then exit 0; fi
-mycelium_prepare_state_dir "$REPO_ROOT" read-only || exit 0
-mycelium_select_session_state "$REPO_ROOT" "$INPUT" read-only || exit 0
-mycelium_payload_owns_active_session "$REPO_ROOT" "$INPUT" || exit 0
+# One state call resolves and authorizes the transaction and reads its marker.
+mycelium__state "$REPO_ROOT" "$INPUT" \
+  prepare:read-only select:read-only owns marker || exit 0
 
 SESSION_MARKER="$STATE_DIR/data-lineage-session-id.tmp"
 
@@ -52,8 +52,8 @@ if [[ ! "$SESSION_ID" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]+$ ]]; then
 fi
 ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
 if [[ -z "$SESSION_ID" && -f "$ACTIVE_LOG_FILE" ]]; then
-  if _ACTIVE_MARKER=$(mycelium_read_active_log_marker "$REPO_ROOT" "$ACTIVE_LOG_FILE"); then
-    LOG_PATH=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '1p')
+  if [[ "$MYCELIUM_MARKER_STATE" == valid ]]; then
+    LOG_PATH="$MYCELIUM_MARKER_LOG"
   else
     LOG_PATH=""
   fi
