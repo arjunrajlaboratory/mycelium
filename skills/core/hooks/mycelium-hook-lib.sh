@@ -269,8 +269,7 @@ mycelium_registry_cell() {
     return
   fi
   if mycelium__plain_cell "$value"; then
-    printf '%s\n' "$MYCELIUM__CELL"
-    return 0
+    mycelium__fast_write "$MYCELIUM__CELL"$'\n' && return 0
   fi
   printf '%s' "$value" | python3 -c "$MYCELIUM__PY_REGISTRY_CELL"
 }
@@ -298,8 +297,7 @@ mycelium__plain_cell() {
 # interpreter reading it from stdin would, failing as that would.
 mycelium_json_dumps_stdin() {
   if mycelium__json_literal stdin "$1"; then
-    printf '%s\n' "$MYCELIUM__JSON"
-    return 0
+    mycelium__fast_write "$MYCELIUM__JSON"$'\n' && return 0
   fi
   printf '%s' "$1" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))'
 }
@@ -308,7 +306,8 @@ mycelium_emit_stop_block() {
   local reason="$1"
   local escaped_reason=""
   escaped_reason=$(mycelium_json_dumps_stdin "$reason" 2>/dev/null) || return 1
-  printf '{"decision": "block", "reason": %s}\n' "$escaped_reason"
+  # SIGPIPE-safe: Stop writes this while holding its locks.
+  mycelium__fast_write "{\"decision\": \"block\", \"reason\": $escaped_reason}"$'\n'
 }
 
 mycelium_living_changed() {
@@ -969,6 +968,14 @@ MYCELIUM__PC_SLOT_VARS="${MYCELIUM__PC_SLOT_VARS-}"
 # Print the cached answer. A closed or failing stdout makes this fail rather
 # than kill the shell with SIGPIPE, so the caller can let the real decoder
 # meet the same stdout.
+# Write TEXT for a fast path. Like the cached decoders, a closed or failing
+# stdout makes this fail rather than kill the shell with SIGPIPE (which would
+# skip the hook's EXIT trap and leave its locks held); the caller then runs
+# the interpreter, which meets the same stdout and reports what it would.
+mycelium__fast_write() {
+  ( trap '' PIPE; printf '%s' "$1" ) 2>/dev/null
+}
+
 mycelium__payload_write() {
   ( trap '' PIPE; printf '%s' "$MYCELIUM__PC_OUT" ) 2>/dev/null
 }
@@ -1135,10 +1142,12 @@ mycelium_edit_status() {
 
 # mycelium_session_start_cwd PAYLOAD: SessionStart's cwd field, printing
 # nothing when it cannot be read. echo hands the decoder the payload plus a
-# newline, which JSON ignores; a payload echo would read as options is
-# decoded by the original pipeline.
+# newline, which JSON ignores; a payload echo would read as options, or any
+# payload while xpg_echo makes echo expand escapes, is decoded by the
+# original pipeline.
 mycelium_session_start_cwd() {
-  if [[ "$1" != -* ]] && mycelium__payload_cached "cwd0:" "$1"; then
+  if [[ "$1" != -* ]] && ! shopt -q xpg_echo \
+    && mycelium__payload_cached "cwd0:" "$1"; then
     if mycelium__payload_write; then
       [[ "$MYCELIUM__PC_STATUS" == 0 ]] && return 0
       echo ""
@@ -1210,19 +1219,16 @@ mycelium_emit_context() {
   # Same bytes as the interpreter below, built without one when exact.
   if [[ "$host" == "codex" && "$event" == "Stop" ]]; then
     if mycelium__json_literal argv "${system_message:-$context}"; then
-      printf '{"systemMessage": %s}\n' "$MYCELIUM__JSON"
-      return 0
+      mycelium__fast_write "{\"systemMessage\": $MYCELIUM__JSON}"$'\n' && return 0
     fi
   elif mycelium__json_literal argv "$event"; then
     payload="{\"hookSpecificOutput\": {\"hookEventName\": $MYCELIUM__JSON"
     if mycelium__json_literal argv "$context"; then
       payload="$payload, \"additionalContext\": $MYCELIUM__JSON}"
       if [[ -z "$system_message" ]]; then
-        printf '%s}\n' "$payload"
-        return 0
+        mycelium__fast_write "$payload}"$'\n' && return 0
       elif mycelium__json_literal argv "$system_message"; then
-        printf '%s, "systemMessage": %s}\n' "$payload" "$MYCELIUM__JSON"
-        return 0
+        mycelium__fast_write "$payload, \"systemMessage\": $MYCELIUM__JSON}"$'\n' && return 0
       fi
     fi
   fi

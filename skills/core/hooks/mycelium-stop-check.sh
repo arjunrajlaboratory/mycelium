@@ -316,7 +316,7 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
           | tr '\n' ',' | sed 's/,$//; s/,/, /g')
         REASON="STOP BLOCKED — ${FILES_CHANGED} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update ${HANDOFF_PATH}."
         ESCAPED_REASON=$(mycelium_json_dumps_stdin "$REASON" 2>/dev/null)
-        printf '{"decision": "block", "reason": %s}\n' "$ESCAPED_REASON"
+        mycelium__fast_write "{\"decision\": \"block\", \"reason\": $ESCAPED_REASON}"$'\n' || true
         exit 0
       fi
     fi
@@ -709,4 +709,5 @@ fi
 REASON="STOP BLOCKED — ${FILE_COUNT} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update ${HANDOFF_PATH}."
 
 ESCAPED_REASON=$(mycelium_json_dumps_stdin "$REASON" 2>/dev/null)
-printf '{"decision": "block", "reason": %s}\n' "$ESCAPED_REASON"
+# A host that stopped reading must not keep the hook from releasing its locks.
+mycelium__fast_write "{\"decision\": \"block\", \"reason\": $ESCAPED_REASON}"$'\n' || true

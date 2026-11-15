@@ -426,3 +426,23 @@ def test_post_tool_hooks_decode_the_payload_once(tmp_path, hook, limit):
         check=True,
     )
     assert 0 < _launches(log) <= limit
+
+
+def test_session_start_cwd_matches_echo_when_xpg_echo_expands_escapes(tmp_path):
+    payload = json.dumps({"cwd": "/tmp/a\\bb\\tc"})
+    script = r"""
+set -uo pipefail
+source "$1"
+payload="$2"
+shopt -s xpg_echo
+mycelium_payload_preload "$payload" cwd0:
+cached=$(mycelium_session_start_cwd "$payload"; printf x)
+direct=$(echo "$payload" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cwd', ''))" 2>/dev/null || echo ""; printf x)
+[[ "$cached" == "$direct" ]] && echo same || printf 'differ %q %q\n' "$cached" "$direct"
+"""
+    for bash in _bashes():
+        result = subprocess.run(
+            [bash, "-c", script, "probe", str(LIB), payload],
+            capture_output=True, text=True, check=True,
+        )
+        assert result.stdout == "same\n", (bash, result.stdout)

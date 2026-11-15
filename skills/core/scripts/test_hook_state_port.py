@@ -710,3 +710,48 @@ def test_session_start_releases_both_locks_when_the_state_process_dies(tmp_path)
     assert not (run / "mycelium-session.lock").exists()
     assert not (repo / ".mycelium" / "mycelium-stop.lock").exists()
     assert not (run / "active-session-log.tmp").exists()
+
+
+def test_a_closed_output_pipe_still_releases_every_lock(tmp_path):
+    """A host that stops reading before a hook writes must not leave locks.
+
+    SessionStart and Stop write their JSON while holding both locks. A
+    builtin write that died of SIGPIPE skipped the EXIT trap that releases
+    them; the fast paths now fail like the interpreter they skip.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _base(repo)
+    for name in ("decisions.md", "conventions.md"):
+        (repo / ".living" / name).write_text(f"# {name}\n")
+    env = os.environ.copy()
+    env["MYCELIUM_HOOK_HOST"] = "claude"
+    env["MYCELIUM_KNOWLEDGE_DIR"] = str(tmp_path / "knowledge")
+    payloads = tmp_path / "payloads"
+    payloads.mkdir()
+    base = {"session_id": "s1", "cwd": str(repo)}
+    (payloads / "start.json").write_text(json.dumps({**base, "hook_event_name": "SessionStart", "source": "startup"}))
+    (payloads / "edit.json").write_text(json.dumps({
+        **base, "hook_event_name": "PostToolUse", "tool_name": "Edit",
+        "tool_input": {"file_path": str(repo / "a.py")}, "tool_response": {"success": True}}))
+    (payloads / "stop.json").write_text(json.dumps({**base, "hook_event_name": "Stop"}))
+    run = repo / ".mycelium" / "run" / "claude" / "s1"
+
+    def closed(hook: str, payload: str) -> None:
+        # The reader exits at once, so the hook's first write meets a
+        # closed pipe.
+        subprocess.run(
+            ["bash", "-c", '"$1" < "$2" | true', "closed", str(HOOKS_DIR / hook), str(payloads / payload)],
+            cwd=repo, env=env, timeout=60, check=False,
+        )
+        assert not (run / "mycelium-session.lock").exists(), hook
+        assert not (repo / ".mycelium" / "mycelium-stop.lock").exists(), hook
+
+    closed("mycelium-health.sh", "start.json")
+    assert (run / "active-session-log.tmp").exists()
+    subprocess.run([str(HOOKS_DIR / "mycelium-activity-tracker.sh")], cwd=repo, env=env,
+                   input=(payloads / "edit.json").read_text(), text=True, check=True)
+    closed("mycelium-stop-check.sh", "stop.json")
+    # The Stop was blocked (its reason never reached anyone); state survives.
+    assert (run / "active-session-log.tmp").exists()
