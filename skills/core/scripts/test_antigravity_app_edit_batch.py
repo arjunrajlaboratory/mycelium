@@ -216,7 +216,7 @@ def test_real_tracker_records_a_valid_batch_and_acknowledges_exactly(tracked):
     repo, session, run = tracked
     paths = [str(repo / "reports/a.html"), str(repo / "reports/b.html")]
     data = batch_input(repo, session, paths)
-    result = run_shell(ACTIVITY, data, repo, ag.APP_HOST)
+    result = run_shell(ACTIVITY, data, repo, ag.APP_HOST, **{ag.ACTIVITY_BATCH_ENV: "1"})
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"mycelium_activity_batch": dict(data["mycelium_activity_batch"],
                                                                          status="recorded")}
@@ -260,7 +260,7 @@ def test_real_tracker_refuses_invalid_batches_before_any_write(tracked, tmp_path
         count=len(paths), sha256=hashlib.sha256("\n".join(paths).encode()).hexdigest())
     for case, data in cases.items():
         before = {p.name: p.read_bytes() for p in run.iterdir() if p.is_file()}
-        result = run_shell(ACTIVITY, data, repo, ag.APP_HOST)
+        result = run_shell(ACTIVITY, data, repo, ag.APP_HOST, **{ag.ACTIVITY_BATCH_ENV: "1"})
         assert result.returncode != 0 and result.stdout == "", case
         assert "batch rejected" in result.stderr, case
         assert {p.name: p.read_bytes() for p in run.iterdir() if p.is_file()} == before, case
@@ -268,9 +268,51 @@ def test_real_tracker_refuses_invalid_batches_before_any_write(tracked, tmp_path
 
 @pytest.mark.parametrize("host", ["antigravity-ide", "claude", "codex"])
 def test_real_tracker_accepts_batch_input_only_from_the_app_host(tracked, host):
+    """Only the App adapter can select batch mode; other hosts never enter it."""
     repo, session, run = tracked
-    result = run_shell(ACTIVITY, batch_input(repo, session, [str(repo / "reports/a.html")]), repo, host)
-    assert result.returncode != 0 and result.stdout == "" and "only for the Antigravity App" in result.stderr
+    result = run_shell(ACTIVITY, batch_input(repo, session, [str(repo / "reports/a.html")]), repo, host,
+                       **{ag.ACTIVITY_BATCH_ENV: "1"})
+    assert result.returncode == 0 and result.stdout == "", result.stderr
+    assert not (repo / ".mycelium/run" / host / session / "mycelium-session-activity.tmp").exists()
+
+
+def test_real_tracker_ignores_batch_field_without_the_adapter_flag(tracked):
+    """A payload-supplied batch identity alone never selects batch mode."""
+    repo, session, run = tracked
+    result = run_shell(ACTIVITY, batch_input(repo, session, [str(repo / "reports/a.html")]), repo, ag.APP_HOST)
+    assert result.returncode == 0 and result.stdout == "", result.stderr
+    assert not (run / "mycelium-session-activity.tmp").exists()
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+@pytest.mark.parametrize("where", ["old_string", "new_string", "file_name"])
+def test_batch_marker_text_in_an_edit_is_tracked_normally(tmp_path, monkeypatch, host, where):
+    """Regression: the literal text "mycelium_activity_batch" in an edit used to
+    switch Claude and Codex into the App-only batch mode and exit 65."""
+    monkeypatch.setenv("PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"])
+    monkeypatch.delenv(ag.ACTIVITY_BATCH_ENV, raising=False)
+    repo = (tmp_path / "research").resolve()
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".living").mkdir()
+    session = "11111111-2222-3333-4444-555555555555"
+    start = run_shell("mycelium-health.sh", {"cwd": str(repo), "session_id": session, "source": "startup"},
+                      repo, host)
+    assert start.returncode == 0, start.stderr
+    name = "mycelium_activity_batch.py" if where == "file_name" else "notes.py"
+    target = repo / name
+    target.write_text("x = 'mycelium_activity_batch'\n")
+    tool_input = {"file_path": str(target), "old_string": "mycelium_activity_batch",
+                  "new_string": "renamed"}
+    if where == "new_string":
+        tool_input.update(old_string="renamed", new_string='"mycelium_activity_batch"')
+    data = {"cwd": str(repo), "session_id": session, "tool_name": "Edit", "tool_input": tool_input,
+            "tool_response": {"filePath": str(target), "success": True}}
+    result = run_shell(ACTIVITY, data, repo, host)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "" and "batch" not in result.stderr
+    activity_file = repo / ".mycelium/run" / host / session / "mycelium-session-activity.tmp"
+    assert activity_file.read_text().split() == [name]
 
 
 @pytest.mark.parametrize("shape", ["file_path", "patch-headers"])

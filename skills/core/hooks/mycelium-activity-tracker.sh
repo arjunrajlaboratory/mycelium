@@ -20,24 +20,25 @@ source "$HERE/mycelium-hook-lib.sh"
 INPUT=$(cat)
 
 # Optional structured batch (Antigravity App Stop recovery only): tool_input.file_paths
-# plus mycelium_activity_batch {id, count, sha256}. Every entry must already be an
-# exact canonical eligible path inside the repository; the whole batch is refused
-# before any state change otherwise. An acknowledgement bound to the exact batch is
-# printed only after every entry was recorded. Legacy single-path/patch input is
-# unchanged and silent.
+# plus mycelium_activity_batch {id, count, sha256}. Batch mode is selected only by
+# the App adapter, which sets MYCELIUM_ANTIGRAVITY_ACTIVITY_BATCH=1 for that one
+# call under MYCELIUM_HOOK_HOST=antigravity-app. Payload text never selects it, so
+# a Claude or Codex edit that mentions the field name is tracked like any other.
+# Every entry must already be an exact canonical eligible path inside the
+# repository; the whole batch is refused before any state change otherwise. An
+# acknowledgement bound to the exact batch is printed only after every entry was
+# recorded. Legacy single-path/patch input is unchanged and silent.
 BATCH=0
 BATCH_ACK=""
 BATCH_COUNT=0
-if [[ "$INPUT" == *'"mycelium_activity_batch"'* ]]; then
+if [[ "${MYCELIUM_ANTIGRAVITY_ACTIVITY_BATCH:-}" == "1" \
+  && "$(mycelium_hook_host)" == "antigravity-app" ]]; then
   BATCH=1
 fi
 batch_fail() {
   printf 'Mycelium activity batch rejected: %s\n' "$1" >&2
   exit "${2:-65}"
 }
-if [[ "$BATCH" == 1 && "$(mycelium_hook_host)" != "antigravity-app" ]]; then
-  batch_fail "batch input is supported only for the Antigravity App host"
-fi
 
 # PostToolUse payloads describe attempted edits as well as successful ones.
 # Ignore an explicitly failed result; an absent status remains compatible with
@@ -258,8 +259,8 @@ def emit(raw_path):
 tool_input = payload.get("tool_input") or {}
 path = tool_input.get("file_path")
 emit(path)
-if isinstance(payload.get("mycelium_activity_batch"), dict):
-    for batch_path in tool_input.get("file_paths") or []:  # already validated as eligible
+if sys.argv[3] == "1":  # batch mode: file_paths were already validated as eligible
+    for batch_path in tool_input.get("file_paths") or []:
         emit(batch_path)
 command = tool_input.get("command")
 if isinstance(command, str):
@@ -267,7 +268,7 @@ if isinstance(command, str):
         match = re.match(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", line)
         if match:
             emit(match.group(1))
-' "$SESSION_CWD" "$REPO_ROOT")
+' "$SESSION_CWD" "$REPO_ROOT" "$BATCH")
 
 if [[ "$BATCH" == 1 && "$recorded" != "$BATCH_COUNT" ]]; then
   batch_fail "recorded $recorded of $BATCH_COUNT entries; no acknowledgement" 70

@@ -54,6 +54,9 @@ APP_RECOVERY_ACTION_SECONDS = 12  # the shared per-hook default
 # A recovery batch starts only with at least this much real tracker allowance.
 APP_RECOVERY_BATCH_MIN_SECONDS = 5
 ACTIVITY_HOOK = "mycelium-activity-tracker.sh"
+# Set only by this adapter, only for its Stop-recovery batch. The shared tracker
+# chooses batch mode from this flag plus the App host, never from payload text.
+ACTIVITY_BATCH_ENV = "MYCELIUM_ANTIGRAVITY_ACTIVITY_BATCH"
 STATE_SCHEMA = 2
 PLUGIN = Path(__file__).resolve().parents[3]
 MAX_STOP_RETRIES = 3
@@ -182,11 +185,14 @@ def transcript_records(path):
     return records
 
 
-def run_hook(name, data, root, plugin, *, timeout=12):
+def run_hook(name, data, root, plugin, *, timeout=12, batch=False):
     host = active_host()
     # Strict capture makes a failed lineage extractor a nonzero hook outcome.
     env = dict(os.environ, MYCELIUM_HOOK_HOST=host, MYCELIUM_PLUGIN_ROOT=str(plugin),
                MYCELIUM_STRICT_CAPTURE="1")
+    env.pop(ACTIVITY_BATCH_ENV, None)
+    if batch:
+        env[ACTIVITY_BATCH_ENV] = "1"
     script = plugin / "skills/core/hooks" / name
     marker = root / ".mycelium/run" / host / data["session_id"] / "active-session-log.tmp"
     had_marker = marker.is_file()
@@ -680,7 +686,7 @@ def _dispatch(event, payload, plugin_root, host):
                     result = run_hook(ACTIVITY_HOOK, dict(
                         data, tool_name="Write", tool_input={"file_paths": paths}, tool_response={"success": True},
                         mycelium_activity_batch=batch), root, plugin_root,
-                        timeout=min(APP_RECOVERY_ACTION_SECONDS, remaining))
+                        timeout=min(APP_RECOVERY_ACTION_SECONDS, remaining), batch=True)
                     if result != {"mycelium_activity_batch": dict(batch, status="recorded")}:
                         raise RuntimeError("missing or malformed batch acknowledgement")
                 except Exception as exc:
