@@ -1184,10 +1184,11 @@ mycelium__json_literal() {
   local mode="$1"
   local value="$2"
   local LC_ALL=C
-  local bs='\' dq='"' rep=""
-  local ascii_re='^[ -~]*$'
+  local dq='"'
   local restore_patsub=false
   local fs="" stdin="" stdout=""
+  local chunk=0 limit=32768 at=0 size=0 length=0 piece="" out=""
+  local continuation_re=$'^[\x80-\xbf]'
 
   MYCELIUM__JSON=""
   read -r fs stdin stdout <<< "$MYCELIUM__PC_ENC" || true
@@ -1198,28 +1199,60 @@ mycelium__json_literal() {
   else
     [[ "$fs" == utf-8/surrogateescape ]] || return 1
   fi
+  # Pattern substitution costs time quadratic in its matches on bash 3.2
+  # (16 KB of quotes took ten seconds). Bound the work: bash 3.2 encodes in
+  # small pieces split between UTF-8 characters, and long values on any bash
+  # go to the interpreter, so a hook holding its locks never stalls here.
+  if (( BASH_VERSINFO[0] < 4 )); then
+    chunk=512
+    limit=8192
+  fi
+  length=${#value}
+  (( length <= limit )) || return 1
+  (( chunk > 0 )) || chunk=$length
   if shopt -q patsub_replacement 2>/dev/null; then
     restore_patsub=true
     shopt -u patsub_replacement
   fi
-  rep="$bs$bs"; value="${value//"$bs"/$rep}"
-  rep="$bs$dq"; value="${value//"$dq"/$rep}"
-  rep="${bs}n"; value="${value//$'\n'/$rep}"
-  rep="${bs}r"; value="${value//$'\r'/$rep}"
-  rep="${bs}t"; value="${value//$'\t'/$rep}"
-  rep="${bs}b"; value="${value//$'\b'/$rep}"
-  rep="${bs}f"; value="${value//$'\f'/$rep}"
-  rep="${bs}u2014"; value="${value//$'\xe2\x80\x94'/$rep}"
-  rep="${bs}u2013"; value="${value//$'\xe2\x80\x93'/$rep}"
-  rep="${bs}u2192"; value="${value//$'\xe2\x86\x92'/$rep}"
-  rep="${bs}u2026"; value="${value//$'\xe2\x80\xa6'/$rep}"
-  rep="${bs}u2018"; value="${value//$'\xe2\x80\x98'/$rep}"
-  rep="${bs}u2019"; value="${value//$'\xe2\x80\x99'/$rep}"
-  rep="${bs}u201c"; value="${value//$'\xe2\x80\x9c'/$rep}"
-  rep="${bs}u201d"; value="${value//$'\xe2\x80\x9d'/$rep}"
+  while (( at < length )); do
+    size=$chunk
+    # Never split a UTF-8 sequence: move the cut back off continuation bytes.
+    while (( size > 1 && at + size < length )) \
+      && [[ "${value:$((at + size)):1}" =~ $continuation_re ]]; do
+      size=$((size - 1))
+    done
+    piece="${value:$at:$size}"
+    mycelium__json_escape_piece || break
+    out="$out$piece"
+    at=$((at + size))
+  done
   [[ "$restore_patsub" == false ]] || shopt -s patsub_replacement
-  [[ "$value" =~ $ascii_re ]] || return 1
-  MYCELIUM__JSON="$dq$value$dq"
+  (( at >= length )) || return 1
+  MYCELIUM__JSON="$dq$out$dq"
+}
+
+# Escape `piece` (in mycelium__json_literal's C-locale scope, with
+# patsub_replacement off) as json.dumps would; fail if a byte remains that
+# the fast path does not cover.
+mycelium__json_escape_piece() {
+  local bs='\' dq='"' rep=""
+  local ascii_re='^[ -~]*$'
+  rep="$bs$bs"; piece="${piece//"$bs"/$rep}"
+  rep="$bs$dq"; piece="${piece//"$dq"/$rep}"
+  rep="${bs}n"; piece="${piece//$'\n'/$rep}"
+  rep="${bs}r"; piece="${piece//$'\r'/$rep}"
+  rep="${bs}t"; piece="${piece//$'\t'/$rep}"
+  rep="${bs}b"; piece="${piece//$'\b'/$rep}"
+  rep="${bs}f"; piece="${piece//$'\f'/$rep}"
+  rep="${bs}u2014"; piece="${piece//$'\xe2\x80\x94'/$rep}"
+  rep="${bs}u2013"; piece="${piece//$'\xe2\x80\x93'/$rep}"
+  rep="${bs}u2192"; piece="${piece//$'\xe2\x86\x92'/$rep}"
+  rep="${bs}u2026"; piece="${piece//$'\xe2\x80\xa6'/$rep}"
+  rep="${bs}u2018"; piece="${piece//$'\xe2\x80\x98'/$rep}"
+  rep="${bs}u2019"; piece="${piece//$'\xe2\x80\x99'/$rep}"
+  rep="${bs}u201c"; piece="${piece//$'\xe2\x80\x9c'/$rep}"
+  rep="${bs}u201d"; piece="${piece//$'\xe2\x80\x9d'/$rep}"
+  [[ "$piece" =~ $ascii_re ]]
 }
 
 mycelium_emit_context() {

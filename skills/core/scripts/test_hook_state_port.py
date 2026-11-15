@@ -803,3 +803,38 @@ def test_a_closed_output_pipe_still_releases_every_lock(tmp_path):
     closed("mycelium-stop-check.sh", "stop.json")
     # The Stop was blocked (its reason never reached anyone); state survives.
     assert (run / "active-session-log.tmp").exists()
+
+
+def test_a_dead_marker_read_at_session_start_still_opens_the_transaction(tmp_path):
+    """On a fresh root there is no marker to read, so a state process that
+    dies at that read must not leave the task without a transaction (and so
+    without Stop enforcement). With a marker present, nothing is touched."""
+    repo = _git_repo(tmp_path)
+    dying = _dying_state_python(tmp_path, b"marker\0", keep_cut=False)
+    base = {"session_id": "s1", "cwd": str(repo)}
+    start = {**base, "hook_event_name": "SessionStart", "source": "startup"}
+    result = _hook("mycelium-health.sh", start, repo, dying)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    run = repo / ".mycelium" / "run" / "claude" / "s1"
+    marker = (run / "active-session-log.tmp").read_bytes()
+    assert (run / "active-session-owner-id.tmp").read_text() == "s1\n"
+    assert not (run / "mycelium-session.lock").exists()
+    assert not (repo / ".mycelium" / "mycelium-stop.lock").exists()
+
+    # A resumed start whose marker read dies leaves the live transaction be.
+    before = _snapshot(repo / ".mycelium")
+    result = _hook("mycelium-health.sh", {**start, "source": "resume"}, repo, dying)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert _snapshot(repo / ".mycelium") == before
+    assert (run / "active-session-log.tmp").read_bytes() == marker
+
+    plain = os.environ.copy()
+    plain["MYCELIUM_HOOK_HOST"] = "claude"
+    plain["MYCELIUM_KNOWLEDGE_DIR"] = str(tmp_path / "knowledge")
+    edit = {**base, "hook_event_name": "PostToolUse", "tool_name": "Edit",
+            "tool_input": {"file_path": str(repo / "a.py")}, "tool_response": {"success": True}}
+    assert _hook("mycelium-activity-tracker.sh", edit, repo, plain).returncode == 0
+    result = _hook("mycelium-stop-check.sh", {**base, "hook_event_name": "Stop"}, repo, plain)
+    assert json.loads(result.stdout)["decision"] == "block"

@@ -42,6 +42,13 @@ SAMPLES: list[bytes] = [
     b"\n",
     b"x" * 5000 + "—".encode() * 200,
     b"[log](2026-11-14-001-repo.md) <tag> 'single'",
+    # Long values: bash 3.2 encodes in pieces cut between UTF-8 characters,
+    # so dashes and escapes land on every piece boundary; past the size cap
+    # every bash hands the value to the interpreter.
+    "\u2014".encode() * 3000,
+    (b'\\"' + "\u2014".encode() + b"a\n") * 1500,
+    b"y" * 511 + "\u2014".encode() * 5 + b"z" * 1000,
+    (b'\\"' + "\u2014".encode() + b"a\n") * 6000,
 ]
 
 
@@ -179,3 +186,33 @@ printf 'my-project\n' | mycelium_registry_cell >/dev/null
     )
     assert result.returncode == 0, result.stderr
     assert log.read_text() == ""
+
+
+def test_adversarial_long_messages_encode_quickly_on_every_bash(tmp_path):
+    """Pattern substitution is quadratic on bash 3.2; a hook holding its
+    locks must not spend seconds escaping a long handoff full of quotes."""
+    script = r"""
+source "$1"
+mycelium_payload_preload '{"cwd": "x"}' get:cwd
+unit=$'\\"\xe2\x80\x94a\n'
+value=""
+while (( ${#value} < 45000 )); do value="$value$unit"; done
+small="${value:0:8000}"
+start=$SECONDS
+for _ in 1 2 3; do
+  MYCELIUM_HOOK_HOST=claude mycelium_emit_context SessionStart "$value" "$value" >/dev/null
+  MYCELIUM_HOOK_HOST=claude mycelium_emit_context SessionStart "$small" >/dev/null
+  mycelium_emit_stop_block "$small" >/dev/null
+done
+echo "elapsed=$((SECONDS - start))"
+"""
+    env = os.environ.copy()
+    env["LC_ALL"] = "en_US.UTF-8"
+    for bash in _bashes():
+        result = subprocess.run(
+            [bash, "-c", script, "probe", str(LIB)],
+            capture_output=True, text=True, env=env, timeout=120,
+        )
+        assert result.returncode == 0, result.stderr
+        elapsed = int(result.stdout.strip().split("=")[1])
+        assert elapsed <= 5, (bash, elapsed)

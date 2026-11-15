@@ -48,8 +48,23 @@ fi
 if ! mycelium__state "$REPO_ROOT" "$INPUT" \
   prepare:bootstrap lock:stop prepare:write select:create lock:session \
   marker owner; then
-  mycelium__state_release_held
-  exit 0
+  # The marker (op 6) and owner (op 7) reads never fail, so a failure there
+  # means the process died with both locks held. An unread owner is treated
+  # as invalid, which never supersedes another root. An unread marker is
+  # harmless only when there is no marker file to read; otherwise leave the
+  # existing transaction exactly as it is.
+  if (( MYCELIUM__STATE_FAILED == 7 )) \
+    || { (( MYCELIUM__STATE_FAILED == 6 )) \
+      && [[ ! -f "$STATE_DIR/active-session-log.tmp" ]]; }; then
+    if (( MYCELIUM__STATE_FAILED == 6 )); then
+      MYCELIUM_MARKER_STATE=absent
+    fi
+    MYCELIUM_OWNER_STATE=invalid
+    MYCELIUM_OWNER_ID=""
+  else
+    mycelium__state_release_held
+    exit 0
+  fi
 fi
 trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT
 
