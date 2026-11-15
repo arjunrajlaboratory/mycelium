@@ -148,8 +148,14 @@ python3 tools/antigravity.py doctor --profile app \
 
 Update by rerunning `install --profile app` with the same destination, and
 remove with `uninstall --profile app --destination ...`; both follow the same
-ownership, backup and refusal rules as the IDE package. Start a new App
-conversation after any package change.
+ownership and refusal rules as the IDE package. Because the App package lives
+inside the repository, it, `.agents/.mycelium-staging` and
+`.agents/.mycelium-backups` each carry a generated `.gitignore` containing `*`,
+so `git add -A` never commits them and your own `.gitignore` is not edited. An
+ordinary App update deletes the previous generation once the new one passes
+the doctor check; `--repair-permissions` and `uninstall` still keep a backup
+under `.agents/.mycelium-backups` (ignored), which you can delete by hand.
+Start a new App conversation after any package change.
 
 Limitations of the App preview:
 

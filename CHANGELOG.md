@@ -14,7 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   host's selected model.
 - An Antigravity installer with dry runs, file and permission verification,
   atomic replacement, and retained backups. The App profile installs per
-  workspace. See the README for installation and setup.
+  workspace, Git-ignores its package, staging and backup directories, and
+  removes the previous generation after a verified update. Hooks run on the
+  interpreter selected with `--python`. See the README for installation and
+  setup.
 - Native App 2.31.0 tracking for verified sandboxed commands and supported edits,
   including bounded recovery of missed edit callbacks at Stop.
 

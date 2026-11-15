@@ -53,6 +53,33 @@ def test_app_package_identity_guidance_and_hooks(workspace):
     assert package.doctor(target, workspace=workspace, profile="app")["ok"]
 
 
+def git_would_add(workspace):
+    out = subprocess.run(["git", "-C", str(workspace), "add", "-A", "--dry-run"],
+                         capture_output=True, text=True, check=True).stdout
+    return [line for line in out.splitlines() if ".agents" in line]
+
+
+def test_app_install_update_and_uninstall_stay_out_of_git(workspace, tmp_path):
+    """The workspace-local package, its staging area and its backups are never
+    picked up by `git add -A`, and a verified update leaves no backup behind."""
+    (workspace / ".gitignore").write_text("results/\n")
+    user_ignore = (workspace / ".gitignore").read_bytes()
+    target = app_target(workspace)
+    assert package.install(target, python=PYTHON, profile="app")["ok"]
+    assert git_would_add(workspace) == []
+    other = tmp_path / "other venv"
+    import venv
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(other)
+    report = package.install(target, python=other / "bin/python3", profile="app")  # a real update
+    assert report["ok"] and "backup" not in report
+    backups = workspace / ".agents/.mycelium-backups"
+    assert not backups.exists() or [p for p in backups.iterdir() if p.is_dir()] == []
+    assert git_would_add(workspace) == []
+    package.uninstall(target, profile="app")
+    assert git_would_add(workspace) == []
+    assert (workspace / ".gitignore").read_bytes() == user_ignore  # the user's file is untouched
+
+
 def test_app_and_ide_identities_are_distinct_and_ide_default_is_unchanged():
     ide = package.candidate_files(package.SOURCE, PYTHON)
     explicit = package.candidate_files(package.SOURCE, PYTHON, "ide")
@@ -67,7 +94,8 @@ def test_app_and_ide_identities_are_distinct_and_ide_default_is_unchanged():
     assert ide_hooks["PostToolUse"][0]["matcher"] == \
         "run_command|view_file|write_to_file|replace_file_content|multi_replace_file_content"
     assert "--host" not in json.dumps(ide_hooks)
-    assert set(ide) == set(app)
+    assert set(ide) | {".gitignore"} == set(app)  # only the workspace-local App package self-ignores
+    assert app[".gitignore"][0] == package.GIT_IGNORE_ALL
 
 
 @pytest.mark.parametrize("where", ["global-default", "plugins-without-agents", "agents-root", "missing-workspace"])
