@@ -242,6 +242,10 @@ def contains_symlink(top: str) -> bool:
         origin = os.open(".", os.O_RDONLY)
     except OSError:
         origin = None
+    try:
+        origin_path = os.getcwd()
+    except OSError:
+        origin_path = None
     held: list[int] = []
     try:
         return _walk(top, held)
@@ -253,21 +257,42 @@ def contains_symlink(top: str) -> bool:
                 os.close(descriptor)
             except OSError:
                 pass
-        if origin is not None:
-            try:
-                os.fchdir(origin)
-            except OSError:
-                pass
-            os.close(origin)
+        _restore_cwd(origin, origin_path)
+
+
+def _restore_cwd(origin: int | None, origin_path: str | None) -> None:
+    """Leave the scanned tree: back to the original cwd, or to / when that is
+    no longer reachable. Later ops use absolute paths only, but no cwd may
+    stay inside a repository-controlled tree."""
+    restored = False
+    if origin is not None:
+        try:
+            os.fchdir(origin)
+            restored = True
+        except OSError:
+            pass
+        os.close(origin)
+    if not restored and origin_path is not None:
+        try:
+            os.chdir(origin_path)
+            restored = True
+        except OSError:
+            pass
+    if not restored:
+        os.chdir("/")
 
 
 def _walk(top: str, held: list[int]) -> bool:
     """contains_symlink's walk. Every descriptor it keeps is in HELD, which
     the caller closes; the caller also restores the cwd."""
+    # A missing or unreadable root is what find reports and moves past; any
+    # other error (EIO, ESTALE) leaves the tree unexamined.
     try:
         root = os.lstat(top)
-    except OSError:
-        return False
+    except OSError as error:
+        if error.errno in {errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.EPERM}:
+            return False
+        return True
     if stat.S_ISLNK(root.st_mode):
         return True
     if not stat.S_ISDIR(root.st_mode):

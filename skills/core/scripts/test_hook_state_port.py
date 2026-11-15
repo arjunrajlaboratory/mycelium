@@ -92,8 +92,16 @@ _MISSING = object()
 def _snapshot(root: Path) -> list[tuple[str, ...]]:
     """Every path under root with its type, mode, and content or target."""
     rows: list[tuple[str, ...]] = []
-    for current, dirs, files in os.walk(root, followlinks=False):
-        for name in sorted(dirs + files):
+    # Iterative: os.walk recurses before Python 3.12, and the deep fixtures
+    # are 1,100 directories deep.
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        try:
+            names = os.listdir(current)
+        except OSError:
+            continue
+        for name in sorted(names):
             path = Path(current) / name
             relative = str(path.relative_to(root))
             try:
@@ -106,6 +114,7 @@ def _snapshot(root: Path) -> list[tuple[str, ...]]:
                 rows.append((relative, "link", os.readlink(path)))
             elif stat.S_ISDIR(info.st_mode):
                 rows.append((relative, "dir", oct(info.st_mode & 0o777)))
+                pending.append(path)
             else:
                 content = path.read_bytes()
                 if name == "owner":
@@ -527,16 +536,6 @@ def _resolve(steps: list[str], repo: Path) -> list[str]:
         else:
             resolved.append(step)
     return resolved
-
-
-def _remove(path: Path) -> None:
-    if path.is_symlink() or not path.is_dir():
-        path.unlink()
-        return
-    path.chmod(0o755)
-    for child in path.iterdir():
-        _remove(child)
-    path.rmdir()
 
 
 def _execute(tmp_path: Path, library: Path, build: Builder, env_extra: dict[str, str], steps: list[str], locale: str = "C") -> tuple[str, list[tuple[str, ...]]]:
@@ -1102,3 +1101,71 @@ def test_an_inherited_lock_variable_is_never_released(tmp_path, hook):
     assert result.returncode == 0, result.stderr
     for name in ("stop", "session"):
         assert (foreign / name / "owner").read_text() == "1 1\n"
+
+
+def test_a_root_that_cannot_be_examined_is_unsafe_but_a_missing_one_is_not(tmp_path, monkeypatch):
+    module = _state_module()
+    top = tmp_path / ".mycelium"
+    top.mkdir()
+    real_lstat = os.lstat
+
+    def failing(code):
+        def lstat(path, *args, **kwargs):
+            if str(path) == str(top):
+                raise OSError(code, os.strerror(code), str(path))
+            return real_lstat(path, *args, **kwargs)
+        return lstat
+
+    import errno
+    for code, unsafe in ((errno.EIO, True), (errno.ESTALE, True), (errno.ENOENT, False), (errno.EACCES, False)):
+        monkeypatch.setattr(module.os, "lstat", failing(code))
+        assert module.contains_symlink(str(top)) is unsafe, errno.errorcode[code]
+
+
+def test_the_scan_never_leaves_the_process_inside_the_tree(tmp_path):
+    """If the original cwd cannot be re-entered, the scan still leaves the
+    scanned tree (for /), whatever it answers."""
+    top = tmp_path / ".living"
+    (top / "a" / "b").mkdir(parents=True)
+    start = tmp_path / "start"
+    start.mkdir()
+    probe = (
+        "import importlib.util, os, sys\n"
+        "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "os.chdir(sys.argv[3])\n"
+        "real = os.fchdir\n"
+        "def fchdir(fd):\n"
+        "    if os.path.samefile(f'/dev/fd/{fd}', sys.argv[3]): raise PermissionError(13, 'denied')\n"
+        "    return real(fd)\n"
+        "m.os.fchdir = fchdir\n"
+        "os.chmod(sys.argv[3], 0o000)\n"
+        "try:\n"
+        "    answer = m.contains_symlink(sys.argv[2])\n"
+        "finally:\n"
+        "    os.chmod(sys.argv[3], 0o755)\n"
+        "print(answer, os.getcwd())\n"
+    )
+    result = subprocess.run(
+        [shutil.which("python3"), "-I", "-c", probe, str(HOOKS_DIR / "mycelium_hook_state.py"), str(top), str(start)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    answer, cwd = result.stdout.split()
+    assert answer == "False"
+    assert not cwd.startswith(str(top.resolve()))
+
+
+def test_releasing_a_lock_forgets_it_before_removing_it():
+    """A hook killed between removing its lock and forgetting it would let
+    its EXIT trap release a successor's lock at the same path."""
+    script = r"""
+source "$1"
+mycelium_release_directory_lock() { printf 'stop=[%s] session=[%s]\n' "$MYCELIUM_STOP_LOCK_DIR" "$MYCELIUM_SESSION_LOCK_DIR"; }
+MYCELIUM_STOP_LOCK_DIR=/x/stop.lock
+mycelium_release_stop_lock
+MYCELIUM_SESSION_LOCK_DIR=/x/session.lock
+mycelium_release_session_lock
+"""
+    result = subprocess.run(["bash", "-c", script, "probe", str(LIB)], capture_output=True, text=True, check=True)
+    assert result.stdout == "stop=[] session=[]\nstop=[] session=[]\n"

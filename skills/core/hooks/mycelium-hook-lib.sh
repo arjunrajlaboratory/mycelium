@@ -580,8 +580,11 @@ mycelium_acquire_stop_lock() {
 }
 
 mycelium_release_stop_lock() {
-  mycelium_release_directory_lock "${MYCELIUM_STOP_LOCK_DIR:-}"
+  # Forget the lock before removing it: if this hook is killed in between,
+  # an EXIT trap must not release the path a successor may already hold.
+  local lock_dir="${MYCELIUM_STOP_LOCK_DIR:-}"
   MYCELIUM_STOP_LOCK_DIR=""
+  mycelium_release_directory_lock "$lock_dir"
 }
 
 mycelium_acquire_session_lock() {
@@ -593,8 +596,11 @@ mycelium_acquire_session_lock() {
 }
 
 mycelium_release_session_lock() {
-  mycelium_release_directory_lock "${MYCELIUM_SESSION_LOCK_DIR:-}"
+  # Forget the lock before removing it: if this hook is killed in between,
+  # an EXIT trap must not release the path a successor may already hold.
+  local lock_dir="${MYCELIUM_SESSION_LOCK_DIR:-}"
   MYCELIUM_SESSION_LOCK_DIR=""
+  mycelium_release_directory_lock "$lock_dir"
 }
 
 mycelium_knowledge_dir() {
