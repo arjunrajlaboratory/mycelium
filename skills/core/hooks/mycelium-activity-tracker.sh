@@ -19,19 +19,19 @@ source "$HERE/mycelium-hook-lib.sh"
 
 INPUT=$(cat)
 
-mycelium_payload_preload "$INPUT" 'edit:' 'get:cwd' 'opt:session_id'
+mycelium_payload_preload INPUT 'edit:' 'get:cwd' 'opt:session_id'
 
 # PostToolUse payloads describe attempted edits as well as successful ones.
 # Ignore an explicitly failed result; an absent status remains compatible with
 # Claude's Edit/Write payloads and older Codex versions.
-TOOL_SUCCEEDED=$(mycelium_edit_status "$INPUT")
+TOOL_SUCCEEDED=$(mycelium_edit_status INPUT)
 if [[ "$TOOL_SUCCEEDED" == false ]]; then
   exit 0
 fi
 
 # --- Repo and .living/ checks ---
 
-SESSION_CWD=$(mycelium_json_get 'cwd' "$INPUT")
+SESSION_CWD=$(mycelium_json_get 'cwd' INPUT)
 if [[ -z "$SESSION_CWD" ]]; then
   SESSION_CWD=$(pwd)
 fi

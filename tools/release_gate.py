@@ -171,7 +171,9 @@ def parallel_pytest_args() -> list[str]:
     """
     if importlib.util.find_spec("xdist") is None:
         return []
-    return ["-n", "auto", "--dist", "worksteal"]
+    # Load the plugin explicitly: PYTEST_DISABLE_PLUGIN_AUTOLOAD would
+    # otherwise leave -n and --dist unrecognized.
+    return ["-p", "xdist", "-n", "auto", "--dist", "worksteal"]
 
 
 def ladder_commands(repo: Path, skip_knowledge_map: bool) -> list[list[str]]:

@@ -13,8 +13,8 @@ source "$HERE/mycelium-hook-lib.sh"
 
 # Read stdin JSON
 INPUT=$(cat)
-mycelium_payload_preload "$INPUT" 'opt:session_id' 'get:source' 'cwd0:'
-HOST_SESSION_ID=$(mycelium_json_get_optional_string 'session_id' "$INPUT") || exit 0
+mycelium_payload_preload INPUT 'opt:session_id' 'get:source' 'cwd0:'
+HOST_SESSION_ID=$(mycelium_json_get_optional_string 'session_id' INPUT) || exit 0
 if [[ -n "$HOST_SESSION_ID" ]] \
   && ! mycelium_valid_session_id "$HOST_SESSION_ID"; then
   exit 0
@@ -26,11 +26,11 @@ SYSTEM_MESSAGE=""
 NOW_TS=$(date +%s)
 
 # Extract cwd from input
-CWD=$(mycelium_session_start_cwd "$INPUT")
+CWD=$(mycelium_session_start_cwd INPUT)
 if [ -z "$CWD" ]; then
   CWD=$(pwd)
 fi
-SOURCE=$(mycelium_json_get 'source' "$INPUT")
+SOURCE=$(mycelium_json_get 'source' INPUT)
 
 # Find git repo root
 REPO_ROOT=$(cd "$CWD" && git rev-parse --show-toplevel 2>/dev/null || echo "")

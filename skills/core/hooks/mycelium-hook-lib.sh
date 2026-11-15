@@ -46,7 +46,7 @@ mycelium__state() {
   for op in "${ops[@]}"; do
     case "$op" in
       select:*|owns)
-        if ! sid=$(mycelium_json_get_optional_string 'session_id' "$input"); then
+        if ! sid=$(mycelium_json_get_optional_string 'session_id' input); then
           sid=""
           sid_status=fail
         fi
@@ -229,7 +229,8 @@ mycelium_payload_owns_active_session() {
 # validates the existing transaction without mutating shared preparation.
 mycelium__post_tool_prepare_mode() {
   local host_session_id=""
-  host_session_id=$(mycelium_json_get_optional_string 'session_id' "$1") || return 1
+  local input="$1"
+  host_session_id=$(mycelium_json_get_optional_string 'session_id' input) || return 1
   if [[ -n "$host_session_id" ]]; then
     MYCELIUM__PREPARE_MODE=read-only
   else
@@ -973,6 +974,10 @@ out.flush()
 MYCELIUM__PC_RAW=""
 MYCELIUM__PC_ENC=""
 MYCELIUM__PC_READY=false
+# Above this many bytes, comparing the payload on every cached read costs more
+# than starting a decoder, so large payloads keep one interpreter per field.
+MYCELIUM__PC_MAX_BYTES=65536
+MYCELIUM__PC_BYTES=0
 MYCELIUM__PC_OUT=""
 MYCELIUM__PC_STATUS=0
 MYCELIUM__PC_VAR=""
@@ -994,6 +999,22 @@ mycelium__payload_write() {
   ( trap '' PIPE; printf '%s' "$MYCELIUM__PC_OUT" ) 2>/dev/null
 }
 
+# Payload helpers take the NAME of the variable holding the payload, never
+# its value: on bash 3.2 every multi-megabyte function argument costs tens of
+# milliseconds, more than the Python start the cache saves.
+mycelium__payload_name_ok() {
+  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "$1" != __mycelium_* ]]
+}
+
+# Sets MYCELIUM__PC_BYTES to the byte length of the payload in variable $1.
+# The C locale stays local to this function so the decoders still run in the
+# caller's locale.
+mycelium__payload_bytes() {
+  local LC_ALL=C
+  mycelium__payload_name_ok "$1" || return 1
+  eval "MYCELIUM__PC_BYTES=\${#$1}"
+}
+
 # Slot names are fixed decoder kinds plus dotted payload paths.
 mycelium__payload_slot_ok() {
   [[ "$1" =~ ^(get|opt|exit):[A-Za-z_][A-Za-z0-9_.]*$|^(exit|edit|cwd0):$ ]]
@@ -1009,12 +1030,13 @@ mycelium__payload_slot_var() {
   MYCELIUM__PC_VAR="MYCELIUM__PC_SLOT_$slot"
 }
 
-# Decode the named fields of one payload in a single Python process and keep
-# the exact stdout and exit status each decoder would have produced. Slots are
-# `get:PATH`, `opt:PATH`, or `exit:`. Never fails: any slot that cannot be
-# preloaded falls back to its own interpreter.
+# mycelium_payload_preload VAR SLOT...: decode the named fields of the payload
+# held in variable VAR in a single Python process, keeping the exact stdout
+# and exit status each decoder would have produced. Slots are `get:PATH`,
+# `opt:PATH`, or `exit:`. Never fails: a slot that cannot be preloaded, or a
+# payload over MYCELIUM__PC_MAX_BYTES, falls back to one interpreter per read.
 mycelium_payload_preload() {
-  local raw="$1"
+  local __mycelium_name="$1"
   shift
   local -a argv=()
   local slot="" body="" path="" status="" output="" var=""
@@ -1026,10 +1048,16 @@ mycelium_payload_preload() {
     shopt -u nocasematch
   fi
   MYCELIUM__PC_READY=false
+  MYCELIUM__PC_RAW=""
   for var in $MYCELIUM__PC_SLOT_VARS; do
     unset "${var}_S" "${var}_O"
   done
   MYCELIUM__PC_SLOT_VARS=""
+  if ! mycelium__payload_bytes "$__mycelium_name" \
+    || (( MYCELIUM__PC_BYTES > MYCELIUM__PC_MAX_BYTES )); then
+    [[ "$restore_nocasematch" == false ]] || shopt -s nocasematch
+    return 0
+  fi
   for slot in "$@"; do
     mycelium__payload_slot_ok "$slot" || continue
     path="${slot#*:}"
@@ -1056,7 +1084,9 @@ mycelium_payload_preload() {
   fi
 
   MYCELIUM__PC_ENC=""
-  while IFS= read -r -d '' slot     && IFS= read -r -d '' status     && IFS= read -r -d '' output; do
+  while IFS= read -r -d '' slot \
+    && IFS= read -r -d '' status \
+    && IFS= read -r -d '' output; do
     if [[ "$slot" == "env:" ]]; then
       MYCELIUM__PC_ENC="$output"
       continue
@@ -1067,100 +1097,110 @@ mycelium_payload_preload() {
     var="$MYCELIUM__PC_VAR"
     printf -v "${var}_O" '%s' "$output"
     printf -v "${var}_S" '%s' "$status"
-  done < <(printf '%s' "$raw"     | python3 -c "$MYCELIUM__PY_PRELOAD" "${argv[@]}" 2>/dev/null)
+  done < <(printf '%s' "${!__mycelium_name}" \
+    | python3 -c "$MYCELIUM__PY_PRELOAD" "${argv[@]}" 2>/dev/null)
 
-  MYCELIUM__PC_RAW="$raw"
+  MYCELIUM__PC_RAW="${!__mycelium_name}"
   MYCELIUM__PC_READY=true
   [[ "$restore_nocasematch" == false ]] || shopt -s nocasematch
   return 0
 }
 
 # Succeeds, setting MYCELIUM__PC_OUT and MYCELIUM__PC_STATUS, when SLOT was
-# preloaded for exactly this payload.
+# preloaded for exactly the payload now held in variable $2. Only small
+# payloads are ever preloaded, so the comparison stays cheap.
 mycelium__payload_cached() {
-  local slot="$1"
-  local payload="$2"
-  local var="" status_var="" output_var="" same=false
+  local __mycelium_slot="$1"
+  local __mycelium_name="$2"
+  local __mycelium_var="" __mycelium_status="" __mycelium_output=""
+  local __mycelium_same=false
 
   [[ "$MYCELIUM__PC_READY" == true ]] || return 1
+  mycelium__payload_name_ok "$__mycelium_name" || return 1
+  mycelium__payload_slot_ok "$__mycelium_slot" || return 1
   if shopt -q nocasematch; then
     shopt -u nocasematch
-    [[ "$payload" == "$MYCELIUM__PC_RAW" ]] && mycelium__payload_slot_ok "$slot" \
-      && same=true
+    [[ "${!__mycelium_name}" == "$MYCELIUM__PC_RAW" ]] && __mycelium_same=true
     shopt -s nocasematch
   else
-    [[ "$payload" == "$MYCELIUM__PC_RAW" ]] && mycelium__payload_slot_ok "$slot" \
-      && same=true
+    [[ "${!__mycelium_name}" == "$MYCELIUM__PC_RAW" ]] && __mycelium_same=true
   fi
-  [[ "$same" == true ]] || return 1
-  mycelium__payload_slot_var "$slot"
-  var="$MYCELIUM__PC_VAR"
-  status_var="${var}_S"
-  output_var="${var}_O"
-  [[ -n "${!status_var:-}" ]] || return 1
-  MYCELIUM__PC_STATUS="${!status_var}"
-  MYCELIUM__PC_OUT="${!output_var:-}"
+  [[ "$__mycelium_same" == true ]] || return 1
+  mycelium__payload_slot_var "$__mycelium_slot"
+  __mycelium_var="$MYCELIUM__PC_VAR"
+  __mycelium_status="${__mycelium_var}_S"
+  __mycelium_output="${__mycelium_var}_O"
+  [[ -n "${!__mycelium_status:-}" ]] || return 1
+  MYCELIUM__PC_STATUS="${!__mycelium_status}"
+  MYCELIUM__PC_OUT="${!__mycelium_output:-}"
   return 0
 }
 
-# mycelium_json_get PATH [PAYLOAD]: print a scalar field. Reads the payload
-# from stdin unless it is passed as the second argument.
+# mycelium_json_get PATH [VAR]: print a scalar field of the payload held in
+# variable VAR, or read from stdin when VAR is omitted.
 mycelium_json_get() {
-  local dotted_path="$1"
+  local __mycelium_path="$1"
   if (( $# > 1 )); then
-    if mycelium__payload_cached "get:$dotted_path" "$2"; then
+    mycelium__payload_name_ok "$2" || return 1
+    if mycelium__payload_cached "get:$__mycelium_path" "$2"; then
       # If stdout cannot take the answer, let the decoder meet the same
       # stdout and report whatever it would.
       mycelium__payload_write && return "$MYCELIUM__PC_STATUS"
     fi
-    printf '%s' "$2" | python3 -c "$MYCELIUM__PY_JSON_GET" "$dotted_path"
+    printf '%s' "${!2}" | python3 -c "$MYCELIUM__PY_JSON_GET" "$__mycelium_path"
     return
   fi
-  python3 -c "$MYCELIUM__PY_JSON_GET" "$dotted_path"
+  python3 -c "$MYCELIUM__PY_JSON_GET" "$__mycelium_path"
 }
 
-# mycelium_json_get_optional_string PATH [PAYLOAD]: print a string field, or
+# mycelium_json_get_optional_string PATH [VAR]: print a string field, or
 # nothing when it is absent or null; fail on malformed JSON or a non-string.
 mycelium_json_get_optional_string() {
-  local dotted_path="$1"
+  local __mycelium_path="$1"
   if (( $# > 1 )); then
-    if mycelium__payload_cached "opt:$dotted_path" "$2"; then
+    mycelium__payload_name_ok "$2" || return 1
+    if mycelium__payload_cached "opt:$__mycelium_path" "$2"; then
       mycelium__payload_write && return "$MYCELIUM__PC_STATUS"
     fi
-    printf '%s' "$2" \
-      | python3 -c "$MYCELIUM__PY_JSON_OPTIONAL_STRING" "$dotted_path"
+    printf '%s' "${!2}" \
+      | python3 -c "$MYCELIUM__PY_JSON_OPTIONAL_STRING" "$__mycelium_path"
     return
   fi
-  python3 -c "$MYCELIUM__PY_JSON_OPTIONAL_STRING" "$dotted_path"
+  python3 -c "$MYCELIUM__PY_JSON_OPTIONAL_STRING" "$__mycelium_path"
 }
 
-# mycelium_bash_exit [PAYLOAD]: print the tool exit status, if any.
+# mycelium_bash_exit [VAR]: print the tool exit status of the payload held in
+# variable VAR, or read from stdin when VAR is omitted.
 mycelium_bash_exit() {
   if (( $# > 0 )); then
+    mycelium__payload_name_ok "$1" || return 1
     if mycelium__payload_cached "exit:" "$1"; then
       mycelium__payload_write && return "$MYCELIUM__PC_STATUS"
     fi
-    printf '%s' "$1" | python3 -c "$MYCELIUM__PY_BASH_EXIT"
+    printf '%s' "${!1}" | python3 -c "$MYCELIUM__PY_BASH_EXIT"
     return
   fi
   python3 -c "$MYCELIUM__PY_BASH_EXIT"
 }
 
-# mycelium_edit_status PAYLOAD: print true, false, or unknown for an edit.
+# mycelium_edit_status VAR: print true, false, or unknown for the edit whose
+# payload is held in variable VAR.
 mycelium_edit_status() {
+  mycelium__payload_name_ok "$1" || return 1
   if mycelium__payload_cached "edit:" "$1"; then
     mycelium__payload_write && return "$MYCELIUM__PC_STATUS"
   fi
-  printf '%s' "$1" | python3 -c "$MYCELIUM__PY_EDIT_STATUS"
+  printf '%s' "${!1}" | python3 -c "$MYCELIUM__PY_EDIT_STATUS"
 }
 
-# mycelium_session_start_cwd PAYLOAD: SessionStart's cwd field, printing
-# nothing when it cannot be read. echo hands the decoder the payload plus a
-# newline, which JSON ignores; a payload echo would read as options, or any
-# payload while xpg_echo makes echo expand escapes, is decoded by the
-# original pipeline.
+# mycelium_session_start_cwd VAR: SessionStart's cwd field of the payload
+# held in variable VAR, printing nothing when it cannot be read. echo hands
+# the decoder the payload plus a newline, which JSON ignores; a payload echo
+# would read as options, or any payload while xpg_echo makes echo expand
+# escapes, is decoded by the original pipeline.
 mycelium_session_start_cwd() {
-  if [[ "$1" != -* ]] && ! shopt -q xpg_echo \
+  mycelium__payload_name_ok "$1" || return 1
+  if [[ "${!1}" != -* ]] && ! shopt -q xpg_echo \
     && mycelium__payload_cached "cwd0:" "$1"; then
     if mycelium__payload_write; then
       [[ "$MYCELIUM__PC_STATUS" == 0 ]] && return 0
@@ -1168,7 +1208,7 @@ mycelium_session_start_cwd() {
       return 0
     fi
   fi
-  echo "$1" | python3 -c "$MYCELIUM__PY_START_CWD" 2>/dev/null || echo ""
+  echo "${!1}" | python3 -c "$MYCELIUM__PY_START_CWD" 2>/dev/null || echo ""
 }
 
 # mycelium__json_literal MODE VALUE: set MYCELIUM__JSON to what

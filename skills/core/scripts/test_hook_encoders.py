@@ -67,7 +67,8 @@ COMPARE = r"""
 set -uo pipefail
 source "$1"
 dir="$2"
-mycelium_payload_preload '{"cwd": "x"}' get:cwd
+probe_payload='{"cwd": "x"}'
+mycelium_payload_preload probe_payload get:cwd
 [[ -n "$MYCELIUM__PC_ENC" ]] || { echo "no encodings reported" >&2; exit 9; }
 shopt -s nocasematch
 if [[ "${PATSUB:-}" == on ]]; then shopt -s patsub_replacement 2>/dev/null || true; fi
@@ -170,7 +171,8 @@ def test_ordinary_messages_need_no_interpreter(tmp_path):
     env.pop("PYTHONUTF8", None)
     script = r"""
 source "$1"
-mycelium_payload_preload '{"cwd": "x"}' get:cwd
+probe_payload='{"cwd": "x"}'
+mycelium_payload_preload probe_payload get:cwd
 : > "$2"
 MYCELIUM_HOOK_HOST=claude mycelium_emit_context PostToolUse 'SESSION LOG UPDATE: ### HH:MM — title "quoted" \n done' >/dev/null
 MYCELIUM_HOOK_HOST=codex mycelium_emit_context Stop '.living/ updated.' >/dev/null
@@ -193,7 +195,8 @@ def test_adversarial_long_messages_encode_quickly_on_every_bash(tmp_path):
     locks must not spend seconds escaping a long handoff full of quotes."""
     script = r"""
 source "$1"
-mycelium_payload_preload '{"cwd": "x"}' get:cwd
+probe_payload='{"cwd": "x"}'
+mycelium_payload_preload probe_payload get:cwd
 unit=$'\\"\xe2\x80\x94a\n'
 value=""
 while (( ${#value} < 45000 )); do value="$value$unit"; done
