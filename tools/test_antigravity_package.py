@@ -114,11 +114,11 @@ def load_installed(target, relative, name):
 
 
 @pytest.mark.parametrize("explicit", [{"MYCELIUM_HOOK_HOST": "claude"}, {"MYCELIUM_HOOK_HOST": "codex"},
-                                      {"MYCELIUM_AGENT_CLI": "/bin/echo"}])
+                                      {"MYCELIUM_HOOK_HOST": "claude", "MYCELIUM_AGENT_CLI": "/bin/echo"}])
 def test_package_marker_never_overrides_an_explicit_claude_or_codex_choice(tmp_path, monkeypatch, explicit):
     """Regression: a Claude/Codex session that reaches the Antigravity package
-    (e.g. through the shared .mycelium/plugin-root pointer) kept its explicit
-    host or CLI override, instead of being forced offline by .antigravity-host."""
+    (e.g. through the shared .mycelium/plugin-root pointer) with an explicit
+    MYCELIUM_HOOK_HOST was forced offline by .antigravity-host."""
     target = tmp_path / "plugins/mycelium"
     package.install(target, python=Path(sys.executable))
     assert (target / ".antigravity-host").is_file()
@@ -129,6 +129,11 @@ def test_package_marker_never_overrides_an_explicit_claude_or_codex_choice(tmp_p
     with pytest.raises(FileNotFoundError, match="Antigravity"):  # Antigravity's own shell: offline
         index._agent_cli_command()
     assert labeler._resolve_agent_cli() is None
+    assert labeler._resolve_agent_cli(explicit_bin="/bin/echo") == (["/bin/echo"], "claude")
+    monkeypatch.setenv("MYCELIUM_AGENT_CLI", "/bin/echo")  # a global export alone does not opt out
+    with pytest.raises(FileNotFoundError, match="Antigravity"):
+        index._agent_cli_command()
+    monkeypatch.delenv("MYCELIUM_AGENT_CLI")
     for key, value in explicit.items():
         monkeypatch.setenv(key, value)
     fake = tmp_path / "bin"

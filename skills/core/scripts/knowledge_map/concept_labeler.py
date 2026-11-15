@@ -115,12 +115,12 @@ _CMUX_CLAUDE = "/Applications/cmux.app/Contents/Resources/bin/claude"
 def _resolve_agent_cli(explicit_bin: str | None = None) -> tuple[list[str], str] | None:
     """Return a command prefix and provider name for Claude or Codex."""
     # Antigravity uses its own selected model. The package marker covers the
-    # agent's native shell, which sets nothing; it never overrides an explicit
-    # Claude/Codex host, binary, or MYCELIUM_AGENT_CLI choice.
+    # agent's native shell, which sets no host (a globally exported
+    # MYCELIUM_AGENT_CLI does not opt out); it never overrides an explicit
+    # MYCELIUM_HOOK_HOST=claude or codex, or a binary passed by the caller.
     host = os.environ.get("MYCELIUM_HOOK_HOST")
     if host in {"antigravity-ide", "antigravity-app"} or (
             host not in {"claude", "codex"} and not explicit_bin and
-            not os.environ.get("MYCELIUM_AGENT_CLI", "").strip() and
             (Path(__file__).resolve().parents[4] / ".antigravity-host").is_file()):
         return None
     if explicit_bin:
