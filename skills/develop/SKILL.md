@@ -157,9 +157,15 @@ Operational gotchas, all of which have cost a full cycle:
   interpreter that actually has `pytest`, or the ladder fails on an import.
 - `codex exec` blocks reading stdin; redirect `< /dev/null` for a
   non-interactive audit.
-- Codex plugin hooks need a one-time interactive trust step (`/hooks`, trust,
-  restart). A fresh `codex exec` in an untrusted project shows zero dispatch,
-  which is an environment result, not a hook defect.
+- Codex plugin hooks need an interactive trust step (`/hooks`, trust,
+  restart) after every install: Codex pins each approval to a hash of the
+  whole installed bundle, so a new cachebuster, a reinstall of the same tree,
+  or even a `git status` inside an installed bundle that carries `.git`
+  (it rewrites `.git/index`) invalidates it. A `codex exec` against untrusted
+  hooks shows zero dispatch, which is an environment result, not a hook defect.
+  Check trust before an audit, not after: `/hooks`, or the app-server's
+  read-only `hooks/list`, whose `trustStatus` reads `modified` for a stale
+  approval.
 - `timeout` does not exist on macOS. A wrapper that silently fails to run makes
   "no output" look like "no dispatch".
 

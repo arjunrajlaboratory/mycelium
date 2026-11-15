@@ -331,6 +331,47 @@ def test_readme_documents_codex_install_update_and_migration():
     assert "codex update" in readme
 
 
+HOOK_SENTINEL = "SESSION HANDOFF PATH"
+
+
+def _managed_enforcement_section(guidance: str) -> str:
+    start = guidance.index("### Automated Enforcement")
+    end = guidance.index("### Knowledge Transfer (Cross-Project)", start)
+    return guidance[start:end]
+
+
+def test_session_start_still_emits_the_hook_health_sentinel():
+    # The in-context health check keys on this exact text; renaming it in
+    # the hook without updating the guidance would make every task report
+    # that hooks are not running.
+    health = (HOOKS_DIR / "mycelium-health.sh").read_text()
+    assert f'MESSAGES="${{MESSAGES}}{HOOK_SENTINEL}:' in health
+
+
+def test_generated_guidance_tells_agents_to_report_skipped_hooks(tmp_path):
+    repo = _repo(tmp_path, living=False)
+    init_repo.create_agent_guidance(repo)
+
+    # The check must sit inside the managed section so that migration and
+    # re-initialization deliver it to already-initialized projects.
+    section = " ".join(
+        _managed_enforcement_section((repo / "MYCELIUM.md").read_text()).split()
+    )
+    assert f"`{HOOK_SENTINEL}:`" in section
+    assert "lifecycle hooks are not running" in section
+    assert "Tell the user before starting work" in section
+    assert "trust the `mycelium@mycelium` hooks" in section
+    assert "every Mycelium install, upgrade, or reinstall" in section
+    assert "Subagents" in section
+
+
+def test_readme_documents_hook_re_review_after_every_upgrade():
+    readme = " ".join((PLUGIN_ROOT / "README.md").read_text().split())
+    assert "binds each hook approval to the installed plugin's contents" in readme
+    assert "every Mycelium upgrade or reinstall" in readme
+    assert f"`{HOOK_SENTINEL}`" in readme
+
+
 def test_readme_documents_claude_update_and_restart():
     readme = (PLUGIN_ROOT / "README.md").read_text()
     normalized = " ".join(readme.split())
@@ -458,6 +499,9 @@ def test_init_uses_plugin_bundled_codex_hooks_and_agent_guidance(tmp_path, capsy
     assert "bundled with the Mycelium plugin via PLUGIN_ROOT" in install_output
     assert "open /hooks" in install_output
     assert "trust all five Mycelium hooks" in install_output
+    assert "every plugin upgrade or reinstall needs this review again" in (
+        " ".join(install_output.split())
+    )
     assert "not the desktop app" in install_output
     assert "codex update" in install_output
 

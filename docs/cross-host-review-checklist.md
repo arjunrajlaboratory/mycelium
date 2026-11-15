@@ -120,6 +120,11 @@ hook, filesystem, or lifecycle boundaries.
       never mistaken for a live current session.
 - [ ] The documented install, update, trust, restart, and migration instructions
       match the current Claude Code and Codex interfaces.
+- [ ] Install and update instructions say Codex hook approval is pinned to the
+      installed bundle's contents (`trusted_content_hash`), so every upgrade or
+      reinstall needs `/hooks` review again; generated guidance keeps an
+      in-context hook health check whose sentinel text matches what
+      SessionStart actually emits.
 
 ## 4. Lifecycle State Machine
 
@@ -544,6 +549,7 @@ exercise them.
 | Fresh initialization encounters an unsafe later managed target | Preflight rejects it before creating any Mycelium directory or file. |
 | A Claude or Codex hook config is valid JSON but has malformed event, group, handler, or command types | Initialization and migration reject it before changing guidance, runtime state, hooks, todo files, or the knowledge index. |
 | `bash run.sh`, `./run.sh`, `snakemake -c1`, `sbatch job.sh`, or `nextflow run main.nf` runs; or `snakemake -n`, `bash -n run.sh`, `sbatch --test-only job.sh`, or `cat run.sh` runs | Runs open the post-action cycle and record their entry script as lineage; non-executing modes and mentions produce neither. |
+| Codex has skipped every Mycelium hook because an upgrade invalidated its approval | The root agent finds no `SESSION HANDOFF PATH:` line in its context and tells the user to re-trust the `mycelium@mycelium` hooks in `/hooks`; migration delivers that check to existing projects, and renaming the SessionStart sentinel fails a test. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |
 
 ## Validation Gate

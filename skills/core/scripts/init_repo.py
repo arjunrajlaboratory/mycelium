@@ -1169,7 +1169,9 @@ def install_codex_hooks(target_dir: Path):
     print(
         "  Codex action required after plugin install or upgrade: in a current "
         "CLI (not the desktop app), open /hooks, trust all five Mycelium hooks, "
-        "exit Codex, and restart it. If /hooks is absent, run codex update first."
+        "exit Codex, and restart it. If /hooks is absent, run codex update first. "
+        "Codex binds hook approval to the installed plugin's contents, so every "
+        "plugin upgrade or reinstall needs this review again."
     )
     return changed
 

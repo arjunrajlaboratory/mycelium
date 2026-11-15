@@ -7,7 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Agents now warn when Mycelium's hooks are silently skipped.** Current
+  Codex releases (seen on CLI 0.167.2 and Desktop 0.169.0-alpha) bind each
+  plugin hook approval to a `trusted_content_hash`, a SHA-256 over every file
+  in the installed plugin bundle. Every Mycelium upgrade, reinstall, or
+  downgrade therefore resets approval, and Codex skips all five hooks with no
+  warning inside the task. Older approvals that recorded only `trusted_hash`
+  stay valid only for the bundle Codex saw when it first upgraded. The
+  managed `### Automated Enforcement` section of generated `MYCELIUM.md` now
+  tells the root agent to check its context for the `SESSION HANDOFF PATH:`
+  line SessionStart injects and, when it is missing, to tell the user before
+  starting work (on Codex: open `/hooks`, trust the `mycelium@mycelium` hooks,
+  restart). The check is host-neutral and also covers Claude Code projects
+  whose hook registrations are missing. Re-run `$mycelium:core` migration or
+  initialization to add it to existing projects; it changes only that managed
+  section.
+
 ### Changed
+
+- **Install, update, and trust docs say every upgrade needs `/hooks` review
+  again.** The README, the core skill, `init_repo.py`'s install message, and
+  the generated guidance now say Codex hook approval follows the installed
+  plugin's contents, not a one-time trust step.
 
 - **An R run whose script is uncertain is recorded as such, not as a fake
   inline script.** When shell syntax or `R_BATCH_OPTIONS` may change which

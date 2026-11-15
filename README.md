@@ -67,6 +67,15 @@ relaunch the CLI. Fully exit Codex afterward and restart it so the approved
 the plugin and resolve through Codex's dynamic `PLUGIN_ROOT`; they do not embed
 a versioned cache path into your repositories.
 
+Current Codex binds each hook approval to the installed plugin's contents, a
+hash of every file in the installed plugin. Repeat the `/hooks` review after
+every Mycelium upgrade or reinstall, including a downgrade or a reinstall of
+the same version. Until you do, Codex skips all Mycelium hooks without warning
+inside the task: no SessionStart context, no reminders, no Stop enforcement.
+`/hooks` reports them as needing review. Initialized projects tell the agent to
+check for the `SESSION HANDOFF PATH` line that SessionStart adds to its context
+and to warn you when the line is missing.
+
 **Local Claude development install:**
 
 ```bash
@@ -92,9 +101,9 @@ installation, open `/hooks` in a current Codex CLI—not the desktop app—and t
 all five Mycelium command hooks. If `/hooks` is absent, run `codex update` and
 relaunch the CLI. Fully exit Codex and restart it before opening the initialized
 project. Codex deliberately skips untrusted command hooks. Revisit `/hooks`
-after plugin upgrades: Codex resolves `PLUGIN_ROOT` to the new live cache path,
-so the displayed command and its trust record can change even though
-repositories no longer retain the old path.
+after every plugin upgrade or reinstall: Codex invalidates the approval
+whenever the installed plugin's files change, even though repositories no longer
+retain a cache path.
 
 ### 3. Install domain conventions (optional)
 
@@ -150,8 +159,11 @@ codex plugin add mycelium@mycelium
 ```
 
 The first command refreshes the configured Git marketplace; the second updates
-the installed plugin cache. Start a new Codex task afterward so the updated
-skills are discovered. You can confirm the installed version with:
+the installed plugin cache. Then open `/hooks` in a current Codex CLI and trust
+the `mycelium@mycelium` hooks again: Codex treats the updated plugin's hooks as
+needing review and skips them until you approve them. Fully exit Codex and start
+a new task afterward so the updated skills and hooks are discovered. You can
+confirm the installed version with:
 
 ```bash
 codex plugin list --json
@@ -244,8 +256,9 @@ bundled once with the plugin in `hooks/hooks.json`; a small dispatcher no-ops
 outside Mycelium repositories, refreshes `.mycelium/plugin-root`, and invokes
 the shared scripts through Codex's dynamic `PLUGIN_ROOT`. Codex users must open
 `/hooks` in a current CLI—not the desktop app—and trust all five Mycelium
-command hooks, then fully exit and restart Codex. Run `codex update` first if
-the CLI does not expose `/hooks`. Codex exposes shell and unified-exec work
+command hooks, then fully exit and restart Codex, and repeat this after every
+Mycelium upgrade or reinstall. Run `codex update` first if the CLI does not
+expose `/hooks`. Codex exposes shell and unified-exec work
 under the `Bash` matcher and file edits as `apply_patch`; read telemetry is
 Claude-only because Codex does not expose its internal file reads to
 `PostToolUse`.
