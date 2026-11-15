@@ -48,11 +48,7 @@ fi
 if ! mycelium__state "$REPO_ROOT" "$INPUT" \
   prepare:bootstrap lock:stop prepare:write select:create lock:session \
   marker owner; then
-  # Ops 1-2 failed before the lifecycle lock was held; ops 3-5 failed while
-  # holding only that lock.
-  if (( MYCELIUM__STATE_FAILED > 2 )); then
-    mycelium_release_stop_lock
-  fi
+  mycelium__state_release_held
   exit 0
 fi
 trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT

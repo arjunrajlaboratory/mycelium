@@ -63,12 +63,7 @@ else
 fi
 if ! mycelium__state "$REPO_ROOT" "$INPUT" "${_STOP_OPS[@]}"; then
   _STOP_FAILED="$MYCELIUM__STATE_FAILED"
-  if (( _STOP_FAILED > _STOP_SESSION_LOCK_OP )); then
-    mycelium_release_session_lock
-  fi
-  if (( _STOP_FAILED > _STOP_LOCK_OP )); then
-    mycelium_release_stop_lock
-  fi
+  mycelium__state_release_held
   if (( _STOP_FAILED == _STOP_LOCK_OP )); then
     # A concurrent owner may still fail or be interrupted, so accepting this
     # Stop would bypass lifecycle enforcement. Preserve state and ask the host

@@ -15,6 +15,7 @@ MYCELIUM_MARKER_FORMAT=""
 MYCELIUM_OWNER_STATE=""
 MYCELIUM_OWNER_ID=""
 MYCELIUM__STATE_FAILED=0
+MYCELIUM__STATE_HELD=""
 
 # mycelium__state REPO_ROOT PAYLOAD OP...: run the ops in order and stop at
 # the first failure. Applies the assignments the ops make (STATE_DIR,
@@ -40,6 +41,7 @@ mycelium__state() {
   local last_ok=0 failed=0 busy=0 ended=false
 
   MYCELIUM__STATE_FAILED=0
+  MYCELIUM__STATE_HELD=""
   (( ${#ops[@]} > 0 )) || return 0
   for op in "${ops[@]}"; do
     case "$op" in
@@ -76,8 +78,14 @@ mycelium__state() {
           IFS= read -r -d '' a || break
           IFS= read -r -d '' b || break
           case "$a" in
-            stop) MYCELIUM_STOP_LOCK_DIR="$b" ;;
-            session) MYCELIUM_SESSION_LOCK_DIR="$b" ;;
+            stop)
+              MYCELIUM_STOP_LOCK_DIR="$b"
+              MYCELIUM__STATE_HELD="$MYCELIUM__STATE_HELD stop"
+              ;;
+            session)
+              MYCELIUM_SESSION_LOCK_DIR="$b"
+              MYCELIUM__STATE_HELD="$MYCELIUM__STATE_HELD session"
+              ;;
           esac
           ;;
         marker)
@@ -135,12 +143,14 @@ mycelium__state() {
           MYCELIUM__STATE_FAILED=$((offset + busy))
           return 1
         fi
+        MYCELIUM__STATE_HELD="$MYCELIUM__STATE_HELD stop"
         ;;
       lock:session)
         if ! mycelium_acquire_session_lock "${STATE_DIR:-}"; then
           MYCELIUM__STATE_FAILED=$((offset + busy))
           return 1
         fi
+        MYCELIUM__STATE_HELD="$MYCELIUM__STATE_HELD session"
         ;;
       *)
         MYCELIUM__STATE_FAILED=$((offset + busy))
@@ -152,6 +162,20 @@ mycelium__state() {
       return 0
     fi
   done
+}
+
+# Release the locks the last mycelium__state call took, narrowest first. A
+# failed call may hold a lock even when the op that took it never reported
+# success (its process died after the lock record), so callers release by
+# this record rather than by the failed op's index.
+mycelium__state_release_held() {
+  case " $MYCELIUM__STATE_HELD " in
+    *" session "*) mycelium_release_session_lock ;;
+  esac
+  case " $MYCELIUM__STATE_HELD " in
+    *" stop "*) mycelium_release_stop_lock ;;
+  esac
+  MYCELIUM__STATE_HELD=""
 }
 
 mycelium_prepare_state_dir() {
@@ -222,9 +246,7 @@ mycelium_prepare_locked_post_tool_state() {
     lock:session \
     prepare:read-only select:read-only owns \
     marker; then
-    if (( MYCELIUM__STATE_FAILED > 4 )); then
-      mycelium_release_session_lock
-    fi
+    mycelium__state_release_held
     return 1
   fi
   return 0
@@ -260,6 +282,11 @@ mycelium__plain_cell() {
   local trimmed="$1"
   local LC_ALL=C
   local plain_re='^[A-Za-z0-9._/-]*$'
+  local fs="" stdin="" stdout=""
+  # Python would print through its own stdout encoding (utf-16 adds a BOM and
+  # fails on a pipe), so only a reported UTF-8 interpreter is matched.
+  read -r fs stdin stdout <<< "$MYCELIUM__PC_ENC" || true
+  [[ "$stdin" == utf-8/* && "$stdout" == utf-8/* ]] || return 1
   while [[ "$trimmed" == *$'\n' ]]; do
     trimmed="${trimmed%$'\n'}"
   done

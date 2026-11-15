@@ -105,6 +105,8 @@ ENVIRONMENTS = {
     "c": {"LC_ALL": "C"},
     "latin1": {"LC_ALL": "en_US.ISO8859-1"},
     "io-latin1": {"LC_ALL": "en_US.UTF-8", "PYTHONIOENCODING": "latin-1"},
+    "io-utf16": {"LC_ALL": "en_US.UTF-8", "PYTHONIOENCODING": "utf-16"},
+    "io-utf8sig": {"LC_ALL": "en_US.UTF-8", "PYTHONIOENCODING": "utf-8-sig"},
     "utf8-mode": {"LC_ALL": "C", "PYTHONUTF8": "1"},
     "patsub": {"LC_ALL": "en_US.UTF-8", "PATSUB": "on"},
 }

@@ -615,3 +615,98 @@ def test_reference_fixture_is_the_pre_port_library():
     assert "commit e3090da" in text
     assert "python3 - \"$repo_root\" \"$requested_state\" <<'PY'" in text
     assert shutil.which("bash")
+
+
+def _state_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "mycelium_hook_state_under_test", HOOKS_DIR / "mycelium_hook_state.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_an_unexpected_error_reading_state_reads_as_invalid(tmp_path, monkeypatch, capsysbinary):
+    """The old inline interpreters crashed to a nonzero exit, which bash read
+    as an invalid marker or owner. A RuntimeError from a symlink loop (Python
+    3.12 and older) must do the same here, not abort the whole sequence: an
+    aborted Stop sequence used to exit silently instead of blocking."""
+    module = _state_module()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = _active(repo)
+    real_resolve = Path.resolve
+
+    def looping_resolve(self, strict=False):
+        if self.name == "log":
+            raise RuntimeError("Symlink loop from " + str(self))
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", looping_resolve)
+    with pytest.raises(module.OpFailed):
+        module.read_marker(str(repo), str(run / "active-session-log.tmp"))
+
+    def state(*ops, sid="s1"):
+        return module.State(
+            ["1", "claude", "ok", sid, str(repo), str(run), str(repo / ".mycelium"), "", "", *ops]
+        )
+
+    state("marker", "owner", "owns").run()
+    out = capsysbinary.readouterr().out.split(b"\0")
+    assert out[:5] == [b"marker", b"invalid", b"", b"", b""]
+    assert out[5:7] == [b"ok", b"1"]
+    assert out[7:11] == [b"owner", b"valid", b"s1", b"ok"]
+    # An identified event cannot be authorized by an unreadable marker.
+    assert out[12:14] == [b"fail", b"3"]
+
+    # An identity-free payload with no owner token keeps the reference's
+    # compatibility path for a corrupt marker.
+    (run / "active-session-owner-id.tmp").unlink()
+    state("owns", sid="").run()
+    assert capsysbinary.readouterr().out.split(b"\0")[:2] == [b"ok", b"1"]
+
+
+def test_session_start_releases_both_locks_when_the_state_process_dies(tmp_path):
+    """A state process that dies after taking both locks leaves neither."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _base(repo)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real = shutil.which("python3")
+    shim = bin_dir / "python3"
+    # Run the real interpreter; for the state module, cut its report right
+    # after the session lock record, as if it had been killed there.
+    shim.write_text(
+        f"#!{real}\n"
+        "import subprocess, sys\n"
+        f"argv = [{real!r}] + sys.argv[1:]\n"
+        "if not any(a.endswith('mycelium_hook_state.py') for a in sys.argv[1:]):\n"
+        "    raise SystemExit(subprocess.call(argv))\n"
+        "out = subprocess.run(argv, stdout=subprocess.PIPE).stdout\n"
+        "cut = out.find(b'lock\\0session\\0')\n"
+        "if cut >= 0:\n"
+        "    end = out.index(b'\\0', cut + len(b'lock\\0session\\0')) + 1\n"
+        "    out = out[:end]\n"
+        "sys.stdout.buffer.write(out)\n"
+    )
+    shim.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["MYCELIUM_HOOK_HOST"] = "claude"
+    env["MYCELIUM_KNOWLEDGE_DIR"] = str(tmp_path / "knowledge")
+    start = {"session_id": "s1", "cwd": str(repo), "hook_event_name": "SessionStart", "source": "startup"}
+    result = subprocess.run(
+        [str(HOOKS_DIR / "mycelium-health.sh")],
+        cwd=repo, input=json.dumps(start), text=True, capture_output=True, env=env, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    run = repo / ".mycelium" / "run" / "claude" / "s1"
+    assert run.is_dir()
+    assert not (run / "mycelium-session.lock").exists()
+    assert not (repo / ".mycelium" / "mycelium-stop.lock").exists()
+    assert not (run / "active-session-log.tmp").exists()

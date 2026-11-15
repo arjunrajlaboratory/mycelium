@@ -125,7 +125,12 @@ def physical_dir(path: str) -> str:
     """
     if not path.startswith("/"):
         raise OpFailed
-    origin = os.open(".", os.O_RDONLY)
+    try:
+        origin = os.open(".", os.O_RDONLY)
+    except OSError:
+        # A deleted or unreadable cwd does not stop bash's cd; every path
+        # this module uses afterwards is absolute.
+        origin = None
     try:
         try:
             os.chdir(os.path.normpath(path))
@@ -134,10 +139,17 @@ def physical_dir(path: str) -> str:
                 os.chdir(path)
             except OSError:
                 raise OpFailed from None
-        resolved = os.getcwd()
+        try:
+            resolved = os.getcwd()
+        except OSError:
+            raise OpFailed from None
     finally:
-        os.fchdir(origin)
-        os.close(origin)
+        if origin is not None:
+            try:
+                os.fchdir(origin)
+            except OSError:
+                pass
+            os.close(origin)
     return resolved.rstrip("\n")
 
 
@@ -180,6 +192,29 @@ def read_lines(path: str) -> list[bytes] | None:
     return lines
 
 
+def fails_closed(function):
+    """An unexpected error is OpFailed, as an inline interpreter's crash was.
+
+    The bash helpers ran these checks in `python3 -` and treated any nonzero
+    exit, a traceback included, as an invalid file. Callers that catch
+    OpFailed to choose a compatibility path must see the same for an
+    unexpected error (for example RuntimeError from a symlink loop).
+    """
+
+    def wrapper(*args):
+        try:
+            return function(*args)
+        except OpFailed:
+            raise
+        except Exception:
+            raise OpFailed from None
+
+    wrapper.__name__ = function.__name__
+    wrapper.__doc__ = function.__doc__
+    return wrapper
+
+
+@fails_closed
 def read_owner_id(owner_file: str) -> str:
     """mycelium_read_session_owner_id."""
     if not (isfile(owner_file) and not islink(owner_file)):
@@ -193,6 +228,7 @@ def read_owner_id(owner_file: str) -> str:
     return owner_id
 
 
+@fails_closed
 def read_marker(repo_root: str, marker_file: str) -> tuple[str, str, str]:
     """mycelium_read_active_log_marker: (safe log path, owner ts, format)."""
     if not (isfile(marker_file) and not islink(marker_file)):
@@ -598,21 +634,27 @@ class State:
     # -- reads that never fail the sequence ---------------------------------
 
     def marker(self, marker_file: str) -> None:
-        if not isfile(marker_file):
+        try:
+            present = isfile(marker_file)
+        except Exception:
+            present = True
+        if not present:
             emit("marker", "absent", "", "", "")
             return
         try:
             path, owner_ts, owner_format = read_marker(self.repo_root, marker_file)
-        except OpFailed:
+        except Exception:
             emit("marker", "invalid", "", "", "")
             return
         emit("marker", "valid", path, owner_ts, owner_format)
 
     def owner(self, owner_file: str) -> None:
         try:
-            emit("owner", "valid", read_owner_id(owner_file))
-        except OpFailed:
+            owner_id = read_owner_id(owner_file)
+        except Exception:
             emit("owner", "invalid", "")
+            return
+        emit("owner", "valid", owner_id)
 
     # -- driver -------------------------------------------------------------
 
