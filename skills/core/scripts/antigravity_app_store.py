@@ -31,8 +31,12 @@ STEP_GENERIC, STEP_FORMAT = 132, 0
 STATUS_RUNNING, STATUS_DONE = 2, 3
 TOOL_SOURCE_BUILTIN = 1
 RUN_COMMAND_TYPE = "type.googleapis.com/exa.cortex.core.tools.RunCommand"
-# Assumed from the "FileEdit typed Any" evidence by analogy with RunCommand; an
-# App row with any other type URL is simply not tracked.
+# ASSUMPTION: this type URL is inferred from the "FileEdit typed Any" evidence by
+# analogy with RunCommand; it was never observed in a captured App row, and the
+# tests use hand-built rows. A completed built-in edit whose record has another
+# type, or another kind/argument shape, raises UnrecognizedShape: the adapter
+# tells the model the edit was not tracked, and `tools/antigravity.py doctor
+# --profile app` reports what the App's own stores contain (edit_shape_report).
 FILE_EDIT_TYPE = "type.googleapis.com/exa.cortex.core.tools.FileEdit"
 # Observed App run_command arguments. BypassSandbox is accepted only as false; the
 # typed result must still prove the command ran in the sandbox.
@@ -52,6 +56,15 @@ MAX_EDIT_ARGS = 768 * 1024
 
 class Unverified(Exception):
     """The native store does not prove this exact step."""
+
+
+class UnrecognizedShape(Unverified):
+    """A completed built-in edit's native record does not have the assumed shape.
+
+    Unlike other Unverified outcomes (a failed edit, a different path), this means
+    the App's record format differs from what this module was written for, so
+    every edit of that shape would go untracked. Callers must make it visible.
+    """
 
 
 class Pending(Exception):
@@ -269,9 +282,17 @@ def _decode_tool(cid, step, status, payload, tool_names, expected_type):
     if status != STATUS_DONE:
         raise Unverified("native step did not complete")
     _message(metadata, 8)  # completed_at must be present on a terminal row
-    response = _message(_message(root, 140), 2)
-    typed = _message(response, 6)
-    if _text(typed, 1) != expected_type:
+    try:
+        response = _message(_message(root, 140), 2)
+        typed = _message(response, 6)
+        type_url = _text(typed, 1)
+    except Unverified as error:
+        if name in EDIT_TOOLS and expected_type == FILE_EDIT_TYPE:
+            raise UnrecognizedShape(f"native edit result has no typed record ({error})") from error
+        raise
+    if type_url != expected_type:
+        if name in EDIT_TOOLS and expected_type == FILE_EDIT_TYPE:
+            raise UnrecognizedShape("native edit result type is not the assumed FileEdit")
         raise Unverified("native result has an unexpected type")
     # Arguments are parsed only after tool and result type are identified; only a
     # supported FileEdit gets the larger bound. Their content is never returned.
@@ -323,11 +344,13 @@ def _edit_from(cid, step, status, payload, tool_names, expected_path=None):
         cid, step, status, payload, set(tool_names) & set(EDIT_TOOLS), FILE_EDIT_TYPE)
     keys, kinds = EDIT_TOOLS[name]
     path = args.get("Path")
-    if set(args) - keys or not isinstance(path, str) or (expected_path is not None and path != expected_path):
+    if set(args) - keys:
+        raise UnrecognizedShape("native edit arguments have unrecognised keys")
+    if not isinstance(path, str) or (expected_path is not None and path != expected_path):
         raise Unverified("native edit arguments differ from the hook call")
     kind = _one(result, 1, 0, required=False)
     if kind not in kinds:
-        raise Unverified("native edit kind does not match its tool")
+        raise UnrecognizedShape("native edit kind does not match its tool")
     if _text(result, 2) != path or not os.path.isabs(path) or os.path.normpath(path) != path:
         raise Unverified("native edit path is not canonical or differs from its arguments")
     return {"call_id": call_id, "path": path, "kind": kind, "tool": name, "source_step": source_step}
@@ -409,3 +432,60 @@ def recover_edits(cid, after, through, *, seconds=SCAN_SECONDS):
             if len(rejected) < MAX_SCAN_REASONS:
                 rejected[str(idx)] = str(error)[:200]
     return {"status": status, "edits": edits, "rejected": rejected}
+
+
+# ---- Doctor: does the App's own edit record match the assumed shape? ------------------------------
+
+MAX_SHAPE_CONVERSATIONS = 20
+MAX_SHAPE_ROWS = 200
+
+
+def edit_shape_report(*, max_conversations=MAX_SHAPE_CONVERSATIONS, max_rows=MAX_SHAPE_ROWS):
+    """Read-only census of completed built-in edit rows in the newest App stores.
+
+    status: "unavailable" (no readable store), "no-evidence" (no completed edit
+    rows yet), "recognized" (every edit row has the assumed FileEdit shape), or
+    "unrecognized" (at least one does not, so such edits go untracked).
+    """
+    import uuid
+    report = {"status": "unavailable", "conversations_scanned": 0, "edit_rows": 0,
+              "recognized": 0, "unrecognized": 0, "reasons": {}, "assumed_type": FILE_EDIT_TYPE}
+    directory = Path.home().joinpath(*STORE_ROOT)
+    try:
+        if directory.is_symlink() or not directory.is_dir():
+            return report
+        stores = []
+        for entry in directory.iterdir():
+            try:
+                if entry.suffix == ".db" and str(uuid.UUID(entry.stem)) == entry.stem and not entry.is_symlink():
+                    stores.append((entry.stat().st_mtime, entry.stem))
+            except (ValueError, OSError):
+                continue
+    except OSError:
+        return report
+    names = tuple(name.encode() for name in EDIT_TOOLS)
+    for _, cid in sorted(stores, reverse=True)[:max_conversations]:
+        try:
+            rows = _session(cid, lambda connection: connection.execute(
+                "SELECT idx, status, step_payload FROM steps WHERE step_type = ? AND step_format = ? "
+                "AND status = ? AND length(step_payload) <= ? AND (instr(step_payload, ?) > 0 OR "
+                "instr(step_payload, ?) > 0) ORDER BY idx DESC LIMIT ?",
+                (STEP_GENERIC, STEP_FORMAT, STATUS_DONE, MAX_PAYLOAD, *names, max_rows)).fetchall())
+        except Unverified:
+            continue
+        report["conversations_scanned"] += 1
+        for idx, status, payload in rows:
+            try:
+                _edit_from(cid, idx, status, payload, EDIT_TOOLS)
+                report["recognized"] += 1
+            except UnrecognizedShape as error:
+                report["unrecognized"] += 1
+                reason = str(error)[:200]
+                report["reasons"][reason] = report["reasons"].get(reason, 0) + 1
+            except (Unverified, Pending):
+                continue  # not a completed built-in edit call (another tool, failed, ...)
+    report["edit_rows"] = report["recognized"] + report["unrecognized"]
+    if report["conversations_scanned"]:
+        report["status"] = ("unrecognized" if report["unrecognized"] else
+                            "recognized" if report["recognized"] else "no-evidence")
+    return report

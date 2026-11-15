@@ -173,6 +173,15 @@ Limitations of the App preview:
 - Only successful built-in `write_file` and `edit_file` steps count as edits.
   A missed edit callback is recovered once from the step record at a normal
   Stop; other editing routes are not tracked.
+- Edit tracking assumes the App records a completed edit as a typed
+  `exa.cortex.core.tools.FileEdit` result with the CREATE/OVERWRITE/EDIT kinds
+  and argument keys listed in `antigravity_app_store.py`. That type name was
+  inferred, not observed in a captured App row, and the tests use hand-built
+  rows. If a real edit record has another shape, the edit is not tracked, the
+  model is told so at its next step (naming the step), and
+  `doctor --profile app` reports `app_edit_records.status: "unrecognized"` with
+  a warning after reading the newest App conversation stores read-only. Run
+  that doctor check after your first App edit.
 - Lifecycle state lives under `.mycelium/antigravity-app/` and
   `.mycelium/run/antigravity-app/`. Only Git roots containing `.living/`
   receive state.

@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interpreter selected with `--python`. See the README for installation and
   setup.
 - Native App 2.31.0 tracking for verified sandboxed commands and supported edits,
-  including bounded recovery of missed edit callbacks at Stop.
+  including bounded recovery of missed edit callbacks at Stop. Edit tracking
+  assumes an inferred `FileEdit` record type; an edit record of another shape
+  is reported to the model and by `doctor --profile app` instead of being
+  dropped silently.
 
 ### Changed
 

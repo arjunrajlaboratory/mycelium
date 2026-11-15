@@ -80,6 +80,33 @@ def test_app_install_update_and_uninstall_stay_out_of_git(workspace, tmp_path):
     assert (workspace / ".gitignore").read_bytes() == user_ignore  # the user's file is untouched
 
 
+def test_app_doctor_reports_unrecognised_edit_records_read_only(workspace, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    target = app_target(workspace)
+    package.install(target, python=PYTHON, profile="app")
+    report = package.doctor(target, workspace=workspace, profile="app")
+    assert report["ok"] and report["app_edit_records"]["status"] == "unavailable" and "warnings" not in report
+    assert not (home / ".gemini").exists()
+    sys.path.insert(0, str(package.SOURCE / "skills/core/scripts"))
+    try:
+        from test_antigravity_app_native import Store, edit_payload
+        import antigravity_app_store as store
+    finally:
+        sys.path.pop(0)
+    db = Store(home, cid=CID)
+    try:
+        db.put(3, edit_payload(str(workspace / "a.md"), step=3, type_url="type.googleapis.com/x.FileWrite"))
+        report = package.doctor(target, workspace=workspace, profile="app")
+    finally:
+        db.close()
+    assert report["ok"]  # package identity is fine; the host-format gap is a warning
+    assert report["app_edit_records"]["status"] == "unrecognized"
+    assert report["app_edit_records"]["assumed_type"] == store.FILE_EDIT_TYPE
+    assert report["warnings"] and "not tracked" in report["warnings"][0]
+
+
 def test_app_and_ide_identities_are_distinct_and_ide_default_is_unchanged():
     ide = package.candidate_files(package.SOURCE, PYTHON)
     explicit = package.candidate_files(package.SOURCE, PYTHON, "ide")

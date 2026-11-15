@@ -114,7 +114,8 @@ def test_large_arguments_of_an_unsupported_type_keep_the_generic_bound(native):
     home, repo, payload, calls, db = native
     path = str(repo / "report.html")
     db.put(6, edit_payload(path, step=6, args=large_args(path), type_url=store.RUN_COMMAND_TYPE))
-    with pytest.raises(store.Unverified, match="unexpected type"):
+    # Rejected on its type before the oversized arguments are parsed.
+    with pytest.raises(store.UnrecognizedShape, match="not the assumed FileEdit"):
         store.edit(CID, 6, "write_file", path)
 
 

@@ -556,6 +556,68 @@ def test_failed_or_unverified_edit_is_not_tracked(native, tmp_path, case):
     assert state_of(repo).get("unresolved_commands", {}) == {}  # edits never block Stop
 
 
+# ---- The FileEdit record type is an assumption: an unrecognised shape must be visible ----------
+
+SHAPE_CASES = {"other-type": dict(type_url="type.googleapis.com/exa.cortex.core.tools.FileWrite"),
+               "no-result": dict(result=False), "kind-unknown": dict(kind=4), "kind-missing": dict(kind=0),
+               "row-extra-arg": "extra"}
+
+
+@pytest.mark.parametrize("case", sorted(SHAPE_CASES))
+def test_unrecognised_edit_record_shape_is_reported_not_silent(native, case):
+    home, repo, payload, calls, db = native
+    target = str(repo / "notes.md")
+    row = SHAPE_CASES[case]
+    if row == "extra":
+        row = dict(args=dict(edit_args(target), Encoding="utf-8"))
+    db.put(7, edit_payload(target, **row))
+    app("PostToolUse", edit_event(payload, target))
+    assert calls == []  # still never guessed as tracked
+    warnings = [c for c in state_of(repo)["context"] if "does not recognise" in c]
+    assert len(warnings) == 1 and "step 7" in warnings[0] and "doctor" in warnings[0]
+    app("PostToolUse", edit_event(payload, target))  # a repeat callback does not duplicate it
+    assert len([c for c in state_of(repo)["context"] if "does not recognise" in c]) == 1
+    assert state_of(repo).get("unresolved_commands", {}) == {}  # edits never block Stop
+
+
+@pytest.mark.parametrize("case", ["verified", "failed-edit", "running", "hook-path-differs", "no-row"])
+def test_ordinary_edit_outcomes_raise_no_shape_warning(native, case):
+    home, repo, payload, calls, db = native
+    target = str(repo / "notes.md")
+    row = {"failed-edit": dict(status=7, result=False), "running": dict(status=2)}.get(case, {})
+    if case != "no-row":
+        db.put(7, edit_payload(target, **row))
+    hook_args = edit_args(str(repo / "other.md")) if case == "hook-path-differs" else None
+    app("PostToolUse", edit_event(payload, target, args=hook_args))
+    assert not [c for c in state_of(repo)["context"] if "does not recognise" in c]
+
+
+def test_edit_shape_report_counts_recognised_and_unrecognised_rows_read_only(home):
+    home, repo = home
+    db = Store(home)
+    try:
+        assert store.edit_shape_report()["status"] == "no-evidence"
+        db.put(3, edit_payload(str(repo / "a.md"), step=3))
+        assert store.edit_shape_report()["status"] == "recognized"
+        db.put(4, edit_payload(str(repo / "b.md"), step=4, call_id="call-b",
+                               type_url="type.googleapis.com/exa.cortex.core.tools.FileWrite"))
+        before = {p.name: p.read_bytes() for p in db.path.parent.iterdir() if not p.name.endswith("-shm")}
+        report = store.edit_shape_report()
+        after = {p.name: p.read_bytes() for p in db.path.parent.iterdir() if not p.name.endswith("-shm")}
+    finally:
+        db.close()
+    assert before == after
+    assert report["status"] == "unrecognized" and report["edit_rows"] == 2
+    assert report["recognized"] == 1 and report["unrecognized"] == 1
+    assert report["conversations_scanned"] == 1
+
+
+def test_edit_shape_report_without_a_store_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert store.edit_shape_report()["status"] == "unavailable"
+    assert not (tmp_path / ".gemini").exists()
+
+
 # ---- Real shared hooks: verified App command reaches lineage and one accepted Stop ---------------
 
 def test_real_app_verified_command_reaches_lineage_and_accepts_once(tmp_path, monkeypatch):

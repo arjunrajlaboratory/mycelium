@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -177,6 +178,18 @@ def validate_ownership_manifest(manifest, *, allow_legacy=False, profile="ide"):
         raise ValueError("Invalid installation permission manifest")
 
 
+def app_edit_records(target):
+    """Read-only check of the App's own edit records with the installed reader."""
+    reader = target / "skills/core/scripts/antigravity_app_store.py"
+    try:
+        spec = importlib.util.spec_from_file_location("mycelium_antigravity_app_store", reader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.edit_shape_report()
+    except Exception as error:  # a diagnostic must not break the identity report
+        return {"status": "unavailable", "reason": f"{type(error).__name__}: {error}"[:300]}
+
+
 def doctor(destination, *, workspace=None, profile="ide"):
     target = app_destination(destination) if profile == "app" else safe_path(destination)
     if not target.is_dir():
@@ -207,6 +220,12 @@ def doctor(destination, *, workspace=None, profile="ide"):
             "live_validation": "Package identity only; requires a separate natural-dispatch receipt"}
     if profile != "ide":
         report["profile"] = profile
+    if profile == "app" and content_ok:
+        report["app_edit_records"] = app_edit_records(target)
+        if report["app_edit_records"]["status"] == "unrecognized":
+            report.setdefault("warnings", []).append(
+                "Some completed App edit records do not have the FileEdit shape edit tracking assumes "
+                "(pinned to App 2.31.0); those edits are not tracked. See app_edit_records.")
     if workspace is not None:
         report["workspace"] = workspace_readiness(workspace, profile)
         report["ok"] = report["ok"] and report["workspace"]["ok"]
