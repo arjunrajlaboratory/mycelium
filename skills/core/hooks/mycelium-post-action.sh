@@ -17,10 +17,10 @@ source "$HERE/mycelium-hook-lib.sh"
 
 INPUT=$(cat)
 
-mycelium_payload_preload "$INPUT" 'get:tool_input.command' 'get:cwd' 'opt:session_id' 'exit:'
+mycelium_payload_preload INPUT 'get:tool_input.command' 'get:cwd' 'opt:session_id' 'exit:'
 
 # Extract the command that was run
-COMMAND=$(mycelium_json_get 'tool_input.command' "$INPUT")
+COMMAND=$(mycelium_json_get 'tool_input.command' INPUT)
 if [[ -z "$COMMAND" ]]; then
   exit 0
 fi
@@ -30,11 +30,11 @@ fi
 # Share the data-lineage parser's command-position and control-flow checks so
 # skipped compound branches and interpreter text used as arguments cannot open
 # a false bookkeeping cycle.
-SESSION_CWD=$(mycelium_json_get 'cwd' "$INPUT")
+SESSION_CWD=$(mycelium_json_get 'cwd' INPUT)
 if [[ -z "$SESSION_CWD" || ! -d "$SESSION_CWD" ]]; then
   SESSION_CWD=$(pwd)
 fi
-BASH_EXIT=$(mycelium_bash_exit "$INPUT")
+BASH_EXIT=$(mycelium_bash_exit INPUT)
 if [[ -z "$BASH_EXIT" && "$(mycelium_hook_host)" == "claude" ]]; then
   BASH_EXIT=0
 fi

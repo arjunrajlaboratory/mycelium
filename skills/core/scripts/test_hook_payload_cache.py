@@ -83,21 +83,21 @@ payload_file="$2"
 shift 2
 payload=$(cat "$payload_file"; printf x)
 payload="${payload%x}"
-mycelium_payload_preload "$payload" "$@"
+mycelium_payload_preload payload "$@"
 for slot in "$@"; do
   kind="${slot%%:*}"
   path="${slot#*:}"
   hit=miss
-  mycelium__payload_cached "$slot" "$payload" && hit=hit
+  mycelium__payload_cached "$slot" payload && hit=hit
   case "$kind" in
     get)
-      cached=$(mycelium_json_get "$path" "$payload"; printf 'rc=%s' "$?")
+      cached=$(mycelium_json_get "$path" payload; printf 'rc=%s' "$?")
       direct=$(printf '%s' "$payload" | mycelium_json_get "$path"; printf 'rc=%s' "$?") ;;
     opt)
-      cached=$(mycelium_json_get_optional_string "$path" "$payload" 2>/dev/null; printf 'rc=%s' "$?")
+      cached=$(mycelium_json_get_optional_string "$path" payload 2>/dev/null; printf 'rc=%s' "$?")
       direct=$(printf '%s' "$payload" | mycelium_json_get_optional_string "$path" 2>/dev/null; printf 'rc=%s' "$?") ;;
     exit)
-      cached=$(mycelium_bash_exit "$payload"; printf 'rc=%s' "$?")
+      cached=$(mycelium_bash_exit payload; printf 'rc=%s' "$?")
       direct=$(printf '%s' "$payload" | mycelium_bash_exit; printf 'rc=%s' "$?") ;;
   esac
   printf '%s\t%s\t%q\t%q\n' "$slot" "$hit" "$cached" "$direct"
@@ -196,13 +196,60 @@ def test_cache_answers_ordinary_fields_without_new_interpreters(tmp_path):
     assert set(hits.values()) == {"hit"}, hits
 
 
+@pytest.mark.parametrize(
+    ("filler", "cached"),
+    [
+        ("a" * 60_000, True),
+        # 30,000 characters but 90,000 UTF-8 bytes: the limit counts bytes.
+        ("\u20ac" * 30_000, False),
+        ("a" * 70_000, False),
+    ],
+)
+def test_large_payloads_skip_the_cache(tmp_path, filler, cached):
+    """Comparing a large payload on every read costs more than a decoder."""
+    payload_file = tmp_path / "payload.json"
+    payload_file.write_bytes(
+        json.dumps(
+            {"session_id": "s1", "cwd": "/w", "tool_response": {"output": filler}},
+            ensure_ascii=False,
+        ).encode()
+    )
+    result = subprocess.run(
+        ["bash", "-c", COMPARE, "compare", str(LIB), str(payload_file),
+         "get:cwd", "opt:session_id", "exit:"],
+        capture_output=True,
+        check=True,
+        env={**os.environ, "LC_ALL": "en_US.UTF-8"},
+    )
+    rows = [line.split(b"\t") for line in result.stdout.splitlines()]
+    assert len(rows) == 3
+    for slot, hit, cached_answer, direct in rows:
+        assert cached_answer == direct, slot
+        assert hit == (b"hit" if cached else b"miss"), (slot, hit)
+
+
+def test_helpers_take_a_variable_name_not_the_payload():
+    """Passing a multi-megabyte payload as an argument is slow on bash 3.2."""
+    out = _probe(
+        """
+big="{\\"cwd\\": \\"/w\\", \\"pad\\": \\"$(head -c 200000 /dev/zero | tr '\\0' a)\\"}"
+mycelium_payload_preload big get:cwd
+mycelium_json_get cwd big
+mycelium_json_get cwd 'not a name' || echo rejected
+"""
+    )
+    assert out == "/w\nrejected\n"
+
+
 def test_cache_never_answers_for_a_different_payload(tmp_path):
     script = r"""
 set -uo pipefail
 source "$1"
-mycelium_payload_preload '{"cwd": "/first"}' get:cwd
-mycelium__payload_cached get:cwd '{"cwd": "/second"}' && echo stale-hit
-mycelium_json_get cwd '{"cwd": "/second"}'
+p='{"cwd": "/first"}'
+mycelium_payload_preload p get:cwd
+p='{"cwd": "/second"}'
+mycelium__payload_cached get:cwd p && echo stale-hit
+mycelium_json_get cwd p
 """
     result = subprocess.run(
         ["bash", "-c", script, "probe", str(LIB)],
@@ -225,10 +272,11 @@ def _probe(script: str) -> str:
 def test_a_second_preload_drops_every_earlier_answer():
     out = _probe(
         """
-mycelium_payload_preload '{"source":"first"}' get:source
+p='{"source":"first"}'
+mycelium_payload_preload p get:source
 p='{"cwd":"new","source":"second"}'
-mycelium_payload_preload "$p" get:cwd
-mycelium_json_get source "$p"
+mycelium_payload_preload p get:cwd
+mycelium_json_get source p
 """
     )
     assert out == "second\n"
@@ -238,9 +286,11 @@ def test_preload_clears_old_answers_whatever_ifs_is():
     out = _probe(
         """
 IFS=$'\\n\\t'
-mycelium_payload_preload '{"source":"old"}' get:source
-mycelium_payload_preload '{"source":"new"}' get:cwd
-mycelium_json_get source '{"source":"new"}'
+p='{"source":"old"}'
+mycelium_payload_preload p get:source
+p='{"source":"new"}'
+mycelium_payload_preload p get:cwd
+mycelium_json_get source p
 """
     )
     assert out == "new\n"
@@ -250,8 +300,10 @@ def test_cache_compares_payloads_case_sensitively():
     out = _probe(
         """
 shopt -s nocasematch
-mycelium_payload_preload '{"cwd":"lower"}' get:cwd
-mycelium_json_get cwd '{"cwd":"LOWER"}'
+p='{"cwd":"lower"}'
+mycelium_payload_preload p get:cwd
+p='{"cwd":"LOWER"}'
+mycelium_json_get cwd p
 shopt -q nocasematch && echo still-set
 """
     )
@@ -262,9 +314,9 @@ def test_cached_answer_meets_a_closed_stdout_like_the_decoder():
     out = _probe(
         """
 p='{"cwd":"x"}'
-mycelium_payload_preload "$p" get:cwd opt:cwd exit:
+mycelium_payload_preload p get:cwd opt:cwd exit:
 for f in "mycelium_json_get cwd" "mycelium_json_get_optional_string cwd" "mycelium_bash_exit"; do
-  if $f "$p" >&- 2>/dev/null; then c=0; else c=$?; fi
+  if $f p >&- 2>/dev/null; then c=0; else c=$?; fi
   if printf '%s' "$p" | $f >&- 2>/dev/null; then d=0; else d=$?; fi
   echo "$c $d"
 done
@@ -282,12 +334,12 @@ def test_cached_answer_meets_a_broken_pipe_like_the_decoder():
         "set -euo pipefail\n"
         f'source "{LIB}"\n'
         "p='{\"cwd\":\"x\"}'\n"
-        "mycelium_payload_preload \"$p\" get:cwd opt:cwd exit:\n"
+        "mycelium_payload_preload p get:cwd opt:cwd exit:\n"
     )
     for cached, direct in (
-        ('mycelium_json_get cwd "$p"', 'printf "%s" "$p" | mycelium_json_get cwd'),
+        ('mycelium_json_get cwd p', 'printf "%s" "$p" | mycelium_json_get cwd'),
         (
-            'mycelium_json_get_optional_string cwd "$p"',
+            'mycelium_json_get_optional_string cwd p',
             'printf "%s" "$p" | mycelium_json_get_optional_string cwd',
         ),
     ):
@@ -308,11 +360,12 @@ def test_cached_answer_meets_a_broken_pipe_like_the_decoder():
 def test_sourcing_the_library_again_keeps_old_answers_clearable():
     out = _probe(
         """
-mycelium_payload_preload '{"source":"old"}' get:source
+p='{"source":"old"}'
+mycelium_payload_preload p get:source
 source "$1"
 p='{"source":"new"}'
-mycelium_payload_preload "$p" get:cwd
-mycelium_json_get source "$p"
+mycelium_payload_preload p get:cwd
+mycelium_json_get source p
 """
     )
     assert out == "new\n"
@@ -322,8 +375,8 @@ def test_distinct_paths_never_share_a_cache_entry():
     out = _probe(
         """
 p='{"a":{"b":"nested"},"a_D_b":"literal","a_Db":"other","a_U_Db":"third"}'
-mycelium_payload_preload "$p" get:a.b get:a_D_b get:a_Db get:a_U_Db
-for path in a.b a_D_b a_Db a_U_Db; do mycelium_json_get "$path" "$p"; done
+mycelium_payload_preload p get:a.b get:a_D_b get:a_Db get:a_U_Db
+for path in a.b a_D_b a_Db a_U_Db; do mycelium_json_get "$path" p; done
 """
     )
     assert out == "nested\nliteral\nother\nthird\n"

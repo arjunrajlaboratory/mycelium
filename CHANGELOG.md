@@ -15,14 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mycelium_payload_preload` now runs the same decoder code for all of a
   hook's fields in one interpreter and serves each later read from bash.
   Answers are byte-identical, exit status included; a field whose decoder
-  would raise or print a NUL byte falls back to its own interpreter. The
-  PostToolUse activity tracker drops from 15 to 10 Python starts and the
-  post-action hook from 20 to 13, about a quarter of their run time.
+  would raise, print a NUL byte, or hit the recursion limit falls back to its
+  own interpreter. The PostToolUse activity tracker drops from 15 to 10
+  Python starts and the post-action hook from 20 to 13, cutting 17–23% of
+  their run time. Payloads over 64 KiB (an Edit of a large file carries the
+  whole original) skip the cache and decode as before, because comparing
+  them on every read would cost more than it saves.
 - **The compatibility test suite runs in parallel.** CI and
   `tools/release_gate.py` run `skills/core/scripts` with pytest-xdist
   (`-n auto --dist worksteal`) when it is installed; every test works in its
-  own temporary repository. The release gate still runs the suite serially
-  where xdist is missing.
+  own temporary repository. The release gate loads xdist explicitly with
+  `-p xdist`, so `PYTEST_DISABLE_PLUGIN_AUTOLOAD` does not break it, and
+  still runs the suite serially where xdist is missing.
 
 - **An R run whose script is uncertain is recorded as such, not as a fake
   inline script.** When shell syntax or `R_BATCH_OPTIONS` may change which

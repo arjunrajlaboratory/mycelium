@@ -19,7 +19,7 @@ source "$HERE/mycelium-hook-lib.sh"
 
 INPUT=$(cat)
 
-mycelium_payload_preload "$INPUT" 'get:cwd' 'opt:session_id'
+mycelium_payload_preload INPUT 'get:cwd' 'opt:session_id'
 
 # PostToolUse payloads describe attempted edits as well as successful ones.
 # Ignore an explicitly failed result; an absent status remains compatible with
@@ -108,7 +108,7 @@ fi
 
 # --- Repo and .living/ checks ---
 
-SESSION_CWD=$(mycelium_json_get 'cwd' "$INPUT")
+SESSION_CWD=$(mycelium_json_get 'cwd' INPUT)
 if [[ -z "$SESSION_CWD" ]]; then
   SESSION_CWD=$(pwd)
 fi
