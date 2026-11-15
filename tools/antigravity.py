@@ -362,14 +362,58 @@ def install(destination, *, python=Path(sys.executable), source=SOURCE, dry_run=
         if stage.exists() and not retain:
             shutil.rmtree(stage)
     result = doctor(target, profile=profile)
-    if backup and profile == "app" and not repair_permissions and result["ok"]:
-        # The new generation is verified and the old one is an owned package
-        # copy with no user data, so an ordinary App update keeps no backup
-        # inside the workspace. Explicit permission repair still retains one.
+    if (backup and profile == "app" and not repair_permissions and result["ok"]
+            and is_exact_owned_generation(backup)):
+        # The new generation is verified and the displaced one, inventoried just
+        # now, holds nothing but its own manifest (plus regenerable bytecode), so
+        # an ordinary App update keeps no backup inside the workspace. Anything
+        # else, and explicit permission repair, keeps the backup.
         shutil.rmtree(backup)
     elif backup:
         result["backup"] = str(backup)
     return result
+
+
+def is_exact_owned_generation(root):
+    """True only if every entry under root is its manifest's file, bytes and mode.
+
+    Unlike doctor's file_map, nothing is skipped except __pycache__ directories
+    holding only .pyc files: a cache-named directory can still hold user files.
+    """
+    try:
+        manifest = json.loads((root / OWNERSHIP).read_text())
+        files, modes = manifest["files"], manifest["modes"]
+        if not isinstance(files, dict) or not isinstance(modes, dict):
+            return False
+        expected_dirs = {parent.as_posix() for name in files for parent in Path(name).parents if parent != Path(".")}
+        seen = set()
+        for directory, dirs, names in os.walk(root, followlinks=False):
+            relative_dir = Path(directory).relative_to(root)
+            in_bytecode_cache = relative_dir.name == "__pycache__"
+            for name in dirs:
+                path = Path(directory) / name
+                relative = path.relative_to(root).as_posix()
+                if not stat.S_ISDIR(path.lstat().st_mode):
+                    return False
+                if relative not in expected_dirs and name != "__pycache__":
+                    return False
+            for name in names:
+                path = Path(directory) / name
+                relative = path.relative_to(root).as_posix()
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode):
+                    return False
+                if in_bytecode_cache and name.endswith(".pyc") and relative not in files:
+                    continue
+                if relative == OWNERSHIP:
+                    continue
+                if (relative not in files or stat.S_IMODE(info.st_mode) != modes.get(relative) or
+                        hashlib.sha256(path.read_bytes()).hexdigest() != files[relative]):
+                    return False
+                seen.add(relative)
+        return seen == set(files)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def is_candidate(root, files):

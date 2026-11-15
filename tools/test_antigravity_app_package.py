@@ -107,6 +107,59 @@ def test_app_doctor_reports_unrecognised_edit_records_read_only(workspace, tmp_p
     assert report["warnings"] and "not tracked" in report["warnings"][0]
 
 
+@pytest.mark.parametrize("change", ["unowned-in-cache-dir", "unowned-file", "edited-owned-file", "mode-change"])
+def test_app_update_keeps_a_backup_holding_anything_but_its_own_package(workspace, tmp_path, change):
+    """The displaced generation is deleted only if it holds exactly its manifest
+    (plus regenerable bytecode); otherwise the backup and the content survive."""
+    target = app_target(workspace)
+    package.install(target, python=PYTHON, profile="app")
+    (target / "skills/core/scripts/__pycache__").mkdir(exist_ok=True)
+    (target / "skills/core/scripts/__pycache__/generate_index.cpython-399.pyc").write_bytes(b"bytecode")
+    marker = {"unowned-in-cache-dir": ".pytest_cache/user-notes.txt",
+              "unowned-file": "skills/core/user-notes.txt",
+              "edited-owned-file": "README.md", "mode-change": "README.md"}[change]
+    real_doctor = package.doctor
+
+    def tamper_after_backup(destination, **kw):  # the displaced copy changes after the identity check
+        backups = workspace / ".agents/.mycelium-backups"
+        for old in (p for p in backups.iterdir() if p.is_dir()) if backups.exists() else ():
+            path = old / marker
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if change == "mode-change":
+                path.chmod(0o600)
+            elif not path.exists() or change == "edited-owned-file":
+                path.write_text("user content\n")
+        return real_doctor(destination, **kw)
+
+    other = tmp_path / "other venv"
+    import venv
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(other)
+    import unittest.mock
+    with unittest.mock.patch.object(package, "doctor", tamper_after_backup):
+        report = package.install(target, python=other / "bin/python3", profile="app")
+    assert report["ok"] and "backup" in report
+    kept = Path(report["backup"]) / marker
+    if change == "mode-change":
+        assert kept.stat().st_mode & 0o777 == 0o600
+    else:
+        assert kept.read_text() == "user content\n"
+    assert git_would_add(workspace) == []
+
+
+def test_app_update_still_drops_a_backup_with_only_bytecode_added(workspace, tmp_path):
+    target = app_target(workspace)
+    package.install(target, python=PYTHON, profile="app")
+    (target / "skills/core/scripts/__pycache__").mkdir(exist_ok=True)
+    (target / "skills/core/scripts/__pycache__/x.cpython-399.pyc").write_bytes(b"bytecode")
+    other = tmp_path / "other venv"
+    import venv
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(other)
+    report = package.install(target, python=other / "bin/python3", profile="app")
+    assert report["ok"] and "backup" not in report
+    backups = workspace / ".agents/.mycelium-backups"
+    assert not backups.exists() or [p for p in backups.iterdir() if p.is_dir()] == []
+
+
 def test_app_and_ide_identities_are_distinct_and_ide_default_is_unchanged():
     ide = package.candidate_files(package.SOURCE, PYTHON)
     explicit = package.candidate_files(package.SOURCE, PYTHON, "ide")

@@ -153,7 +153,9 @@ inside the repository, it, `.agents/.mycelium-staging` and
 `.agents/.mycelium-backups` each carry a generated `.gitignore` containing `*`,
 so `git add -A` never commits them and your own `.gitignore` is not edited. An
 ordinary App update deletes the previous generation once the new one passes
-the doctor check; `--repair-permissions` and `uninstall` still keep a backup
+the doctor check and the old one holds exactly its own manifest's files, bytes
+and modes (plus regenerable `__pycache__/*.pyc`); if it holds anything else,
+its backup is kept and reported. `--repair-permissions` and `uninstall` still keep a backup
 under `.agents/.mycelium-backups` (ignored), which you can delete by hand.
 Start a new App conversation after any package change.
 
