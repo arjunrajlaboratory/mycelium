@@ -178,6 +178,14 @@ mycelium__state_release_held() {
   MYCELIUM__STATE_HELD=""
 }
 
+# Record the marker as unreadable after its read op died.
+mycelium__state_marker_unread() {
+  MYCELIUM_MARKER_STATE=invalid
+  MYCELIUM_MARKER_LOG=""
+  MYCELIUM_MARKER_TS=""
+  MYCELIUM_MARKER_FORMAT=""
+}
+
 mycelium_prepare_state_dir() {
   mycelium__state "$1" "" "prepare:${2:-write}"
 }
@@ -246,6 +254,12 @@ mycelium_prepare_locked_post_tool_state() {
     lock:session \
     prepare:read-only select:read-only owns \
     marker; then
+    if (( MYCELIUM__STATE_FAILED == 8 )); then
+      # Authorized and locked; only the marker read died. The old helper
+      # read a crashed marker reader as an invalid marker and carried on.
+      mycelium__state_marker_unread
+      return 0
+    fi
     mycelium__state_release_held
     return 1
   fi

@@ -49,6 +49,7 @@ if [[ -n "$HOST_SESSION_ID" ]]; then
   _STOP_LOCK_OP=4
   _STOP_PREPARE_OP=5
   _STOP_SESSION_LOCK_OP=9
+  _STOP_READ_OP=13
 else
   _STOP_OPS=(
     prepare:bootstrap select:read-only
@@ -60,6 +61,7 @@ else
   _STOP_LOCK_OP=3
   _STOP_PREPARE_OP=4
   _STOP_SESSION_LOCK_OP=5
+  _STOP_READ_OP=6
 fi
 if ! mycelium__state "$REPO_ROOT" "$INPUT" "${_STOP_OPS[@]}"; then
   _STOP_FAILED="$MYCELIUM__STATE_FAILED"
@@ -76,6 +78,11 @@ if ! mycelium__state "$REPO_ROOT" "$INPUT" "${_STOP_OPS[@]}"; then
   elif (( _STOP_FAILED == _STOP_SESSION_LOCK_OP )); then
     mycelium_emit_stop_block \
       "STOP BLOCKED — the session event lock remained busy. Active state was preserved; wait for the in-flight hook to finish, then retry Stop."
+  elif (( _STOP_FAILED >= _STOP_READ_OP )); then
+    # The marker and owner reads never fail; reaching here means the state
+    # process died after both locks were taken. Never accept on that.
+    mycelium_emit_stop_block \
+      "STOP BLOCKED — the active session state could not be read. Active state was preserved; retry Stop."
   fi
   exit 0
 fi

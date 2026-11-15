@@ -33,8 +33,13 @@ if [[ -z "$SESSION_CWD" ]] || [[ ! -d "$SESSION_CWD" ]]; then exit 0; fi
 REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo "")
 if [[ -z "$REPO_ROOT" ]] || [[ ! -d "$REPO_ROOT/.living" ]]; then exit 0; fi
 # One state call resolves and authorizes the transaction and reads its marker.
-mycelium__state "$REPO_ROOT" "$INPUT" \
-  prepare:read-only select:read-only owns marker || exit 0
+# A dead marker read (op 4) reads as an invalid marker, as the old helper's
+# crash did; the session ID then falls back below.
+if ! mycelium__state "$REPO_ROOT" "$INPUT" \
+  prepare:read-only select:read-only owns marker; then
+  (( MYCELIUM__STATE_FAILED == 4 )) || exit 0
+  mycelium__state_marker_unread
+fi
 
 SESSION_MARKER="$STATE_DIR/data-lineage-session-id.tmp"
 

@@ -668,18 +668,14 @@ def test_an_unexpected_error_reading_state_reads_as_invalid(tmp_path, monkeypatc
     assert capsysbinary.readouterr().out.split(b"\0")[:2] == [b"ok", b"1"]
 
 
-def test_session_start_releases_both_locks_when_the_state_process_dies(tmp_path):
-    """A state process that dies after taking both locks leaves neither."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    _base(repo)
-    bin_dir = tmp_path / "bin"
+def _dying_state_python(tmp_path: Path, cut: bytes, keep_cut: bool) -> dict[str, str]:
+    """PATH whose python3 runs normally, except that the state module's
+    report stops at the first `cut` record (kept or not), as if the process
+    had been killed there."""
+    bin_dir = tmp_path / "dying-bin"
     bin_dir.mkdir()
     real = shutil.which("python3")
     shim = bin_dir / "python3"
-    # Run the real interpreter; for the state module, cut its report right
-    # after the session lock record, as if it had been killed there.
     shim.write_text(
         f"#!{real}\n"
         "import subprocess, sys\n"
@@ -687,10 +683,10 @@ def test_session_start_releases_both_locks_when_the_state_process_dies(tmp_path)
         "if not any(a.endswith('mycelium_hook_state.py') for a in sys.argv[1:]):\n"
         "    raise SystemExit(subprocess.call(argv))\n"
         "out = subprocess.run(argv, stdout=subprocess.PIPE).stdout\n"
-        "cut = out.find(b'lock\\0session\\0')\n"
-        "if cut >= 0:\n"
-        "    end = out.index(b'\\0', cut + len(b'lock\\0session\\0')) + 1\n"
-        "    out = out[:end]\n"
+        f"cut, keep = {cut!r}, {keep_cut!r}\n"
+        "at = out.find(cut)\n"
+        "if at >= 0:\n"
+        "    out = out[:out.index(b'\\0', at + len(cut)) + 1] if keep else out[:at]\n"
         "sys.stdout.buffer.write(out)\n"
     )
     shim.chmod(0o755)
@@ -698,11 +694,32 @@ def test_session_start_releases_both_locks_when_the_state_process_dies(tmp_path)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     env["MYCELIUM_HOOK_HOST"] = "claude"
     env["MYCELIUM_KNOWLEDGE_DIR"] = str(tmp_path / "knowledge")
-    start = {"session_id": "s1", "cwd": str(repo), "hook_event_name": "SessionStart", "source": "startup"}
-    result = subprocess.run(
-        [str(HOOKS_DIR / "mycelium-health.sh")],
-        cwd=repo, input=json.dumps(start), text=True, capture_output=True, env=env, timeout=60,
+    return env
+
+
+def _hook(name: str, payload: dict, repo: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [str(HOOKS_DIR / name)], cwd=repo, input=json.dumps(payload), text=True,
+        capture_output=True, env=env, timeout=60,
     )
+
+
+def _git_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _base(repo)
+    for name in ("decisions.md", "conventions.md"):
+        (repo / ".living" / name).write_text(f"# {name}\n")
+    return repo
+
+
+def test_session_start_releases_both_locks_when_the_state_process_dies(tmp_path):
+    """A state process that dies after taking both locks leaves neither."""
+    repo = _git_repo(tmp_path)
+    env = _dying_state_python(tmp_path, b"lock\0session\0", keep_cut=True)
+    start = {"session_id": "s1", "cwd": str(repo), "hook_event_name": "SessionStart", "source": "startup"}
+    result = _hook("mycelium-health.sh", start, repo, env)
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
     run = repo / ".mycelium" / "run" / "claude" / "s1"
@@ -710,6 +727,37 @@ def test_session_start_releases_both_locks_when_the_state_process_dies(tmp_path)
     assert not (run / "mycelium-session.lock").exists()
     assert not (repo / ".mycelium" / "mycelium-stop.lock").exists()
     assert not (run / "active-session-log.tmp").exists()
+
+
+def test_a_dead_marker_read_blocks_stop_and_still_tracks_edits(tmp_path):
+    """The marker and owner reads never fail, so a failure there is a dead
+    process. Stop must block rather than accept; an authorized PostToolUse
+    event carries on with the marker unread, as the old helpers did when
+    their marker reader crashed."""
+    repo = _git_repo(tmp_path)
+    plain = os.environ.copy()
+    plain["MYCELIUM_HOOK_HOST"] = "claude"
+    plain["MYCELIUM_KNOWLEDGE_DIR"] = str(tmp_path / "knowledge")
+    base = {"session_id": "s1", "cwd": str(repo)}
+    assert _hook("mycelium-health.sh", {**base, "hook_event_name": "SessionStart", "source": "startup"},
+                 repo, plain).returncode == 0
+    run = repo / ".mycelium" / "run" / "claude" / "s1"
+    marker = (run / "active-session-log.tmp").read_bytes()
+
+    dying = _dying_state_python(tmp_path, b"marker\0", keep_cut=False)
+    edit = {**base, "hook_event_name": "PostToolUse", "tool_name": "Edit",
+            "tool_input": {"file_path": str(repo / "a.py")}, "tool_response": {"success": True}}
+    result = _hook("mycelium-activity-tracker.sh", edit, repo, dying)
+    assert result.returncode == 0, result.stderr
+    assert (run / "mycelium-session-activity.tmp").read_text() == "a.py\n"
+    assert not (run / "mycelium-session.lock").exists()
+
+    result = _hook("mycelium-stop-check.sh", {**base, "hook_event_name": "Stop"}, repo, dying)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == "block"
+    assert (run / "active-session-log.tmp").read_bytes() == marker
+    assert not (run / "mycelium-session.lock").exists()
+    assert not (repo / ".mycelium" / "mycelium-stop.lock").exists()
 
 
 def test_a_closed_output_pipe_still_releases_every_lock(tmp_path):
