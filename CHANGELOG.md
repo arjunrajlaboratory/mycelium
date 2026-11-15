@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tracker 8 to 2, blocked Stop 20 to 8. A marker or owner file holding a NUL
   byte is now refused instead of read with the NUL dropped, and a repository
   path that is not valid UTF-8 no longer silently disables the hooks.
+- **A host that stops reading no longer leaves lifecycle locks held.** Stop
+  wrote its block JSON with a shell builtin while holding both locks; a
+  closed output pipe killed the hook with SIGPIPE before its EXIT trap could
+  release them, so the next lifecycle hook waited out its retry budget.
+  Hook output is now written so that a closed pipe fails the write instead.
 - **The compatibility test suite runs in parallel.** CI and
   `tools/release_gate.py` run `skills/core/scripts` with pytest-xdist
   (`-n auto --dist worksteal`) when it is installed; every test works in its
