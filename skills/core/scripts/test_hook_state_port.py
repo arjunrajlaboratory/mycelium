@@ -42,12 +42,18 @@ DRIVER = r"""
 set -u
 source "$1"
 shift
+# %q output depends on the locale on bash 3.2; format in the C locale so runs
+# under different locales compare only what the helpers did.
+quote() {
+  local LC_ALL=C
+  printf '%s=%q\n' "$1" "$2"
+}
 dump() {
   local name
   printf 'rc=%s\n' "$1"
   for name in VARIABLES; do
     if [[ -n "${!name+set}" ]]; then
-      printf '%s=%q\n' "$name" "${!name}"
+      quote "$name" "${!name}"
     else
       printf '%s unset\n' "$name"
     fi
@@ -62,8 +68,8 @@ while (( $# > 0 )); do
     owns) mycelium_payload_owns_active_session "$REPO" "$PAYLOAD" >/dev/null 2>&1; rc=$? ;;
     post) mycelium_prepare_post_tool_state "$REPO" "$PAYLOAD" >/dev/null 2>&1; rc=$? ;;
     locked) mycelium_prepare_locked_post_tool_state "$REPO" "$PAYLOAD" >/dev/null 2>&1; rc=$? ;;
-    marker) out=$(mycelium_read_active_log_marker "$REPO" "$1" 2>/dev/null); rc=$?; printf 'out=%q\n' "$out"; shift ;;
-    owner) out=$(mycelium_read_session_owner_id "$1" 2>/dev/null); rc=$?; printf 'out=%q\n' "$out"; shift ;;
+    marker) out=$(mycelium_read_active_log_marker "$REPO" "$1" 2>/dev/null); rc=$?; quote out "$out"; shift ;;
+    owner) out=$(mycelium_read_session_owner_id "$1" 2>/dev/null); rc=$?; quote out "$out"; shift ;;
   esac
   printf '== %s\n' "$step"
   dump "$rc"
@@ -519,7 +525,7 @@ def _remove(path: Path) -> None:
     path.rmdir()
 
 
-def _execute(tmp_path: Path, library: Path, build: Builder, env_extra: dict[str, str], steps: list[str]) -> tuple[str, list[tuple[str, ...]]]:
+def _execute(tmp_path: Path, library: Path, build: Builder, env_extra: dict[str, str], steps: list[str], locale: str = "C") -> tuple[str, list[tuple[str, ...]]]:
     work = tmp_path / "work"
     if work.exists():
         # chmod -R and rm -rf walk trees deeper than PATH_MAX.
@@ -532,6 +538,9 @@ def _execute(tmp_path: Path, library: Path, build: Builder, env_extra: dict[str,
     env = os.environ.copy()
     env.pop("MYCELIUM_STATE_DIR", None)
     env.pop("MYCELIUM_PLUGIN_ROOT", None)
+    for name in ("LANG", "LC_CTYPE", "PYTHONIOENCODING", "PYTHONUTF8"):
+        env.pop(name, None)
+    env["LC_ALL"] = locale
     env["MYCELIUM_HOOK_HOST"] = "claude"
     env["REPO"] = str(repo.resolve())
     env["PAYLOAD"] = _payload()
@@ -548,13 +557,36 @@ def _execute(tmp_path: Path, library: Path, build: Builder, env_extra: dict[str,
     return result.stdout.decode(errors="surrogateescape"), _snapshot(work)
 
 
+# Python's stdout uses surrogateescape in the C and C.UTF-8 locales but is
+# strict in a locale such as en_US.UTF-8, so the old helpers' print() of a
+# path holding non-UTF-8 bytes crashed there and the marker read as corrupt.
+# The runner writes bytes and accepts such a marker in every locale (a
+# documented change), which is what the old helpers did in the C locale.
+LOCALES = ("C", "C.UTF-8", "en_US.UTF-8")
+LOCALE_DEPENDENT_IN_REFERENCE = {"marker-invalid-utf8", "marker-invalid-utf8-legacy"}
+
+
+@pytest.mark.parametrize("locale", LOCALES)
 @pytest.mark.parametrize("name", sorted(SCENARIOS))
-def test_state_runner_matches_reference_helpers(tmp_path, name):
+def test_state_runner_matches_reference_helpers(tmp_path, name, locale):
     build, env_extra, steps = SCENARIOS[name]
-    reference = _execute(tmp_path, REFERENCE, build, env_extra, steps)
-    live = _execute(tmp_path, LIB, build, env_extra, steps)
+    reference_locale = "C" if name in LOCALE_DEPENDENT_IN_REFERENCE else locale
+    reference = _execute(tmp_path, REFERENCE, build, env_extra, steps, reference_locale)
+    live = _execute(tmp_path, LIB, build, env_extra, steps, locale)
     assert live[0] == reference[0]
     assert live[1] == reference[1]
+
+
+def test_the_reference_rejected_a_non_utf8_marker_only_in_strict_locales(tmp_path):
+    """Pins the behaviour change above: the old helpers called this marker
+    corrupt under en_US.UTF-8, the runner accepts it as they did under C."""
+    build, env_extra, steps = SCENARIOS["marker-invalid-utf8"]
+    strict = _execute(tmp_path, REFERENCE, build, env_extra, steps, "en_US.UTF-8")
+    lenient = _execute(tmp_path, REFERENCE, build, env_extra, steps, "C")
+    live = _execute(tmp_path, LIB, build, env_extra, steps, "en_US.UTF-8")
+    if strict[0] == lenient[0]:
+        pytest.skip("en_US.UTF-8 is not installed here, so stdout is not strict")
+    assert live[0] == lenient[0] != strict[0]
 
 
 @pytest.mark.parametrize(
@@ -896,3 +928,103 @@ def test_a_very_deep_state_tree_still_lets_stop_block(tmp_path):
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["decision"] == "block"
     subprocess.run(["rm", "-rf", str(repo / ".mycelium" / "d")], check=True)
+
+
+def test_a_symlinked_or_swapped_scan_root_is_unsafe(tmp_path, monkeypatch):
+    """find without -H/-L reports TOP itself when it is a symlink. A
+    `.living` or `.mycelium` swapped for a symlink after preflight must not
+    be walked through and called safe."""
+    module = _state_module()
+    real = tmp_path / "real"
+    (real / "sub").mkdir(parents=True)
+    link = tmp_path / "state"
+    link.symlink_to(real)
+    assert module.contains_symlink(str(real)) is False
+    assert module.contains_symlink(str(link)) is True
+
+    # Swapped between the lstat and the open: the opened directory is not
+    # the one examined.
+    real_lstat = os.lstat
+
+    def stale_lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if str(path) == str(real):
+            fake = list(info)
+            fake[1] = info.st_ino + 1  # st_ino
+            return os.stat_result(fake)
+        return info
+
+    monkeypatch.setattr(module.os, "lstat", stale_lstat)
+    assert module.contains_symlink(str(real)) is True
+
+
+def test_directories_churning_during_the_scan_are_skipped_not_unsafe(tmp_path):
+    """Hooks create and remove lock directories constantly. Like fts, the
+    scan skips a directory that changed after it was listed; reading that as
+    "unsafe" made prepare fail, so a Stop could exit without enforcing."""
+    module = _state_module()
+    state = tmp_path / ".mycelium"
+    session = state / "run" / "claude" / "s2"
+    session.mkdir(parents=True)
+    (state / "run" / "claude" / "s1").mkdir()
+    churners = [
+        subprocess.Popen(
+            ["bash", "-c", 'while :; do mkdir "$1/$2" 2>/dev/null; mkdir "$1/$2/inner" 2>/dev/null; rmdir "$1/$2/inner" "$1/$2" 2>/dev/null; done',
+             "churn", str(session), f"mycelium-session.lock{index % 2}"])
+        for index in range(3)
+    ]
+    try:
+        deadline = time.time() + 6
+        scans = unsafe = 0
+        while time.time() < deadline:
+            scans += 1
+            unsafe += module.contains_symlink(str(state))
+    finally:
+        for churner in churners:
+            churner.kill()
+            churner.wait()
+    assert scans > 200
+    assert unsafe == 0, f"{unsafe}/{scans} scans called a churning tree unsafe"
+    # A real symlink is still found.
+    (session / "evil").symlink_to(tmp_path)
+    assert module.contains_symlink(str(state)) is True
+
+
+@pytest.mark.parametrize("hook", ["mycelium-stop-check.sh", "mycelium-health.sh"])
+def test_a_hook_killed_while_waiting_for_the_session_lock_releases_the_lifecycle_lock(tmp_path, hook):
+    """SessionStart and Stop hold the lifecycle lock while they wait for a
+    busy session lock; SIGTERM during that wait must still release it."""
+    repo = _git_repo(tmp_path)
+    env = os.environ.copy()
+    env["MYCELIUM_HOOK_HOST"] = "claude"
+    env["MYCELIUM_KNOWLEDGE_DIR"] = str(tmp_path / "knowledge")
+    base = {"session_id": "s1", "cwd": str(repo)}
+    start = {**base, "hook_event_name": "SessionStart", "source": "startup"}
+    assert _hook("mycelium-health.sh", start, repo, env).returncode == 0
+    run = repo / ".mycelium" / "run" / "claude" / "s1"
+    holder = subprocess.Popen(["sleep", "60"])
+    try:
+        lock = run / "mycelium-session.lock"
+        lock.mkdir()
+        (lock / "owner").write_text(f"{holder.pid} {int(time.time())}\n")
+        payload = {**base, "hook_event_name": "Stop"} if hook.endswith("stop-check.sh") else {**start, "source": "resume"}
+        process = subprocess.Popen(
+            [str(HOOKS_DIR / hook)], cwd=repo, env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        process.stdin.write(json.dumps(payload).encode())
+        process.stdin.close()
+        stop_lock = repo / ".mycelium" / "mycelium-stop.lock"
+        deadline = time.time() + 20
+        while not stop_lock.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert stop_lock.exists(), "the hook never took the lifecycle lock"
+        time.sleep(0.5)
+        assert process.poll() is None, "the hook did not wait for the session lock"
+        process.send_signal(signal.SIGTERM)
+        process.wait(timeout=20)
+        assert not stop_lock.exists()
+        assert lock.exists()  # the live holder's lock is untouched
+    finally:
+        holder.kill()
+        holder.wait()

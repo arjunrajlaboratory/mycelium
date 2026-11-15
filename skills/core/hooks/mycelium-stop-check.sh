@@ -63,6 +63,10 @@ else
   _STOP_SESSION_LOCK_OP=5
   _STOP_READ_OP=6
 fi
+# Release whatever the state call takes even if this hook is killed while it
+# waits: the lifecycle lock is recorded before any wait for the session lock.
+# Both releases do nothing for a lock that was never taken.
+trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT
 if ! mycelium__state "$REPO_ROOT" "$INPUT" "${_STOP_OPS[@]}"; then
   _STOP_FAILED="$MYCELIUM__STATE_FAILED"
   mycelium__state_release_held
@@ -86,7 +90,6 @@ if ! mycelium__state "$REPO_ROOT" "$INPUT" "${_STOP_OPS[@]}"; then
   fi
   exit 0
 fi
-trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT
 
 HANDOFF_PATH="$STATE_DIR/last-session.md"
 

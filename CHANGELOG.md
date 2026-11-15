@@ -38,8 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload preload. Python starts per event: SessionStart 12 to 5, edit
   tracker 11 to 4, analysis post-action 13 to 4, data tracker 9 to 3, read
   tracker 8 to 2, blocked Stop 20 to 8. A marker or owner file holding a NUL
-  byte is now refused instead of read with the NUL dropped, and a repository
-  path that is not valid UTF-8 no longer silently disables the hooks.
+  byte is now refused instead of read with the NUL dropped. A repository
+  path that is not valid UTF-8 no longer silently disables the hooks, and an
+  active marker naming a log file whose name is not valid UTF-8 is accepted
+  in every locale; before, a strict UTF-8 locale such as en_US.UTF-8 (but
+  not C or C.UTF-8) made it read as corrupt, so SessionStart and Stop
+  removed it.
 - **A host that stops reading no longer leaves lifecycle locks held.** Stop
   wrote its block JSON with a shell builtin while holding both locks; a
   closed output pipe killed the hook with SIGPIPE before its EXIT trap could

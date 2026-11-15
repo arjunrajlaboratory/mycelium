@@ -184,58 +184,121 @@ def _same_dir(device: int, inode: int) -> bool:
     return (info.st_dev, info.st_ino) == (device, inode)
 
 
+def _open_dir(name: str) -> int | None:
+    """Open NAME (relative to the cwd) as a directory without following a
+    symlink, or None if it is gone, not a directory, or a symlink now."""
+    try:
+        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+
+
+# Directory descriptors kept for the way back up; deeper levels return by
+# ".." and verify the parent's identity instead, so a 1,100-deep tree never
+# needs more than this many open descriptors.
+_SCAN_FD_DEPTH = 64
+
+
 def contains_symlink(top: str) -> bool:
     """`find TOP -type l -print -quit` printed something.
 
-    Walks the way find's fts does: iteratively, moving the cwd by relative
-    name, so neither the recursion limit nor PATH_MAX bounds the depth (a
-    tree 1,100 directories deep is still scanned). Each step down and back up
-    is checked against the directory identity it expects; if the tree moves
-    underneath, the answer is "unsafe".
+    Like find without -H or -L, TOP itself counts when it is a symlink, and
+    the walk never follows one. It walks the way fts does: iteratively,
+    moving the cwd by relative name, so neither the recursion limit nor
+    PATH_MAX bounds the depth (a tree 1,100 directories deep is still
+    scanned). A child is opened without following links and entered only if
+    it is still the directory that was listed; one that changed in the
+    meantime (hooks create and remove lock directories all the time) is
+    skipped, as fts skips it. The answer is "unsafe" for a symlink found, a
+    root that is not the directory first examined, or a walk that cannot get
+    back to a verified parent.
     """
     try:
         origin = os.open(".", os.O_RDONLY)
     except OSError:
         origin = None
+    held: list[int] = []
     try:
         try:
-            os.chdir(top)
-            top_info = os.stat(".")
+            root = os.lstat(top)
         except OSError:
             return False
+        if stat.S_ISLNK(root.st_mode):
+            return True
+        if not stat.S_ISDIR(root.st_mode):
+            return False
+        descriptor = _open_dir(top)
+        if descriptor is None:
+            return True
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (root.st_dev, root.st_ino):
+                return True
+            os.fchdir(descriptor)
+        except OSError:
+            os.close(descriptor)
+            return True
         found = _scan_cwd()
         if found is None:
+            os.close(descriptor)
             return True
-        # Each frame: (remaining subdirectories, this directory's identity).
-        stack = [(iter(found), (top_info.st_dev, top_info.st_ino))]
+        held.append(descriptor)
+        # Each frame: (remaining subdirectories, identity, descriptor or None).
+        stack = [(iter(found), (root.st_dev, root.st_ino), descriptor)]
         while stack:
-            pending, _ = stack[-1]
+            pending = stack[-1][0]
             descended = False
             for name, device, inode in pending:
-                try:
-                    os.chdir(name)
-                except OSError:
+                child = _open_dir(name)
+                if child is None:
                     continue
-                if not _same_dir(device, inode):
-                    return True
+                try:
+                    info = os.fstat(child)
+                    if (info.st_dev, info.st_ino) != (device, inode):
+                        # Replaced since it was listed: skip it, as fts does.
+                        os.close(child)
+                        continue
+                    os.fchdir(child)
+                except OSError:
+                    os.close(child)
+                    continue
                 found = _scan_cwd()
                 if found is None:
+                    os.close(child)
                     return True
-                stack.append((iter(found), (device, inode)))
+                if len(stack) < _SCAN_FD_DEPTH:
+                    held.append(child)
+                    stack.append((iter(found), (device, inode), child))
+                else:
+                    os.close(child)
+                    stack.append((iter(found), (device, inode), None))
                 descended = True
                 break
             if descended:
                 continue
-            stack.pop()
-            if stack:
-                try:
+            _, _, own = stack.pop()
+            if own is not None:
+                held.remove(own)
+                os.close(own)
+            if not stack:
+                break
+            parent_identity, parent_fd = stack[-1][1], stack[-1][2]
+            try:
+                if parent_fd is not None:
+                    os.fchdir(parent_fd)
+                else:
                     os.chdir("..")
-                except OSError:
-                    return True
-                if not _same_dir(*stack[-1][1]):
-                    return True
+            except OSError:
+                return True
+            if parent_fd is None and not _same_dir(*parent_identity):
+                return True
         return False
     finally:
+        for descriptor in held:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         if origin is not None:
             try:
                 os.fchdir(origin)

@@ -45,6 +45,9 @@ fi
 # the shared directory, takes the lifecycle lock, prepares shared state,
 # selects (creating) this root's run directory, takes its session lock, and
 # reads the active marker and owner token under both locks.
+# Install the release before the call: it may wait for the session lock while
+# holding the lifecycle lock. Releasing a lock never taken does nothing.
+trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT
 if ! mycelium__state "$REPO_ROOT" "$INPUT" \
   prepare:bootstrap lock:stop prepare:write select:create lock:session \
   marker owner; then
@@ -66,7 +69,6 @@ if ! mycelium__state "$REPO_ROOT" "$INPUT" \
     exit 0
   fi
 fi
-trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT
 
 if [[ "${MYCELIUM_SESSION_SCOPED:-false}" == true ]]; then
   MESSAGES="${MESSAGES}SESSION HANDOFF PATH: Write the complete five-section handoff for this root task to ${STATE_DIR}/last-session.md. Accepted Stop will publish it to the shared resume pointer.\n\n"
