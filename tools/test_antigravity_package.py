@@ -67,6 +67,39 @@ def test_selected_virtual_environment_is_preserved_for_hooks_and_children(tmp_pa
     assert json.loads(result.stdout) == [str(selected), str(selected)]
 
 
+def test_shared_hooks_python3_is_the_selected_interpreter_not_its_neighbor(tmp_path):
+    """Regression: with --python .../python3.X the adapter ran that interpreter,
+    but the shared hooks call plain python3, which resolved to whatever else sat
+    in the same directory."""
+    selected = tmp_path / "selected venv"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(selected)
+    versioned = selected / f"bin/python{sys.version_info.major}.{sys.version_info.minor}"
+    assert versioned.exists()
+    site = subprocess.check_output([str(versioned), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+                                   text=True).strip()
+    (Path(site) / "mycelium_venv_marker.py").write_text("VALUE = 42\n")
+    neighbor = selected / "bin/python3"
+    neighbor.unlink()
+    neighbor.write_text("#!/bin/sh\necho wrong-python3 >&2\nexit 97\n")
+    neighbor.chmod(0o755)
+    target = tmp_path / "plugins/mycelium"
+    package.install(target, python=versioned)
+    assert package.doctor(target)["ok"]
+    command = json.loads((target / "hooks.json").read_text())["mycelium"]["PreInvocation"][0]["command"]
+    probe = target / "probe.py"
+    probe.write_text(
+        "import json, subprocess, sys\nfrom pathlib import Path\n"
+        "sys.path.insert(0, 'skills/core/scripts')\nimport antigravity_hooks as ag\n"
+        "env = ag.hook_environment('antigravity-ide', Path.cwd())\n"
+        "out = subprocess.run(['bash', '-c', 'python3 -c \"import sys, mycelium_venv_marker; print(sys.prefix)\"'],"
+        " env=env, capture_output=True, text=True)\n"
+        "print(json.dumps([out.returncode, out.stdout.strip(), out.stderr.strip()]))\n")
+    command = command.replace("skills/core/scripts/antigravity_hooks.py PreInvocation", "probe.py")
+    result = subprocess.run(command, shell=True, cwd=target, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [0, str(selected), ""]
+
+
 def test_native_package_contains_all_base_skills_and_no_personal_coordination(tmp_path):
     target = tmp_path / ".agents/plugins/mycelium"
     package.install(target, python=Path(sys.executable))

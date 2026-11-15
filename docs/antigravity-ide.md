@@ -13,7 +13,10 @@ The installer pins that interpreter's resolved path into the native hook
 commands so the IDE and terminal use the same Python installation. A selected
 virtual-environment launcher is preserved, including its `sys.prefix`, packages,
 and the `python3` used by child hooks; validating its symlink destination does
-not replace the selected launcher.
+not replace the selected launcher. The shared hooks call plain `python3`, so the
+package contains a generated `bin/python3` shim that runs the selected launcher,
+and the adapter puts it first on the hooks' `PATH`. Any `--python` spelling
+works, including `python3.12`, even when a different `python3` sits beside it.
 
 ```bash
 # Preview, install globally, then verify every installed file.
