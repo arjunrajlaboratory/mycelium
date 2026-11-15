@@ -1,10 +1,11 @@
 # Initialize Mycelium in Antigravity IDE or App
 
 Use this sequence when the user has requested initialization in a Git project
-that does not yet contain `.living/`. Existing project files can stay in place;
-initialization does not require restructuring them. If `.living/` already
-exists, follow the core skill's maintenance or migration instructions instead
-of rerunning initialization or deleting the living layer.
+that does not yet contain `.living/`. If the project already has files, follow
+the core skill's existing-repo step first: audit the current structure, propose
+the plan, and ask the user to confirm before running anything below. If
+`.living/` already exists, follow the core skill's maintenance or migration
+instructions instead of rerunning initialization or deleting the living layer.
 
 ## Resolve the three paths
 
