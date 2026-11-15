@@ -52,7 +52,9 @@ dump() {
   local name
   printf 'rc=%s\n' "$1"
   for name in VARIABLES; do
-    if [[ -n "${!name+set}" ]]; then
+    # The library starts with empty lock variables (an inherited one is not
+    # ours); empty and unset both mean "holds no lock".
+    if [[ -n "${!name+set}" && ( "$name" != *_LOCK_DIR || -n "${!name}" ) ]]; then
       quote "$name" "${!name}"
     else
       printf '%s unset\n' "$name"
@@ -213,6 +215,18 @@ def _scenarios() -> dict[str, tuple[Builder, dict[str, str], list[str]]]:
 
     for mode in ("write", "read-only", "bootstrap"):
         add(f"state-unsearchable-{mode}", state_unsearchable, {}, ["prepare", mode])
+
+    def living_mode(mode: int, where: str) -> Builder:
+        def build(repo: Path) -> None:
+            _base(repo)
+            (repo / where).chmod(mode)
+        return build
+
+    # find cannot read or enter these and prints nothing, so they are safe.
+    for label, mode in {"unreadable": 0o300, "unsearchable": 0o600}.items():
+        for where in (".living", ".living/log"):
+            add(f"living-{where.strip('.').replace('/', '-')}-{label}", living_mode(mode, where), {},
+                ["prepare", "write", "prepare", "read-only"])
 
     def deep(where: str, link: bool) -> Builder:
         """1,100 nested directories: past Python's recursion limit and,
@@ -1028,3 +1042,63 @@ def test_a_hook_killed_while_waiting_for_the_session_lock_releases_the_lifecycle
     finally:
         holder.kill()
         holder.wait()
+
+
+
+def test_running_out_of_descriptors_makes_the_scan_unsafe(tmp_path):
+    """A walk that cannot open part of the tree has not shown it is free of
+    symlinks; descriptor exhaustion must not read as an empty directory."""
+    top = tmp_path / ".living"
+    top.mkdir()
+    fd = os.open(top, os.O_RDONLY)
+    for _ in range(70):
+        os.mkdir("d", dir_fd=fd)
+        child = os.open("d", os.O_RDONLY, dir_fd=fd)
+        os.close(fd)
+        fd = child
+    os.symlink("/tmp", "evil", dir_fd=fd)
+    os.close(fd)
+    probe = (
+        "import importlib.util, os, resource, sys\n"
+        "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "limit = int(sys.argv[3])\n"
+        "if limit:\n"
+        "    resource.setrlimit(resource.RLIMIT_NOFILE, (limit, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))\n"
+        "    held = []\n"
+        "    while True:\n"
+        "        try: held.append(os.open('/dev/null', os.O_RDONLY))\n"
+        "        except OSError: break\n"
+        "    for fd in held[:3]: os.close(fd)\n"
+        "print(m.contains_symlink(sys.argv[2]))\n"
+    )
+    for limit in ("0", "64"):
+        result = subprocess.run(
+            [shutil.which("python3"), "-I", "-c", probe, str(HOOKS_DIR / "mycelium_hook_state.py"), str(top), limit],
+            capture_output=True, text=True, check=True,
+        )
+        assert result.stdout == "True\n", (limit, result.stdout, result.stderr)
+
+
+@pytest.mark.parametrize("hook", ["mycelium-stop-check.sh", "mycelium-health.sh"])
+def test_an_inherited_lock_variable_is_never_released(tmp_path, hook):
+    """A lock directory named in the environment belongs to someone else;
+    a hook that fails before taking any lock must leave it alone."""
+    repo = _git_repo(tmp_path)
+    foreign = tmp_path / "foreign"
+    for name in ("stop", "session"):
+        (foreign / name).mkdir(parents=True)
+        (foreign / name / "owner").write_text("1 1\n")
+    env = os.environ.copy()
+    env["MYCELIUM_HOOK_HOST"] = "claude"
+    env["MYCELIUM_KNOWLEDGE_DIR"] = str(tmp_path / "knowledge")
+    env["MYCELIUM_STATE_DIR"] = "/"  # fails preparation before any lock
+    env["MYCELIUM_STOP_LOCK_DIR"] = str(foreign / "stop")
+    env["MYCELIUM_SESSION_LOCK_DIR"] = str(foreign / "session")
+    base = {"session_id": "s1", "cwd": str(repo)}
+    payload = {**base, "hook_event_name": "Stop"} if hook.endswith("stop-check.sh") else {
+        **base, "hook_event_name": "SessionStart", "source": "startup"}
+    result = _hook(hook, payload, repo, env)
+    assert result.returncode == 0, result.stderr
+    for name in ("stop", "session"):
+        assert (foreign / name / "owner").read_text() == "1 1\n"

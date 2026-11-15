@@ -16,6 +16,10 @@ MYCELIUM_OWNER_STATE=""
 MYCELIUM_OWNER_ID=""
 MYCELIUM__STATE_FAILED=0
 MYCELIUM__STATE_HELD=""
+# Lock directories this process acquired. A value inherited from the
+# environment names someone else's lock: never let a release remove it.
+MYCELIUM_STOP_LOCK_DIR=""
+MYCELIUM_SESSION_LOCK_DIR=""
 
 # mycelium__state REPO_ROOT PAYLOAD OP...: run the ops in order and stop at
 # the first failure. Applies the assignments the ops make (STATE_DIR,
