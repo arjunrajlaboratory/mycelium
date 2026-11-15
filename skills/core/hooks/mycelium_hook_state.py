@@ -153,21 +153,95 @@ def physical_dir(path: str) -> str:
     return resolved.rstrip("\n")
 
 
-def contains_symlink(top: str) -> bool:
-    """`find TOP -type l -print -quit` printed something."""
+def _scan_cwd() -> list[tuple[str, int, int]] | None:
+    """Subdirectories of the cwd as (name, dev, inode), or None on a symlink.
+
+    An unreadable directory has no visible entries, as `find` reports it and
+    moves on.
+    """
+    subdirs: list[tuple[str, int, int]] = []
     try:
-        entries = list(os.scandir(top))
+        entries = list(os.scandir("."))
     except OSError:
-        return False
+        return subdirs
     for entry in entries:
         try:
             if entry.is_symlink():
-                return True
-            if entry.is_dir(follow_symlinks=False) and contains_symlink(entry.path):
-                return True
+                return None
+            if entry.is_dir(follow_symlinks=False):
+                info = entry.stat(follow_symlinks=False)
+                subdirs.append((entry.name, info.st_dev, info.st_ino))
         except OSError:
             continue
-    return False
+    return subdirs
+
+
+def _same_dir(device: int, inode: int) -> bool:
+    try:
+        info = os.stat(".")
+    except OSError:
+        return False
+    return (info.st_dev, info.st_ino) == (device, inode)
+
+
+def contains_symlink(top: str) -> bool:
+    """`find TOP -type l -print -quit` printed something.
+
+    Walks the way find's fts does: iteratively, moving the cwd by relative
+    name, so neither the recursion limit nor PATH_MAX bounds the depth (a
+    tree 1,100 directories deep is still scanned). Each step down and back up
+    is checked against the directory identity it expects; if the tree moves
+    underneath, the answer is "unsafe".
+    """
+    try:
+        origin = os.open(".", os.O_RDONLY)
+    except OSError:
+        origin = None
+    try:
+        try:
+            os.chdir(top)
+            top_info = os.stat(".")
+        except OSError:
+            return False
+        found = _scan_cwd()
+        if found is None:
+            return True
+        # Each frame: (remaining subdirectories, this directory's identity).
+        stack = [(iter(found), (top_info.st_dev, top_info.st_ino))]
+        while stack:
+            pending, _ = stack[-1]
+            descended = False
+            for name, device, inode in pending:
+                try:
+                    os.chdir(name)
+                except OSError:
+                    continue
+                if not _same_dir(device, inode):
+                    return True
+                found = _scan_cwd()
+                if found is None:
+                    return True
+                stack.append((iter(found), (device, inode)))
+                descended = True
+                break
+            if descended:
+                continue
+            stack.pop()
+            if stack:
+                try:
+                    os.chdir("..")
+                except OSError:
+                    return True
+                if not _same_dir(*stack[-1][1]):
+                    return True
+        return False
+    finally:
+        if origin is not None:
+            try:
+                os.fchdir(origin)
+            except OSError:
+                pass
+            os.close(origin)
 
 
 def read_lines(path: str) -> list[bytes] | None:

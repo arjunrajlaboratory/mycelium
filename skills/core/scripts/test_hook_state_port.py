@@ -87,8 +87,13 @@ def _snapshot(root: Path) -> list[tuple[str, ...]]:
     for current, dirs, files in os.walk(root, followlinks=False):
         for name in sorted(dirs + files):
             path = Path(current) / name
-            info = path.lstat()
             relative = str(path.relative_to(root))
+            try:
+                info = path.lstat()
+            except OSError:
+                # Deeper than PATH_MAX: identical in both runs, unreadable here.
+                rows.append((relative, "unreachable"))
+                continue
             if stat.S_ISLNK(info.st_mode):
                 rows.append((relative, "link", os.readlink(path)))
             elif stat.S_ISDIR(info.st_mode):
@@ -202,6 +207,31 @@ def _scenarios() -> dict[str, tuple[Builder, dict[str, str], list[str]]]:
 
     for mode in ("write", "read-only", "bootstrap"):
         add(f"state-unsearchable-{mode}", state_unsearchable, {}, ["prepare", mode])
+
+    def deep(where: str, link: bool) -> Builder:
+        """1,100 nested directories: past Python's recursion limit and,
+        with the path, past macOS PATH_MAX."""
+        def build(repo: Path) -> None:
+            _base(repo)
+            top = repo / where
+            top.mkdir(parents=True, exist_ok=True)
+            fd = os.open(top, os.O_RDONLY)
+            try:
+                for _ in range(1100):
+                    os.mkdir("d", dir_fd=fd)
+                    child = os.open("d", os.O_RDONLY, dir_fd=fd)
+                    os.close(fd)
+                    fd = child
+                if link:
+                    os.symlink("/tmp", "evil", dir_fd=fd)
+            finally:
+                os.close(fd)
+        return build
+
+    for where in (".mycelium", ".living/findings"):
+        for link in (False, True):
+            label = f"deep-{where.strip('.').replace('/', '-')}-{'link' if link else 'plain'}"
+            add(label, deep(where, link), {}, ["prepare", "bootstrap", "prepare", "read-only"])
 
     add("state-env-outside", _base, {"MYCELIUM_STATE_DIR": "/tmp"}, ["prepare", "write"])
     add("state-env-relative", _base, {"MYCELIUM_STATE_DIR": "custom/state"}, full)
@@ -492,7 +522,9 @@ def _remove(path: Path) -> None:
 def _execute(tmp_path: Path, library: Path, build: Builder, env_extra: dict[str, str], steps: list[str]) -> tuple[str, list[tuple[str, ...]]]:
     work = tmp_path / "work"
     if work.exists():
-        _remove(work)
+        # chmod -R and rm -rf walk trees deeper than PATH_MAX.
+        subprocess.run(["chmod", "-R", "u+rwx", str(work)], check=False)
+        subprocess.run(["rm", "-rf", str(work)], check=True)
     work.mkdir()
     repo = work / "repo"
     repo.mkdir()
@@ -838,3 +870,29 @@ def test_a_dead_marker_read_at_session_start_still_opens_the_transaction(tmp_pat
     assert _hook("mycelium-activity-tracker.sh", edit, repo, plain).returncode == 0
     result = _hook("mycelium-stop-check.sh", {**base, "hook_event_name": "Stop"}, repo, plain)
     assert json.loads(result.stdout)["decision"] == "block"
+
+
+def test_a_very_deep_state_tree_still_lets_stop_block(tmp_path):
+    """A 1,100-level directory tree under .mycelium is legal; the symlink
+    scan must finish (as find does) so Stop still enforces."""
+    repo = _git_repo(tmp_path)
+    env = os.environ.copy()
+    env["MYCELIUM_HOOK_HOST"] = "claude"
+    env["MYCELIUM_KNOWLEDGE_DIR"] = str(tmp_path / "knowledge")
+    base = {"session_id": "s1", "cwd": str(repo)}
+    assert _hook("mycelium-health.sh", {**base, "hook_event_name": "SessionStart", "source": "startup"},
+                 repo, env).returncode == 0
+    edit = {**base, "hook_event_name": "PostToolUse", "tool_name": "Edit",
+            "tool_input": {"file_path": str(repo / "a.py")}, "tool_response": {"success": True}}
+    assert _hook("mycelium-activity-tracker.sh", edit, repo, env).returncode == 0
+    fd = os.open(repo / ".mycelium", os.O_RDONLY)
+    for _ in range(1100):
+        os.mkdir("d", dir_fd=fd)
+        child = os.open("d", os.O_RDONLY, dir_fd=fd)
+        os.close(fd)
+        fd = child
+    os.close(fd)
+    result = _hook("mycelium-stop-check.sh", {**base, "hook_event_name": "Stop"}, repo, env)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["decision"] == "block"
+    subprocess.run(["rm", "-rf", str(repo / ".mycelium" / "d")], check=True)
