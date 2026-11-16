@@ -1927,6 +1927,40 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "    frame = pd.read_csv(root / 'input.csv')\n",
             id="runtime-attribute-through-iteration",
         ),
+        pytest.param(
+            "path = Path(__file__).parent / 'input.csv'\n"
+            "def choose():\n"
+            "    global path\n"
+            "    path = Path(__file__).parent / 'actual.csv'\n"
+            "choose()\n"
+            "frame = pd.read_csv(path)\n",
+            id="global-write-rebinds-module-path",
+        ),
+        pytest.param(
+            "def main():\n"
+            "    path = Path(__file__).parent / 'input.csv'\n"
+            "    def choose():\n"
+            "        nonlocal path\n"
+            "        path = Path(__file__).parent / 'actual.csv'\n"
+            "    choose()\n"
+            "    frame = pd.read_csv(path)\n"
+            "main()\n",
+            id="nonlocal-write-rebinds-function-path",
+        ),
+        pytest.param(
+            "class Config:\n"
+            "    def __init__(self):\n"
+            "        self.data_dir = Path(os.environ['DATA_DIR'])\n"
+            "config = Config()\n"
+            "def load():\n"
+            "    path = config.data_dir / 'input.csv'\n"
+            "    return pd.read_csv(path)\n"
+            "def save(frame):\n"
+            "    path = Path(__file__).parent / 'result.csv'\n"
+            "    frame.to_csv(path, index=False)\n"
+            "save(load())\n",
+            id="same-local-name-in-helpers-with-runtime-instance-field",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(

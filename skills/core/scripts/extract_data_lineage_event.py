@@ -4845,6 +4845,15 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             key = (id(scope_of.get(id(value), tree)), assigned_name)
             definitions_by_scope.setdefault(key, []).append(value)
 
+    # A ``global`` or ``nonlocal`` write in another scope rebinds a name
+    # without counting against its owner, so such names never resolve.
+    redeclared_names = {
+        name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Global, ast.Nonlocal))
+        for name in node.names
+    }
+
     def visible_definition(name_node: ast.Name) -> ast.AST | None:
         """The single assigned value a name read sees, or None if unsure.
 
@@ -4852,10 +4861,18 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         are invisible to nested scopes) to the first scope that binds the
         name. It resolves only when that scope binds the name exactly once,
         by a plain assignment; a loop, ``with``, import, second assignment,
-        or ``global``/``nonlocal`` declaration leaves it unresolved. A
-        binding of the same name in an unrelated scope does not interfere.
+        or ``global``/``nonlocal`` declaration leaves it unresolved. A loop,
+        comprehension, or other non-assignment binding of the same name in
+        an unrelated scope does not interfere; a second plain assignment
+        anywhere does.
         """
         name = name_node.id
+        # Never resolve more than before #131: the name must also have a
+        # single plain assignment in the whole file. Two same-named locals
+        # in different helpers may carry values the taint pass cannot see
+        # (``self.data_dir = ...`` set from the environment, say).
+        if name in redeclared_names or len(assignments.get(name, ())) != 1:
+            return None
         start = scope = scope_of.get(id(name_node), tree)
         while scope is not None:
             if scope is start or not isinstance(scope, ast.ClassDef):
