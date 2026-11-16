@@ -1961,6 +1961,12 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "save(load())\n",
             id="same-local-name-in-helpers-with-runtime-instance-field",
         ),
+        pytest.param(
+            "data_dir = os.path.expanduser('~/datasets/study')\n"
+            "for data_dir in Path(data_dir).glob('batch_*'):\n"
+            "    frame = pd.read_csv(data_dir / 'input.csv')\n",
+            id="uncertain-binding-keeps-unresolvable-assignment-strict",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
@@ -2164,6 +2170,15 @@ def test_repository_recovery_leaves_static_parameter_defaults_unresolved(
             "    frame.to_csv(config.data_dir / 'result.csv')\n"
             "main()\n",
             id="same-local-name-for-unrelated-config-instances",
+        ),
+        pytest.param(
+            "class Base:\n"
+            "    root = Path(__file__).parent\n"
+            "class External(Base):\n"
+            "    root = Path(sys.argv[1])\n"
+            "frame = pd.read_csv(Base.root / 'input.csv')\n"
+            "frame.to_csv(Base().root / 'result.csv')\n",
+            id="subclass-runtime-override-does-not-taint-base",
         ),
     ],
 )

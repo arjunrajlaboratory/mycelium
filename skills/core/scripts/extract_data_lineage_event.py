@@ -4201,10 +4201,22 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         if isinstance(expression, ast.Name):
             if expression.id in shadowed_names:
                 return set()
-            definition = visible_definition(expression)
-            if definition is None or expression.id in resolving:
+            if expression.id in resolving:
                 return set()
-            return collect(definition, resolving | {expression.id})
+            definition = visible_definition(expression)
+            if definition is not None:
+                return collect(definition, resolving | {expression.id})
+            # Uncertain which binding is live. Never be more permissive than
+            # the file-wide lookup used before #131: if the name's single
+            # assignment would make the whole path unresolvable, so does an
+            # uncertain lookup, rather than letting a literal suffix through.
+            definitions = assignments.get(expression.id, [])
+            if (
+                len(definitions) == 1
+                and collect(definitions[0], resolving | {expression.id}) is None
+            ):
+                return None
+            return set()
         if isinstance(
             expression,
             (
@@ -4456,6 +4468,9 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
     # lookup, so two functions' unrelated ``config`` locals stay apart.
     group_parent: dict[tuple[int, str], tuple[int, str]] = {}
     group_attributes: dict[tuple[int, str], set[str]] = {}
+    # Classes in each group, and each class's named bases, for inheritance.
+    group_classes: dict[tuple[int, str], set[tuple[int, str]]] = {}
+    class_bases: dict[tuple[int, str], list[tuple[int, str]]] = {}
 
     def binding_key(scope: ast.AST | None, name: str) -> tuple[int, str]:
         """The (scope, name) of the binding ``name`` refers to in ``scope``."""
@@ -4493,16 +4508,40 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         merged = attributes_a | attributes_b if attributes_b else attributes_a
         if merged:
             group_attributes[a] = merged
-        return attributes_a != attributes_b
+        classes_b = group_classes.pop(b, set())
+        if classes_b:
+            group_classes.setdefault(a, set()).update(classes_b)
+        return attributes_a != attributes_b or bool(classes_b or group_classes.get(a))
 
     def attribute_tainted(scope: ast.AST | None, dotted: str) -> bool:
+        """Whether ``receiver.attribute`` is tainted, here or by inheritance.
+
+        Inheritance is followed upward only, from the receiver's classes to
+        their bases, so a subclass's runtime override never taints the base.
+        A very deep or wide hierarchy is treated as tainted.
+        """
         receiver, _, attribute = dotted.partition(".")
         if not attribute:
             return False
         key = binding_key(scope, receiver)
         if key not in group_parent:
             return False
-        return attribute in group_attributes.get(group_of(key), ())
+        seen: set[tuple[int, str]] = set()
+        stack = [group_of(key)]
+        while stack:
+            group = stack.pop()
+            if group in seen:
+                continue
+            seen.add(group)
+            if attribute in group_attributes.get(group, ()):
+                return True
+            if len(seen) > 64:
+                return True
+            for class_key in group_classes.get(group, ()):
+                stack.extend(
+                    group_of(base) for base in class_bases.get(class_key, ())
+                )
+        return False
 
     scope_bound: dict[ast.AST, set[str]] = {}
     scope_globals: dict[ast.AST, set[str]] = {}
@@ -4753,11 +4792,17 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         if isinstance(scope, ast.ClassDef):
             class_key = (id(parent), scope.name)
             group_parent.setdefault(class_key, class_key)
-            # Inherited attributes: share a group with each named base class.
-            for base in scope.bases:
-                if isinstance(base, ast.Name) and join_groups(
-                    class_key, binding_key(parent, base.id)
-                ):
+            group_classes.setdefault(group_of(class_key), set()).add(class_key)
+            # Inherited attributes are looked up through the named bases.
+            if class_key not in class_bases:
+                bases = []
+                for base in scope.bases:
+                    if isinstance(base, ast.Name):
+                        base_key = binding_key(parent, base.id)
+                        group_parent.setdefault(base_key, base_key)
+                        bases.append(base_key)
+                class_bases[class_key] = bases
+                if bases:
                     grew = True
             group = group_attributes.setdefault(group_of(class_key), set())
             for name in local_names:
