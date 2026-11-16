@@ -4804,8 +4804,39 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             # rather than risk a decoy or an unbounded scan.
             return set(), set()
 
+    # Runtime values also taint by name across the whole file, as before
+    # #131: a name assigned from a runtime value anywhere taints every read
+    # of that name. It over-taints across scopes, but it also follows
+    # routes the scoped pass does not model (factory returns, nested
+    # attributes, container writes), so no runtime-value case can regress.
+    # Parameters stay scoped: tainting every same-named variable in the file
+    # whenever some function has a parameter of that name would drop too
+    # much ordinary recovery. Propagated with a worklist, linear in the
+    # assignments.
+    runtime_names: set[str] = set()
+    assignment_readers: dict[str, list[str]] = {}
+    runtime_queue: list[str] = []
+    for assigned_name, values in assignments.items():
+        for value in values:
+            for item in ast.walk(value):
+                if isinstance(item, ast.Name):
+                    assignment_readers.setdefault(item.id, []).append(assigned_name)
+            if assigned_name not in runtime_names and reads_runtime_source(value):
+                runtime_names.add(assigned_name)
+                runtime_queue.append(assigned_name)
+    while runtime_queue:
+        for reader in assignment_readers.get(runtime_queue.pop(), ()):
+            if reader not in runtime_names:
+                runtime_names.add(reader)
+                runtime_queue.append(reader)
+
     def runtime_dependent(call: ast.Call, expression: ast.AST) -> bool:
         """Whether a path expression draws on a value chosen at run time."""
+        if any(
+            isinstance(item, ast.Name) and item.id in runtime_names
+            for item in ast.walk(expression)
+        ):
+            return True
         return depends_on_runtime(scope_of.get(id(call), tree), expression)
 
     definitions_by_scope: dict[tuple[int, str], list[ast.AST]] = {}

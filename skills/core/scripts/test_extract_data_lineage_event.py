@@ -1867,6 +1867,66 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "frame.to_csv(Config().root / 'result.csv')\n",
             id="inherited-runtime-class-attribute",
         ),
+        pytest.param(
+            "class Config:\n"
+            "    root = Path(sys.argv[1])\n"
+            "def get_config():\n"
+            "    return Config()\n"
+            "config = get_config()\n"
+            "root = config.root\n"
+            "frame = pd.read_csv(root / 'input.csv')\n"
+            "frame.to_csv(root / 'result.csv')\n",
+            id="runtime-attribute-through-config-factory",
+        ),
+        pytest.param(
+            "class Paths:\n"
+            "    root = Path(sys.argv[1])\n"
+            "class Config:\n"
+            "    paths = Paths()\n"
+            "root = Config.paths.root\n"
+            "frame = pd.read_csv(root / 'input.csv')\n"
+            "frame.to_csv(root / 'result.csv')\n",
+            id="runtime-attribute-through-nested-config",
+        ),
+        pytest.param(
+            "root = Path(sys.argv[1])\n"
+            "config = {'root': None}\n"
+            "config['root'] = root\n"
+            "def main():\n"
+            "    root = Path(config['root'])\n"
+            "    frame = pd.read_csv(root / 'input.csv')\n"
+            "    frame.to_csv(root / 'result.csv')\n"
+            "main()\n",
+            id="runtime-value-through-dictionary-write",
+        ),
+        pytest.param(
+            "class Config:\n"
+            "    root = Path(sys.argv[1])\n"
+            "config = None\n"
+            "def setup():\n"
+            "    global config\n"
+            "    config = Config()\n"
+            "setup()\n"
+            "root = config.root\n"
+            "frame = pd.read_csv(root / 'input.csv')\n",
+            id="runtime-attribute-through-global-alias",
+        ),
+        pytest.param(
+            "class Config:\n"
+            "    root = Path(sys.argv[1])\n"
+            "config, count = Config(), 1\n"
+            "root = config.root\n"
+            "frame = pd.read_csv(root / 'input.csv')\n",
+            id="runtime-attribute-through-unpacking",
+        ),
+        pytest.param(
+            "class Config:\n"
+            "    root = Path(sys.argv[1])\n"
+            "for config in [Config()]:\n"
+            "    root = config.root\n"
+            "    frame = pd.read_csv(root / 'input.csv')\n",
+            id="runtime-attribute-through-iteration",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
@@ -1957,25 +2017,6 @@ def test_repository_recovery_leaves_static_parameter_defaults_unresolved(
             "    inner()\n"
             "outer(sys.argv[1])\n",
             id="inner-local-shadows-outer-parameter",
-        ),
-        pytest.param(
-            "def parse():\n"
-            "    base = Path(sys.argv[1])\n"
-            "    return base\n"
-            "base = Path(__file__).parent\n"
-            "frame = pd.read_csv(base / 'input.csv')\n"
-            "frame.to_csv(base / 'result.csv')\n",
-            id="function-local-runtime-name-does-not-taint-module-name",
-        ),
-        pytest.param(
-            "class Config:\n"
-            "    root = sys.argv[1]\n"
-            "    def load(self):\n"
-            "        root = Path(__file__).parent\n"
-            "        frame = pd.read_csv(root / 'input.csv')\n"
-            "        frame.to_csv(root / 'result.csv')\n"
-            "Config().load()\n",
-            id="method-local-shadows-class-attribute",
         ),
         pytest.param(
             "root = Path(__file__).parent\n"
