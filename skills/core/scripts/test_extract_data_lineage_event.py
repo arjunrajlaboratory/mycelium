@@ -1400,6 +1400,143 @@ def test_repository_recovery_rejects_runtime_filename_concatenation(
     assert event["inputs"] == []
 
 
+_PANDAS_PATH_PRELUDE = "import os\nimport sys\nfrom pathlib import Path\nimport pandas as pd\n"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "frame = pd.read_csv(Path(__file__).parent / 'input.csv')\n"
+            "frame.to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="file-anchored",
+        ),
+        pytest.param(
+            "ROOT = Path(__file__).resolve().parent\n"
+            "frame = pd.read_csv(ROOT / 'input.csv')\n"
+            "frame.to_csv(ROOT.joinpath('result.csv'))\n",
+            id="module-constant",
+        ),
+        pytest.param(
+            "limit = int(sys.argv[1])\n"
+            "data_dir = os.environ.get('UNUSED', 'x')\n"
+            "frame = pd.read_csv(Path(__file__).parent / 'input.csv')\n"
+            "top = frame.head(limit)\n"
+            "top.to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="runtime-values-unrelated-to-path",
+        ),
+        pytest.param(
+            "input = Path(__file__).parent\n"
+            "frame = pd.read_csv(input / 'input.csv')\n"
+            "frame.to_csv(input / 'result.csv')\n",
+            id="locally-rebound-builtin-input",
+        ),
+    ],
+)
+def test_repository_recovery_keeps_static_path_prefixes(
+    tmp_path: Path, source: str
+) -> None:
+    """A static prefix with a literal filename still recovers the repo file."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    sample = tmp_path / "input.csv"
+    result = tmp_path / "result.csv"
+    sample.write_text("value\n1\n")
+    result.write_text("value\n1\n")
+    script = tmp_path / "run.py"
+    script.write_text(_PANDAS_PATH_PRELUDE + source)
+    args = argparse.Namespace(
+        ts="2026-11-15T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py 5",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "static+repository"
+    assert [item["path"] for item in event["inputs"]] == [str(sample)]
+    assert [item["path"] for item in event["outputs"]] == [str(result)]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "frame = pd.read_csv(Path(sys.argv[1]) / 'input.csv')\n"
+            "frame.to_csv(Path(sys.argv[1]) / 'result.csv', index=False)\n",
+            id="argv-inline",
+        ),
+        pytest.param(
+            "base = Path(sys.argv[1])\n"
+            "path = base / 'input.csv'\n"
+            "frame = pd.read_csv(path)\n"
+            "frame.to_csv(base / 'result.csv')\n",
+            id="argv-through-assignments",
+        ),
+        pytest.param(
+            "from sys import argv\n"
+            "frame = pd.read_csv(Path(argv[1]) / 'input.csv')\n"
+            "frame.to_csv(Path(argv[1]).joinpath('result.csv'))\n",
+            id="argv-imported-name",
+        ),
+        pytest.param(
+            "import argparse\n"
+            "parser = argparse.ArgumentParser()\n"
+            "parser.add_argument('indir')\n"
+            "args = parser.parse_args()\n"
+            "frame = pd.read_csv(Path(args.indir) / 'input.csv')\n"
+            "frame.to_csv(Path(args.indir) / 'result.csv')\n",
+            id="argparse-namespace",
+        ),
+        pytest.param(
+            "frame = pd.read_csv(Path(os.environ['DATA_DIR']) / 'input.csv')\n"
+            "frame.to_csv(os.path.join(os.environ['DATA_DIR'], 'result.csv'))\n",
+            id="environ-subscript",
+        ),
+        pytest.param(
+            "frame = pd.read_csv(os.path.join(sys.argv[1], 'input.csv'))\n"
+            "frame.to_csv(Path(sys.argv[1], 'result.csv'))\n",
+            id="argv-path-join-arguments",
+        ),
+    ],
+)
+def test_repository_recovery_ignores_decoys_for_runtime_path_prefixes(
+    tmp_path: Path, source: str
+) -> None:
+    """A runtime-chosen directory must not resolve to a same-named repo file.
+
+    The script reads ``<external>/input.csv`` from a command-line or
+    environment value; the repository's own ``input.csv`` is a decoy.
+    """
+    repo = tmp_path / "repo"
+    external = tmp_path / "external"
+    repo.mkdir()
+    external.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "input.csv").write_text("value\n999\n")
+    (repo / "result.csv").write_text("stale\n999\n")
+    (external / "input.csv").write_text("value\n42\n")
+    script = repo / "run.py"
+    script.write_text(_PANDAS_PATH_PRELUDE + source)
+    args = argparse.Namespace(
+        ts="2026-11-15T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd=f"python run.py {external}",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, repo, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+    assert event["outputs"] == []
+    assert event["lineage_warnings"]
+
+
 @pytest.mark.parametrize(
     "source,expected_key",
     [

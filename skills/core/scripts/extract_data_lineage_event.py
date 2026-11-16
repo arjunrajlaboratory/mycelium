@@ -3995,6 +3995,28 @@ _DETERMINISTIC_PATH_CALLS = {
 }
 
 
+# Values a script receives at run time. A path built from one may point outside
+# the repository, so repository recovery must not match its literal suffix
+# against a same-named repository file.
+_RUNTIME_PATH_SOURCES = {
+    "fileinput.input",
+    "input",
+    "os.environ",
+    "os.environb",
+    "os.getenv",
+    "os.getenvb",
+    "sys.argv",
+    "sys.stdin",
+}
+# ``parser.parse_args()`` and friends return the parsed command line.
+_RUNTIME_ARGUMENT_PARSERS = {
+    "parse_args",
+    "parse_intermixed_args",
+    "parse_known_args",
+    "parse_known_intermixed_args",
+}
+
+
 def _repository_root(cwd: Path) -> Path | None:
     try:
         result = subprocess.run(
@@ -4235,6 +4257,59 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
             return collect(expression.value, resolving)
         return set()
 
+    def canonical_name(node: ast.AST) -> str | None:
+        raw_name = _call_name(node)
+        if not raw_name:
+            return None
+        parts = raw_name.split(".")
+        if parts[0] in import_aliases:
+            parts = import_aliases[parts[0]].split(".") + parts[1:]
+        return ".".join(parts)
+
+    def reads_runtime_value(expression: ast.AST, tainted: set[str]) -> bool:
+        for node in ast.walk(expression):
+            if isinstance(node, ast.Name) and node.id in tainted:
+                return True
+            if isinstance(node, (ast.Attribute, ast.Name)):
+                root = _call_name(node)
+                root = root.split(".", 1)[0] if root else None
+                if (
+                    canonical_name(node) in _RUNTIME_PATH_SOURCES
+                    and (root in import_aliases or root not in locally_bound_roots)
+                ):
+                    return True
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _RUNTIME_ARGUMENT_PARSERS
+            ):
+                return True
+        return False
+
+    # Names any of whose assignments draw on a runtime value, propagated
+    # through further assignments until nothing changes. A name with several
+    # definitions is tainted by any one of them: recovery should then stay
+    # unresolved rather than guess which definition ran.
+    runtime_names: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, definitions in assignments.items():
+            if name in runtime_names:
+                continue
+            if any(reads_runtime_value(item, runtime_names) for item in definitions):
+                runtime_names.add(name)
+                changed = True
+
+    def runtime_dependent(expression: ast.AST) -> bool:
+        """Whether a path expression draws on a value chosen at run time.
+
+        A command-line argument or environment value can name a directory
+        outside the repository, so the literal filename appended to it says
+        nothing about which repository file, if any, was read or written.
+        """
+        return reads_runtime_value(expression, runtime_names)
+
     inputs: set[str] = set()
     outputs: set[str] = set()
     for node in ast.walk(tree):
@@ -4251,7 +4326,9 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
         )
         values: set[str] = set()
         for expression in path_expressions:
-            expression_values = collect(expression)
+            expression_values = (
+                None if runtime_dependent(expression) else collect(expression)
+            )
             if expression_values is None:
                 values.clear()
                 break
