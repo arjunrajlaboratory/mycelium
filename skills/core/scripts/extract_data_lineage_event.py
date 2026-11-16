@@ -1721,6 +1721,11 @@ def _r_batch_script(command: str, match: re.Match[str]) -> _RWord | None:
         return None if words.complete else matched
     if not infile.known:
         return infile
+    # R's BATCH script runs `${R_HOME}/bin/R -f ${in} ...` with `${in}`
+    # unquoted, so `R CMD BATCH 'my file.R'` reads `my`, never `my file.R`.
+    # A spaced input is therefore split, not resolved as one path. The
+    # contrived `'x.R y'`, where the first field is itself a script, is
+    # deliberately left unrecorded (the locating regex wants an R-shaped word).
     in_words = _ifs_split(infile.text)
     if not in_words:
         return None

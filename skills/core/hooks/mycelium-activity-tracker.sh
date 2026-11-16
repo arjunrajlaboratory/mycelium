@@ -19,6 +19,8 @@ source "$HERE/mycelium-hook-lib.sh"
 
 INPUT=$(cat)
 
+mycelium_payload_preload INPUT 'edit:' 'get:cwd' 'opt:session_id'
+
 # Optional structured batch (Antigravity App Stop recovery only): tool_input.file_paths
 # plus mycelium_activity_batch {id, count, sha256}. Batch mode is selected only by
 # the App adapter, which sets MYCELIUM_ANTIGRAVITY_ACTIVITY_BATCH=1 for that one
@@ -43,91 +45,14 @@ batch_fail() {
 # PostToolUse payloads describe attempted edits as well as successful ones.
 # Ignore an explicitly failed result; an absent status remains compatible with
 # Claude's Edit/Write payloads and older Codex versions.
-TOOL_SUCCEEDED=$(printf '%s' "$INPUT" | python3 -c '
-import json, re, sys
-try:
-    payload = json.load(sys.stdin)
-except Exception:
-    print("unknown")
-    raise SystemExit
-response = payload.get("tool_response")
-
-def structured_exit_code(value):
-    if isinstance(value, dict):
-        if value.get("isError") is True or value.get("success") is False:
-            return 1
-        for key in ("exit_code", "exitCode", "return_code", "returncode"):
-            candidate = value.get(key)
-            if isinstance(candidate, int) and not isinstance(candidate, bool):
-                return candidate
-        for candidate in value.values():
-            found = structured_exit_code(candidate)
-            if found is not None:
-                return found
-    elif isinstance(value, list):
-        for candidate in value:
-            found = structured_exit_code(candidate)
-            if found is not None:
-                return found
-    elif isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-        except Exception:
-            decoded = None
-        if decoded is not None and decoded != value:
-            found = structured_exit_code(decoded)
-            if found is not None:
-                return found
-    return None
-
-def textual_exit_code(value):
-    if isinstance(value, dict):
-        for candidate in value.values():
-            found = textual_exit_code(candidate)
-            if found is not None:
-                return found
-    elif isinstance(value, list):
-        for candidate in value:
-            found = textual_exit_code(candidate)
-            if found is not None:
-                return found
-    elif isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-        except Exception:
-            decoded = None
-        if decoded is not None and decoded != value:
-            found = textual_exit_code(decoded)
-            if found is not None:
-                return found
-        if re.match(
-            r"^\s*(?:error|failed|patch failed|invalid (?:context|patch))\b",
-            value,
-            re.IGNORECASE,
-        ):
-            return 1
-        match = re.search(
-            r"(?:exit(?:ed)?(?:[ _-]with)?(?:[ _-]code)?|return(?:[ _-]code)?)"
-            r"[\":= ]+(-?\d+)",
-            value,
-            re.IGNORECASE,
-        )
-        if match:
-            return int(match.group(1))
-    return None
-
-status = structured_exit_code(response)
-if status is None:
-    status = textual_exit_code(response)
-print("unknown" if status is None else ("true" if status == 0 else "false"))
-')
+TOOL_SUCCEEDED=$(mycelium_edit_status INPUT)
 if [[ "$TOOL_SUCCEEDED" == false ]]; then
   exit 0
 fi
 
 # --- Repo and .living/ checks ---
 
-SESSION_CWD=$(printf '%s' "$INPUT" | mycelium_json_get 'cwd')
+SESSION_CWD=$(mycelium_json_get 'cwd' INPUT)
 if [[ -z "$SESSION_CWD" ]]; then
   SESSION_CWD=$(pwd)
 fi

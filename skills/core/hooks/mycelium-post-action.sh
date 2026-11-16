@@ -17,8 +17,10 @@ source "$HERE/mycelium-hook-lib.sh"
 
 INPUT=$(cat)
 
+mycelium_payload_preload INPUT 'get:tool_input.command' 'get:cwd' 'opt:session_id' 'exit:'
+
 # Extract the command that was run
-COMMAND=$(printf '%s' "$INPUT" | mycelium_json_get 'tool_input.command')
+COMMAND=$(mycelium_json_get 'tool_input.command' INPUT)
 if [[ -z "$COMMAND" ]]; then
   exit 0
 fi
@@ -28,11 +30,11 @@ fi
 # Share the data-lineage parser's command-position and control-flow checks so
 # skipped compound branches and interpreter text used as arguments cannot open
 # a false bookkeeping cycle.
-SESSION_CWD=$(printf '%s' "$INPUT" | mycelium_json_get 'cwd')
+SESSION_CWD=$(mycelium_json_get 'cwd' INPUT)
 if [[ -z "$SESSION_CWD" || ! -d "$SESSION_CWD" ]]; then
   SESSION_CWD=$(pwd)
 fi
-BASH_EXIT=$(printf '%s' "$INPUT" | mycelium_bash_exit)
+BASH_EXIT=$(mycelium_bash_exit INPUT)
 if [[ -z "$BASH_EXIT" && "$(mycelium_hook_host)" == "claude" ]]; then
   BASH_EXIT=0
 fi
@@ -76,9 +78,10 @@ LIVING_DIRECTIVE=""
 # Part 1: Log append (always fires, no debounce)
 if [ -f "$ACTIVE_LOG_FILE" ]; then
   # SessionStart stores the log path on line 1 and the owning session's
-  # timestamp on line 2. Only the path belongs in the agent directive.
-  if _ACTIVE_MARKER=$(mycelium_read_active_log_marker "$REPO_ROOT" "$ACTIVE_LOG_FILE"); then
-    LOG_PATH=$(printf '%s\n' "$_ACTIVE_MARKER" | sed -n '1p')
+  # timestamp on line 2. Only the path belongs in the agent directive. The
+  # locked state call above already read and validated the marker.
+  if [[ "$MYCELIUM_MARKER_STATE" == valid ]]; then
+    LOG_PATH="$MYCELIUM_MARKER_LOG"
     LOG_DIRECTIVE="SESSION LOG UPDATE: Append a 2-3 line timestamped entry to ${LOG_PATH} describing what you just did, the result, and any notable outputs. This log is append-only: append to it; never rewrite it (Stop needs its header). Format: ### HH:MM — <action title> followed by bullet points with Command, Result, and Output fields as applicable."
   fi
 fi

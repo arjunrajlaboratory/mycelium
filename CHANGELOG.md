@@ -24,8 +24,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is reported to the model and by `doctor --profile app` instead of being
   dropped silently. The App's conversation stores are read through a private
   snapshot, so no App file (including SQLite's `-shm` index) is ever written.
+- **Agents now warn when Mycelium's hooks are silently skipped.** Current
+  Codex releases (seen on CLI 0.167.2 and Desktop 0.169.0-alpha) bind each
+  plugin hook approval to a `trusted_content_hash`, a SHA-256 over every file
+  in the installed plugin bundle. Every Mycelium upgrade, reinstall, or
+  downgrade therefore resets approval, and Codex skips all five hooks with no
+  warning inside the task. Older approvals that recorded only `trusted_hash`
+  stay valid only for the bundle Codex saw when it first upgraded. The
+  managed `### Automated Enforcement` section of generated `MYCELIUM.md` now
+  tells the root agent to check its context once, at the start of the task,
+  for the `SESSION HANDOFF PATH:` line SessionStart injects and, when it is
+  missing, to tell the user before starting work that the hooks are probably
+  not running (on Codex: re-trust the `mycelium@mycelium` hooks, restart). It
+  does not re-check after compaction, and it notes the identity-free and
+  pre-0.7 flat-transaction cases where hooks run without the line. The check
+  is host-neutral and also covers Claude Code projects whose hook
+  registrations are missing. Re-run `$mycelium:core` migration or
+  initialization to add it to existing projects; it changes only that managed
+  section.
 
 ### Changed
+
+- **Install, update, and trust docs say every upgrade needs hook review
+  again, and no longer send users away from the Codex desktop app.** The
+  README, the core and develop skills, `init_repo.py`'s install message, and
+  the generated guidance now say Codex hook approval follows the installed
+  plugin's contents, not a one-time trust step. On Codex 0.169.0 (observed on
+  one machine), trusting in the terminal CLI's `/hooks` saved only
+  `trusted_hash`, so `/hooks` showed the hooks as active while Codex skipped
+  them; only approvals made while the desktop app ran were complete. The docs
+  now point to the desktop app, warn that `/hooks` alone is not proof, make
+  the app-server `hooks/list` request (`trustStatus` `trusted`) the reliable
+  check, and note that launching the desktop app re-copies the plugin from its
+  marketplace source, which needs approval again.
+- **Hooks decode their payload in one Python process.** Each hook used to
+  start a separate `python3` for every payload field it read (`session_id`,
+  `cwd`, the command, the exit status), up to seven times per event.
+  `mycelium_payload_preload` now runs the same decoder code for all of a
+  hook's fields in one interpreter and serves each later read from bash.
+  Answers are byte-identical, exit status included; a field whose decoder
+  would raise, print a NUL byte, or hit the recursion limit falls back to its
+  own interpreter. The PostToolUse activity tracker drops from 15 to 10
+  Python starts and the post-action hook from 20 to 13, cutting 17–23% of
+  their run time. Payloads over 64 KiB (an Edit of a large file carries the
+  whole original) skip the cache and decode as before, because comparing
+  them on every read would cost more than it saves.
+- **Hooks run their state checks in one Python process per pass.** Shared
+  state preparation, private run selection, active-marker and owner-token
+  parsing, ownership authorization, and the first lock attempt used to start
+  one interpreter each, several times per event. They now run as ordered ops
+  in `skills/core/hooks/mycelium_hook_state.py` (started with `-I -S`), which
+  keeps each helper's checks, order, variable assignments, and fail-closed
+  results; a test runs every scenario against the previous helpers and
+  requires identical results. A PostToolUse event validates, takes its
+  session lock with one `mkdir(2)`, and revalidates inside the lock in that
+  single process; a held lock falls back to the unchanged bash wait-and-reap
+  loop and resumes the remaining checks in a new process. Small encoders
+  (hook JSON output, the Stop block reason, the branch scalar, plain
+  registry cells) skip the interpreter when their output is provably
+  byte-identical, and the edit-status and SessionStart cwd decoders join the
+  payload preload. Python starts per event: SessionStart 12 to 5, edit
+  tracker 11 to 4, analysis post-action 13 to 4, data tracker 9 to 3, read
+  tracker 8 to 2, blocked Stop 20 to 8. A marker or owner file holding a NUL
+  byte is now refused instead of read with the NUL dropped. A repository
+  path that is not valid UTF-8 no longer silently disables the hooks, and an
+  active marker naming a log file whose name is not valid UTF-8 is accepted
+  in every locale; before, a strict UTF-8 locale such as en_US.UTF-8 (but
+  not C or C.UTF-8) made it read as corrupt, so SessionStart and Stop
+  removed it.
+- **A host that stops reading no longer leaves lifecycle locks held.** Stop
+  wrote its block JSON with a shell builtin while holding both locks; a
+  closed output pipe killed the hook with SIGPIPE before its EXIT trap could
+  release them, so the next lifecycle hook waited out its retry budget.
+  Hook output is now written so that a closed pipe fails the write instead.
+- **The compatibility test suite runs in parallel.** CI and
+  `tools/release_gate.py` run `skills/core/scripts` with pytest-xdist
+  (`-n auto --dist worksteal`) when it is installed; every test works in its
+  own temporary repository. The release gate loads xdist explicitly with
+  `-p xdist`, so `PYTEST_DISABLE_PLUGIN_AUTOLOAD` does not break it, and
+  still runs the suite serially where xdist is missing.
 
 - **An R run whose script is uncertain is recorded as such, not as a fake
   inline script.** When shell syntax or `R_BATCH_OPTIONS` may change which
