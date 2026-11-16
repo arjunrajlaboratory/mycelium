@@ -1452,6 +1452,12 @@ _PANDAS_PATH_PRELUDE = "import os\nimport sys\nfrom pathlib import Path\nimport 
             "frames[0].to_csv(Path(__file__).parent / 'result.csv')\n",
             id="writer-on-subscript",
         ),
+        pytest.param(
+            "from helpers import export_table as to_csv\n"
+            "p = Path(__file__).parent\n"
+            "pd.read_csv(p / 'input.csv').to_csv(p / 'result.csv')\n",
+            id="chained-writer-despite-unrelated-same-named-import",
+        ),
     ],
 )
 def test_repository_recovery_keeps_static_path_prefixes(
@@ -1528,12 +1534,53 @@ def test_repository_recovery_records_savefig_chained_on_call(
             "savefig(Path(__file__).parent / 'result.csv')\n",
             id="local-savefig",
         ),
+        pytest.param(
+            "class Preview:\n"
+            "    def to_csv(self, path):\n"
+            "        print(path)\n"
+            "Preview().to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="custom-method-on-constructor",
+        ),
+        pytest.param(
+            "class Preview:\n"
+            "    def to_csv(self, path):\n"
+            "        print(path)\n"
+            "preview = Preview()\n"
+            "preview.to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="custom-method-on-name",
+        ),
+        pytest.param(
+            "class Preview:\n"
+            "    def savefig(self, path):\n"
+            "        print(path)\n"
+            "[Preview()][0].savefig(Path(__file__).parent / 'result.csv')\n",
+            id="custom-savefig-on-subscript",
+        ),
+        pytest.param(
+            "from matplotlib.pyplot import savefig\n"
+            "def savefig(path):\n"
+            "    print(path)\n"
+            "savefig(Path(__file__).parent / 'result.csv')\n",
+            id="imported-writer-redefined",
+        ),
+        pytest.param(
+            "from matplotlib.pyplot import savefig\n"
+            "savefig = print\n"
+            "savefig(Path(__file__).parent / 'result.csv')\n",
+            id="imported-writer-reassigned",
+        ),
+        pytest.param(
+            "from matplotlib.pyplot import savefig\n"
+            "def run(savefig):\n"
+            "    savefig(Path(__file__).parent / 'result.csv')\n",
+            id="imported-writer-shadowed-by-parameter",
+        ),
     ],
 )
-def test_repository_recovery_ignores_unqualified_custom_writer(
+def test_repository_recovery_ignores_custom_writer(
     tmp_path: Path, source: str
 ) -> None:
-    """A bare writer name is a user's own function, not proof of a write."""
+    """A writer name the script defines or rebinds is not proof of a write."""
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     result = tmp_path / "result.csv"
     result.write_text("value\n1\n")

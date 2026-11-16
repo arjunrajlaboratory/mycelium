@@ -4040,16 +4040,28 @@ def _call_name(node: ast.AST) -> str | None:
     return None
 
 
+def _call_root(node: ast.AST) -> str | None:
+    """The name a dotted callee starts from, or None for an unnamed receiver."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
 def _io_call_direction(
     node: ast.Call,
     import_aliases: dict[str, str],
     locally_bound_roots: set[str],
+    defined_function_names: frozenset[str] = frozenset(),
 ) -> str | None:
     raw_name = _call_name(node.func)
     if not raw_name:
         return None
     parts = raw_name.split(".")
-    if parts[0] in import_aliases:
+    # ``_call_name`` reduces ``read_csv(...).to_csv`` to the bare ``to_csv``.
+    # Only a callee rooted at a name may be resolved through an import alias;
+    # otherwise ``from helpers import x as to_csv`` would rename the method.
+    rooted = _call_root(node.func) is not None
+    if rooted and parts[0] in import_aliases:
         parts = import_aliases[parts[0]].split(".") + parts[1:]
     name = ".".join(parts)
     leaf = name.rsplit(".", 1)[-1]
@@ -4062,11 +4074,20 @@ def _io_call_direction(
         # whatever the receiver: a name, a call result such as
         # ``pd.read_csv(...).to_csv`` or ``frame.head(n).to_csv``, or a
         # subscript. ``_call_name`` drops an unnamed receiver, so test the AST
-        # node rather than the dotted name. A bare writer name, however, is
-        # evidence only when an import maps it to a known data-I/O package.
-        if (
-            isinstance(node.func, ast.Attribute)
-            or parts[0] in _KNOWN_IO_MODULE_ROOTS
+        # node rather than the dotted name. A method the script itself
+        # defines under a writer's name is the script's own code, though,
+        # unless the callee is reached through a data-I/O module import.
+        # A bare writer name is evidence only when an import maps it to a
+        # known data-I/O package and nothing in the script rebinds it.
+        if isinstance(node.func, ast.Attribute):
+            if (
+                node.func.attr not in defined_function_names
+                or (rooted and parts[0] in _KNOWN_IO_MODULE_ROOTS)
+            ):
+                return "output"
+        elif (
+            parts[0] in _KNOWN_IO_MODULE_ROOTS
+            and raw_name not in locally_bound_roots
         ):
             return "output"
     if leaf in _INPUT_CALL_LEAVES or name in {
@@ -4127,6 +4148,11 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
     }
     locally_bound_roots.update(shadowed_names)
+    defined_function_names = frozenset(
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+    )
     locally_bound_roots.update(
         node.name
         for node in ast.walk(tree)
@@ -4321,7 +4347,9 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        direction = _io_call_direction(node, import_aliases, locally_bound_roots)
+        direction = _io_call_direction(
+            node, import_aliases, locally_bound_roots, defined_function_names
+        )
         if direction is None:
             continue
         path_expressions = list(node.args[:1])
