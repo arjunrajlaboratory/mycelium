@@ -724,13 +724,16 @@ suffix; nested comments; and a second copy of a "first-only" element. Each
 must be ignored, preserved byte-for-byte, or rejected — never rewritten.
 
 **Recurrence (#129):** the `ACTIVE_CONVENTIONS.yaml` repair edited YAML line
-by line, and three review rounds each found new valid inputs it corrupted: a
-comment line that was really block-scalar content, `|+` trailing blank lines
-it stripped, a list indented as a whole, a `[] # note` it rewrote. What
-stopped the cycle was narrowing *when* to rewrite (only files carrying the
-legacy key) and checking every rewrite with the real parser, so it must load
-to the same entries or be refused. When the parser is an optional dependency,
-keep the line rules for the narrow repair and let the parser veto it.
+by line, and four review rounds each found new valid inputs it corrupted:
+block-scalar content read as comments, `|+` trailing blanks stripped, anchors
+broken by removing an entry, a quoted multi-line scalar mistaken for the
+legacy key, U+2028 split by `splitlines`. Each fix that widened what the
+editor accepted invited the next case. What converged was the opposite:
+accept exactly the grammar the machine writers emit, refuse everything else
+before any mutation, rewrite only files carrying the defect's marker, and let
+the real parser (when installed) veto any rewrite that changes the parsed
+value. Keep every reviewer's adversarial input in one refusal table that runs
+with and without the optional parser.
 
 ## 37. An exemption is wider than the evidence that justifies it
 

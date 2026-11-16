@@ -100,19 +100,6 @@ class TestInstallerRepairsExistingFiles:
         ic.update_active_conventions(tmp_path, "robust-analysis")
         assert sorted(_names(tmp_path)) == ["idea-generator", "robust-analysis"]
 
-    def test_dedents_entries_nested_under_the_key(self, tmp_path: Path) -> None:
-        _write_registry(
-            tmp_path,
-            "active_conventions:\n"
-            "  - name: robust-analysis\n"
-            "    path: .living/conventions/robust-analysis/\n"
-            "    core: true\n",
-        )
-        ic.update_active_conventions(tmp_path, "bioinformatics")
-        data = _load(tmp_path)
-        assert [e["name"] for e in data] == ["robust-analysis", "bioinformatics"]
-        assert data[0]["core"] is True
-
     def test_canonical_file_keeps_comments_and_entries(self, tmp_path: Path) -> None:
         _write_registry(
             tmp_path,
@@ -188,7 +175,6 @@ class TestInstallerRepairsExistingFiles:
             ("---\n- name: a\n", ["a", "bioinformatics"]),
             ("\ufeff- name: a\n", ["a", "bioinformatics"]),
             ("- name: a\n...\n", ["a", "bioinformatics"]),
-            ("-\n  name: a\n", ["a", "bioinformatics"]),
             ("# c\n---\n[]\n", ["bioinformatics"]),
         ],
     )
@@ -198,16 +184,6 @@ class TestInstallerRepairsExistingFiles:
         _write_registry(tmp_path, text)
         ic.update_active_conventions(tmp_path, "bioinformatics")
         assert _names(tmp_path) == expected
-
-    def test_keep_chomped_scalar_survives_another_install(
-        self, tmp_path: Path
-    ) -> None:
-        """Codex P2: trailing blank lines can be part of a `|+` value."""
-        _write_registry(tmp_path, "- name: a\n  notes: |+\n    text\n\n\n")
-        ic.update_active_conventions(tmp_path, "b")
-        data = _load(tmp_path)
-        assert data[0]["notes"] == "text\n\n\n"
-        assert [e["name"] for e in data] == ["a", "b"]
 
     def test_empty_list_comment_survives_an_install(self, tmp_path: Path) -> None:
         _write_registry(tmp_path, "[] # hand note\n")
@@ -227,11 +203,58 @@ class TestInstallerRepairsExistingFiles:
             ic.update_active_conventions(repo, "b")
         assert (outside / "ACTIVE_CONVENTIONS.yaml").read_text(encoding="utf-8") == "[]\n"
 
-    def test_unspaced_hash_is_part_of_the_name(self, tmp_path: Path) -> None:
-        """YAML starts a comment only at a `#` preceded by whitespace."""
-        _write_registry(tmp_path, "- name: foo#bar\n  path: p/\n")
-        ic.update_active_conventions(tmp_path, "foo")
-        assert _names(tmp_path) == ["foo#bar", "foo"]
+    def test_capitalized_core_flag_is_kept(self, tmp_path: Path) -> None:
+        _write_registry(tmp_path, "- name: a\n  core: True\n")
+        ic.update_active_conventions(tmp_path, "a")
+        assert _load(tmp_path)[0]["core"] is True
+
+    def test_refused_update_leaves_an_installed_pack_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex P2: the CLI validates the exact rewrite before copying."""
+        repo = tmp_path / "repo"
+        path = _write_registry(repo, "version: 1\n- name: bioinformatics\n")
+        pack = repo / ".living" / "conventions" / "bioinformatics"
+        pack.mkdir()
+        (pack / "local-edit.md").write_text("keep\n", encoding="utf-8")
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(_SCRIPT_DIR / "install_convention.py"),
+                "--name",
+                "bioinformatics",
+                "--target-dir",
+                str(repo),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 1
+        assert (pack / "local-edit.md").read_text(encoding="utf-8") == "keep\n"
+        assert path.read_text(encoding="utf-8") == "version: 1\n- name: bioinformatics\n"
+
+    def test_name_specific_refusal_happens_before_copying(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Preflight runs the exact rewrite for this pack name, not a generic read."""
+        repo = tmp_path / "repo"
+        _write_registry(repo, "- name: a\n")
+        pack = repo / ".living" / "conventions" / "bioinformatics"
+        pack.mkdir()
+        (pack / "local-edit.md").write_text("keep\n", encoding="utf-8")
+
+        def refuse(target_dir: Path, name: str, now: str) -> str:
+            assert name == "bioinformatics"
+            raise ic.UnrecognizedRegistryError("refused for this name")
+
+        monkeypatch.setattr(ic, "_plan_update", refuse)
+        monkeypatch.setattr(
+            sys, "argv", ["install_convention.py", "--name", "bioinformatics",
+                          "--target-dir", str(repo)],
+        )
+        with pytest.raises(SystemExit):
+            ic.main()
+        assert (pack / "local-edit.md").read_text(encoding="utf-8") == "keep\n"
 
     def test_unrecognized_registry_aborts_before_copying(self, tmp_path: Path) -> None:
         """The CLI refuses before copying the pack, leaving no partial install."""
@@ -250,9 +273,35 @@ class TestInstallerRepairsExistingFiles:
             text=True,
         )
         assert result.returncode == 1
-        assert "unexpected top-level content" in result.stdout
+        assert "unsupported registry line" in result.stdout
         assert path.read_text(encoding="utf-8") == "version: 1\n- name: a\n"
         assert not (repo / ".living" / "conventions" / "bioinformatics").exists()
+
+    def test_field_after_a_blank_line_stays_with_its_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex P2: a blank line inside an entry must not end it."""
+        _write_registry(
+            tmp_path,
+            "- name: robust-analysis\n  path: original/\n"
+            "- name: bioinformatics\n  path: old/\n\n  core: true\n",
+        )
+        ic.update_active_conventions(tmp_path, "bioinformatics")
+        data = _load(tmp_path)
+        assert data[0] == {"name": "robust-analysis", "path": "original/"}
+        assert data[1]["name"] == "bioinformatics" and data[1]["core"] is True
+
+    def test_name_on_a_later_field_line_is_matched(self, tmp_path: Path) -> None:
+        """Codex P2: the name need not be the entry's first field."""
+        _write_registry(tmp_path, "- path: old/\n  name: bioinformatics\n")
+        ic.update_active_conventions(tmp_path, "bioinformatics")
+        assert _names(tmp_path) == ["bioinformatics"]
+
+    def test_commented_core_flag_is_kept(self, tmp_path: Path) -> None:
+        """Codex P2: a trailing comment does not hide the flag."""
+        _write_registry(tmp_path, "- name: a\n  core: true # required\n")
+        ic.update_active_conventions(tmp_path, "a")
+        assert _load(tmp_path)[0]["core"] is True
 
     def test_missing_file_is_created_as_a_list(self, tmp_path: Path) -> None:
         (tmp_path / REGISTRY).parent.mkdir(parents=True)
@@ -275,32 +324,11 @@ class TestNormalize:
     def test_empty_shapes_become_an_empty_list(self, text: str) -> None:
         assert yaml.safe_load(ic.normalize_active_conventions(text)) == []
 
-    @pytest.mark.parametrize(
-        "text, expected",
-        [
-            # A deeper comment before the first item sets no indent.
-            (
-                "active_conventions:\n    # note\n  - name: a\n    path: p/\n",
-                [{"name": "a", "path": "p/"}],
-            ),
-            # A column-0 comment does not end the key's block.
-            ("active_conventions:\n# note\n  - name: a\n", [{"name": "a"}]),
-            # Blank lines inside the block do not end it either.
-            (
-                "active_conventions:\n  - name: a\n\n  - name: b\n",
-                [{"name": "a"}, {"name": "b"}],
-            ),
-            # YAML's compact form: items at the key's own indent.
-            ("active_conventions:\n- name: a\n", [{"name": "a"}]),
-            # A top-level list indented as a whole (Codex P2).
-            ("  - name: a\n    path: p/\n", [{"name": "a", "path": "p/"}]),
-            ("# c\n  - name: a\n", [{"name": "a"}]),
-            # An empty flow list on its own line under the key (Codex P2).
-            ("active_conventions:\n  []\n", []),
-        ],
-    )
-    def test_nested_block_variants(self, text: str, expected: list) -> None:
-        assert yaml.safe_load(ic.normalize_active_conventions(text)) == expected
+    def test_compact_form_under_the_key(self) -> None:
+        """YAML lets a key's list sit at the key's own indent."""
+        assert yaml.safe_load(
+            ic.normalize_active_conventions("active_conventions:\n- name: a\n")
+        ) == [{"name": "a"}]
 
     @pytest.mark.parametrize(
         "text",
@@ -315,6 +343,33 @@ class TestNormalize:
         with pytest.raises(ic.UnrecognizedRegistryError):
             ic.normalize_active_conventions(text)
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "active_conventions:\n  owner: lab\n",
+            "  owner: lab\n",
+            "active_conventions:\n  # c\n  owner: lab\n",
+        ],
+    )
+    def test_non_list_block_is_refused_without_pyyaml(
+        self, text: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex P2: the line rules alone must not dedent a mapping."""
+        monkeypatch.setattr(ic, "_yaml", lambda: None)
+        with pytest.raises(ic.UnrecognizedRegistryError):
+            ic.normalize_active_conventions(text)
+
+    def test_issue_129_repair_without_pyyaml(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(ic, "_yaml", lambda: None)
+        assert yaml.safe_load(ic.normalize_active_conventions(BROKEN_129)) == [
+            {"name": "robust-analysis", "path": ".living/conventions/robust-analysis/",
+             "installed": yaml.safe_load("2026-04-01T20:22:21Z")},
+            {"name": "idea-generator", "path": ".living/conventions/idea-generator/",
+             "installed": yaml.safe_load("2026-04-01T20:22:22Z")},
+        ]
+
     def test_rewrite_check_refuses_output_that_is_not_a_list(self) -> None:
         """The PyYAML guard catches any shape the line rules get wrong."""
         with pytest.raises(ic.UnrecognizedRegistryError):
@@ -324,18 +379,11 @@ class TestNormalize:
         with pytest.raises(ic.UnrecognizedRegistryError):
             ic._check_rewrite("- name: a\n", "- name: b\n")
 
-    def test_block_scalar_under_the_key_keeps_its_value(self) -> None:
-        """Codex P2: a `#` line inside a block scalar is content, not a comment."""
-        text = "active_conventions:\n  - name: a\n    notes: |\n      # note\n      more\n"
-        assert yaml.safe_load(ic.normalize_active_conventions(text)) == [
-            {"name": "a", "notes": "# note\nmore\n"}
-        ]
-
     @pytest.mark.parametrize(
         "text",
         [
             BROKEN_129,
-            "active_conventions:\n  - name: a\n    path: p/\n",
+            "active_conventions:\n- name: a\n  path: p/\n",
             "- name: a\n  path: p/\n",
         ],
     )
@@ -343,6 +391,54 @@ class TestNormalize:
         once = ic.normalize_active_conventions(text)
         assert ic.normalize_active_conventions(once) == once
         assert isinstance(yaml.safe_load(once), list)
+
+
+# Valid YAML outside the machine-written grammar, collected across review
+# rounds. Each must be refused with nothing written, whether or not PyYAML is
+# installed: a line editor cannot rewrite these safely.
+OUT_OF_GRAMMAR = [
+    "active_conventions:\n  - name: a\n    path: p/\n",  # nested under the key
+    "active_conventions:\n    # note\n  - name: a\n",
+    "active_conventions:\n  - name: a\n    notes: |\n      # note\n",
+    "active_conventions:\n  owner: lab\n",  # mapping, not a list
+    "active_conventions:\n  []\n",
+    "  - name: a\n    path: p/\n",  # list indented as a whole
+    "-\n  name: a\n",  # bare dash item
+    "- name: a\n  notes: |+\n    text\n\n\n",  # block scalar
+    "- name: a\n  notes: |\n    core: true\n",
+    "- name: a\n  path: &p shared/\n- name: b\n  path: *p\n",  # anchor/alias
+    "[{name: robust-analysis, path: p/}]\n",  # flow list
+    '- name: a\n  notes: "first\nactive_conventions: []\n    last"\n',  # quoted multi-line
+    "- name: a\n  notes: x\u2028y\n",  # Unicode line separator
+    "- name: foo#bar\n",  # `#` without a preceding space is scalar text
+    "- name: a\n  name: b\n",  # duplicate key
+    "version: 1\nactive_conventions:\n  - name: a\n",
+]
+
+
+class TestOutOfGrammar:
+    @pytest.mark.parametrize("pyyaml", [True, False])
+    @pytest.mark.parametrize("text", OUT_OF_GRAMMAR)
+    def test_installer_refuses_without_writing(
+        self, tmp_path: Path, text: str, pyyaml: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        if not pyyaml:
+            monkeypatch.setattr(ic, "_yaml", lambda: None)
+        path = _write_registry(tmp_path, text)
+        with pytest.raises(ic.UnrecognizedRegistryError):
+            ic.update_active_conventions(tmp_path, "a")
+        assert path.read_text(encoding="utf-8") == text
+
+    @pytest.mark.parametrize("pyyaml", [True, False])
+    @pytest.mark.parametrize("text", OUT_OF_GRAMMAR)
+    def test_migration_leaves_file_byte_identical(
+        self, tmp_path: Path, text: str, pyyaml: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        if not pyyaml:
+            monkeypatch.setattr(ic, "_yaml", lambda: None)
+        path = _write_registry(tmp_path, text)
+        assert mig.repair_active_conventions(tmp_path) in (False, None)
+        assert path.read_text(encoding="utf-8") == text
 
 
 class TestFreshInit:

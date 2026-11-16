@@ -19,11 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   legacy shape into the list before adding its entry. Reinstalling a pack also
   now replaces only the entry with that exact name (installing `bio` no longer
   removes `bioinformatics`) and keeps a core pack's `core: true` flag. The
-  installer edits the file in place, so comments and other authored lines
-  survive. It writes atomically, refuses a symlinked registry or conventions
-  directory, and stops before copying a pack when the registry holds content
-  it cannot safely edit. When PyYAML is installed, every rewrite must load to
-  the same entries (plus the one being installed) or it is refused.
+  installer edits the file in place, so comments and other entries survive.
+  It reads only the shape Mycelium writes (comments, `[]`, and `- key: value`
+  entries with two-space `key: value` fields holding one-line scalars) and
+  refuses anything else, such as nested blocks, block scalars, anchors, or
+  flow lists, before copying the pack, asking for a hand fix. It writes
+  atomically and refuses a symlinked registry or conventions directory. When
+  PyYAML is installed, every rewrite must also load to the same entries (plus
+  the one being installed) or it is refused.
   `migrate_existing_repos.py` gains an idempotent `ACTIVE_CONVENTIONS.yaml
   shape` action. It rewrites only files that still carry the legacy
   `active_conventions:` key, leaves every other file byte-identical, and

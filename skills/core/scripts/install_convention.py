@@ -99,21 +99,40 @@ def copy_convention(network_dir: Path, name: str, target_dir: Path):
 #
 # with `[]` standing for "no packs". Older init_repo.py seeded a mapping
 # (`active_conventions: []`) and this installer appended list items under it,
-# which is invalid YAML (#129). The helpers below drop that legacy key and
-# otherwise edit the file line by line, so PyYAML stays optional and authored
-# lines survive. When PyYAML is installed, every rewrite must load to the same
-# entries as the original (plus or minus the one being installed), and is
-# refused otherwise: the line rules are a convenience, the parser is the check.
+# which is invalid YAML (#129).
+#
+# The file is machine-written, so this module reads exactly the grammar
+# Mycelium's writers produce, and refuses anything else rather than guess:
+#
+#   - blank lines and `#` comment lines
+#   - `[]` (optionally commented), meaning no packs
+#   - the legacy `active_conventions:` / `active_conventions: []` key line
+#   - an optional leading `---` and a trailing `...`
+#   - an entry: `- key: value`, then `  key: value` field lines indented by
+#     exactly two spaces, where every value is a one-line scalar (plain, or
+#     a complete single- or double-quoted string)
+#
+# Anchors, aliases, tags, flow collections, block scalars, nested blocks and
+# multi-line scalars are all refused. A line-based editor cannot rewrite those
+# safely without a YAML parser, and PyYAML is optional here. When PyYAML is
+# installed, every rewrite must also load to the expected entries, or it is
+# refused (pattern 36 in skills/develop/references/regression-patterns.md).
 REGISTRY_RELATIVE = Path(".living") / "conventions" / "ACTIVE_CONVENTIONS.yaml"
 REGISTRY_HEADER = "# Active Convention Packs\n# Updated by init_repo.py and install_convention.py\n"
-_LEGACY_KEY = re.compile(r"^active_conventions:\s*(\[\s*\])?\s*(#.*)?$")
-_EMPTY_LIST = re.compile(r"^\[\s*\]\s*(?P<comment>#.*)?$")
-_ENTRY_NAME = re.compile(
-    r"""^-\s+name:\s*(?P<q>["']?)(?P<name>.*?)(?P=q)(?:\s+#.*)?\s*$"""
+_BOM = "\ufeff"
+# YAML 1.1 treats these as line breaks inside a scalar; Python's splitlines
+# splits on even more. Refuse them so line structure means one thing.
+_EXTRA_BREAKS = ("\x85", "\u2028", "\u2029")
+_COMMENT = re.compile(r"^\s*#.*$")
+_EMPTY_LIST = re.compile(r"^\[\s*\](?:\s+(?P<comment>#.*))?\s*$")
+_LEGACY_KEY = re.compile(r"^active_conventions:(?:\s+\[\s*\])?(?:\s+#.*)?\s*$")
+_DOC_START = re.compile(r"^---(?:\s+#.*)?\s*$")
+_DOC_END = re.compile(r"^\.\.\.(?:\s+#.*)?\s*$")
+_SCALAR = r"""(?:"(?P<dq>[^"\\]*)"|'(?P<sq>[^']*)'|(?P<plain>[A-Za-z0-9._/~+][^#]*?))"""
+_FIELD = re.compile(
+    rf"^(?P<key>[A-Za-z_][\w-]*):[ \t]+{_SCALAR}(?:[ \t]+#.*)?[ \t]*$"
 )
-_DOC_START = re.compile(r"^---\s*(#.*)?$")
-_DOC_END = re.compile(r"^\.\.\.\s*(#.*)?$")
-_BOM = "﻿"
+_TRUE = {"true", "yes", "on"}  # the YAML 1.1 spellings safe_load reads as true
 
 
 class UnrecognizedRegistryError(ValueError):
@@ -130,87 +149,104 @@ def format_registry_entry(name: str, installed: str, core: bool = False) -> str:
     return entry + "\n  core: true" if core else entry
 
 
-def _is_comment(line: str) -> bool:
-    return line.lstrip().startswith("#")
+def _field(text: str, line: str) -> tuple[str, str]:
+    """Parse one `key: value` scalar, refusing anything outside the grammar."""
+    match = _FIELD.match(text)
+    if not match:
+        raise UnrecognizedRegistryError(f"unsupported registry line: {line!r}")
+    plain = match.group("plain")
+    if plain is not None and (": " in plain or plain.endswith(":")):
+        raise UnrecognizedRegistryError(f"unsupported registry line: {line!r}")
+    value = next(
+        group for group in (match.group("dq"), match.group("sq"), plain) if group is not None
+    )
+    return match.group("key"), value
 
 
-def _is_entry_start(line: str) -> bool:
-    """A top-level sequence item: `- key: value` or a bare `-` line."""
-    return line.startswith("- ") or line.rstrip() == "-"
+class _Entry:
+    """One registry entry: its exact source lines and its own fields."""
+
+    def __init__(self, line: str):
+        self.lines = [line]
+        key, value = _field(line[2:], line)
+        self.fields = {key: value}
+
+    def add_field(self, line: str) -> None:
+        key, value = _field(line[2:], line)
+        if key in self.fields:
+            raise UnrecognizedRegistryError(f"duplicate field {key!r}: {line!r}")
+        self.fields[key] = value
+        self.lines.append(line)
+
+    @property
+    def name(self) -> str | None:
+        return self.fields.get("name")
+
+    @property
+    def core(self) -> bool:
+        return self.fields.get("core", "").lower() in _TRUE
 
 
-def has_legacy_key(text: str) -> bool:
-    """True when the registry still carries the `active_conventions:` key."""
-    return any(_LEGACY_KEY.match(line) for line in text.removeprefix(_BOM).splitlines())
+def _parse_registry(text: str) -> tuple[list, bool]:
+    """Split registry text into items: str lines kept verbatim, and _Entry.
 
-
-def _registry_lines(text: str) -> list[str]:
-    """Return the registry's lines in list shape, with no `[]` marker.
-
-    Drops the legacy `active_conventions:` key line. A block list nested under
-    that key, or a top-level list indented as a whole, is dedented by its
-    first item's indent; blank and comment lines inside the block keep their
-    indent relative to it. Raises UnrecognizedRegistryError for any other
-    top-level content.
+    Returns (items, had_legacy_key). The legacy key, `[]` markers and a
+    trailing `...` are dropped (a `[]` comment is kept as a comment line).
+    Raises UnrecognizedRegistryError for anything outside the grammar.
     """
-    lines: list[str] = []
-    nested_indent: int | None = None  # indent of the block's first item
-    # The document's top level starts out like a key's block, so a list that
-    # is indented as a whole is dedented the same way.
-    in_key_block = True
-    for line in text.removeprefix(_BOM).splitlines():
-        if _DOC_END.match(line):
-            # Entries appended after an end marker would leave the document.
+    text = text.removeprefix(_BOM)
+    if any(char in text for char in _EXTRA_BREAKS):
+        raise UnrecognizedRegistryError("registry contains a Unicode line separator")
+    raw_lines = [line.removesuffix("\r") for line in text.split("\n")]
+    if raw_lines and raw_lines[-1] == "":
+        raw_lines.pop()  # the final newline
+    items: list = []
+    pending: list[str] = []  # blank/comment lines not yet placed
+    entry: _Entry | None = None  # entry that a following field line extends
+    had_legacy_key = False
+    seen_content = False
+    ended = False
+    for line in raw_lines:
+        if not line.strip() or _COMMENT.match(line):
+            pending.append(line)
             continue
-        if _DOC_START.match(line):
-            # Only comments may precede a document start marker.
-            if any(earlier.strip() and not _is_comment(earlier) for earlier in lines):
-                raise UnrecognizedRegistryError("multiple YAML documents")
-            lines.append(line)
+        if ended:
+            raise UnrecognizedRegistryError("content after the `...` end marker")
+        if line.startswith("  ") and not line.startswith("   "):
+            if entry is None:
+                raise UnrecognizedRegistryError(f"field outside an entry: {line!r}")
+            entry.lines.extend(pending)
+            pending = []
+            entry.add_field(line)
             continue
-        key = _LEGACY_KEY.match(line)
-        if key:
-            # Only a bare `active_conventions:` can own an indented block.
-            in_key_block = key.group(1) is None
-            nested_indent = None
-            continue
-        empty = _EMPTY_LIST.match(line.strip() if in_key_block and nested_indent is None else line)
-        if empty:
+        items.extend(pending)
+        pending = []
+        entry = None
+        if line.startswith("- "):
+            entry = _Entry(line)
+            items.append(entry)
+        elif _LEGACY_KEY.match(line):
+            had_legacy_key = True
+        elif empty := _EMPTY_LIST.match(line):
             if empty.group("comment"):
-                lines.append(empty.group("comment"))
-            continue
-        if in_key_block:
-            if not line.strip() or _is_comment(line):
-                if nested_indent is not None and line[:nested_indent].isspace():
-                    lines.append(line[nested_indent:])
-                else:
-                    lines.append(line.lstrip(" "))
-                continue
-            if line.startswith(" "):
-                indent = len(line) - len(line.lstrip(" "))
-                if nested_indent is None:
-                    nested_indent = indent
-                if indent < nested_indent:
-                    raise UnrecognizedRegistryError(
-                        f"inconsistent indentation under active_conventions: {line!r}"
-                    )
-                lines.append(line[nested_indent:])
-                continue
-            in_key_block = False
-        if line.strip() and not (
-            line.startswith((" ", "#")) or _is_entry_start(line)
-        ):
-            raise UnrecognizedRegistryError(
-                f"unexpected top-level content: {line!r}"
-            )
-        lines.append(line)
-    return lines
+                items.append(empty.group("comment"))
+        elif _DOC_START.match(line) and not seen_content:
+            items.append(line)
+        elif _DOC_END.match(line):
+            ended = True
+        else:
+            raise UnrecognizedRegistryError(f"unsupported registry line: {line!r}")
+        seen_content = True
+    items.extend(pending)
+    return items, had_legacy_key
 
 
-def _render_registry(lines: list[str]) -> str:
-    """Join registry lines, writing `[]` when no entry remains."""
-    lines = list(lines)
-    if not any(_is_entry_start(line) for line in lines):
+def _render_registry(items: list) -> str:
+    """Join parsed items, writing `[]` when no entry remains."""
+    lines: list[str] = []
+    for item in items:
+        lines.extend(item.lines if isinstance(item, _Entry) else [item])
+    if not any(isinstance(item, _Entry) for item in items):
         lines.append("[]")
     return "\n".join(lines) + "\n"
 
@@ -249,7 +285,7 @@ def _check_rewrite(original: str, result: str, expected_change=None) -> None:
     """Refuse a rewrite that is not a list or changes entries it should not.
 
     `expected_change` maps the original entry list to the expected new one.
-    A no-op when PyYAML is not installed.
+    A no-op when PyYAML is not installed; the grammar above is the guard then.
     """
     yaml = _yaml()
     if yaml is None:
@@ -271,21 +307,23 @@ def _check_rewrite(original: str, result: str, expected_change=None) -> None:
 def normalize_active_conventions(text: str) -> str:
     """Rewrite ACTIVE_CONVENTIONS.yaml text into the canonical list shape.
 
-    Raises UnrecognizedRegistryError when the text is in neither shape or the
-    rewrite would not preserve its entries.
+    Raises UnrecognizedRegistryError when the text is outside the grammar or
+    the rewrite would not preserve its entries.
     """
-    result = _render_registry(_registry_lines(text))
+    items, _ = _parse_registry(text)
+    result = _render_registry(items)
     _check_rewrite(text, result)
     return result
 
 
 def repaired_registry_text(text: str) -> str | None:
-    """Return the repaired text, or None when the file has no legacy key.
+    """Return the repaired text, or None when the file needs no repair.
 
-    Only the legacy `active_conventions:` shape is rewritten; every other file
-    is left byte-identical. Raises UnrecognizedRegistryError as normalize does.
+    Only a file carrying the legacy `active_conventions:` key line is
+    rewritten; every other file is left byte-identical. Raises
+    UnrecognizedRegistryError when a legacy file is outside the grammar.
     """
-    if not has_legacy_key(text):
+    if not any(_LEGACY_KEY.match(line) for line in text.removeprefix(_BOM).split("\n")):
         return None
     return normalize_active_conventions(text)
 
@@ -303,58 +341,58 @@ def read_registry_text(target_dir: Path) -> str:
     return yaml_path.read_text(encoding="utf-8")
 
 
-def preflight_registry(target_dir: Path) -> None:
-    """Raise ValueError if update_active_conventions would refuse this repo."""
-    text = read_registry_text(target_dir)
-    if text:
-        normalize_active_conventions(text)
+def _plan_update(target_dir: Path, name: str, now: str) -> str:
+    """Build the registry text that installing `name` would write.
 
-
-def update_active_conventions(target_dir: Path, name: str):
-    """Update .living/conventions/ACTIVE_CONVENTIONS.yaml with the new convention."""
-    yaml_path = target_dir / REGISTRY_RELATIVE
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    # Read existing content (repairing a legacy mapping shape) or start fresh
+    Raises ValueError (UnrecognizedRegistryError, or an unsafe-path error)
+    when the update would be refused, without writing anything.
+    """
     original = read_registry_text(target_dir)
-    existing_lines = _registry_lines(original) if original else []
+    items, _ = _parse_registry(original) if original else ([], False)
 
-    # Remove this convention's existing entry, matching the name exactly, and
-    # carry its core flag over to the replacement.
-    filtered = []
-    skip = False
-    was_core = False
-    for line in existing_lines:
-        match = _ENTRY_NAME.match(line)
-        if match and match.group("name") == name:
-            skip = True
-            continue
-        if skip and line.startswith("  "):
-            if line.strip() == "core: true":
-                was_core = True
-            continue
-        skip = False
-        filtered.append(line)
+    # Remove this convention's existing entry (only its own lines), matching
+    # the name exactly, and carry its core flag over to the replacement.
+    was_core = any(
+        isinstance(item, _Entry) and item.name == name and item.core for item in items
+    )
+    kept = [item for item in items if not (isinstance(item, _Entry) and item.name == name)]
 
-    entry = format_registry_entry(name, now, core=was_core)
-    if not any(line.strip() for line in filtered):
-        filtered = [REGISTRY_HEADER, entry]
+    entry = _Entry.__new__(_Entry)
+    entry.lines = format_registry_entry(name, now, core=was_core).split("\n")
+    entry.fields = {}
+    if not any(isinstance(item, _Entry) or item.strip() for item in kept):
+        kept = [REGISTRY_HEADER, entry]
     else:
-        filtered.append(entry)
-
-    result = _render_registry(filtered)
+        kept.append(entry)
+    result = _render_registry(kept)
 
     def expected(old: list) -> list:
-        kept = [e for e in old if not (isinstance(e, dict) and e.get("name") == name)]
+        remaining = [e for e in old if not (isinstance(e, dict) and e.get("name") == name)]
         new_entry = {"name": name, "path": f".living/conventions/{name}/"}
         new_entry["installed"] = datetime.strptime(now, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc
         )
         if was_core:
             new_entry["core"] = True
-        return kept + [new_entry]
+        return remaining + [new_entry]
 
     _check_rewrite(original, result, expected)
+    return result
+
+
+def preflight_update(target_dir: Path, name: str) -> None:
+    """Raise ValueError if update_active_conventions would refuse `name`."""
+    _plan_update(target_dir, name, _utc_now())
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def update_active_conventions(target_dir: Path, name: str):
+    """Update .living/conventions/ACTIVE_CONVENTIONS.yaml with the new convention."""
+    result = _plan_update(target_dir, name, _utc_now())
+    yaml_path = target_dir / REGISTRY_RELATIVE
     _atomic_write_text(yaml_path, result)
     print(f"  Updated {yaml_path}")
 
@@ -436,7 +474,7 @@ def main():
     # Validate the registry before copying anything, so an unreadable or
     # unsafe registry cannot leave a pack installed but unregistered.
     try:
-        preflight_registry(target_dir)
+        preflight_update(target_dir, args.name)
     except ValueError as error:
         print(f"\nError: cannot update {REGISTRY_RELATIVE}: {error}")
         print("Fix the file by hand (it should be a YAML list of pack entries).")
