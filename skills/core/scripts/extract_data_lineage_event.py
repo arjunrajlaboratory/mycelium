@@ -4085,18 +4085,7 @@ def _io_call_direction(
 
 
 def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
-    """Collect data-like literals reachable from actual I/O call arguments.
-
-    Pathologically nested source can exhaust the recursion limit in the
-    expression walkers; recover nothing then, rather than lose the event.
-    """
-    try:
-        return _io_literal_filenames_unguarded(source)
-    except RecursionError:
-        return set(), set()
-
-
-def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
+    """Collect data-like literals reachable from actual I/O call arguments."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -4158,10 +4147,10 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         if isinstance(expression, ast.Name):
             if expression.id in shadowed_names or expression.id in resolving:
                 return unresolved
-            definition = visible_definition(expression)
-            if definition is None:
+            definitions = assignments.get(expression.id, [])
+            if len(definitions) != 1:
                 return unresolved
-            return static_value(definition, resolving | {expression.id})
+            return static_value(definitions[0], resolving | {expression.id})
         if isinstance(expression, (ast.List, ast.Tuple)):
             values = [static_value(item, resolving) for item in expression.elts]
             if any(value is unresolved for value in values):
@@ -4201,22 +4190,10 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         if isinstance(expression, ast.Name):
             if expression.id in shadowed_names:
                 return set()
-            if expression.id in resolving:
-                return set()
-            definition = visible_definition(expression)
-            if definition is not None:
-                return collect(definition, resolving | {expression.id})
-            # Uncertain which binding is live. Never be more permissive than
-            # the file-wide lookup used before #131: if the name's single
-            # assignment would make the whole path unresolvable, so does an
-            # uncertain lookup, rather than letting a literal suffix through.
             definitions = assignments.get(expression.id, [])
-            if (
-                len(definitions) == 1
-                and collect(definitions[0], resolving | {expression.id}) is None
-            ):
-                return None
-            return set()
+            if len(definitions) != 1 or expression.id in resolving:
+                return set()
+            return collect(definitions[0], resolving | {expression.id})
         if isinstance(
             expression,
             (
@@ -4289,9 +4266,10 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             parts = import_aliases[parts[0]].split(".") + parts[1:]
         return ".".join(parts)
 
-    def reads_runtime_source(expression: ast.AST) -> bool:
-        """Whether ``expression`` reads argv, the environment, or similar."""
+    def reads_runtime_value(expression: ast.AST, tainted: set[str]) -> bool:
         for node in ast.walk(expression):
+            if isinstance(node, ast.Name) and node.id in tainted:
+                return True
             if isinstance(node, (ast.Attribute, ast.Name)):
                 root = _call_name(node)
                 root = root.split(".", 1)[0] if root else None
@@ -4308,631 +4286,33 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
                 return True
         return False
 
-    # Names whose value is chosen at run time, per lexical scope. A runtime
-    # value (command line, environment) or a function parameter, which the
-    # caller chooses, can name a directory outside the repository, so a
-    # literal filename joined to it does not identify a repository file.
-    #
-    # A scope's tainted names are its parameters, names it binds from a
-    # runtime value or from another tainted name (assignment, loop, ``with``,
-    # comprehension target, walrus, match capture), and tainted names of
-    # enclosing scopes that it does not rebind. Locals of nested functions do
-    # not leak outward, and a local that shadows an enclosing parameter is
-    # judged by its own bindings. Where Python's rules are subtle the pass
-    # errs toward taint, which only costs recovery: a class body rebinding a
-    # name does not hide the enclosing binding (reads before the rebinding see
-    # it), and a name with several bindings in one scope is tainted by any.
-    # ``global``, ``nonlocal``, and comprehension walrus targets taint the
-    # binding they name; a class whose body binds a tainted name taints the
-    # class name. A static parameter default does not help, because any
-    # caller may override it.
-    #
-    # Each scope stores only its own tainted names, and inherited taint is
-    # looked up through parent links, so many sibling scopes under a large
-    # module do not each copy the module's names. Everything is iterative,
-    # so deeply nested source cannot exhaust the recursion limit.
-    function_types = (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda)
-    comprehension_types = (ast.DictComp, ast.GeneratorExp, ast.ListComp, ast.SetComp)
-    scope_types = function_types + comprehension_types + (ast.ClassDef,)
-
-    def scope_body(scope: ast.AST) -> list[ast.AST]:
-        if isinstance(scope, ast.Lambda):
-            return [scope.body]
-        if isinstance(scope, comprehension_types):
-            # The first iterable runs in the enclosing scope; see own_nodes.
-            first, *rest = scope.generators
-            if isinstance(scope, ast.DictComp):
-                results = [scope.key, scope.value]
-            else:
-                results = [scope.elt]
-            return [*results, first.target, *first.ifs, *rest]
-        return list(getattr(scope, "body", []))
-
-    def evaluated_outside(scope: ast.AST) -> list[ast.AST]:
-        """Parts of a nested scope's node that run in the enclosing scope."""
-        if isinstance(scope, comprehension_types):
-            return [scope.generators[0].iter]
-        found = list(getattr(scope, "decorator_list", []))
-        if isinstance(scope, function_types):
-            signature = scope.args
-            found.extend(signature.defaults)
-            found.extend(item for item in signature.kw_defaults if item)
-            arguments = signature.posonlyargs + signature.args + signature.kwonlyargs
-            arguments += [arg for arg in (signature.vararg, signature.kwarg) if arg]
-            found.extend(arg.annotation for arg in arguments if arg.annotation)
-            returns = getattr(scope, "returns", None)
-            if returns is not None:
-                found.append(returns)
-        elif isinstance(scope, ast.ClassDef):
-            found.extend(scope.bases)
-            found.extend(keyword.value for keyword in scope.keywords)
-        return found
-
-    def own_nodes(scope: ast.AST) -> list[ast.AST]:
-        """Nodes evaluated in ``scope`` itself, not in a nested scope.
-
-        A nested scope's node is included, so a nested definition's name
-        counts as bound here, with the parts of it that run here too.
-        """
-        found: list[ast.AST] = []
-        stack = scope_body(scope)
-        while stack:
-            node = stack.pop()
-            found.append(node)
-            if isinstance(node, scope_types):
-                stack.extend(evaluated_outside(node))
+    # Names any of whose assignments draw on a runtime value, propagated
+    # through further assignments until nothing changes. A name with several
+    # definitions is tainted by any one of them: recovery should then stay
+    # unresolved rather than guess which definition ran. Function and lambda
+    # parameters are runtime values too: every caller, and any default, can
+    # pass a directory outside the repository. Matching by name across the
+    # file only ever leaves more paths unresolved, never records a wrong file.
+    runtime_names: set[str] = set(shadowed_names)
+    changed = True
+    while changed:
+        changed = False
+        for name, definitions in assignments.items():
+            if name in runtime_names:
                 continue
-            stack.extend(ast.iter_child_nodes(node))
-        return found
+            if any(reads_runtime_value(item, runtime_names) for item in definitions):
+                runtime_names.add(name)
+                changed = True
 
-    def parameters(scope: ast.AST) -> set[str]:
-        if not isinstance(scope, function_types):
-            return set()
-        signature = scope.args
-        names = {
-            arg.arg
-            for arg in signature.posonlyargs + signature.args + signature.kwonlyargs
-        }
-        names.update(
-            arg.arg for arg in (signature.vararg, signature.kwarg) if arg is not None
-        )
-        return names
+    def runtime_dependent(expression: ast.AST) -> bool:
+        """Whether a path expression draws on a value chosen at run time.
 
-    def stored_names(target: ast.AST) -> set[str]:
-        return {
-            node.id
-            for node in ast.walk(target)
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
-        }
-
-    def comprehension_walrus_targets(node: ast.AST) -> set[str]:
-        """Walrus targets inside a comprehension, which bind outside it."""
-        names: set[str] = set()
-        stack = [node]
-        while stack:
-            item = stack.pop()
-            if isinstance(item, ast.NamedExpr):
-                names |= stored_names(item.target)
-            if isinstance(item, (*function_types, ast.ClassDef)):
-                continue
-            stack.extend(ast.iter_child_nodes(item))
-        return names
-
-    def free_reads(value: ast.AST) -> set[str]:
-        """Names ``value`` reads, skipping names a nested lambda or
-        comprehension inside it binds for itself.
-
-        ``X.attr`` is also reported as the dotted name, so a class attribute
-        bound from a runtime value taints reads of that attribute only.
+        A command-line argument, environment value or function parameter
+        can name a directory outside the repository, so the literal filename
+        appended to it says nothing about which repository file, if any, was
+        read or written.
         """
-        names: set[str] = set()
-        stack: list[tuple[ast.AST, frozenset[str]]] = [(value, frozenset())]
-        while stack:
-            node, hidden = stack.pop()
-            if isinstance(node, ast.Name):
-                if node.id not in hidden:
-                    names.add(node.id)
-                continue
-            if isinstance(node, ast.Attribute):
-                receiver = node.value
-                if isinstance(receiver, ast.Call):
-                    # ``Config().root`` reads the class attribute too.
-                    receiver = receiver.func
-                if isinstance(receiver, ast.Name) and receiver.id not in hidden:
-                    names.add(f"{receiver.id}.{node.attr}")
-            if isinstance(node, (ast.Lambda, *comprehension_types)):
-                if isinstance(node, ast.Lambda):
-                    local = parameters(node)
-                else:
-                    local = set()
-                    for generator in node.generators:
-                        local |= stored_names(generator.target)
-                inner = hidden | local
-                stack.extend((item, hidden) for item in evaluated_outside(node))
-                stack.extend((item, inner) for item in scope_body(node))
-                continue
-            stack.extend((child, hidden) for child in ast.iter_child_nodes(node))
-        return names
-
-    user_defined = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef))
-    }
-    own_taint: dict[ast.AST, set[str]] = {}
-    # Tainted class attributes. A class, and every name bound to it or to an
-    # instance of it (``config = Config()``, ``cfg = config``), share one
-    # group in a union-find; each group holds one attribute set, so memory
-    # stays linear however many aliases and tainted fields a script has.
-    # Members are keyed by (binding scope, name), resolved with Python's
-    # lookup, so two functions' unrelated ``config`` locals stay apart.
-    group_parent: dict[tuple[int, str], tuple[int, str]] = {}
-    group_attributes: dict[tuple[int, str], set[str]] = {}
-    # Classes in each group, and each class's named bases, for inheritance.
-    group_classes: dict[tuple[int, str], set[tuple[int, str]]] = {}
-    class_bases: dict[tuple[int, str], list[tuple[int, str]]] = {}
-
-    def binding_key(scope: ast.AST | None, name: str) -> tuple[int, str]:
-        """The (scope, name) of the binding ``name`` refers to in ``scope``."""
-        start = scope
-        while scope is not None:
-            if scope is start or not isinstance(scope, ast.ClassDef):
-                if name in scope_globals.get(scope, ()):
-                    return (id(tree), name)
-                if name in scope_counts.get(scope, {}):
-                    return (id(scope), name)
-            scope = lexical_parent.get(scope)
-        return (id(tree), name)
-
-    def group_of(name: tuple[int, str]) -> tuple[int, str]:
-        root = name
-        while group_parent.get(root, root) != root:
-            root = group_parent[root]
-        while group_parent.get(name, name) != root:
-            group_parent[name], name = root, group_parent[name]
-        return root
-
-    def join_groups(first: tuple[int, str], second: tuple[int, str]) -> bool:
-        """Merge two names' groups; report whether either side gained taint."""
-        group_parent.setdefault(first, first)
-        group_parent.setdefault(second, second)
-        a, b = group_of(first), group_of(second)
-        if a == b:
-            return False
-        attributes_a = group_attributes.pop(a, set())
-        attributes_b = group_attributes.pop(b, set())
-        if len(attributes_a) < len(attributes_b):
-            a, b = b, a
-            attributes_a, attributes_b = attributes_b, attributes_a
-        group_parent[b] = a
-        merged = attributes_a | attributes_b if attributes_b else attributes_a
-        if merged:
-            group_attributes[a] = merged
-        classes_b = group_classes.pop(b, set())
-        if classes_b:
-            group_classes.setdefault(a, set()).update(classes_b)
-        return attributes_a != attributes_b or bool(classes_b or group_classes.get(a))
-
-    def attribute_tainted(scope: ast.AST | None, dotted: str) -> bool:
-        """Whether ``receiver.attribute`` is tainted, here or by inheritance.
-
-        Inheritance is followed upward only, from the receiver's classes to
-        their bases, so a subclass's runtime override never taints the base.
-        A very deep or wide hierarchy is treated as tainted.
-        """
-        receiver, _, attribute = dotted.partition(".")
-        if not attribute:
-            return False
-        key = binding_key(scope, receiver)
-        if key not in group_parent:
-            return False
-        seen: set[tuple[int, str]] = set()
-        stack = [group_of(key)]
-        while stack:
-            group = stack.pop()
-            if group in seen:
-                continue
-            seen.add(group)
-            if attribute in group_attributes.get(group, ()):
-                return True
-            if len(seen) > 64:
-                return True
-            for class_key in group_classes.get(group, ()):
-                stack.extend(
-                    group_of(base) for base in class_bases.get(class_key, ())
-                )
-        return False
-
-    scope_bound: dict[ast.AST, set[str]] = {}
-    scope_globals: dict[ast.AST, set[str]] = {}
-    scope_redirects: dict[ast.AST, set[str]] = {}
-    scope_counts: dict[ast.AST, dict[str, int]] = {}
-    lexical_parent: dict[ast.AST, ast.AST | None] = {tree: None}
-    scope_of: dict[int, ast.AST] = {}
-    # Names tainted from inside a nested scope through ``global``,
-    # ``nonlocal``, a comprehension walrus, or a class body, keyed by the
-    # scope that owns the binding.
-    redirected: dict[ast.AST, set[str]] = {}
-    settle_conservatively = False
-
-    def is_tainted(scope: ast.AST | None, name: str) -> bool:
-        """Whether ``name`` as seen from ``scope`` holds a runtime value."""
-        if "." in name and attribute_tainted(scope, name):
-            return True
-        start = scope
-        root = name.split(".", 1)[0]
-        while scope is not None:
-            # A class body's names are invisible to scopes nested in it.
-            if scope is start or not isinstance(scope, ast.ClassDef):
-                if name in own_taint.get(scope, ()):
-                    return True
-                if root in scope_globals.get(scope, ()):
-                    return name in own_taint.get(tree, ())
-                if root in scope_bound.get(scope, ()):
-                    return False
-            scope = lexical_parent[scope]
-        return False
-
-    def depends_on_runtime(scope: ast.AST | None, expression: ast.AST) -> bool:
-        return reads_runtime_source(expression) or any(
-            is_tainted(scope, name) for name in free_reads(expression)
-        )
-
-    def taint_scope(scope: ast.AST) -> tuple[bool, list[ast.AST]]:
-        """Compute one scope's own taint.
-
-        Returns whether redirects grew, and the scopes nested directly in it.
-        """
-        grew = False
-        parent = lexical_parent[scope]
-        nodes = own_nodes(scope)
-        for node in nodes:
-            scope_of[id(node)] = scope
-        global_names = {
-            name for node in nodes if isinstance(node, ast.Global) for name in node.names
-        }
-        nonlocal_names = {
-            name
-            for node in nodes
-            if isinstance(node, ast.Nonlocal)
-            for name in node.names
-        }
-        walrus_names = (
-            {
-                name
-                for node in nodes
-                if isinstance(node, ast.NamedExpr)
-                for name in stored_names(node.target)
-            }
-            if isinstance(scope, comprehension_types)
-            else set()
-        )
-        # Every binding form: assignment targets, definitions, imports,
-        # exception names, match captures, and walrus targets of nested
-        # comprehensions, which bind here.
-        counts: dict[str, int] = {}
-
-        def binds(*names: str) -> None:
-            for name in names:
-                counts[name] = counts.get(name, 0) + 1
-
-        binds(*parameters(scope))
-        for node in nodes:
-            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-                binds(node.id)
-            elif isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)):
-                binds(node.name)
-            elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                binds(
-                    *(
-                        (alias.asname or alias.name).split(".", 1)[0]
-                        for alias in node.names
-                        if alias.name != "*"
-                    )
-                )
-            elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
-                if node.name:
-                    binds(node.name)
-            elif isinstance(node, ast.MatchMapping) and node.rest:
-                binds(node.rest)
-            elif isinstance(node, comprehension_types) and not isinstance(
-                scope, comprehension_types
-            ):
-                binds(*comprehension_walrus_targets(node))
-        scope_counts[scope] = counts
-        local_names = set(counts)
-        redirected_here = global_names | nonlocal_names | walrus_names
-        bound = set() if isinstance(scope, ast.ClassDef) else set(local_names)
-        bound -= redirected_here
-        scope_bound[scope] = bound
-        scope_globals[scope] = global_names
-        scope_redirects[scope] = redirected_here
-
-        bindings: list[tuple[set[str], ast.AST]] = []
-        for node in nodes:
-            pairs: list[tuple[ast.AST, ast.AST | None]] = []
-            if isinstance(node, ast.Assign):
-                pairs = [(target, node.value) for target in node.targets]
-            elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
-                pairs = [(node.target, node.value)]
-            elif isinstance(node, (ast.AsyncFor, ast.For, ast.comprehension)):
-                pairs = [(node.target, node.iter)]
-            elif isinstance(node, (ast.AsyncWith, ast.With)):
-                pairs = [
-                    (item.optional_vars, item.context_expr)
-                    for item in node.items
-                    if item.optional_vars is not None
-                ]
-            elif isinstance(node, ast.Match):
-                for case in node.cases:
-                    captures: set[str] = set()
-                    for item in ast.walk(case.pattern):
-                        if isinstance(item, (ast.MatchAs, ast.MatchStar)):
-                            if item.name:
-                                captures.add(item.name)
-                        elif isinstance(item, ast.MatchMapping) and item.rest:
-                            captures.add(item.rest)
-                    if captures:
-                        bindings.append((captures, node.subject))
-            for target, value in pairs:
-                names = stored_names(target)
-                if names and value is not None:
-                    bindings.append((names, value))
-
-        tainted = parameters(scope) | redirected.get(scope, set())
-
-        # ``config = Config()`` or ``cfg = Config`` joins the class's group,
-        # so ``config.root`` is tainted when ``Config.root`` is.
-        for names, value in bindings:
-            source = value.func if isinstance(value, ast.Call) else value
-            if isinstance(source, ast.Name):
-                for name in names:
-                    if join_groups(
-                        (id(scope), name), binding_key(scope, source.id)
-                    ):
-                        grew = True
-        if settle_conservatively:
-            for names, _ in bindings:
-                tainted |= names & redirected_here
-        if isinstance(scope, comprehension_types):
-            first = scope.generators[0]
-            if depends_on_runtime(parent, first.iter):
-                tainted |= stored_names(first.target)
-
-        # Propagate with a worklist keyed on the names each value reads, so a
-        # long assignment chain costs one visit per binding rather than a
-        # rescan of every binding per newly tainted name. A name read here
-        # but not bound here takes its taint from the enclosing scopes.
-        readers: dict[str, list[int]] = {}
-        for index, (_, value) in enumerate(bindings):
-            for name in free_reads(value):
-                readers.setdefault(name, []).append(index)
-        own_taint[scope] = tainted
-        queue = [
-            name
-            for name in readers
-            if name in tainted
-            or (
-                name.split(".", 1)[0] not in bound
-                and name.split(".", 1)[0] not in global_names
-                and is_tainted(parent, name)
-            )
-            or (
-                name.split(".", 1)[0] in global_names
-                and name in own_taint.get(tree, ())
-            )
-            or ("." in name and attribute_tainted(scope, name))
-        ]
-        fired: set[int] = set()
-
-        def fire(index: int) -> None:
-            if index in fired:
-                return
-            fired.add(index)
-            for name in bindings[index][0]:
-                if name not in tainted:
-                    tainted.add(name)
-                    queue.append(name)
-
-        for index, (_, value) in enumerate(bindings):
-            if reads_runtime_source(value):
-                fire(index)
-        while queue:
-            for index in readers.get(queue.pop(), ()):
-                fire(index)
-
-        def redirect(owner: ast.AST | None, name: str) -> None:
-            nonlocal grew
-            if owner is not None and name not in redirected.setdefault(owner, set()):
-                redirected[owner].add(name)
-                grew = True
-
-        def enclosing(accept) -> ast.AST | None:
-            outer = parent
-            while outer is not None and not accept(outer):
-                outer = lexical_parent[outer]
-            return outer
-
-        for name in tainted & redirected_here:
-            if name in global_names:
-                redirect(tree, name)
-            elif name in nonlocal_names:
-                # ``nonlocal`` skips class bodies and comprehensions.
-                redirect(
-                    enclosing(
-                        lambda outer, name=name: isinstance(outer, function_types)
-                        and name in scope_bound.get(outer, ())
-                    ),
-                    name,
-                )
-            else:
-                # A comprehension walrus binds in the nearest enclosing
-                # function or module.
-                redirect(
-                    enclosing(
-                        lambda outer: outer is tree
-                        or isinstance(outer, function_types)
-                    ),
-                    name,
-                )
-        # Taint leaves a scope through what it exports. A class body name
-        # bound from a runtime value taints ``Class.name`` (only that
-        # attribute; a static sibling such as ``Config.data_dir`` still
-        # recovers). A function whose return or yield values depend on a
-        # runtime value taints its own name, so ``root = get_root()`` stays
-        # unresolved; a method does so through its class. Once settling turns
-        # conservative, any export that calls a function or class defined in
-        # this file counts too, so chains of helpers settle in a bounded
-        # number of passes.
-        def exported_taint(value: ast.AST) -> bool:
-            if depends_on_runtime(scope, value):
-                return True
-            return settle_conservatively and bool(free_reads(value) & user_defined)
-
-        if isinstance(scope, ast.ClassDef):
-            class_key = (id(parent), scope.name)
-            group_parent.setdefault(class_key, class_key)
-            group_classes.setdefault(group_of(class_key), set()).add(class_key)
-            # Inherited attributes are looked up through the named bases.
-            if class_key not in class_bases:
-                bases = []
-                for base in scope.bases:
-                    if isinstance(base, ast.Name):
-                        base_key = binding_key(parent, base.id)
-                        group_parent.setdefault(base_key, base_key)
-                        bases.append(base_key)
-                class_bases[class_key] = bases
-                if bases:
-                    grew = True
-            group = group_attributes.setdefault(group_of(class_key), set())
-            for name in local_names:
-                if name in tainted and name not in group:
-                    group.add(name)
-                    grew = True
-        if isinstance(scope, function_types) and not isinstance(scope, ast.Lambda):
-            exports = [
-                node.value
-                for node in nodes
-                if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom))
-                and node.value is not None
-            ]
-            if any(exported_taint(value) for value in exports):
-                redirect(parent, scope.name)
-
-        nested = [node for node in nodes if isinstance(node, scope_types)]
-        for node in nested:
-            lexical_parent[node] = scope
-        return grew, nested
-
-    def taint_pass() -> bool:
-        """Compute every scope's taint, parents first; report redirect growth."""
-        grew = False
-        work: list[ast.AST] = [tree]
-        while work:
-            scope_grew, nested = taint_scope(work.pop())
-            grew = grew or scope_grew
-            work.extend(nested)
-        return grew
-
-    # Redirected names only grow. Each pass usually settles them, but a chain
-    # of ``global`` assignments written in reverse order would add one name
-    # per pass, quadratic in the chain length. After a few precise passes,
-    # taint every redirected name a scope binds: that settles in at most two
-    # more passes and errs toward unresolved lineage.
-    passes = 0
-    while taint_pass():
-        passes += 1
-        if passes >= 3:
-            settle_conservatively = True
-        if passes >= 8:
-            # Still growing after the conservative passes: recover nothing
-            # rather than risk a decoy or an unbounded scan.
-            return set(), set()
-
-    # Runtime values also taint by name across the whole file, as before
-    # #131: a name assigned from a runtime value anywhere taints every read
-    # of that name. It over-taints across scopes, but it also follows
-    # routes the scoped pass does not model (factory returns, nested
-    # attributes, container writes), so no runtime-value case can regress.
-    # Parameters stay scoped: tainting every same-named variable in the file
-    # whenever some function has a parameter of that name would drop too
-    # much ordinary recovery. Propagated with a worklist, linear in the
-    # assignments.
-    runtime_names: set[str] = set()
-    assignment_readers: dict[str, list[str]] = {}
-    runtime_queue: list[str] = []
-    for assigned_name, values in assignments.items():
-        for value in values:
-            for item in ast.walk(value):
-                if isinstance(item, ast.Name):
-                    assignment_readers.setdefault(item.id, []).append(assigned_name)
-            if assigned_name not in runtime_names and reads_runtime_source(value):
-                runtime_names.add(assigned_name)
-                runtime_queue.append(assigned_name)
-    while runtime_queue:
-        for reader in assignment_readers.get(runtime_queue.pop(), ()):
-            if reader not in runtime_names:
-                runtime_names.add(reader)
-                runtime_queue.append(reader)
-
-    def runtime_dependent(call: ast.Call, expression: ast.AST) -> bool:
-        """Whether a path expression draws on a value chosen at run time."""
-        if any(
-            isinstance(item, ast.Name) and item.id in runtime_names
-            for item in ast.walk(expression)
-        ):
-            return True
-        return depends_on_runtime(scope_of.get(id(call), tree), expression)
-
-    definitions_by_scope: dict[tuple[int, str], list[ast.AST]] = {}
-    for assigned_name, values in assignments.items():
-        for value in values:
-            key = (id(scope_of.get(id(value), tree)), assigned_name)
-            definitions_by_scope.setdefault(key, []).append(value)
-
-    # A ``global`` or ``nonlocal`` write in another scope rebinds a name
-    # without counting against its owner, so such names never resolve.
-    redeclared_names = {
-        name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Global, ast.Nonlocal))
-        for name in node.names
-    }
-
-    def visible_definition(name_node: ast.Name) -> ast.AST | None:
-        """The single assigned value a name read sees, or None if unsure.
-
-        Follows Python's lookup from the reading scope outward (class bodies
-        are invisible to nested scopes) to the first scope that binds the
-        name. It resolves only when that scope binds the name exactly once,
-        by a plain assignment; a loop, ``with``, import, second assignment,
-        or ``global``/``nonlocal`` declaration leaves it unresolved. A loop,
-        comprehension, or other non-assignment binding of the same name in
-        an unrelated scope does not interfere; a second plain assignment
-        anywhere does.
-        """
-        name = name_node.id
-        # Never resolve more than before #131: the name must also have a
-        # single plain assignment in the whole file. Two same-named locals
-        # in different helpers may carry values the taint pass cannot see
-        # (``self.data_dir = ...`` set from the environment, say).
-        if name in redeclared_names or len(assignments.get(name, ())) != 1:
-            return None
-        start = scope = scope_of.get(id(name_node), tree)
-        while scope is not None:
-            if scope is start or not isinstance(scope, ast.ClassDef):
-                if name in scope_redirects.get(scope, ()):
-                    return None
-                count = scope_counts.get(scope, {}).get(name, 0)
-                if count:
-                    # A class body runs top to bottom, so a read there may
-                    # come before its own binding; leave it unresolved.
-                    if count != 1 or isinstance(scope, ast.ClassDef):
-                        return None
-                    found = definitions_by_scope.get((id(scope), name), ())
-                    return found[0] if len(found) == 1 else None
-            scope = lexical_parent.get(scope)
-        return None
+        return reads_runtime_value(expression, runtime_names)
 
     inputs: set[str] = set()
     outputs: set[str] = set()
@@ -4951,7 +4331,7 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         values: set[str] = set()
         for expression in path_expressions:
             expression_values = (
-                None if runtime_dependent(node, expression) else collect(expression)
+                None if runtime_dependent(expression) else collect(expression)
             )
             if expression_values is None:
                 values.clear()

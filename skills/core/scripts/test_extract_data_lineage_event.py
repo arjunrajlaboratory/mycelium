@@ -1572,12 +1572,10 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             id="parameter-division",
         ),
         pytest.param(
-            "def load(d):\n"
-            "    src = d / 'input.csv'\n"
-            "    frame = pd.read_csv(src)\n"
-            "    frame.to_csv(Path(d, 'result.csv'))\n"
-            "load(sys.argv[1])\n",
-            id="parameter-through-local-assignment",
+            "async def load(d):\n"
+            "    frame = pd.read_csv(Path(d, 'input.csv'))\n"
+            "    frame.to_csv(Path(d) / 'result.csv')\n",
+            id="async-parameter-path-call",
         ),
         pytest.param(
             "def load(*, d):\n"
@@ -1585,6 +1583,18 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "    frame.to_csv(os.path.join(d, 'result.csv'))\n"
             "load(d=sys.argv[1])\n",
             id="keyword-only-parameter-path-join",
+        ),
+        pytest.param(
+            "def load(*dirs, **opts):\n"
+            "    frame = pd.read_csv(dirs[0] / 'input.csv')\n"
+            "    frame.to_csv(opts['out'] / 'result.csv')\n",
+            id="star-args-and-kwargs",
+        ),
+        pytest.param(
+            "load = lambda d: pd.read_csv(d / 'input.csv')\n"
+            "save = lambda frame, d: frame.to_csv(d / 'result.csv')\n"
+            "save(load(Path(sys.argv[1])), Path(sys.argv[1]))\n",
+            id="lambda-parameter",
         ),
         pytest.param(
             "def outer(d):\n"
@@ -1605,368 +1615,6 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "Job(sys.argv[1]).run()\n",
             id="method-self-attribute",
         ),
-        pytest.param(
-            "ROOT = Path(__file__).parent\n"
-            "def load(root=ROOT):\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n"
-            "    frame.to_csv(root / 'result.csv')\n"
-            "load(Path(sys.argv[1]))\n",
-            id="static-default-overridden-by-caller",
-        ),
-        pytest.param(
-            "base = None\n"
-            "def setup():\n"
-            "    global base\n"
-            "    base = Path(sys.argv[1])\n"
-            "setup()\n"
-            "frame = pd.read_csv(base / 'input.csv')\n"
-            "frame.to_csv(base / 'result.csv')\n",
-            id="runtime-value-assigned-through-global",
-        ),
-        pytest.param(
-            "def outer(d):\n"
-            "    root = None\n"
-            "    def set_root():\n"
-            "        nonlocal root\n"
-            "        root = d\n"
-            "    set_root()\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n"
-            "    frame.to_csv(root / 'result.csv')\n"
-            "outer(Path(sys.argv[1]))\n",
-            id="parameter-assigned-through-nonlocal",
-        ),
-        pytest.param(
-            "class Job:\n"
-            "    def run(self):\n"
-            "        frame = pd.read_csv(Path(sys.argv[1]) / 'input.csv')\n"
-            "        frame.to_csv(Path(sys.argv[1]) / 'result.csv')\n"
-            "Job().run()\n",
-            id="runtime-value-inside-method",
-        ),
-        pytest.param(
-            "def configure(d):\n"
-            "    global root\n"
-            "    root = Path(d)\n"
-            "configure(sys.argv[1])\n"
-            "frame = pd.read_csv(root / 'input.csv')\n"
-            "frame.to_csv(root / 'result.csv')\n",
-            id="parameter-assigned-through-global",
-        ),
-        pytest.param(
-            "def load(dirs):\n"
-            "    for d in dirs:\n"
-            "        frame = pd.read_csv(d / 'input.csv')\n"
-            "        frame.to_csv(d / 'result.csv')\n"
-            "load([Path(sys.argv[1])])\n",
-            id="loop-target-from-parameter",
-        ),
-        pytest.param(
-            "import contextlib\n"
-            "def load(d):\n"
-            "    with contextlib.nullcontext(Path(d)) as root:\n"
-            "        frame = pd.read_csv(root / 'input.csv')\n"
-            "        frame.to_csv(root / 'result.csv')\n"
-            "load(sys.argv[1])\n",
-            id="with-target-from-parameter",
-        ),
-        pytest.param(
-            "def load(dirs):\n"
-            "    return [pd.read_csv(d / 'input.csv') for d in dirs]\n"
-            "load([Path(sys.argv[1])])\n",
-            id="comprehension-target-from-parameter",
-        ),
-        pytest.param(
-            "root = Path(sys.argv[1])\n"
-            "def outer():\n"
-            "    root = Path(__file__).parent\n"
-            "    def inner():\n"
-            "        global root\n"
-            "        frame = pd.read_csv(root / 'input.csv')\n"
-            "        frame.to_csv(root / 'result.csv')\n"
-            "    inner()\n"
-            "    return root\n"
-            "outer()\n",
-            id="global-read-skips-enclosing-static-local",
-        ),
-        pytest.param(
-            "roots = [Path(sys.argv[1])]\n"
-            "frames = [pd.read_csv(roots / 'input.csv') for roots in roots]\n",
-            id="first-comprehension-iterable-runs-in-outer-scope",
-        ),
-        pytest.param(
-            "def outer():\n"
-            "    root = Path(__file__).parent\n"
-            "    class Holder:\n"
-            "        root = None\n"
-            "        def set(self):\n"
-            "            nonlocal root\n"
-            "            root = Path(sys.argv[1])\n"
-            "    Holder().set()\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n"
-            "    frame.to_csv(root / 'result.csv')\n"
-            "outer()\n",
-            id="nonlocal-skips-class-scope",
-        ),
-        pytest.param(
-            "root = Path(sys.argv[1])\n"
-            "class C:\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n"
-            "    root = Path(__file__).parent\n",
-            id="class-body-read-before-rebinding",
-        ),
-        pytest.param(
-            "def load(d):\n"
-            "    [(root := d) for _ in [0]]\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n"
-            "    frame.to_csv(root / 'result.csv')\n"
-            "load(Path(sys.argv[1]))\n",
-            id="comprehension-walrus-binds-enclosing-function",
-        ),
-        pytest.param(
-            "class Config:\n"
-            "    root = Path(sys.argv[1])\n"
-            "root = Config.root\n"
-            "frame = pd.read_csv(root / 'input.csv')\n"
-            "frame.to_csv(root / 'result.csv')\n",
-            id="class-attribute-alias",
-        ),
-        pytest.param(
-            "def outer():\n"
-            "    from os import curdir as root\n"
-            "    def set_root():\n"
-            "        nonlocal root\n"
-            "        root = Path(sys.argv[1])\n"
-            "    set_root()\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n"
-            "    frame.to_csv(root / 'result.csv')\n"
-            "outer()\n",
-            id="nonlocal-owner-bound-by-import",
-        ),
-        pytest.param(
-            "def load(config):\n"
-            "    match config:\n"
-            "        case {'root': root}:\n"
-            "            frame = pd.read_csv(root / 'input.csv')\n"
-            "            frame.to_csv(root / 'result.csv')\n"
-            "load({'root': Path(sys.argv[1])})\n",
-            id="match-capture-from-parameter",
-        ),
-        pytest.param(
-            "def outer():\n"
-            "    match 0:\n"
-            "        case root:\n"
-            "            pass\n"
-            "    def set_root():\n"
-            "        nonlocal root\n"
-            "        root = Path(sys.argv[1])\n"
-            "    set_root()\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n"
-            "    frame.to_csv(root / 'result.csv')\n"
-            "outer()\n",
-            id="nonlocal-owner-bound-by-match-capture",
-        ),
-        pytest.param(
-            "def outer():\n"
-            "    [(root := Path('.')) for _ in [0]]\n"
-            "    def set_root():\n"
-            "        nonlocal root\n"
-            "        root = Path(sys.argv[1])\n"
-            "    set_root()\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n"
-            "    frame.to_csv(root / 'result.csv')\n"
-            "outer()\n",
-            id="nonlocal-owner-bound-by-comprehension-walrus",
-        ),
-        pytest.param(
-            "def main():\n"
-            "    root = Path(sys.argv[1])\n"
-            "    def f(x: pd.read_csv(root / 'input.csv')) -> None:\n"
-            "        pass\n"
-            "    return f\n"
-            "main()\n",
-            id="annotation-runs-in-enclosing-scope",
-        ),
-        pytest.param(
-            "def get_root():\n"
-            "    root = Path(sys.argv[1])\n"
-            "    return root\n"
-            "def main():\n"
-            "    root = get_root()\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n"
-            "    frame.to_csv(root / 'result.csv')\n"
-            "main()\n",
-            id="runtime-value-returned-by-helper",
-        ),
-        pytest.param(
-            "class Config:\n"
-            "    def get_root():\n"
-            "        return Path(os.environ['DATA_DIR'])\n"
-            "root = Config.get_root()\n"
-            "frame = pd.read_csv(root / 'input.csv')\n"
-            "frame.to_csv(root / 'result.csv')\n",
-            id="runtime-value-returned-by-method",
-        ),
-        pytest.param(
-            "def helper():\n"
-            "    path = Path(sys.argv[1]) / 'input.csv'\n"
-            "    return None\n"
-            "for path in [Path(__file__).parent / 'actual.csv']:\n"
-            "    frame = pd.read_csv(path)\n",
-            id="loop-target-shadowing-another-scopes-assignment",
-        ),
-        pytest.param(
-            "class Config:\n"
-            "    root = Path(os.environ['DATA_DIR'])\n"
-            "config = Config()\n"
-            "root = config.root\n"
-            "frame = pd.read_csv(root / 'input.csv')\n"
-            "frame.to_csv(root / 'result.csv')\n",
-            id="class-attribute-through-instance",
-        ),
-        pytest.param(
-            "class Config:\n"
-            "    root = Path(sys.argv[1])\n"
-            "def main():\n"
-            "    settings = Config\n"
-            "    cfg = settings()\n"
-            "    frame = pd.read_csv(cfg.root / 'input.csv')\n"
-            "    frame.to_csv(cfg.root / 'result.csv')\n"
-            "main()\n",
-            id="class-attribute-through-alias-chain",
-        ),
-        pytest.param(
-            "path = Path(__file__).parent / 'missing.csv'\n"
-            "def main(dirs):\n"
-            "    for path in dirs:\n"
-            "        frame = pd.read_csv(path / 'input.csv')\n"
-            "main([Path(sys.argv[1])])\n",
-            id="function-loop-shadows-module-assignment",
-        ),
-        pytest.param(
-            "class Config:\n"
-            "    root = Path(sys.argv[1])\n"
-            "root = Config().root\n"
-            "frame = pd.read_csv(root / 'input.csv')\n"
-            "frame.to_csv(root / 'result.csv')\n",
-            id="class-attribute-through-temporary-instance",
-        ),
-        pytest.param(
-            "path = Path(__file__).parent / 'missing.csv'\n"
-            "class C:\n"
-            "    frame = pd.read_csv(path)\n"
-            "    path = Path(__file__).parent / 'input.csv'\n",
-            id="class-body-read-before-own-binding",
-        ),
-        pytest.param(
-            "class Base:\n"
-            "    root = Path(sys.argv[1])\n"
-            "class Config(Base):\n"
-            "    pass\n"
-            "root = Config.root\n"
-            "frame = pd.read_csv(root / 'input.csv')\n"
-            "frame.to_csv(Config().root / 'result.csv')\n",
-            id="inherited-runtime-class-attribute",
-        ),
-        pytest.param(
-            "class Config:\n"
-            "    root = Path(sys.argv[1])\n"
-            "def get_config():\n"
-            "    return Config()\n"
-            "config = get_config()\n"
-            "root = config.root\n"
-            "frame = pd.read_csv(root / 'input.csv')\n"
-            "frame.to_csv(root / 'result.csv')\n",
-            id="runtime-attribute-through-config-factory",
-        ),
-        pytest.param(
-            "class Paths:\n"
-            "    root = Path(sys.argv[1])\n"
-            "class Config:\n"
-            "    paths = Paths()\n"
-            "root = Config.paths.root\n"
-            "frame = pd.read_csv(root / 'input.csv')\n"
-            "frame.to_csv(root / 'result.csv')\n",
-            id="runtime-attribute-through-nested-config",
-        ),
-        pytest.param(
-            "root = Path(sys.argv[1])\n"
-            "config = {'root': None}\n"
-            "config['root'] = root\n"
-            "def main():\n"
-            "    root = Path(config['root'])\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n"
-            "    frame.to_csv(root / 'result.csv')\n"
-            "main()\n",
-            id="runtime-value-through-dictionary-write",
-        ),
-        pytest.param(
-            "class Config:\n"
-            "    root = Path(sys.argv[1])\n"
-            "config = None\n"
-            "def setup():\n"
-            "    global config\n"
-            "    config = Config()\n"
-            "setup()\n"
-            "root = config.root\n"
-            "frame = pd.read_csv(root / 'input.csv')\n",
-            id="runtime-attribute-through-global-alias",
-        ),
-        pytest.param(
-            "class Config:\n"
-            "    root = Path(sys.argv[1])\n"
-            "config, count = Config(), 1\n"
-            "root = config.root\n"
-            "frame = pd.read_csv(root / 'input.csv')\n",
-            id="runtime-attribute-through-unpacking",
-        ),
-        pytest.param(
-            "class Config:\n"
-            "    root = Path(sys.argv[1])\n"
-            "for config in [Config()]:\n"
-            "    root = config.root\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n",
-            id="runtime-attribute-through-iteration",
-        ),
-        pytest.param(
-            "path = Path(__file__).parent / 'input.csv'\n"
-            "def choose():\n"
-            "    global path\n"
-            "    path = Path(__file__).parent / 'actual.csv'\n"
-            "choose()\n"
-            "frame = pd.read_csv(path)\n",
-            id="global-write-rebinds-module-path",
-        ),
-        pytest.param(
-            "def main():\n"
-            "    path = Path(__file__).parent / 'input.csv'\n"
-            "    def choose():\n"
-            "        nonlocal path\n"
-            "        path = Path(__file__).parent / 'actual.csv'\n"
-            "    choose()\n"
-            "    frame = pd.read_csv(path)\n"
-            "main()\n",
-            id="nonlocal-write-rebinds-function-path",
-        ),
-        pytest.param(
-            "class Config:\n"
-            "    def __init__(self):\n"
-            "        self.data_dir = Path(os.environ['DATA_DIR'])\n"
-            "config = Config()\n"
-            "def load():\n"
-            "    path = config.data_dir / 'input.csv'\n"
-            "    return pd.read_csv(path)\n"
-            "def save(frame):\n"
-            "    path = Path(__file__).parent / 'result.csv'\n"
-            "    frame.to_csv(path, index=False)\n"
-            "save(load())\n",
-            id="same-local-name-in-helpers-with-runtime-instance-field",
-        ),
-        pytest.param(
-            "data_dir = os.path.expanduser('~/datasets/study')\n"
-            "for data_dir in Path(data_dir).glob('batch_*'):\n"
-            "    frame = pd.read_csv(data_dir / 'input.csv')\n",
-            id="uncertain-binding-keeps-unresolvable-assignment-strict",
-        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
@@ -1978,6 +1626,26 @@ def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
     joined to it does not identify a repository file.
     """
     event = _decoy_repository_event(tmp_path, source)
+
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+    assert event["outputs"] == []
+    assert event["lineage_warnings"]
+
+
+def test_repository_recovery_ignores_decoys_for_parameter_aliases(
+    tmp_path: Path,
+) -> None:
+    """A local alias built from a parameter inherits its runtime taint."""
+    event = _decoy_repository_event(
+        tmp_path,
+        "def load(d):\n"
+        "    p = d / 'input.csv'\n"
+        "    q = Path(d, 'result.csv')\n"
+        "    frame = pd.read_csv(p)\n"
+        "    frame.to_csv(q)\n"
+        "load(Path(sys.argv[1]))\n",
+    )
 
     assert event["io_detection"] == "unresolved"
     assert event["inputs"] == []
@@ -2022,163 +1690,12 @@ def test_repository_recovery_leaves_static_parameter_defaults_unresolved(
         ),
         pytest.param(
             "ROOT = Path(__file__).parent\n"
-            "def main():\n"
+            "def main(limit):\n"
             "    frame = pd.read_csv(ROOT / 'input.csv')\n"
-            "    frame.to_csv(ROOT / 'result.csv')\n"
-            "main()\n",
-            id="function-using-module-constant",
-        ),
-        pytest.param(
-            "def helper(root):\n"
-            "    return root\n"
-            "root = Path(__file__).parent\n"
-            "frame = pd.read_csv(root / 'input.csv')\n"
-            "frame.to_csv(root / 'result.csv')\n",
-            id="module-name-shared-with-other-function-parameter",
-        ),
-        pytest.param(
-            "def main(config):\n"
-            "    root = Path(__file__).parent\n"
-            "    def helper():\n"
-            "        root = config\n"
-            "        return root\n"
-            "    helper()\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n"
-            "    frame.to_csv(root / 'result.csv')\n"
-            "main(sys.argv[1])\n",
-            id="nested-local-does-not-taint-outer-name",
-        ),
-        pytest.param(
-            "def outer(root):\n"
-            "    def inner():\n"
-            "        root = Path(__file__).parent\n"
-            "        frame = pd.read_csv(root / 'input.csv')\n"
-            "        frame.to_csv(root / 'result.csv')\n"
-            "    inner()\n"
-            "outer(sys.argv[1])\n",
-            id="inner-local-shadows-outer-parameter",
-        ),
-        pytest.param(
-            "root = Path(__file__).parent\n"
-            "def load(root=pd.read_csv(root / 'input.csv')):\n"
-            "    return root\n"
-            "frame = load()\n"
-            "frame.to_csv(Path(__file__).parent / 'result.csv')\n",
-            id="default-expression-runs-in-enclosing-scope",
-        ),
-        pytest.param(
-            "def load(root):\n"
-            "    out = Path(__file__).parent / 'result.csv'\n"
-            "    frames = [pd.read_csv(root / 'input.csv')"
-            " for root in [Path(__file__).parent]]\n"
-            "    frame = frames[0]\n"
-            "    frame.to_csv(out)\n"
-            "load(sys.argv[1])\n",
-            id="comprehension-target-shadows-parameter",
-        ),
-        pytest.param(
-            "def load(n):\n"
-            "    for root in [Path(__file__).parent]:\n"
-            "        frame = pd.read_csv(root / 'input.csv')\n"
-            "        frame.to_csv(root / 'result.csv')\n"
-            "load(5)\n",
-            id="static-loop-target",
-        ),
-        pytest.param(
-            "def load(limit):\n"
-            "    root = Path(__file__).parent\n"
-            "    settings = {}\n"
-            "    settings[root] = limit\n"
-            "    frame = pd.read_csv(root / 'input.csv')\n"
-            "    frame.to_csv(root / 'result.csv')\n"
-            "load(5)\n",
-            id="subscript-index-is-not-a-binding",
-        ),
-        pytest.param(
-            "roots = [Path(__file__).parent]\n"
-            "frames = [pd.read_csv(r / 'input.csv') for r in roots if sys.argv]\n"
-            "frame = frames[0]\n"
-            "frame.to_csv(Path(__file__).parent / 'result.csv')\n",
-            id="static-comprehension-with-runtime-filter",
-        ),
-        pytest.param(
-            "def load(root):\n"
-            "    roots = [root for root in [Path(__file__).parent]]\n"
-            "    for base in roots:\n"
-            "        frame = pd.read_csv(base / 'input.csv')\n"
-            "        frame.to_csv(base / 'result.csv')\n"
-            "load(sys.argv[1])\n",
-            id="comprehension-local-is-not-a-parameter-dependency",
-        ),
-        pytest.param(
-            "def load(root):\n"
-            "    pick = lambda root=Path(__file__).parent: root\n"
-            "    base = pick()\n"
-            "    frame = pd.read_csv(base / 'input.csv')\n"
-            "    frame.to_csv(base / 'result.csv')\n"
-            "load(sys.argv[1])\n",
-            id="lambda-parameter-is-not-a-parameter-dependency",
-        ),
-        pytest.param(
-            "ROOT = Path(__file__).parent\n"
-            "class Config:\n"
-            "    data_dir = ROOT\n"
-            "    n_jobs = int(os.getenv('N_JOBS', '1'))\n"
-            "frame = pd.read_csv(Config.data_dir / 'input.csv')\n"
-            "frame.to_csv(Config.data_dir / 'result.csv')\n",
-            id="static-class-attribute-beside-runtime-field",
-        ),
-        pytest.param(
-            "ROOT = Path(__file__).parent\n"
-            "class Config:\n"
-            "    data_dir = ROOT\n"
-            "    n_jobs = int(os.getenv('N_JOBS', '1'))\n"
-            "config = Config()\n"
-            "frame = pd.read_csv(config.data_dir / 'input.csv')\n"
-            "frame.to_csv(config.data_dir / 'result.csv')\n",
-            id="static-attribute-through-instance-beside-runtime-field",
-        ),
-        pytest.param(
-            "input_path = Path(__file__).parent / 'input.csv'\n"
-            "result_path = Path(__file__).parent / 'result.csv'\n"
-            "def list_inputs(directory):\n"
-            "    return [input_path.name for input_path in directory.glob('*.csv')]\n"
-            "frame = pd.read_csv(input_path)\n"
-            "frame.to_csv(result_path)\n",
-            id="unrelated-comprehension-binding-of-same-name",
-        ),
-        pytest.param(
-            "INPUT = Path(__file__).parent / 'input.csv'\n"
-            "RESULT = Path(__file__).parent / 'result.csv'\n"
-            "def main():\n"
-            "    frame = pd.read_csv(INPUT)\n"
-            "    frame.to_csv(RESULT)\n"
-            "main()\n",
-            id="module-path-constant-read-in-function",
-        ),
-        pytest.param(
-            "class RuntimeConfig:\n"
-            "    data_dir = Path(sys.argv[1])\n"
-            "class StaticConfig:\n"
-            "    data_dir = Path(__file__).parent\n"
-            "def inspect_external():\n"
-            "    config = RuntimeConfig()\n"
-            "    return config\n"
-            "def main():\n"
-            "    config = StaticConfig()\n"
-            "    frame = pd.read_csv(config.data_dir / 'input.csv')\n"
-            "    frame.to_csv(config.data_dir / 'result.csv')\n"
-            "main()\n",
-            id="same-local-name-for-unrelated-config-instances",
-        ),
-        pytest.param(
-            "class Base:\n"
-            "    root = Path(__file__).parent\n"
-            "class External(Base):\n"
-            "    root = Path(sys.argv[1])\n"
-            "frame = pd.read_csv(Base.root / 'input.csv')\n"
-            "frame.to_csv(Base().root / 'result.csv')\n",
-            id="subclass-runtime-override-does-not-taint-base",
+            "    top = frame.head(limit)\n"
+            "    top.to_csv(ROOT / 'result.csv')\n"
+            "main(int(sys.argv[1]))\n",
+            id="module-constant-beside-parameter",
         ),
     ],
 )
@@ -2207,190 +1724,6 @@ def test_repository_recovery_keeps_static_paths_beside_parameters(
     assert event["io_detection"] == "static+repository"
     assert [item["path"] for item in event["inputs"]] == [str(sample)]
     assert [item["path"] for item in event["outputs"]] == [str(result)]
-
-
-@pytest.mark.parametrize(
-    "build",
-    [
-        pytest.param(
-            lambda n: "def load(root):\n"
-            + "".join(f"    p{i} = None\n" for i in range(n))
-            + "".join(f"    p{i} = p{i - 1}\n" for i in range(n - 1, 0, -1))
-            + "    p0 = root\n    pd.read_csv(p0 / 'input.csv')\n",
-            id="reverse-assignment-chain",
-        ),
-        pytest.param(
-            lambda n: "def load(root):\n"
-            + "".join(f"    p{i} = None\n" for i in range(n))
-            + "".join(f"    p{i} = p{i - 1}\n" for i in range(1, n))
-            + "    p0 = root\n    pd.read_csv(p0 / 'input.csv')\n",
-            id="forward-assignment-chain",
-        ),
-        pytest.param(
-            lambda n: "".join(f"g{i} = None\n" for i in range(n))
-            + "".join(
-                f"def s{i}():\n    global g{i}\n    g{i} = g{i + 1}\n"
-                for i in range(n - 1)
-            )
-            + f"def s{n - 1}():\n    global g{n - 1}\n    g{n - 1} = sys.argv[1]\n"
-            + "pd.read_csv(g0 / 'input.csv')\n",
-            id="reverse-global-chain",
-        ),
-        pytest.param(
-            lambda n: "class C0:\n    root = Path(sys.argv[1])\n"
-            + "".join(f"class C{i}:\n    root = C{i - 1}.root\n" for i in range(1, n))
-            + f"pd.read_csv(C{n - 1}.root / 'input.csv')\n",
-            id="class-attribute-chain",
-        ),
-        pytest.param(
-            lambda n: "".join(
-                f"def f{i}():\n    return f{i + 1}()\n" for i in range(n - 1)
-            )
-            + f"def f{n - 1}():\n    return Path(sys.argv[1])\n"
-            + "pd.read_csv(f0() / 'input.csv')\n",
-            id="helper-return-chain",
-        ),
-    ],
-)
-def test_repository_recovery_taint_scan_stays_linear(
-    build, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Taint propagation must not rescan every binding per tainted name.
-
-    Work is measured as ``ast.walk`` calls, not wall time, so the check is
-    deterministic under parallel test load. Doubling the input must roughly
-    double the work; a quadratic fixed point (about 12 s at 3000 links)
-    quadruples it.
-    """
-    import ast
-
-    real_walk = ast.walk
-    calls = 0
-
-    def counting_walk(node):
-        nonlocal calls
-        calls += 1
-        return real_walk(node)
-
-    monkeypatch.setattr(ast, "walk", counting_walk)
-    work = []
-    for size in (500, 1000):
-        calls = 0
-        inputs, outputs = lineage_event._io_literal_filenames(
-            _PANDAS_PATH_PRELUDE + build(size)
-        )
-        assert inputs == set()
-        assert outputs == set()
-        work.append(calls)
-
-    assert work[1] < 3 * work[0], work
-
-
-def test_repository_recovery_taint_memory_stays_linear_for_sibling_scopes() -> None:
-    """Sibling scopes must not each copy every inherited tainted name.
-
-    2000 tainted module names under 2000 functions peaked at about 134 MiB
-    when every scope copied the inherited set; per-scope sets with parent
-    lookups stay near 13 MiB.
-    """
-    import tracemalloc
-
-    size = 2000
-    source = (
-        "import sys\n"
-        + "".join(f"g{i} = sys.argv\n" for i in range(size))
-        + "".join(f"def f{i}():\n    pass\n" for i in range(size))
-    )
-    tracemalloc.start()
-    try:
-        lineage_event._io_literal_filenames(source)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-
-    assert peak < 48 * 2**20, peak
-
-
-def test_repository_recovery_alias_memory_stays_linear() -> None:
-    """Aliases must share a class's attribute taint, not copy it.
-
-    800 runtime fields and 800 instances peaked near 107 MiB when every
-    alias stored every tainted field.
-    """
-    import tracemalloc
-
-    size = 800
-    source = (
-        "import sys\nclass Config:\n"
-        + "".join(f"    f{i} = sys.argv[1]\n" for i in range(size))
-        + "".join(f"c{i} = Config()\n" for i in range(size))
-    )
-    tracemalloc.start()
-    try:
-        lineage_event._io_literal_filenames(source)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-
-    assert peak < 48 * 2**20, peak
-
-
-def test_repository_recovery_definition_lookup_stays_linear() -> None:
-    """Resolving a name must not scan every same-named assignment in the file.
-
-    Best of three timings per size; linear work quadruples from 2000 to 8000
-    functions, the per-read scan of all definitions grew sixteenfold.
-    """
-    import time
-
-    def best_time(size: int) -> float:
-        source = _PANDAS_PATH_PRELUDE + "".join(
-            f"def f{i}():\n"
-            f"    path = Path(__file__).parent / 'x{i}.csv'\n"
-            "    pd.read_csv(path)\n"
-            for i in range(size)
-        )
-        timings = []
-        for _ in range(3):
-            started = time.perf_counter()
-            lineage_event._io_literal_filenames(source)
-            timings.append(time.perf_counter() - started)
-        return min(timings)
-
-    small, large = best_time(2000), best_time(8000)
-
-    assert large < 9 * small, (small, large)
-
-
-def test_repository_recovery_survives_deeply_nested_scopes() -> None:
-    """Deep nesting must not raise RecursionError and drop the event."""
-    source = "x = " + "lambda: " * 1000 + "0\n"
-
-    assert lineage_event._io_literal_filenames(source) == (set(), set())
-
-
-def test_repository_recovery_scope_lookup_stays_linear_for_wide_bodies() -> None:
-    """Finding each I/O call's scope must not rescan the whole function body.
-
-    Uses the best of three timings per size so parallel test load does not
-    decide the result; linear work doubles, the quadratic lookup quadrupled.
-    """
-    import time
-
-    def best_time(size: int) -> float:
-        source = _PANDAS_PATH_PRELUDE + "def load():\n" + (
-            "    pd.read_csv(Path(__file__).parent / 'input.csv')\n" * size
-        )
-        timings = []
-        for _ in range(3):
-            started = time.perf_counter()
-            lineage_event._io_literal_filenames(source)
-            timings.append(time.perf_counter() - started)
-        return min(timings)
-
-    small, large = best_time(3000), best_time(12000)
-
-    assert large < 6 * small, (small, large)
 
 
 @pytest.mark.parametrize(

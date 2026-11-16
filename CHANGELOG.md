@@ -23,20 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory passed in as a function parameter** (#131). In
   `def load(d): pd.read_csv(d / "input.csv")`, the caller chooses `d`, so
   it can point outside the repository, yet repository recovery matched the
-  repository's own `input.csv` and recorded and hashed it as an input. A
-  path that uses an enclosing function's parameter now stays unresolved
-  with the usual dynamic-path warning, whether directly, through `self`,
-  or through names bound from it by assignment, loop, `with`,
-  comprehension, walrus, or `match`. That includes parameters with a
-  static default such as `root=ROOT`, because any caller can override the
-  default. Runtime values now also carry through helper return values,
-  class attributes, instances, and base classes (`Config().root`). Parameter
-  taint follows Python's scoping rules, so a static path is still recovered
-  when it only shares a name with a parameter in another function, or
-  sits beside a runtime field in the same class (`Config.data_dir`). Name
-  resolution never recovers a path that the previous release left
-  unresolved. Existing projects need no migration; only new lineage
-  events change.
+  repository's own `input.csv` and recorded and hashed it as an input.
+  Function and lambda parameters, including `self`, `*args`, `**kwargs`,
+  and keyword-only parameters, are now treated like command-line values: a
+  path built from one, directly or through assignments, stays unresolved
+  with the usual dynamic-path warning. A parameter with a static default
+  such as `root=ROOT` also stays unresolved, because any caller can
+  override it. Static paths elsewhere in the script are still recovered.
+  Existing projects need no migration; only new lineage events change.
 
 ## [0.9.4] - 2026-11-15
 
