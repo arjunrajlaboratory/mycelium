@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Data lineage no longer records a same-named repository file for a
+  directory passed in as a function parameter** (#131). In
+  `def load(d): pd.read_csv(d / "input.csv")`, the caller chooses `d`, so
+  it can point outside the repository, yet repository recovery matched the
+  repository's own `input.csv` and recorded and hashed it as an input. A
+  path that uses a parameter of an enclosing function, directly, through
+  `self`, or through names assigned from it, now stays unresolved with the
+  usual dynamic-path warning. That includes parameters with a static
+  default such as `root=ROOT`, because any caller can override the default.
+  Static paths in the same script, including module-level names that only
+  share a parameter's name, are still recovered. Existing projects need no
+  migration; only new lineage events change.
+
 ## [0.9.4] - 2026-11-15
 
 ### Added

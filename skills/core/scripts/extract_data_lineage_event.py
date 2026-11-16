@@ -4310,6 +4310,74 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
         """
         return reads_runtime_value(expression, runtime_names)
 
+    # A function parameter is chosen by the caller, so it can name a directory
+    # outside the repository just like a command-line argument. For each
+    # function, collect its parameters plus the names assigned inside it from
+    # them. The set is scoped to that function (and functions nested in it),
+    # so a module-level name that merely shares a parameter's name elsewhere
+    # still recovers. A static default does not help: any caller, including
+    # an importer of the module, may override it.
+    parent_of: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent_of[child] = node
+    parameter_scopes: dict[ast.AST, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda)):
+            continue
+        signature = node.args
+        names = {
+            arg.arg
+            for arg in signature.posonlyargs + signature.args + signature.kwonlyargs
+        }
+        names.update(
+            arg.arg for arg in (signature.vararg, signature.kwarg) if arg is not None
+        )
+        local_assignments: list[tuple[set[str], ast.AST]] = []
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Assign):
+                targets, value = inner.targets, inner.value
+            elif isinstance(inner, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                targets, value = [inner.target], inner.value
+            else:
+                continue
+            if value is None:
+                continue
+            bound = {
+                target_node.id
+                for target in targets
+                for target_node in ast.walk(target)
+                if isinstance(target_node, ast.Name)
+            }
+            local_assignments.append((bound, value))
+        changed = True
+        while changed:
+            changed = False
+            for bound, value in local_assignments:
+                if bound <= names:
+                    continue
+                if any(
+                    isinstance(item, ast.Name) and item.id in names
+                    for item in ast.walk(value)
+                ):
+                    names |= bound
+                    changed = True
+        parameter_scopes[node] = names
+
+    def parameter_dependent(call: ast.Call, expression: ast.AST) -> bool:
+        """Whether a path expression uses an enclosing function's parameter."""
+        names: set[str] = set()
+        scope = parent_of.get(call)
+        while scope is not None:
+            names |= parameter_scopes.get(scope, set())
+            scope = parent_of.get(scope)
+        if not names:
+            return False
+        return any(
+            isinstance(item, ast.Name) and item.id in names
+            for item in ast.walk(expression)
+        )
+
     inputs: set[str] = set()
     outputs: set[str] = set()
     for node in ast.walk(tree):
@@ -4327,7 +4395,10 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
         values: set[str] = set()
         for expression in path_expressions:
             expression_values = (
-                None if runtime_dependent(expression) else collect(expression)
+                None
+                if runtime_dependent(expression)
+                or parameter_dependent(node, expression)
+                else collect(expression)
             )
             if expression_values is None:
                 values.clear()
