@@ -312,13 +312,18 @@ def ensure_todo_contract(repo_path: Path, dry_run: bool = False) -> bool:
 ACTIVE_CONVENTIONS_RELATIVE = ".living/conventions/ACTIVE_CONVENTIONS.yaml"
 
 
-def repair_active_conventions(repo_path: Path, dry_run: bool = False) -> bool:
+UNRECOGNIZED_REGISTRY_STATUS = "skipped (unrecognized shape; fix by hand)"
+
+
+def repair_active_conventions(
+    repo_path: Path, dry_run: bool = False
+) -> bool | None:
     """Rewrite a legacy ACTIVE_CONVENTIONS.yaml into the bare-list shape.
 
     Older init seeded `active_conventions: []` and install_convention.py then
     appended list items under it, leaving invalid YAML (#129). A file already
     in list shape is left byte-identical, trailing blank lines included. A file
-    in neither shape is reported and left alone rather than guessed at.
+    in neither shape is left alone rather than guessed at; that returns None.
     """
     path = repo_path / ACTIVE_CONVENTIONS_RELATIVE
     ir.ensure_safe_regular_file(path)
@@ -326,14 +331,14 @@ def repair_active_conventions(repo_path: Path, dry_run: bool = False) -> bool:
         return False
     text = path.read_text(encoding="utf-8")
     try:
-        if not ic.registry_needs_repair(text):
-            return False
-        repaired = ic.normalize_active_conventions(text)
+        repaired = ic.repaired_registry_text(text)
     except ic.UnrecognizedRegistryError as error:
         print(
             f"  Warning: left {ACTIVE_CONVENTIONS_RELATIVE} unchanged: {error}",
             file=sys.stderr,
         )
+        return None
+    if repaired is None:
         return False
     if not dry_run:
         ir._atomic_write_text(path, repaired)
@@ -589,7 +594,11 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
         "Claude hooks top-up": _action_status(hooks_applied),
         "Legacy Codex hook cleanup": _action_status(codex_hooks_applied),
         "Todo contract": _action_status(todo_applied),
-        "ACTIVE_CONVENTIONS.yaml shape": _action_status(conventions_applied),
+        "ACTIVE_CONVENTIONS.yaml shape": (
+            UNRECOGNIZED_REGISTRY_STATUS
+            if conventions_applied is None
+            else _action_status(conventions_applied)
+        ),
         "Entry heading levels": (
             _action_status(headings_applied)
             + ("; " + "; ".join(heading_notes) if heading_notes else "")

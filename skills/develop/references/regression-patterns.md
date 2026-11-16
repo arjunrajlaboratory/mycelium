@@ -723,6 +723,15 @@ inside a quoted attribute value; a quoted `>`; a hyphenated attribute
 suffix; nested comments; and a second copy of a "first-only" element. Each
 must be ignored, preserved byte-for-byte, or rejected — never rewritten.
 
+**Recurrence (#129):** the `ACTIVE_CONVENTIONS.yaml` repair edited YAML line
+by line, and three review rounds each found new valid inputs it corrupted: a
+comment line that was really block-scalar content, `|+` trailing blank lines
+it stripped, a list indented as a whole, a `[] # note` it rewrote. What
+stopped the cycle was narrowing *when* to rewrite (only files carrying the
+legacy key) and checking every rewrite with the real parser, so it must load
+to the same entries or be refused. When the parser is an optional dependency,
+keep the line rules for the narrow repair and let the parser veto it.
+
 ## 37. An exemption is wider than the evidence that justifies it
 
 **Failure:** A checker exempts a region because something vouches for it,

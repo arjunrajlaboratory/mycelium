@@ -528,14 +528,13 @@ def create_living_layer(target_dir: Path):
     ):
         print("  Created: .living/log/LOG_REGISTRY.md")
 
-    # Create ACTIVE_CONVENTIONS.yaml
+    # Create ACTIVE_CONVENTIONS.yaml: a bare YAML list, the shape every
+    # registry writer uses; `[]` means no packs installed yet. Imported here
+    # because install_convention imports this module's file helpers.
+    from install_convention import REGISTRY_HEADER
+
     conventions_yaml = living_dir / "conventions" / "ACTIVE_CONVENTIONS.yaml"
-    if _write_text_if_missing(
-        conventions_yaml,
-        # A bare YAML list, the same shape install_core_convention_packs and
-        # install_convention.py write; `[]` means no packs installed yet.
-        "# Active Convention Packs\n# Updated by init_repo.py and install_convention.py\n\n[]\n",
-    ):
+    if _write_text_if_missing(conventions_yaml, REGISTRY_HEADER + "\n[]\n"):
         print("  Created: .living/conventions/ACTIVE_CONVENTIONS.yaml")
 
 

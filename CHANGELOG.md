@@ -19,12 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   legacy shape into the list before adding its entry. Reinstalling a pack also
   now replaces only the entry with that exact name (installing `bio` no longer
   removes `bioinformatics`) and keeps a core pack's `core: true` flag. The
-  installer writes the registry atomically, refuses a symlinked one, and stops
-  before copying a pack when the registry holds content in neither shape.
+  installer edits the file in place, so comments and other authored lines
+  survive. It writes atomically, refuses a symlinked registry or conventions
+  directory, and stops before copying a pack when the registry holds content
+  it cannot safely edit. When PyYAML is installed, every rewrite must load to
+  the same entries (plus the one being installed) or it is refused.
   `migrate_existing_repos.py` gains an idempotent `ACTIVE_CONVENTIONS.yaml
-  shape` action that repairs existing files, leaves list-shaped ones
-  byte-identical, and warns about, rather than rewrites, a file in neither
-  shape. Run the `$mycelium:core` migration
+  shape` action. It rewrites only files that still carry the legacy
+  `active_conventions:` key, leaves every other file byte-identical, and
+  reports a legacy file it cannot repair as `skipped (unrecognized shape; fix
+  by hand)`. Run the `$mycelium:core` migration
   to repair an existing project. Nothing in the plugin parsed this file, so
   no behavior changes for projects that skip the migration.
 
