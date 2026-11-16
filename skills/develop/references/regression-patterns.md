@@ -811,7 +811,8 @@ when the runner image moved.
 (`mkdir`, `O_EXCL`, `link`, `rename` without replacement), invoke the
 primitive directly rather than through a userland utility whose error handling
 can soften it. Keep the guarantee in one helper (`mycelium_mkdir_exclusive`)
-and route every mutex-style call through it. A plain create-if-missing call
+and route every mutex-style call through it; the state runner's one
+uncontended `lock:*` attempt is the same bare `os.mkdir`. A plain create-if-missing call
 that is not a mutex may keep using the utility.
 
 **Regression evidence:** Put a `mkdir` shim on `PATH` that reproduces the
@@ -879,3 +880,35 @@ nesting; and deterministic fuzz tests that compare each
 fast path with the plain computation (pruned scan against `finditer`,
 cached prefix folds against whole-prefix tokenization, each rewritten
 regex against its previous version).
+
+## 43. A shell fast path imitates the interpreter it skips
+
+**Failure:** Moving work out of a `python3` start into bash looks like a pure
+speedup, but bash and Python disagree in places no ordinary test reaches.
+bash 3.2 keeps double quotes inside a `${v//x/"y"}` replacement while 5.x
+removes them, and bash 5.2's default `patsub_replacement` eats backslashes in
+an unquoted one. `local LC_ALL=C` is exported to every child when `LC_ALL`
+was already exported, so an interpreter started inside that scope decodes
+differently. Python decodes argv with the filesystem encoding and stdin with
+the locale encoding plus universal newlines, so the same bytes can encode to
+two different JSON strings, and `PYTHONIOENCODING` or `PYTHONUTF8` changes
+both. Each gap makes the "same" output differ on one host and not another.
+
+**Invariant:** A bash path that replaces an interpreter covers only a class
+of inputs whose output it can prove identical, and hands everything else to
+the interpreter. Decide the class on bytes in a C-locale scope that starts
+no process, pin shell options that change substitution, and gate on the
+encodings the interpreter actually reports (the payload preload reports
+them) rather than on environment variables. When a whole helper moves into
+Python instead, port each check in order, keep the variables bash assigned
+before a later check failed, and refuse inputs the old shell code read
+inconsistently (NUL bytes) rather than guess.
+
+**Regression evidence:** Differential tests that run both paths on the same
+bytes: control characters, CR and CRLF, invalid and partial UTF-8 around the
+covered sequences, long strings, across every installed bash, several
+locales, `PYTHONIOENCODING`, `PYTHONUTF8`, and `patsub_replacement` on. For a
+ported helper, keep a frozen copy of the code it replaced and compare
+statuses, variables, output, and filesystem effects on adversarial state
+(symlinks, malformed markers and owners, invalid IDs, held locks). Mutate the
+port and confirm the comparison fails.

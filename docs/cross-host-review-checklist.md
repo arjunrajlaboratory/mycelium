@@ -382,7 +382,8 @@ hook, filesystem, or lifecycle boundaries.
       reminder, never a suppressed event, deleted authored content, or a
       crashed hook.
 - [ ] Mutex-style directory creation (lock acquisition and reap claims) goes
-      through `mycelium_mkdir_exclusive`, which calls `mkdir(2)` directly; no
+      through `mycelium_mkdir_exclusive` or the state runner's single
+      `lock:*` attempt, both of which call `mkdir(2)` directly; no
       lock trusts the exit status of the `mkdir` utility, which uutils
       coreutils 0.10.0 reports as success for a lost creation race.
 - [ ] Lock acquisition has bounded failure behavior; a recorded dead owner is
@@ -425,6 +426,10 @@ hook, filesystem, or lifecycle boundaries.
       hooks do not assume a `python` alias exists when only `python3` is present.
 - [ ] Missing helpers, missing optional dependencies, invalid JSON, malformed
       timestamps, and partially written state fail safely.
+- [ ] A bash path that skips an interpreter (cached decoders, JSON and
+      registry-cell encoders) is byte-identical to it, exit status included,
+      across bash 3.2 and 5.x, locales, `PYTHONIOENCODING`/`PYTHONUTF8`, and
+      `patsub_replacement`, or falls back to the interpreter.
 - [ ] Shell fallbacks do not use `command || echo fallback` when the command can
       emit stdout before failing; captured values are single-line and encoded
       for their JSON, YAML, Markdown, or path destination.
@@ -552,6 +557,7 @@ exercise them.
 | A Claude or Codex hook config is valid JSON but has malformed event, group, handler, or command types | Initialization and migration reject it before changing guidance, runtime state, hooks, todo files, or the knowledge index. |
 | `bash run.sh`, `./run.sh`, `snakemake -c1`, `sbatch job.sh`, or `nextflow run main.nf` runs; or `snakemake -n`, `bash -n run.sh`, `sbatch --test-only job.sh`, or `cat run.sh` runs | Runs open the post-action cycle and record their entry script as lineage; non-executing modes and mentions produce neither. |
 | Codex has skipped every Mycelium hook because an upgrade invalidated its approval | The root agent finds no `SESSION HANDOFF PATH:` line in its context and tells the user the hooks are probably not running and to re-trust the `mycelium@mycelium` hooks (from the desktop app on Codex 0.169.0); `hooks/list` confirms `trustStatus` `trusted` before an audit; migration delivers that check to existing projects, and renaming the SessionStart sentinel fails a test. |
+| A hook state check, lock attempt, or encoder moves out of its own interpreter | A differential test runs the moved code and the code it replaced on the same adversarial state and requires identical statuses, variables, output, and filesystem effects; launch counts per hook are pinned. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |
 
 ## Validation Gate

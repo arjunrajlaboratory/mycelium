@@ -54,6 +54,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their run time. Payloads over 64 KiB (an Edit of a large file carries the
   whole original) skip the cache and decode as before, because comparing
   them on every read would cost more than it saves.
+- **Hooks run their state checks in one Python process per pass.** Shared
+  state preparation, private run selection, active-marker and owner-token
+  parsing, ownership authorization, and the first lock attempt used to start
+  one interpreter each, several times per event. They now run as ordered ops
+  in `skills/core/hooks/mycelium_hook_state.py` (started with `-I -S`), which
+  keeps each helper's checks, order, variable assignments, and fail-closed
+  results; a test runs every scenario against the previous helpers and
+  requires identical results. A PostToolUse event validates, takes its
+  session lock with one `mkdir(2)`, and revalidates inside the lock in that
+  single process; a held lock falls back to the unchanged bash wait-and-reap
+  loop and resumes the remaining checks in a new process. Small encoders
+  (hook JSON output, the Stop block reason, the branch scalar, plain
+  registry cells) skip the interpreter when their output is provably
+  byte-identical, and the edit-status and SessionStart cwd decoders join the
+  payload preload. Python starts per event: SessionStart 12 to 5, edit
+  tracker 11 to 4, analysis post-action 13 to 4, data tracker 9 to 3, read
+  tracker 8 to 2, blocked Stop 20 to 8. A marker or owner file holding a NUL
+  byte is now refused instead of read with the NUL dropped. A repository
+  path that is not valid UTF-8 no longer silently disables the hooks, and an
+  active marker naming a log file whose name is not valid UTF-8 is accepted
+  in every locale; before, a strict UTF-8 locale such as en_US.UTF-8 (but
+  not C or C.UTF-8) made it read as corrupt, so SessionStart and Stop
+  removed it.
+- **A host that stops reading no longer leaves lifecycle locks held.** Stop
+  wrote its block JSON with a shell builtin while holding both locks; a
+  closed output pipe killed the hook with SIGPIPE before its EXIT trap could
+  release them, so the next lifecycle hook waited out its retry budget.
+  Hook output is now written so that a closed pipe fails the write instead.
 - **The compatibility test suite runs in parallel.** CI and
   `tools/release_gate.py` run `skills/core/scripts` with pytest-xdist
   (`-n auto --dist worksteal`) when it is installed; every test works in its

@@ -29,6 +29,8 @@ SLOTS = [
     "opt:cwd",
     "opt:tool_input.command",
     "exit:",
+    "edit:",
+    "cwd0:",
 ]
 
 PAYLOADS: list[bytes] = [
@@ -58,6 +60,16 @@ PAYLOADS: list[bytes] = [
     b'"just a string"',
     b"null",
     b"",
+    b"-n",
+    b'-E {"cwd": "/echo/reads/options"}',
+    b'{"cwd": null}',
+    b'{"cwd": ""}',
+    json.dumps({"tool_response": {"isError": True}}).encode(),
+    json.dumps({"tool_response": {"success": False, "exit_code": 0}}).encode(),
+    json.dumps({"tool_response": "error: patch did not apply"}).encode(),
+    json.dumps({"tool_response": ["Invalid context at line 3"]}).encode(),
+    json.dumps({"tool_response": {"output": "Exit code: 0"}}).encode(),
+    json.dumps({"tool_response": json.dumps({"returncode": 2})}).encode(),
     b"{not json",
     b'{"cwd": "a"} trailing',
     b'{"cwd": 1' + b"0" * 5000 + b"}",
@@ -99,6 +111,13 @@ for slot in "$@"; do
     exit)
       cached=$(mycelium_bash_exit payload; printf 'rc=%s' "$?")
       direct=$(printf '%s' "$payload" | mycelium_bash_exit; printf 'rc=%s' "$?") ;;
+    edit)
+      cached=$(mycelium_edit_status payload 2>/dev/null; printf 'rc=%s' "$?")
+      direct=$(printf '%s' "$payload" | python3 -c "$MYCELIUM__PY_EDIT_STATUS" 2>/dev/null; printf 'rc=%s' "$?") ;;
+    cwd0)
+      # SessionStart's original pipeline, verbatim.
+      cached=$(mycelium_session_start_cwd payload; printf 'rc=%s' "$?")
+      direct=$(echo "$payload" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cwd', ''))" 2>/dev/null || echo ""; printf 'rc=%s' "$?") ;;
   esac
   printf '%s\t%s\t%q\t%q\n' "$slot" "$hit" "$cached" "$direct"
 done
@@ -171,7 +190,7 @@ def test_deep_nesting_matches_on_every_installed_python(tmp_path, python):
         payload_file.write_bytes(payload)
         result = subprocess.run(
             ["bash", "-c", COMPARE, "compare", str(LIB), str(payload_file),
-             "get:cwd", "opt:session_id", "exit:"],
+             "get:cwd", "opt:session_id", "exit:", "edit:", "cwd0:"],
             capture_output=True,
             check=True,
             env=env,
@@ -408,9 +427,11 @@ def _launches(log: Path) -> int:
 @pytest.mark.parametrize(
     ("hook", "limit"),
     [
-        # Before the payload cache these started 15 and 20 interpreters.
-        ("mycelium-activity-tracker.sh", 10),
-        ("mycelium-post-action.sh", 13),
+        # Before the payload cache these started 15 and 20 interpreters, and
+        # 10 and 13 before the state runner; test_hook_launch_counts.py pins
+        # every hook exactly.
+        ("mycelium-activity-tracker.sh", 4),
+        ("mycelium-post-action.sh", 4),
     ],
 )
 def test_post_tool_hooks_decode_the_payload_once(tmp_path, hook, limit):
@@ -458,3 +479,23 @@ def test_post_tool_hooks_decode_the_payload_once(tmp_path, hook, limit):
         check=True,
     )
     assert 0 < _launches(log) <= limit
+
+
+def test_session_start_cwd_matches_echo_when_xpg_echo_expands_escapes(tmp_path):
+    payload = json.dumps({"cwd": "/tmp/a\\bb\\tc"})
+    script = r"""
+set -uo pipefail
+source "$1"
+payload="$2"
+shopt -s xpg_echo
+mycelium_payload_preload payload cwd0:
+cached=$(mycelium_session_start_cwd payload; printf x)
+direct=$(echo "$payload" | python3 -c "import sys,json; print(json.load(sys.stdin).get('cwd', ''))" 2>/dev/null || echo ""; printf x)
+[[ "$cached" == "$direct" ]] && echo same || printf 'differ %q %q\n' "$cached" "$direct"
+"""
+    for bash in _bashes():
+        result = subprocess.run(
+            [bash, "-c", script, "probe", str(LIB), payload],
+            capture_output=True, text=True, check=True,
+        )
+        assert result.stdout == "same\n", (bash, result.stdout)
