@@ -63,10 +63,12 @@ For analysis, report generation, idea brainstorming, and code review, direct the
     Codex's dynamic `PLUGIN_ROOT`; initialization must not write versioned
     plugin-cache paths into `.codex/hooks.json`. Codex binds hook approval to
     the installed plugin's contents, so after every plugin install, upgrade, or
-    reinstall tell the user to open `/hooks` in a current Codex CLI (not the
-    desktop app), trust the five plugin hooks, fully exit Codex, and restart it
-    so the approved hook set is loaded at SessionStart. If `/hooks` is absent,
-    tell them to run `codex update` and relaunch the CLI first.
+    reinstall tell the user to review and trust the five plugin hooks, fully
+    exit Codex, and restart it so the approved hook set is loaded at
+    SessionStart. On Codex 0.169.0, terminal `/hooks` was observed to save an
+    incomplete approval (the hooks show as trusted but are still skipped);
+    only approvals made while the Codex desktop app was running were complete,
+    so point the user to the desktop app for now.
 
 **References to consult**:
 - `skills/core/references/folder-structure.md` — canonical target structure
@@ -277,9 +279,8 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 2. Each action is idempotent — re-running on an already-migrated repo is a no-op.
 3. Use `--dry-run` first to preview changes.
 4. **Codex only**: after a real migration following plugin install or upgrade,
-   tell the user to open `/hooks` in a current CLI (not the desktop app), review
-   and trust all five Mycelium plugin hooks, fully exit Codex, and restart it.
-   If `/hooks` is absent, run `codex update` and relaunch the CLI first.
+   tell the user to review and trust all five Mycelium plugin hooks (from the
+   Codex desktop app; see step 14 of init), fully exit Codex, and restart it.
 
 ---
 
@@ -396,15 +397,17 @@ Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 
 **Stop hook logic**: SessionStart snapshots the repository's existing dirty state, so Stop reports only paths changed during the current session. The stop hook checks if `mycelium-post-action.sh` fired during the session (indicated by the presence of `.mycelium/mycelium-reminded.tmp`). If `.living/` was not updated afterward, it blocks immediately—even for a short session—and preserves its work timestamp so repeated Stop attempts cannot bypass enforcement. If `.living/` was updated, it emits a non-blocking reminder to enhance the deterministic session summary. Read-only sessions, config-only sessions, and sessions without meaningful activity are never checked.
 
-Codex requires each exact plugin command hook to be reviewed and trusted through
-`/hooks` in the current CLI; the desktop app does not expose that slash command.
-If `/hooks` is absent from the CLI, run `codex update` and relaunch it. Codex
-binds each approval to the installed plugin's contents, so after first install
-and after every plugin upgrade or reinstall, approve all five Mycelium hooks,
-fully exit Codex, and restart it. Until then Codex skips the hooks without any
-warning inside the task. The generated `MYCELIUM.md` therefore tells the root
-agent to warn the user when its context lacks the `SESSION HANDOFF PATH:` line
-that SessionStart injects.
+Codex requires each exact plugin command hook to be reviewed and trusted, and
+it binds each approval to the installed plugin's contents, so after first
+install and after every plugin upgrade or reinstall, approve all five Mycelium
+hooks, fully exit Codex, and restart it. Until then Codex skips the hooks
+without any warning inside the task. On Codex 0.169.0 (observed on one machine),
+trusting in the terminal CLI's `/hooks` saved an incomplete approval: `/hooks`
+showed every hook as active while Codex still skipped them. Approvals saved
+while the Codex desktop app was running were complete. The generated
+`MYCELIUM.md` therefore tells the root agent to check once, at the start of the
+task, for the `SESSION HANDOFF PATH:` line that SessionStart injects and to
+warn the user when it is missing.
 Codex matches shell and unified-exec work under `Bash`, and its activity tracker
 parses `apply_patch` headers. The plugin registry and dispatcher resolve the
 live `PLUGIN_ROOT` and refresh `.mycelium/plugin-root` automatically, so cache
@@ -436,7 +439,7 @@ Quick checks an agent or human can run to confirm mycelium is wired correctly:
 |-------|--------------------|----------|
 | Claude hooks installed | `cat .claude/settings.local.json` | SessionStart, PostToolUse, and Stop registrations present |
 | Codex hooks bundled | Inspect the installed plugin's `hooks/hooks.json` | Five `PLUGIN_ROOT`-based SessionStart, PostToolUse, and Stop registrations present |
-| Codex hooks trusted | Open `/hooks` in a current Codex CLI (not the desktop app; run `codex update` if absent) | All five Mycelium plugin hooks show as trusted; recheck after every plugin upgrade or reinstall |
+| Codex hooks trusted | Send `hooks/list` to `codex app-server` (terminal `/hooks` can show hooks as active while they are skipped) | Every `mycelium@mycelium` hook reports `trustStatus` `trusted`; recheck after every plugin upgrade or reinstall |
 | Hooks dispatching | Start a fresh root task in the project | Its context contains a `SESSION HANDOFF PATH:` line from SessionStart |
 | INDEX.md has knowledge summary | `grep "BEGIN KNOWLEDGE SUMMARY" .living/INDEX.md` | Match present |
 | Read-access being logged | `tail .mycelium/mycelium-read-access.log` | Entries appearing when Claude reads `.living/` files |

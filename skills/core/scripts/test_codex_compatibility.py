@@ -327,7 +327,6 @@ def test_readme_documents_codex_install_update_and_migration():
     assert "Migration is idempotent" in readme
     assert "open `/hooks`" in readme
     assert "trust all five Mycelium command hooks" in normalized
-    assert "not a Codex desktop-app slash command" in normalized
     assert "codex update" in readme
 
 
@@ -363,6 +362,55 @@ def test_generated_guidance_tells_agents_to_report_skipped_hooks(tmp_path):
     assert "trust the `mycelium@mycelium` hooks" in section
     assert "every Mycelium install, upgrade, or reinstall" in section
     assert "Subagents" in section
+    # The line is also missing for legacy flat layouts whose hooks do run,
+    # so the guidance must not claim certainty.
+    assert "usually means" in section
+    # Compaction may drop SessionStart context mid-task; check only once.
+    assert "once, at the start of the task" in section
+    assert "compact" in section
+    # Observed on Codex 0.169.0: terminal /hooks saved a partial approval.
+    assert "desktop app" in section
+    assert "not the desktop app" not in section
+    assert "may show the hooks as trusted" in section
+
+
+# Observed on Codex 0.169.0 (2026-11-15): trusting in terminal `/hooks` wrote
+# only `trusted_hash`, so `/hooks` showed the hooks active while Codex skipped
+# them. Only the desktop app wrote `trusted_content_hash`.
+TRUST_DOCS = [
+    "README.md",
+    "skills/core/SKILL.md",
+    "skills/develop/SKILL.md",
+    "skills/core/templates/MYCELIUM.md.template",
+    "skills/core/scripts/init_repo.py",
+]
+
+
+def test_trust_docs_do_not_exclude_the_codex_desktop_app():
+    for rel in TRUST_DOCS:
+        text = " ".join((PLUGIN_ROOT / rel).read_text().split())
+        assert "not the desktop app" not in text, rel
+        assert "desktop-app slash command" not in text, rel
+        assert "desktop app does not expose" not in text, rel
+
+
+def test_readme_documents_observed_partial_trust_from_terminal_hooks():
+    readme = " ".join((PLUGIN_ROOT / "README.md").read_text().split())
+    assert "Codex 0.169.0" in readme
+    assert "desktop app" in readme
+    assert "may show the hooks as trusted" in readme
+    assert "`hooks/list`" in readme
+    assert "`trustStatus`" in readme
+    assert "marketplace source" in readme
+    assert "needing review" not in readme
+
+
+def test_develop_skill_makes_hooks_list_the_trust_check():
+    skill = " ".join((PLUGIN_ROOT / "skills/develop/SKILL.md").read_text().split())
+    assert "`hooks/list`" in skill
+    assert "`trustStatus` must be `trusted`" in skill
+    assert "Codex 0.169.0" in skill
+    assert "marketplace source" in skill
 
 
 def test_readme_documents_hook_re_review_after_every_upgrade():
@@ -502,7 +550,8 @@ def test_init_uses_plugin_bundled_codex_hooks_and_agent_guidance(tmp_path, capsy
     assert "every plugin upgrade or reinstall needs this review again" in (
         " ".join(install_output.split())
     )
-    assert "not the desktop app" in install_output
+    assert "desktop app" in install_output
+    assert "not the desktop app" not in install_output
     assert "codex update" in install_output
 
 
