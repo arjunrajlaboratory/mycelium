@@ -327,6 +327,23 @@ class TestInstallerRepairsExistingFiles:
         ic.update_active_conventions(tmp_path, name)
         assert _names(tmp_path) == [name]
 
+    @pytest.mark.parametrize(
+        "name",
+        ["robust-analysis", "café", "on", "123", "a b", 'a"b', "a\\b", "it's", "x: y", "#x"],
+    )
+    def test_writer_output_is_accepted_by_the_reader(self, name: str) -> None:
+        """Codex P1: every entry the writer emits must parse back unchanged."""
+        text = ic.format_registry_entry(name, "2026-01-01T00:00:00Z", core=True) + "\n"
+        items, _ = ic._parse_registry(text)
+        assert [item.name for item in items] == [name]
+        assert items[0].core
+        assert yaml.safe_load(text)[0]["name"] == name
+
+    def test_unregistrable_names_are_refused(self) -> None:
+        for name in ["a'b\"c", "line\nbreak", "tab\there"]:
+            with pytest.raises(ic.UnrecognizedRegistryError):
+                ic.format_registry_entry(name, "2026-01-01T00:00:00Z")
+
     def test_missing_file_is_created_as_a_list(self, tmp_path: Path) -> None:
         (tmp_path / REGISTRY).parent.mkdir(parents=True)
         ic.update_active_conventions(tmp_path, "bioinformatics")

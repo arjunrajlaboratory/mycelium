@@ -9,7 +9,6 @@ Usage:
 """
 
 import argparse
-import json
 import re
 import shutil
 import sys
@@ -147,17 +146,33 @@ _YAML_SPECIAL = {"y", "n", "yes", "no", "true", "false", "on", "off", "null"}
 
 
 def _yaml_name(name: str) -> str:
-    """Render a pack name so YAML loads it back as the same string."""
+    """Render a pack name so YAML, and _parse_registry, read back the same string."""
     if _PLAIN_NAME.match(name) and name.lower() not in _YAML_SPECIAL:
         return name
-    return json.dumps(name)  # a JSON string is a valid YAML double-quoted scalar
+    return _quote(name)
+
+
+def _quote(value: str) -> str:
+    """Quote a scalar using only the escape-free forms the grammar accepts."""
+    if not value.isprintable() or any(char in value for char in _EXTRA_BREAKS):
+        raise UnrecognizedRegistryError(f"pack name cannot be registered: {value!r}")
+    if "'" not in value:
+        return f"'{value}'"  # single-quoted YAML has no escapes
+    if '"' not in value and "\\" not in value:
+        return f'"{value}"'
+    raise UnrecognizedRegistryError(f"pack name cannot be registered: {value!r}")
+
+
+def _registry_path(name: str) -> str:
+    path = f".living/conventions/{name}/"
+    return path if _PLAIN_NAME.match(name) else _quote(path)
 
 
 def format_registry_entry(name: str, installed: str, core: bool = False) -> str:
     """Render one registry entry; the only place the entry shape is defined."""
     entry = (
         f"- name: {_yaml_name(name)}\n"
-        f"  path: .living/conventions/{name}/\n"
+        f"  path: {_registry_path(name)}\n"
         f"  installed: {installed}"
     )
     return entry + "\n  core: true" if core else entry
