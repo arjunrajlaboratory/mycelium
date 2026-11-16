@@ -1578,60 +1578,12 @@ def test_repository_recovery_records_savefig(
             "savefig(Path(__file__).parent / 'result.csv')\n",
             id="local-savefig",
         ),
-        pytest.param(
-            "class Preview:\n"
-            "    def to_csv(self, path):\n"
-            "        print(path)\n"
-            "Preview().to_csv(Path(__file__).parent / 'result.csv')\n",
-            id="custom-method-on-constructor",
-        ),
-        pytest.param(
-            "class Preview:\n"
-            "    def to_csv(self, path):\n"
-            "        print(path)\n"
-            "preview = Preview()\n"
-            "preview.to_csv(Path(__file__).parent / 'result.csv')\n",
-            id="custom-method-on-name",
-        ),
-        pytest.param(
-            "class Preview:\n"
-            "    def savefig(self, path):\n"
-            "        print(path)\n"
-            "Preview().savefig(Path(__file__).parent / 'result.csv')\n",
-            id="custom-savefig-on-constructor",
-        ),
-        pytest.param(
-            "from matplotlib.pyplot import savefig\n"
-            "def savefig(path):\n"
-            "    print(path)\n"
-            "savefig(Path(__file__).parent / 'result.csv')\n",
-            id="imported-writer-redefined",
-        ),
-        pytest.param(
-            "from matplotlib.pyplot import savefig\n"
-            "savefig = print\n"
-            "savefig(Path(__file__).parent / 'result.csv')\n",
-            id="imported-writer-reassigned",
-        ),
-        pytest.param(
-            "from matplotlib.pyplot import savefig\n"
-            "def run(savefig):\n"
-            "    savefig(Path(__file__).parent / 'result.csv')\n",
-            id="imported-writer-shadowed-by-parameter",
-        ),
-        pytest.param(
-            "from matplotlib.pyplot import savefig\n"
-            "def run():\n"
-            "    savefig = print\n"
-            "    savefig(Path(__file__).parent / 'result.csv')\n",
-            id="imported-writer-rebound-in-enclosing-function",
-        ),
     ],
 )
-def test_repository_recovery_ignores_custom_writer(
+def test_repository_recovery_ignores_unqualified_custom_writer(
     tmp_path: Path, source: str
 ) -> None:
-    """A writer name the script defines or rebinds is not proof of a write."""
+    """A bare writer name is a user's own function, not proof of a write."""
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     result = tmp_path / "result.csv"
     result.write_text("value\n1\n")

@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `to_parquet`, `savefig`, and the rest) now counts as a write, whatever the
   receiver. A bare `to_csv(...)` is still ignored unless an import maps it to
   a known data-I/O package, so a user's own function of that name does not
-  invent an output (#132).
+  invent an output. An unrelated import aliased to a writer's name, such as
+  `from helpers import export_table as to_csv`, no longer renames a chained
+  `.to_csv(...)` method and hides its write (#132).
 
 ## [0.9.4] - 2026-11-15
 

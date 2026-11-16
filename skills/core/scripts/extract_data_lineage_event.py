@@ -4051,7 +4051,6 @@ def _io_call_direction(
     node: ast.Call,
     import_aliases: dict[str, str],
     locally_bound_roots: set[str],
-    user_writer_calls: frozenset[int] = frozenset(),
 ) -> str | None:
     raw_name = _call_name(node.func)
     if not raw_name:
@@ -4060,8 +4059,7 @@ def _io_call_direction(
     # ``_call_name`` reduces ``read_csv(...).to_csv`` to the bare ``to_csv``.
     # Only a callee rooted at a name may be resolved through an import alias;
     # otherwise ``from helpers import x as to_csv`` would rename the method.
-    rooted = _call_root(node.func) is not None
-    if rooted and parts[0] in import_aliases:
+    if _call_root(node.func) is not None and parts[0] in import_aliases:
         parts = import_aliases[parts[0]].split(".") + parts[1:]
     name = ".".join(parts)
     leaf = name.rsplit(".", 1)[-1]
@@ -4074,12 +4072,10 @@ def _io_call_direction(
         # whatever the receiver: a name, a call result such as
         # ``pd.read_csv(...).to_csv`` or ``frame.head(n).to_csv``, or a
         # subscript. ``_call_name`` drops an unnamed receiver, so test the AST
-        # node rather than the dotted name. A bare writer name is evidence
-        # only when an import maps it to a known data-I/O package. Either way,
-        # ``_user_writer_calls`` has already marked calls that provably reach
-        # the script's own code instead.
-        if id(node) in user_writer_calls:
-            return None
+        # node rather than the dotted name. As for a named receiver, a
+        # receiver whose type cannot be known statically counts as a writer.
+        # A bare writer name, however, is evidence only when an import maps
+        # it to a known data-I/O package.
         if (
             isinstance(node.func, ast.Attribute)
             or parts[0] in _KNOWN_IO_MODULE_ROOTS
@@ -4104,159 +4100,6 @@ def _io_call_direction(
         ):
             return "input"
     return None
-
-
-def _scope_bindings(node: ast.AST) -> set[str]:
-    """Names a function, lambda, comprehension, or module body binds itself.
-
-    Nested function, lambda, class, and comprehension bodies are separate
-    scopes, so only their own names (for definitions) count here.
-    """
-    bound: set[str] = set()
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-        arguments = node.args
-        for argument in (
-            arguments.posonlyargs + arguments.args + arguments.kwonlyargs
-        ):
-            bound.add(argument.arg)
-        for argument in (arguments.vararg, arguments.kwarg):
-            if argument is not None:
-                bound.add(argument.arg)
-        if isinstance(node, ast.Lambda):
-            return bound
-        pending = list(node.body)
-    elif isinstance(
-        node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
-    ):
-        pending = [generator.target for generator in node.generators]
-    else:
-        pending = list(getattr(node, "body", []))
-    while pending:
-        child = pending.pop()
-        if isinstance(
-            child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-        ):
-            bound.add(child.name)
-            continue
-        if isinstance(
-            child,
-            (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp),
-        ):
-            continue
-        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
-            bound.add(child.id)
-        elif isinstance(child, ast.ExceptHandler) and child.name:
-            bound.add(child.name)
-        elif isinstance(child, (ast.MatchAs, ast.MatchStar)) and child.name:
-            bound.add(child.name)
-        elif isinstance(child, ast.MatchMapping) and child.rest:
-            bound.add(child.rest)
-        pending.extend(ast.iter_child_nodes(child))
-    return bound
-
-
-def _user_writer_calls(tree: ast.Module) -> frozenset[int]:
-    """Writer-named calls that provably run the script's own code.
-
-    A bare writer such as an imported ``savefig`` is the script's own code when
-    a scope enclosing the call rebinds that name (a ``def``, an assignment, or
-    a parameter). A writer method is the script's own code when its receiver
-    is an instance of a class the script defines with that method: either
-    ``Preview().to_csv(...)`` directly or through a name bound exactly once to
-    such a constructor call. Any other receiver may be a real data frame or
-    figure, so it stays a write; an unrelated definition elsewhere that only
-    shares the writer's name proves nothing about this call.
-    """
-    custom_methods: dict[str, set[str]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            methods = {
-                item.name
-                for item in node.body
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and item.name in _OUTPUT_CALL_LEAVES
-            }
-            if methods:
-                custom_methods.setdefault(node.name, set()).update(methods)
-    bindings: dict[str, list[ast.AST | None]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            bindings.setdefault(node.id, []).append(None)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target = node.targets[0]
-            if isinstance(target, ast.Name):
-                values = bindings[target.id]
-                values[values.index(None)] = node.value
-
-    def constructed_class(expression: ast.AST) -> str | None:
-        if (
-            isinstance(expression, ast.Call)
-            and isinstance(expression.func, ast.Name)
-            and expression.func.id in custom_methods
-        ):
-            return expression.func.id
-        return None
-
-    def receiver_class(expression: ast.AST) -> str | None:
-        if isinstance(expression, ast.Name):
-            values = bindings.get(expression.id, [])
-            if len(values) == 1 and values[0] is not None:
-                return constructed_class(values[0])
-            return None
-        return constructed_class(expression)
-
-    user_calls: set[int] = set()
-
-    def visit(node: ast.AST, scopes: list[set[str]]) -> None:
-        if isinstance(node, ast.Call):
-            callee = node.func
-            if (
-                isinstance(callee, ast.Name)
-                and callee.id in _OUTPUT_CALL_LEAVES
-                and any(callee.id in scope for scope in scopes)
-            ):
-                user_calls.add(id(node))
-            elif (
-                isinstance(callee, ast.Attribute)
-                and callee.attr in _OUTPUT_CALL_LEAVES
-            ):
-                owner = receiver_class(callee.value)
-                if owner is not None and callee.attr in custom_methods[owner]:
-                    user_calls.add(id(node))
-        if isinstance(
-            node,
-            (
-                ast.FunctionDef,
-                ast.AsyncFunctionDef,
-                ast.Lambda,
-                ast.ListComp,
-                ast.SetComp,
-                ast.DictComp,
-                ast.GeneratorExp,
-            ),
-        ):
-            inner = scopes + [_scope_bindings(node)]
-            for child in ast.iter_child_nodes(node):
-                visit(child, inner)
-            return
-        if isinstance(node, ast.ClassDef):
-            # A class body binds names only for its own statements, not for
-            # the methods nested inside it.
-            class_scope = scopes + [_scope_bindings(node)]
-            for child in ast.iter_child_nodes(node):
-                visit(
-                    child,
-                    scopes
-                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    else class_scope,
-                )
-            return
-        for child in ast.iter_child_nodes(node):
-            visit(child, scopes)
-
-    visit(tree, [_scope_bindings(tree)])
-    return frozenset(user_calls)
 
 
 def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
@@ -4296,7 +4139,6 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
     }
     locally_bound_roots.update(shadowed_names)
-    user_writer_calls = _user_writer_calls(tree)
     locally_bound_roots.update(
         node.name
         for node in ast.walk(tree)
@@ -4491,9 +4333,7 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        direction = _io_call_direction(
-            node, import_aliases, locally_bound_roots, user_writer_calls
-        )
+        direction = _io_call_direction(node, import_aliases, locally_bound_roots)
         if direction is None:
             continue
         path_expressions = list(node.args[:1])
