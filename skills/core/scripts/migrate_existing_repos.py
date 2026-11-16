@@ -10,9 +10,12 @@ Performs the provider-neutral upgrade actions needed by current Mycelium repos:
 3. **Entry heading levels** — raises `##` entries in `.living/learnings.md`
    and `.living/decisions.md` to the `###` level every `generate_index.py`
    parser reads, recovering entries that were silently absent from INDEX.md.
-4. **INDEX.md regen** — runs `generate_index.py --summary-heuristic` so
+4. **ACTIVE_CONVENTIONS.yaml shape** — rewrites a registry left in the
+   legacy `active_conventions:` mapping shape (invalid YAML once a pack was
+   appended, #129) into the bare list every writer now uses.
+5. **INDEX.md regen** — runs `generate_index.py --summary-heuristic` so
    the freshly-anchored INDEX.md actually has cluster content.
-5. **MEMORY.md routing** — appends the Global Knowledge Domains routing
+6. **MEMORY.md routing** — appends the Global Knowledge Domains routing
    table to `~/.claude/projects/*/memory/MEMORY.md` files.
 
 All actions are idempotent: re-running on an already-migrated repo is a
@@ -37,6 +40,7 @@ sys.path.insert(0, str(_SCRIPT_DIR))
 import generate_index as gi  # noqa: E402
 import init_knowledge as ik  # noqa: E402
 import init_repo as ir  # noqa: E402
+import install_convention as ic  # noqa: E402
 import validate_structure as vs  # noqa: E402
 
 # The "Knowledge index" callout that gets inserted into CLAUDE.md if missing.
@@ -305,6 +309,29 @@ def ensure_todo_contract(repo_path: Path, dry_run: bool = False) -> bool:
     return missing
 
 
+ACTIVE_CONVENTIONS_RELATIVE = ".living/conventions/ACTIVE_CONVENTIONS.yaml"
+
+
+def repair_active_conventions(repo_path: Path, dry_run: bool = False) -> bool:
+    """Rewrite a legacy ACTIVE_CONVENTIONS.yaml into the bare-list shape.
+
+    Older init seeded `active_conventions: []` and install_convention.py then
+    appended list items under it, leaving invalid YAML (#129). A file already
+    in list shape is left byte-identical, trailing newline included.
+    """
+    path = repo_path / ACTIVE_CONVENTIONS_RELATIVE
+    ir.ensure_safe_regular_file(path)
+    if not path.exists():
+        return False
+    text = path.read_text(encoding="utf-8")
+    repaired = ic.normalize_active_conventions(text)
+    if repaired.splitlines() == text.splitlines():
+        return False
+    if not dry_run:
+        ir._atomic_write_text(path, repaired)
+    return True
+
+
 # Entry IDs are positional: generate_index derives "{prefix}-{n}" from file
 # order at read time. Recovering a hidden entry therefore takes its slot in the
 # sequence and pushes later IDs along, which cannot be avoided without changing
@@ -527,6 +554,7 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
         ".codex/.gitignore",
         "todo/TODO_REGISTRY.md",
         "todo/TODO_ITEM_TEMPLATE.md",
+        ACTIVE_CONVENTIONS_RELATIVE,
     )
     for relative in managed_files:
         ir.ensure_safe_regular_file(repo_path / relative)
@@ -538,6 +566,7 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
     hooks_applied = topup_hooks(repo_path, dry_run=dry_run)
     codex_hooks_applied = topup_codex_hooks(repo_path, dry_run=dry_run)
     todo_applied = ensure_todo_contract(repo_path, dry_run=dry_run)
+    conventions_applied = repair_active_conventions(repo_path, dry_run=dry_run)
     # Must precede regen_index: the rebuilt index has to see repaired entries.
     heading_notes: list[str] = []
     headings_applied = migrate_entry_headings(
@@ -552,6 +581,7 @@ def migrate_one(repo_path: Path, dry_run: bool = False) -> dict[str, str]:
         "Claude hooks top-up": _action_status(hooks_applied),
         "Legacy Codex hook cleanup": _action_status(codex_hooks_applied),
         "Todo contract": _action_status(todo_applied),
+        "ACTIVE_CONVENTIONS.yaml shape": _action_status(conventions_applied),
         "Entry heading levels": (
             _action_status(headings_applied)
             + ("; " + "; ".join(heading_notes) if heading_notes else "")

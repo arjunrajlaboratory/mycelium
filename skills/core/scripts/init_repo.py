@@ -532,7 +532,9 @@ def create_living_layer(target_dir: Path):
     conventions_yaml = living_dir / "conventions" / "ACTIVE_CONVENTIONS.yaml"
     if _write_text_if_missing(
         conventions_yaml,
-        "# Active Convention Packs\n# Updated by install_convention.py\n\nactive_conventions: []\n",
+        # A bare YAML list, the same shape install_core_convention_packs and
+        # install_convention.py write; `[]` means no packs installed yet.
+        "# Active Convention Packs\n# Updated by install_convention.py\n\n[]\n",
     ):
         print("  Created: .living/conventions/ACTIVE_CONVENTIONS.yaml")
 

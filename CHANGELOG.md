@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`.living/conventions/ACTIVE_CONVENTIONS.yaml` is valid YAML again (#129).**
+  Init seeded the registry as a mapping (`active_conventions: []`), while
+  `install_convention.py` appended pack entries as a top-level list. When the
+  seed survived init (core packs not found at init time, or projects started
+  on older releases), the first pack install left a file `yaml.safe_load`
+  rejects. The registry now has one shape everywhere, a bare list with `[]`
+  for no packs. Init seeds `[]`, and `install_convention.py` rewrites either
+  legacy shape into the list before adding its entry. Reinstalling a pack also
+  now replaces only the entry with that exact name: installing `bio` no longer
+  removes `bioinformatics`. `migrate_existing_repos.py` gains an idempotent
+  `ACTIVE_CONVENTIONS.yaml shape` action that repairs existing files and
+  leaves list-shaped ones byte-identical. Run the `$mycelium:core` migration
+  to repair an existing project. Nothing in the plugin parsed this file, so
+  no behavior changes for projects that skip the migration.
+
 ## [0.9.4] - 2026-11-15
 
 ### Added
