@@ -3906,6 +3906,32 @@ def test_batch_input_keeps_a_nonbreaking_space(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"R CMD BATCH my\ file.R",
+        'R CMD BATCH "my file.R"',
+        "R CMD BATCH 'my file.R'",
+        "R CMD BATCH 'my file.R' 'out file.Rout'",
+    ],
+)
+def test_batch_never_runs_an_input_with_a_space(
+    tmp_path: Path, command: str
+) -> None:
+    """R's BATCH script runs `R -f ${in}` unquoted, so `my file.R` becomes
+    `-f my file.R` and R reads `my` (checked on R 4.6): nothing runs the
+    named script. `R -f 'my file.R'` does run it."""
+    (tmp_path / "my file.R").write_text("print(1)\n")
+    (tmp_path / "first.R").write_text("print(1)\n")
+    assert detect_scripts(command, tmp_path) == []
+    assert detect_scripts("R CMD BATCH first.R", tmp_path) == [
+        (tmp_path / "first.R", None)
+    ]
+    assert detect_scripts("R -f 'my file.R'", tmp_path) == [
+        (tmp_path / "my file.R", None)
+    ]
+
+
 def test_batch_candidate_does_not_cross_command_boundaries(tmp_path: Path) -> None:
     (tmp_path / "script.R").write_text("print(1)\n")
     for joiner in ("&&", ";", "||", "\n"):
