@@ -1722,6 +1722,49 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "load(Path(sys.argv[1]))\n",
             id="comprehension-walrus-binds-enclosing-function",
         ),
+        pytest.param(
+            "class Config:\n"
+            "    root = Path(sys.argv[1])\n"
+            "root = Config.root\n"
+            "frame = pd.read_csv(root / 'input.csv')\n"
+            "frame.to_csv(root / 'result.csv')\n",
+            id="class-attribute-alias",
+        ),
+        pytest.param(
+            "def outer():\n"
+            "    from os import curdir as root\n"
+            "    def set_root():\n"
+            "        nonlocal root\n"
+            "        root = Path(sys.argv[1])\n"
+            "    set_root()\n"
+            "    frame = pd.read_csv(root / 'input.csv')\n"
+            "    frame.to_csv(root / 'result.csv')\n"
+            "outer()\n",
+            id="nonlocal-owner-bound-by-import",
+        ),
+        pytest.param(
+            "def load(config):\n"
+            "    match config:\n"
+            "        case {'root': root}:\n"
+            "            frame = pd.read_csv(root / 'input.csv')\n"
+            "            frame.to_csv(root / 'result.csv')\n"
+            "load({'root': Path(sys.argv[1])})\n",
+            id="match-capture-from-parameter",
+        ),
+        pytest.param(
+            "def outer():\n"
+            "    match 0:\n"
+            "        case root:\n"
+            "            pass\n"
+            "    def set_root():\n"
+            "        nonlocal root\n"
+            "        root = Path(sys.argv[1])\n"
+            "    set_root()\n"
+            "    frame = pd.read_csv(root / 'input.csv')\n"
+            "    frame.to_csv(root / 'result.csv')\n"
+            "outer()\n",
+            id="nonlocal-owner-bound-by-match-capture",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(

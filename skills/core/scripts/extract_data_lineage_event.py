@@ -4447,23 +4447,30 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
                 if isinstance(scope, comprehension_types)
                 else set()
             )
-            if isinstance(scope, ast.ClassDef):
-                bound: set[str] = set()
-            else:
-                bound = parameters(scope)
-                bound.update(
-                    node.id
-                    for node in nodes
-                    if isinstance(node, ast.Name)
-                    and isinstance(node.ctx, (ast.Store, ast.Del))
-                )
-                bound.update(
-                    node.name
-                    for node in nodes
-                    if isinstance(
-                        node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)
+            # Every binding form: assignment targets, definitions, imports,
+            # exception names, and match captures.
+            local_names = parameters(scope)
+            for node in nodes:
+                if isinstance(node, ast.Name) and isinstance(
+                    node.ctx, (ast.Store, ast.Del)
+                ):
+                    local_names.add(node.id)
+                elif isinstance(
+                    node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)
+                ):
+                    local_names.add(node.name)
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    local_names.update(
+                        (alias.asname or alias.name).split(".", 1)[0]
+                        for alias in node.names
+                        if alias.name != "*"
                     )
-                )
+                elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+                    if node.name:
+                        local_names.add(node.name)
+                elif isinstance(node, ast.MatchMapping) and node.rest:
+                    local_names.add(node.rest)
+            bound = set() if isinstance(scope, ast.ClassDef) else set(local_names)
             redirected_here = global_names | nonlocal_names | walrus_names
             bound -= redirected_here
             # A ``global`` name reads the module binding, never an enclosing
@@ -4496,6 +4503,17 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
                     names = stored_names(target)
                     if names and value is not None:
                         bindings.append((names, value))
+                if isinstance(node, ast.Match):
+                    for case in node.cases:
+                        captures: set[str] = set()
+                        for item in ast.walk(case.pattern):
+                            if isinstance(item, (ast.MatchAs, ast.MatchStar)):
+                                if item.name:
+                                    captures.add(item.name)
+                            elif isinstance(item, ast.MatchMapping) and item.rest:
+                                captures.add(item.rest)
+                        if captures:
+                            bindings.append((captures, node.subject))
             if settle_conservatively:
                 for names, _ in bindings:
                     tainted |= names & redirected_here
@@ -4556,6 +4574,18 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
                     owner, set()
                 ):
                     redirected[owner].add(name)
+                    grew = True
+
+            # A class whose body binds a tainted name taints the class name,
+            # so ``Config.root`` stays unresolved when ``root`` is tainted.
+            if (
+                isinstance(scope, ast.ClassDef)
+                and chain
+                and tainted & (local_names - set(inherited))
+            ):
+                owner = chain[-1][0]
+                if scope.name not in redirected.setdefault(owner, set()):
+                    redirected[owner].add(scope.name)
                     grew = True
 
             inner_chain = chain + ((scope, bound),)
