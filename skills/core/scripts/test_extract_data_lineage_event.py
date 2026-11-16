@@ -1458,6 +1458,21 @@ _PANDAS_PATH_PRELUDE = "import os\nimport sys\nfrom pathlib import Path\nimport 
             "pd.read_csv(p / 'input.csv').to_csv(p / 'result.csv')\n",
             id="chained-writer-despite-unrelated-same-named-import",
         ),
+        pytest.param(
+            "class Preview:\n"
+            "    def to_csv(self, path):\n"
+            "        print(path)\n"
+            "p = Path(__file__).parent\n"
+            "pd.read_csv(p / 'input.csv').to_csv(p / 'result.csv')\n",
+            id="chained-writer-beside-unrelated-custom-method",
+        ),
+        pytest.param(
+            "def to_csv(path):\n"
+            "    print(path)\n"
+            "frame = pd.read_csv(Path(__file__).parent / 'input.csv')\n"
+            "frame.to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="named-writer-beside-unrelated-custom-function",
+        ),
     ],
 )
 def test_repository_recovery_keeps_static_path_prefixes(
@@ -1487,19 +1502,48 @@ def test_repository_recovery_keeps_static_path_prefixes(
     assert [item["path"] for item in event["outputs"]] == [str(result)]
 
 
-def test_repository_recovery_records_savefig_chained_on_call(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "import matplotlib.pyplot as plt\n"
+            "plt.figure().savefig(Path(__file__).parent / 'figure.png')\n",
+            id="chained-on-call",
+        ),
+        pytest.param(
+            "import matplotlib.pyplot as plt\n"
+            "class Preview:\n"
+            "    def savefig(self, path):\n"
+            "        print(path)\n"
+            "plt.figure().savefig(Path(__file__).parent / 'figure.png')\n",
+            id="chained-beside-unrelated-custom-method",
+        ),
+        pytest.param(
+            "from matplotlib.pyplot import savefig\n"
+            "def preview(savefig):\n"
+            "    pass\n"
+            "savefig(Path(__file__).parent / 'figure.png')\n",
+            id="imported-beside-parameter-in-other-scope",
+        ),
+        pytest.param(
+            "from matplotlib.pyplot import savefig\n"
+            "class Panel:\n"
+            "    savefig = None\n"
+            "    def draw(self):\n"
+            "        savefig(Path(__file__).parent / 'figure.png')\n",
+            id="imported-inside-method-despite-class-attribute",
+        ),
+    ],
+)
+def test_repository_recovery_records_savefig(
+    tmp_path: Path, source: str
 ) -> None:
-    """A figure method called on a call result is still a write."""
+    """A real figure write survives chaining and unrelated same-named code."""
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     figure = tmp_path / "figure.png"
     figure.write_bytes(b"png")
     script = tmp_path / "run.py"
-    script.write_text(
-        "from pathlib import Path\n"
-        "import matplotlib.pyplot as plt\n"
-        "plt.figure().savefig(Path(__file__).parent / 'figure.png')\n"
-    )
+    script.write_text("from pathlib import Path\n" + source)
     args = argparse.Namespace(
         ts="2026-11-15T12:00:00Z",
         agent_id="",
@@ -1553,8 +1597,8 @@ def test_repository_recovery_records_savefig_chained_on_call(
             "class Preview:\n"
             "    def savefig(self, path):\n"
             "        print(path)\n"
-            "[Preview()][0].savefig(Path(__file__).parent / 'result.csv')\n",
-            id="custom-savefig-on-subscript",
+            "Preview().savefig(Path(__file__).parent / 'result.csv')\n",
+            id="custom-savefig-on-constructor",
         ),
         pytest.param(
             "from matplotlib.pyplot import savefig\n"
@@ -1574,6 +1618,13 @@ def test_repository_recovery_records_savefig_chained_on_call(
             "def run(savefig):\n"
             "    savefig(Path(__file__).parent / 'result.csv')\n",
             id="imported-writer-shadowed-by-parameter",
+        ),
+        pytest.param(
+            "from matplotlib.pyplot import savefig\n"
+            "def run():\n"
+            "    savefig = print\n"
+            "    savefig(Path(__file__).parent / 'result.csv')\n",
+            id="imported-writer-rebound-in-enclosing-function",
         ),
     ],
 )
