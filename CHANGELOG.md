@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`.living/conventions/ACTIVE_CONVENTIONS.yaml` is valid YAML again (#129).**
+  Init seeded the registry as a mapping (`active_conventions: []`), while
+  `install_convention.py` appended pack entries as a top-level list. When the
+  seed survived init (core packs not found at init time, or projects started
+  on older releases), the first pack install left a file `yaml.safe_load`
+  rejects. The registry now has one shape everywhere, a bare list with `[]`
+  for no packs. Init seeds `[]`, and `install_convention.py` rewrites either
+  legacy shape into the list before adding its entry. Reinstalling a pack also
+  now replaces only the entry with that exact name (installing `bio` no longer
+  removes `bioinformatics`) and keeps a core pack's `core: true` flag. The
+  installer edits the file in place, so comments and other entries survive.
+  It reads only the shape Mycelium writes (comments, `[]`, and `- key: value`
+  entries with two-space `key: value` fields holding one-line scalars) and
+  refuses anything else, such as nested blocks, block scalars, anchors, or
+  flow lists, before copying the pack, asking for a hand fix. It writes
+  atomically and refuses a symlinked registry or conventions directory. When
+  PyYAML is installed, every rewrite must also load to the same entries (plus
+  the one being installed) or it is refused.
+  `migrate_existing_repos.py` gains an idempotent `ACTIVE_CONVENTIONS.yaml
+  shape` action. It rewrites only files that still carry the legacy
+  `active_conventions:` key, leaves every other file byte-identical, and
+  reports a legacy file it cannot repair as `skipped (unrecognized shape; fix
+  by hand)`. Run the `$mycelium:core` migration
+  to repair an existing project. Nothing in the plugin parsed this file, so
+  no behavior changes for projects that skip the migration.
+
 - **Data lineage no longer records a same-named repository file for a path
   the script chooses at run time.** When a script builds a path such as
   `Path(sys.argv[1]) / "input.csv"`, repository recovery used to drop the

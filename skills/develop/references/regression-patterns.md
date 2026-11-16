@@ -734,6 +734,18 @@ inside a quoted attribute value; a quoted `>`; a hyphenated attribute
 suffix; nested comments; and a second copy of a "first-only" element. Each
 must be ignored, preserved byte-for-byte, or rejected — never rewritten.
 
+**Recurrence (#129):** the `ACTIVE_CONVENTIONS.yaml` repair edited YAML line
+by line, and four review rounds each found new valid inputs it corrupted:
+block-scalar content read as comments, `|+` trailing blanks stripped, anchors
+broken by removing an entry, a quoted multi-line scalar mistaken for the
+legacy key, U+2028 split by `splitlines`. Each fix that widened what the
+editor accepted invited the next case. What converged was the opposite:
+accept exactly the grammar the machine writers emit, refuse everything else
+before any mutation, rewrite only files carrying the defect's marker, and let
+the real parser (when installed) veto any rewrite that changes the parsed
+value. Keep every reviewer's adversarial input in one refusal table that runs
+with and without the optional parser.
+
 ## 37. An exemption is wider than the evidence that justifies it
 
 **Failure:** A checker exempts a region because something vouches for it,
