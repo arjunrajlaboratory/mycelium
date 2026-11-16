@@ -35,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to repair an existing project. Nothing in the plugin parsed this file, so
   no behavior changes for projects that skip the migration.
 
+- **Data lineage no longer records a same-named repository file for a path
+  the script chooses at run time.** When a script builds a path such as
+  `Path(sys.argv[1]) / "input.csv"`, repository recovery used to drop the
+  runtime part, find the repository's own `input.csv`, and record (and hash)
+  it as an input even though the script read a file elsewhere. Recovery now
+  leaves a path unresolved, with the usual dynamic-path warning, when it
+  draws on `sys.argv`, `argparse` results, `os.environ`, `os.getenv`,
+  `input()`, or `sys.stdin`, directly or through assignments. Paths anchored
+  on `__file__` or other static values are still recovered. Existing
+  projects need no migration; only new lineage events change.
+
 ## [0.9.4] - 2026-11-15
 
 ### Added

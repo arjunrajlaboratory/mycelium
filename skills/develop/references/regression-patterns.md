@@ -489,7 +489,9 @@ from `results/` as an output. Recursively collecting a conditional path records
 both branches, while leaf-name matching treats a user-defined `read_csv` helper
 as real data I/O. Trusting a familiar alias after any rebinding has the same
 effect, and retaining the literal half of runtime string concatenation can hash
-a decoy whose basename was never read.
+a decoy whose basename was never read. Path division and `os.path.join` do the
+same: `Path(sys.argv[1]) / "input.csv"` names a file outside the repository,
+yet dropping the runtime prefix matched the repository's own `input.csv`.
 
 **Invariant:** Recovery candidates must data-flow into the path argument of a
 recognized reader or writer expression. Direction is semantic evidence from
@@ -507,6 +509,10 @@ require unresolved lineage, while retaining a supported imported reader. Rebind
 its conventional alias through assignment, loop, context manager, unpacking,
 exception handling, walrus, comprehension, and pattern matching, and combine a
 runtime prefix with a literal suffix; require every case to stay unresolved.
+Join a command-line, `argparse`, or environment directory to a literal filename
+that also exists in the repository, by division, `joinpath`, `os.path.join`,
+and through assignments; require no lineage, while a `__file__`-anchored path
+to the same filename is still recovered.
 
 ## 27. Resolved I/O triggers repository traversal
 
