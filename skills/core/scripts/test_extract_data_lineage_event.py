@@ -1814,6 +1814,26 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "    frame = pd.read_csv(path)\n",
             id="loop-target-shadowing-another-scopes-assignment",
         ),
+        pytest.param(
+            "class Config:\n"
+            "    root = Path(os.environ['DATA_DIR'])\n"
+            "config = Config()\n"
+            "root = config.root\n"
+            "frame = pd.read_csv(root / 'input.csv')\n"
+            "frame.to_csv(root / 'result.csv')\n",
+            id="class-attribute-through-instance",
+        ),
+        pytest.param(
+            "class Config:\n"
+            "    root = Path(sys.argv[1])\n"
+            "def main():\n"
+            "    settings = Config\n"
+            "    cfg = settings()\n"
+            "    frame = pd.read_csv(cfg.root / 'input.csv')\n"
+            "    frame.to_csv(cfg.root / 'result.csv')\n"
+            "main()\n",
+            id="class-attribute-through-alias-chain",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
@@ -1993,6 +2013,16 @@ def test_repository_recovery_leaves_static_parameter_defaults_unresolved(
             "frame = pd.read_csv(Config.data_dir / 'input.csv')\n"
             "frame.to_csv(Config.data_dir / 'result.csv')\n",
             id="static-class-attribute-beside-runtime-field",
+        ),
+        pytest.param(
+            "ROOT = Path(__file__).parent\n"
+            "class Config:\n"
+            "    data_dir = ROOT\n"
+            "    n_jobs = int(os.getenv('N_JOBS', '1'))\n"
+            "config = Config()\n"
+            "frame = pd.read_csv(config.data_dir / 'input.csv')\n"
+            "frame.to_csv(config.data_dir / 'result.csv')\n",
+            id="static-attribute-through-instance-beside-runtime-field",
         ),
     ],
 )

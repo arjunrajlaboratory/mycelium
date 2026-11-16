@@ -4477,6 +4477,10 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef))
     }
     own_taint: dict[ast.AST, set[str]] = {}
+    # Tainted attribute names per class, and per name bound to that class or
+    # an instance of it (``config = Config()``). Keyed by plain name across
+    # scopes, which can only add taint.
+    attribute_taint: dict[str, set[str]] = {}
     scope_bound: dict[ast.AST, set[str]] = {}
     scope_globals: dict[ast.AST, set[str]] = {}
     lexical_parent: dict[ast.AST, ast.AST | None] = {tree: None}
@@ -4599,6 +4603,30 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
                     bindings.append((names, value))
 
         tainted = parameters(scope) | redirected.get(scope, set())
+
+        # ``config = Config()`` or ``cfg = Config`` carries the class's
+        # tainted attributes to ``config.root``, transitively through
+        # further aliases.
+        alias_targets: dict[str, list[str]] = {}
+        for names, value in bindings:
+            source = value.func if isinstance(value, ast.Call) else value
+            if isinstance(source, ast.Name):
+                alias_targets.setdefault(source.id, []).extend(names)
+        alias_queue = [name for name in alias_targets if attribute_taint.get(name)]
+        while alias_queue:
+            source = alias_queue.pop()
+            attributes = attribute_taint.get(source, set())
+            for target in alias_targets.get(source, ()):
+                added = attributes - attribute_taint.get(target, set())
+                if added:
+                    attribute_taint.setdefault(target, set()).update(added)
+                    tainted.update(f"{target}.{attribute}" for attribute in added)
+                    alias_queue.append(target)
+            for target in alias_targets.get(source, ()):
+                tainted.update(
+                    f"{target}.{attribute}"
+                    for attribute in attribute_taint.get(target, set())
+                )
         if settle_conservatively:
             for names, _ in bindings:
                 tainted |= names & redirected_here
@@ -4700,6 +4728,7 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             for name in local_names:
                 if name in tainted:
                     redirect(parent, f"{scope.name}.{name}")
+                    attribute_taint.setdefault(scope.name, set()).add(name)
         if isinstance(scope, function_types) and not isinstance(scope, ast.Lambda):
             exports = [
                 node.value
