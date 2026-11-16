@@ -502,6 +502,20 @@ class TestFreshInit:
         assert sorted(p.name for p in conventions.iterdir()) == ["ACTIVE_CONVENTIONS.yaml"]
         assert _load(repo) == []
 
+    def test_init_refuses_unregistrable_core_pack_before_any_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex P1: init's preflight checks core names before writing anything."""
+        network = tmp_path / "network"
+        (network / "a'b\"c").mkdir(parents=True)
+        (network / "a'b\"c" / "CONVENTION_PACK.yaml").write_text("core: true\n")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        monkeypatch.setattr(ir, "find_network_conventions_dir", lambda: network)
+        with pytest.raises(ic.UnrecognizedRegistryError):
+            ir.preflight_initialization(repo)
+        assert list(repo.iterdir()) == []
+
     def test_init_then_install_is_valid_yaml(self, tmp_path: Path) -> None:
         """End to end through the CLIs, as the issue asks."""
         repo = tmp_path / "proj"

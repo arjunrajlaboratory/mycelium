@@ -267,7 +267,12 @@ def preflight_initialization(target_dir: Path) -> None:
 
     network_dir = find_network_conventions_dir()
     if network_dir:
+        # Imported here: install_convention imports this module's file helpers.
+        from install_convention import format_registry_entry
+
         for pack_name in get_core_convention_packs(network_dir):
+            # Refuse a name the registry cannot hold before any init write.
+            format_registry_entry(pack_name, "1970-01-01T00:00:00Z", core=True)
             destination = target_dir / ".living" / "conventions" / pack_name
             ensure_safe_project_directory(
                 target_dir,
