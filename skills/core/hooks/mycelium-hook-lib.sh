@@ -2,210 +2,204 @@
 
 # Shared compatibility helpers for Claude Code and Codex hooks.
 
-mycelium_prepare_state_dir() {
+# The state helpers below run in mycelium_hook_state.py, one interpreter per
+# call of mycelium__state however many checks the call chains. The module
+# documents each op; every op keeps the contract of the bash helper it
+# replaced, including the variables that helper assigned.
+MYCELIUM__STATE_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/mycelium_hook_state.py"
+# Results of the marker and owner ops (states: absent, invalid, valid).
+MYCELIUM_MARKER_STATE=""
+MYCELIUM_MARKER_LOG=""
+MYCELIUM_MARKER_TS=""
+MYCELIUM_MARKER_FORMAT=""
+MYCELIUM_OWNER_STATE=""
+MYCELIUM_OWNER_ID=""
+MYCELIUM__STATE_FAILED=0
+MYCELIUM__STATE_HELD=""
+# Lock directories this process acquired. A value inherited from the
+# environment names someone else's lock: never let a release remove it.
+MYCELIUM_STOP_LOCK_DIR=""
+MYCELIUM_SESSION_LOCK_DIR=""
+
+# mycelium__state REPO_ROOT PAYLOAD OP...: run the ops in order and stop at
+# the first failure. Applies the assignments the ops make (STATE_DIR,
+# MYCELIUM_SHARED_STATE_DIR, MYCELIUM_SESSION_*, the lock directories, and the
+# marker and owner reads), sets MYCELIUM__STATE_FAILED to the 1-based index of
+# the failed op (0 when none failed), and returns nonzero on failure.
+#
+# A lock op makes one mkdir(2) attempt in Python. When the lock is held, this
+# runs the unchanged bash acquisition loop (dead-owner reaping, retries) and
+# then resumes the remaining ops in a fresh interpreter, so every check after
+# a lock still runs after it was taken.
+mycelium__state() {
   local repo_root="$1"
-  local mode="${2:-write}"
-  local requested_state=""
-  local living_dir=""
-  local legacy_dir=""
-  local legacy_session=""
-  local unsafe_link=""
-  local plugin_pointer=""
-  local pointer_tmp=""
-  local managed_target=""
+  local input="$2"
+  shift 2
+  local -a ops=("$@")
+  local sid=""
+  local sid_status=ok
+  local host=claude
+  local op=""
+  local offset=0
+  local kind="" a="" b="" c="" d=""
+  local last_ok=0 failed=0 busy=0 ended=false
 
-  [[ "$mode" == "write" \
-    || "$mode" == "read-only" \
-    || "$mode" == "bootstrap" ]] || return 1
+  MYCELIUM__STATE_FAILED=0
+  MYCELIUM__STATE_HELD=""
+  (( ${#ops[@]} > 0 )) || return 0
+  for op in "${ops[@]}"; do
+    case "$op" in
+      select:*|owns)
+        if ! sid=$(mycelium_json_get_optional_string 'session_id' input); then
+          sid=""
+          sid_status=fail
+        fi
+        break
+        ;;
+    esac
+  done
+  case "${MYCELIUM_HOOK_HOST:-}" in
+    codex|claude) host="$MYCELIUM_HOOK_HOST" ;;
+  esac
 
-  repo_root=$(cd "$repo_root" 2>/dev/null && pwd -P) || return 1
-  living_dir="$repo_root/.living"
+  while true; do
+    last_ok=0
+    failed=0
+    busy=0
+    ended=false
+    while IFS= read -r -d '' kind; do
+      case "$kind" in
+        set)
+          IFS= read -r -d '' a || break
+          IFS= read -r -d '' b || break
+          case "$a" in
+            STATE_DIR|MYCELIUM_SHARED_STATE_DIR|MYCELIUM_SESSION_SCOPED|MYCELIUM_SESSION_HOST|MYCELIUM_HOST_SESSION_ID|MYCELIUM_ACTIVE_FLAT_FALLBACK)
+              printf -v "$a" '%s' "$b"
+              ;;
+          esac
+          ;;
+        lock)
+          IFS= read -r -d '' a || break
+          IFS= read -r -d '' b || break
+          case "$a" in
+            stop)
+              MYCELIUM_STOP_LOCK_DIR="$b"
+              MYCELIUM__STATE_HELD="$MYCELIUM__STATE_HELD stop"
+              ;;
+            session)
+              MYCELIUM_SESSION_LOCK_DIR="$b"
+              MYCELIUM__STATE_HELD="$MYCELIUM__STATE_HELD session"
+              ;;
+          esac
+          ;;
+        marker)
+          IFS= read -r -d '' a || break
+          IFS= read -r -d '' b || break
+          IFS= read -r -d '' c || break
+          IFS= read -r -d '' d || break
+          MYCELIUM_MARKER_STATE="$a"
+          MYCELIUM_MARKER_LOG="$b"
+          MYCELIUM_MARKER_TS="$c"
+          MYCELIUM_MARKER_FORMAT="$d"
+          ;;
+        owner)
+          IFS= read -r -d '' a || break
+          IFS= read -r -d '' b || break
+          MYCELIUM_OWNER_STATE="$a"
+          MYCELIUM_OWNER_ID="$b"
+          ;;
+        ok|fail|busy)
+          IFS= read -r -d '' a || break
+          [[ "$a" =~ ^[0-9]+$ ]] || break
+          case "$kind" in
+            ok) last_ok="$a" ;;
+            fail) failed="$a" ;;
+            busy) busy="$a" ;;
+          esac
+          ;;
+        end)
+          ended=true
+          ;;
+      esac
+    done < <(python3 -I -S "$MYCELIUM__STATE_PY" \
+      "$$" "$host" "$sid_status" "$sid" "$repo_root" \
+      "${STATE_DIR:-}" "${MYCELIUM_SHARED_STATE_DIR:-}" \
+      "${MYCELIUM_STATE_DIR:-}" "${MYCELIUM_PLUGIN_ROOT:-}" \
+      "${ops[@]:$offset}" 2>/dev/null)
 
-  # These hooks run from a globally trusted plugin but operate on an
-  # untrusted checkout. Never follow repository-controlled symlinks for state
-  # or lifecycle output: doing so would turn a normal hook into an arbitrary
-  # out-of-project writer.
-  if [[ -L "$living_dir" ]]; then
-    return 1
-  fi
-  if [[ -d "$living_dir" ]]; then
-    unsafe_link=$(find "$living_dir" -type l -print -quit 2>/dev/null || true)
-    if [[ -n "$unsafe_link" ]]; then
+    # An interpreter that died before reporting its end failed the op it was
+    # running, whatever it had already reported.
+    if [[ "$ended" != true ]]; then
+      failed=$((last_ok + 1))
+      busy=0
+    fi
+    if (( failed > 0 )); then
+      MYCELIUM__STATE_FAILED=$((offset + failed))
       return 1
     fi
-  fi
-
-  requested_state="${MYCELIUM_STATE_DIR:-$repo_root/.mycelium}"
-  requested_state=$(python3 - "$repo_root" "$requested_state" <<'PY'
-import os
-import stat
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1]).resolve(strict=True)
-candidate = Path(sys.argv[2])
-if not candidate.is_absolute():
-    candidate = root / candidate
-candidate = Path(os.path.abspath(candidate))
-try:
-    relative = candidate.relative_to(root)
-except ValueError:
-    raise SystemExit(1)
-if not relative.parts:
-    raise SystemExit(1)
-
-# Reject every existing symlink or non-directory component before mkdir. This
-# validates the path before the shell can follow a repository-controlled link.
-current = root
-for part in relative.parts:
-    current = current / part
-    try:
-        mode = current.lstat().st_mode
-    except FileNotFoundError:
-        continue
-    except OSError:
-        raise SystemExit(1)
-    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-        raise SystemExit(1)
-
-try:
-    candidate.resolve(strict=False).relative_to(root)
-except (OSError, RuntimeError, ValueError):
-    raise SystemExit(1)
-print(candidate)
-PY
-  ) || return 1
-  if [[ "$mode" == "read-only" ]]; then
-    [[ -d "$requested_state" ]] || return 1
-  else
-    mkdir -p "$requested_state" || return 1
-  fi
-  STATE_DIR=$(cd "$requested_state" 2>/dev/null && pwd -P) || return 1
-  case "$STATE_DIR" in
-    "$repo_root"/*) ;;
-    *) return 1 ;;
-  esac
-  # STATE_DIR historically named the repository-global runtime directory.
-  # Keep that value as the shared coordination root even after an identified
-  # host task selects its private run directory below.
-  MYCELIUM_SHARED_STATE_DIR="$STATE_DIR"
-  unsafe_link=$(find "$STATE_DIR" -type l -print -quit 2>/dev/null || true)
-  if [[ -n "$unsafe_link" ]]; then
-    return 1
-  fi
-
-  # Ownership preflight for host-identified PostToolUse events must happen
-  # before state initialization, plugin-pointer refresh, or legacy migration.
-  if [[ "$mode" == "read-only" || "$mode" == "bootstrap" ]]; then
-    return 0
-  fi
-
-  plugin_pointer="$STATE_DIR/plugin-root"
-  legacy_dir="$repo_root/.claude"
-  legacy_session="$legacy_dir/last-session.md"
-  for managed_target in \
-    "$STATE_DIR/.gitignore" \
-    "$STATE_DIR/last-session.md"; do
-    if [[ ( -e "$managed_target" || -L "$managed_target" ) \
-      && ( ! -f "$managed_target" || -L "$managed_target" ) ]]; then
-      return 1
+    if (( busy == 0 )); then
+      return 0
+    fi
+    op="${ops[$((offset + busy - 1))]}"
+    case "$op" in
+      lock:stop)
+        if ! mycelium_acquire_stop_lock "${MYCELIUM_SHARED_STATE_DIR:-}"; then
+          MYCELIUM__STATE_FAILED=$((offset + busy))
+          return 1
+        fi
+        MYCELIUM__STATE_HELD="$MYCELIUM__STATE_HELD stop"
+        ;;
+      lock:session)
+        if ! mycelium_acquire_session_lock "${STATE_DIR:-}"; then
+          MYCELIUM__STATE_FAILED=$((offset + busy))
+          return 1
+        fi
+        MYCELIUM__STATE_HELD="$MYCELIUM__STATE_HELD session"
+        ;;
+      *)
+        MYCELIUM__STATE_FAILED=$((offset + busy))
+        return 1
+        ;;
+    esac
+    offset=$((offset + busy))
+    if (( offset >= ${#ops[@]} )); then
+      return 0
     fi
   done
-  if [[ -n "${MYCELIUM_PLUGIN_ROOT:-}" \
-    && ( -e "$plugin_pointer" || -L "$plugin_pointer" ) \
-    && ( ! -f "$plugin_pointer" || -L "$plugin_pointer" ) ]]; then
-    return 1
-  fi
+}
 
-  if [[ ! -f "$STATE_DIR/.gitignore" ]]; then
-    printf '*\n!.gitignore\n' > "$STATE_DIR/.gitignore"
-  fi
+# Release the locks the last mycelium__state call took, narrowest first. A
+# failed call may hold a lock even when the op that took it never reported
+# success (its process died after the lock record), so callers release by
+# this record rather than by the failed op's index.
+mycelium__state_release_held() {
+  case " $MYCELIUM__STATE_HELD " in
+    *" session "*) mycelium_release_session_lock ;;
+  esac
+  case " $MYCELIUM__STATE_HELD " in
+    *" stop "*) mycelium_release_stop_lock ;;
+  esac
+  MYCELIUM__STATE_HELD=""
+}
 
-  # Codex plugin hooks carry their live bundle root through the dispatcher.
-  # Refresh the generated guidance pointer only after the shared state safety
-  # checks above, and replace it atomically rather than following an existing
-  # path with shell redirection.
-  if [[ -n "${MYCELIUM_PLUGIN_ROOT:-}" ]]; then
-    if [[ ! -f "$plugin_pointer" \
-      || "$(cat "$plugin_pointer" 2>/dev/null || true)" != "$MYCELIUM_PLUGIN_ROOT" ]]; then
-      pointer_tmp=$(mktemp "$STATE_DIR/.plugin-root.tmp.XXXXXX") || return 1
-      if ! printf '%s\n' "$MYCELIUM_PLUGIN_ROOT" > "$pointer_tmp" \
-        || ! mv -f "$pointer_tmp" "$plugin_pointer"; then
-        rm -f "$pointer_tmp"
-        return 1
-      fi
-    fi
-  fi
+# Record the marker as unreadable after its read op died.
+mycelium__state_marker_unread() {
+  MYCELIUM_MARKER_STATE=invalid
+  MYCELIUM_MARKER_LOG=""
+  MYCELIUM_MARKER_TS=""
+  MYCELIUM_MARKER_FORMAT=""
+}
 
-  # Preserve cross-session context from projects initialized before v0.4.
-  if [[ ! -f "$STATE_DIR/last-session.md" \
-    && -d "$legacy_dir" \
-    && ! -L "$legacy_dir" \
-    && -f "$legacy_session" \
-    && ! -L "$legacy_session" ]]; then
-    cp "$legacy_session" "$STATE_DIR/last-session.md"
-  fi
-
-  return 0
+mycelium_prepare_state_dir() {
+  mycelium__state "$1" "" "prepare:${2:-write}"
 }
 
 mycelium_read_active_log_marker() {
-  local repo_root="$1"
-  local marker_file="$2"
-  local raw_path=""
-  local owner_ts=""
-  local ownership_format=""
-  local line_count=""
-  local safe_path=""
-
-  [[ -f "$marker_file" && ! -L "$marker_file" ]] || return 1
-  raw_path=$(sed -n '1p' "$marker_file" 2>/dev/null || true)
-  owner_ts=$(sed -n '2p' "$marker_file" 2>/dev/null || true)
-  ownership_format=$(sed -n '3p' "$marker_file" 2>/dev/null || true)
-  line_count=$(awk 'END { print NR }' "$marker_file" 2>/dev/null || true)
-  [[ -n "$raw_path" && "$owner_ts" =~ ^[0-9]{1,18}$ ]] || return 1
-  if [[ "$line_count" == 2 ]]; then
-    [[ -z "$ownership_format" ]] || return 1
-  elif [[ "$line_count" == 3 ]]; then
-    [[ "$ownership_format" == "owner-id-v1" ]] || return 1
-  else
-    return 1
-  fi
-
-  safe_path=$(python3 - "$repo_root" "$raw_path" <<'PY'
-import os
-import stat
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1]).resolve(strict=True)
-raw = Path(sys.argv[2])
-if not raw.is_absolute():
-    raise SystemExit(1)
-log_root = (root / ".living" / "log").resolve(strict=False)
-candidate = Path(os.path.abspath(raw))
-try:
-    relative = candidate.resolve(strict=False).relative_to(log_root)
-except (OSError, RuntimeError, ValueError):
-    raise SystemExit(1)
-if len(relative.parts) != 1:
-    raise SystemExit(1)
-try:
-    mode = candidate.lstat().st_mode
-except FileNotFoundError:
-    pass
-except OSError:
-    raise SystemExit(1)
-else:
-    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-        raise SystemExit(1)
-print(candidate)
-PY
-  ) || return 1
-  [[ -n "$safe_path" ]] || return 1
-  printf '%s\n%s\n' "$safe_path" "$owner_ts"
-  if [[ -n "$ownership_format" ]]; then
-    printf '%s\n' "$ownership_format"
+  mycelium__state "$1" "" "marker-at=$2" || return 1
+  [[ "$MYCELIUM_MARKER_STATE" == valid ]] || return 1
+  printf '%s\n%s\n' "$MYCELIUM_MARKER_LOG" "$MYCELIUM_MARKER_TS"
+  if [[ -n "$MYCELIUM_MARKER_FORMAT" ]]; then
+    printf '%s\n' "$MYCELIUM_MARKER_FORMAT"
   fi
 }
 
@@ -220,222 +214,119 @@ mycelium_valid_session_id() {
 }
 
 mycelium_read_session_owner_id() {
-  local owner_file="$1"
-  local owner_id=""
-  local line_count=""
-
-  [[ -f "$owner_file" && ! -L "$owner_file" ]] || return 1
-  owner_id=$(sed -n '1p' "$owner_file" 2>/dev/null || true)
-  line_count=$(awk 'END { print NR }' "$owner_file" 2>/dev/null || true)
-  mycelium_valid_session_id "$owner_id" || return 1
-  [[ "$line_count" == 1 ]] || return 1
-  printf '%s\n' "$owner_id"
+  mycelium__state "" "" "owner-at=$1" || return 1
+  [[ "$MYCELIUM_OWNER_STATE" == valid ]] || return 1
+  printf '%s\n' "$MYCELIUM_OWNER_ID"
 }
 
 mycelium_select_session_state() {
-  local repo_root="$1"
-  local input="$2"
-  local mode="${3:-read-only}"
-  local shared_state="${MYCELIUM_SHARED_STATE_DIR:-${STATE_DIR:-}}"
-  local host_session_id=""
-  local host=""
-  local run_state=""
-  local flat_owner=""
-  local flat_marker=""
-
-  [[ -n "$shared_state" && -d "$shared_state" && ! -L "$shared_state" ]] \
-    || return 1
-  repo_root=$(cd "$repo_root" 2>/dev/null && pwd -P) || return 1
-  host_session_id=$(mycelium_json_get_optional_string 'session_id' input) || return 1
-
-  # Identity-free hosts retain the pre-0.7 flat transaction layout. Never map
-  # an invalid nonempty identity onto that compatibility path.
-  if [[ -z "$host_session_id" ]]; then
-    STATE_DIR="$shared_state"
-    MYCELIUM_SESSION_SCOPED=false
-    MYCELIUM_SESSION_HOST="legacy"
-    MYCELIUM_HOST_SESSION_ID=""
-    MYCELIUM_ACTIVE_FLAT_FALLBACK=false
-    return 0
-  fi
-  mycelium_valid_session_id "$host_session_id" || return 1
-  host=$(mycelium_hook_host)
-  [[ "$host" == "claude" || "$host" == "codex" ]] || return 1
-
-  run_state="$shared_state/run/$host/$host_session_id"
-
-  # Rolling-upgrade compatibility: a task started by the prior build may still
-  # own the flat transaction. Route only an exact owner match there; another
-  # root gets a new scoped transaction and cannot consume the old evidence.
-  if [[ ! -e "$run_state" && ! -L "$run_state" \
-    && -f "$shared_state/active-session-log.tmp" \
-    && ! -L "$shared_state/active-session-log.tmp" ]]; then
-    flat_owner=$(mycelium_read_session_owner_id \
-      "$shared_state/active-session-owner-id.tmp" 2>/dev/null || true)
-    flat_marker=$(mycelium_read_active_log_marker \
-      "$repo_root" "$shared_state/active-session-log.tmp" 2>/dev/null || true)
-    if [[ -n "$flat_marker" && "$flat_owner" == "$host_session_id" ]]; then
-      STATE_DIR="$shared_state"
-      MYCELIUM_SESSION_SCOPED=false
-      MYCELIUM_SESSION_HOST="$host"
-      MYCELIUM_HOST_SESSION_ID="$host_session_id"
-      MYCELIUM_ACTIVE_FLAT_FALLBACK=true
-      return 0
-    fi
-  fi
-
-  run_state=$(python3 - "$shared_state" "$host" "$host_session_id" "$mode" <<'PY'
-import os
-import stat
-import sys
-from pathlib import Path
-
-shared = Path(sys.argv[1]).resolve(strict=True)
-host, session_id, mode = sys.argv[2:]
-if host not in {"claude", "codex"}:
-    raise SystemExit(1)
-if not session_id or len(session_id) > 200 or session_id in {".", ".."}:
-    raise SystemExit(1)
-if any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" for ch in session_id):
-    raise SystemExit(1)
-if mode not in {"create", "read-only"}:
-    raise SystemExit(1)
-
-current = shared
-for part in ("run", host, session_id):
-    current = current / part
-    try:
-        metadata = current.lstat()
-    except FileNotFoundError:
-        if mode != "create":
-            raise SystemExit(1)
-        try:
-            current.mkdir(mode=0o700)
-        except FileExistsError:
-            metadata = current.lstat()
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-                raise SystemExit(1)
-    except OSError:
-        raise SystemExit(1)
-    else:
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            raise SystemExit(1)
-
-candidate = current.resolve(strict=True)
-try:
-    candidate.relative_to(shared)
-except ValueError:
-    raise SystemExit(1)
-print(candidate)
-PY
-  ) || return 1
-  [[ -n "$run_state" ]] || return 1
-  STATE_DIR="$run_state"
-  MYCELIUM_SESSION_SCOPED=true
-  MYCELIUM_SESSION_HOST="$host"
-  MYCELIUM_HOST_SESSION_ID="$host_session_id"
-  MYCELIUM_ACTIVE_FLAT_FALLBACK=false
-  return 0
+  mycelium__state "$1" "$2" "select:${3:-read-only}"
 }
 
 mycelium_payload_owns_active_session() {
-  local repo_root="$1"
-  local input="$2"
-  local marker_file="$STATE_DIR/active-session-log.tmp"
-  local owner_file="$STATE_DIR/active-session-owner-id.tmp"
-  local marker=""
-  local owner_format=""
-  local owner_id=""
-  local host_session_id=""
-  local host_identified=false
+  mycelium__state "$1" "$2" owns
+}
 
+# Identity-free payloads keep compatibility with hosts predating session IDs,
+# including their markerless activity enforcement, so they may initialize the
+# shared state. An identified payload cannot create markerless state: it
+# validates the existing transaction without mutating shared preparation.
+mycelium__post_tool_prepare_mode() {
+  local host_session_id=""
+  local input="$1"
   host_session_id=$(mycelium_json_get_optional_string 'session_id' input) || return 1
   if [[ -n "$host_session_id" ]]; then
-    mycelium_valid_session_id "$host_session_id" || return 1
-    host_identified=true
+    MYCELIUM__PREPARE_MODE=read-only
+  else
+    MYCELIUM__PREPARE_MODE=write
   fi
-
-  # A host-identified event with no active transaction is a delayed event from
-  # a completed/superseded task. Only payloads from legacy hosts that omit a
-  # session identity may retain the pre-owner compatibility behavior.
-  if [[ ! -f "$marker_file" ]]; then
-    [[ "$host_identified" != true \
-      && ! -e "$owner_file" && ! -L "$owner_file" ]]
-    return
-  fi
-  if ! marker=$(mycelium_read_active_log_marker "$repo_root" "$marker_file"); then
-    # A legacy/corrupt marker with no owner token cannot authorize a log write,
-    # but it also must not disable independent activity enforcement. A claimed
-    # host-owned transaction remains fail-closed.
-    [[ "$host_identified" != true \
-      && ! -e "$owner_file" && ! -L "$owner_file" ]]
-    return
-  fi
-  owner_format=$(printf '%s\n' "$marker" | sed -n '3p')
-  if [[ "$owner_format" != "owner-id-v1" \
-    && ! -e "$owner_file" && ! -L "$owner_file" ]]; then
-    return 0
-  fi
-  owner_id=$(mycelium_read_session_owner_id "$owner_file") || return 1
-  [[ "$host_identified" == true && "$host_session_id" == "$owner_id" ]]
 }
 
 mycelium_prepare_post_tool_state() {
-  local repo_root="$1"
-  local input="$2"
-  local host_session_id=""
-
-  host_session_id=$(mycelium_json_get_optional_string 'session_id' input) || return 1
-  if [[ -n "$host_session_id" ]]; then
-    # An identified payload cannot create markerless state. Validate the
-    # existing transaction without mutating shared preparation state. The
-    # locked wrapper below revalidates after the event-lock wait.
-    mycelium_prepare_state_dir "$repo_root" read-only || return 1
-    mycelium_select_session_state "$repo_root" "$input" read-only || return 1
-    mycelium_payload_owns_active_session "$repo_root" "$input" || return 1
-  else
-    # Identity-free payloads retain compatibility with hosts predating session
-    # IDs, including their markerless activity enforcement.
-    mycelium_prepare_state_dir "$repo_root" || return 1
-    mycelium_select_session_state "$repo_root" "$input" read-only || return 1
-    mycelium_payload_owns_active_session "$repo_root" "$input" || return 1
-  fi
+  mycelium__post_tool_prepare_mode "$2" || return 1
+  mycelium__state "$1" "$2" \
+    "prepare:$MYCELIUM__PREPARE_MODE" select:read-only owns
 }
 
+# Validate, take the private session lock, and validate again: Stop may have
+# accepted this transaction while the event waited. The second pass runs
+# inside the critical section, before any state mutation. Also reads the
+# active marker for the caller (MYCELIUM_MARKER_*).
 mycelium_prepare_locked_post_tool_state() {
-  local repo_root="$1"
-  local input="$2"
-
-  mycelium_prepare_post_tool_state "$repo_root" "$input" || return 1
-  mycelium_acquire_session_lock "$STATE_DIR" || return 1
-
-  # Stop may have accepted this transaction while the event waited. Resolve
-  # and authorize the payload again inside the private session critical section
-  # before allowing any state mutation.
-  if ! mycelium_prepare_state_dir "$repo_root" read-only \
-    || ! mycelium_select_session_state "$repo_root" "$input" read-only \
-    || ! mycelium_payload_owns_active_session "$repo_root" "$input"; then
-    mycelium_release_session_lock
+  mycelium__post_tool_prepare_mode "$2" || return 1
+  if ! mycelium__state "$1" "$2" \
+    "prepare:$MYCELIUM__PREPARE_MODE" select:read-only owns \
+    lock:session \
+    prepare:read-only select:read-only owns \
+    marker; then
+    if (( MYCELIUM__STATE_FAILED == 8 )); then
+      # Authorized and locked; only the marker read died. The old helper
+      # read a crashed marker reader as an invalid marker and carried on.
+      mycelium__state_marker_unread
+      return 0
+    fi
+    mycelium__state_release_held
     return 1
   fi
   return 0
 }
 
-mycelium_registry_cell() {
-  python3 -c '
+# Filters stdin into one Markdown table cell. A value of letters, digits,
+# `.`, `_`, `/`, and `-` (plus trailing newlines) is already its own cell, so
+# it skips the interpreter; anything else, including a NUL byte, goes to it.
+MYCELIUM__PY_REGISTRY_CELL='
 import html
 import sys
 value = sys.stdin.read().replace("\r", " ").replace("\n", " ")
 print(html.escape(" ".join(value.split()), quote=True).replace("|", "&#124;"))
 '
+
+mycelium_registry_cell() {
+  local value=""
+  if IFS= read -r -d '' value; then
+    { printf '%s\0' "$value"; cat; } | python3 -c "$MYCELIUM__PY_REGISTRY_CELL"
+    return
+  fi
+  if mycelium__plain_cell "$value"; then
+    mycelium__fast_write "$MYCELIUM__CELL"$'\n' && return 0
+  fi
+  printf '%s' "$value" | python3 -c "$MYCELIUM__PY_REGISTRY_CELL"
+}
+
+# Sets MYCELIUM__CELL when VALUE without its trailing newlines is plain.
+# Matching runs on bytes. No interpreter may start in this C-locale scope:
+# an exported LC_ALL would reach it.
+mycelium__plain_cell() {
+  local trimmed="$1"
+  local LC_ALL=C
+  local plain_re='^[A-Za-z0-9._/-]*$'
+  local fs="" stdin="" stdout=""
+  # Python would print through its own stdout encoding (utf-16 adds a BOM and
+  # fails on a pipe), so only a reported UTF-8 interpreter is matched.
+  read -r fs stdin stdout <<< "$MYCELIUM__PC_ENC" || true
+  [[ "$stdin" == utf-8/* && "$stdout" == utf-8/* ]] || return 1
+  while [[ "$trimmed" == *$'\n' ]]; do
+    trimmed="${trimmed%$'\n'}"
+  done
+  [[ "$trimmed" =~ $plain_re ]] || return 1
+  MYCELIUM__CELL="$trimmed"
+}
+
+# mycelium_json_dumps_stdin VALUE: print json.dumps of VALUE as an
+# interpreter reading it from stdin would, failing as that would.
+mycelium_json_dumps_stdin() {
+  if mycelium__json_literal stdin "$1"; then
+    mycelium__fast_write "$MYCELIUM__JSON"$'\n' && return 0
+  fi
+  printf '%s' "$1" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))'
 }
 
 mycelium_emit_stop_block() {
   local reason="$1"
   local escaped_reason=""
-  escaped_reason=$(printf '%s' "$reason" | python3 -c \
-    'import json, sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null) || return 1
-  printf '{"decision": "block", "reason": %s}\n' "$escaped_reason"
+  escaped_reason=$(mycelium_json_dumps_stdin "$reason" 2>/dev/null) || return 1
+  # SIGPIPE-safe: Stop writes this while holding its locks.
+  mycelium__fast_write "{\"decision\": \"block\", \"reason\": $escaped_reason}"$'\n'
 }
 
 mycelium_living_changed() {
@@ -689,8 +580,11 @@ mycelium_acquire_stop_lock() {
 }
 
 mycelium_release_stop_lock() {
-  mycelium_release_directory_lock "${MYCELIUM_STOP_LOCK_DIR:-}"
+  # Forget the lock before removing it: if this hook is killed in between,
+  # an EXIT trap must not release the path a successor may already hold.
+  local lock_dir="${MYCELIUM_STOP_LOCK_DIR:-}"
   MYCELIUM_STOP_LOCK_DIR=""
+  mycelium_release_directory_lock "$lock_dir"
 }
 
 mycelium_acquire_session_lock() {
@@ -702,8 +596,11 @@ mycelium_acquire_session_lock() {
 }
 
 mycelium_release_session_lock() {
-  mycelium_release_directory_lock "${MYCELIUM_SESSION_LOCK_DIR:-}"
+  # Forget the lock before removing it: if this hook is killed in between,
+  # an EXIT trap must not release the path a successor may already hold.
+  local lock_dir="${MYCELIUM_SESSION_LOCK_DIR:-}"
   MYCELIUM_SESSION_LOCK_DIR=""
+  mycelium_release_directory_lock "$lock_dir"
 }
 
 mycelium_knowledge_dir() {
@@ -902,6 +799,89 @@ if result is not None:
     print(result)
 '
 
+# The activity tracker's verdict on an edit: true, false, or unknown.
+MYCELIUM__PY_EDIT_STATUS='
+import json, re, sys
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    print("unknown")
+    raise SystemExit
+response = payload.get("tool_response")
+
+def structured_exit_code(value):
+    if isinstance(value, dict):
+        if value.get("isError") is True or value.get("success") is False:
+            return 1
+        for key in ("exit_code", "exitCode", "return_code", "returncode"):
+            candidate = value.get(key)
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                return candidate
+        for candidate in value.values():
+            found = structured_exit_code(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = structured_exit_code(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except Exception:
+            decoded = None
+        if decoded is not None and decoded != value:
+            found = structured_exit_code(decoded)
+            if found is not None:
+                return found
+    return None
+
+def textual_exit_code(value):
+    if isinstance(value, dict):
+        for candidate in value.values():
+            found = textual_exit_code(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = textual_exit_code(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except Exception:
+            decoded = None
+        if decoded is not None and decoded != value:
+            found = textual_exit_code(decoded)
+            if found is not None:
+                return found
+        if re.match(
+            r"^\s*(?:error|failed|patch failed|invalid (?:context|patch))\b",
+            value,
+            re.IGNORECASE,
+        ):
+            return 1
+        match = re.search(
+            r"(?:exit(?:ed)?(?:[ _-]with)?(?:[ _-]code)?|return(?:[ _-]code)?)"
+            r"[\":= ]+(-?\d+)",
+            value,
+            re.IGNORECASE,
+        )
+        if match:
+            return int(match.group(1))
+    return None
+
+status = structured_exit_code(response)
+if status is None:
+    status = textual_exit_code(response)
+print("unknown" if status is None else ("true" if status == 0 else "false"))
+'
+
+# SessionStart's cwd, as `echo "$PAYLOAD" | python3 -c BODY` printed it.
+MYCELIUM__PY_START_CWD="import sys,json; print(json.load(sys.stdin).get('cwd', ''))"
+
 # Runs several decoder bodies against one payload. argv holds
 # (slot, body, path-or-empty, has-path) quadruples; each body sees exactly the
 # stdin, argv, stdout encoding, and exit semantics of its own `python3 -c`.
@@ -979,12 +959,30 @@ for index in range(0, len(args) - 3, 4):
         continue
     records.append((slot, status, output))
 out = sys.stdout.buffer
+# The text encodings a separate `python3 -c` started by this hook would use,
+# so bash can tell when it may encode a JSON string itself (see
+# mycelium__json_literal). Its stdin and stdout are pipes, like this process has.
+try:
+    import codecs
+
+    def canonical(name):
+        return codecs.lookup(name).name
+
+    encodings = "%s/%s %s/%s %s/%s" % (
+        canonical(sys.getfilesystemencoding()), sys.getfilesystemencodeerrors(),
+        canonical(in_encoding), in_errors,
+        canonical(out_encoding), out_errors,
+    )
+    out.write(b"env:\0" + b"0\0" + encodings.encode("ascii") + b"\0")
+except Exception:
+    pass
 for slot, status, output in records:
     out.write(slot.encode() + b"\0" + str(status).encode() + b"\0" + output + b"\0")
 out.flush()
 '
 
 MYCELIUM__PC_RAW=""
+MYCELIUM__PC_ENC=""
 MYCELIUM__PC_READY=false
 # Above this many bytes, comparing the payload on every cached read costs more
 # than starting a decoder, so large payloads keep one interpreter per field.
@@ -999,6 +997,14 @@ MYCELIUM__PC_SLOT_VARS="${MYCELIUM__PC_SLOT_VARS-}"
 # Print the cached answer. A closed or failing stdout makes this fail rather
 # than kill the shell with SIGPIPE, so the caller can let the real decoder
 # meet the same stdout.
+# Write TEXT for a fast path. Like the cached decoders, a closed or failing
+# stdout makes this fail rather than kill the shell with SIGPIPE (which would
+# skip the hook's EXIT trap and leave its locks held); the caller then runs
+# the interpreter, which meets the same stdout and reports what it would.
+mycelium__fast_write() {
+  ( trap '' PIPE; printf '%s' "$1" ) 2>/dev/null
+}
+
 mycelium__payload_write() {
   ( trap '' PIPE; printf '%s' "$MYCELIUM__PC_OUT" ) 2>/dev/null
 }
@@ -1021,7 +1027,7 @@ mycelium__payload_bytes() {
 
 # Slot names are fixed decoder kinds plus dotted payload paths.
 mycelium__payload_slot_ok() {
-  [[ "$1" =~ ^(get|opt|exit):[A-Za-z_][A-Za-z0-9_.]*$|^exit:$ ]]
+  [[ "$1" =~ ^(get|opt|exit):[A-Za-z_][A-Za-z0-9_.]*$|^(exit|edit|cwd0):$ ]]
 }
 
 # Sets MYCELIUM__PC_VAR to the variable prefix that stores SLOT.
@@ -1069,12 +1075,14 @@ mycelium_payload_preload() {
       get) body="$MYCELIUM__PY_JSON_GET" ;;
       opt) body="$MYCELIUM__PY_JSON_OPTIONAL_STRING" ;;
       exit) body="$MYCELIUM__PY_BASH_EXIT" ;;
+      edit) body="$MYCELIUM__PY_EDIT_STATUS" ;;
+      cwd0) body="$MYCELIUM__PY_START_CWD" ;;
     esac
     mycelium__payload_slot_var "$slot"
     var="$MYCELIUM__PC_VAR"
     printf -v "${var}_S" '%s' ""
     MYCELIUM__PC_SLOT_VARS="$MYCELIUM__PC_SLOT_VARS $var"
-    if [[ "${slot%%:*}" == exit ]]; then
+    if [[ "$slot" == *: ]]; then
       argv+=("$slot" "$body" "" 0)
     else
       argv+=("$slot" "$body" "$path" 1)
@@ -1085,9 +1093,14 @@ mycelium_payload_preload() {
     return 0
   fi
 
+  MYCELIUM__PC_ENC=""
   while IFS= read -r -d '' slot \
     && IFS= read -r -d '' status \
     && IFS= read -r -d '' output; do
+    if [[ "$slot" == "env:" ]]; then
+      MYCELIUM__PC_ENC="$output"
+      continue
+    fi
     mycelium__payload_slot_ok "$slot" || continue
     [[ "$status" =~ ^[0-9]+$ ]] || continue
     mycelium__payload_slot_var "$slot"
@@ -1180,12 +1193,142 @@ mycelium_bash_exit() {
   python3 -c "$MYCELIUM__PY_BASH_EXIT"
 }
 
+# mycelium_edit_status VAR: print true, false, or unknown for the edit whose
+# payload is held in variable VAR.
+mycelium_edit_status() {
+  mycelium__payload_name_ok "$1" || return 1
+  if mycelium__payload_cached "edit:" "$1"; then
+    mycelium__payload_write && return "$MYCELIUM__PC_STATUS"
+  fi
+  printf '%s' "${!1}" | python3 -c "$MYCELIUM__PY_EDIT_STATUS"
+}
+
+# mycelium_session_start_cwd VAR: SessionStart's cwd field of the payload
+# held in variable VAR, printing nothing when it cannot be read. echo hands
+# the decoder the payload plus a newline, which JSON ignores; a payload echo
+# would read as options, or any payload while xpg_echo makes echo expand
+# escapes, is decoded by the original pipeline.
+mycelium_session_start_cwd() {
+  mycelium__payload_name_ok "$1" || return 1
+  if [[ "${!1}" != -* ]] && ! shopt -q xpg_echo \
+    && mycelium__payload_cached "cwd0:" "$1"; then
+    if mycelium__payload_write; then
+      [[ "$MYCELIUM__PC_STATUS" == 0 ]] && return 0
+      echo ""
+      return 0
+    fi
+  fi
+  echo "${!1}" | python3 -c "$MYCELIUM__PY_START_CWD" 2>/dev/null || echo ""
+}
+
+# mycelium__json_literal MODE VALUE: set MYCELIUM__JSON to what
+# `print(json.dumps(text))` prints, without its newline, when a separate
+# interpreter reads VALUE from argv (MODE argv) or from stdin (MODE stdin).
+# Fails, so the caller runs that interpreter, unless the result is provably
+# the same: the preload saw UTF-8 for argv, stdin, and stdout, and VALUE holds
+# only printable ASCII, the escapes json.dumps spells out, and a few UTF-8
+# punctuation marks Mycelium's own messages use. Matching runs on bytes, and
+# UTF-8 decoding never treats those byte sequences as anything else, so a
+# byte the table does not cover leaves a non-ASCII byte and falls back.
+mycelium__json_literal() {
+  local mode="$1"
+  local value="$2"
+  local LC_ALL=C
+  local dq='"'
+  local restore_patsub=false
+  local fs="" stdin="" stdout=""
+  local chunk=0 limit=32768 at=0 size=0 length=0 piece="" out=""
+  local continuation_re=$'^[\x80-\xbf]'
+
+  MYCELIUM__JSON=""
+  read -r fs stdin stdout <<< "$MYCELIUM__PC_ENC" || true
+  [[ "$fs" == utf-8/* && "$stdout" == utf-8/* ]] || return 1
+  if [[ "$mode" == stdin ]]; then
+    # Text-mode stdin translates CR and CRLF to LF.
+    [[ "$stdin" == utf-8/* && "$value" != *$'\r'* ]] || return 1
+  else
+    [[ "$fs" == utf-8/surrogateescape ]] || return 1
+  fi
+  # Pattern substitution costs time quadratic in its matches on bash 3.2
+  # (16 KB of quotes took ten seconds). Bound the work: bash 3.2 encodes in
+  # small pieces split between UTF-8 characters, and long values on any bash
+  # go to the interpreter, so a hook holding its locks never stalls here.
+  if (( BASH_VERSINFO[0] < 4 )); then
+    chunk=512
+    limit=8192
+  fi
+  length=${#value}
+  (( length <= limit )) || return 1
+  (( chunk > 0 )) || chunk=$length
+  if shopt -q patsub_replacement 2>/dev/null; then
+    restore_patsub=true
+    shopt -u patsub_replacement
+  fi
+  while (( at < length )); do
+    size=$chunk
+    # Never split a UTF-8 sequence: move the cut back off continuation bytes.
+    while (( size > 1 && at + size < length )) \
+      && [[ "${value:$((at + size)):1}" =~ $continuation_re ]]; do
+      size=$((size - 1))
+    done
+    piece="${value:$at:$size}"
+    mycelium__json_escape_piece || break
+    out="$out$piece"
+    at=$((at + size))
+  done
+  [[ "$restore_patsub" == false ]] || shopt -s patsub_replacement
+  (( at >= length )) || return 1
+  MYCELIUM__JSON="$dq$out$dq"
+}
+
+# Escape `piece` (in mycelium__json_literal's C-locale scope, with
+# patsub_replacement off) as json.dumps would; fail if a byte remains that
+# the fast path does not cover.
+mycelium__json_escape_piece() {
+  local bs='\' dq='"' rep=""
+  local ascii_re='^[ -~]*$'
+  rep="$bs$bs"; piece="${piece//"$bs"/$rep}"
+  rep="$bs$dq"; piece="${piece//"$dq"/$rep}"
+  rep="${bs}n"; piece="${piece//$'\n'/$rep}"
+  rep="${bs}r"; piece="${piece//$'\r'/$rep}"
+  rep="${bs}t"; piece="${piece//$'\t'/$rep}"
+  rep="${bs}b"; piece="${piece//$'\b'/$rep}"
+  rep="${bs}f"; piece="${piece//$'\f'/$rep}"
+  rep="${bs}u2014"; piece="${piece//$'\xe2\x80\x94'/$rep}"
+  rep="${bs}u2013"; piece="${piece//$'\xe2\x80\x93'/$rep}"
+  rep="${bs}u2192"; piece="${piece//$'\xe2\x86\x92'/$rep}"
+  rep="${bs}u2026"; piece="${piece//$'\xe2\x80\xa6'/$rep}"
+  rep="${bs}u2018"; piece="${piece//$'\xe2\x80\x98'/$rep}"
+  rep="${bs}u2019"; piece="${piece//$'\xe2\x80\x99'/$rep}"
+  rep="${bs}u201c"; piece="${piece//$'\xe2\x80\x9c'/$rep}"
+  rep="${bs}u201d"; piece="${piece//$'\xe2\x80\x9d'/$rep}"
+  [[ "$piece" =~ $ascii_re ]]
+}
+
 mycelium_emit_context() {
   local event="$1"
   local context="$2"
   local system_message="${3:-}"
   local host
+  local payload=""
   host=$(mycelium_hook_host)
+
+  # Same bytes as the interpreter below, built without one when exact.
+  if [[ "$host" == "codex" && "$event" == "Stop" ]]; then
+    if mycelium__json_literal argv "${system_message:-$context}"; then
+      mycelium__fast_write "{\"systemMessage\": $MYCELIUM__JSON}"$'\n' && return 0
+    fi
+  elif mycelium__json_literal argv "$event"; then
+    payload="{\"hookSpecificOutput\": {\"hookEventName\": $MYCELIUM__JSON"
+    if mycelium__json_literal argv "$context"; then
+      payload="$payload, \"additionalContext\": $MYCELIUM__JSON}"
+      if [[ -z "$system_message" ]]; then
+        mycelium__fast_write "$payload}"$'\n' && return 0
+      elif mycelium__json_literal argv "$system_message"; then
+        mycelium__fast_write "$payload, \"systemMessage\": $MYCELIUM__JSON}"$'\n' && return 0
+      fi
+    fi
+  fi
 
   python3 - "$host" "$event" "$context" "$system_message" <<'PY'
 import json
