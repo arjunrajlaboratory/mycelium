@@ -1643,6 +1643,38 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "Job().run()\n",
             id="runtime-value-inside-method",
         ),
+        pytest.param(
+            "def configure(d):\n"
+            "    global root\n"
+            "    root = Path(d)\n"
+            "configure(sys.argv[1])\n"
+            "frame = pd.read_csv(root / 'input.csv')\n"
+            "frame.to_csv(root / 'result.csv')\n",
+            id="parameter-assigned-through-global",
+        ),
+        pytest.param(
+            "def load(dirs):\n"
+            "    for d in dirs:\n"
+            "        frame = pd.read_csv(d / 'input.csv')\n"
+            "        frame.to_csv(d / 'result.csv')\n"
+            "load([Path(sys.argv[1])])\n",
+            id="loop-target-from-parameter",
+        ),
+        pytest.param(
+            "import contextlib\n"
+            "def load(d):\n"
+            "    with contextlib.nullcontext(Path(d)) as root:\n"
+            "        frame = pd.read_csv(root / 'input.csv')\n"
+            "        frame.to_csv(root / 'result.csv')\n"
+            "load(sys.argv[1])\n",
+            id="with-target-from-parameter",
+        ),
+        pytest.param(
+            "def load(dirs):\n"
+            "    return [pd.read_csv(d / 'input.csv') for d in dirs]\n"
+            "load([Path(sys.argv[1])])\n",
+            id="comprehension-target-from-parameter",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
@@ -1753,6 +1785,42 @@ def test_repository_recovery_leaves_static_parameter_defaults_unresolved(
             "Config().load()\n",
             id="method-local-shadows-class-attribute",
         ),
+        pytest.param(
+            "root = Path(__file__).parent\n"
+            "def load(root=pd.read_csv(root / 'input.csv')):\n"
+            "    return root\n"
+            "frame = load()\n"
+            "frame.to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="default-expression-runs-in-enclosing-scope",
+        ),
+        pytest.param(
+            "def load(root):\n"
+            "    out = Path(__file__).parent / 'result.csv'\n"
+            "    frames = [pd.read_csv(root / 'input.csv')"
+            " for root in [Path(__file__).parent]]\n"
+            "    frame = frames[0]\n"
+            "    frame.to_csv(out)\n"
+            "load(sys.argv[1])\n",
+            id="comprehension-target-shadows-parameter",
+        ),
+        pytest.param(
+            "def load(n):\n"
+            "    for root in [Path(__file__).parent]:\n"
+            "        frame = pd.read_csv(root / 'input.csv')\n"
+            "        frame.to_csv(root / 'result.csv')\n"
+            "load(5)\n",
+            id="static-loop-target",
+        ),
+        pytest.param(
+            "def load(limit):\n"
+            "    root = Path(__file__).parent\n"
+            "    settings = {}\n"
+            "    settings[root] = limit\n"
+            "    frame = pd.read_csv(root / 'input.csv')\n"
+            "    frame.to_csv(root / 'result.csv')\n"
+            "load(5)\n",
+            id="subscript-index-is-not-a-binding",
+        ),
     ],
 )
 def test_repository_recovery_keeps_static_paths_beside_parameters(
@@ -1780,6 +1848,53 @@ def test_repository_recovery_keeps_static_paths_beside_parameters(
     assert event["io_detection"] == "static+repository"
     assert [item["path"] for item in event["inputs"]] == [str(sample)]
     assert [item["path"] for item in event["outputs"]] == [str(result)]
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(
+            lambda n: "def load(root):\n"
+            + "".join(f"    p{i} = None\n" for i in range(n))
+            + "".join(f"    p{i} = p{i - 1}\n" for i in range(n - 1, 0, -1))
+            + "    p0 = root\n    pd.read_csv(p0 / 'input.csv')\n",
+            id="reverse-assignment-chain",
+        ),
+        pytest.param(
+            lambda n: "def load(root):\n"
+            + "".join(f"    p{i} = None\n" for i in range(n))
+            + "".join(f"    p{i} = p{i - 1}\n" for i in range(1, n))
+            + "    p0 = root\n    pd.read_csv(p0 / 'input.csv')\n",
+            id="forward-assignment-chain",
+        ),
+        pytest.param(
+            lambda n: "".join(f"g{i} = None\n" for i in range(n))
+            + "".join(
+                f"def s{i}():\n    global g{i}\n    g{i} = g{i + 1}\n"
+                for i in range(n - 1)
+            )
+            + f"def s{n - 1}():\n    global g{n - 1}\n    g{n - 1} = sys.argv[1]\n"
+            + "pd.read_csv(g0 / 'input.csv')\n",
+            id="reverse-global-chain",
+        ),
+    ],
+)
+def test_repository_recovery_taint_scan_stays_linear(build) -> None:
+    """Taint propagation must not rescan every binding per tainted name.
+
+    A quadratic fixed point took about 12 s on these inputs; the worklist
+    takes well under a second. The budget only catches the quadratic shape.
+    """
+    import time
+
+    source = _PANDAS_PATH_PRELUDE + build(3000)
+    started = time.perf_counter()
+    inputs, outputs = lineage_event._io_literal_filenames(source)
+    elapsed = time.perf_counter() - started
+
+    assert inputs == set()
+    assert outputs == set()
+    assert elapsed < 3.0
 
 
 @pytest.mark.parametrize(

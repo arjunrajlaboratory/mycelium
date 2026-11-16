@@ -4301,12 +4301,17 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
     # several assignments in one scope is tainted by any of them: recovery
     # then stays unresolved rather than guess which assignment ran. A static
     # parameter default does not help, because any caller may override it.
-    scope_types = (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda)
     function_types = (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda)
+    comprehension_types = (ast.DictComp, ast.GeneratorExp, ast.ListComp, ast.SetComp)
+    scope_types = function_types + comprehension_types + (ast.ClassDef,)
 
     def scope_body(scope: ast.AST) -> list[ast.AST]:
         if isinstance(scope, ast.Lambda):
             return [scope.body]
+        if isinstance(scope, ast.DictComp):
+            return [scope.key, scope.value, *scope.generators]
+        if isinstance(scope, comprehension_types):
+            return [scope.elt, *scope.generators]
         return list(getattr(scope, "body", []))
 
     def own_nodes(scope: ast.AST) -> list[ast.AST]:
@@ -4325,7 +4330,7 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
                 if isinstance(node, function_types):
                     stack.extend(node.args.defaults)
                     stack.extend(item for item in node.args.kw_defaults if item)
-                else:
+                elif isinstance(node, ast.ClassDef):
                     stack.extend(node.bases)
                     stack.extend(keyword.value for keyword in node.keywords)
                 continue
@@ -4366,19 +4371,11 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
             if isinstance(node, ast.Nonlocal)
             for name in node.names
         }
-        comprehension_targets = {
-            id(target_node)
-            for node in nodes
-            if isinstance(node, ast.comprehension)
-            for target_node in ast.walk(node.target)
-        }
         bound = parameters(scope)
         bound.update(
             node.id
             for node in nodes
-            if isinstance(node, ast.Name)
-            and isinstance(node.ctx, (ast.Store, ast.Del))
-            and id(node) not in comprehension_targets
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
         )
         bound.update(
             node.name
@@ -4388,17 +4385,13 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
         bound -= global_names | nonlocal_names
         tainted = parameters(scope) | (set(inherited) - bound)
         tainted |= redirected.get(scope, set())
-        assignments_here: list[tuple[set[str], ast.AST]] = []
-        assigned_here: set[str] = set()
-        for node in nodes:
-            if isinstance(node, ast.Assign):
-                targets, value = node.targets, node.value
-            elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
-                targets, value = [node.target], node.value
-            else:
-                continue
+        # Every binding that takes a value: assignments, loop targets,
+        # ``with ... as`` targets, and comprehension targets.
+        bindings: list[tuple[set[str], ast.AST]] = []
+
+        def bind(targets: list[ast.AST], value: ast.AST | None) -> None:
             if value is None:
-                continue
+                return
             names = {
                 target_node.id
                 for target in targets
@@ -4407,19 +4400,49 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
                 and isinstance(target_node.ctx, ast.Store)
             }
             if names:
-                assignments_here.append((names, value))
-                assigned_here |= names
+                bindings.append((names, value))
+
+        for node in nodes:
+            if isinstance(node, ast.Assign):
+                bind(node.targets, node.value)
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                bind([node.target], node.value)
+            elif isinstance(node, (ast.AsyncFor, ast.For, ast.comprehension)):
+                bind([node.target], node.iter)
+            elif isinstance(node, (ast.AsyncWith, ast.With)):
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        bind([item.optional_vars], item.context_expr)
         if settle_conservatively:
-            tainted |= assigned_here & (global_names | nonlocal_names)
-        changed = True
-        while changed:
-            changed = False
-            for names, value in assignments_here:
-                if names <= tainted:
-                    continue
-                if reads_runtime_value(value, tainted):
-                    tainted |= names
-                    changed = True
+            for names, _ in bindings:
+                tainted |= names & (global_names | nonlocal_names)
+
+        # Propagate with a worklist keyed on the names each value reads, so a
+        # long assignment chain costs one visit per binding, not one rescan
+        # of every binding per newly tainted name.
+        readers: dict[str, list[int]] = {}
+        queue = list(tainted)
+        fired: set[int] = set()
+
+        def fire(index: int) -> None:
+            if index in fired:
+                return
+            fired.add(index)
+            for name in bindings[index][0]:
+                if name not in tainted:
+                    tainted.add(name)
+                    queue.append(name)
+
+        for index, (_, value) in enumerate(bindings):
+            for item in ast.walk(value):
+                if isinstance(item, ast.Name):
+                    readers.setdefault(item.id, []).append(index)
+        for index, (_, value) in enumerate(bindings):
+            if reads_runtime_value(value, set()):
+                fire(index)
+        while queue:
+            for index in readers.get(queue.pop(), ()):
+                fire(index)
         scope_taint[scope] = tainted
 
         grew = False
