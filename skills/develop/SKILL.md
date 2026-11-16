@@ -157,9 +157,25 @@ Operational gotchas, all of which have cost a full cycle:
   interpreter that actually has `pytest`, or the ladder fails on an import.
 - `codex exec` blocks reading stdin; redirect `< /dev/null` for a
   non-interactive audit.
-- Codex plugin hooks need a one-time interactive trust step (`/hooks`, trust,
-  restart). A fresh `codex exec` in an untrusted project shows zero dispatch,
-  which is an environment result, not a hook defect.
+- Codex plugin hooks need an interactive trust step (trust, then restart)
+  after every install: Codex pins each approval to a hash of the whole
+  installed bundle, so a new cachebuster, a reinstall of the same tree, or even
+  a `git status` inside an installed bundle that carries `.git` (it rewrites
+  `.git/index`) invalidates it. A `codex exec` against untrusted hooks shows
+  zero dispatch, which is an environment result, not a hook defect.
+- On Codex 0.169.0 (one machine, 2026-11-15), trusting in terminal `/hooks`
+  wrote only `trusted_hash` to `~/.codex/config.toml`, with no
+  `trusted_content_hash`; `/hooks` then showed every hook as active while
+  Codex skipped them all. The complete entries were written while the Codex
+  desktop app was running, so approve from the desktop app. Launching the
+  desktop app re-copies the plugin from its marketplace source (for local
+  development, the working checkout), replacing the installed candidate and
+  needing approval again—verify the installed hash after launching it.
+- So check trust before an audit with the app-server, not `/hooks`: run
+  `codex app-server`, send `initialize`, the `initialized` notification, then
+  `hooks/list` with `{"cwds": [<project>]}`. Every `mycelium@mycelium` hook's
+  `trustStatus` must be `trusted`; `modified` means a stale or incomplete
+  approval. The request is read-only.
 - `timeout` does not exist on macOS. A wrapper that silently fails to run makes
   "no output" look like "no dispatch".
 

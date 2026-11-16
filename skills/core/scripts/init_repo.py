@@ -1167,9 +1167,13 @@ def install_codex_hooks(target_dir: Path):
 
     print("  Codex hooks are bundled with the Mycelium plugin via PLUGIN_ROOT.")
     print(
-        "  Codex action required after plugin install or upgrade: in a current "
-        "CLI (not the desktop app), open /hooks, trust all five Mycelium hooks, "
-        "exit Codex, and restart it. If /hooks is absent, run codex update first."
+        "  Codex action required after plugin install or upgrade: trust all "
+        "five Mycelium hooks, exit Codex, and restart it. On Codex 0.169.0, "
+        "approve them from the desktop app: the CLI's /hooks was observed to "
+        "save an incomplete approval that still skips the hooks. If you use "
+        "the CLI, open /hooks (run codex update if it is absent). Codex binds "
+        "hook approval to the installed plugin's contents, so every plugin "
+        "upgrade or reinstall needs this review again."
     )
     return changed
 

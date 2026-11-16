@@ -7,8 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Agents now warn when Mycelium's hooks are silently skipped.** Current
+  Codex releases (seen on CLI 0.167.2 and Desktop 0.169.0-alpha) bind each
+  plugin hook approval to a `trusted_content_hash`, a SHA-256 over every file
+  in the installed plugin bundle. Every Mycelium upgrade, reinstall, or
+  downgrade therefore resets approval, and Codex skips all five hooks with no
+  warning inside the task. Older approvals that recorded only `trusted_hash`
+  stay valid only for the bundle Codex saw when it first upgraded. The
+  managed `### Automated Enforcement` section of generated `MYCELIUM.md` now
+  tells the root agent to check its context once, at the start of the task,
+  for the `SESSION HANDOFF PATH:` line SessionStart injects and, when it is
+  missing, to tell the user before starting work that the hooks are probably
+  not running (on Codex: re-trust the `mycelium@mycelium` hooks, restart). It
+  does not re-check after compaction, and it notes the identity-free and
+  pre-0.7 flat-transaction cases where hooks run without the line. The check
+  is host-neutral and also covers Claude Code projects whose hook
+  registrations are missing. Re-run `$mycelium:core` migration or
+  initialization to add it to existing projects; it changes only that managed
+  section.
+
 ### Changed
 
+- **Install, update, and trust docs say every upgrade needs hook review
+  again, and no longer send users away from the Codex desktop app.** The
+  README, the core and develop skills, `init_repo.py`'s install message, and
+  the generated guidance now say Codex hook approval follows the installed
+  plugin's contents, not a one-time trust step. On Codex 0.169.0 (observed on
+  one machine), trusting in the terminal CLI's `/hooks` saved only
+  `trusted_hash`, so `/hooks` showed the hooks as active while Codex skipped
+  them; only approvals made while the desktop app ran were complete. The docs
+  now point to the desktop app, warn that `/hooks` alone is not proof, make
+  the app-server `hooks/list` request (`trustStatus` `trusted`) the reliable
+  check, and note that launching the desktop app re-copies the plugin from its
+  marketplace source, which needs approval again.
 - **Hooks decode their payload in one Python process.** Each hook used to
   start a separate `python3` for every payload field it read (`session_id`,
   `cwd`, the command, the exit status), up to seven times per event.
