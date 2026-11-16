@@ -317,15 +317,23 @@ def repair_active_conventions(repo_path: Path, dry_run: bool = False) -> bool:
 
     Older init seeded `active_conventions: []` and install_convention.py then
     appended list items under it, leaving invalid YAML (#129). A file already
-    in list shape is left byte-identical, trailing newline included.
+    in list shape is left byte-identical, trailing blank lines included. A file
+    in neither shape is reported and left alone rather than guessed at.
     """
     path = repo_path / ACTIVE_CONVENTIONS_RELATIVE
     ir.ensure_safe_regular_file(path)
     if not path.exists():
         return False
     text = path.read_text(encoding="utf-8")
-    repaired = ic.normalize_active_conventions(text)
-    if repaired.splitlines() == text.splitlines():
+    try:
+        if not ic.registry_needs_repair(text):
+            return False
+        repaired = ic.normalize_active_conventions(text)
+    except ic.UnrecognizedRegistryError as error:
+        print(
+            f"  Warning: left {ACTIVE_CONVENTIONS_RELATIVE} unchanged: {error}",
+            file=sys.stderr,
+        )
         return False
     if not dry_run:
         ir._atomic_write_text(path, repaired)

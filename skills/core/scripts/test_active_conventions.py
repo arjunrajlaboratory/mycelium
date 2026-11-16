@@ -152,6 +152,53 @@ class TestInstallerRepairsExistingFiles:
         ic.update_active_conventions(tmp_path, "bioinformatics")
         assert _names(tmp_path) == ["bioinformatics"]
 
+    def test_reinstalling_a_core_pack_keeps_its_core_flag(
+        self, tmp_path: Path
+    ) -> None:
+        _write_registry(
+            tmp_path,
+            ic.format_registry_entry("robust-analysis", "2026-01-01", core=True)
+            + "\n",
+        )
+        ic.update_active_conventions(tmp_path, "robust-analysis")
+        assert _load(tmp_path)[0]["core"] is True
+
+    def test_symlinked_registry_is_not_written_through(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside.yaml"
+        outside.write_text("[]\n", encoding="utf-8")
+        (tmp_path / REGISTRY).parent.mkdir(parents=True)
+        (tmp_path / REGISTRY).symlink_to(outside)
+        with pytest.raises(ValueError):
+            ic.update_active_conventions(tmp_path, "bioinformatics")
+        assert outside.read_text(encoding="utf-8") == "[]\n"
+
+    def test_preserves_stricter_mode(self, tmp_path: Path) -> None:
+        path = _write_registry(tmp_path, "[]\n")
+        path.chmod(0o600)
+        ic.update_active_conventions(tmp_path, "bioinformatics")
+        assert path.stat().st_mode & 0o777 == 0o600
+
+    def test_unrecognized_registry_aborts_before_copying(self, tmp_path: Path) -> None:
+        """The CLI refuses before copying the pack, leaving no partial install."""
+        repo = tmp_path / "repo"
+        path = _write_registry(repo, "version: 1\n- name: a\n")
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(_SCRIPT_DIR / "install_convention.py"),
+                "--name",
+                "bioinformatics",
+                "--target-dir",
+                str(repo),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 1
+        assert "unexpected top-level content" in result.stdout
+        assert path.read_text(encoding="utf-8") == "version: 1\n- name: a\n"
+        assert not (repo / ".living" / "conventions" / "bioinformatics").exists()
+
     def test_missing_file_is_created_as_a_list(self, tmp_path: Path) -> None:
         (tmp_path / REGISTRY).parent.mkdir(parents=True)
         ic.update_active_conventions(tmp_path, "bioinformatics")
@@ -172,6 +219,40 @@ class TestNormalize:
     )
     def test_empty_shapes_become_an_empty_list(self, text: str) -> None:
         assert yaml.safe_load(ic.normalize_active_conventions(text)) == []
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            # A deeper comment before the first item sets no indent.
+            (
+                "active_conventions:\n    # note\n  - name: a\n    path: p/\n",
+                [{"name": "a", "path": "p/"}],
+            ),
+            # A column-0 comment does not end the key's block.
+            ("active_conventions:\n# note\n  - name: a\n", [{"name": "a"}]),
+            # Blank lines inside the block do not end it either.
+            (
+                "active_conventions:\n  - name: a\n\n  - name: b\n",
+                [{"name": "a"}, {"name": "b"}],
+            ),
+            # YAML's compact form: items at the key's own indent.
+            ("active_conventions:\n- name: a\n", [{"name": "a"}]),
+        ],
+    )
+    def test_nested_block_variants(self, text: str, expected: list) -> None:
+        assert yaml.safe_load(ic.normalize_active_conventions(text)) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "version: 1\nactive_conventions:\n  - name: a\n",
+            "active_conventions:\n    - name: a\n  - name: b\n",
+            "packs:\n  - name: a\n",
+        ],
+    )
+    def test_unrecognized_content_is_refused(self, text: str) -> None:
+        with pytest.raises(ic.UnrecognizedRegistryError):
+            ic.normalize_active_conventions(text)
 
     @pytest.mark.parametrize(
         "text",
@@ -246,6 +327,7 @@ class TestMigration:
         [
             "- name: a\n  path: p/\n",
             "- name: a\n  path: p/",  # no trailing newline: not churned
+            "- name: a\n  path: p/\n\n\n",  # trailing blank lines: not churned
             "[]\n",
         ],
     )
@@ -253,6 +335,27 @@ class TestMigration:
         path = _write_registry(tmp_path, text)
         assert mig.repair_active_conventions(tmp_path) is False
         assert path.read_text(encoding="utf-8") == text
+
+    def test_unrecognized_file_is_left_alone(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        text = "version: 1\nactive_conventions:\n  - name: a\n"
+        path = _write_registry(tmp_path, text)
+        assert mig.repair_active_conventions(tmp_path) is False
+        assert path.read_text(encoding="utf-8") == text
+        assert "left .living/conventions/ACTIVE_CONVENTIONS.yaml unchanged" in (
+            capsys.readouterr().err
+        )
+
+    def test_repair_rejects_a_symlinked_registry(self, tmp_path: Path) -> None:
+        """Pins repair's own guard, independent of migrate_one's tree check."""
+        outside = tmp_path / "outside.yaml"
+        outside.write_text(BROKEN_129, encoding="utf-8")
+        (tmp_path / REGISTRY).parent.mkdir(parents=True)
+        (tmp_path / REGISTRY).symlink_to(outside)
+        with pytest.raises(ValueError):
+            mig.repair_active_conventions(tmp_path)
+        assert outside.read_text(encoding="utf-8") == BROKEN_129
 
     def test_missing_file_is_skipped(self, tmp_path: Path) -> None:
         (tmp_path / ".living").mkdir()

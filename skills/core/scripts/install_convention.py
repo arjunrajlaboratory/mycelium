@@ -15,6 +15,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from init_repo import _atomic_write_text, ensure_safe_regular_file
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -94,20 +96,43 @@ def copy_convention(network_dir: Path, name: str, target_dir: Path):
 # with `[]` standing for "no packs". Older init_repo.py seeded a mapping
 # (`active_conventions: []`) and this installer appended list items under it,
 # which is invalid YAML (#129). The helpers below read either legacy shape and
-# always write the list. They work line by line so PyYAML stays optional.
+# always write the list. They work line by line so PyYAML stays optional, and
+# refuse any other top-level content rather than guess at it.
+REGISTRY_RELATIVE = Path(".living") / "conventions" / "ACTIVE_CONVENTIONS.yaml"
+REGISTRY_HEADER = "# Active Convention Packs\n# Updated by init_repo.py and install_convention.py\n"
 _LEGACY_KEY = re.compile(r"^active_conventions:\s*(\[\s*\])?\s*(#.*)?$")
 _EMPTY_LIST = re.compile(r"^\[\s*\]\s*(#.*)?$")
 _ENTRY_NAME = re.compile(r"""^-\s+name:\s*(?P<q>["']?)(?P<name>.*?)(?P=q)\s*(#.*)?$""")
 
 
+class UnrecognizedRegistryError(ValueError):
+    """ACTIVE_CONVENTIONS.yaml holds content outside both known shapes."""
+
+
+def format_registry_entry(name: str, installed: str, core: bool = False) -> str:
+    """Render one registry entry; the only place the entry shape is defined."""
+    entry = (
+        f"- name: {name}\n"
+        f"  path: .living/conventions/{name}/\n"
+        f"  installed: {installed}"
+    )
+    return entry + "\n  core: true" if core else entry
+
+
+def _is_comment(line: str) -> bool:
+    return line.lstrip().startswith("#")
+
+
 def _registry_lines(text: str) -> list[str]:
     """Return the registry's lines in list shape, with no `[]` marker.
 
-    Drops the legacy `active_conventions:` key line. When that key holds a
-    nested block list, its items are dedented to column 0.
+    Drops the legacy `active_conventions:` key line. When a bare key holds a
+    nested block list, its items are dedented by the first item's indent;
+    blank and comment lines inside that block do not end it. Raises
+    UnrecognizedRegistryError for any other top-level content.
     """
     lines: list[str] = []
-    nested_indent: int | None = None  # set while inside a bare key's block
+    nested_indent: int | None = None  # indent of the key block's first item
     in_key_block = False
     for line in text.splitlines():
         key = _LEGACY_KEY.match(line)
@@ -119,76 +144,101 @@ def _registry_lines(text: str) -> list[str]:
         if _EMPTY_LIST.match(line):
             continue
         if in_key_block:
-            if not line.strip():
-                lines.append("")
+            if not line.strip() or _is_comment(line):
+                lines.append(line.lstrip(" "))
                 continue
             if line.startswith(" "):
+                indent = len(line) - len(line.lstrip(" "))
                 if nested_indent is None:
-                    nested_indent = len(line) - len(line.lstrip(" "))
-                if line[:nested_indent].isspace():
-                    lines.append(line[nested_indent:])
-                else:
-                    lines.append(line.lstrip(" "))
+                    nested_indent = indent
+                if indent < nested_indent:
+                    raise UnrecognizedRegistryError(
+                        f"inconsistent indentation under active_conventions: {line!r}"
+                    )
+                lines.append(line[nested_indent:])
                 continue
             in_key_block = False
+        if line.strip() and not line.startswith((" ", "- ", "#")):
+            raise UnrecognizedRegistryError(
+                f"unexpected top-level content: {line!r}"
+            )
         lines.append(line)
     return lines
 
 
 def _render_registry(lines: list[str]) -> str:
     """Join registry lines, writing `[]` when no entry remains."""
-    lines = list(lines)
-    while lines and not lines[-1].strip():
-        lines.pop()
+    lines = _strip_trailing_blank(lines)
     if not any(line.startswith("- ") for line in lines):
         lines.append("[]")
     return "\n".join(lines) + "\n"
 
 
+def _strip_trailing_blank(lines: list[str]) -> list[str]:
+    lines = list(lines)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
 def normalize_active_conventions(text: str) -> str:
-    """Rewrite ACTIVE_CONVENTIONS.yaml text into the canonical list shape."""
+    """Rewrite ACTIVE_CONVENTIONS.yaml text into the canonical list shape.
+
+    Raises UnrecognizedRegistryError when the text is neither shape.
+    """
     return _render_registry(_registry_lines(text))
+
+
+def registry_needs_repair(text: str) -> bool:
+    """True when normalizing would change more than trailing blank lines."""
+    normalized = normalize_active_conventions(text)
+    return _strip_trailing_blank(normalized.splitlines()) != _strip_trailing_blank(
+        text.splitlines()
+    )
+
+
+def read_registry_lines(target_dir: Path) -> list[str]:
+    """Validate and read the registry; [] when it does not exist yet."""
+    yaml_path = target_dir / REGISTRY_RELATIVE
+    ensure_safe_regular_file(yaml_path)
+    if not yaml_path.exists():
+        return []
+    return _registry_lines(yaml_path.read_text(encoding="utf-8"))
 
 
 def update_active_conventions(target_dir: Path, name: str):
     """Update .living/conventions/ACTIVE_CONVENTIONS.yaml with the new convention."""
-    yaml_path = target_dir / ".living" / "conventions" / "ACTIVE_CONVENTIONS.yaml"
+    yaml_path = target_dir / REGISTRY_RELATIVE
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Read existing content (repairing a legacy mapping shape) or start fresh
-    existing_lines = []
-    if yaml_path.exists():
-        existing_lines = _registry_lines(yaml_path.read_text())
+    existing_lines = read_registry_lines(target_dir)
 
-    # Remove this convention's existing entry, matching the name exactly
+    # Remove this convention's existing entry, matching the name exactly, and
+    # carry its core flag over to the replacement.
     filtered = []
     skip = False
+    was_core = False
     for line in existing_lines:
         match = _ENTRY_NAME.match(line)
         if match and match.group("name") == name:
             skip = True
             continue
         if skip and line.startswith("  "):
+            if line.strip() == "core: true":
+                was_core = True
             continue
         skip = False
         filtered.append(line)
 
-    while filtered and not filtered[-1].strip():
-        filtered.pop()
-
-    # Add the new entry
-    entry = (
-        f"- name: {name}\n"
-        f"  path: .living/conventions/{name}/\n"
-        f"  installed: {now}"
-    )
-
-    if not filtered:
-        filtered = ["# Active convention packs", entry]
+    filtered = _strip_trailing_blank(filtered)
+    entry = format_registry_entry(name, now, core=was_core)
+    if not any(line.strip() for line in filtered):
+        filtered = [REGISTRY_HEADER, entry]
     else:
         filtered.append(entry)
 
-    yaml_path.write_text(_render_registry(filtered))
+    _atomic_write_text(yaml_path, _render_registry(filtered))
     print(f"  Updated {yaml_path}")
 
 
@@ -264,6 +314,15 @@ def main():
     if args.name not in available:
         print(f"\nConvention pack '{args.name}' not found in network.")
         print(f"Available packs: {', '.join(available) if available else 'none found'}")
+        sys.exit(1)
+
+    # Validate the registry before copying anything, so an unreadable or
+    # unsafe registry cannot leave a pack installed but unregistered.
+    try:
+        read_registry_lines(target_dir)
+    except ValueError as error:
+        print(f"\nError: cannot update {REGISTRY_RELATIVE}: {error}")
+        print("Fix the file by hand (it should be a YAML list of pack entries).")
         sys.exit(1)
 
     print(f"\nInstalling {args.name} convention pack...")

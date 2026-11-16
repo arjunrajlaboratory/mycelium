@@ -534,7 +534,7 @@ def create_living_layer(target_dir: Path):
         conventions_yaml,
         # A bare YAML list, the same shape install_core_convention_packs and
         # install_convention.py write; `[]` means no packs installed yet.
-        "# Active Convention Packs\n# Updated by install_convention.py\n\n[]\n",
+        "# Active Convention Packs\n# Updated by init_repo.py and install_convention.py\n\n[]\n",
     ):
         print("  Created: .living/conventions/ACTIVE_CONVENTIONS.yaml")
 
@@ -647,6 +647,9 @@ def install_core_convention_packs(target_dir: Path):
         print("  Install them manually with install_convention.py.")
         return
 
+    # Imported here: install_convention imports this module's file helpers.
+    from install_convention import REGISTRY_HEADER, format_registry_entry
+
     core_packs = get_core_convention_packs(network_dir)
     if not core_packs:
         print("  No core convention packs found in network.")
@@ -665,20 +668,10 @@ def install_core_convention_packs(target_dir: Path):
         shutil.copytree(source, dest)
         copied = [f for f in sorted(dest.rglob("*")) if f.is_file()]
         print(f"  Installed {pack_name} ({len(copied)} files)")
-        entries.append(
-            f"- name: {pack_name}\n"
-            f"  path: .living/conventions/{pack_name}/\n"
-            f"  installed: {now}\n"
-            f"  core: true"
-        )
+        entries.append(format_registry_entry(pack_name, now, core=True))
 
     # Write ACTIVE_CONVENTIONS.yaml with core entries
-    yaml_content = (
-        "# Active Convention Packs\n"
-        "# Updated by init_repo.py and install_convention.py\n\n"
-        + "\n".join(entries)
-        + "\n"
-    )
+    yaml_content = REGISTRY_HEADER + "\n" + "\n".join(entries) + "\n"
     _atomic_write_text(yaml_path, yaml_content)
     print(f"  Updated ACTIVE_CONVENTIONS.yaml with {len(core_packs)} core packs")
 
