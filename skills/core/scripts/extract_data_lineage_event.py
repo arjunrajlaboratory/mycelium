@@ -4126,6 +4126,32 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             for target in targets:
                 if isinstance(target, ast.Name) and value is not None:
                     assignments.setdefault(target.id, []).append(value)
+    # Every binding site of each name, in any scope. A name resolves through
+    # ``assignments`` only when its single assignment is also its only
+    # binding: a loop, ``with``, comprehension, walrus, import, or a binding
+    # in another scope could otherwise hand recovery a literal that the
+    # running code never used.
+    binding_sites: dict[str, int] = {}
+    for node in ast.walk(tree):
+        bound_here: list[str] = []
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound_here = [node.id]
+        elif isinstance(node, ast.arg):
+            bound_here = [node.arg]
+        elif isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)):
+            bound_here = [node.name]
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound_here = [
+                (alias.asname or alias.name).split(".", 1)[0]
+                for alias in node.names
+                if alias.name != "*"
+            ]
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+            bound_here = [node.name] if node.name else []
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound_here = [node.rest]
+        for name in bound_here:
+            binding_sites[name] = binding_sites.get(name, 0) + 1
     locally_bound_roots = {
         node.id
         for node in ast.walk(tree)
@@ -4159,7 +4185,7 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             if expression.id in shadowed_names or expression.id in resolving:
                 return unresolved
             definitions = assignments.get(expression.id, [])
-            if len(definitions) != 1:
+            if len(definitions) != 1 or binding_sites.get(expression.id) != 1:
                 return unresolved
             return static_value(definitions[0], resolving | {expression.id})
         if isinstance(expression, (ast.List, ast.Tuple)):
@@ -4202,7 +4228,11 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             if expression.id in shadowed_names:
                 return set()
             definitions = assignments.get(expression.id, [])
-            if len(definitions) != 1 or expression.id in resolving:
+            if (
+                len(definitions) != 1
+                or binding_sites.get(expression.id) != 1
+                or expression.id in resolving
+            ):
                 return set()
             return collect(definitions[0], resolving | {expression.id})
         if isinstance(
@@ -4408,7 +4438,11 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
 
     def free_reads(value: ast.AST) -> set[str]:
         """Names ``value`` reads, skipping names a nested lambda or
-        comprehension inside it binds for itself."""
+        comprehension inside it binds for itself.
+
+        ``X.attr`` is also reported as the dotted name, so a class attribute
+        bound from a runtime value taints reads of that attribute only.
+        """
         names: set[str] = set()
         stack: list[tuple[ast.AST, frozenset[str]]] = [(value, frozenset())]
         while stack:
@@ -4417,6 +4451,12 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
                 if node.id not in hidden:
                     names.add(node.id)
                 continue
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id not in hidden
+            ):
+                names.add(f"{node.value.id}.{node.attr}")
             if isinstance(node, (ast.Lambda, *comprehension_types)):
                 if isinstance(node, ast.Lambda):
                     local = parameters(node)
@@ -4431,6 +4471,11 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             stack.extend((child, hidden) for child in ast.iter_child_nodes(node))
         return names
 
+    user_defined = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef))
+    }
     own_taint: dict[ast.AST, set[str]] = {}
     scope_bound: dict[ast.AST, set[str]] = {}
     scope_globals: dict[ast.AST, set[str]] = {}
@@ -4445,14 +4490,15 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
     def is_tainted(scope: ast.AST | None, name: str) -> bool:
         """Whether ``name`` as seen from ``scope`` holds a runtime value."""
         start = scope
+        root = name.split(".", 1)[0]
         while scope is not None:
             # A class body's names are invisible to scopes nested in it.
             if scope is start or not isinstance(scope, ast.ClassDef):
                 if name in own_taint.get(scope, ()):
                     return True
-                if name in scope_globals.get(scope, ()):
+                if root in scope_globals.get(scope, ()):
                     return name in own_taint.get(tree, ())
-                if name in scope_bound.get(scope, ()):
+                if root in scope_bound.get(scope, ()):
                     return False
             scope = lexical_parent[scope]
         return False
@@ -4575,11 +4621,14 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             for name in readers
             if name in tainted
             or (
-                name not in bound
-                and name not in global_names
+                name.split(".", 1)[0] not in bound
+                and name.split(".", 1)[0] not in global_names
                 and is_tainted(parent, name)
             )
-            or (name in global_names and name in own_taint.get(tree, ()))
+            or (
+                name.split(".", 1)[0] in global_names
+                and name in own_taint.get(tree, ())
+            )
         ]
         fired: set[int] = set()
 
@@ -4633,10 +4682,33 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
                     ),
                     name,
                 )
-        # A class whose body binds a tainted name taints the class name,
-        # so ``Config.root`` stays unresolved when ``root`` is tainted.
-        if isinstance(scope, ast.ClassDef) and tainted & local_names:
-            redirect(parent, scope.name)
+        # Taint leaves a scope through what it exports. A class body name
+        # bound from a runtime value taints ``Class.name`` (only that
+        # attribute; a static sibling such as ``Config.data_dir`` still
+        # recovers). A function whose return or yield values depend on a
+        # runtime value taints its own name, so ``root = get_root()`` stays
+        # unresolved; a method does so through its class. Once settling turns
+        # conservative, any export that calls a function or class defined in
+        # this file counts too, so chains of helpers settle in a bounded
+        # number of passes.
+        def exported_taint(value: ast.AST) -> bool:
+            if depends_on_runtime(scope, value):
+                return True
+            return settle_conservatively and bool(free_reads(value) & user_defined)
+
+        if isinstance(scope, ast.ClassDef):
+            for name in local_names:
+                if name in tainted:
+                    redirect(parent, f"{scope.name}.{name}")
+        if isinstance(scope, function_types) and not isinstance(scope, ast.Lambda):
+            exports = [
+                node.value
+                for node in nodes
+                if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom))
+                and node.value is not None
+            ]
+            if any(exported_taint(value) for value in exports):
+                redirect(parent, scope.name)
 
         nested = [node for node in nodes if isinstance(node, scope_types)]
         for node in nested:
@@ -4663,6 +4735,10 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         passes += 1
         if passes >= 3:
             settle_conservatively = True
+        if passes >= 8:
+            # Still growing after the conservative passes: recover nothing
+            # rather than risk a decoy or an unbounded scan.
+            return set(), set()
 
     def runtime_dependent(call: ast.Call, expression: ast.AST) -> bool:
         """Whether a path expression draws on a value chosen at run time."""

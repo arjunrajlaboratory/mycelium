@@ -1786,6 +1786,34 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "main()\n",
             id="annotation-runs-in-enclosing-scope",
         ),
+        pytest.param(
+            "def get_root():\n"
+            "    root = Path(sys.argv[1])\n"
+            "    return root\n"
+            "def main():\n"
+            "    root = get_root()\n"
+            "    frame = pd.read_csv(root / 'input.csv')\n"
+            "    frame.to_csv(root / 'result.csv')\n"
+            "main()\n",
+            id="runtime-value-returned-by-helper",
+        ),
+        pytest.param(
+            "class Config:\n"
+            "    def get_root():\n"
+            "        return Path(os.environ['DATA_DIR'])\n"
+            "root = Config.get_root()\n"
+            "frame = pd.read_csv(root / 'input.csv')\n"
+            "frame.to_csv(root / 'result.csv')\n",
+            id="runtime-value-returned-by-method",
+        ),
+        pytest.param(
+            "def helper():\n"
+            "    path = Path(sys.argv[1]) / 'input.csv'\n"
+            "    return None\n"
+            "for path in [Path(__file__).parent / 'actual.csv']:\n"
+            "    frame = pd.read_csv(path)\n",
+            id="loop-target-shadowing-another-scopes-assignment",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
@@ -1957,6 +1985,15 @@ def test_repository_recovery_leaves_static_parameter_defaults_unresolved(
             "load(sys.argv[1])\n",
             id="lambda-parameter-is-not-a-parameter-dependency",
         ),
+        pytest.param(
+            "ROOT = Path(__file__).parent\n"
+            "class Config:\n"
+            "    data_dir = ROOT\n"
+            "    n_jobs = int(os.getenv('N_JOBS', '1'))\n"
+            "frame = pd.read_csv(Config.data_dir / 'input.csv')\n"
+            "frame.to_csv(Config.data_dir / 'result.csv')\n",
+            id="static-class-attribute-beside-runtime-field",
+        ),
     ],
 )
 def test_repository_recovery_keeps_static_paths_beside_parameters(
@@ -2012,6 +2049,20 @@ def test_repository_recovery_keeps_static_paths_beside_parameters(
             + f"def s{n - 1}():\n    global g{n - 1}\n    g{n - 1} = sys.argv[1]\n"
             + "pd.read_csv(g0 / 'input.csv')\n",
             id="reverse-global-chain",
+        ),
+        pytest.param(
+            lambda n: "class C0:\n    root = Path(sys.argv[1])\n"
+            + "".join(f"class C{i}:\n    root = C{i - 1}.root\n" for i in range(1, n))
+            + f"pd.read_csv(C{n - 1}.root / 'input.csv')\n",
+            id="class-attribute-chain",
+        ),
+        pytest.param(
+            lambda n: "".join(
+                f"def f{i}():\n    return f{i + 1}()\n" for i in range(n - 1)
+            )
+            + f"def f{n - 1}():\n    return Path(sys.argv[1])\n"
+            + "pd.read_csv(f0() / 'input.csv')\n",
+            id="helper-return-chain",
         ),
     ],
 )
