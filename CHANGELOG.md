@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-11-16
+
 ### Fixed
 
 - **`.living/conventions/ACTIVE_CONVENTIONS.yaml` is valid YAML again (#129).**
@@ -45,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `input()`, or `sys.stdin`, directly or through assignments. Paths anchored
   on `__file__` or other static values are still recovered. Existing
   projects need no migration; only new lineage events change.
+
 - **Data lineage no longer records a same-named repository file for a
   directory passed in as a function parameter** (#131). In
   `def load(d): pd.read_csv(d / "input.csv")`, the caller chooses `d`, so
