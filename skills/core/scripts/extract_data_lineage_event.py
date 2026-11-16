@@ -4289,12 +4289,25 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
     # Names any of whose assignments draw on a runtime value, propagated
     # through further assignments until nothing changes. A name with several
     # definitions is tainted by any one of them: recovery should then stay
-    # unresolved rather than guess which definition ran.
-    runtime_names: set[str] = set()
+    # unresolved rather than guess which definition ran. Function and lambda
+    # parameters are runtime values too: every caller, and any default, can
+    # pass a directory outside the repository. Matching by name across the
+    # file only ever leaves more paths unresolved, never records a wrong file.
+    # Unpacked names (``a, b = dirs``) carry their source's taint too, though
+    # recovery never resolves them to a value.
+    taint_sources = {name: list(values) for name, values in assignments.items()}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, (ast.List, ast.Tuple)):
+                    for item in ast.walk(target):
+                        if isinstance(item, ast.Name):
+                            taint_sources.setdefault(item.id, []).append(node.value)
+    runtime_names: set[str] = set(shadowed_names)
     changed = True
     while changed:
         changed = False
-        for name, definitions in assignments.items():
+        for name, definitions in taint_sources.items():
             if name in runtime_names:
                 continue
             if any(reads_runtime_value(item, runtime_names) for item in definitions):
@@ -4304,9 +4317,10 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
     def runtime_dependent(expression: ast.AST) -> bool:
         """Whether a path expression draws on a value chosen at run time.
 
-        A command-line argument or environment value can name a directory
-        outside the repository, so the literal filename appended to it says
-        nothing about which repository file, if any, was read or written.
+        A command-line argument, environment value or function parameter
+        can name a directory outside the repository, so the literal filename
+        appended to it says nothing about which repository file, if any, was
+        read or written.
         """
         return reads_runtime_value(expression, runtime_names)
 

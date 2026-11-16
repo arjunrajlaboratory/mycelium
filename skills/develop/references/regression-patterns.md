@@ -513,6 +513,11 @@ Join a command-line, `argparse`, or environment directory to a literal filename
 that also exists in the repository, by division, `joinpath`, `os.path.join`,
 and through assignments; require no lineage, while a `__file__`-anchored path
 to the same filename is still recovered.
+Repeat with the directory passed in as a function parameter (directly, through
+`self`, a local alias, or a static default such as `root=ROOT`); require no
+lineage, while a static path beside the parameterised one is still recovered.
+Parameters seed the same file-wide runtime taint as command-line values, so
+aliases are caught by the existing propagation.
 
 ## 27. Resolved I/O triggers repository traversal
 

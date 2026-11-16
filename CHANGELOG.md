@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `input()`, or `sys.stdin`, directly or through assignments. Paths anchored
   on `__file__` or other static values are still recovered. Existing
   projects need no migration; only new lineage events change.
+- **Data lineage no longer records a same-named repository file for a
+  directory passed in as a function parameter** (#131). In
+  `def load(d): pd.read_csv(d / "input.csv")`, the caller chooses `d`, so
+  it can point outside the repository, yet repository recovery matched the
+  repository's own `input.csv` and recorded and hashed it as an input.
+  Function and lambda parameters, including `self`, `*args`, `**kwargs`,
+  and keyword-only parameters, are now treated like command-line values: a
+  path built from one, directly or through assignments, stays unresolved
+  with the usual dynamic-path warning. A parameter with a static default
+  such as `root=ROOT` also stays unresolved, because any caller can
+  override it. Static paths elsewhere in the script are still recovered.
+  Existing projects need no migration; only new lineage events change.
 
 ## [0.9.4] - 2026-11-15
 
