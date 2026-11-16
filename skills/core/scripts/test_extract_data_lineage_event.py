@@ -1842,6 +1842,14 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "main([Path(sys.argv[1])])\n",
             id="function-loop-shadows-module-assignment",
         ),
+        pytest.param(
+            "class Config:\n"
+            "    root = Path(sys.argv[1])\n"
+            "root = Config().root\n"
+            "frame = pd.read_csv(root / 'input.csv')\n"
+            "frame.to_csv(root / 'result.csv')\n",
+            id="class-attribute-through-temporary-instance",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
@@ -2179,6 +2187,57 @@ def test_repository_recovery_taint_memory_stays_linear_for_sibling_scopes() -> N
         tracemalloc.stop()
 
     assert peak < 48 * 2**20, peak
+
+
+def test_repository_recovery_alias_memory_stays_linear() -> None:
+    """Aliases must share a class's attribute taint, not copy it.
+
+    800 runtime fields and 800 instances peaked near 107 MiB when every
+    alias stored every tainted field.
+    """
+    import tracemalloc
+
+    size = 800
+    source = (
+        "import sys\nclass Config:\n"
+        + "".join(f"    f{i} = sys.argv[1]\n" for i in range(size))
+        + "".join(f"c{i} = Config()\n" for i in range(size))
+    )
+    tracemalloc.start()
+    try:
+        lineage_event._io_literal_filenames(source)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 48 * 2**20, peak
+
+
+def test_repository_recovery_definition_lookup_stays_linear() -> None:
+    """Resolving a name must not scan every same-named assignment in the file.
+
+    Best of three timings per size; linear work quadruples from 2000 to 8000
+    functions, the per-read scan of all definitions grew sixteenfold.
+    """
+    import time
+
+    def best_time(size: int) -> float:
+        source = _PANDAS_PATH_PRELUDE + "".join(
+            f"def f{i}():\n"
+            f"    path = Path(__file__).parent / 'x{i}.csv'\n"
+            "    pd.read_csv(path)\n"
+            for i in range(size)
+        )
+        timings = []
+        for _ in range(3):
+            started = time.perf_counter()
+            lineage_event._io_literal_filenames(source)
+            timings.append(time.perf_counter() - started)
+        return min(timings)
+
+    small, large = best_time(2000), best_time(8000)
+
+    assert large < 9 * small, (small, large)
 
 
 def test_repository_recovery_survives_deeply_nested_scopes() -> None:

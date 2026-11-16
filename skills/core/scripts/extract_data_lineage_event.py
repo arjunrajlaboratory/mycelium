@@ -4421,12 +4421,13 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
                 if node.id not in hidden:
                     names.add(node.id)
                 continue
-            if (
-                isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Name)
-                and node.value.id not in hidden
-            ):
-                names.add(f"{node.value.id}.{node.attr}")
+            if isinstance(node, ast.Attribute):
+                receiver = node.value
+                if isinstance(receiver, ast.Call):
+                    # ``Config().root`` reads the class attribute too.
+                    receiver = receiver.func
+                if isinstance(receiver, ast.Name) and receiver.id not in hidden:
+                    names.add(f"{receiver.id}.{node.attr}")
             if isinstance(node, (ast.Lambda, *comprehension_types)):
                 if isinstance(node, ast.Lambda):
                     local = parameters(node)
@@ -4447,10 +4448,46 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef))
     }
     own_taint: dict[ast.AST, set[str]] = {}
-    # Tainted attribute names per class, and per name bound to that class or
-    # an instance of it (``config = Config()``). Keyed by plain name across
-    # scopes, which can only add taint.
-    attribute_taint: dict[str, set[str]] = {}
+    # Tainted class attributes. A class, and every name bound to it or to an
+    # instance of it (``config = Config()``, ``cfg = config``), share one
+    # group in a union-find keyed by plain name across scopes; each group
+    # holds one attribute set. That can only add taint, and keeps memory
+    # linear however many aliases and tainted fields a script has.
+    group_parent: dict[str, str] = {}
+    group_attributes: dict[str, set[str]] = {}
+
+    def group_of(name: str) -> str:
+        root = name
+        while group_parent.get(root, root) != root:
+            root = group_parent[root]
+        while group_parent.get(name, name) != root:
+            group_parent[name], name = root, group_parent[name]
+        return root
+
+    def join_groups(first: str, second: str) -> bool:
+        """Merge two names' groups; report whether either side gained taint."""
+        group_parent.setdefault(first, first)
+        group_parent.setdefault(second, second)
+        a, b = group_of(first), group_of(second)
+        if a == b:
+            return False
+        attributes_a = group_attributes.pop(a, set())
+        attributes_b = group_attributes.pop(b, set())
+        if len(attributes_a) < len(attributes_b):
+            a, b = b, a
+            attributes_a, attributes_b = attributes_b, attributes_a
+        group_parent[b] = a
+        merged = attributes_a | attributes_b if attributes_b else attributes_a
+        if merged:
+            group_attributes[a] = merged
+        return attributes_a != attributes_b
+
+    def attribute_tainted(dotted: str) -> bool:
+        receiver, _, attribute = dotted.partition(".")
+        if not attribute or receiver not in group_parent:
+            return False
+        return attribute in group_attributes.get(group_of(receiver), ())
+
     scope_bound: dict[ast.AST, set[str]] = {}
     scope_globals: dict[ast.AST, set[str]] = {}
     scope_redirects: dict[ast.AST, set[str]] = {}
@@ -4465,6 +4502,8 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
 
     def is_tainted(scope: ast.AST | None, name: str) -> bool:
         """Whether ``name`` as seen from ``scope`` holds a runtime value."""
+        if "." in name and attribute_tainted(name):
+            return True
         start = scope
         root = name.split(".", 1)[0]
         while scope is not None:
@@ -4587,29 +4626,14 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
 
         tainted = parameters(scope) | redirected.get(scope, set())
 
-        # ``config = Config()`` or ``cfg = Config`` carries the class's
-        # tainted attributes to ``config.root``, transitively through
-        # further aliases.
-        alias_targets: dict[str, list[str]] = {}
+        # ``config = Config()`` or ``cfg = Config`` joins the class's group,
+        # so ``config.root`` is tainted when ``Config.root`` is.
         for names, value in bindings:
             source = value.func if isinstance(value, ast.Call) else value
             if isinstance(source, ast.Name):
-                alias_targets.setdefault(source.id, []).extend(names)
-        alias_queue = [name for name in alias_targets if attribute_taint.get(name)]
-        while alias_queue:
-            source = alias_queue.pop()
-            attributes = attribute_taint.get(source, set())
-            for target in alias_targets.get(source, ()):
-                added = attributes - attribute_taint.get(target, set())
-                if added:
-                    attribute_taint.setdefault(target, set()).update(added)
-                    tainted.update(f"{target}.{attribute}" for attribute in added)
-                    alias_queue.append(target)
-            for target in alias_targets.get(source, ()):
-                tainted.update(
-                    f"{target}.{attribute}"
-                    for attribute in attribute_taint.get(target, set())
-                )
+                for name in names:
+                    if join_groups(name, source.id):
+                        grew = True
         if settle_conservatively:
             for names, _ in bindings:
                 tainted |= names & redirected_here
@@ -4640,6 +4664,7 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
                 name.split(".", 1)[0] in global_names
                 and name in own_taint.get(tree, ())
             )
+            or ("." in name and attribute_tainted(name))
         ]
         fired: set[int] = set()
 
@@ -4708,10 +4733,12 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             return settle_conservatively and bool(free_reads(value) & user_defined)
 
         if isinstance(scope, ast.ClassDef):
+            group = group_attributes.setdefault(group_of(scope.name), set())
+            group_parent.setdefault(scope.name, scope.name)
             for name in local_names:
-                if name in tainted:
-                    redirect(parent, f"{scope.name}.{name}")
-                    attribute_taint.setdefault(scope.name, set()).add(name)
+                if name in tainted and name not in group:
+                    group.add(name)
+                    grew = True
         if isinstance(scope, function_types) and not isinstance(scope, ast.Lambda):
             exports = [
                 node.value
@@ -4756,6 +4783,12 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         """Whether a path expression draws on a value chosen at run time."""
         return depends_on_runtime(scope_of.get(id(call), tree), expression)
 
+    definitions_by_scope: dict[tuple[int, str], list[ast.AST]] = {}
+    for assigned_name, values in assignments.items():
+        for value in values:
+            key = (id(scope_of.get(id(value), tree)), assigned_name)
+            definitions_by_scope.setdefault(key, []).append(value)
+
     def visible_definition(name_node: ast.Name) -> ast.AST | None:
         """The single assigned value a name read sees, or None if unsure.
 
@@ -4776,11 +4809,7 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
                 if count:
                     if count != 1:
                         return None
-                    found = [
-                        value
-                        for value in assignments.get(name, ())
-                        if scope_of.get(id(value)) is scope
-                    ]
+                    found = definitions_by_scope.get((id(scope), name), ())
                     return found[0] if len(found) == 1 else None
             scope = lexical_parent.get(scope)
         return None
