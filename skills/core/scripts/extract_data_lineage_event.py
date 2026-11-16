@@ -4286,46 +4286,56 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
                 return True
         return False
 
-    # Names any of whose assignments draw on a runtime value, propagated
-    # through further assignments until nothing changes. A name with several
-    # definitions is tainted by any one of them: recovery should then stay
-    # unresolved rather than guess which definition ran.
-    runtime_names: set[str] = set()
-    changed = True
-    while changed:
-        changed = False
-        for name, definitions in assignments.items():
-            if name in runtime_names:
-                continue
-            if any(reads_runtime_value(item, runtime_names) for item in definitions):
-                runtime_names.add(name)
-                changed = True
+    # Names whose value is chosen at run time, per lexical scope. A runtime
+    # value (command line, environment) or a function parameter, which the
+    # caller chooses, can name a directory outside the repository, so a
+    # literal filename joined to it does not identify a repository file.
+    #
+    # Each scope's set holds its parameters, names it assigns from a runtime
+    # value or from another tainted name, and tainted names inherited from
+    # enclosing functions that it does not rebind itself. Locals of nested
+    # functions do not leak outward, and a local that shadows an enclosing
+    # parameter is judged by its own assignments. Class bodies do not pass
+    # their names on to methods, matching Python's scoping. ``global`` and
+    # ``nonlocal`` assignments taint the binding they name. A name with
+    # several assignments in one scope is tainted by any of them: recovery
+    # then stays unresolved rather than guess which assignment ran. A static
+    # parameter default does not help, because any caller may override it.
+    scope_types = (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda)
+    function_types = (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda)
 
-    def runtime_dependent(expression: ast.AST) -> bool:
-        """Whether a path expression draws on a value chosen at run time.
+    def scope_body(scope: ast.AST) -> list[ast.AST]:
+        if isinstance(scope, ast.Lambda):
+            return [scope.body]
+        return list(getattr(scope, "body", []))
 
-        A command-line argument or environment value can name a directory
-        outside the repository, so the literal filename appended to it says
-        nothing about which repository file, if any, was read or written.
+    def own_nodes(scope: ast.AST) -> list[ast.AST]:
+        """Nodes evaluated in ``scope`` itself, not in a nested scope.
+
+        A nested definition is included so its name counts as bound here,
+        along with its decorators, defaults, and bases, which run here too.
         """
-        return reads_runtime_value(expression, runtime_names)
+        found: list[ast.AST] = []
+        stack = scope_body(scope)
+        while stack:
+            node = stack.pop()
+            found.append(node)
+            if isinstance(node, scope_types):
+                stack.extend(getattr(node, "decorator_list", []))
+                if isinstance(node, function_types):
+                    stack.extend(node.args.defaults)
+                    stack.extend(item for item in node.args.kw_defaults if item)
+                else:
+                    stack.extend(node.bases)
+                    stack.extend(keyword.value for keyword in node.keywords)
+                continue
+            stack.extend(ast.iter_child_nodes(node))
+        return found
 
-    # A function parameter is chosen by the caller, so it can name a directory
-    # outside the repository just like a command-line argument. For each
-    # function, collect its parameters plus the names assigned inside it from
-    # them. The set is scoped to that function (and functions nested in it),
-    # so a module-level name that merely shares a parameter's name elsewhere
-    # still recovers. A static default does not help: any caller, including
-    # an importer of the module, may override it.
-    parent_of: dict[ast.AST, ast.AST] = {}
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parent_of[child] = node
-    parameter_scopes: dict[ast.AST, set[str]] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef, ast.Lambda)):
-            continue
-        signature = node.args
+    def parameters(scope: ast.AST) -> set[str]:
+        if not isinstance(scope, function_types):
+            return set()
+        signature = scope.args
         names = {
             arg.arg
             for arg in signature.posonlyargs + signature.args + signature.kwonlyargs
@@ -4333,50 +4343,141 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
         names.update(
             arg.arg for arg in (signature.vararg, signature.kwarg) if arg is not None
         )
-        local_assignments: list[tuple[set[str], ast.AST]] = []
-        for inner in ast.walk(node):
-            if isinstance(inner, ast.Assign):
-                targets, value = inner.targets, inner.value
-            elif isinstance(inner, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
-                targets, value = [inner.target], inner.value
+        return names
+
+    scope_taint: dict[ast.AST, set[str]] = {}
+    # Names tainted from inside a nested scope through ``global`` or
+    # ``nonlocal``, keyed by the scope that owns the binding.
+    redirected: dict[ast.AST, set[str]] = {}
+
+    def visit(
+        scope: ast.AST,
+        inherited: frozenset[str],
+        chain: tuple[tuple[ast.AST, set[str]], ...],
+    ) -> bool:
+        """Compute taint for ``scope`` and nested scopes; report new redirects."""
+        nodes = own_nodes(scope)
+        global_names = {
+            name for node in nodes if isinstance(node, ast.Global) for name in node.names
+        }
+        nonlocal_names = {
+            name
+            for node in nodes
+            if isinstance(node, ast.Nonlocal)
+            for name in node.names
+        }
+        comprehension_targets = {
+            id(target_node)
+            for node in nodes
+            if isinstance(node, ast.comprehension)
+            for target_node in ast.walk(node.target)
+        }
+        bound = parameters(scope)
+        bound.update(
+            node.id
+            for node in nodes
+            if isinstance(node, ast.Name)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and id(node) not in comprehension_targets
+        )
+        bound.update(
+            node.name
+            for node in nodes
+            if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef))
+        )
+        bound -= global_names | nonlocal_names
+        tainted = parameters(scope) | (set(inherited) - bound)
+        tainted |= redirected.get(scope, set())
+        assignments_here: list[tuple[set[str], ast.AST]] = []
+        assigned_here: set[str] = set()
+        for node in nodes:
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                targets, value = [node.target], node.value
             else:
                 continue
             if value is None:
                 continue
-            bound = {
+            names = {
                 target_node.id
                 for target in targets
                 for target_node in ast.walk(target)
                 if isinstance(target_node, ast.Name)
+                and isinstance(target_node.ctx, ast.Store)
             }
-            local_assignments.append((bound, value))
+            if names:
+                assignments_here.append((names, value))
+                assigned_here |= names
+        if settle_conservatively:
+            tainted |= assigned_here & (global_names | nonlocal_names)
         changed = True
         while changed:
             changed = False
-            for bound, value in local_assignments:
-                if bound <= names:
+            for names, value in assignments_here:
+                if names <= tainted:
                     continue
-                if any(
-                    isinstance(item, ast.Name) and item.id in names
-                    for item in ast.walk(value)
-                ):
-                    names |= bound
+                if reads_runtime_value(value, tainted):
+                    tainted |= names
                     changed = True
-        parameter_scopes[node] = names
+        scope_taint[scope] = tainted
 
-    def parameter_dependent(call: ast.Call, expression: ast.AST) -> bool:
-        """Whether a path expression uses an enclosing function's parameter."""
-        names: set[str] = set()
-        scope = parent_of.get(call)
-        while scope is not None:
-            names |= parameter_scopes.get(scope, set())
-            scope = parent_of.get(scope)
-        if not names:
-            return False
-        return any(
-            isinstance(item, ast.Name) and item.id in names
-            for item in ast.walk(expression)
-        )
+        grew = False
+        for name in tainted & (global_names | nonlocal_names):
+            if name in global_names:
+                owner = tree
+            else:
+                owner = next(
+                    (
+                        outer
+                        for outer, outer_bound in reversed(chain)
+                        if outer is not tree and name in outer_bound
+                    ),
+                    None,
+                )
+            if owner is not None and name not in redirected.setdefault(owner, set()):
+                redirected[owner].add(name)
+                grew = True
+
+        inner_chain = chain + ((scope, bound),)
+        passed_on = inherited if isinstance(scope, ast.ClassDef) else frozenset(tainted)
+        for node in nodes:
+            if isinstance(node, scope_types):
+                grew = visit(node, passed_on, inner_chain) or grew
+        return grew
+
+    # Redirected names only grow. Each pass usually settles them, but a chain
+    # of ``global`` assignments written in reverse order would add one name
+    # per pass, quadratic in the chain length. After a few precise passes,
+    # taint every ``global``/``nonlocal`` name a scope assigns: that settles
+    # in at most two more passes and errs toward unresolved lineage.
+    settle_conservatively = False
+    passes = 0
+    while visit(tree, frozenset(), ()):
+        passes += 1
+        if passes >= 3:
+            settle_conservatively = True
+
+    parent_of: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent_of[child] = node
+
+    def enclosing_scope(node: ast.AST) -> ast.AST:
+        """The scope whose names ``node`` sees (decorators/defaults: outer)."""
+        child, parent = node, parent_of.get(node)
+        while parent is not None:
+            if isinstance(parent, scope_types):
+                body = scope_body(parent)
+                if any(child is item for item in body):
+                    return parent
+            child, parent = parent, parent_of.get(parent)
+        return tree
+
+    def runtime_dependent(call: ast.Call, expression: ast.AST) -> bool:
+        """Whether a path expression draws on a value chosen at run time."""
+        tainted = scope_taint.get(enclosing_scope(call), set())
+        return reads_runtime_value(expression, tainted)
 
     inputs: set[str] = set()
     outputs: set[str] = set()
@@ -4395,10 +4496,7 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
         values: set[str] = set()
         for expression in path_expressions:
             expression_values = (
-                None
-                if runtime_dependent(expression)
-                or parameter_dependent(node, expression)
-                else collect(expression)
+                None if runtime_dependent(node, expression) else collect(expression)
             )
             if expression_values is None:
                 values.clear()

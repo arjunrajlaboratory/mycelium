@@ -1613,6 +1613,36 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "load(Path(sys.argv[1]))\n",
             id="static-default-overridden-by-caller",
         ),
+        pytest.param(
+            "base = None\n"
+            "def setup():\n"
+            "    global base\n"
+            "    base = Path(sys.argv[1])\n"
+            "setup()\n"
+            "frame = pd.read_csv(base / 'input.csv')\n"
+            "frame.to_csv(base / 'result.csv')\n",
+            id="runtime-value-assigned-through-global",
+        ),
+        pytest.param(
+            "def outer(d):\n"
+            "    root = None\n"
+            "    def set_root():\n"
+            "        nonlocal root\n"
+            "        root = d\n"
+            "    set_root()\n"
+            "    frame = pd.read_csv(root / 'input.csv')\n"
+            "    frame.to_csv(root / 'result.csv')\n"
+            "outer(Path(sys.argv[1]))\n",
+            id="parameter-assigned-through-nonlocal",
+        ),
+        pytest.param(
+            "class Job:\n"
+            "    def run(self):\n"
+            "        frame = pd.read_csv(Path(sys.argv[1]) / 'input.csv')\n"
+            "        frame.to_csv(Path(sys.argv[1]) / 'result.csv')\n"
+            "Job().run()\n",
+            id="runtime-value-inside-method",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
@@ -1681,6 +1711,47 @@ def test_repository_recovery_leaves_static_parameter_defaults_unresolved(
             "frame = pd.read_csv(root / 'input.csv')\n"
             "frame.to_csv(root / 'result.csv')\n",
             id="module-name-shared-with-other-function-parameter",
+        ),
+        pytest.param(
+            "def main(config):\n"
+            "    root = Path(__file__).parent\n"
+            "    def helper():\n"
+            "        root = config\n"
+            "        return root\n"
+            "    helper()\n"
+            "    frame = pd.read_csv(root / 'input.csv')\n"
+            "    frame.to_csv(root / 'result.csv')\n"
+            "main(sys.argv[1])\n",
+            id="nested-local-does-not-taint-outer-name",
+        ),
+        pytest.param(
+            "def outer(root):\n"
+            "    def inner():\n"
+            "        root = Path(__file__).parent\n"
+            "        frame = pd.read_csv(root / 'input.csv')\n"
+            "        frame.to_csv(root / 'result.csv')\n"
+            "    inner()\n"
+            "outer(sys.argv[1])\n",
+            id="inner-local-shadows-outer-parameter",
+        ),
+        pytest.param(
+            "def parse():\n"
+            "    base = Path(sys.argv[1])\n"
+            "    return base\n"
+            "base = Path(__file__).parent\n"
+            "frame = pd.read_csv(base / 'input.csv')\n"
+            "frame.to_csv(base / 'result.csv')\n",
+            id="function-local-runtime-name-does-not-taint-module-name",
+        ),
+        pytest.param(
+            "class Config:\n"
+            "    root = sys.argv[1]\n"
+            "    def load(self):\n"
+            "        root = Path(__file__).parent\n"
+            "        frame = pd.read_csv(root / 'input.csv')\n"
+            "        frame.to_csv(root / 'result.csv')\n"
+            "Config().load()\n",
+            id="method-local-shadows-class-attribute",
         ),
     ],
 )
