@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import json
 import re
 import shutil
 import sys
@@ -139,17 +140,30 @@ class UnrecognizedRegistryError(ValueError):
     """ACTIVE_CONVENTIONS.yaml holds content this module will not rewrite."""
 
 
+# A name YAML reads back as this same plain string: starts with a letter, no
+# special characters, and not one of the YAML 1.1 bool/null spellings.
+_PLAIN_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*$")
+_YAML_SPECIAL = {"y", "n", "yes", "no", "true", "false", "on", "off", "null"}
+
+
+def _yaml_name(name: str) -> str:
+    """Render a pack name so YAML loads it back as the same string."""
+    if _PLAIN_NAME.match(name) and name.lower() not in _YAML_SPECIAL:
+        return name
+    return json.dumps(name)  # a JSON string is a valid YAML double-quoted scalar
+
+
 def format_registry_entry(name: str, installed: str, core: bool = False) -> str:
     """Render one registry entry; the only place the entry shape is defined."""
     entry = (
-        f"- name: {name}\n"
+        f"- name: {_yaml_name(name)}\n"
         f"  path: .living/conventions/{name}/\n"
         f"  installed: {installed}"
     )
     return entry + "\n  core: true" if core else entry
 
 
-def _field(text: str, line: str) -> tuple[str, str]:
+def _field(text: str, line: str) -> tuple[str, str, bool]:
     """Parse one `key: value` scalar, refusing anything outside the grammar."""
     match = _FIELD.match(text)
     if not match:
@@ -160,7 +174,7 @@ def _field(text: str, line: str) -> tuple[str, str]:
     value = next(
         group for group in (match.group("dq"), match.group("sq"), plain) if group is not None
     )
-    return match.group("key"), value
+    return match.group("key"), value, plain is None
 
 
 class _Entry:
@@ -168,14 +182,17 @@ class _Entry:
 
     def __init__(self, line: str):
         self.lines = [line]
-        key, value = _field(line[2:], line)
+        key, value, quoted = _field(line[2:], line)
         self.fields = {key: value}
+        self.quoted = {key} if quoted else set()
 
     def add_field(self, line: str) -> None:
-        key, value = _field(line[2:], line)
+        key, value, quoted = _field(line[2:], line)
         if key in self.fields:
             raise UnrecognizedRegistryError(f"duplicate field {key!r}: {line!r}")
         self.fields[key] = value
+        if quoted:
+            self.quoted.add(key)
         self.lines.append(line)
 
     @property
@@ -184,6 +201,9 @@ class _Entry:
 
     @property
     def core(self) -> bool:
+        # A quoted "true" is a string, not the flag.
+        if "core" in self.quoted:
+            return False
         return self.fields.get("core", "").lower() in _TRUE
 
 

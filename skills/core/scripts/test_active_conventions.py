@@ -7,6 +7,7 @@ to it, and migration repairs files an older writer left broken. Every one of
 those must leave a file that ``yaml.safe_load`` reads as a list.
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -302,6 +303,29 @@ class TestInstallerRepairsExistingFiles:
         _write_registry(tmp_path, "- name: a\n  core: true # required\n")
         ic.update_active_conventions(tmp_path, "a")
         assert _load(tmp_path)[0]["core"] is True
+
+    @pytest.mark.parametrize("pyyaml", [True, False])
+    def test_quoted_true_is_not_the_core_flag(
+        self, tmp_path: Path, pyyaml: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex P2: `core: "true"` is a string; reinstall must not make it a flag."""
+        if not pyyaml:
+            monkeypatch.setattr(ic, "_yaml", lambda: None)
+        _write_registry(tmp_path, '- name: a\n  core: "true"\n')
+        ic.update_active_conventions(tmp_path, "a")
+        assert "core" not in _load(tmp_path)[0]
+
+    @pytest.mark.parametrize("pyyaml", [True, False])
+    @pytest.mark.parametrize("name", ["on", "No", "null", "123", "1e3", "a b"])
+    def test_yaml_sensitive_names_round_trip(
+        self, tmp_path: Path, name: str, pyyaml: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex P2: a name YAML would read as bool/null/number stays a string."""
+        if not pyyaml:
+            monkeypatch.setattr(ic, "_yaml", lambda: None)
+        _write_registry(tmp_path, f"- name: {json.dumps(name)}\n")
+        ic.update_active_conventions(tmp_path, name)
+        assert _names(tmp_path) == [name]
 
     def test_missing_file_is_created_as_a_list(self, tmp_path: Path) -> None:
         (tmp_path / REGISTRY).parent.mkdir(parents=True)
