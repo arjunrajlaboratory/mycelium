@@ -9,18 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Data lineage no longer records a same-named repository file for a path
+  the script chooses at run time.** When a script builds a path such as
+  `Path(sys.argv[1]) / "input.csv"`, repository recovery used to drop the
+  runtime part, find the repository's own `input.csv`, and record (and hash)
+  it as an input even though the script read a file elsewhere. Recovery now
+  leaves a path unresolved, with the usual dynamic-path warning, when it
+  draws on `sys.argv`, `argparse` results, `os.environ`, `os.getenv`,
+  `input()`, or `sys.stdin`, directly or through assignments. Paths anchored
+  on `__file__` or other static values are still recovered. Existing
+  projects need no migration; only new lineage events change.
 - **Data lineage no longer records a same-named repository file for a
   directory passed in as a function parameter** (#131). In
   `def load(d): pd.read_csv(d / "input.csv")`, the caller chooses `d`, so
   it can point outside the repository, yet repository recovery matched the
   repository's own `input.csv` and recorded and hashed it as an input. A
-  path that uses a parameter of an enclosing function, directly, through
-  `self`, or through names assigned from it, now stays unresolved with the
-  usual dynamic-path warning. That includes parameters with a static
-  default such as `root=ROOT`, because any caller can override the default.
-  Static paths in the same script, including module-level names that only
-  share a parameter's name, are still recovered. Existing projects need no
-  migration; only new lineage events change.
+  path that uses an enclosing function's parameter now stays unresolved
+  with the usual dynamic-path warning, whether directly, through `self`,
+  or through names bound from it by assignment, loop, `with`,
+  comprehension, walrus, or `match`. That includes parameters with a
+  static default such as `root=ROOT`, because any caller can override the
+  default. Runtime values now also carry through helper return values
+  (`root = get_root()`) and class attributes (`Config.root`). Taint follows
+  Python's scoping rules, so a static path is still recovered when it only
+  shares a name with a parameter or runtime value in another scope, or
+  sits beside a runtime field in the same class (`Config.data_dir`).
+  Existing projects need no migration; only new lineage events change.
 
 ## [0.9.4] - 2026-11-15
 
@@ -130,16 +144,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Data lineage no longer records a same-named repository file for a path
-  the script chooses at run time.** When a script builds a path such as
-  `Path(sys.argv[1]) / "input.csv"`, repository recovery used to drop the
-  runtime part, find the repository's own `input.csv`, and record (and hash)
-  it as an input even though the script read a file elsewhere. Recovery now
-  leaves a path unresolved, with the usual dynamic-path warning, when it
-  draws on `sys.argv`, `argparse` results, `os.environ`, `os.getenv`,
-  `input()`, or `sys.stdin`, directly or through assignments. Paths anchored
-  on `__file__` or other static values are still recovered. Existing
-  projects need no migration; only new lineage events change.
 - **Inline R one-liners no longer depend on which startup flag was typed.**
   The post-action check exempted only Python `-c`, so `R -e` and
   `R --vanilla -e` opened a bookkeeping cycle, while `R -q -e` and
