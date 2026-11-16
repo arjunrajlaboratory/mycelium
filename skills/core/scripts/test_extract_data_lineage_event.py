@@ -1765,6 +1765,27 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "outer()\n",
             id="nonlocal-owner-bound-by-match-capture",
         ),
+        pytest.param(
+            "def outer():\n"
+            "    [(root := Path('.')) for _ in [0]]\n"
+            "    def set_root():\n"
+            "        nonlocal root\n"
+            "        root = Path(sys.argv[1])\n"
+            "    set_root()\n"
+            "    frame = pd.read_csv(root / 'input.csv')\n"
+            "    frame.to_csv(root / 'result.csv')\n"
+            "outer()\n",
+            id="nonlocal-owner-bound-by-comprehension-walrus",
+        ),
+        pytest.param(
+            "def main():\n"
+            "    root = Path(sys.argv[1])\n"
+            "    def f(x: pd.read_csv(root / 'input.csv')) -> None:\n"
+            "        pass\n"
+            "    return f\n"
+            "main()\n",
+            id="annotation-runs-in-enclosing-scope",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
@@ -2026,6 +2047,31 @@ def test_repository_recovery_taint_scan_stays_linear(
         work.append(calls)
 
     assert work[1] < 3 * work[0], work
+
+
+def test_repository_recovery_taint_memory_stays_linear_for_sibling_scopes() -> None:
+    """Sibling scopes must not each copy every inherited tainted name.
+
+    2000 tainted module names under 2000 functions peaked at about 134 MiB
+    when every scope copied the inherited set; per-scope sets with parent
+    lookups stay near 13 MiB.
+    """
+    import tracemalloc
+
+    size = 2000
+    source = (
+        "import sys\n"
+        + "".join(f"g{i} = sys.argv\n" for i in range(size))
+        + "".join(f"def f{i}():\n    pass\n" for i in range(size))
+    )
+    tracemalloc.start()
+    try:
+        lineage_event._io_literal_filenames(source)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 48 * 2**20, peak
 
 
 def test_repository_recovery_survives_deeply_nested_scopes() -> None:
