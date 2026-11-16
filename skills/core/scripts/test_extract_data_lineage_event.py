@@ -1431,6 +1431,48 @@ _PANDAS_PATH_PRELUDE = "import os\nimport sys\nfrom pathlib import Path\nimport 
             "frame.to_csv(input / 'result.csv')\n",
             id="locally-rebound-builtin-input",
         ),
+        pytest.param(
+            "p = Path(__file__).parent\n"
+            "pd.read_csv(p / 'input.csv').to_csv(p / 'result.csv')\n",
+            id="writer-chained-on-reader",
+        ),
+        pytest.param(
+            "limit = int(sys.argv[1])\n"
+            "frame = pd.read_csv(Path(__file__).parent / 'input.csv')\n"
+            "frame.head(limit).to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="writer-chained-on-head",
+        ),
+        pytest.param(
+            "p = Path(__file__).parent\n"
+            "pd.read_csv(p / 'input.csv').to_parquet(p / 'result.csv')\n",
+            id="parquet-writer-chained-on-reader",
+        ),
+        pytest.param(
+            "frames = [pd.read_csv(Path(__file__).parent / 'input.csv')]\n"
+            "frames[0].to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="writer-on-subscript",
+        ),
+        pytest.param(
+            "from helpers import export_table as to_csv\n"
+            "p = Path(__file__).parent\n"
+            "pd.read_csv(p / 'input.csv').to_csv(p / 'result.csv')\n",
+            id="chained-writer-despite-unrelated-same-named-import",
+        ),
+        pytest.param(
+            "class Preview:\n"
+            "    def to_csv(self, path):\n"
+            "        print(path)\n"
+            "p = Path(__file__).parent\n"
+            "pd.read_csv(p / 'input.csv').to_csv(p / 'result.csv')\n",
+            id="chained-writer-beside-unrelated-custom-method",
+        ),
+        pytest.param(
+            "def to_csv(path):\n"
+            "    print(path)\n"
+            "frame = pd.read_csv(Path(__file__).parent / 'input.csv')\n"
+            "frame.to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="named-writer-beside-unrelated-custom-function",
+        ),
     ],
 )
 def test_repository_recovery_keeps_static_path_prefixes(
@@ -1458,6 +1500,107 @@ def test_repository_recovery_keeps_static_path_prefixes(
     assert event["io_detection"] == "static+repository"
     assert [item["path"] for item in event["inputs"]] == [str(sample)]
     assert [item["path"] for item in event["outputs"]] == [str(result)]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "import matplotlib.pyplot as plt\n"
+            "plt.figure().savefig(Path(__file__).parent / 'figure.png')\n",
+            id="chained-on-call",
+        ),
+        pytest.param(
+            "import matplotlib.pyplot as plt\n"
+            "class Preview:\n"
+            "    def savefig(self, path):\n"
+            "        print(path)\n"
+            "plt.figure().savefig(Path(__file__).parent / 'figure.png')\n",
+            id="chained-beside-unrelated-custom-method",
+        ),
+        pytest.param(
+            "from matplotlib.pyplot import savefig\n"
+            "def preview(savefig):\n"
+            "    pass\n"
+            "savefig(Path(__file__).parent / 'figure.png')\n",
+            id="imported-beside-parameter-in-other-scope",
+        ),
+        pytest.param(
+            "from matplotlib.pyplot import savefig\n"
+            "class Panel:\n"
+            "    savefig = None\n"
+            "    def draw(self):\n"
+            "        savefig(Path(__file__).parent / 'figure.png')\n",
+            id="imported-inside-method-despite-class-attribute",
+        ),
+    ],
+)
+def test_repository_recovery_records_savefig(
+    tmp_path: Path, source: str
+) -> None:
+    """A real figure write survives chaining and unrelated same-named code."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    figure = tmp_path / "figure.png"
+    figure.write_bytes(b"png")
+    script = tmp_path / "run.py"
+    script.write_text("from pathlib import Path\n" + source)
+    args = argparse.Namespace(
+        ts="2026-11-15T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert [item["path"] for item in event["outputs"]] == [str(figure)]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "def to_csv(path):\n"
+            "    print(path)\n"
+            "to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="local-function",
+        ),
+        pytest.param(
+            "from helpers import to_csv\n"
+            "to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="non-io-import",
+        ),
+        pytest.param(
+            "def savefig(path):\n"
+            "    print(path)\n"
+            "savefig(Path(__file__).parent / 'result.csv')\n",
+            id="local-savefig",
+        ),
+    ],
+)
+def test_repository_recovery_ignores_unqualified_custom_writer(
+    tmp_path: Path, source: str
+) -> None:
+    """A bare writer name is a user's own function, not proof of a write."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    result = tmp_path / "result.csv"
+    result.write_text("value\n1\n")
+    script = tmp_path / "run.py"
+    script.write_text(_PANDAS_PATH_PRELUDE + source)
+    args = argparse.Namespace(
+        ts="2026-11-15T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["outputs"] == []
 
 
 @pytest.mark.parametrize(

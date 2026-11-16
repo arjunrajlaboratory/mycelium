@@ -4040,6 +4040,13 @@ def _call_name(node: ast.AST) -> str | None:
     return None
 
 
+def _call_root(node: ast.AST) -> str | None:
+    """The name a dotted callee starts from, or None for an unnamed receiver."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
 def _io_call_direction(
     node: ast.Call,
     import_aliases: dict[str, str],
@@ -4049,7 +4056,10 @@ def _io_call_direction(
     if not raw_name:
         return None
     parts = raw_name.split(".")
-    if parts[0] in import_aliases:
+    # ``_call_name`` reduces ``read_csv(...).to_csv`` to the bare ``to_csv``.
+    # Only a callee rooted at a name may be resolved through an import alias;
+    # otherwise ``from helpers import x as to_csv`` would rename the method.
+    if _call_root(node.func) is not None and parts[0] in import_aliases:
         parts = import_aliases[parts[0]].split(".") + parts[1:]
     name = ".".join(parts)
     leaf = name.rsplit(".", 1)[-1]
@@ -4058,10 +4068,18 @@ def _io_call_direction(
         "np.savez",
         "np.savez_compressed",
     }:
-        # Object methods such as ``frame.to_csv`` are conventional writers.
-        # A bare writer name, however, is evidence only when an import maps it
-        # to a known data-I/O package.
-        if "." in raw_name or parts[0] in _KNOWN_IO_MODULE_ROOTS:
+        # Object methods such as ``frame.to_csv`` are conventional writers,
+        # whatever the receiver: a name, a call result such as
+        # ``pd.read_csv(...).to_csv`` or ``frame.head(n).to_csv``, or a
+        # subscript. ``_call_name`` drops an unnamed receiver, so test the AST
+        # node rather than the dotted name. As for a named receiver, a
+        # receiver whose type cannot be known statically counts as a writer.
+        # A bare writer name, however, is evidence only when an import maps
+        # it to a known data-I/O package.
+        if (
+            isinstance(node.func, ast.Attribute)
+            or parts[0] in _KNOWN_IO_MODULE_ROOTS
+        ):
             return "output"
     if leaf in _INPUT_CALL_LEAVES or name in {
         "ad.read",
