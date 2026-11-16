@@ -22,8 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   missing, to tell the user before starting work that the hooks are probably
   not running (on Codex: re-trust the `mycelium@mycelium` hooks, restart). It
   does not re-check after compaction, and it notes the identity-free and
-  pre-0.7 flat-transaction cases where hooks run without the line. The check is host-neutral and also covers Claude Code projects
-  whose hook registrations are missing. Re-run `$mycelium:core` migration or
+  pre-0.7 flat-transaction cases where hooks run without the line. The check
+  is host-neutral and also covers Claude Code projects whose hook
+  registrations are missing. Re-run `$mycelium:core` migration or
   initialization to add it to existing projects; it changes only that managed
   section.
 
@@ -41,6 +42,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the app-server `hooks/list` request (`trustStatus` `trusted`) the reliable
   check, and note that launching the desktop app re-copies the plugin from its
   marketplace source, which needs approval again.
+- **Hooks decode their payload in one Python process.** Each hook used to
+  start a separate `python3` for every payload field it read (`session_id`,
+  `cwd`, the command, the exit status), up to seven times per event.
+  `mycelium_payload_preload` now runs the same decoder code for all of a
+  hook's fields in one interpreter and serves each later read from bash.
+  Answers are byte-identical, exit status included; a field whose decoder
+  would raise, print a NUL byte, or hit the recursion limit falls back to its
+  own interpreter. The PostToolUse activity tracker drops from 15 to 10
+  Python starts and the post-action hook from 20 to 13, cutting 17–23% of
+  their run time. Payloads over 64 KiB (an Edit of a large file carries the
+  whole original) skip the cache and decode as before, because comparing
+  them on every read would cost more than it saves.
+- **The compatibility test suite runs in parallel.** CI and
+  `tools/release_gate.py` run `skills/core/scripts` with pytest-xdist
+  (`-n auto --dist worksteal`) when it is installed; every test works in its
+  own temporary repository. The release gate loads xdist explicitly with
+  `-p xdist`, so `PYTEST_DISABLE_PLUGIN_AUTOLOAD` does not break it, and
+  still runs the suite serially where xdist is missing.
 
 - **An R run whose script is uncertain is recorded as such, not as a fake
   inline script.** When shell syntax or `R_BATCH_OPTIONS` may change which

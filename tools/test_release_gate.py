@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -348,6 +350,50 @@ def test_ladder_pytest_commands_disable_the_cache_provider(
     for command in gate.ladder_commands(_repo(tmp_path), skip_knowledge_map=False):
         if "pytest" in " ".join(command):
             assert "no:cacheprovider" in command
+
+
+def test_compatibility_suite_runs_in_parallel_only_when_xdist_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def suite(commands: list[list[str]]) -> list[str]:
+        return next(c for c in commands if "--ignore=skills/core/scripts/knowledge_map" in c)
+
+    repo = _repo(tmp_path)
+    real_find_spec = gate.importlib.util.find_spec
+    monkeypatch.setattr(
+        gate.importlib.util, "find_spec",
+        lambda name: object() if name == "xdist" else real_find_spec(name),
+    )
+    with_xdist = gate.ladder_commands(repo, skip_knowledge_map=True)
+    command = suite(with_xdist)
+    start = command.index("-p", command.index("no:cacheprovider"))
+    assert command[start:start + 6] == [
+        "-p", "xdist", "-n", "auto", "--dist", "worksteal"
+    ]
+    # Only the hook-heavy suite is spread out; the small suites stay serial.
+    others = [c for c in with_xdist if "pytest" in " ".join(c) and c is not suite(with_xdist)]
+    assert all("-n" not in c for c in others)
+
+    monkeypatch.setattr(
+        gate.importlib.util, "find_spec",
+        lambda name: None if name == "xdist" else real_find_spec(name),
+    )
+    without_xdist = gate.ladder_commands(repo, skip_knowledge_map=True)
+    assert "-n" not in suite(without_xdist)
+
+
+def test_parallel_flags_work_with_plugin_autoload_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("xdist")
+    (tmp_path / "test_probe.py").write_text("def test_probe():\n    pass\n")
+    env = {**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         *gate.parallel_pytest_args(), str(tmp_path)],
+        capture_output=True, text=True, env=env, cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_bytecode_prefix_is_outside_any_candidate() -> None:

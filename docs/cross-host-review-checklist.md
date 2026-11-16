@@ -565,7 +565,7 @@ Adapt individual commands when the repository layout changes, but preserve the
 coverage represented by every line.
 
 ```bash
-python3 -m pytest -q skills/core/scripts --ignore=skills/core/scripts/knowledge_map
+python3 -m pytest -q -n auto --dist worksteal skills/core/scripts --ignore=skills/core/scripts/knowledge_map  # drop -n/--dist without pytest-xdist
 python3 -m pytest -q skills/core/scripts/knowledge_map
 bash skills/core/hooks/test_stop_hook.sh
 bash skills/core/hooks/test_hooks_stress.sh

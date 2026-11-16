@@ -31,7 +31,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest pyyaml
+          pip install pytest pytest-xdist pyyaml
           # data_contract_check reads .h5ad obs through h5py; its tests skip without it.
           pip install h5py
 
@@ -128,7 +128,9 @@ jobs:
 
       - name: Run Python compatibility tests
         run: |
-          pytest -q skills/core/scripts --ignore=skills/core/scripts/knowledge_map
+          # Each test uses its own temporary repository, so the hook-heavy
+          # suite runs across all cores.
+          pytest -q -n auto --dist worksteal skills/core/scripts --ignore=skills/core/scripts/knowledge_map
 
       - name: Run hook compatibility tests
         run: |
@@ -181,7 +183,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest pyyaml
+          pip install pytest pytest-xdist pyyaml
 
       - name: Test init and validate scripts (macOS)
         run: |
@@ -196,7 +198,9 @@ jobs:
 
       - name: Run Python compatibility tests (macOS)
         run: |
-          pytest -q skills/core/scripts --ignore=skills/core/scripts/knowledge_map
+          # Each test uses its own temporary repository, so the hook-heavy
+          # suite runs across all cores.
+          pytest -q -n auto --dist worksteal skills/core/scripts --ignore=skills/core/scripts/knowledge_map
 
       - name: Run hook compatibility tests (macOS)
         run: |
