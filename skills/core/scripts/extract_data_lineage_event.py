@@ -4293,11 +4293,21 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
     # parameters are runtime values too: every caller, and any default, can
     # pass a directory outside the repository. Matching by name across the
     # file only ever leaves more paths unresolved, never records a wrong file.
+    # Unpacked names (``a, b = dirs``) carry their source's taint too, though
+    # recovery never resolves them to a value.
+    taint_sources = {name: list(values) for name, values in assignments.items()}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, (ast.List, ast.Tuple)):
+                    for item in ast.walk(target):
+                        if isinstance(item, ast.Name):
+                            taint_sources.setdefault(item.id, []).append(node.value)
     runtime_names: set[str] = set(shadowed_names)
     changed = True
     while changed:
         changed = False
-        for name, definitions in assignments.items():
+        for name, definitions in taint_sources.items():
             if name in runtime_names:
                 continue
             if any(reads_runtime_value(item, runtime_names) for item in definitions):

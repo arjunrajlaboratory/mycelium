@@ -1615,6 +1615,14 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "Job(sys.argv[1]).run()\n",
             id="method-self-attribute",
         ),
+        pytest.param(
+            "def load(dirs):\n"
+            "    input_dir, output_dir = dirs\n"
+            "    frame = pd.read_csv(input_dir / 'input.csv')\n"
+            "    frame.to_csv(output_dir / 'result.csv')\n"
+            "load((Path(sys.argv[1]), Path(sys.argv[1])))\n",
+            id="parameter-tuple-unpacking",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
