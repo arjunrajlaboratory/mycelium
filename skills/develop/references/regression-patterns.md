@@ -513,6 +513,14 @@ Join a command-line, `argparse`, or environment directory to a literal filename
 that also exists in the repository, by division, `joinpath`, `os.path.join`,
 and through assignments; require no lineage, while a `__file__`-anchored path
 to the same filename is still recovered.
+Repeat with the directory passed in as a function parameter (directly, through
+`self`, a loop or comprehension target, or a static default such as
+`root=ROOT`); require no lineage, while a module-level static path that only
+shares the parameter's name is still recovered. Track parameter taint per
+lexical scope, but keep runtime-value taint by name across the file: it also
+covers factory returns, nested config attributes, and container writes that a
+scoped pass misses. A scope-aware lookup must never resolve a name that the
+file-wide single-assignment rule left ambiguous.
 
 ## 27. Resolved I/O triggers repository traversal
 

@@ -29,12 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or through names bound from it by assignment, loop, `with`,
   comprehension, walrus, or `match`. That includes parameters with a
   static default such as `root=ROOT`, because any caller can override the
-  default. Runtime values now also carry through helper return values
-  (`root = get_root()`) and class attributes (`Config.root`). Taint follows
-  Python's scoping rules, so a static path is still recovered when it only
-  shares a name with a parameter or runtime value in another scope, or
-  sits beside a runtime field in the same class (`Config.data_dir`).
-  Existing projects need no migration; only new lineage events change.
+  default. Runtime values now also carry through helper return values,
+  class attributes, instances, and base classes (`Config().root`). Parameter
+  taint follows Python's scoping rules, so a static path is still recovered
+  when it only shares a name with a parameter in another function, or
+  sits beside a runtime field in the same class (`Config.data_dir`). Name
+  resolution never recovers a path that the previous release left
+  unresolved. Existing projects need no migration; only new lineage
+  events change.
 
 ## [0.9.4] - 2026-11-15
 
