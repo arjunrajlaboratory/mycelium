@@ -1850,6 +1850,23 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "frame.to_csv(root / 'result.csv')\n",
             id="class-attribute-through-temporary-instance",
         ),
+        pytest.param(
+            "path = Path(__file__).parent / 'missing.csv'\n"
+            "class C:\n"
+            "    frame = pd.read_csv(path)\n"
+            "    path = Path(__file__).parent / 'input.csv'\n",
+            id="class-body-read-before-own-binding",
+        ),
+        pytest.param(
+            "class Base:\n"
+            "    root = Path(sys.argv[1])\n"
+            "class Config(Base):\n"
+            "    pass\n"
+            "root = Config.root\n"
+            "frame = pd.read_csv(root / 'input.csv')\n"
+            "frame.to_csv(Config().root / 'result.csv')\n",
+            id="inherited-runtime-class-attribute",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
@@ -2057,6 +2074,21 @@ def test_repository_recovery_leaves_static_parameter_defaults_unresolved(
             "    frame.to_csv(RESULT)\n"
             "main()\n",
             id="module-path-constant-read-in-function",
+        ),
+        pytest.param(
+            "class RuntimeConfig:\n"
+            "    data_dir = Path(sys.argv[1])\n"
+            "class StaticConfig:\n"
+            "    data_dir = Path(__file__).parent\n"
+            "def inspect_external():\n"
+            "    config = RuntimeConfig()\n"
+            "    return config\n"
+            "def main():\n"
+            "    config = StaticConfig()\n"
+            "    frame = pd.read_csv(config.data_dir / 'input.csv')\n"
+            "    frame.to_csv(config.data_dir / 'result.csv')\n"
+            "main()\n",
+            id="same-local-name-for-unrelated-config-instances",
         ),
     ],
 )

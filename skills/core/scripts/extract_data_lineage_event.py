@@ -4450,13 +4450,26 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
     own_taint: dict[ast.AST, set[str]] = {}
     # Tainted class attributes. A class, and every name bound to it or to an
     # instance of it (``config = Config()``, ``cfg = config``), share one
-    # group in a union-find keyed by plain name across scopes; each group
-    # holds one attribute set. That can only add taint, and keeps memory
-    # linear however many aliases and tainted fields a script has.
-    group_parent: dict[str, str] = {}
-    group_attributes: dict[str, set[str]] = {}
+    # group in a union-find; each group holds one attribute set, so memory
+    # stays linear however many aliases and tainted fields a script has.
+    # Members are keyed by (binding scope, name), resolved with Python's
+    # lookup, so two functions' unrelated ``config`` locals stay apart.
+    group_parent: dict[tuple[int, str], tuple[int, str]] = {}
+    group_attributes: dict[tuple[int, str], set[str]] = {}
 
-    def group_of(name: str) -> str:
+    def binding_key(scope: ast.AST | None, name: str) -> tuple[int, str]:
+        """The (scope, name) of the binding ``name`` refers to in ``scope``."""
+        start = scope
+        while scope is not None:
+            if scope is start or not isinstance(scope, ast.ClassDef):
+                if name in scope_globals.get(scope, ()):
+                    return (id(tree), name)
+                if name in scope_counts.get(scope, {}):
+                    return (id(scope), name)
+            scope = lexical_parent.get(scope)
+        return (id(tree), name)
+
+    def group_of(name: tuple[int, str]) -> tuple[int, str]:
         root = name
         while group_parent.get(root, root) != root:
             root = group_parent[root]
@@ -4464,7 +4477,7 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             group_parent[name], name = root, group_parent[name]
         return root
 
-    def join_groups(first: str, second: str) -> bool:
+    def join_groups(first: tuple[int, str], second: tuple[int, str]) -> bool:
         """Merge two names' groups; report whether either side gained taint."""
         group_parent.setdefault(first, first)
         group_parent.setdefault(second, second)
@@ -4482,11 +4495,14 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             group_attributes[a] = merged
         return attributes_a != attributes_b
 
-    def attribute_tainted(dotted: str) -> bool:
+    def attribute_tainted(scope: ast.AST | None, dotted: str) -> bool:
         receiver, _, attribute = dotted.partition(".")
-        if not attribute or receiver not in group_parent:
+        if not attribute:
             return False
-        return attribute in group_attributes.get(group_of(receiver), ())
+        key = binding_key(scope, receiver)
+        if key not in group_parent:
+            return False
+        return attribute in group_attributes.get(group_of(key), ())
 
     scope_bound: dict[ast.AST, set[str]] = {}
     scope_globals: dict[ast.AST, set[str]] = {}
@@ -4502,7 +4518,7 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
 
     def is_tainted(scope: ast.AST | None, name: str) -> bool:
         """Whether ``name`` as seen from ``scope`` holds a runtime value."""
-        if "." in name and attribute_tainted(name):
+        if "." in name and attribute_tainted(scope, name):
             return True
         start = scope
         root = name.split(".", 1)[0]
@@ -4632,7 +4648,9 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             source = value.func if isinstance(value, ast.Call) else value
             if isinstance(source, ast.Name):
                 for name in names:
-                    if join_groups(name, source.id):
+                    if join_groups(
+                        (id(scope), name), binding_key(scope, source.id)
+                    ):
                         grew = True
         if settle_conservatively:
             for names, _ in bindings:
@@ -4664,7 +4682,7 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
                 name.split(".", 1)[0] in global_names
                 and name in own_taint.get(tree, ())
             )
-            or ("." in name and attribute_tainted(name))
+            or ("." in name and attribute_tainted(scope, name))
         ]
         fired: set[int] = set()
 
@@ -4733,8 +4751,15 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             return settle_conservatively and bool(free_reads(value) & user_defined)
 
         if isinstance(scope, ast.ClassDef):
-            group = group_attributes.setdefault(group_of(scope.name), set())
-            group_parent.setdefault(scope.name, scope.name)
+            class_key = (id(parent), scope.name)
+            group_parent.setdefault(class_key, class_key)
+            # Inherited attributes: share a group with each named base class.
+            for base in scope.bases:
+                if isinstance(base, ast.Name) and join_groups(
+                    class_key, binding_key(parent, base.id)
+                ):
+                    grew = True
+            group = group_attributes.setdefault(group_of(class_key), set())
             for name in local_names:
                 if name in tainted and name not in group:
                     group.add(name)
@@ -4807,7 +4832,9 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
                     return None
                 count = scope_counts.get(scope, {}).get(name, 0)
                 if count:
-                    if count != 1:
+                    # A class body runs top to bottom, so a read there may
+                    # come before its own binding; leave it unresolved.
+                    if count != 1 or isinstance(scope, ast.ClassDef):
                         return None
                     found = definitions_by_scope.get((id(scope), name), ())
                     return found[0] if len(found) == 1 else None
