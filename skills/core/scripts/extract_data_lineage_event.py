@@ -4058,10 +4058,16 @@ def _io_call_direction(
         "np.savez",
         "np.savez_compressed",
     }:
-        # Object methods such as ``frame.to_csv`` are conventional writers.
-        # A bare writer name, however, is evidence only when an import maps it
-        # to a known data-I/O package.
-        if "." in raw_name or parts[0] in _KNOWN_IO_MODULE_ROOTS:
+        # Object methods such as ``frame.to_csv`` are conventional writers,
+        # whatever the receiver: a name, a call result such as
+        # ``pd.read_csv(...).to_csv`` or ``frame.head(n).to_csv``, or a
+        # subscript. ``_call_name`` drops an unnamed receiver, so test the AST
+        # node rather than the dotted name. A bare writer name, however, is
+        # evidence only when an import maps it to a known data-I/O package.
+        if (
+            isinstance(node.func, ast.Attribute)
+            or parts[0] in _KNOWN_IO_MODULE_ROOTS
+        ):
             return "output"
     if leaf in _INPUT_CALL_LEAVES or name in {
         "ad.read",

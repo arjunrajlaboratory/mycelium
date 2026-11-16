@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Lineage now records writes chained onto another call.** In
+  `pd.read_csv(p / "input.csv").to_csv(p / "result.csv")` or
+  `frame.head(n).to_csv(...)`, repository recovery recorded the input but
+  dropped the output. A writer method called on a call result or a subscript
+  reached the detector as a bare `to_csv` and was rejected like an
+  unqualified call. Any writer method called on an object (`to_csv`,
+  `to_parquet`, `savefig`, and the rest) now counts as a write, whatever the
+  receiver. A bare `to_csv(...)` is still ignored unless an import maps it to
+  a known data-I/O package, so a user's own function of that name does not
+  invent an output (#132).
+
 ## [0.9.4] - 2026-11-15
 
 ### Added
