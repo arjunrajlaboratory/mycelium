@@ -1834,6 +1834,14 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "main()\n",
             id="class-attribute-through-alias-chain",
         ),
+        pytest.param(
+            "path = Path(__file__).parent / 'missing.csv'\n"
+            "def main(dirs):\n"
+            "    for path in dirs:\n"
+            "        frame = pd.read_csv(path / 'input.csv')\n"
+            "main([Path(sys.argv[1])])\n",
+            id="function-loop-shadows-module-assignment",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
@@ -2023,6 +2031,24 @@ def test_repository_recovery_leaves_static_parameter_defaults_unresolved(
             "frame = pd.read_csv(config.data_dir / 'input.csv')\n"
             "frame.to_csv(config.data_dir / 'result.csv')\n",
             id="static-attribute-through-instance-beside-runtime-field",
+        ),
+        pytest.param(
+            "input_path = Path(__file__).parent / 'input.csv'\n"
+            "result_path = Path(__file__).parent / 'result.csv'\n"
+            "def list_inputs(directory):\n"
+            "    return [input_path.name for input_path in directory.glob('*.csv')]\n"
+            "frame = pd.read_csv(input_path)\n"
+            "frame.to_csv(result_path)\n",
+            id="unrelated-comprehension-binding-of-same-name",
+        ),
+        pytest.param(
+            "INPUT = Path(__file__).parent / 'input.csv'\n"
+            "RESULT = Path(__file__).parent / 'result.csv'\n"
+            "def main():\n"
+            "    frame = pd.read_csv(INPUT)\n"
+            "    frame.to_csv(RESULT)\n"
+            "main()\n",
+            id="module-path-constant-read-in-function",
         ),
     ],
 )

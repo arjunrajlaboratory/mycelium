@@ -4126,32 +4126,6 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
             for target in targets:
                 if isinstance(target, ast.Name) and value is not None:
                     assignments.setdefault(target.id, []).append(value)
-    # Every binding site of each name, in any scope. A name resolves through
-    # ``assignments`` only when its single assignment is also its only
-    # binding: a loop, ``with``, comprehension, walrus, import, or a binding
-    # in another scope could otherwise hand recovery a literal that the
-    # running code never used.
-    binding_sites: dict[str, int] = {}
-    for node in ast.walk(tree):
-        bound_here: list[str] = []
-        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            bound_here = [node.id]
-        elif isinstance(node, ast.arg):
-            bound_here = [node.arg]
-        elif isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)):
-            bound_here = [node.name]
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            bound_here = [
-                (alias.asname or alias.name).split(".", 1)[0]
-                for alias in node.names
-                if alias.name != "*"
-            ]
-        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
-            bound_here = [node.name] if node.name else []
-        elif isinstance(node, ast.MatchMapping) and node.rest:
-            bound_here = [node.rest]
-        for name in bound_here:
-            binding_sites[name] = binding_sites.get(name, 0) + 1
     locally_bound_roots = {
         node.id
         for node in ast.walk(tree)
@@ -4184,10 +4158,10 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         if isinstance(expression, ast.Name):
             if expression.id in shadowed_names or expression.id in resolving:
                 return unresolved
-            definitions = assignments.get(expression.id, [])
-            if len(definitions) != 1 or binding_sites.get(expression.id) != 1:
+            definition = visible_definition(expression)
+            if definition is None:
                 return unresolved
-            return static_value(definitions[0], resolving | {expression.id})
+            return static_value(definition, resolving | {expression.id})
         if isinstance(expression, (ast.List, ast.Tuple)):
             values = [static_value(item, resolving) for item in expression.elts]
             if any(value is unresolved for value in values):
@@ -4227,14 +4201,10 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         if isinstance(expression, ast.Name):
             if expression.id in shadowed_names:
                 return set()
-            definitions = assignments.get(expression.id, [])
-            if (
-                len(definitions) != 1
-                or binding_sites.get(expression.id) != 1
-                or expression.id in resolving
-            ):
+            definition = visible_definition(expression)
+            if definition is None or expression.id in resolving:
                 return set()
-            return collect(definitions[0], resolving | {expression.id})
+            return collect(definition, resolving | {expression.id})
         if isinstance(
             expression,
             (
@@ -4483,6 +4453,8 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
     attribute_taint: dict[str, set[str]] = {}
     scope_bound: dict[ast.AST, set[str]] = {}
     scope_globals: dict[ast.AST, set[str]] = {}
+    scope_redirects: dict[ast.AST, set[str]] = {}
+    scope_counts: dict[ast.AST, dict[str, int]] = {}
     lexical_parent: dict[ast.AST, ast.AST | None] = {tree: None}
     scope_of: dict[int, ast.AST] = {}
     # Names tainted from inside a nested scope through ``global``,
@@ -4544,32 +4516,43 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
         # Every binding form: assignment targets, definitions, imports,
         # exception names, match captures, and walrus targets of nested
         # comprehensions, which bind here.
-        local_names = parameters(scope)
+        counts: dict[str, int] = {}
+
+        def binds(*names: str) -> None:
+            for name in names:
+                counts[name] = counts.get(name, 0) + 1
+
+        binds(*parameters(scope))
         for node in nodes:
             if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-                local_names.add(node.id)
+                binds(node.id)
             elif isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)):
-                local_names.add(node.name)
+                binds(node.name)
             elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                local_names.update(
-                    (alias.asname or alias.name).split(".", 1)[0]
-                    for alias in node.names
-                    if alias.name != "*"
+                binds(
+                    *(
+                        (alias.asname or alias.name).split(".", 1)[0]
+                        for alias in node.names
+                        if alias.name != "*"
+                    )
                 )
             elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
                 if node.name:
-                    local_names.add(node.name)
+                    binds(node.name)
             elif isinstance(node, ast.MatchMapping) and node.rest:
-                local_names.add(node.rest)
+                binds(node.rest)
             elif isinstance(node, comprehension_types) and not isinstance(
                 scope, comprehension_types
             ):
-                local_names |= comprehension_walrus_targets(node)
+                binds(*comprehension_walrus_targets(node))
+        scope_counts[scope] = counts
+        local_names = set(counts)
         redirected_here = global_names | nonlocal_names | walrus_names
         bound = set() if isinstance(scope, ast.ClassDef) else set(local_names)
         bound -= redirected_here
         scope_bound[scope] = bound
         scope_globals[scope] = global_names
+        scope_redirects[scope] = redirected_here
 
         bindings: list[tuple[set[str], ast.AST]] = []
         for node in nodes:
@@ -4772,6 +4755,35 @@ def _io_literal_filenames_unguarded(source: str) -> tuple[set[str], set[str]]:
     def runtime_dependent(call: ast.Call, expression: ast.AST) -> bool:
         """Whether a path expression draws on a value chosen at run time."""
         return depends_on_runtime(scope_of.get(id(call), tree), expression)
+
+    def visible_definition(name_node: ast.Name) -> ast.AST | None:
+        """The single assigned value a name read sees, or None if unsure.
+
+        Follows Python's lookup from the reading scope outward (class bodies
+        are invisible to nested scopes) to the first scope that binds the
+        name. It resolves only when that scope binds the name exactly once,
+        by a plain assignment; a loop, ``with``, import, second assignment,
+        or ``global``/``nonlocal`` declaration leaves it unresolved. A
+        binding of the same name in an unrelated scope does not interfere.
+        """
+        name = name_node.id
+        start = scope = scope_of.get(id(name_node), tree)
+        while scope is not None:
+            if scope is start or not isinstance(scope, ast.ClassDef):
+                if name in scope_redirects.get(scope, ()):
+                    return None
+                count = scope_counts.get(scope, {}).get(name, 0)
+                if count:
+                    if count != 1:
+                        return None
+                    found = [
+                        value
+                        for value in assignments.get(name, ())
+                        if scope_of.get(id(value)) is scope
+                    ]
+                    return found[0] if len(found) == 1 else None
+            scope = lexical_parent.get(scope)
+        return None
 
     inputs: set[str] = set()
     outputs: set[str] = set()
