@@ -1675,6 +1675,53 @@ def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
             "load([Path(sys.argv[1])])\n",
             id="comprehension-target-from-parameter",
         ),
+        pytest.param(
+            "root = Path(sys.argv[1])\n"
+            "def outer():\n"
+            "    root = Path(__file__).parent\n"
+            "    def inner():\n"
+            "        global root\n"
+            "        frame = pd.read_csv(root / 'input.csv')\n"
+            "        frame.to_csv(root / 'result.csv')\n"
+            "    inner()\n"
+            "    return root\n"
+            "outer()\n",
+            id="global-read-skips-enclosing-static-local",
+        ),
+        pytest.param(
+            "roots = [Path(sys.argv[1])]\n"
+            "frames = [pd.read_csv(roots / 'input.csv') for roots in roots]\n",
+            id="first-comprehension-iterable-runs-in-outer-scope",
+        ),
+        pytest.param(
+            "def outer():\n"
+            "    root = Path(__file__).parent\n"
+            "    class Holder:\n"
+            "        root = None\n"
+            "        def set(self):\n"
+            "            nonlocal root\n"
+            "            root = Path(sys.argv[1])\n"
+            "    Holder().set()\n"
+            "    frame = pd.read_csv(root / 'input.csv')\n"
+            "    frame.to_csv(root / 'result.csv')\n"
+            "outer()\n",
+            id="nonlocal-skips-class-scope",
+        ),
+        pytest.param(
+            "root = Path(sys.argv[1])\n"
+            "class C:\n"
+            "    frame = pd.read_csv(root / 'input.csv')\n"
+            "    root = Path(__file__).parent\n",
+            id="class-body-read-before-rebinding",
+        ),
+        pytest.param(
+            "def load(d):\n"
+            "    [(root := d) for _ in [0]]\n"
+            "    frame = pd.read_csv(root / 'input.csv')\n"
+            "    frame.to_csv(root / 'result.csv')\n"
+            "load(Path(sys.argv[1]))\n",
+            id="comprehension-walrus-binds-enclosing-function",
+        ),
     ],
 )
 def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
@@ -1821,6 +1868,31 @@ def test_repository_recovery_leaves_static_parameter_defaults_unresolved(
             "load(5)\n",
             id="subscript-index-is-not-a-binding",
         ),
+        pytest.param(
+            "roots = [Path(__file__).parent]\n"
+            "frames = [pd.read_csv(r / 'input.csv') for r in roots if sys.argv]\n"
+            "frame = frames[0]\n"
+            "frame.to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="static-comprehension-with-runtime-filter",
+        ),
+        pytest.param(
+            "def load(root):\n"
+            "    roots = [root for root in [Path(__file__).parent]]\n"
+            "    for base in roots:\n"
+            "        frame = pd.read_csv(base / 'input.csv')\n"
+            "        frame.to_csv(base / 'result.csv')\n"
+            "load(sys.argv[1])\n",
+            id="comprehension-local-is-not-a-parameter-dependency",
+        ),
+        pytest.param(
+            "def load(root):\n"
+            "    pick = lambda root=Path(__file__).parent: root\n"
+            "    base = pick()\n"
+            "    frame = pd.read_csv(base / 'input.csv')\n"
+            "    frame.to_csv(base / 'result.csv')\n"
+            "load(sys.argv[1])\n",
+            id="lambda-parameter-is-not-a-parameter-dependency",
+        ),
     ],
 )
 def test_repository_recovery_keeps_static_paths_beside_parameters(
@@ -1879,22 +1951,69 @@ def test_repository_recovery_keeps_static_paths_beside_parameters(
         ),
     ],
 )
-def test_repository_recovery_taint_scan_stays_linear(build) -> None:
+def test_repository_recovery_taint_scan_stays_linear(
+    build, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Taint propagation must not rescan every binding per tainted name.
 
-    A quadratic fixed point took about 12 s on these inputs; the worklist
-    takes well under a second. The budget only catches the quadratic shape.
+    Work is measured as ``ast.walk`` calls, not wall time, so the check is
+    deterministic under parallel test load. Doubling the input must roughly
+    double the work; a quadratic fixed point (about 12 s at 3000 links)
+    quadruples it.
+    """
+    import ast
+
+    real_walk = ast.walk
+    calls = 0
+
+    def counting_walk(node):
+        nonlocal calls
+        calls += 1
+        return real_walk(node)
+
+    monkeypatch.setattr(ast, "walk", counting_walk)
+    work = []
+    for size in (500, 1000):
+        calls = 0
+        inputs, outputs = lineage_event._io_literal_filenames(
+            _PANDAS_PATH_PRELUDE + build(size)
+        )
+        assert inputs == set()
+        assert outputs == set()
+        work.append(calls)
+
+    assert work[1] < 3 * work[0], work
+
+
+def test_repository_recovery_survives_deeply_nested_scopes() -> None:
+    """Deep nesting must not raise RecursionError and drop the event."""
+    source = "x = " + "lambda: " * 1000 + "0\n"
+
+    assert lineage_event._io_literal_filenames(source) == (set(), set())
+
+
+def test_repository_recovery_scope_lookup_stays_linear_for_wide_bodies() -> None:
+    """Finding each I/O call's scope must not rescan the whole function body.
+
+    Uses the best of three timings per size so parallel test load does not
+    decide the result; linear work doubles, the quadratic lookup quadrupled.
     """
     import time
 
-    source = _PANDAS_PATH_PRELUDE + build(3000)
-    started = time.perf_counter()
-    inputs, outputs = lineage_event._io_literal_filenames(source)
-    elapsed = time.perf_counter() - started
+    def best_time(size: int) -> float:
+        source = _PANDAS_PATH_PRELUDE + "def load():\n" + (
+            "    pd.read_csv(Path(__file__).parent / 'input.csv')\n" * size
+        )
+        timings = []
+        for _ in range(3):
+            started = time.perf_counter()
+            lineage_event._io_literal_filenames(source)
+            timings.append(time.perf_counter() - started)
+        return min(timings)
 
-    assert inputs == set()
-    assert outputs == set()
-    assert elapsed < 3.0
+    small, large = best_time(3000), best_time(12000)
+
+    assert large < 6 * small, (small, large)
 
 
 @pytest.mark.parametrize(
