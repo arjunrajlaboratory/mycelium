@@ -147,7 +147,7 @@ _YAML_SPECIAL = {"y", "n", "yes", "no", "true", "false", "on", "off", "null"}
 
 def _yaml_name(name: str) -> str:
     """Render a pack name so YAML, and _parse_registry, read back the same string."""
-    if _PLAIN_NAME.match(name) and name.lower() not in _YAML_SPECIAL:
+    if _PLAIN_NAME.fullmatch(name) and name.lower() not in _YAML_SPECIAL:
         return name
     return _quote(name)
 
@@ -165,7 +165,7 @@ def _quote(value: str) -> str:
 
 def _registry_path(name: str) -> str:
     path = f".living/conventions/{name}/"
-    return path if _PLAIN_NAME.match(name) else _quote(path)
+    return path if _PLAIN_NAME.fullmatch(name) else _quote(path)
 
 
 def format_registry_entry(name: str, installed: str, core: bool = False) -> str:

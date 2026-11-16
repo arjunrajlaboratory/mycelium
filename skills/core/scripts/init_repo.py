@@ -658,7 +658,9 @@ def install_core_convention_packs(target_dir: Path):
     conventions_dir = target_dir / ".living" / "conventions"
     yaml_path = conventions_dir / "ACTIVE_CONVENTIONS.yaml"
 
-    entries = []
+    # Format every entry before copying anything, so a name the registry
+    # cannot hold is refused with no pack copied.
+    entries = [format_registry_entry(name, now, core=True) for name in core_packs]
     for pack_name in core_packs:
         source = network_dir / pack_name
         dest = conventions_dir / pack_name
@@ -667,7 +669,6 @@ def install_core_convention_packs(target_dir: Path):
         shutil.copytree(source, dest)
         copied = [f for f in sorted(dest.rglob("*")) if f.is_file()]
         print(f"  Installed {pack_name} ({len(copied)} files)")
-        entries.append(format_registry_entry(pack_name, now, core=True))
 
     # Write ACTIVE_CONVENTIONS.yaml with core entries
     yaml_content = REGISTRY_HEADER + "\n" + "\n".join(entries) + "\n"

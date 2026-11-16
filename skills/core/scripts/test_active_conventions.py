@@ -340,7 +340,7 @@ class TestInstallerRepairsExistingFiles:
         assert yaml.safe_load(text)[0]["name"] == name
 
     def test_unregistrable_names_are_refused(self) -> None:
-        for name in ["a'b\"c", "line\nbreak", "tab\there"]:
+        for name in ["a'b\"c", "line\nbreak", "tab\there", "alpha\n"]:
             with pytest.raises(ic.UnrecognizedRegistryError):
                 ic.format_registry_entry(name, "2026-01-01T00:00:00Z")
 
@@ -483,6 +483,25 @@ class TestOutOfGrammar:
 
 
 class TestFreshInit:
+    def test_unregistrable_core_pack_is_refused_before_copying(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex P1: init formats every core entry before copying any pack."""
+        network = tmp_path / "network"
+        for name in ["good", "a'b\"c"]:
+            (network / name).mkdir(parents=True)
+            (network / name / "CONVENTION_PACK.yaml").write_text("core: true\n")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        ir.create_directory_structure(repo)
+        ir.create_living_layer(repo)
+        monkeypatch.setattr(ir, "find_network_conventions_dir", lambda: network)
+        with pytest.raises(ic.UnrecognizedRegistryError):
+            ir.install_core_convention_packs(repo)
+        conventions = repo / ".living" / "conventions"
+        assert sorted(p.name for p in conventions.iterdir()) == ["ACTIVE_CONVENTIONS.yaml"]
+        assert _load(repo) == []
+
     def test_init_then_install_is_valid_yaml(self, tmp_path: Path) -> None:
         """End to end through the CLIs, as the issue asks."""
         repo = tmp_path / "proj"
