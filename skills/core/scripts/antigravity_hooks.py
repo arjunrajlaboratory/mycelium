@@ -584,11 +584,26 @@ def _dispatch(event, payload, plugin_root, host):
                 turn["uncertain"] = True
                 save()
 
-            def apply_hooks(hooks, command_data, step_index, **budget):
+            capture_deferred = []
+
+            def capture_budget():
+                """A capture hook's timeout inside a shared App Stop budget, or None to wait."""
+                if app_stop_deadline is None:
+                    return {}
+                remaining = app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
+                if remaining < APP_RECOVERY_BATCH_MIN_SECONDS:
+                    return None
+                return {"timeout": min(APP_RECOVERY_ACTION_SECONDS, remaining)}
+
+            def apply_hooks(hooks, command_data, step_index):
                 for hook in hooks:
                     action = f"{step_index}:{hook}"
                     if action in turn["actions"]:
                         continue
+                    budget = capture_budget()
+                    if budget is None:  # not journaled: a later Stop dispatches it once
+                        capture_deferred.append(action)
+                        return
                     turn["actions"][action] = "running"
                     save()
                     try:
@@ -633,14 +648,18 @@ def _dispatch(event, payload, plugin_root, host):
                     pending[step_key] = {"command": command, "call_id": call}
                     save()
                 else:
-                    pending.pop(step_key, None)
+                    # Bind first and keep the pending entry until every capture action
+                    # is journaled, so an interruption here is retried, never dropped.
                     bindings[step_key] = call
                     save()
+                    hooks = ["mycelium-data-tracker.sh", "mycelium-post-action.sh"]
                     if value["root"] == root:
-                        apply_hooks(["mycelium-data-tracker.sh", "mycelium-post-action.sh"],
-                                    dict(data, cwd=value["cwd"], tool_name="Bash",
-                                         tool_input={"command": command},
-                                         tool_response={"exit_code": value["exit_code"]}), int(step_key))
+                        apply_hooks(hooks, dict(data, cwd=value["cwd"], tool_name="Bash",
+                                                tool_input={"command": command},
+                                                tool_response={"exit_code": value["exit_code"]}), int(step_key))
+                    if value["root"] != root or all(f"{step_key}:{h}" in turn["actions"] for h in hooks):
+                        pending.pop(step_key, None)
+                        save()
 
             def edit_target(found, step_index):
                 """Whether one verified native edit earns activity credit in this root."""
@@ -844,6 +863,8 @@ def _dispatch(event, payload, plugin_root, host):
                     save()
                 if turn["uncertain"]:
                     result = {"decision": "block", "reason": UNRESOLVED_HOOK}
+                elif capture_deferred:
+                    result = {"decision": "block", "reason": "No time remained in this Stop to record completed native command steps. Active state was preserved; the next Stop records them."}
                 elif turn["pending_commands"]:
                     result = {"decision": "block", "reason": "Native analysis commands still lack terminal evidence. Wait for completion; Mycelium has not finalized output provenance."}
                 elif turn.get("app_pending"):

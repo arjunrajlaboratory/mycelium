@@ -701,3 +701,69 @@ def test_workspace_root_with_trailing_space_is_not_trimmed_into_a_neighbor(tmp_p
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         (repo / ".living").mkdir()
     assert ag.roots_for({"workspacePaths": [str(spaced)]}) == [spaced.resolve()]
+
+
+# ---- Settling async App commands: crash safety and the shared Stop budget ------------------------
+
+def queue_async(payload, db, repo, steps):
+    for step in steps:
+        call = f"call-async-{step}"
+        db.put(step, command_payload(str(repo), step=step, status=2, completed=False, typed=False,
+                                     block=False, call_id=call))
+        app("PostToolUse", cmd(payload, step=step))
+    for step in steps:  # the same rows become terminal before the next event
+        db.put(step, command_payload(str(repo), step=step, exit_code=0, call_id=f"call-async-{step}"))
+
+
+def test_interrupt_after_binding_never_drops_a_pending_command(native, monkeypatch):
+    """Regression: the pending entry was removed and saved before any capture action was
+    journaled, so a kill at that boundary let Stop accept without the command's lineage."""
+    home, repo, payload, calls, db = native
+    queue_async(payload, db, repo, [5])
+    original, killed = ag.atomic_write_text, []
+
+    def write(path, text, **kw):
+        original(path, text, **kw)
+        turn = json.loads(text).get("turns", {}).get("0", {}) if path.name == "native-state.json" else {}
+        if not killed and "5" in turn.get("app_bindings", {}):
+            killed.append(True)
+            raise KeyboardInterrupt  # the process dies right after this durable write
+
+    monkeypatch.setattr(ag, "atomic_write_text", write)
+    with pytest.raises(KeyboardInterrupt):
+        app("PreInvocation", dict(payload, initialNumSteps=6))
+    monkeypatch.setattr(ag, "atomic_write_text", original)
+    assert data_calls(calls) == []
+    assert app("Stop", stop(payload)) == {}
+    assert data_calls(calls) == [(h, str(repo), {"command": COMMAND}, {"exit_code": 0}) for h in DATA_HOOKS]
+    assert state_of(repo)["app_pending"] == {} and state_of(repo)["status"] == "accepted"
+
+
+def test_stop_settles_pending_commands_within_the_shared_deadline(native, monkeypatch):
+    """Regression: every terminal App command was captured before the Stop deadline was
+    checked, so three commands at 8 s per hook overran the native 45 s Stop timeout."""
+    home, repo, payload, calls, db = native
+    queue_async(payload, db, repo, [5, 6, 7])
+    clock, timeouts = [1000.0], []
+    monkeypatch.setattr(ag.time, "monotonic", lambda: clock[0])
+    recorder = ag.run_hook
+
+    def slow(name, data, root, plugin, **kw):
+        if name in DATA_HOOKS:
+            timeouts.append(kw.get("timeout"))
+            clock[0] += 8
+        return recorder(name, data, root, plugin, **kw)
+
+    monkeypatch.setattr(ag, "run_hook", slow)
+    first = app("Stop", stop(payload))
+    assert first["decision"] == "continue" and "time" in first["reason"]
+    assert clock[0] - 1000.0 <= ag.APP_STOP_BUDGET_SECONDS - ag.APP_FINALIZE_RESERVE_SECONDS + 12
+    assert timeouts and all(t is not None and t <= ag.APP_RECOVERY_ACTION_SECONDS for t in timeouts)
+    turn = state_of(repo)
+    assert not turn["uncertain"] and "running" not in turn["actions"].values()
+    assert turn["status"] == "active" and turn["app_pending"]  # the rest waits, still owed
+    for _ in range(3):  # each later Stop gets a fresh budget and settles more
+        if app("Stop", stop(payload, executionNum=1)) == {}:
+            break
+    done = [c for c in data_calls(calls)]
+    assert len(done) == 6 and state_of(repo)["status"] == "accepted"
