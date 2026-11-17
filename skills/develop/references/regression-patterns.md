@@ -489,7 +489,9 @@ from `results/` as an output. Recursively collecting a conditional path records
 both branches, while leaf-name matching treats a user-defined `read_csv` helper
 as real data I/O. Trusting a familiar alias after any rebinding has the same
 effect, and retaining the literal half of runtime string concatenation can hash
-a decoy whose basename was never read.
+a decoy whose basename was never read. Path division and `os.path.join` do the
+same: `Path(sys.argv[1]) / "input.csv"` names a file outside the repository,
+yet dropping the runtime prefix matched the repository's own `input.csv`.
 
 **Invariant:** Recovery candidates must data-flow into the path argument of a
 recognized reader or writer expression. Direction is semantic evidence from
@@ -507,6 +509,15 @@ require unresolved lineage, while retaining a supported imported reader. Rebind
 its conventional alias through assignment, loop, context manager, unpacking,
 exception handling, walrus, comprehension, and pattern matching, and combine a
 runtime prefix with a literal suffix; require every case to stay unresolved.
+Join a command-line, `argparse`, or environment directory to a literal filename
+that also exists in the repository, by division, `joinpath`, `os.path.join`,
+and through assignments; require no lineage, while a `__file__`-anchored path
+to the same filename is still recovered.
+Repeat with the directory passed in as a function parameter (directly, through
+`self`, a local alias, or a static default such as `root=ROOT`); require no
+lineage, while a static path beside the parameterised one is still recovered.
+Parameters seed the same file-wide runtime taint as command-line values, so
+aliases are caught by the existing propagation.
 
 ## 27. Resolved I/O triggers repository traversal
 
@@ -722,6 +733,18 @@ neighbors: the same markup inside a comment, inside a script string, and
 inside a quoted attribute value; a quoted `>`; a hyphenated attribute
 suffix; nested comments; and a second copy of a "first-only" element. Each
 must be ignored, preserved byte-for-byte, or rejected — never rewritten.
+
+**Recurrence (#129):** the `ACTIVE_CONVENTIONS.yaml` repair edited YAML line
+by line, and four review rounds each found new valid inputs it corrupted:
+block-scalar content read as comments, `|+` trailing blanks stripped, anchors
+broken by removing an entry, a quoted multi-line scalar mistaken for the
+legacy key, U+2028 split by `splitlines`. Each fix that widened what the
+editor accepted invited the next case. What converged was the opposite:
+accept exactly the grammar the machine writers emit, refuse everything else
+before any mutation, rewrite only files carrying the defect's marker, and let
+the real parser (when installed) veto any rewrite that changes the parsed
+value. Keep every reviewer's adversarial input in one refusal table that runs
+with and without the optional parser.
 
 ## 37. An exemption is wider than the evidence that justifies it
 

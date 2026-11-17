@@ -1400,6 +1400,483 @@ def test_repository_recovery_rejects_runtime_filename_concatenation(
     assert event["inputs"] == []
 
 
+_PANDAS_PATH_PRELUDE = "import os\nimport sys\nfrom pathlib import Path\nimport pandas as pd\n"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "frame = pd.read_csv(Path(__file__).parent / 'input.csv')\n"
+            "frame.to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="file-anchored",
+        ),
+        pytest.param(
+            "ROOT = Path(__file__).resolve().parent\n"
+            "frame = pd.read_csv(ROOT / 'input.csv')\n"
+            "frame.to_csv(ROOT.joinpath('result.csv'))\n",
+            id="module-constant",
+        ),
+        pytest.param(
+            "limit = int(sys.argv[1])\n"
+            "data_dir = os.environ.get('UNUSED', 'x')\n"
+            "frame = pd.read_csv(Path(__file__).parent / 'input.csv')\n"
+            "top = frame.head(limit)\n"
+            "top.to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="runtime-values-unrelated-to-path",
+        ),
+        pytest.param(
+            "input = Path(__file__).parent\n"
+            "frame = pd.read_csv(input / 'input.csv')\n"
+            "frame.to_csv(input / 'result.csv')\n",
+            id="locally-rebound-builtin-input",
+        ),
+        pytest.param(
+            "p = Path(__file__).parent\n"
+            "pd.read_csv(p / 'input.csv').to_csv(p / 'result.csv')\n",
+            id="writer-chained-on-reader",
+        ),
+        pytest.param(
+            "limit = int(sys.argv[1])\n"
+            "frame = pd.read_csv(Path(__file__).parent / 'input.csv')\n"
+            "frame.head(limit).to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="writer-chained-on-head",
+        ),
+        pytest.param(
+            "p = Path(__file__).parent\n"
+            "pd.read_csv(p / 'input.csv').to_parquet(p / 'result.csv')\n",
+            id="parquet-writer-chained-on-reader",
+        ),
+        pytest.param(
+            "frames = [pd.read_csv(Path(__file__).parent / 'input.csv')]\n"
+            "frames[0].to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="writer-on-subscript",
+        ),
+        pytest.param(
+            "from helpers import export_table as to_csv\n"
+            "p = Path(__file__).parent\n"
+            "pd.read_csv(p / 'input.csv').to_csv(p / 'result.csv')\n",
+            id="chained-writer-despite-unrelated-same-named-import",
+        ),
+        pytest.param(
+            "class Preview:\n"
+            "    def to_csv(self, path):\n"
+            "        print(path)\n"
+            "p = Path(__file__).parent\n"
+            "pd.read_csv(p / 'input.csv').to_csv(p / 'result.csv')\n",
+            id="chained-writer-beside-unrelated-custom-method",
+        ),
+        pytest.param(
+            "def to_csv(path):\n"
+            "    print(path)\n"
+            "frame = pd.read_csv(Path(__file__).parent / 'input.csv')\n"
+            "frame.to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="named-writer-beside-unrelated-custom-function",
+        ),
+    ],
+)
+def test_repository_recovery_keeps_static_path_prefixes(
+    tmp_path: Path, source: str
+) -> None:
+    """A static prefix with a literal filename still recovers the repo file."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    sample = tmp_path / "input.csv"
+    result = tmp_path / "result.csv"
+    sample.write_text("value\n1\n")
+    result.write_text("value\n1\n")
+    script = tmp_path / "run.py"
+    script.write_text(_PANDAS_PATH_PRELUDE + source)
+    args = argparse.Namespace(
+        ts="2026-11-15T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py 5",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "static+repository"
+    assert [item["path"] for item in event["inputs"]] == [str(sample)]
+    assert [item["path"] for item in event["outputs"]] == [str(result)]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "import matplotlib.pyplot as plt\n"
+            "plt.figure().savefig(Path(__file__).parent / 'figure.png')\n",
+            id="chained-on-call",
+        ),
+        pytest.param(
+            "import matplotlib.pyplot as plt\n"
+            "class Preview:\n"
+            "    def savefig(self, path):\n"
+            "        print(path)\n"
+            "plt.figure().savefig(Path(__file__).parent / 'figure.png')\n",
+            id="chained-beside-unrelated-custom-method",
+        ),
+        pytest.param(
+            "from matplotlib.pyplot import savefig\n"
+            "def preview(savefig):\n"
+            "    pass\n"
+            "savefig(Path(__file__).parent / 'figure.png')\n",
+            id="imported-beside-parameter-in-other-scope",
+        ),
+        pytest.param(
+            "from matplotlib.pyplot import savefig\n"
+            "class Panel:\n"
+            "    savefig = None\n"
+            "    def draw(self):\n"
+            "        savefig(Path(__file__).parent / 'figure.png')\n",
+            id="imported-inside-method-despite-class-attribute",
+        ),
+    ],
+)
+def test_repository_recovery_records_savefig(
+    tmp_path: Path, source: str
+) -> None:
+    """A real figure write survives chaining and unrelated same-named code."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    figure = tmp_path / "figure.png"
+    figure.write_bytes(b"png")
+    script = tmp_path / "run.py"
+    script.write_text("from pathlib import Path\n" + source)
+    args = argparse.Namespace(
+        ts="2026-11-15T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert [item["path"] for item in event["outputs"]] == [str(figure)]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "def to_csv(path):\n"
+            "    print(path)\n"
+            "to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="local-function",
+        ),
+        pytest.param(
+            "from helpers import to_csv\n"
+            "to_csv(Path(__file__).parent / 'result.csv')\n",
+            id="non-io-import",
+        ),
+        pytest.param(
+            "def savefig(path):\n"
+            "    print(path)\n"
+            "savefig(Path(__file__).parent / 'result.csv')\n",
+            id="local-savefig",
+        ),
+    ],
+)
+def test_repository_recovery_ignores_unqualified_custom_writer(
+    tmp_path: Path, source: str
+) -> None:
+    """A bare writer name is a user's own function, not proof of a write."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    result = tmp_path / "result.csv"
+    result.write_text("value\n1\n")
+    script = tmp_path / "run.py"
+    script.write_text(_PANDAS_PATH_PRELUDE + source)
+    args = argparse.Namespace(
+        ts="2026-11-15T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["outputs"] == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "frame = pd.read_csv(Path(sys.argv[1]) / 'input.csv')\n"
+            "frame.to_csv(Path(sys.argv[1]) / 'result.csv', index=False)\n",
+            id="argv-inline",
+        ),
+        pytest.param(
+            "base = Path(sys.argv[1])\n"
+            "path = base / 'input.csv'\n"
+            "frame = pd.read_csv(path)\n"
+            "frame.to_csv(base / 'result.csv')\n",
+            id="argv-through-assignments",
+        ),
+        pytest.param(
+            "from sys import argv\n"
+            "frame = pd.read_csv(Path(argv[1]) / 'input.csv')\n"
+            "frame.to_csv(Path(argv[1]).joinpath('result.csv'))\n",
+            id="argv-imported-name",
+        ),
+        pytest.param(
+            "import argparse\n"
+            "parser = argparse.ArgumentParser()\n"
+            "parser.add_argument('indir')\n"
+            "args = parser.parse_args()\n"
+            "frame = pd.read_csv(Path(args.indir) / 'input.csv')\n"
+            "frame.to_csv(Path(args.indir) / 'result.csv')\n",
+            id="argparse-namespace",
+        ),
+        pytest.param(
+            "frame = pd.read_csv(Path(os.environ['DATA_DIR']) / 'input.csv')\n"
+            "frame.to_csv(os.path.join(os.environ['DATA_DIR'], 'result.csv'))\n",
+            id="environ-subscript",
+        ),
+        pytest.param(
+            "frame = pd.read_csv(os.path.join(sys.argv[1], 'input.csv'))\n"
+            "frame.to_csv(Path(sys.argv[1], 'result.csv'))\n",
+            id="argv-path-join-arguments",
+        ),
+    ],
+)
+def test_repository_recovery_ignores_decoys_for_runtime_path_prefixes(
+    tmp_path: Path, source: str
+) -> None:
+    """A runtime-chosen directory must not resolve to a same-named repo file.
+
+    The script reads ``<external>/input.csv`` from a command-line or
+    environment value; the repository's own ``input.csv`` is a decoy.
+    """
+    repo = tmp_path / "repo"
+    external = tmp_path / "external"
+    repo.mkdir()
+    external.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "input.csv").write_text("value\n999\n")
+    (repo / "result.csv").write_text("stale\n999\n")
+    (external / "input.csv").write_text("value\n42\n")
+    script = repo / "run.py"
+    script.write_text(_PANDAS_PATH_PRELUDE + source)
+    args = argparse.Namespace(
+        ts="2026-11-15T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd=f"python run.py {external}",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, repo, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+    assert event["outputs"] == []
+    assert event["lineage_warnings"]
+
+
+def _decoy_repository_event(tmp_path: Path, source: str) -> dict:
+    """Run ``source`` against a repository holding same-named decoys."""
+    repo = tmp_path / "repo"
+    external = tmp_path / "external"
+    repo.mkdir()
+    external.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "input.csv").write_text("value\n999\n")
+    (repo / "result.csv").write_text("stale\n999\n")
+    (external / "input.csv").write_text("value\n42\n")
+    script = repo / "run.py"
+    script.write_text(_PANDAS_PATH_PRELUDE + source)
+    args = argparse.Namespace(
+        ts="2026-11-15T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd=f"python run.py {external}",
+        bash_exit=0,
+    )
+    event = build_event_for_detection((script, None), args, repo, "abc123")
+    assert event is not None
+    return event
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "def load(d):\n"
+            "    frame = pd.read_csv(d / 'input.csv')\n"
+            "    frame.to_csv(d / 'result.csv')\n"
+            "load(Path(sys.argv[1]))\n",
+            id="parameter-division",
+        ),
+        pytest.param(
+            "async def load(d):\n"
+            "    frame = pd.read_csv(Path(d, 'input.csv'))\n"
+            "    frame.to_csv(Path(d) / 'result.csv')\n",
+            id="async-parameter-path-call",
+        ),
+        pytest.param(
+            "def load(*, d):\n"
+            "    frame = pd.read_csv(os.path.join(d, 'input.csv'))\n"
+            "    frame.to_csv(os.path.join(d, 'result.csv'))\n"
+            "load(d=sys.argv[1])\n",
+            id="keyword-only-parameter-path-join",
+        ),
+        pytest.param(
+            "def load(*dirs, **opts):\n"
+            "    frame = pd.read_csv(dirs[0] / 'input.csv')\n"
+            "    frame.to_csv(opts['out'] / 'result.csv')\n",
+            id="star-args-and-kwargs",
+        ),
+        pytest.param(
+            "load = lambda d: pd.read_csv(d / 'input.csv')\n"
+            "save = lambda frame, d: frame.to_csv(d / 'result.csv')\n"
+            "save(load(Path(sys.argv[1])), Path(sys.argv[1]))\n",
+            id="lambda-parameter",
+        ),
+        pytest.param(
+            "def outer(d):\n"
+            "    def inner():\n"
+            "        frame = pd.read_csv(d / 'input.csv')\n"
+            "        frame.to_csv(d / 'result.csv')\n"
+            "    inner()\n"
+            "outer(Path(sys.argv[1]))\n",
+            id="enclosing-function-parameter",
+        ),
+        pytest.param(
+            "class Job:\n"
+            "    def __init__(self, d):\n"
+            "        self.d = Path(d)\n"
+            "    def run(self):\n"
+            "        frame = pd.read_csv(self.d / 'input.csv')\n"
+            "        frame.to_csv(self.d / 'result.csv')\n"
+            "Job(sys.argv[1]).run()\n",
+            id="method-self-attribute",
+        ),
+        pytest.param(
+            "def load(dirs):\n"
+            "    input_dir, output_dir = dirs\n"
+            "    frame = pd.read_csv(input_dir / 'input.csv')\n"
+            "    frame.to_csv(output_dir / 'result.csv')\n"
+            "load((Path(sys.argv[1]), Path(sys.argv[1])))\n",
+            id="parameter-tuple-unpacking",
+        ),
+    ],
+)
+def test_repository_recovery_ignores_decoys_for_parameter_path_prefixes(
+    tmp_path: Path, source: str
+) -> None:
+    """A directory passed in as a parameter must not match a repo decoy (#131).
+
+    The caller decides the directory at run time, so the literal filename
+    joined to it does not identify a repository file.
+    """
+    event = _decoy_repository_event(tmp_path, source)
+
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+    assert event["outputs"] == []
+    assert event["lineage_warnings"]
+
+
+def test_repository_recovery_ignores_decoys_for_parameter_aliases(
+    tmp_path: Path,
+) -> None:
+    """A local alias built from a parameter inherits its runtime taint."""
+    event = _decoy_repository_event(
+        tmp_path,
+        "def load(d):\n"
+        "    p = d / 'input.csv'\n"
+        "    q = Path(d, 'result.csv')\n"
+        "    frame = pd.read_csv(p)\n"
+        "    frame.to_csv(q)\n"
+        "load(Path(sys.argv[1]))\n",
+    )
+
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+    assert event["outputs"] == []
+    assert event["lineage_warnings"]
+
+
+def test_repository_recovery_leaves_static_parameter_defaults_unresolved(
+    tmp_path: Path,
+) -> None:
+    """A static default is still a parameter: any call may override it.
+
+    Even when every visible call relies on the default, recovery does not
+    follow it, because proving that no caller (including an importer of the
+    module) overrides the default is beyond this static scan. Unresolved
+    lineage with a warning is preferred to a confidently wrong input.
+    """
+    event = _decoy_repository_event(
+        tmp_path,
+        "ROOT = Path(__file__).parent\n"
+        "def load(root=ROOT):\n"
+        "    frame = pd.read_csv(root / 'input.csv')\n"
+        "    frame.to_csv(root / 'result.csv')\n"
+        "load()\n",
+    )
+
+    assert event["io_detection"] == "unresolved"
+    assert event["inputs"] == []
+    assert event["outputs"] == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "def main(limit):\n"
+            "    frame = pd.read_csv(Path(__file__).parent / 'input.csv')\n"
+            "    top = frame.head(limit)\n"
+            "    top.to_csv(Path(__file__).parent / 'result.csv')\n"
+            "main(int(sys.argv[1]))\n",
+            id="function-with-unrelated-parameter",
+        ),
+        pytest.param(
+            "ROOT = Path(__file__).parent\n"
+            "def main(limit):\n"
+            "    frame = pd.read_csv(ROOT / 'input.csv')\n"
+            "    top = frame.head(limit)\n"
+            "    top.to_csv(ROOT / 'result.csv')\n"
+            "main(int(sys.argv[1]))\n",
+            id="module-constant-beside-parameter",
+        ),
+    ],
+)
+def test_repository_recovery_keeps_static_paths_beside_parameters(
+    tmp_path: Path, source: str
+) -> None:
+    """Parameters only block recovery for paths that actually use them."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    sample = tmp_path / "input.csv"
+    result = tmp_path / "result.csv"
+    sample.write_text("value\n1\n")
+    result.write_text("value\n1\n")
+    script = tmp_path / "run.py"
+    script.write_text(_PANDAS_PATH_PRELUDE + source)
+    args = argparse.Namespace(
+        ts="2026-11-15T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py 5",
+        bash_exit=0,
+    )
+
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123")
+
+    assert event is not None
+    assert event["io_detection"] == "static+repository"
+    assert [item["path"] for item in event["inputs"]] == [str(sample)]
+    assert [item["path"] for item in event["outputs"]] == [str(result)]
+
+
 @pytest.mark.parametrize(
     "source,expected_key",
     [

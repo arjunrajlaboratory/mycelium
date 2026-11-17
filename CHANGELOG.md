@@ -24,6 +24,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is reported to the model and by `doctor --profile app` instead of being
   dropped silently. The App's conversation stores are read through a private
   snapshot, so no App file (including SQLite's `-shm` index) is ever written.
+
+### Fixed
+
+- Antigravity keeps running commands pending until matching terminal evidence
+  arrives. It retains each undelivered reminder and reconciles accepted Stop
+  receipts when a finalizer response is lost.
+- Antigravity hook launchers preserve the selected Python virtual environment.
+  Knowledge indexing uses the built-in offline summaries and concept labels.
+- Stop-hook source resolution works in macOS system Bash 3.2.
+
+## [0.9.5] - 2026-11-16
+
+### Fixed
+
+- **`.living/conventions/ACTIVE_CONVENTIONS.yaml` is valid YAML again (#129).**
+  Init seeded the registry as a mapping (`active_conventions: []`), while
+  `install_convention.py` appended pack entries as a top-level list. When the
+  seed survived init (core packs not found at init time, or projects started
+  on older releases), the first pack install left a file `yaml.safe_load`
+  rejects. The registry now has one shape everywhere, a bare list with `[]`
+  for no packs. Init seeds `[]`, and `install_convention.py` rewrites either
+  legacy shape into the list before adding its entry. Reinstalling a pack also
+  now replaces only the entry with that exact name (installing `bio` no longer
+  removes `bioinformatics`) and keeps a core pack's `core: true` flag. The
+  installer edits the file in place, so comments and other entries survive.
+  It reads only the shape Mycelium writes (comments, `[]`, and `- key: value`
+  entries with two-space `key: value` fields holding one-line scalars) and
+  refuses anything else, such as nested blocks, block scalars, anchors, or
+  flow lists, before copying the pack, asking for a hand fix. It writes
+  atomically and refuses a symlinked registry or conventions directory. When
+  PyYAML is installed, every rewrite must also load to the same entries (plus
+  the one being installed) or it is refused.
+  `migrate_existing_repos.py` gains an idempotent `ACTIVE_CONVENTIONS.yaml
+  shape` action. It rewrites only files that still carry the legacy
+  `active_conventions:` key, leaves every other file byte-identical, and
+  reports a legacy file it cannot repair as `skipped (unrecognized shape; fix
+  by hand)`. Run the `$mycelium:core` migration
+  to repair an existing project. Nothing in the plugin parsed this file, so
+  no behavior changes for projects that skip the migration.
+
+- **Data lineage no longer records a same-named repository file for a path
+  the script chooses at run time.** When a script builds a path such as
+  `Path(sys.argv[1]) / "input.csv"`, repository recovery used to drop the
+  runtime part, find the repository's own `input.csv`, and record (and hash)
+  it as an input even though the script read a file elsewhere. Recovery now
+  leaves a path unresolved, with the usual dynamic-path warning, when it
+  draws on `sys.argv`, `argparse` results, `os.environ`, `os.getenv`,
+  `input()`, or `sys.stdin`, directly or through assignments. Paths anchored
+  on `__file__` or other static values are still recovered. Existing
+  projects need no migration; only new lineage events change.
+
+- **Data lineage no longer records a same-named repository file for a
+  directory passed in as a function parameter** (#131). In
+  `def load(d): pd.read_csv(d / "input.csv")`, the caller chooses `d`, so
+  it can point outside the repository, yet repository recovery matched the
+  repository's own `input.csv` and recorded and hashed it as an input.
+  Function and lambda parameters, including `self`, `*args`, `**kwargs`,
+  and keyword-only parameters, are now treated like command-line values: a
+  path built from one, directly or through assignments, stays unresolved
+  with the usual dynamic-path warning. A parameter with a static default
+  such as `root=ROOT` also stays unresolved, because any caller can
+  override it. Static paths elsewhere in the script are still recovered.
+  Existing projects need no migration; only new lineage events change.
+
+- **Lineage now records writes chained onto another call.** In
+  `pd.read_csv(p / "input.csv").to_csv(p / "result.csv")` or
+  `frame.head(n).to_csv(...)`, repository recovery recorded the input but
+  dropped the output. A writer method called on a call result or a subscript
+  reached the detector as a bare `to_csv` and was rejected like an
+  unqualified call. Any writer method called on an object (`to_csv`,
+  `to_parquet`, `savefig`, and the rest) now counts as a write, whatever the
+  receiver. A bare `to_csv(...)` is still ignored unless an import maps it to
+  a known data-I/O package, so a user's own function of that name does not
+  invent an output. An unrelated import aliased to a writer's name, such as
+  `from helpers import export_table as to_csv`, no longer renames a chained
+  `.to_csv(...)` method and hides its write (#132).
+
+## [0.9.4] - 2026-11-15
+
+### Added
+
 - **Agents now warn when Mycelium's hooks are silently skipped.** Current
   Codex releases (seen on CLI 0.167.2 and Desktop 0.169.0-alpha) bind each
   plugin hook approval to a `trusted_content_hash`, a SHA-256 over every file
@@ -202,12 +283,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MYCELIUM.md` keeps its current post-action wording, because re-running init
   refreshes only its managed Automated Enforcement section and session-summary
   line; new projects get the new line.
-- Antigravity keeps running commands pending until matching terminal evidence
-  arrives. It retains each undelivered reminder and reconciles accepted Stop
-  receipts when a finalizer response is lost.
-- Antigravity hook launchers preserve the selected Python virtual environment.
-  Knowledge indexing uses the built-in offline summaries and concept labels.
-- Stop-hook source resolution works in macOS system Bash 3.2.
 
 ## [0.9.3] - 2026-11-07
 

@@ -3995,6 +3995,28 @@ _DETERMINISTIC_PATH_CALLS = {
 }
 
 
+# Values a script receives at run time. A path built from one may point outside
+# the repository, so repository recovery must not match its literal suffix
+# against a same-named repository file.
+_RUNTIME_PATH_SOURCES = {
+    "fileinput.input",
+    "input",
+    "os.environ",
+    "os.environb",
+    "os.getenv",
+    "os.getenvb",
+    "sys.argv",
+    "sys.stdin",
+}
+# ``parser.parse_args()`` and friends return the parsed command line.
+_RUNTIME_ARGUMENT_PARSERS = {
+    "parse_args",
+    "parse_intermixed_args",
+    "parse_known_args",
+    "parse_known_intermixed_args",
+}
+
+
 def _repository_root(cwd: Path) -> Path | None:
     try:
         result = subprocess.run(
@@ -4018,6 +4040,13 @@ def _call_name(node: ast.AST) -> str | None:
     return None
 
 
+def _call_root(node: ast.AST) -> str | None:
+    """The name a dotted callee starts from, or None for an unnamed receiver."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
 def _io_call_direction(
     node: ast.Call,
     import_aliases: dict[str, str],
@@ -4027,7 +4056,10 @@ def _io_call_direction(
     if not raw_name:
         return None
     parts = raw_name.split(".")
-    if parts[0] in import_aliases:
+    # ``_call_name`` reduces ``read_csv(...).to_csv`` to the bare ``to_csv``.
+    # Only a callee rooted at a name may be resolved through an import alias;
+    # otherwise ``from helpers import x as to_csv`` would rename the method.
+    if _call_root(node.func) is not None and parts[0] in import_aliases:
         parts = import_aliases[parts[0]].split(".") + parts[1:]
     name = ".".join(parts)
     leaf = name.rsplit(".", 1)[-1]
@@ -4036,10 +4068,18 @@ def _io_call_direction(
         "np.savez",
         "np.savez_compressed",
     }:
-        # Object methods such as ``frame.to_csv`` are conventional writers.
-        # A bare writer name, however, is evidence only when an import maps it
-        # to a known data-I/O package.
-        if "." in raw_name or parts[0] in _KNOWN_IO_MODULE_ROOTS:
+        # Object methods such as ``frame.to_csv`` are conventional writers,
+        # whatever the receiver: a name, a call result such as
+        # ``pd.read_csv(...).to_csv`` or ``frame.head(n).to_csv``, or a
+        # subscript. ``_call_name`` drops an unnamed receiver, so test the AST
+        # node rather than the dotted name. As for a named receiver, a
+        # receiver whose type cannot be known statically counts as a writer.
+        # A bare writer name, however, is evidence only when an import maps
+        # it to a known data-I/O package.
+        if (
+            isinstance(node.func, ast.Attribute)
+            or parts[0] in _KNOWN_IO_MODULE_ROOTS
+        ):
             return "output"
     if leaf in _INPUT_CALL_LEAVES or name in {
         "ad.read",
@@ -4235,6 +4275,73 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
             return collect(expression.value, resolving)
         return set()
 
+    def canonical_name(node: ast.AST) -> str | None:
+        raw_name = _call_name(node)
+        if not raw_name:
+            return None
+        parts = raw_name.split(".")
+        if parts[0] in import_aliases:
+            parts = import_aliases[parts[0]].split(".") + parts[1:]
+        return ".".join(parts)
+
+    def reads_runtime_value(expression: ast.AST, tainted: set[str]) -> bool:
+        for node in ast.walk(expression):
+            if isinstance(node, ast.Name) and node.id in tainted:
+                return True
+            if isinstance(node, (ast.Attribute, ast.Name)):
+                root = _call_name(node)
+                root = root.split(".", 1)[0] if root else None
+                if (
+                    canonical_name(node) in _RUNTIME_PATH_SOURCES
+                    and (root in import_aliases or root not in locally_bound_roots)
+                ):
+                    return True
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _RUNTIME_ARGUMENT_PARSERS
+            ):
+                return True
+        return False
+
+    # Names any of whose assignments draw on a runtime value, propagated
+    # through further assignments until nothing changes. A name with several
+    # definitions is tainted by any one of them: recovery should then stay
+    # unresolved rather than guess which definition ran. Function and lambda
+    # parameters are runtime values too: every caller, and any default, can
+    # pass a directory outside the repository. Matching by name across the
+    # file only ever leaves more paths unresolved, never records a wrong file.
+    # Unpacked names (``a, b = dirs``) carry their source's taint too, though
+    # recovery never resolves them to a value.
+    taint_sources = {name: list(values) for name, values in assignments.items()}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, (ast.List, ast.Tuple)):
+                    for item in ast.walk(target):
+                        if isinstance(item, ast.Name):
+                            taint_sources.setdefault(item.id, []).append(node.value)
+    runtime_names: set[str] = set(shadowed_names)
+    changed = True
+    while changed:
+        changed = False
+        for name, definitions in taint_sources.items():
+            if name in runtime_names:
+                continue
+            if any(reads_runtime_value(item, runtime_names) for item in definitions):
+                runtime_names.add(name)
+                changed = True
+
+    def runtime_dependent(expression: ast.AST) -> bool:
+        """Whether a path expression draws on a value chosen at run time.
+
+        A command-line argument, environment value or function parameter
+        can name a directory outside the repository, so the literal filename
+        appended to it says nothing about which repository file, if any, was
+        read or written.
+        """
+        return reads_runtime_value(expression, runtime_names)
+
     inputs: set[str] = set()
     outputs: set[str] = set()
     for node in ast.walk(tree):
@@ -4251,7 +4358,9 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
         )
         values: set[str] = set()
         for expression in path_expressions:
-            expression_values = collect(expression)
+            expression_values = (
+                None if runtime_dependent(expression) else collect(expression)
+            )
             if expression_values is None:
                 values.clear()
                 break

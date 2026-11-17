@@ -115,8 +115,8 @@ knowledge and optional domain steps below after the base scaffold succeeds.
 2. List available conventions from `network/conventions/`, noting which are core (already installed) and which are domain (available to add).
 3. User selects which to install.
 4. Run `skills/core/scripts/install_convention.py` to copy conventions into `.living/conventions/[name]/`.
-5. Update `.living/conventions/ACTIVE_CONVENTIONS.yaml`.
-6. Update `MYCELIUM.md` to reference the new convention pack.
+5. The script registers the pack in `.living/conventions/ACTIVE_CONVENTIONS.yaml` (a bare YAML list of entries); do not hand-edit that file.
+6. Confirm `MYCELIUM.md` references the new convention pack (the script adds it).
 
 ---
 
@@ -280,7 +280,7 @@ knowledge and optional domain steps below after the base scaffold succeeds.
 
 **Trigger**: "migrate this repo", "upgrade mycelium", "this is an old repo"
 
-**Purpose**: Bring a repo started on an earlier Mycelium version up to current spec — creates canonical `MYCELIUM.md` guidance and a Codex `AGENTS.md` adapter, migrates runtime state to `.mycelium/`, tops up Claude hooks, removes obsolete project-local Codex hook paths in favor of the plugin bundle, regenerates the heuristic SUMMARY block, and preserves Claude MEMORY.md routing where available.
+**Purpose**: Bring a repo started on an earlier Mycelium version up to current spec — creates canonical `MYCELIUM.md` guidance and a Codex `AGENTS.md` adapter, migrates runtime state to `.mycelium/`, tops up Claude hooks, removes obsolete project-local Codex hook paths in favor of the plugin bundle, repairs a legacy-shaped `ACTIVE_CONVENTIONS.yaml`, regenerates the heuristic SUMMARY block, and preserves Claude MEMORY.md routing where available.
 
 **Steps**:
 1. Run `python3 skills/core/scripts/migrate_existing_repos.py --repo .` (or `--scan <parent-dir>` to migrate every child).
