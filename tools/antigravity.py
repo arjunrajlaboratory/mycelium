@@ -140,7 +140,9 @@ def workspace_readiness(workspace, profile="ide"):
                          capture_output=True, text=True, timeout=5)
     if git.returncode:
         return dict(result, reason="Workspace is not inside a Git repository")
-    root = safe_path(Path(git.stdout.strip()))
+    # Git ends the path with one newline; a root name may itself end in whitespace.
+    out = git.stdout
+    root = safe_path(Path(out[:-1] if out.endswith("\n") else out))
     living = safe_path(root / ".living")
     result["git_root"] = str(root)
     if not living.is_dir():

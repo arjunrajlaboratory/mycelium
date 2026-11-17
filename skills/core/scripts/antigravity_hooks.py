@@ -153,7 +153,8 @@ def roots_for(payload):
                                 capture_output=True, text=True, timeout=5)
         if result.returncode:
             continue
-        root = Path(result.stdout.strip())
+        # Git ends the path with one newline; a root name may itself end in whitespace.
+        root = Path(result.stdout[:-1] if result.stdout.endswith("\n") else result.stdout)
         safe_path(root)
         living = root / ".living"
         if not living.exists() and not living.is_symlink():

@@ -132,3 +132,15 @@ def test_source_identity_does_not_depend_on_selected_python_path():
     second = manifest(python=Path('/second/venv/bin/python3'))
     assert first['files']['hooks.json'] != second['files']['hooks.json']
     assert first['source_digest'] == second['source_digest']
+
+
+def test_workspace_readiness_keeps_a_trailing_space_in_the_git_root(tmp_path):
+    """Regression: strip() on the Git root reported a neighbor `proj` for `proj `."""
+    import subprocess
+    spaced, neighbor = tmp_path / 'proj ', tmp_path / 'proj'
+    for repo in (spaced, neighbor):
+        repo.mkdir()
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    (neighbor / '.living').mkdir()
+    report = package.workspace_readiness(spaced)
+    assert not report['lifecycle_opt_in']

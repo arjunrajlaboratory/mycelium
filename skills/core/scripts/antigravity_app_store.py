@@ -403,7 +403,11 @@ def _edit_from(cid, step, status, payload, tool_names, expected_path=None):
     kind = _one(result, 1, 0, required=False)
     if kind not in kinds:
         raise UnrecognizedShape("native edit kind does not match its tool")
-    if _text(result, 2) != path or not os.path.isabs(path) or os.path.normpath(path) != path:
+    try:
+        recorded = _text(result, 2)
+    except Unverified as error:  # absent, repeated or non-text path field: format drift
+        raise UnrecognizedShape("native edit record has no single text path field") from error
+    if recorded != path or not os.path.isabs(path) or os.path.normpath(path) != path:
         raise Unverified("native edit path is not canonical or differs from its arguments")
     return {"call_id": call_id, "path": path, "kind": kind, "tool": name, "source_step": source_step}
 

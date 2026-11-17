@@ -78,7 +78,9 @@ def edit_payload(path, *, step=7, status=3, call_id="call-synthetic-edit", name=
                  type_url=store.FILE_EDIT_TYPE, result=True, kind=store.EDIT_CREATE, args=None, typed_path=None):
     metadata = ld(4, ld(1, call_id) + ld(2, name) + ld(3, json.dumps(args or edit_args(path)))) + \
         ld(20, vi(2, step) + ld(4, CID)) + ld(8, vi(1, 1700000000)) + vi(38, 1)
-    typed = (vi(1, kind) if kind else b"") + ld(2, typed_path or path)
+    # typed_path=False omits the path field; bytes replace it with a non-text wire type.
+    typed = (vi(1, kind) if kind else b"") + (
+        b"" if typed_path is False else vi(2, 1) if typed_path == b"varint" else ld(2, typed_path or path))
     response = ld(6, ld(1, type_url) + ld(2, typed)) if result else b""
     return vi(1, 132) + vi(4, status) + ld(5, metadata) + ld(140, ld(2, response))
 
@@ -585,7 +587,8 @@ def test_store_reads_leave_every_app_file_byte_identical(native, live_writer):
 
 SHAPE_CASES = {"other-type": dict(type_url="type.googleapis.com/exa.cortex.core.tools.FileWrite"),
                "no-result": dict(result=False), "kind-unknown": dict(kind=4), "kind-missing": dict(kind=0),
-               "row-extra-arg": "extra"}
+               "row-extra-arg": "extra", "path-missing": dict(typed_path=False),
+               "path-wrong-wire-type": dict(typed_path=b"varint")}
 
 
 @pytest.mark.parametrize("case", sorted(SHAPE_CASES))
@@ -687,3 +690,14 @@ def test_real_app_verified_command_reaches_lineage_and_accepts_once(tmp_path, mo
     manifest = json.dumps(json.loads(lineage[0].read_text()), ensure_ascii=False)
     assert str(repo / "analysis.py") in manifest and "data.csv" in manifest
     assert app("Stop", stop(payload, executionNum=1)) == {}
+
+
+def test_workspace_root_with_trailing_space_is_not_trimmed_into_a_neighbor(tmp_path):
+    """Regression: strip() on `git rev-parse --show-toplevel` turned `proj ` into
+    `proj`, so a neighboring opted-in repository received lifecycle state."""
+    spaced, neighbor = tmp_path / "proj ", tmp_path / "proj"
+    for repo in (spaced, neighbor):
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / ".living").mkdir()
+    assert ag.roots_for({"workspacePaths": [str(spaced)]}) == [spaced.resolve()]
