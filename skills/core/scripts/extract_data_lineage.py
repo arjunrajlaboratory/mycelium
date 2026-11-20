@@ -188,7 +188,9 @@ def enrich_file_record(rec: dict[str, Any]) -> dict[str, Any]:
     """Fill in sha256/n_rows for a file record if missing and file exists on disk."""
     out = dict(rec)
     path_str = out.get("path")
-    if not path_str:
+    if not path_str or out.get("_missing"):
+        # The hook found nothing at this path when the command ran; a file
+        # created there later is not what the command touched.
         return out
     path = Path(path_str)
     if not path.exists():
@@ -269,8 +271,9 @@ def normalize_skip(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_data_command(raw: dict[str, Any]) -> dict[str, Any]:
-    """Keep a data command's known fields. Its file records were hashed at
-    hook time; only missing hashes are filled, as for actions."""
+    """Keep a data command's known fields. Its file records were taken at
+    hook time; a hash is filled only where none was recorded, and a path
+    recorded as missing stays missing."""
     return {
         "ts": raw.get("ts"),
         "event_id": raw.get("event_id"),

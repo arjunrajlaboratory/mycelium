@@ -1228,3 +1228,19 @@ def test_stdin_fed_python_with_valued_options_is_labelled(project, command):
 
 def test_stdin_fed_python_printing_its_version_is_not_a_run(project):
     assert _event("printf x | xargs python3 -uV", project) is None
+
+
+# ---------- Codex review round 13 ----------
+
+
+def test_a_path_missing_at_hook_time_stays_missing_at_stop(project):
+    os.replace(project / "data/x.csv", project / "data/z.csv")
+    event = _event("mv data/x.csv data/z.csv", project)
+    assert event["inputs"][0]["_missing"] is True
+    (project / "data/x.csv").write_text("a different file\n")
+    stream = project / "events.tmp"
+    stream.write_text(json.dumps(event) + "\n")
+    manifest = consolidator.extract(stream, "s", str(project))
+    [record] = manifest["data_commands"][0]["inputs"]
+    assert record.get("_missing") is True
+    assert record.get("sha256") is None and "n_rows" not in record
