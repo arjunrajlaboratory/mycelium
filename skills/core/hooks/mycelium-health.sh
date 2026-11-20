@@ -31,6 +31,15 @@ if [ -z "$CWD" ]; then
   CWD=$(pwd)
 fi
 SOURCE=$(mycelium_json_get 'source' INPUT)
+# `reopen` is Mycelium's own source, never a host's: a PostToolUse hook found
+# its live host session without a transaction because a Stop already accepted
+# that turn (hosts run Stop after every turn). It runs the same locked
+# transaction setup as a start, and nothing else: no context, no scheduled-job
+# prompts, no INDEX refresh. See mycelium_reopen_post_tool_transaction.
+REOPEN=false
+if [[ "$SOURCE" == "reopen" ]]; then
+  REOPEN=true
+fi
 
 # Find git repo root
 REPO_ROOT=$(cd "$CWD" && git rev-parse --show-toplevel 2>/dev/null || echo "")
@@ -89,6 +98,15 @@ fi
 # AND those signals are also quiet.
 ACTIVE_LOG_FILE="$STATE_DIR/active-session-log.tmp"
 ACTIVE_OWNER_FILE="$STATE_DIR/active-session-owner-id.tmp"
+# A reopen only ever creates a transaction where none exists. Any marker it
+# finds under the locks (a parallel hook's fresh transaction, or corrupt or
+# foreign state that appeared while it waited) stays exactly as it is: the
+# caller's locked validation decides whether it is usable. Stale and corrupt
+# cleanup belong to host SessionStarts.
+if [[ "$REOPEN" == true ]] \
+  && [[ -e "$ACTIVE_LOG_FILE" || -L "$ACTIVE_LOG_FILE" ]]; then
+  exit 0
+fi
 mycelium_archive_abandoned_events() {
   local fallback_id="$1"
   local events_file="$STATE_DIR/mycelium-data-events.tmp"
@@ -229,12 +247,28 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
   fi
 fi
 
+# A turn of a continuing host session (reopen, resume, compaction) starts
+# when the previous turn's accepted Stop ended, as that Stop recorded; a
+# reopen runs only after its turn's first command. A fresh startup always
+# starts now.
+CARRIED_START_TS=""
+_CARRIED_TS_FILE="$STATE_DIR/next-turn-start-ts.tmp"
+if [[ "$SOURCE" != "startup" && "${MYCELIUM_SESSION_SCOPED:-false}" == true ]] \
+  && [ ! -f "$ACTIVE_LOG_FILE" ] \
+  && [[ -f "$_CARRIED_TS_FILE" && ! -L "$_CARRIED_TS_FILE" ]]; then
+  CARRIED_START_TS=$(head -1 "$_CARRIED_TS_FILE" 2>/dev/null || true)
+  if [[ ! "$CARRIED_START_TS" =~ ^[0-9]{1,18}$ ]] \
+    || (( CARRIED_START_TS > NOW_TS )); then
+    CARRIED_START_TS=""
+  fi
+fi
+
 # Record session-start timestamp — only for primary sessions (not subagents).
 # After the cleanup above, a remaining active-session-log.tmp implies a
 # genuine in-progress primary session, so we preserve its start ts.
 FRESH_PRIMARY_SESSION=false
 if [ ! -f "$ACTIVE_LOG_FILE" ]; then
-    date +%s > "$STATE_DIR/session-start-ts.tmp"
+    printf '%s\n' "${CARRIED_START_TS:-$(date +%s)}" > "$STATE_DIR/session-start-ts.tmp"
     # A host session ID is the only per-invocation identity shared by its
     # SessionStart and Stop processes. Clear any orphaned prior owner before
     # reserving this fresh primary transaction.
@@ -288,9 +322,11 @@ stamp_due_reason() {
   fi
 }
 
-# --- Knowledge audit check (runs regardless of SOURCE) ---
+# --- Knowledge audit check (every host SessionStart, never a reopen) ---
 KNOWLEDGE_DIR=$(mycelium_knowledge_dir)
-if [ ! -d "$KNOWLEDGE_DIR" ]; then
+if [[ "$REOPEN" == true ]]; then
+  :
+elif [ ! -d "$KNOWLEDGE_DIR" ]; then
   MESSAGES="${MESSAGES}KNOWLEDGE SYSTEM INIT: ~/.mycelium/knowledge/ does not exist. Create the directory and initialize domain files per the progressive disclosure spec. Run this silently as a background task.\n\n"
 elif [ -f "$KNOWLEDGE_DIR/.last-audit" ]; then
   stamp_due_reason "$(first_stamp_token "$KNOWLEDGE_DIR/.last-audit")" "since last"
@@ -305,6 +341,9 @@ fi
 # Only runs if we're inside a meta-project (portfolio with multiple subprojects)
 META_PROJECT=""
 _CHECK_DIR=$(dirname "$REPO_ROOT")
+if [[ "$REOPEN" == true ]]; then
+  _CHECK_DIR="/"
+fi
 while [ "$_CHECK_DIR" != "/" ] && [ "$_CHECK_DIR" != "." ]; do
   if [ -d "$_CHECK_DIR/.living" ]; then
     META_PROJECT="$_CHECK_DIR"
@@ -314,7 +353,7 @@ while [ "$_CHECK_DIR" != "/" ] && [ "$_CHECK_DIR" != "." ]; do
 done
 
 # Also check if current dir IS the meta-project (has subprojects with .living/)
-if [ -z "$META_PROJECT" ] && [ -d "$REPO_ROOT/.living" ]; then
+if [[ "$REOPEN" != true ]] && [ -z "$META_PROJECT" ] && [ -d "$REPO_ROOT/.living" ]; then
   SUBPROJECT_COUNT=0
   for _sp in "$REPO_ROOT"/*/.living; do
     [ -d "$_sp" ] && SUBPROJECT_COUNT=$(( SUBPROJECT_COUNT + 1 ))
@@ -417,6 +456,15 @@ REGISTRY_EOF
     BRANCH_YAML=$(mycelium_json_dumps_stdin "$BRANCH")
     STARTED=$(date +%Y-%m-%dT%H:%M:%S%z)
     TIME_SHORT=$(date +%H:%M)
+    if [[ -n "$CARRIED_START_TS" ]]; then
+      # BSD date reads an epoch with -r, GNU date with -d @.
+      if _CARRIED_STARTED=$(date -r "$CARRIED_START_TS" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null \
+          || date -d "@$CARRIED_START_TS" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null); then
+        STARTED="$_CARRIED_STARTED"
+        TIME_SHORT=$(date -r "$CARRIED_START_TS" +%H:%M 2>/dev/null \
+          || date -d "@$CARRIED_START_TS" +%H:%M 2>/dev/null || date +%H:%M)
+      fi
+    fi
 
     # Find previous session log for this project (glob-safe, no pipefail risk)
     PREV_LOG=""
@@ -475,9 +523,13 @@ LOG_EOF
       exit 0
     }
     if ! {
+      # The marker's timestamp is the owner's liveness clock, so a turn that
+      # starts from a carried (earlier) accounting time is still marked as
+      # owned from now: an idle gap must not make it look abandoned.
       printf "%s\n%s\n" \
         "$LOG_PATH" \
-        "$(cat "$STATE_DIR/session-start-ts.tmp" 2>/dev/null || date +%s)"
+        "$(if [[ -n "$CARRIED_START_TS" ]]; then printf '%s' "$NOW_TS"; \
+          else cat "$STATE_DIR/session-start-ts.tmp" 2>/dev/null || date +%s; fi)"
       if [[ -n "$_ACTIVE_MARKER_FORMAT" ]]; then
         printf '%s\n' "$_ACTIVE_MARKER_FORMAT"
       fi
@@ -495,7 +547,7 @@ LOG_EOF
     # KNOWLEDGE SUMMARY block from tag annotations. Falls back to
     # --counts-only if the script is too old to know the new flag.
     GENERATE_INDEX_SCRIPT="$HERE/../scripts/generate_index.py"
-    if [ -f "$GENERATE_INDEX_SCRIPT" ]; then
+    if [[ "$REOPEN" != true ]] && [ -f "$GENERATE_INDEX_SCRIPT" ]; then
       python3 "$GENERATE_INDEX_SCRIPT" --living-dir "$LIVING_DIR" --summary-heuristic >/dev/null 2>&1 \
         || python3 "$GENERATE_INDEX_SCRIPT" --living-dir "$LIVING_DIR" --counts-only >/dev/null 2>&1 \
         || true
@@ -506,13 +558,40 @@ LOG_EOF
     # work is not misreported as activity from the current session.
     SESSION_CHANGES_SCRIPT="${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"
     SESSION_BASELINE_FILE="$STATE_DIR/session-file-baseline.json"
-    if [ -f "$SESSION_CHANGES_SCRIPT" ]; then
+    # An accepted Stop leaves the next turn of the same host session the
+    # baseline it ended on (see mycelium_carry_baseline_forward). A reopen
+    # runs after the turn's first command, so its own snapshot would hide
+    # that command's changes; resume and compaction continue the same
+    # session too. Only a fresh startup begins from a new snapshot.
+    CARRIED_BASELINE_FILE="$STATE_DIR/next-turn-baseline.json"
+    if [[ "$SOURCE" != "startup" && "${MYCELIUM_SESSION_SCOPED:-false}" == true ]] \
+      && [[ -f "$CARRIED_BASELINE_FILE" && ! -L "$CARRIED_BASELINE_FILE" ]] \
+      && mv -f "$CARRIED_BASELINE_FILE" "$SESSION_BASELINE_FILE" 2>/dev/null; then
+      :
+    elif [ -f "$SESSION_CHANGES_SCRIPT" ]; then
       python3 "$SESSION_CHANGES_SCRIPT" snapshot \
         --repo-root "$REPO_ROOT" \
         --output "$SESSION_BASELINE_FILE" >/dev/null 2>&1 \
         || rm -f "$SESSION_BASELINE_FILE"
     fi
   fi
+fi
+
+# A fresh startup never continues an earlier turn, so it drops any carried
+# baseline and start time. Run directories of ended host sessions keep theirs
+# (a few kilobytes); deleting them by age would also hit a live session that
+# idled, whose next turn would then lose its first command's changes.
+if [[ "$SOURCE" == "startup" && "${MYCELIUM_SESSION_SCOPED:-false}" == true ]]; then
+  rm -f "$STATE_DIR/next-turn-baseline.json" "$STATE_DIR/next-turn-start-ts.tmp"
+elif [[ "$FRESH_PRIMARY_SESSION" == true ]]; then
+  # This invocation opened the turn's transaction and consumed the pair.
+  rm -f "$_CARRIED_TS_FILE"
+fi
+
+# A reopen is silent: the PostToolUse hook that asked for it reports to the
+# model itself, with this transaction's log path.
+if [[ "$REOPEN" == true ]]; then
+  exit 0
 fi
 
 # Only run .living/ health checks on fresh session starts

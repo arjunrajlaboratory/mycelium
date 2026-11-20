@@ -6,7 +6,8 @@
 # call of mycelium__state however many checks the call chains. The module
 # documents each op; every op keeps the contract of the bash helper it
 # replaced, including the variables that helper assigned.
-MYCELIUM__STATE_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/mycelium_hook_state.py"
+MYCELIUM__HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+MYCELIUM__STATE_PY="$MYCELIUM__HOOKS_DIR/mycelium_hook_state.py"
 # Results of the marker and owner ops (states: absent, invalid, valid).
 MYCELIUM_MARKER_STATE=""
 MYCELIUM_MARKER_LOG=""
@@ -252,8 +253,42 @@ mycelium_prepare_post_tool_state() {
 # accepted this transaction while the event waited. The second pass runs
 # inside the critical section, before any state mutation. Also reads the
 # active marker for the caller (MYCELIUM_MARKER_*).
+#
+# With a third argument `reopen`, a caller that has work to record (an
+# analysis or data command, a project edit) reopens its own host session's
+# transaction when that session has none, then validates once more. Hosts run
+# Stop after every turn, and an accepted Stop removes the transaction, so
+# without this every later turn of a live session was dropped silently until
+# the next SessionStart. Reads and non-work events never pass `reopen`.
 mycelium_prepare_locked_post_tool_state() {
+  local allow_reopen="${3:-}"
   mycelium__post_tool_prepare_mode "$2" || return 1
+  if mycelium__prepare_locked_post_tool_state_once "$1" "$2"; then
+    return 0
+  fi
+  [[ "$allow_reopen" == reopen ]] || return 1
+  mycelium_reopen_post_tool_transaction "$1" "$2" || return 1
+  mycelium__post_tool_prepare_mode "$2" || return 1
+  mycelium__prepare_locked_post_tool_state_once "$1" "$2"
+}
+
+# mycelium__checked_shared_state_dir REPO_ROOT: print the shared state
+# directory after a fresh read-only preparation of it has just passed every
+# containment and symlink check. Writers to shared files outside a
+# transaction call this immediately before writing, rather than trusting what
+# an earlier state call left behind (that call may have failed on a symlink
+# it found after assigning the directory). It runs in a subshell, so the
+# caller's STATE_DIR and lock records are untouched.
+mycelium__checked_shared_state_dir() {
+  (
+    mycelium__state "$1" "" prepare:read-only >/dev/null 2>&1 || exit 1
+    [[ -n "${MYCELIUM_SHARED_STATE_DIR:-}" && -d "$MYCELIUM_SHARED_STATE_DIR" \
+      && ! -L "$MYCELIUM_SHARED_STATE_DIR" ]] || exit 1
+    printf '%s\n' "$MYCELIUM_SHARED_STATE_DIR"
+  )
+}
+
+mycelium__prepare_locked_post_tool_state_once() {
   if ! mycelium__state "$1" "$2" \
     "prepare:$MYCELIUM__PREPARE_MODE" select:read-only owns \
     lock:session \
@@ -269,6 +304,237 @@ mycelium_prepare_locked_post_tool_state() {
     return 1
   fi
   return 0
+}
+
+# Lineage skip records. A command the recorder meant to record but could not
+# leaves one NDJSON line saying why, so a missing event is distinguishable from
+# "nothing ran". Inside a transaction the line goes into the session's own raw
+# event stream (`"kind": "skip"`), which Stop consolidates into the manifest's
+# `skipped` list and reports. Without a transaction it goes to the shared
+# `lineage-skips-unowned.ndjson` audit file, keyed by host and host session ID.
+# Neither copies data: only the command text the host already showed, a
+# reason, and a short detail.
+#
+# The session stream is locked on the file itself, like the extractor's
+# appends. The shared file is locked through a stable sibling
+# (`lineage-skips-unowned.ndjson.lock`) because Stop rewrites it by atomic
+# replacement: a failed rewrite leaves the original records in place.
+MYCELIUM__PY_LINEAGE_SKIP='
+import fcntl, json, os, sys, uuid
+path, ts, command, reason, detail = sys.argv[1:6]
+# skip_id makes a record countable once however often a retry moves it.
+record = {"ts": ts, "kind": "skip", "skip_id": uuid.uuid4().hex,
+          "skip_reason": reason, "detail": detail,
+          "bash_cmd": command, "agent_id": None, "agent_type": None,
+          "bash_exit": None}
+rest = sys.argv[6:]
+once = False
+stable_lock = False
+while len(rest) >= 2:
+    flag, value = rest[0], rest[1]
+    rest = rest[2:]
+    if flag == "--agent-id":
+        record["agent_id"] = value
+    elif flag == "--agent-type":
+        record["agent_type"] = value
+    elif flag == "--bash-exit":
+        try:
+            record["bash_exit"] = int(value)
+        except ValueError:
+            pass
+    elif flag == "--session-id":
+        record["host_session_id"] = value
+    elif flag == "--host":
+        record["host"] = value
+    elif flag == "--once":
+        once = value == "true"
+    elif flag == "--stable-lock":
+        stable_lock = value == "true"
+line = (json.dumps(record) + "\n").encode("ascii")
+lock_path = path + ".lock" if stable_lock else path
+lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "a+b") as handle:
+        if once:
+            # One record per gap, host, and session: decided under the lock
+            # so parallel hooks cannot both write it.
+            handle.seek(0)
+            for existing in handle:
+                try:
+                    prior = json.loads(existing)
+                except ValueError:
+                    continue
+                if (
+                    isinstance(prior, dict)
+                    and prior.get("kind") == "skip"
+                    and prior.get("skip_reason") == record["skip_reason"]
+                    and prior.get("host") == record.get("host")
+                    and prior.get("host_session_id") == record.get("host_session_id")
+                ):
+                    raise SystemExit(0)
+        handle.write(line)
+        handle.flush()
+finally:
+    os.close(lock_fd)
+'
+
+# mycelium_record_lineage_skip EVENTS_FILE TS COMMAND REASON DETAIL [FLAGS...]
+# Caller holds the session lock and owns the transaction.
+mycelium_record_lineage_skip() {
+  python3 -c "$MYCELIUM__PY_LINEAGE_SKIP" "$@" >/dev/null 2>&1 || true
+}
+
+# mycelium_record_unowned_lineage_skip REPO_ROOT PAYLOAD COMMAND REASON DETAIL
+# [once]: record a skip with no transaction, in the shared state directory
+# only after a fresh preparation of it passed every safety check. Stop reports
+# and clears the records for its own host session.
+mycelium_record_unowned_lineage_skip() {
+  local repo_root="$1"
+  local input="$2"
+  local command="$3"
+  local reason="$4"
+  local detail="$5"
+  local once="${6:-}"
+  local shared=""
+  local sid=""
+  # Only a valid host session can ever be reported by its own Stop; a
+  # malformed identity is refused, never downgraded to an anonymous record.
+  sid=$(mycelium_json_get_optional_string 'session_id' input) || return 0
+  mycelium_valid_session_id "$sid" || return 0
+  shared=$(mycelium__checked_shared_state_dir "$repo_root") || return 0
+  mycelium_record_lineage_skip "$shared/lineage-skips-unowned.ndjson" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$command" "$reason" "$detail" \
+    --session-id "$sid" --host "$(mycelium_hook_host)" --stable-lock true \
+    --once "$([[ "$once" == once ]] && echo true || echo false)"
+}
+
+# mycelium_take_unowned_lineage_skips SHARED HOST SID [DEST]: move this host
+# session's records out of the shared unowned-skip file. With DEST (the
+# session's raw event stream, when Stop holds a valid owned transaction) they
+# are appended there first; without it, one LINEAGE GAP sentence about them
+# is printed. The shared file is then replaced atomically under its stable
+# lock, so any failure leaves every record where it was and prints nothing.
+# A rewrite that fails after the append leaves copies in both places; each
+# carries its skip_id, and every reader counts a skip_id once.
+MYCELIUM__PY_TAKE_UNOWNED_SKIPS='
+import collections, fcntl, json, os, stat, sys, tempfile
+shared, host, sid = sys.argv[1:4]
+dest = sys.argv[4] if len(sys.argv) > 4 else ""
+path = os.path.join(shared, "lineage-skips-unowned.ndjson")
+lock_fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        raise SystemExit(0)
+    with os.fdopen(fd, "rb") as handle:
+        mode = stat.S_IMODE(os.fstat(handle.fileno()).st_mode)
+        lines = handle.read().splitlines(keepends=True)
+    taken, kept = [], []
+    for raw in lines:
+        try:
+            record = json.loads(raw)
+        except ValueError:
+            kept.append(raw)
+            continue
+        if (isinstance(record, dict) and record.get("host") == host
+                and record.get("host_session_id") == sid):
+            taken.append(record)
+        else:
+            kept.append(raw)
+    if not taken:
+        raise SystemExit(0)
+    if dest:
+        out_fd = os.open(dest, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(out_fd, "ab") as out:
+            fcntl.flock(out.fileno(), fcntl.LOCK_EX)
+            out.write(b"".join(
+                (json.dumps(r) + "\n").encode("ascii")
+                for r in taken
+            ))
+            out.flush()
+    temp_fd, temp_name = tempfile.mkstemp(prefix=".lineage-skips-unowned.", dir=shared)
+    try:
+        with os.fdopen(temp_fd, "wb") as out:
+            out.write(b"".join(kept))
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(temp_name, mode)
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+finally:
+    os.close(lock_fd)
+if not dest:
+    reasons = collections.Counter(str(r.get("skip_reason") or "unknown") for r in taken)
+    detail = ", ".join(f"{reason} x{count}" for reason, count in sorted(reasons.items()))
+    print(
+        f"LINEAGE GAP: {len(taken)} data command(s) this session were not recorded "
+        f"({detail}), and no lineage transaction was open to hold them; treat "
+        "their provenance as unknown."
+    )
+'
+
+# mycelium_take_unowned_lineage_skips REPO_ROOT HOST SID [DEST]: returns
+# nonzero when a transfer or rewrite failed.
+mycelium_take_unowned_lineage_skips() {
+  local repo_root="$1"
+  local shared=""
+  local override="${MYCELIUM_STATE_DIR:-}"
+  shift
+  # A relative state override resolves against the repository root, as the
+  # state runner resolves it, not against this hook's working directory.
+  if [[ -n "$override" && "$override" != /* ]]; then
+    override="$repo_root/$override"
+  fi
+  # Stop runs this every turn; start interpreters only when there is a file.
+  [[ -f "$repo_root/.mycelium/lineage-skips-unowned.ndjson" \
+    || ( -n "$override" && -f "$override/lineage-skips-unowned.ndjson" ) ]] \
+    || return 0
+  shared=$(mycelium__checked_shared_state_dir "$repo_root") || return 0
+  # A nonzero status means the records may now be in both places; the caller
+  # must not accept until a retry completes the move.
+  python3 -c "$MYCELIUM__PY_TAKE_UNOWNED_SKIPS" "$shared" "$@" 2>/dev/null
+}
+
+# mycelium_reopen_post_tool_transaction REPO_ROOT PAYLOAD: open a transaction
+# for the payload's own host session through SessionStart's locked setup
+# (`source: reopen`), for a valid identified session only. It returns 0 when
+# the caller should validate again: after asking SessionStart to open one, or
+# when a marker already exists, which is usually a parallel hook's fresh
+# transaction for the same call. The caller's locked validation, not this
+# check, decides whether that marker is usable, so a corrupt or foreign
+# marker still fails closed. SessionStart in reopen mode never touches an
+# existing marker, and parallel hooks for one call open exactly one.
+mycelium_reopen_post_tool_transaction() {
+  local repo_root="$1"
+  local input="$2"
+  local sid=""
+  local shared=""
+  local marker=""
+  local sid_json=""
+  local cwd_json=""
+  sid=$(mycelium_json_get_optional_string 'session_id' input) || return 1
+  mycelium_valid_session_id "$sid" || return 1
+  [[ -d "$repo_root/.living" && ! -L "$repo_root/.living" ]] || return 1
+  if shared=$(mycelium__checked_shared_state_dir "$repo_root"); then
+    marker="$shared/run/$(mycelium_hook_host)/$sid/active-session-log.tmp"
+    if [[ -e "$marker" || -L "$marker" ]]; then
+      return 0
+    fi
+  fi
+  sid_json=$(mycelium_json_dumps_stdin "$sid") || return 1
+  cwd_json=$(mycelium_json_dumps_stdin "$repo_root") || return 1
+  printf '{"session_id": %s, "cwd": %s, "hook_event_name": "SessionStart", "source": "reopen"}' \
+    "$sid_json" "$cwd_json" \
+    | "$MYCELIUM__HOOKS_DIR/mycelium-health.sh" >/dev/null 2>&1
 }
 
 # Filters stdin into one Markdown table cell. A value of letters, digits,

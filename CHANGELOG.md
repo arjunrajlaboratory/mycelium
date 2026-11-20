@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Work after an accepted Stop is no longer dropped silently.** Claude Code
+  and Codex run Stop after every turn, and an accepted Stop removed the
+  session's transaction, so every later turn's analysis, lineage, log prompts,
+  and Stop enforcement vanished until the next resume or compaction. An
+  SNP-tree Claude session ran about 200 detectable analysis commands and
+  recorded one lineage event. Now an analysis or data command, or a project
+  edit, from a live host session with no transaction reopens that session's
+  transaction through SessionStart's own locked setup, with a fresh session
+  log; the accepted turn's log and manifest are never touched. Reads,
+  non-analysis commands, and edits under `.living`/`.mycelium` never reopen,
+  another root's live state is untouched, and unsafe state still refuses.
+  The accepted Stop leaves the next turn a baseline (the idle turn's own, or
+  a fresh snapshot after work) and its start time, so the command that
+  triggers a reopen, including a commit it makes, still counts as session
+  work. A turn whose only work was shell edits is caught at Stop by comparing
+  against that baseline. Expect one session log per working turn in long
+  interactive sessions, as resumes already produced. Existing projects need
+  no migration.
+- **Lineage gaps are recorded instead of silent.** When the lineage extractor
+  fails or is missing, the detector crashes (it now exits 70 on an internal
+  error instead of 1, which meant "not analysis"), or no transaction can be
+  opened, the tracker writes a skip record with its reason; records written
+  without a transaction are reported by that session's next Stop on every
+  path, and the shared file holding them is rewritten atomically. A script
+  that is gone by the time the hook runs (`python3 tmp.py && rm tmp.py`) now
+  leaves a `script-unreadable` skip instead of nothing. Session skips appear in the manifest's new
+  `skipped` list and `summary.skipped_count`, and Stop reports a
+  `LINEAGE GAP:` line. Older manifests lack these keys; read them as unknown
+  coverage.
+
 ## [0.9.5] - 2026-11-16
 
 ### Fixed

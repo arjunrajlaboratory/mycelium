@@ -243,14 +243,17 @@ dedicated lifecycle and retain that root ID. Publish identity before the active
 marker, encode the ownership format in that marker, and fail closed when a
 required companion identity is corrupt, multiline, or missing. Retain shared
 timestamps only as an upgrade fallback for markers that identify legacy
-sessions. Once an identified transaction's marker is gone, later identified
-PostToolUse payloads are stale and must not fall back to markerless legacy mode.
+sessions. Once an identified transaction's marker is gone, a later identified
+PostToolUse payload never writes into that transaction or falls back to
+markerless legacy mode; if it carries work, it reopens a fresh transaction for
+its own host session (pattern 44).
 
 **Regression evidence:** Start a new root owner while the prior task remains
-unfinalized, then deliver late tool and Stop events from the old owner. Also
-deliver Bash/edit/read events after an accepted Stop removed the marker. Require
-the current state to remain byte-identical and no transaction state to be
-recreated; only identity-free legacy payloads may use markerless behavior.
+unfinalized, then deliver late tool and Stop events from the old owner. Require
+the current root's state to remain byte-identical. Also deliver Bash/edit/read
+events after an accepted Stop removed the marker: reads and non-work commands
+recreate nothing, and work opens only a fresh transaction of its own; only
+identity-free legacy payloads may use markerless behavior.
 
 ## 15. Terminal-only mode is treated as execution
 
@@ -935,3 +938,46 @@ ported helper, keep a frozen copy of the code it replaced and compare
 statuses, variables, output, and filesystem effects on adversarial state
 (symlinks, malformed markers and owners, invalid IDs, held locks). Mutate the
 port and confirm the comparison fails.
+
+## 44. A per-turn host event is treated as the end of the session
+
+**Failure:** Claude Code and Codex run Stop after every turn, but the
+lifecycle treated an accepted Stop as the end of the host session: it removed
+the transaction, and every later PostToolUse from that still-live session was
+classified as a late delivery and dropped without output. A session that
+accepted one idle turn recorded nothing more (no lineage, no log prompt, no
+Stop enforcement) until the next resume or compaction. An SNP-tree Claude
+session ran about 200 detectable analysis commands and recorded one lineage
+event; replaying the same commands through the same hooks one at a time
+recorded them all, so unit tests never saw it.
+
+**Invariant:** Model the host's real event cadence, not the name of the event.
+An accepted turn closes its transaction; later work in the same host session
+opens a new one through the same locked setup a start uses, and never revives
+the accepted one. Only events that carry work reopen. Every hook path that
+declines a detected command leaves a reasoned record, so silence cannot pass
+for "nothing happened".
+
+**Regression evidence:** Accept an idle turn, then run analysis, a data
+command, and a project edit; require events, a fresh log, and a blocking Stop.
+Make the first command after an idle turn an inline write and require Stop to
+block on its file (the reopen must not snapshot after the command it serves).
+Publish a valid marker between a hook's failed validation and its reopen
+check and require the hook to record; plant a corrupt marker while a reopen
+waits and require it byte-identical afterward. Commit in the reopening command
+and require Stop to count it; age the carried baseline past any plausible
+cleanup threshold and require it still used. Report unowned gaps behind a
+corrupt marker and a foreign owner, and keep every record when the shared
+file's rewrite fails. Make a turn's only work a shell edit and require Stop to
+enforce it; record a script that deleted itself as a skip, never an event
+(file existence is part of the execution trust gate); count a repeated skip
+once; put U+2028 in a skipped command and require one intact record. Reopen
+after a long idle and require a resume to keep the transaction (accounting
+time is not the liveness clock), and require a `.living`-only turn to refresh
+the carried baseline so its note cannot excuse later work.
+Accept a working turn and require its log byte-identical while the next turn
+gets a second log. Race parallel hooks through a reopen (one transaction),
+keep another live root byte-identical, refuse a symlinked run tree, and require
+reads and non-work commands to recreate nothing. Replay a real transcript
+through the hooks in order, Stops included, and compare recorded events with
+detected commands.

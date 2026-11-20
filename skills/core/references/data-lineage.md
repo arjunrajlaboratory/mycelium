@@ -81,6 +81,74 @@ in place; the next Stop attempt rebuilds the same session manifest with any
 additional analysis events. Cleanup and raw-event rotation happen only after
 the Stop check accepts the session.
 
+Claude Code and Codex run Stop after every turn, so an accepted Stop closes a
+turn, not the host session. When the tracker finds no transaction for its host
+session and the command would record lineage, it reopens that session's
+transaction through SessionStart's locked setup (`source: reopen`) and records
+the event there; the next turn's lineage therefore lands in a new manifest
+rather than being dropped. Commands the detector does not treat as analysis
+never reopen. An accepted Stop leaves `next-turn-baseline.json` (the idle
+turn's baseline, or a fresh snapshot after a turn with work) and
+`next-turn-start-ts.tmp` (when it accepted) in the run directory. The
+reopened transaction starts from both, so the triggering command's own file
+changes and commits count as session work. A host startup of the same session
+drops them; an ended session's run directory keeps them (a few kilobytes),
+because deleting them by age would also hit a live session that idled. A
+turn whose only work was shell edits reopens nothing from PostToolUse, so a
+Stop with no transaction compares the repository (outside `.living/` and
+`.mycelium/`) against the carried baseline and, if anything changed, reopens
+and runs once more against that transaction. If only `.living/` changed, it
+refreshes the carried baseline and start time instead, so a note from a turn
+with no other work cannot count as reflection for a later turn's work. The
+carried start time bounds accounting only; the reopened marker's liveness
+timestamp is always the time of the reopen. After a turn with work, Stop takes
+the successor snapshot before removing any active state; if it cannot be
+written, Stop blocks with the transaction intact rather than leave the next
+turn without a baseline.
+
+A detected script that is gone or unreadable when the hook runs
+(`python3 tmp.py && rm tmp.py`) is not an event, since a missing file is no
+evidence of a run, but it is not silent either: the tracker records a
+`script-unreadable` skip naming the path.
+
+### Skips
+
+A command the tracker meant to record but could not leaves a skip record
+instead of nothing, so a missing event is never read as "nothing ran":
+
+| `skip_reason` | When | Where |
+|---|---|---|
+| `extractor-failed` | the per-event extractor exited nonzero (`detail`: `exit N`) | session raw stream |
+| `extractor-missing` | the extractor file is absent; recorded once per session, since no command can be classified | session raw stream, or unowned file |
+| `detector-failed` | with no transaction, the pre-reopen check crashed (`detail`: `exit N`; the detector exits 70 on an internal error, never 1, which means "not analysis") | `.mycelium/lineage-skips-unowned.ndjson` |
+| `no-transaction` | reopening was refused or failed (corrupt marker, busy lifecycle lock) | `.mycelium/lineage-skips-unowned.ndjson` |
+| `script-unreadable` | a detected script was gone or unreadable when the hook ran (`detail`: its path) | session raw stream |
+
+```json
+{"ts": "...", "kind": "skip", "skip_id": "9f1c...", "skip_reason": "extractor-failed",
+ "detail": "exit 3", "bash_cmd": "python3 analysis.py", "bash_exit": 0,
+ "agent_id": null, "agent_type": null}
+```
+
+In the session raw stream, skips are consolidated into the manifest's
+`skipped` list, and Stop's message carries a `LINEAGE GAP:` line naming the
+count and reasons. Unowned records carry `host` and `host_session_id`. That
+session's next Stop moves them into its raw stream only when it holds a valid
+transaction it owns; on every other path (no transaction, an invalid marker,
+another owner) it reports them directly in its message. The shared file is
+locked through `lineage-skips-unowned.ndjson.lock` and rewritten by atomic
+replacement, so a failed rewrite keeps every record; a rewrite that fails
+after a transfer can leave a copy in both places, so every reader counts a
+`skip_id` once, and a Stop whose move into its own stream failed blocks
+until a retry completes it, so no later turn reports the same gap again.
+Before writing to it, a hook re-checks the shared state
+directory's containment and symlinks, and refuses a payload without a valid
+host session ID. Records are ASCII-only JSON, so no Unicode line separator in
+a command can split one. A skip record holds only the command text the host already
+showed, the reason, and a short detail; never data. When the shared state
+directory itself fails its safety checks there is nowhere safe to write, and
+the skip is not recorded.
+
 ## Event schema (NDJSON, one line per detected script)
 
 ```json
@@ -175,11 +243,16 @@ captured.
     "total_action_count": 7,
     "known_exit_count": 5,
     "failed_action_count": 0,
-    "scripts_executed": ["analysis/foo.py", "(inline ab12cd34ef56)", ...]
+    "scripts_executed": ["analysis/foo.py", "(inline ab12cd34ef56)", ...],
+    "skipped_count": 0
   },
+  "skipped": [<skip 1>, ...],
   "extraction_warnings": [...]
 }
 ```
+
+`skipped` and `summary.skipped_count` were added after 0.9.5. A manifest written
+earlier has neither key: read its coverage as unknown, not as zero skips.
 
 `total_wall_seconds` sums only actions whose host payload carried a wall
 time and is `null` when none did (some hosts, including current Codex Bash

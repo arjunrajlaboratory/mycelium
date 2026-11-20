@@ -37,8 +37,6 @@ source "$HERE/mycelium-hook-lib.sh"
   # other trackers). Bail unless the repo has .living/ (mycelium-enabled).
   REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo "")
   if [[ -z "$REPO_ROOT" ]] || [[ ! -d "$REPO_ROOT/.living" ]]; then exit 0; fi
-  mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT" || exit 0
-  trap mycelium_release_session_lock EXIT
 
   AGENT_ID=$(mycelium_json_get 'agent_id' INPUT)
   AGENT_TYPE=$(mycelium_json_get 'agent_type' INPUT)
@@ -51,11 +49,6 @@ source "$HERE/mycelium-hook-lib.sh"
 
   # Locate the Python extractor helper. Default: sibling in skills/core/scripts/.
   HELPER="${MYCELIUM_DATA_HELPER:-$HERE/../scripts/extract_data_lineage_event.py}"
-  if [[ ! -f "$HELPER" ]]; then exit 0; fi
-
-  TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  EVENTS_FILE="$STATE_DIR/mycelium-data-events.tmp"
-  mkdir -p "$STATE_DIR"
 
   # Build optional flags conditionally. macOS bash 3.2 treats empty-array
   # expansion as unbound under `set -u`, so use the ${arr+"${arr[@]}"} idiom
@@ -63,20 +56,90 @@ source "$HERE/mycelium-hook-lib.sh"
   AGENT_FLAGS=()
   if [[ -n "$AGENT_ID" ]]; then AGENT_FLAGS+=(--agent-id "$AGENT_ID"); fi
   if [[ -n "$AGENT_TYPE" ]]; then AGENT_FLAGS+=(--agent-type "$AGENT_TYPE"); fi
+  EXIT_FLAGS=()
   if [[ "$BASH_EXIT" =~ ^-?[0-9]+$ ]]; then
-    AGENT_FLAGS+=(--bash-exit "$BASH_EXIT")
+    EXIT_FLAGS+=(--bash-exit "$BASH_EXIT")
+  fi
+
+  if ! mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT"; then
+    # No transaction for this host session. Hosts run Stop after every turn,
+    # so a live session whose earlier turn was accepted lands here. Reopen it
+    # only for a command that would record lineage; a command the detector
+    # rejects stays silent, exactly as before. A detector that cannot answer
+    # is a gap, not a "no", and is recorded as one.
+    if [[ ! -f "$HELPER" ]]; then
+      mycelium_record_unowned_lineage_skip "$REPO_ROOT" "$INPUT" "$COMMAND" \
+        "extractor-missing" "no command could be checked: $HELPER" once
+      exit 0
+    fi
+    CHECK_STATUS=0
+    python3 "$HELPER" \
+      --cwd "$SESSION_CWD" \
+      --ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --bash-cmd "$COMMAND" \
+      --check-execution \
+      ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} >/dev/null 2>&1 || CHECK_STATUS=$?
+    if (( CHECK_STATUS == 1 )); then
+      exit 0
+    elif (( CHECK_STATUS != 0 )); then
+      mycelium_record_unowned_lineage_skip "$REPO_ROOT" "$INPUT" "$COMMAND" \
+        "detector-failed" "exit $CHECK_STATUS"
+      exit 0
+    fi
+    if ! mycelium_reopen_post_tool_transaction "$REPO_ROOT" "$INPUT" \
+      || ! mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT"; then
+      mycelium_record_unowned_lineage_skip "$REPO_ROOT" "$INPUT" "$COMMAND" \
+        "no-transaction" "reopen refused or failed"
+      exit 0
+    fi
+  fi
+  trap mycelium_release_session_lock EXIT
+
+  TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  EVENTS_FILE="$STATE_DIR/mycelium-data-events.tmp"
+  mkdir -p "$STATE_DIR"
+
+  if [[ ! -f "$HELPER" ]]; then
+    # Without the extractor no command can be classified, so this is one gap
+    # for the session, recorded once, not a lost data command per Bash call.
+    mycelium_record_lineage_skip "$EVENTS_FILE" "$TS" "$COMMAND" \
+      "extractor-missing" "no command could be checked: $HELPER" \
+      ${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"} ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} \
+      --once true
+    exit 0
   fi
 
   # --append-to delegates the file write to Python so we get fcntl.flock-
   # protected appends. Shell `>>` is only atomic for writes <= PIPE_BUF, and
   # embedded script_source can push lines past that. Concurrent Bash tools
   # firing PostToolUse hooks in parallel would otherwise interleave bytes.
-  python3 "$HELPER" \
+  # A failed extractor used to vanish here; it now leaves a skip record in
+  # the same stream, so the manifest shows the gap instead of nothing.
+  EXTRACTOR_STATUS=0
+  EXTRACTOR_OUT=$(python3 "$HELPER" \
     --cwd "$SESSION_CWD" \
     --ts "$TS" \
     --bash-cmd "$COMMAND" \
     --append-to "$EVENTS_FILE" \
-    ${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"} 2>/dev/null || exit 0
+    ${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"} \
+    ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} 2>/dev/null) || EXTRACTOR_STATUS=$?
+  if (( EXTRACTOR_STATUS != 0 )); then
+    mycelium_record_lineage_skip "$EVENTS_FILE" "$TS" "$COMMAND" \
+      "extractor-failed" "exit $EXTRACTOR_STATUS" \
+      ${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"} ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"}
+  elif [[ -n "$EXTRACTOR_OUT" ]]; then
+    # The extractor names each detected script it could not read (gone or
+    # unreadable when the hook ran): an unknown execution, recorded as a gap.
+    while IFS= read -r UNREADABLE_LINE; do
+      [[ -n "$UNREADABLE_LINE" ]] || continue
+      UNREADABLE_PATH=$(python3 -c \
+        'import json, sys; print(json.loads(sys.argv[1])["unreadable_script"])' \
+        "$UNREADABLE_LINE" 2>/dev/null) || continue
+      mycelium_record_lineage_skip "$EVENTS_FILE" "$TS" "$COMMAND" \
+        "script-unreadable" "$UNREADABLE_PATH" \
+        ${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"} ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"}
+    done <<<"$EXTRACTOR_OUT"
+  fi
 } 2>/dev/null || true
 
 exit 0

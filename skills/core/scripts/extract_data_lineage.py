@@ -30,10 +30,21 @@ Output:
             "total_action_count": N,
             "known_exit_count": N,
             "failed_action_count": N,
-            "scripts_executed": [...]
+            "scripts_executed": [...],
+            "skipped_count": N               # commands the recorder could not record
           },
+          "skipped": [<skip 1>, ...],
           "extraction_warnings": [...]
         }
+
+Skip shape (NDJSON, `"kind": "skip"`) — written by the tracker hook when it
+meant to record a command and could not, so a missing event is never read as
+"nothing ran":
+    {"ts", "kind": "skip", "skip_id", "skip_reason": "extractor-failed" | ...,
+     "detail": "exit 3", "bash_cmd", "bash_exit", "agent_id", "agent_type"}
+A skip_id is counted once even if a retried transfer repeated the record.
+Manifests written before skips existed have no `skipped` key; read it as
+unknown, not as zero.
 
 Event shape (NDJSON, one line each) — produced by the tracker hook:
     {
@@ -199,11 +210,26 @@ def normalize_event(
     return event
 
 
+def normalize_skip(raw: dict[str, Any]) -> dict[str, Any]:
+    """Keep a skip record's known fields; it is evidence of a gap, not I/O."""
+    return {
+        "ts": raw.get("ts"),
+        "skip_id": raw.get("skip_id"),
+        "skip_reason": raw.get("skip_reason") or "unknown",
+        "detail": raw.get("detail"),
+        "bash_cmd": raw.get("bash_cmd"),
+        "bash_exit": raw.get("bash_exit"),
+        "agent_id": raw.get("agent_id"),
+        "agent_type": raw.get("agent_type"),
+    }
+
+
 def build_manifest(
     events: list[dict[str, Any]],
     session_id: str,
     repo_root: str,
     warnings: list[str],
+    skipped: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the consolidated manifest from normalized events."""
     if events:
@@ -285,7 +311,9 @@ def build_manifest(
             "known_exit_count": known_exit_count,
             "failed_action_count": failed_action_count,
             "scripts_executed": scripts_executed,
+            "skipped_count": len(skipped or []),
         },
+        "skipped": sorted(skipped or [], key=lambda s: str(s.get("ts") or "")),
         "extraction_warnings": warnings,
     }
 
@@ -294,6 +322,8 @@ def extract(events_file: Path, session_id: str, repo_root: str) -> dict[str, Any
     """End-to-end: read NDJSON events, normalize, build manifest."""
     warnings: list[str] = []
     events: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    seen_skip_ids: set[str] = set()
     if events_file.exists():
         for idx, line in enumerate(
             events_file.read_text(encoding="utf-8").splitlines()
@@ -306,12 +336,21 @@ def extract(events_file: Path, session_id: str, repo_root: str) -> dict[str, Any
             except json.JSONDecodeError as exc:
                 warnings.append(f"event[{idx}]: invalid JSON ({exc}), skipped")
                 continue
+            if isinstance(raw, dict) and raw.get("kind") == "skip":
+                # A retried transfer can repeat a record; count each skip_id once.
+                skip_id = raw.get("skip_id")
+                if skip_id and skip_id in seen_skip_ids:
+                    continue
+                if skip_id:
+                    seen_skip_ids.add(skip_id)
+                skipped.append(normalize_skip(raw))
+                continue
             normalized = normalize_event(raw, warnings, idx)
             if normalized is not None:
                 events.append(normalized)
     else:
         warnings.append(f"events file not found: {events_file}")
-    return build_manifest(events, session_id, repo_root, warnings)
+    return build_manifest(events, session_id, repo_root, warnings, skipped)
 
 
 def main() -> int:
@@ -330,7 +369,8 @@ def main() -> int:
         f"({manifest['n_actions']} actions, "
         f"{len(manifest['summary']['unique_inputs'])} inputs, "
         f"{len(manifest['summary']['unique_outputs'])} outputs, "
-        f"{len(manifest['extraction_warnings'])} warnings)"
+        f"{len(manifest['extraction_warnings'])} warnings, "
+        f"{manifest['summary']['skipped_count']} skipped)"
     )
     return 0
 

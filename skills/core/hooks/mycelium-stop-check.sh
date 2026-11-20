@@ -27,6 +27,62 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 if [ -z "$REPO_ROOT" ]; then
   exit 0
 fi
+# Report, and clear, the skips this host session's hooks recorded while it had
+# no transaction it owned. Used on the paths that end Stop without one.
+mycelium_report_unowned_lineage_gaps() {
+  local gap=""
+  gap=$(mycelium_take_unowned_lineage_skips \
+    "$REPO_ROOT" "$(mycelium_hook_host)" "$HOST_SESSION_ID") || gap=""
+  if [[ -n "$gap" ]]; then
+    mycelium_emit_context "Stop" "$gap"
+  fi
+}
+
+# With no transaction for this host session, compare the repository against
+# the baseline the previous accepted Stop carried forward (from the time it
+# recorded). Project changes outside `.living/` and `.mycelium/` mean the turn
+# did work no PostToolUse hook reopened for: reopen (status 0). Changes only
+# under `.living/` (a note written in a turn with no other work) refresh the
+# carried baseline and start time instead, so that note can never stand in
+# for the reflection a later turn's work owes. Called with the state call's
+# run directory in STATE_DIR and no locks held.
+mycelium_stop_reopen_for_shell_changes() {
+  local state_dir="${STATE_DIR:-}"
+  local carried="$state_dir/next-turn-baseline.json"
+  local helper="${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"
+  local start_ts=""
+  local changed=""
+  local changed_path=""
+  local project_changed=false
+  local collect_args=()
+  [[ "${MYCELIUM_SESSION_SCOPED:-false}" == true && -n "$state_dir" \
+    && "$state_dir" != "${MYCELIUM_SHARED_STATE_DIR:-}" ]] || return 1
+  [[ -f "$carried" && ! -L "$carried" && -f "$helper" ]] || return 1
+  start_ts=$(head -1 "$state_dir/next-turn-start-ts.tmp" 2>/dev/null || true)
+  collect_args=(collect --repo-root "$REPO_ROOT" --baseline "$carried" \
+    --exclude-prefix ".living/log/" --exclude ".living/INDEX.md")
+  if [[ "$start_ts" =~ ^[0-9]{1,18}$ ]]; then
+    collect_args+=(--start-ts "$start_ts")
+  fi
+  changed=$(python3 "$helper" "${collect_args[@]}" 2>/dev/null) || return 1
+  [[ -n "$changed" ]] || return 1
+  while IFS= read -r changed_path; do
+    case "$changed_path" in
+      ""|.living/*) ;;
+      *) project_changed=true ;;
+    esac
+  done <<<"$changed"
+  if [[ "$project_changed" == true ]]; then
+    mycelium_reopen_post_tool_transaction "$REPO_ROOT" "$INPUT"
+    return $?
+  fi
+  python3 "$helper" snapshot --repo-root "$REPO_ROOT" --output "$carried.tmp" \
+    >/dev/null 2>&1 && mv -f "$carried.tmp" "$carried" \
+    && printf '%s\n' "$(date +%s)" > "$state_dir/next-turn-start-ts.tmp"
+  rm -f "$carried.tmp"
+  return 1
+}
+
 # One state call runs the whole entry sequence below; a lock that is already
 # held falls back to the bash retry loop and resumes the remaining checks.
 #
@@ -87,6 +143,19 @@ if ! mycelium__state "$REPO_ROOT" "$INPUT" "${_STOP_OPS[@]}"; then
     # process died after both locks were taken. Never accept on that.
     mycelium_emit_stop_block \
       "STOP BLOCKED — the active session state could not be read. Active state was preserved; retry Stop."
+  elif [[ -n "$HOST_SESSION_ID" ]]; then
+    # This host session has no transaction. A turn whose only work was shell
+    # edits (`printf > model.py`) reopens nothing from PostToolUse, so check
+    # the baseline the last accepted Stop carried forward; if project files
+    # changed, reopen and run this Stop once more against that transaction.
+    if [[ -z "${MYCELIUM__STOP_REOPENED:-}" ]] \
+      && mycelium_stop_reopen_for_shell_changes; then
+      export MYCELIUM__STOP_REOPENED=1
+      exec "$HERE/mycelium-stop-check.sh" <<<"$INPUT"
+    fi
+    # Commands its hooks could not record were kept in the shared unowned-
+    # skip file; report them now rather than end the turn in silence.
+    mycelium_report_unowned_lineage_gaps
   fi
   exit 0
 fi
@@ -127,10 +196,37 @@ if [[ "$ACTIVE_MARKER_VALID" == true \
     exit 0
   elif [[ "$OWNER_SESSION_ID" != "$HOST_SESSION_ID" ]]; then
     # Child session: do not consolidate lineage, finalize/delete the primary
-    # log, or consume any of the primary's shared enforcement state.
+    # log, or consume any of the primary's shared enforcement state. Its own
+    # unowned gaps are still reported, never appended to the owner's stream.
+    mycelium_report_unowned_lineage_gaps
     exit 0
   else
     SESSION_OWNERSHIP="host-id"
+  fi
+fi
+
+# Skips this host session's hooks recorded while it had no transaction (a
+# refused reopen, a failed detector) join its raw stream when this Stop holds
+# a valid transaction it owns, so the manifest's `skipped` list and the
+# LINEAGE GAP report include them. Without one (the marker was invalid and
+# has just been removed) no manifest will be written, so they are reported
+# directly in this Stop's message instead.
+UNOWNED_GAP_MSG=""
+if [[ -n "$HOST_SESSION_ID" ]]; then
+  if [[ "$ACTIVE_MARKER_VALID" == true && "$SESSION_OWNERSHIP" == host-id ]]; then
+    # A failed move may leave copies in both the session stream and the
+    # shared file. Accepting now would archive this stream and let a later
+    # turn report the same gaps again, so block and let the retry finish the
+    # move; skip_id collapses the repeated append within this manifest.
+    if ! mycelium_take_unowned_lineage_skips "$REPO_ROOT" "$(mycelium_hook_host)" \
+      "$HOST_SESSION_ID" "$STATE_DIR/mycelium-data-events.tmp" >/dev/null; then
+      mycelium_emit_stop_block \
+        "STOP BLOCKED — this session's unowned lineage skip records could not be moved into its lineage stream (lineage-skips-unowned.ndjson rewrite failed). Active state was preserved; retry Stop."
+      exit 0
+    fi
+  else
+    UNOWNED_GAP_MSG=$(mycelium_take_unowned_lineage_skips \
+      "$REPO_ROOT" "$(mycelium_hook_host)" "$HOST_SESSION_ID") || UNOWNED_GAP_MSG=""
   fi
 fi
 
@@ -150,6 +246,116 @@ LINEAGE_EVENT_COUNT=0
 if [[ -s "$STATE_DIR/mycelium-data-events.tmp" ]]; then
   LINEAGE_EVENT_COUNT=1
 fi
+
+# Commands the lineage recorder meant to record but could not left skip
+# records in the raw stream (now the manifest's `skipped` list). Say so at
+# Stop: silence must never read as "nothing ran".
+LINEAGE_GAP_MSG=""
+if [[ -s "$STATE_DIR/mycelium-data-events.tmp" ]] \
+  && grep -q '"kind": "skip"' "$STATE_DIR/mycelium-data-events.tmp" 2>/dev/null; then
+  LINEAGE_GAP_MSG=$(python3 - "$STATE_DIR/mycelium-data-events.tmp" <<'PY' 2>/dev/null || true
+import collections, json, sys
+reasons = collections.Counter()
+seen = set()
+with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+    for line in handle:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("kind") == "skip":
+            skip_id = record.get("skip_id")
+            if skip_id in seen:
+                continue
+            if skip_id:
+                seen.add(skip_id)
+            reasons[str(record.get("skip_reason") or "unknown")] += 1
+if reasons:
+    total = sum(reasons.values())
+    detail = ", ".join(f"{reason} x{count}" for reason, count in sorted(reasons.items()))
+    print(
+        f"LINEAGE GAP: {total} data command(s) so far this session were not recorded "
+        f"({detail}). They are listed under `skipped` in this session's "
+        ".living/log/data-lineage manifest; treat their provenance as unknown."
+    )
+PY
+)
+fi
+if [[ -n "$UNOWNED_GAP_MSG" ]]; then
+  LINEAGE_GAP_MSG="${LINEAGE_GAP_MSG:+$LINEAGE_GAP_MSG }$UNOWNED_GAP_MSG"
+fi
+mycelium_with_lineage_gap() {
+  if [[ -n "$LINEAGE_GAP_MSG" ]]; then
+    printf '%s\n\n%s' "$1" "$LINEAGE_GAP_MSG"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# Hosts run Stop after every turn, so an accepted Stop usually ends a turn,
+# not the host session. The next turn's work reopens a transaction from a
+# PostToolUse hook, after its first command already ran, so SessionStart's
+# snapshot at that moment would count that command's changes as pre-existing.
+# Leave the next turn a baseline taken here instead: an idle turn's baseline
+# is still exact (nothing changed against it), and a turn with work gets a
+# fresh snapshot of where it ended. Reopen, resume, and compaction use it,
+# together with the turn's start time (next-turn-start-ts.tmp).
+TURN_HAD_WORK=1
+BASELINE_CARRIED=false
+mycelium__carry_is_scoped() {
+  [[ "${MYCELIUM_SESSION_SCOPED:-false}" == true \
+    && "$STATE_DIR" != "$MYCELIUM_SHARED_STATE_DIR" ]]
+}
+
+# Take a turn-with-work's successor snapshot before any active state is
+# removed. It fails, and the caller blocks with the transaction intact, when
+# the snapshot cannot be written: accepting without a successor baseline would
+# let the next turn's shell-only edits go unenforced.
+mycelium_prepare_carried_baseline() {
+  local helper="${MYCELIUM_SESSION_CHANGES_HELPER:-$SCRIPT_DIR/scripts/session_file_changes.py}"
+  local next="$STATE_DIR/next-turn-baseline.json.next"
+  rm -f "$next"
+  mycelium__carry_is_scoped || return 0
+  [[ "$TURN_HAD_WORK" == 0 ]] && return 0
+  [[ -f "$helper" ]] || return 1
+  python3 "$helper" snapshot --repo-root "$REPO_ROOT" --output "$next" \
+    >/dev/null 2>&1 && [[ -f "$next" && ! -L "$next" ]] || {
+    rm -f "$next"
+    return 1
+  }
+}
+
+# Install what the next turn starts from: the prepared snapshot after a turn
+# with work, or this idle turn's own baseline, which is still exact.
+mycelium_carry_baseline_forward() {
+  local baseline="$STATE_DIR/session-file-baseline.json"
+  local carried="$STATE_DIR/next-turn-baseline.json"
+  local next="$STATE_DIR/next-turn-baseline.json.next"
+  [[ "$BASELINE_CARRIED" == false ]] || return 0
+  BASELINE_CARRIED=true
+  if ! mycelium__carry_is_scoped; then
+    rm -f "$baseline"
+    return 0
+  fi
+  rm -f "$carried"
+  # The next turn begins now. Its reopened log starts from this time, not
+  # from the reopen, so a commit its first command makes is still inside the
+  # window session accounting reads commits from.
+  printf '%s\n' "$(date +%s)" > "$STATE_DIR/next-turn-start-ts.tmp" 2>/dev/null || true
+  if [[ -f "$next" && ! -L "$next" ]]; then
+    mv -f "$next" "$carried" 2>/dev/null || rm -f "$next"
+    rm -f "$baseline"
+  elif [[ "$TURN_HAD_WORK" == 0 && -f "$baseline" && ! -L "$baseline" ]]; then
+    mv -f "$baseline" "$carried" 2>/dev/null || rm -f "$baseline"
+  else
+    rm -f "$baseline"
+  fi
+}
+
+mycelium_block_for_carried_baseline() {
+  mycelium_emit_stop_block \
+    "STOP BLOCKED — the baseline this session's next turn starts from could not be written (session_file_changes.py snapshot failed). Active state was preserved; retry Stop."
+}
 
 # Accepting Stop owns final cleanup of data-lineage state. Retaining both files
 # across a blocked Stop lets later analysis append to the same manifest.
@@ -312,6 +518,7 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
       || [ "$FILES_CHANGED" -gt 0 ]; then
       ENFORCEMENT_REQUIRED=1
     fi
+    TURN_HAD_WORK=$ENFORCEMENT_REQUIRED
     if [ "$ENFORCEMENT_REQUIRED" -eq 1 ]; then
       WORK_TS=$(head -1 "$STATE_DIR/mycelium-reminded.tmp" 2>/dev/null || echo "$START_TS")
       [[ "$WORK_TS" =~ ^[0-9]+$ ]] || WORK_TS=0
@@ -325,6 +532,7 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
           | while IFS= read -r changed_path; do basename "$changed_path"; done \
           | tr '\n' ',' | sed 's/,$//; s/,/, /g')
         REASON="STOP BLOCKED — ${FILES_CHANGED} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update ${HANDOFF_PATH}."
+        REASON=$(mycelium_with_lineage_gap "$REASON")
         ESCAPED_REASON=$(mycelium_json_dumps_stdin "$REASON" 2>/dev/null)
         mycelium__fast_write "{\"decision\": \"block\", \"reason\": $ESCAPED_REASON}"$'\n' || true
         exit 0
@@ -341,7 +549,7 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
       rm -f "$ACTIVE_LOG_FILE"
       rm -f "$ACTIVE_OWNER_FILE"
       rm -f "$STATE_DIR/session-start-ts.tmp"
-      rm -f "$SESSION_BASELINE_FILE"
+      mycelium_carry_baseline_forward
       rm -f "$STATE_DIR/living-reminder-baseline.json"
       # No registry row, no finalization — clean exit (noise session)
     else
@@ -651,14 +859,21 @@ fi
 REMINDER_FILE="$STATE_DIR/mycelium-reminded.tmp"
 ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
 if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
+  if ! mycelium_prepare_carried_baseline; then
+    mycelium_block_for_carried_baseline
+    exit 0
+  fi
   rm -f "$ACTIVE_LOG_FILE"
   rm -f "$ACTIVE_OWNER_FILE"
   rm -f "$STATE_DIR/handoff-finalization-pending.tmp"
   rm -f "$STATE_DIR/session-start-ts.tmp"
-  rm -f "$STATE_DIR/session-file-baseline.json"
+  mycelium_carry_baseline_forward
   rm -f "$STATE_DIR/living-reminder-baseline.json"
   mycelium_accept_lineage_session
   mycelium_cleanup_accepted_scoped_state
+  if [[ -n "$LINEAGE_GAP_MSG" ]]; then
+    mycelium_emit_context "Stop" "$LINEAGE_GAP_MSG"
+  fi
   exit 0
 fi
 
@@ -698,6 +913,10 @@ fi
 
 # If any was updated after the post-action hook fired, protocol was followed
 if [ "$LIVING_UPDATED" = true ]; then
+  if ! mycelium_prepare_carried_baseline; then
+    mycelium_block_for_carried_baseline
+    exit 0
+  fi
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
@@ -705,10 +924,11 @@ if [ "$LIVING_UPDATED" = true ]; then
   rm -f "$ACTIVE_OWNER_FILE"
   rm -f "$STATE_DIR/handoff-finalization-pending.tmp"
   rm -f "$STATE_DIR/session-start-ts.tmp"
-  rm -f "$STATE_DIR/session-file-baseline.json"
+  mycelium_carry_baseline_forward
   rm -f "$STATE_DIR/living-reminder-baseline.json"
 
   ENHANCE_MSG=".living/ updated. The accepted handoff was published to ${MYCELIUM_SHARED_STATE_DIR}/last-session.md, and the deterministic LOG_REGISTRY summary is in place."
+  ENHANCE_MSG=$(mycelium_with_lineage_gap "$ENHANCE_MSG")
   mycelium_emit_context "Stop" "$ENHANCE_MSG"
   mycelium_accept_lineage_session
   mycelium_cleanup_accepted_scoped_state
@@ -717,6 +937,7 @@ fi
 
 # Block: work happened but .living/ was never updated
 REASON="STOP BLOCKED — ${FILE_COUNT} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update ${HANDOFF_PATH}."
+REASON=$(mycelium_with_lineage_gap "$REASON")
 
 ESCAPED_REASON=$(mycelium_json_dumps_stdin "$REASON" 2>/dev/null)
 # A host that stopped reading must not keep the hook from releasing its locks.

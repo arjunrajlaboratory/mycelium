@@ -638,8 +638,9 @@ def test_a_held_lock_falls_back_and_revalidates_after_acquiring(tmp_path):
 
     The session lock is held by a live process. While the event waits, Stop
     accepts the transaction (the marker disappears) and releases the lock.
-    The event must take the lock, find no transaction, release, and write
-    nothing.
+    The event must take the lock, find no transaction, and release it; it
+    never writes into the accepted transaction. Its real edit then opens a
+    fresh one for the same host session.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -681,8 +682,9 @@ def test_a_held_lock_falls_back_and_revalidates_after_acquiring(tmp_path):
     finally:
         holder.send_signal(signal.SIGTERM)
         holder.wait()
-    assert not (run / "mycelium-session-activity.tmp").exists()
-    assert not (run / "mycelium-reminded.tmp").exists()
+    marker = (run / "active-session-log.tmp").read_text().splitlines()
+    assert Path(marker[0]).parent == repo / ".living" / "log"
+    assert (run / "mycelium-session-activity.tmp").read_text() == "a.py\n"
     assert not (run / "mycelium-session.lock").exists()
 
 
