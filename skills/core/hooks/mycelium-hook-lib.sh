@@ -254,8 +254,8 @@ mycelium_prepare_post_tool_state() {
 # inside the critical section, before any state mutation. Also reads the
 # active marker for the caller (MYCELIUM_MARKER_*).
 #
-# With a third argument `reopen`, a caller that has work to record (an
-# analysis or data command, a project edit) reopens its own host session's
+# With a third argument `reopen`, a caller that has work to record (a
+# proven analysis run, a project edit) reopens its own host session's
 # transaction when that session has none, then validates once more. Hosts run
 # Stop after every turn, and an accepted Stop removes the transaction, so
 # without this every later turn of a live session was dropped silently until
@@ -308,7 +308,10 @@ mycelium__prepare_locked_post_tool_state_once() {
 
 # Lineage skip records. A command the recorder meant to record but could not
 # leaves one NDJSON line saying why, so a missing event is distinguishable from
-# "nothing ran". Inside a transaction the line goes into the session's own raw
+# "nothing ran".
+# The shared file also holds `"kind": "data_command"` records the data tracker
+# wrote while its host session had no transaction (see
+# mycelium-data-tracker.sh); they carry the same host and session keys. Inside a transaction the line goes into the session's own raw
 # event stream (`"kind": "skip"`), which Stop consolidates into the manifest's
 # `skipped` list and reports. Without a transaction it goes to the shared
 # `lineage-skips-unowned.ndjson` audit file, keyed by host and host session ID.
@@ -413,8 +416,9 @@ mycelium_record_unowned_lineage_skip() {
 # mycelium_take_unowned_lineage_skips SHARED HOST SID [DEST]: move this host
 # session's records out of the shared unowned-skip file. With DEST (the
 # session's raw event stream, when Stop holds a valid owned transaction) they
-# are appended there first; without it, one LINEAGE GAP sentence about them
-# is printed. The shared file is then replaced atomically under its stable
+# are appended there first; without it, its skips are taken and one LINEAGE
+# GAP sentence about them is printed, while its `data_command` records stay
+# in the file for the session's next owned Stop (they are not gaps). The shared file is then replaced atomically under its stable
 # lock, so any failure leaves every record where it was and prints nothing.
 # A rewrite that fails after the append leaves copies in both places; each
 # carries its skip_id, and every reader counts a skip_id once.
@@ -441,9 +445,12 @@ try:
             kept.append(raw)
             continue
         if (isinstance(record, dict) and record.get("host") == host
-                and record.get("host_session_id") == sid):
+                and record.get("host_session_id") == sid
+                and (dest or record.get("kind") != "data_command")):
             taken.append(record)
         else:
+            # A data_command is a record waiting for a stream, not a gap:
+            # without one it stays for the next owned Stop of the session.
             kept.append(raw)
     if not taken:
         raise SystemExit(0)

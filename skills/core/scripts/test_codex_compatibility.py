@@ -2150,6 +2150,23 @@ def test_codex_post_tool_use_ignores_mycelium_control_plane_utilities(
     assert not (repo / ".mycelium" / "mycelium-data-events.tmp").exists()
 
 
+def _analysis_events(repo: Path) -> list[dict]:
+    """Analysis events in the tracker stream; data_command records, which
+    never claim an execution, are checked and left out."""
+    path = repo / ".mycelium" / "mycelium-data-events.tmp"
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text().splitlines():
+        record = json.loads(line)
+        if record.get("kind") == "data_command":
+            assert record["io_detection"] == "unresolved"
+            assert "script" not in record
+            continue
+        events.append(record)
+    return events
+
+
 def test_documented_data_contract_command_opens_no_bookkeeping(tmp_path):
     """The data-contract guide's run command is a managed utility, not analysis."""
     guide = (
@@ -2175,7 +2192,9 @@ def test_documented_data_contract_command_opens_no_bookkeeping(tmp_path):
     assert not (repo / ".mycelium" / "mycelium-reminded.tmp").exists()
     lineage = _run_hook("mycelium-data-tracker.sh", repo, payload)
     assert lineage.returncode == 0, lineage.stderr
-    assert not (repo / ".mycelium" / "mycelium-data-events.tmp").exists()
+    # It reads a contract file, so it may leave a data_command record, but
+    # never an analysis event.
+    assert _analysis_events(repo) == []
 
     # Paired positive: the same command shape on a user script is analysis.
     script = repo / "analysis" / "check.py"
@@ -2574,7 +2593,8 @@ def test_codex_data_tracker_skips_analysis_in_failed_and_chain(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert not (repo / ".mycelium" / "mycelium-data-events.tmp").exists()
+    # The unproven run is labelled in a data_command, never an action.
+    assert _analysis_events(repo) == []
 
 
 def test_codex_data_tracker_records_proven_successful_and_chain(tmp_path):

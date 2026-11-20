@@ -4,12 +4,14 @@
 # shell-script, snakemake, sbatch, and nextflow runners), regex-
 # extracts the script's data I/O at execution time, SHA-snapshots the script
 # + touched files, and appends one NDJSON event per detected script to
-# .mycelium/mycelium-data-events.tmp under fcntl.flock. Consumed at Stop by
+# .mycelium/mycelium-data-events.tmp under fcntl.flock. Any other Bash call
+# that touches data (shell operations on data paths, inline reads the
+# detector rejects) appends one minimal `"kind": "data_command"` record. Consumed at Stop by
 # mycelium-data-lineage-stop.sh -> extract_data_lineage.py to assemble the
 # per-session manifest at .living/log/data-lineage/<sid>.json.
 #
-# Independent of the mycelium scribe / .living/-updated logic — fires only
-# when actual data analysis is detected.
+# Independent of the mycelium scribe / .living/-updated logic — records only
+# commands that run an analysis or touch data.
 #
 # Install: registered automatically by init_repo.install_claude_hooks() under
 #   PostToolUse with matcher "Bash". Innermost-wins: subproject settings need
@@ -64,13 +66,26 @@ source "$HERE/mycelium-hook-lib.sh"
   if ! mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT"; then
     # No transaction for this host session. Hosts run Stop after every turn,
     # so a live session whose earlier turn was accepted lands here. Reopen it
-    # only for a command that would record lineage; a command the detector
-    # rejects stays silent, exactly as before. A detector that cannot answer
-    # is a gap, not a "no", and is recorded as one.
+    # only for a command that would record lineage (a proven analysis run).
+    # A detector that cannot answer is a gap, not a "no", and is recorded as
+    # one. A data command (`head data/x.csv`, an inline read the detector
+    # rejects) does not reopen: it is not work the lifecycle must account
+    # for. Its minimal record waits in the shared unowned file, keyed by host
+    # session, until this session's next owned Stop moves it into a stream.
     if [[ ! -f "$HELPER" ]]; then
       mycelium_record_unowned_lineage_skip "$REPO_ROOT" "$INPUT" "$COMMAND" \
         "extractor-missing" "no command could be checked: $HELPER" once
       exit 0
+    fi
+    DATA_COMMAND_FLAGS=()
+    UNOWNED_SID=$(mycelium_json_get_optional_string 'session_id' INPUT) || UNOWNED_SID=""
+    if [[ -n "$UNOWNED_SID" ]] && mycelium_valid_session_id "$UNOWNED_SID" \
+      && UNOWNED_SHARED=$(mycelium__checked_shared_state_dir "$REPO_ROOT"); then
+      DATA_COMMAND_FLAGS=(
+        --data-command-to "$UNOWNED_SHARED/lineage-skips-unowned.ndjson"
+        --host "$(mycelium_hook_host)" --host-session-id "$UNOWNED_SID"
+        ${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"}
+      )
     fi
     CHECK_STATUS=0
     python3 "$HELPER" \
@@ -78,6 +93,7 @@ source "$HERE/mycelium-hook-lib.sh"
       --ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       --bash-cmd "$COMMAND" \
       --check-execution \
+      ${DATA_COMMAND_FLAGS[@]+"${DATA_COMMAND_FLAGS[@]}"} \
       ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} >/dev/null 2>&1 || CHECK_STATUS=$?
     if (( CHECK_STATUS == 1 )); then
       exit 0

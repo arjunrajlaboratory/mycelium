@@ -242,8 +242,15 @@ if [[ -s "$STATE_DIR/mycelium-data-events.tmp" ]]; then
     exit 0
   fi
 fi
+# Lineage counts as session work only through a record other than a
+# data_command: a look at a data file (`head data/x.csv`) is recorded, but
+# is not work that obliges a session log, as it does not reopen a
+# transaction either. Every writer emits `"kind": "data_command"` with
+# json.dumps spacing; inside a JSON string the quotes are escaped, so a
+# command that merely contains that text cannot match.
 LINEAGE_EVENT_COUNT=0
-if [[ -s "$STATE_DIR/mycelium-data-events.tmp" ]]; then
+if [[ -s "$STATE_DIR/mycelium-data-events.tmp" ]] \
+  && grep -qv '"kind": "data_command"' "$STATE_DIR/mycelium-data-events.tmp" 2>/dev/null; then
   LINEAGE_EVENT_COUNT=1
 fi
 

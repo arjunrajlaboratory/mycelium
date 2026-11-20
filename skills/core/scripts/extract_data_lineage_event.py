@@ -40,6 +40,7 @@ import re
 import shlex
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Generator, Iterator, NamedTuple
 
@@ -4510,6 +4511,502 @@ def get_git_sha(cwd: Path) -> str | None:
         return None
 
 
+# --- Data commands: a minimal record for every other Bash call on data ---
+#
+# The analysis detector above records only interpreter runs it can prove.
+# `head data/x.csv`, `cp a.tsv outputs/`, and inline reads it rejects (a
+# heredoc it cannot model, a compound `cd ...; Rscript x.R`) used to leave
+# nothing. Each such call now leaves one `"kind": "data_command"` record.
+# The record is a different kind from an analysis event on purpose: it never
+# claims that an analysis ran. It keeps the literal data-like words the
+# command text names (`named_paths`, no direction, nothing read or hashed
+# because a word in text is not evidence of access), and lists `inputs` or
+# `outputs` only where shell syntax alone makes the direction certain: a
+# redirection or a `cp`/`mv` operand in a command that exited 0.
+
+# Extensions a shell command on data commonly names, beyond the repository
+# scan's own list (which stays unchanged: it decides hashing, pattern 26).
+_DATA_COMMAND_SUFFIXES = _DATA_FILE_SUFFIXES | {
+    ".tab",
+    ".dat",
+    ".arrow",
+    ".rda",
+    ".mtx",
+    ".fa",
+    ".fasta",
+    ".fna",
+    ".fq",
+    ".fastq",
+    ".bam",
+    ".sam",
+    ".cram",
+    ".bai",
+    ".vcf",
+    ".bcf",
+    ".bed",
+    ".bedgraph",
+    ".bw",
+    ".bigwig",
+    ".gtf",
+    ".gff",
+    ".gff3",
+    ".nwk",
+    ".newick",
+    ".tre",
+    ".tree",
+    ".phy",
+    ".aln",
+    ".maf",
+    ".tif",
+    ".tiff",
+    ".fcs",
+    ".zarr",
+    ".mat",
+    ".sqlite",
+    ".db",
+}
+_DATA_COMMAND_COMPRESSION_SUFFIXES = {".gz", ".bgz", ".bz2", ".xz", ".zst", ".zip"}
+# Path segments that hold tooling or Mycelium's own state, never project data.
+_DATA_COMMAND_EXCLUDED_SEGMENTS = {
+    ".git",
+    ".living",
+    ".mycelium",
+    ".claude",
+    ".codex",
+    ".venv",
+    "venv",
+    "node_modules",
+    "site-packages",
+    "__pycache__",
+}
+# Configuration files that carry a data-like extension.
+_DATA_COMMAND_TOOLING_BASENAMES = {
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "jsconfig.json",
+    "composer.json",
+    "plugin.json",
+    "marketplace.json",
+    "hooks.json",
+    "settings.json",
+    "settings.local.json",
+    "launch.json",
+    "pyrightconfig.json",
+    "requirements.txt",
+    "constraints.txt",
+    "cmakelists.txt",
+    "license.txt",
+}
+# A candidate word: a maximal run of characters that cannot delimit a path
+# in shell or in the code a command embeds. One negated character class, so
+# `finditer` is linear in the command (pattern 42).
+_DATA_COMMAND_WORD_RX = re.compile(r"[^\s'\"`;|&<>(){}\[\],=:]+")
+DATA_COMMAND_NAMED_PATH_LIMIT = 64
+
+
+def _is_data_like_path(word: str) -> bool:
+    """Whether a literal word names data: a data file extension, or a path
+    under `data/` or `analysis/**/outputs/`. Tooling and Mycelium state are
+    not data."""
+    if not word or "://" in word or word.startswith("//"):
+        # A URL; the word scan splits `https:` from `//host/...`.
+        return False
+    segments = [segment for segment in word.split("/") if segment not in ("", ".")]
+    if not segments:
+        return False
+    if any(segment in _DATA_COMMAND_EXCLUDED_SEGMENTS for segment in segments):
+        return False
+    name = segments[-1].lower()
+    if name in _DATA_COMMAND_TOOLING_BASENAMES:
+        return False
+    stem, suffix = os.path.splitext(name)
+    if suffix in _DATA_COMMAND_COMPRESSION_SUFFIXES and stem:
+        return True
+    if suffix in _DATA_COMMAND_SUFFIXES and stem:
+        return True
+    # A data directory itself (`ls data/`, `find analysis/x/outputs`) or
+    # anything beneath one. A bare `data` with no slash is too common a word
+    # (a variable, a column) to count.
+    for index, segment in enumerate(segments):
+        if segment == "data" and (index < len(segments) - 1 or "/" in word):
+            return True
+        if segment == "outputs" and "analysis" in segments[:index]:
+            return True
+    return False
+
+
+def _data_path_mentions(command: str) -> tuple[list[str], bool]:
+    """Literal data-like words the command text names, in first-seen order.
+
+    This is a mention list, not an access list: the word may sit in a
+    comment, an `echo`, or an unexecuted branch. Returns (words, truncated).
+    """
+    seen: dict[str, None] = {}
+    for match in _DATA_COMMAND_WORD_RX.finditer(command):
+        word = match.group(0)
+        if word in seen or not _is_data_like_path(word):
+            continue
+        if len(seen) >= DATA_COMMAND_NAMED_PATH_LIMIT:
+            return list(seen), True
+        seen[word] = None
+    return list(seen), False
+
+
+# Flags that leave `cp SRC... DST` / `mv SRC... DST` operand roles unchanged.
+# Anything else (`-t DIR`, `-T`, `-s`, `-S SUFFIX`, any long option) makes the
+# argv unmodelled, and no direction is claimed (pattern 13).
+_CP_FLAGS = frozenset("fipRrvanLHP")
+_MV_FLAGS = frozenset("fivn")
+_INPUT_REDIRECTIONS = {"<"}
+_OUTPUT_REDIRECTIONS = {">", ">>", ">|", "&>", "&>>"}
+# Unquoted characters that make a word's value depend on the shell (globs,
+# braces, tilde) rather than on its literal text.
+_EXPANDING_UNQUOTED = frozenset("*?[]{}~")
+
+
+class _ShellIO(NamedTuple):
+    inputs: list[tuple[str, str]]
+    outputs: list[tuple[str, str]]
+
+
+def _literal_and_list(command: str) -> list[str] | None:
+    """Split a command that is only simple commands joined by `&&`.
+
+    Any other control operator, subshell, substitution, expansion, heredoc,
+    or unquoted glob returns None: the shell decides what those run or
+    name, so no direction is certain.
+    """
+    if "$" in command or "`" in command:
+        return None
+    masked = _unquoted_shell_text(command)
+    if masked is None:
+        return None
+    parts: list[str] = []
+    start = 0
+    index = 0
+    length = len(masked)
+    while index < length:
+        char = masked[index]
+        if char == "&" and masked[index + 1 : index + 2] == "&":
+            parts.append(command[start:index])
+            index += 2
+            start = index
+            continue
+        previous = masked[index - 1] if index else ""
+        if char == "&":
+            # `&>`, `&>>`, and descriptor duplication (`2>&1`, `<&3`) are
+            # redirections; a lone `&` backgrounds a command.
+            if masked[index + 1 : index + 2] != ">" and previous not in ("<", ">"):
+                return None
+        elif char == "|" and previous == ">":
+            pass  # `>|` is a redirection, not a pipe.
+        elif char in ";|()\n\r":
+            return None
+        elif char in _EXPANDING_UNQUOTED:
+            return None
+        elif char == "<" and masked[index + 1 : index + 2] == "<":
+            return None
+        elif char == "#":
+            # `_unquoted_shell_text` already blanked comments, so this `#`
+            # sits inside a word; harmless.
+            pass
+        index += 1
+    parts.append(command[start:])
+    return [part for part in parts]
+
+
+def _simple_command_words(fragment: str) -> tuple[list[str], list[tuple[str, str]]] | None:
+    """Return (argv, [(redirection operator, target)]) for one simple command."""
+    fragment = _strip_unquoted_shell_comments(_blank_io_numbers(fragment))
+    if fragment is None:
+        return None
+    fragment = _shield_quoted_punctuation(fragment)
+    try:
+        lexer = shlex.shlex(fragment, posix=True, punctuation_chars="&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    argv: list[str] = []
+    redirections: list[tuple[str, str]] = []
+    pending: str | None = None
+    for token in tokens:
+        if pending is not None:
+            redirections.append((pending, token.translate(_PUNCTUATION_UNSHIELD)))
+            pending = None
+        elif token in _SHELL_REDIRECTION_OPERATORS:
+            pending = token
+        elif token and set(token) <= set("&|<>"):
+            return None
+        else:
+            argv.append(token.translate(_PUNCTUATION_UNSHIELD))
+    if pending is not None:
+        return None
+    return argv, redirections
+
+
+def _resolve_shell_path(word: str, cwd: Path | None) -> Path | None:
+    path = Path(word)
+    if path.is_absolute():
+        return path
+    if cwd is None:
+        return None
+    return cwd / path
+
+
+def _copy_move_pairs(argv: list[str], cwd: Path | None) -> list[tuple[Path, Path]] | None:
+    """(source, destination file) pairs for a modelled `cp`/`mv` argv, after
+    the command ran. None when the argv or a destination is not certain."""
+    flags = _CP_FLAGS if argv[0] == "cp" else _MV_FLAGS
+    operands: list[str] = []
+    options_done = False
+    for word in argv[1:]:
+        if not options_done and word == "--":
+            options_done = True
+        elif not options_done and word.startswith("-") and word != "-":
+            if word.startswith("--") or not set(word[1:]) <= flags:
+                return None
+        else:
+            operands.append(word)
+    if len(operands) < 2:
+        return None
+    resolved = [_resolve_shell_path(word, cwd) for word in operands]
+    if any(path is None for path in resolved):
+        return None
+    *sources, destination = resolved
+    assert destination is not None
+    if len(sources) > 1 and not destination.is_dir():
+        return None
+    pairs: list[tuple[Path, Path]] = []
+    for source in sources:
+        assert source is not None
+        into = destination / source.name
+        if argv[0] == "cp":
+            # A copied directory's destination name depends on whether the
+            # destination existed beforehand, which is no longer knowable.
+            if not source.is_file():
+                return None
+            target = into if destination.is_dir() else destination
+        else:
+            # The source is gone; the moved file is either inside the
+            # destination directory or is the destination itself.
+            if into.is_file():
+                target = into
+            elif destination.is_file() and len(sources) == 1:
+                target = destination
+            else:
+                return None
+        pairs.append((source, target))
+    return pairs
+
+
+def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellIO:
+    """Paths whose direction shell syntax alone proves.
+
+    Only for a command that exited 0 and is a plain `&&` list of literal
+    simple commands: then every command ran and succeeded, so its
+    redirections were opened and a modelled `cp`/`mv` read its sources and
+    wrote its destinations. `cd DIR` with a literal existing directory moves
+    the cwd; any other cwd-changing builtin makes later relative paths
+    unknown. Everything else claims nothing.
+    """
+    io = _ShellIO([], [])
+    if bash_exit != 0:
+        return io
+    parts = _literal_and_list(command)
+    if parts is None:
+        return io
+    parsed = []
+    for part in parts:
+        words = _simple_command_words(part)
+        if words is None:
+            return io
+        parsed.append(words)
+    current: Path | None = cwd
+    for argv, redirections in parsed:
+        while argv and _ASSIGNMENT_RX.match(argv[0]):
+            argv = argv[1:]
+        for operator, target in redirections:
+            if not _is_data_like_path(target):
+                continue
+            path = _resolve_shell_path(target, current)
+            if path is None:
+                continue
+            if operator in _INPUT_REDIRECTIONS:
+                io.inputs.append((str(path), "redirection"))
+            elif operator in _OUTPUT_REDIRECTIONS:
+                io.outputs.append((str(path), "redirection"))
+        if not argv:
+            continue
+        if argv[0] in ("cp", "mv"):
+            pairs = _copy_move_pairs(argv, current)
+            for source, target in pairs or []:
+                if _is_data_like_path(str(source)) or _is_data_like_path(str(target)):
+                    io.inputs.append((str(source), argv[0]))
+                    io.outputs.append((str(target), argv[0]))
+        elif argv[0] == "cd":
+            if len(argv) == 2 and not argv[1].startswith("-"):
+                target_dir = _resolve_shell_path(argv[1], current)
+                current = target_dir if target_dir is not None and target_dir.is_dir() else None
+            else:
+                current = None
+        elif argv[0] in _CWD_AFFECTING_BUILTINS or argv[0] in ("exec", "command", "builtin"):
+            current = None
+    return io
+
+
+def _io_records(paths: list[tuple[str, str]], cwd: Path) -> list[dict]:
+    records: list[dict] = []
+    seen: set[str] = set()
+    for path, evidence in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        record = file_record(path, cwd)
+        record["evidence"] = evidence
+        records.append(record)
+    return records
+
+
+_INTERPRETER_COMMAND_RX = re.compile(
+    rf"(?:{_PYTHON_EXE_NAME}|R|Rscript|jupyter|snakemake|nextflow|sbatch)"
+)
+# Words that may precede the command word of a simple command without
+# changing which program runs.
+_COMMAND_POSITION_PREFIXES = frozenset(
+    {"do", "then", "else", "elif", "if", "while", "until", "!", "{",
+     "time", "nohup", "exec", "command", "builtin", "env"}
+)
+_SEGMENT_SPLIT_RX = re.compile(r"[;&|()\n]")
+
+
+def _names_managed_utility(text: str) -> bool:
+    """Whether text names a bundled Mycelium helper by its managed suffix.
+
+    Only gates an unproven label, never lineage: Mycelium's own tool calls
+    are not data commands (pattern 18). The plugin root is not verified, so
+    a same-named user script that is not proven to run also gets no label.
+    """
+    if _MANAGED_SCRIPTS_DIR_SUFFIX not in text:
+        return False
+    return any(suffix in text for suffix in IGNORED_SCRIPT_SUFFIXES)
+
+
+def _interpreter_runs_named(command: str) -> list[str]:
+    """Interpreter commands in command position of the unquoted shell text,
+    for structure the detector does not model (`for ...; do Rscript x.R`,
+    `python3 - <<'PY'`). A label of what the command names, not proof that
+    it ran. One split and one word pass: linear in the command."""
+    masked = _unquoted_shell_text(command)
+    if masked is None:
+        # An apostrophe in a heredoc body leaves an "unterminated" quote to
+        # this masker. Missing a label is the unsafe direction (pattern 33),
+        # so read the raw text instead and accept a spurious label.
+        masked = command
+    found: list[str] = []
+    start = 0
+    for boundary in _SEGMENT_SPLIT_RX.finditer(masked + "\n"):
+        segment = masked[start : boundary.start()]
+        raw_segment = command[start : boundary.start()]
+        start = boundary.end()
+        if _names_managed_utility(raw_segment):
+            continue
+        words = segment.split()
+        index = 0
+        while index < len(words) and (
+            words[index] in _COMMAND_POSITION_PREFIXES
+            or _ASSIGNMENT_RX.match(words[index])
+        ):
+            index += 1
+        if index >= len(words):
+            continue
+        name = words[index].rsplit("/", 1)[-1]
+        if not _INTERPRETER_COMMAND_RX.fullmatch(name):
+            continue
+        if index + 1 < len(words) and words[index + 1].startswith("="):
+            continue  # `R = ...` in embedded code, not a command
+        if (
+            index + 2 < len(words)
+            and words[index + 1] == "-m"
+            and words[index + 2] in IGNORED_PYTHON_MODULES
+        ):
+            continue  # tooling (`python -m pytest`), as the detector treats it
+        label = " ".join(words[index : index + 2])
+        if "<<" in segment and "<<" not in label:
+            label += " <<heredoc"
+        if label not in found:
+            found.append(label)
+        if len(found) >= DATA_COMMAND_NAMED_PATH_LIMIT:
+            break
+    return found
+
+
+def _unproven_analysis_candidates(command: str, cwd: Path) -> list[str]:
+    """Analysis runs the command names when the detector proves none: what
+    the detector finds without execution proof, else interpreter commands
+    in shell structure it does not model. The command may not run them."""
+    try:
+        detections = (
+            _detect_scripts_with_cwd(command, cwd, require_execution_evidence=False)
+            if is_analysis(command)
+            else []
+        )
+    except Exception:  # noqa: BLE001 - a label only; never fail the record
+        detections = []
+    if not detections:
+        return _interpreter_runs_named(command)
+    candidates: list[str] = []
+    for script_path, inline_source, _ in detections:
+        if isinstance(script_path, UnresolvedScript):
+            label = script_path.candidate
+        elif script_path is not None:
+            label = str(script_path)
+            if _names_managed_utility(label):
+                continue
+        elif inline_source is not None:
+            label = "(inline)"
+        else:
+            continue
+        if label not in candidates:
+            candidates.append(label)
+    return candidates
+
+
+def build_data_command_event(args: argparse.Namespace, cwd: Path) -> dict | None:
+    """One minimal `data_command` record for a Bash call that touches data
+    and has no analysis event, or None when the call names no data and no
+    analysis run."""
+    named, truncated = _data_path_mentions(args.bash_cmd)
+    candidates = _unproven_analysis_candidates(args.bash_cmd, cwd)
+    if not named and not candidates:
+        return None
+    io = _certain_shell_io(args.bash_cmd, cwd, getattr(args, "bash_exit", None))
+    signals = []
+    if named:
+        signals.append("data-path")
+    if candidates:
+        signals.append("analysis-unproven")
+    return {
+        "ts": args.ts,
+        "kind": "data_command",
+        "event_id": uuid.uuid4().hex,
+        "agent_id": args.agent_id or None,
+        "agent_type": args.agent_type or None,
+        "bash_cmd": args.bash_cmd,
+        "bash_exit": getattr(args, "bash_exit", None),
+        "cwd": str(cwd),
+        "signals": signals,
+        "named_paths": named,
+        "named_paths_truncated": truncated,
+        "analysis_candidates": candidates,
+        "inputs": _io_records(io.inputs, cwd),
+        "outputs": _io_records(io.outputs, cwd),
+        "io_detection": "unresolved",
+    }
+
+
 def build_event_for_detection(
     detection: tuple[Path | UnresolvedScript | None, str | None],
     args: argparse.Namespace,
@@ -4677,6 +5174,52 @@ def write_events(lines: list[str], append_to: Path | None) -> None:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+def _append_with_stable_lock(path: Path, line: str) -> None:
+    """Append under `<path>.lock`, the lock Stop takes before it rewrites
+    the shared file by atomic replacement; never through a symlink."""
+    lock_fd = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "ab") as handle:
+            handle.write(line.encode("ascii"))
+            handle.flush()
+    finally:
+        os.close(lock_fd)
+
+
+def _record_unowned_data_command(args: argparse.Namespace, cwd: Path) -> None:
+    """Keep a data_command for a host session that has no transaction.
+
+    It waits in the shared file until that session's next owned Stop moves
+    it into the session's stream. A record that cannot be built becomes a
+    skip there instead, so the check's answer never changes and the gap is
+    still reported.
+    """
+    keys = {"host": args.host, "host_session_id": args.host_session_id}
+    try:
+        event = build_data_command_event(args, cwd)
+    except Exception as exc:  # noqa: BLE001 - recorded as a gap below
+        event = {
+            "ts": args.ts,
+            "kind": "skip",
+            "skip_id": uuid.uuid4().hex,
+            "skip_reason": "data-command-failed",
+            "detail": type(exc).__name__,
+            "bash_cmd": args.bash_cmd,
+            "agent_id": args.agent_id or None,
+            "agent_type": args.agent_type or None,
+            "bash_exit": args.bash_exit,
+        }
+    if event is None:
+        return
+    event.update(keys)
+    try:
+        _append_with_stable_lock(args.data_command_to, json.dumps(event) + "\n")
+    except OSError:
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cwd", required=True)
@@ -4707,22 +5250,47 @@ def main() -> int:
         default=None,
         help="Append NDJSON to this file under fcntl.flock. Default: stdout.",
     )
+    ap.add_argument(
+        "--data-command-to",
+        type=Path,
+        default=None,
+        help=(
+            "With --check-execution: when no analysis run is proven, append "
+            "this call's data_command record (if it touches data) to this "
+            "shared file under its stable `.lock` sibling, keyed by --host "
+            "and --host-session-id. The exit status is unchanged."
+        ),
+    )
+    ap.add_argument("--host", default=None)
+    ap.add_argument("--host-session-id", default=None)
     args = ap.parse_args()
-
-    if not is_analysis(args.bash_cmd):
-        return 1 if args.check_execution or args.check_post_action else 0
+    if args.data_command_to is not None and not (
+        args.check_execution and args.host and args.host_session_id
+    ):
+        ap.error("--data-command-to needs --check-execution, --host, and --host-session-id")
 
     cwd = Path(args.cwd)
-    detections = _detect_scripts_with_cwd(
-        args.bash_cmd,
-        cwd,
-        bash_exit=args.bash_exit,
-        require_execution_evidence=True,
-        include_inline=not args.check_post_action,
-    )
+    detections = []
+    if is_analysis(args.bash_cmd):
+        detections = _detect_scripts_with_cwd(
+            args.bash_cmd,
+            cwd,
+            bash_exit=args.bash_exit,
+            require_execution_evidence=True,
+            include_inline=not args.check_post_action,
+        )
     if args.check_execution or args.check_post_action:
-        return 0 if detections else 1
+        if detections:
+            return 0
+        if args.data_command_to is not None:
+            _record_unowned_data_command(args, cwd)
+        return 1
     if not detections:
+        # No proven analysis: a call that still touches data leaves one
+        # minimal record of its own kind, never an analysis event.
+        event = build_data_command_event(args, cwd)
+        if event is not None:
+            write_events([json.dumps(event) + "\n"], args.append_to)
         return 0
 
     # git_sha is the same for every detection in this command — compute once.

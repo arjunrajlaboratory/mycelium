@@ -981,3 +981,33 @@ keep another live root byte-identical, refuse a symlinked run tree, and require
 reads and non-work commands to recreate nothing. Replay a real transcript
 through the hooks in order, Stops included, and compare recorded events with
 detected commands.
+
+## 45. A recorder that writes only what it can prove leaves the rest silent
+
+**Failure:** The lineage detector records an interpreter run only when it can
+prove the run executed, which is the right bar for claiming an analysis. But
+every Bash call below that bar left nothing: `head data/x.csv`, `zcat | cut`,
+`cp a.tsv outputs/`, a heredoc-fed `python3 - <<'PY'` reading a CSV, an
+`Rscript` inside a `for` loop. Replaying the SNP-tree and AP1 transcripts,
+19.6% of data-touching commands left an event; the rest were
+indistinguishable from "nothing happened", which undercounts every look at the
+data. Raising the detector's recall instead would have broken patterns 5, 13,
+15, and 33 by claiming executions from text.
+
+**Invariant:** Separate "this ran, with this I/O" from "this call touched
+data". The second gets its own record kind that no consumer can mistake for
+the first: mentions without direction, a label for unproven runs, and
+direction only where the shell's own grammar proves it (redirections and
+modelled `cp`/`mv` in an exit-0 `&&` list of literal words). The weaker record
+must not drive lifecycle decisions meant for the stronger one (reopening,
+post-action prompts, session-work accounting), and a record that waits for a
+home is not a gap.
+
+**Regression evidence:** Pair every positive with its quoted, commented,
+piped, `||`, `;`, backgrounded, expanded, globbed, heredoc, `cp -t`, and
+unknown-exit neighbor; require mentions to stay directionless and analysis
+runs to stay actions. Assert the record never reopens, never prompts, and is
+not session work; park it without a transaction, keep it through a Stop with
+none, and move it at the next owned Stop. Bound scan time on long words,
+quoted runs, `&&` chains, many operands, and long heredocs, and replay real
+transcripts against an independent classifier.

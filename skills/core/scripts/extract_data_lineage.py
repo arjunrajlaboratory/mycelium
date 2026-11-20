@@ -31,9 +31,11 @@ Output:
             "known_exit_count": N,
             "failed_action_count": N,
             "scripts_executed": [...],
-            "skipped_count": N               # commands the recorder could not record
+            "skipped_count": N,              # commands the recorder could not record
+            "data_command_count": N          # other Bash calls that touched data
           },
           "skipped": [<skip 1>, ...],
+          "data_commands": [<data command 1>, ...],
           "extraction_warnings": [...]
         }
 
@@ -45,6 +47,25 @@ meant to record a command and could not, so a missing event is never read as
 A skip_id is counted once even if a retried transfer repeated the record.
 Manifests written before skips existed have no `skipped` key; read it as
 unknown, not as zero.
+
+Data command shape (NDJSON, `"kind": "data_command"`) — one per Bash call that
+touched data without a proven analysis run (`head data/x.csv`, `cp a.tsv
+outputs/`, an inline read the detector rejects). It is NOT an action: it never
+claims that an analysis ran, so it is kept apart from `actions`:
+    {"ts", "kind": "data_command", "event_id", "bash_cmd", "bash_exit", "cwd",
+     "agent_id", "agent_type",
+     "signals": ["data-path", "analysis-unproven"],
+     "named_paths": [...],            # literal data-like words in the text;
+                                      # mentions, not accesses; no direction
+     "named_paths_truncated": bool,
+     "analysis_candidates": [...],    # interpreter runs named but not proven
+     "inputs":  [{"path", "sha256", "evidence": "redirection"|"cp"|"mv"}],
+     "outputs": [{"path", "sha256", "evidence": ...}],  # only where shell
+                                      # syntax proves direction, exit 0
+     "io_detection": "unresolved"}
+An event_id is counted once even if a retried transfer repeated the record.
+Manifests written before data commands existed have no `data_commands` key;
+read it as unknown, not as zero.
 
 Event shape (NDJSON, one line each) — produced by the tracker hook:
     {
@@ -224,12 +245,34 @@ def normalize_skip(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalize_data_command(raw: dict[str, Any]) -> dict[str, Any]:
+    """Keep a data command's known fields. Its file records were hashed at
+    hook time; only missing hashes are filled, as for actions."""
+    return {
+        "ts": raw.get("ts"),
+        "event_id": raw.get("event_id"),
+        "agent_id": raw.get("agent_id"),
+        "agent_type": raw.get("agent_type"),
+        "bash_cmd": raw.get("bash_cmd"),
+        "bash_exit": raw.get("bash_exit"),
+        "cwd": raw.get("cwd"),
+        "signals": list(raw.get("signals") or []),
+        "named_paths": list(raw.get("named_paths") or []),
+        "named_paths_truncated": bool(raw.get("named_paths_truncated")),
+        "analysis_candidates": list(raw.get("analysis_candidates") or []),
+        "inputs": [enrich_file_record(r) for r in (raw.get("inputs") or [])],
+        "outputs": [enrich_file_record(r) for r in (raw.get("outputs") or [])],
+        "io_detection": "unresolved",
+    }
+
+
 def build_manifest(
     events: list[dict[str, Any]],
     session_id: str,
     repo_root: str,
     warnings: list[str],
     skipped: list[dict[str, Any]] | None = None,
+    data_commands: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the consolidated manifest from normalized events."""
     if events:
@@ -312,8 +355,12 @@ def build_manifest(
             "failed_action_count": failed_action_count,
             "scripts_executed": scripts_executed,
             "skipped_count": len(skipped or []),
+            "data_command_count": len(data_commands or []),
         },
         "skipped": sorted(skipped or [], key=lambda s: str(s.get("ts") or "")),
+        "data_commands": sorted(
+            data_commands or [], key=lambda d: str(d.get("ts") or "")
+        ),
         "extraction_warnings": warnings,
     }
 
@@ -324,6 +371,8 @@ def extract(events_file: Path, session_id: str, repo_root: str) -> dict[str, Any
     events: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     seen_skip_ids: set[str] = set()
+    data_commands: list[dict[str, Any]] = []
+    seen_event_ids: set[str] = set()
     if events_file.exists():
         for idx, line in enumerate(
             events_file.read_text(encoding="utf-8").splitlines()
@@ -345,12 +394,22 @@ def extract(events_file: Path, session_id: str, repo_root: str) -> dict[str, Any
                     seen_skip_ids.add(skip_id)
                 skipped.append(normalize_skip(raw))
                 continue
+            if isinstance(raw, dict) and raw.get("kind") == "data_command":
+                event_id = raw.get("event_id")
+                if event_id and event_id in seen_event_ids:
+                    continue
+                if event_id:
+                    seen_event_ids.add(event_id)
+                data_commands.append(normalize_data_command(raw))
+                continue
             normalized = normalize_event(raw, warnings, idx)
             if normalized is not None:
                 events.append(normalized)
     else:
         warnings.append(f"events file not found: {events_file}")
-    return build_manifest(events, session_id, repo_root, warnings, skipped)
+    return build_manifest(
+        events, session_id, repo_root, warnings, skipped, data_commands
+    )
 
 
 def main() -> int:
@@ -370,7 +429,8 @@ def main() -> int:
         f"{len(manifest['summary']['unique_inputs'])} inputs, "
         f"{len(manifest['summary']['unique_outputs'])} outputs, "
         f"{len(manifest['extraction_warnings'])} warnings, "
-        f"{manifest['summary']['skipped_count']} skipped)"
+        f"{manifest['summary']['skipped_count']} skipped, "
+        f"{manifest['summary']['data_command_count']} data commands)"
     )
     return 0
 
