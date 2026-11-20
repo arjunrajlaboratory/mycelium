@@ -123,7 +123,9 @@ python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/data_contract_check.py
 ```
 
 The script ships with Mycelium as a managed utility, so running it opens no
-post-action cycle and leaves no lineage event.
+post-action cycle and leaves no analysis lineage event. Because the command
+names a data-like file, it may leave a minimal `data_command` record (see
+`data-lineage.md`), which never claims an analysis ran.
 
 The output has one line per check (`PASS`, `WARN`, `GAP`, or `BLOCK`, with the
 rows it ran on). A `batch_confounding` check adds its batch-by-contrast table,

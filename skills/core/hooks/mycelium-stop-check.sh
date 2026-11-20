@@ -242,8 +242,15 @@ if [[ -s "$STATE_DIR/mycelium-data-events.tmp" ]]; then
     exit 0
   fi
 fi
+# Lineage counts as session work only through a record other than a
+# data_command: a look at a data file (`head data/x.csv`) is recorded, but
+# is not work that obliges a session log, as it does not reopen a
+# transaction either. Every writer emits `"kind": "data_command"` with
+# json.dumps spacing; inside a JSON string the quotes are escaped, so a
+# command that merely contains that text cannot match.
 LINEAGE_EVENT_COUNT=0
-if [[ -s "$STATE_DIR/mycelium-data-events.tmp" ]]; then
+if [[ -s "$STATE_DIR/mycelium-data-events.tmp" ]] \
+  && grep -qv '"kind": "data_command"' "$STATE_DIR/mycelium-data-events.tmp" 2>/dev/null; then
   LINEAGE_EVENT_COUNT=1
 fi
 
@@ -373,6 +380,17 @@ mycelium_accept_lineage_session() {
 
   if [[ -f "$events_file" ]]; then
     local prev_dir="$MYCELIUM_SHARED_STATE_DIR/mycelium-data-events-prev"
+    local first_event_id=""
+    # A stream of only data commands belongs to a turn that may release its
+    # session number, which the next session can take again; name its raw
+    # archive by the stream's first event_id too, as its manifest is.
+    if ! grep -qv '"kind": "data_command"' "$events_file" 2>/dev/null; then
+      first_event_id=$(grep -o '"event_id": "[0-9a-f]*"' "$events_file" 2>/dev/null \
+        | head -1 | sed -E 's/.*: "([0-9a-f]*)"/\1/' | cut -c1-12 || true)
+      if [[ -n "$first_event_id" ]]; then
+        session_id="${session_id}-data-commands-${first_event_id}"
+      fi
+    fi
     mkdir -p "$prev_dir"
     mv "$events_file" "$prev_dir/${session_id}.tmp"
     # Keep only the 20 most recent raw-event archives.

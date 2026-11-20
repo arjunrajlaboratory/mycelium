@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -442,6 +443,23 @@ def test_detect_scripts_empty_for_non_analysis(tmp_path: Path) -> None:
 # ---------- managed-utility exclusion (control-plane scripts) ----------
 
 _SHIPPED_SCRIPTS_DIR = Path(__file__).parent
+
+
+def _analysis_events(target: Path) -> list[dict]:
+    """Analysis events in an events file. A command with no proven analysis
+    may still leave a `data_command` record; that record must never claim
+    an execution, so it is checked here and left out of the result."""
+    if not target.exists():
+        return []
+    events = []
+    for line in target.read_text().splitlines():
+        record = json.loads(line)
+        if record.get("kind") == "data_command":
+            assert record["io_detection"] == "unresolved"
+            assert "script" not in record and "script_sha256" not in record
+            continue
+        events.append(record)
+    return events
 
 
 def _shipped_helper_relpaths() -> list[str]:
@@ -2185,9 +2203,9 @@ def test_main_tracks_only_proven_executed_successful_or_alternatives(
     )
 
     assert result.returncode == 0, result.stderr
-    assert target.exists() is expected_event
+    assert bool(_analysis_events(target)) is expected_event
     if expected_event:
-        assert json.loads(target.read_text())["script"] == str(script)
+        assert _analysis_events(target)[0]["script"] == str(script)
 
 
 def test_main_resets_execution_context_after_list_separator(tmp_path: Path) -> None:
@@ -2285,7 +2303,7 @@ def test_main_rejects_unproven_shell_text_matches(
     )
 
     assert result.returncode == 0, result.stderr
-    assert not target.exists()
+    assert _analysis_events(target) == []
 
 
 @pytest.mark.parametrize(
@@ -2351,7 +2369,7 @@ def test_main_rejects_terminal_interpreter_options_before_analysis_payload(
     )
 
     assert result.returncode == 0, result.stderr
-    assert not target.exists()
+    assert _analysis_events(target) == []
 
 
 def test_jupyter_terminal_option_text_in_a_value_is_not_a_terminal_mode(
@@ -2463,7 +2481,7 @@ def test_main_rejects_partial_shell_words_and_env_split_strings(
     )
 
     assert result.returncode == 0, result.stderr
-    assert not target.exists()
+    assert _analysis_events(target) == []
 
 
 @pytest.mark.parametrize(
@@ -2545,7 +2563,7 @@ def test_main_rejects_missing_wrapper_working_directory(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert not target.exists()
+    assert _analysis_events(target) == []
 
 
 def test_detect_script_accepts_redirection_after_complete_shell_word(
@@ -2631,7 +2649,7 @@ def test_main_does_not_infer_failed_and_branch_after_unknown_prefix(
     )
 
     assert result.returncode == 0, result.stderr
-    assert not target.exists()
+    assert _analysis_events(target) == []
 
 
 @pytest.mark.parametrize(

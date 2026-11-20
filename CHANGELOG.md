@@ -39,6 +39,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LINEAGE GAP:` line. Older manifests lack these keys; read them as unknown
   coverage.
 
+### Added
+
+- **Every Bash call that touches data now leaves a lineage record.** The
+  analysis detector records only interpreter runs it can prove, so shell data
+  operations (`head`, `zcat`, `awk`, `cut`, `cp`, `mv` on data files) and
+  inline reads it rejects (heredoc-fed `python3 - <<'PY'`, `Rscript` in a
+  loop) left nothing: 15-37% of data-touching commands in the SNP-tree and
+  AP1 transcripts. Each such call now writes one `"kind": "data_command"`
+  record with `io_detection: "unresolved"`, the literal data-like paths its
+  text names (mentions, without direction), any unproven interpreter runs,
+  and `inputs`/`outputs` only where shell syntax proves direction (a
+  redirection, or `cp`/`mv`, in a command that exited 0). It never claims an
+  analysis ran. Manifests list them in a new `data_commands` key with
+  `summary.data_command_count`, apart from `actions`. Replaying the SNP-tree
+  and AP1 transcripts, 97.7% of data-touching commands now leave an event or
+  a skip (19.6% before). Data commands do not reopen a transaction (the
+  reopen above is for analysis runs and project edits), do not open a
+  post-action cycle, and are not session work. Without a transaction they
+  are parked in `.mycelium/lineage-skips-unowned.ndjson` until that
+  session's next Stop, which moves them into its own stream or, without
+  one, writes them to a manifest of their own. A stream holding only data
+  commands gets a manifest named
+  `data-commands-<host>-<host session>-<event id>.json`, never a session
+  number an idle turn releases. Older manifests lack the new keys; read
+  them as unknown. Existing projects need no migration.
+
 ## [0.9.5] - 2026-11-16
 
 ### Fixed

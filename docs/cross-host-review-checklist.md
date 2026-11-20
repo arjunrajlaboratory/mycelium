@@ -154,10 +154,10 @@ hook, filesystem, or lifecycle boundaries.
       mutation, so an event queued before accepted Stop cannot write afterward.
 - [ ] A host-identified PostToolUse event with no active transaction never
       writes into an accepted or another root's transaction. Hosts run Stop
-      after every turn, so an event carrying work (an analysis or data command,
+      after every turn, so an event carrying work (a proven analysis run,
       a project edit) reopens its own host session's transaction through
-      SessionStart's locked setup (`source: reopen`); reads and non-work
-      commands never reopen. A marker found on the way is always handed back
+      SessionStart's locked setup (`source: reopen`); reads, non-work
+      commands, and `data_command` records never reopen. A marker found on the way is always handed back
       to locked validation (a parallel hook's fresh transaction is used, a
       corrupt or foreign one fails closed), and reopen mode never cleans or
       replaces an existing marker. The reopened transaction starts from the
@@ -363,6 +363,17 @@ hook, filesystem, or lifecycle boundaries.
       and session log have been written successfully.
 - [ ] Extractor failure blocks Stop visibly and preserves the active marker,
       baseline, session ID, and raw events for a deterministic retry.
+- [ ] Every Bash call that touches data leaves an analysis event, a
+      `data_command` record, or a skip. A `data_command` never claims an
+      execution: data-like words in the text are `named_paths` without
+      direction, and `inputs`/`outputs` appear only where shell syntax proves
+      direction in a command that exited 0. It never reopens a transaction,
+      opens a post-action cycle, or counts as session work. Without a
+      transaction it is parked, keyed by host session, and that session's
+      next Stop moves it into an owned stream or writes it to a manifest of
+      its own; it is never reported or cleared as a gap. A stream of only
+      data commands is never named by a session number that an idle turn
+      releases.
 
 ## 8. Concurrency, Atomicity, and Filesystem Safety
 
@@ -523,7 +534,8 @@ exercise them.
 | Runtime state is malformed or partially written | The hook fails visibly without destructive cleanup or out-of-project writes. |
 | The abandoned raw-lineage event path is a nonempty directory or other non-regular object | SessionStart leaves the object, active marker, and owner intact and performs no archive mutation. |
 | A script names a direct relative input, or an absolute external input shares a basename with repository data | Lineage records the authoritative static path exactly once and does not claim repository recovery. |
-| A live host session runs analysis, a data command, or a project edit after an earlier turn's Stop was accepted (including an edit queued on the session lock while Stop accepted) | The event never writes into the accepted transaction; it reopens a fresh transaction for its own host session, with a new log, lineage, and Stop enforcement. Parallel hooks for one call reopen exactly one transaction, another root's live state stays byte-identical, and reads, non-work commands, `.living`/`.mycelium` edits, and unsafe state never reopen. |
+| A live host session runs analysis or makes a project edit after an earlier turn's Stop was accepted (including an edit queued on the session lock while Stop accepted) | The event never writes into the accepted transaction; it reopens a fresh transaction for its own host session, with a new log, lineage, and Stop enforcement. Parallel hooks for one call reopen exactly one transaction, another root's live state stays byte-identical, and reads, non-work commands, `.living`/`.mycelium` edits, and unsafe state never reopen. |
+| A Bash call touches data without a proven analysis run (`head data/x.csv`, `cp a.csv outputs/`, a heredoc-fed `python3 -`), inside a transaction and after an accepted Stop | One `data_command` record with `io_detection: "unresolved"`; direction only for redirections and modelled `cp`/`mv` in an exit-0 `&&` list; quoted, commented, piped, backgrounded, expanded, globbed, `cp -t`, `cp -n`, and unknown-exit neighbors claim nothing; no reopen, no post-action cycle, no session log; parked and written by that session's next Stop; a data-only turn's manifest survives the next session reusing its log number. |
 | The lineage extractor fails or is missing for a detected command | A skip record with the reason reaches the session's raw stream and the manifest's `skipped` list, and Stop's message carries a LINEAGE GAP line. |
 | A second identified root SessionStart arrives while the first root is live | Both roots receive distinct host-scoped run directories, markers, logs, baselines, lineage, and Stop enforcement; neither can mutate or clean the other's state. |
 | A session ID is numeric, Boolean, object/list-valued, `.`, or `..` | SessionStart creates no runtime directory, log, or shared file; a present invalid value never aliases another namespace or downgrades to legacy state. |
