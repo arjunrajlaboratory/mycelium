@@ -607,6 +607,24 @@ def test_real_app_unresolved_command_is_logged_unverified_and_accepted_without_l
     assert not (repo / ".living/log/data-lineage").exists()
 
 
+def test_unverified_provenance_note_never_follows_a_symlinked_log_directory(real_cycle, tmp_path):
+    """Codex P1: the note's containment check resolved symlinks, so a `.living/log`
+    replaced by a symlink let Stop append outside the repository."""
+    repo, payload, run, state = real_cycle
+    write_transcript(Path(payload["transcriptPath"]), [USER, {"step_index": 2, "source": "MODEL",
+                     "type": "GENERIC", "status": "DONE"}])
+    app("PostToolUse", post(payload, 2, "run_command", {"CommandLine": "python3 analysis.py"}))
+    outside = tmp_path / "outside-log"
+    (repo / ".living/log").rename(outside)
+    (repo / ".living/log").symlink_to(outside, target_is_directory=True)
+    before = {p.name: p.read_bytes() for p in outside.iterdir()}
+    try:
+        app("Stop", stop(payload))
+    except Exception:
+        pass  # the shared hooks may refuse the unsafe state; only the write matters here
+    assert {p.name: p.read_bytes() for p in outside.iterdir()} == before
+
+
 @pytest.mark.parametrize("helper", ["missing", "crash"])
 def test_app_strict_capture_missing_or_failing_extractor_is_nonzero(real_cycle, tmp_path, helper):
     repo, payload, run, state = real_cycle

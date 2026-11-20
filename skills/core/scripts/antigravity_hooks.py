@@ -272,14 +272,19 @@ def append_session_log(root, session_id, entry, host=None):
         return False
     lines = marker.read_text(encoding="utf-8").splitlines()
     log = Path(lines[0]) if lines else None
-    log_dir = os.path.realpath(root / ".living/log")
-    if (log is None or not log.is_absolute() or os.path.dirname(os.path.realpath(log)) != log_dir or
-            log.suffix != ".md"):
+    try:  # every component from the project root down, without following a symlink
+        log_dir = ensure_safe_project_directory(root, ".living/log", create=False)
+    except ValueError:
         return False
-    ensure_safe_regular_file(log)
-    if not log.is_file():
+    if (log is None or not log.is_absolute() or log.suffix != ".md" or not log_dir.is_dir() or
+            os.path.realpath(log.parent) != str(log_dir)):
         return False
-    with log.open("a", encoding="utf-8") as stream:
+    target = log_dir / log.name  # written only through the validated directory
+    ensure_safe_regular_file(target)
+    if not target.is_file():
+        return False
+    descriptor = os.open(target, os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
         stream.write(entry)
     return True
 
