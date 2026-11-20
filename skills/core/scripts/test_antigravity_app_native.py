@@ -233,6 +233,8 @@ REJECTED = {
     "row-bypass-sandbox-true": dict(args={"CommandLine": COMMAND, "WaitMsBeforeAsync": 1, "BypassSandbox": True,
                                           "toolSummary": "synthetic"}),
     "row-bypass-sandbox-not-bool": dict(args={"CommandLine": COMMAND, "BypassSandbox": 0}),
+    "row-daemon-true": dict(args={"CommandLine": COMMAND, "IsDaemon": True}),
+    "row-daemon-not-bool": dict(args={"CommandLine": COMMAND, "IsDaemon": 0}),
     "wrong-conversation": dict(cascade=OTHER_CID),
     "source-step-before": dict(source=4),
     "source-step-after": dict(source=6),
@@ -250,9 +252,10 @@ def test_untrusted_native_command_evidence_is_unresolved(native, case):
     db.put(5, command_payload(str(repo), **REJECTED[case]), status=3 if case == "header-status-disagrees" else None)
     app("PostToolUse", cmd(payload))
     assert_unresolved(repo, calls)
-    for attempt in range(ag.MAX_STOP_RETRIES + 1):
-        app("Stop", stop(payload, executionNum=attempt))
-    assert state_of(repo)["status"] == "incomplete"
+    assert app("Stop", stop(payload)) == {}  # recorded, never held
+    turn = state_of(repo)
+    assert turn["status"] == "accepted" and list(turn["unverified_provenance"]) == ["5"]
+    assert data_calls(calls) == []
 
 
 @pytest.mark.parametrize("case", ["outside-root", "traversal", "relative", "linked", "missing-dir"])
@@ -767,3 +770,33 @@ def test_stop_settles_pending_commands_within_the_shared_deadline(native, monkey
             break
     done = [c for c in data_calls(calls)]
     assert len(done) == 6 and state_of(repo)["status"] == "accepted"
+
+
+def test_real_app_2_32_1_run_command_with_explicit_false_flags_is_verified(native):
+    """Regression from a live App 2.32.1 audit: the model sent every run_command with explicit
+    BypassSandbox false and IsDaemon false (these exact argument keys and values). IsDaemon was
+    not an allowed key, so every command stayed unresolved and Stop could never accept."""
+    home, repo, payload, calls, db = native
+    line = "env -C analysis/example python3 run.py --help"
+    args = {"BypassSandbox": False, "CommandLine": line, "IsDaemon": False, "WaitMsBeforeAsync": 10000,
+            "toolSummary": "Run positive probe command"}
+    db.put(12, command_payload(str(repo), step=12, command=line, args=args, call_id="call_17710939438254987027"))
+    app("PostToolUse", post(payload, 12, "run_command", args))
+    turn = state_of(repo)
+    assert turn.get("unresolved_commands", {}) == {} and turn["app_bindings"] == {"12": "call_17710939438254987027"}
+    assert data_calls(calls) == [(h, str(repo), {"command": line}, {"exit_code": 0}) for h in DATA_HOOKS]
+
+
+def test_command_still_running_at_the_final_stop_allowance_is_recorded_unverified(native):
+    """A command the App never marks terminal held Stop forever (then ended incomplete with
+    nothing published). It blocks only within the allowance, then is recorded as unverified."""
+    home, repo, payload, calls, db = native
+    db.put(5, command_payload(str(repo), status=2, completed=False, typed=False, block=False))
+    app("PostToolUse", cmd(payload))
+    for attempt in range(ag.MAX_STOP_RETRIES):
+        blocked = app("Stop", stop(payload, executionNum=attempt))
+        assert blocked["decision"] == "continue" and "still running" in blocked["reason"]
+    assert app("Stop", stop(payload, executionNum=ag.MAX_STOP_RETRIES)) == {}
+    turn = state_of(repo)
+    assert turn["status"] == "accepted" and turn["app_pending"] == {}
+    assert turn["unverified_provenance"] == {"5": ag.FINAL_PENDING} and data_calls(calls) == []

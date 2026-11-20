@@ -26,8 +26,10 @@ terminal block agree on command, canonical working directory inside the
 project, sandboxed execution and explicit exit status. A nonzero exit is a
 real exit. Rendered output and stdout are never evidence. An asynchronous
 command is pending until the same native call records its result; any other
-or unavailable evidence is unresolved and blocks Stop until the bounded
-allowance ends. Only successful built-in edits count: `write_file` as a typed
+or unavailable evidence is unresolved. Unresolved commands never hold Stop:
+they are logged as unverified provenance (`unverified_provenance` in the
+state), and so is a command still pending at the end of the bounded Stop
+allowance. Only successful built-in edits count: `write_file` as a typed
 creation or overwrite, `edit_file` as a typed edit, at their exact canonical
 path. A delivered edit callback must also match the hook path. At a genuine
 natural Stop of the active request, Mycelium also scans that request's own
@@ -47,7 +49,9 @@ started itself.
 
 After natural Stop, inspect `.mycelium/antigravity-app/<conversation>/native-state.json`
 and `.mycelium/run/antigravity-app/<conversation>-turn-<step>/accepted-stop.json`.
-Require one accepted transaction, empty `unresolved_commands` and `app_pending`,
+Require one accepted transaction, empty `unresolved_commands`,
+`unverified_provenance` and `app_pending` (a nonempty one is a failed probe
+even though Stop accepted),
 one `app_bindings` entry per credited command, matching lineage events and
 exit codes, and the negative controls. Record the exact App version: the step
 store shape is pinned to App 2.31.0, and a different version needs a fresh

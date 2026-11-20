@@ -44,7 +44,8 @@ RUN_COMMAND_TYPE = "type.googleapis.com/exa.cortex.core.tools.RunCommand"
 FILE_EDIT_TYPE = "type.googleapis.com/exa.cortex.core.tools.FileEdit"
 # Observed App run_command arguments. BypassSandbox is accepted only as false; the
 # typed result must still prove the command ran in the sandbox.
-COMMAND_ARGS = frozenset({"CommandLine", "WaitMsBeforeAsync", "toolSummary", "BypassSandbox"})
+# App 2.32.1 models may also send explicit false IsDaemon; a daemon or bypass stays unsupported.
+COMMAND_ARGS = frozenset({"CommandLine", "WaitMsBeforeAsync", "toolSummary", "BypassSandbox", "IsDaemon"})
 # FileEdit kinds from the App's descriptor: CREATE=1, OVERWRITE=2, EDIT=3. Each
 # edit tool is accepted only with its captured argument keys and kinds.
 EDIT_CREATE, EDIT_OVERWRITE, EDIT_EDIT = 1, 2, 3
@@ -301,9 +302,10 @@ def read_row(cid, step):
 
 
 def command_args_supported(args):
-    """Only the observed argument keys, a command line, and no sandbox bypass request."""
+    """Only the observed argument keys, a command line, and no sandbox bypass or daemon request."""
     return (isinstance(args, dict) and set(args) <= COMMAND_ARGS and isinstance(args.get("CommandLine"), str) and
-            bool(args["CommandLine"]) and args.get("BypassSandbox", False) is False)
+            bool(args["CommandLine"]) and args.get("BypassSandbox", False) is False and
+            args.get("IsDaemon", False) is False)
 
 
 def _tool_step(cid, step, tool_name, expected_type):

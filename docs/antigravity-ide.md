@@ -169,9 +169,13 @@ Limitations of the App preview:
   an explicit exit status. Prefer synchronous commands. A supported
   asynchronous command stays pending and is credited only after the same
   native step records a verified terminal result. Do not use `BypassSandbox`
-  or terminal-persistent commands. A bypassed command, or one whose evidence
-  stays unavailable or inconsistent, remains unresolved and Stop blocks until
-  its bounded allowance ends.
+  or terminal-persistent commands; an explicit `false` for `BypassSandbox` or
+  `IsDaemon` is accepted. A bypassed or daemon command, or one whose evidence
+  is unavailable or inconsistent, is unresolved: no lineage is recorded for it,
+  and at Stop it is recorded as unverified provenance (in the session log, and
+  in `native-state.json` even when a session with no other work keeps no log)
+  instead of holding Stop. A command still running when the bounded Stop
+  allowance ends is recorded the same way.
 - Only successful built-in `write_file` and `edit_file` steps count as edits.
   A missed edit callback is recovered once from the step record at a normal
   Stop; other editing routes are not tracked.
@@ -220,9 +224,9 @@ remain pending; they do not snapshot outputs or finalize lineage. Later native
 events reconcile the same command step when its transcript status becomes
 `DONE`. A completed command without an exit code retains an unknown exit.
 This IDE profile can leave a finished asynchronous command marked `RUNNING`;
-without terminal evidence Mycelium keeps that cycle unresolved, including after
-the bounded Stop allowance. Prefer synchronous native commands for work that
-must finalize in this preview. Deferred snapshots describe files observed at
+without terminal evidence Mycelium keeps it pending within the bounded Stop
+allowance, then records it in the session log as unverified provenance and
+finalizes. Prefer synchronous native commands for work whose lineage matters. Deferred snapshots describe files observed at
 completion, not instrumented read/write-time provenance.
 
 The native conversation UUID and explicit `USER_INPUT` step identify a work

@@ -66,6 +66,9 @@ APP_EDIT_SHAPE_WARNING = (
 STATE_SCHEMA = 2
 PLUGIN = Path(__file__).resolve().parents[3]
 MAX_STOP_RETRIES = 3
+# A command still pending when the Stop allowance ends can no longer be settled.
+FINAL_PENDING = ("Native command step had no terminal evidence when the Stop allowance ended; "
+                 "output provenance is not recorded")
 MAX_TRANSCRIPT_BYTES = 4 * 1024 * 1024
 MAX_STATE_BYTES = 8 * 1024 * 1024
 EVENTS = {"PreInvocation", "PostToolUse", "PostInvocation", "Stop"}
@@ -259,6 +262,34 @@ def accepted_stop(root, session_id, host=None):
     marker = receipt.parent / "active-session-log.tmp"
     ensure_safe_regular_file(marker)
     return not marker.exists()
+
+
+def append_unverified_provenance(root, session_id, label, steps, host=None):
+    """Append one explicit unverified-provenance entry to the active session log.
+
+    Returns False when no active log is available; the native state still records it.
+    """
+    host = active_host(host)
+    marker = root / ".mycelium/run" / host / session_id / "active-session-log.tmp"
+    if not marker.is_file() or marker.is_symlink():
+        return False
+    lines = marker.read_text(encoding="utf-8").splitlines()
+    log = Path(lines[0]) if lines else None
+    log_dir = os.path.realpath(root / ".living/log")
+    if (log is None or not log.is_absolute() or os.path.dirname(os.path.realpath(log)) != log_dir or
+            log.suffix != ".md"):
+        return False
+    ensure_safe_regular_file(log)
+    if not log.is_file():
+        return False
+    entry = (f"\n### {time.strftime('%H:%M')} — Unverified command provenance ({label})\n"
+             f"- Steps: {', '.join(sorted(steps, key=int))}\n"
+             "- Mycelium could not verify where, how, or with what exit status these native command steps "
+             "ran, or they were still running when the Stop allowance ended. No lineage was recorded for "
+             "them; treat their outputs' provenance as unverified.\n")
+    with log.open("a", encoding="utf-8") as stream:
+        stream.write(entry)
+    return True
 
 
 def context(result):
@@ -791,7 +822,7 @@ def _dispatch(event, payload, plugin_root, host):
                                  if turn.get("app_pending") else "") +
                                 ("\nMycelium cannot verify where or how command steps " +
                                  ", ".join(turn["unresolved_commands"]) + " ran in the Antigravity App. Their "
-                                 "output provenance is unrecorded and this work cycle cannot be finalized as complete."
+                                 "output provenance is unrecorded and will be logged as unverified when this work cycle ends."
                                  if turn.get("unresolved_commands") else ""))
             elif event == "PostToolUse" and app:
                 hooks = []
@@ -861,6 +892,21 @@ def _dispatch(event, payload, plugin_root, host):
                     turn["edit_recovery"] = {"status": status, "after": user_step, "through": boundary,
                                              "credited": credited, "rejected": rejected, "reason": reason}
                     save()
+                if turn["retries"] >= MAX_STOP_RETRIES and not turn["uncertain"] and not capture_deferred:
+                    # Last allowed Stop: commands still pending can no longer be settled.
+                    unresolved = turn.setdefault("unresolved_commands", {})
+                    for pending_key in ("pending_commands", "app_pending"):
+                        for step_key in list(turn.get(pending_key, {})):
+                            unresolved.setdefault(step_key, FINAL_PENDING)
+                            del turn[pending_key][step_key]
+                    save()
+                record = turn.setdefault("unverified_provenance", {})
+                unverified = {k: v for k, v in turn.get("unresolved_commands", {}).items() if k not in record}
+                if unverified:
+                    # No agent action can settle these, so they never hold Stop: record them explicitly.
+                    append_unverified_provenance(root, session_id, profile(host)["label"], unverified)
+                    record.update(unverified)
+                    save()
                 if turn["uncertain"]:
                     result = {"decision": "block", "reason": UNRESOLVED_HOOK}
                 elif capture_deferred:
@@ -869,8 +915,6 @@ def _dispatch(event, payload, plugin_root, host):
                     result = {"decision": "block", "reason": "Native analysis commands still lack terminal evidence. Wait for completion; Mycelium has not finalized output provenance."}
                 elif turn.get("app_pending"):
                     result = {"decision": "block", "reason": "Antigravity App command steps " + ", ".join(turn["app_pending"]) + " are still running. Wait for them to finish; Mycelium has not finalized their output provenance."}
-                elif turn.get("unresolved_commands"):
-                    result = {"decision": "block", "reason": "Mycelium cannot verify the workspace, working directory, or exit status of Antigravity App command steps " + ", ".join(turn["unresolved_commands"]) + ". Their output provenance is unrecorded; this work cycle cannot be accepted as complete."}
                 elif app and turn["edit_recovery"]["status"] == "deferred":
                     result = {"decision": "block", "reason": "No time remains to recover native edit activity before Mycelium finalization. Active state was preserved for retry."}
                 elif app_stop_deadline is not None and app_stop_deadline <= time.monotonic():

@@ -415,7 +415,7 @@ def stop(payload, **kw):
 
 @pytest.mark.parametrize("variant", ["observed", "planner-cwd", "counterfeit-structured-step", "native-error",
                                      "malformed-call", "nameless-call"])
-def test_app_command_without_authoritative_evidence_blocks_clean_stop(started, variant):
+def test_app_command_without_authoritative_evidence_is_recorded_unverified_not_held(started, variant):
     home, repo, payload, calls, state = started
     steps = [USER, {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE"},
              {"step_index": 2, "source": "MODEL", "type": "GENERIC", "status": "DONE",
@@ -438,13 +438,11 @@ def test_app_command_without_authoritative_evidence_blocks_clean_stop(started, v
     assert calls == []  # no lineage, no post-action, no success inferred
     message = app("PreInvocation", dict(payload, initialNumSteps=3))["injectSteps"][0]["ephemeralMessage"]
     assert "cannot verify where or how command steps 2 ran" in message
-    for attempt in range(ag.MAX_STOP_RETRIES):
-        response = app("Stop", stop(payload, executionNum=attempt))
-        assert response["decision"] == "continue" and "command steps 2" in response["reason"]
-    assert app("Stop", stop(payload, executionNum=9)) == {}
+    # No agent action can settle it, so Stop is never held on it: it is recorded instead.
+    assert app("Stop", stop(payload)) == {}
     turn = json.loads(state.read_text())["turns"]["0"]
-    assert turn["status"] == "incomplete" and "command steps 2" in turn["reason"]
-    assert not any(n == "mycelium-stop-check.sh" for _, n, _ in calls)
+    assert turn["status"] == "accepted" and turn["unverified_provenance"] == {"2": ag.APP_UNRESOLVED}
+    assert [n for _, n, _ in calls] == ["mycelium-stop-check.sh"]  # still no lineage or post-action
 
 
 def test_app_command_is_unresolved_in_every_opted_in_root(home, doubles, tmp_path):
@@ -587,15 +585,24 @@ def test_real_app_lost_stop_response_reconciles_without_redispatch(real_cycle, m
     assert calls == [0]
 
 
-def test_real_app_unresolved_command_never_reaches_lineage_or_acceptance(real_cycle):
+def test_real_app_unresolved_command_is_logged_unverified_and_accepted_without_lineage(real_cycle):
+    """Regression from a live App audit: an unresolved command blocked every Stop and the
+    turn ended incomplete with nothing published. It is now logged as unverified provenance."""
     repo, payload, run, state = real_cycle
     write_transcript(Path(payload["transcriptPath"]), [USER, {"step_index": 2, "source": "MODEL",
                      "type": "GENERIC", "status": "DONE"}])
     app("PostToolUse", post(payload, 2, "run_command", {"CommandLine": "python3 analysis.py"}))
-    for attempt in range(ag.MAX_STOP_RETRIES + 1):
-        app("Stop", stop(payload, executionNum=attempt))
-    assert json.loads(state.read_text())["turns"]["0"]["status"] == "incomplete"
-    assert not (run / "accepted-stop.json").exists() and (run / "active-session-log.tmp").is_file()
+    (repo / "summary.csv").write_text("x\n2\n")  # the unverified command's output
+    log = Path((run / "active-session-log.tmp").read_text().splitlines()[0])
+    first = app("Stop", stop(payload))  # ordinary living-layer triage still applies
+    assert first["decision"] == "continue" and ".living/ not updated" in first["reason"]
+    (repo / ".living/learnings.md").write_text("# learnings\n\n- summary.csv provenance is unverified.\n")
+    assert app("Stop", stop(payload, executionNum=1)) == {}
+    turn = json.loads(state.read_text())["turns"]["0"]
+    assert turn["status"] == "accepted" and list(turn["unverified_provenance"]) == ["2"]
+    assert (run / "accepted-stop.json").is_file()
+    text = log.read_text()
+    assert text.count("Unverified command provenance (Antigravity App)") == 1 and "- Steps: 2\n" in text
     assert not (run / "mycelium-data-events.tmp").exists()
     assert not (repo / ".living/log/data-lineage").exists()
 

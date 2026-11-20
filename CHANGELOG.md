@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is reported to the model and by `doctor --profile app` instead of being
   dropped silently. The App's conversation stores are read through a private
   snapshot, so no App file (including SQLite's `-shm` index) is ever written.
+  A command whose provenance cannot be verified, or that is still running when
+  the bounded Stop allowance ends, is logged as unverified provenance instead
+  of holding Stop.
 
 ### Fixed
 
