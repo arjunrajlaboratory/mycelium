@@ -5043,94 +5043,74 @@ def _io_records(paths: list[tuple[str, str]], cwd: Path) -> list[dict]:
     return records
 
 
-_INTERPRETER_COMMAND_RX = re.compile(
-    rf"(?:{_PYTHON_EXE_NAME}|R|Rscript|jupyter|snakemake|nextflow|sbatch)"
-)
 # Words that may precede the command word of a simple command without
 # changing which program runs.
 _COMMAND_POSITION_PREFIXES = frozenset(
     {"do", "then", "else", "elif", "if", "while", "until", "!", "{"}
 )
-# Modes in which a runner checks or lists without running anything; the
-# detector treats them as non-runs, so they are not unproven runs either.
-_SHELL_NON_EXECUTING = frozenset({"-n", "--noexec"})
-_NON_EXECUTING_FLAGS: dict[str, frozenset[str]] = {
-    **{shell: _SHELL_NON_EXECUTING for shell in _SHELL_RUNNER_NAMES},
-    "snakemake": frozenset(
-        {"-n", "--dry-run", "--dryrun", "--lint", "-l", "--list", "--list-rules",
-         "-S", "--summary", "--detailed-summary", "--dag", "--rulegraph",
-         "--filegraph", "--unlock", "-D", "--d3dag"}
-    ),
-    "sbatch": frozenset({"--test-only", "-h", "--help", "-V", "--version", "--usage"}),
-    "nextflow": frozenset({"-preview", "-stub", "-stub-run", "-h", "-help"}),
-}
-def _runner_does_not_execute(name: str, args: list[str]) -> bool:
-    """Whether a runner's own options select a mode that runs nothing.
+_SEGMENT_WORD_LIMIT = 256
+_SEGMENT_TEXT_LIMIT = 16 * 1024
+# Segments the detector reads per command (distinct ones; repeats are free).
+_SEGMENT_DETECTION_LIMIT = 256
 
-    Shells and sbatch take options only before their script word; what
-    follows are the script's arguments (`bash fit.sh -n 100`). Snakemake
-    and nextflow take options anywhere. Bounded to the first 32 words."""
-    flags = _NON_EXECUTING_FLAGS.get(name)
-    if name == "nextflow" and "run" not in args[:3]:
-        return True
-    if not flags:
-        return False
-    options_end_at_script = name in _SHELL_RUNNER_NAMES or name == "sbatch"
-    position = 0
-    while position < min(len(args), 32):
-        word = args[position]
-        if word in flags:
-            return True
-        if name in _SHELL_RUNNER_NAMES and word in ("-o", "+o"):
-            if args[position + 1 : position + 2] == ["noexec"] and word == "-o":
-                return True
-            position += 2
+
+def _segment_run_labels(run_words: list[str], cwd: Path) -> list[str]:
+    """What the detector's own grammar says one simple command runs, without
+    requiring proof that it ran. Shared grammar, not an imitation of it
+    (pattern 36): terminal and non-executing modes, payload boundaries,
+    tooling modules, and Mycelium's helpers are excluded exactly as there."""
+    text = " ".join(shlex.quote(word) for word in run_words)
+    if len(text) > _SEGMENT_TEXT_LIMIT or not is_analysis(text):
+        # A simple command this long is a data payload (`printf '<800 KB>'`),
+        # not a run to name; reading it would cost more than the label.
+        return []
+    try:
+        detections = _detect_scripts_with_cwd(
+            text, cwd, require_execution_evidence=False
+        )
+    except Exception:  # noqa: BLE001 - a label only; never fail the record
+        return []
+    labels: list[str] = []
+    for script_path, inline_source, _ in detections:
+        if isinstance(script_path, UnresolvedScript):
+            label = script_path.candidate
+        elif script_path is not None:
+            label = str(script_path)
+            if _names_managed_utility(label):
+                continue
+        elif inline_source is not None:
+            label = f"{run_words[0]} (inline)"
+        else:
             continue
-        if options_end_at_script and not word.startswith(("-", "+")):
-            return False
-        position += 1
-    return False
+        labels.append(label)
+    return labels
 
 
-def _interpreter_terminal_mode(name: str, args: list[str]) -> bool:
-    """Interpreter-specific print-and-exit modes the generic option scan
-    misses: R reads `--version`/`--help` anywhere before `--args`; jupyter
-    subcommands take `--show-config` and friends after the subcommand;
-    Python short clusters (`-uV`, `-Eh`) end at a payload letter."""
-    window = args[:32]
-    if name in ("R", "Rscript"):
-        for word in window:
-            if word == "--args":
-                return False
-            if word in ("--version", "--help", "-h", "RHOME"):
-                return True
-        return False
-    if name == "jupyter":
-        return any(word in _TERMINAL_ONLY_FLAGS for word in window)
-    if _PYTHON_CLUSTER_RX.fullmatch(name):
-        for word in window:
-            if not word.startswith("-") or word.startswith("--") or word == "-":
-                return False
-            cluster = word[1:]
-            for letter in cluster:
-                if letter in "cm":
-                    return False  # the payload starts; the rest is its text
-                if letter in "Vh?":
-                    return True
-            if cluster[-1:] in ("W", "X"):
-                return False  # the next word is a value; stop conservatively
-        return False
-    return False
+def _stdin_fed_run_label(
+    run_words: list[str], via_xargs: bool, heredoc: bool
+) -> list[str]:
+    """An interpreter that reads its program or file names from stdin, which
+    the detector cannot see: `python3 - <<'PY'`, `R --no-save <<'RS'`,
+    `... | xargs python3`. Only a bare interpreter (options, or `-`, and no
+    other operand) qualifies, so `python3 --version` and the like do not."""
+    name = run_words[0].rsplit("/", 1)[-1]
+    if not (heredoc or via_xargs) or not _STDIN_INTERPRETER_RX.fullmatch(name):
+        return []
+    rest = run_words[1:]
+    if any(word in _STDIN_TERMINAL_FLAGS for word in rest):
+        return []
+    if any(not word.startswith("-") for word in rest):
+        return []
+    if any(word in ("-c", "-m", "-e", "-f") for word in rest):
+        return []
+    label = " ".join(run_words[:2]) if rest else name
+    return [label + (" <<heredoc" if heredoc else "")]
 
 
-_PYTHON_CLUSTER_RX = re.compile(_PYTHON_EXE_NAME)
-_PAYLOAD_OPTIONS = frozenset({"-c", "-m", "-e", "-f", "--file", "-"})
-# Flags that make an interpreter print and exit without running anything.
-_TERMINAL_ONLY_FLAGS = frozenset(
-    {"--version", "-V", "-VV", "--help", "-h", "-?", "--help-all",
-     "--show-config", "--show-config-json", "--generate-config", "--paths",
-     "RHOME"}
-)
+_STDIN_INTERPRETER_RX = re.compile(rf"(?:{_PYTHON_EXE_NAME}|R|Rscript)")
+_STDIN_TERMINAL_FLAGS = frozenset({"--version", "-V", "--help", "-h", "-?"})
+
+
 _LABELLED_SCRIPT_SUFFIXES = (".sh", ".bash", ".py", ".R", ".r")
 # Wrappers that run the command after their own options, and the options of
 # theirs that take a separate value (labels only; nothing here is proof).
@@ -5284,12 +5264,15 @@ def _blank_heredoc_bodies(command: str) -> str:
     return "\n".join(lines)
 
 
-def _interpreter_runs_named(command: str) -> list[str]:
-    """Interpreter commands in command position of the unquoted shell text,
-    for structure the detector does not model (`for ...; do Rscript x.R`,
-    `python3 - <<'PY'`). A label of what the command names, not proof that
-    it ran. Heredoc bodies are not shell text and are skipped. Each pass is
-    linear in the command."""
+def _interpreter_runs_named(command: str, cwd: Path) -> list[str]:
+    """Runs named by the simple commands inside structure the detector does
+    not model as a whole (`for ...; do Rscript x.R; done`, `python3 - <<'PY'`).
+    Each segment, unwrapped, goes through the detector's own grammar without
+    requiring execution proof; stdin-fed interpreters it cannot see get a
+    label of their own. A label of what the command names, not proof that it
+    ran. Heredoc bodies are not shell text and are skipped. Segment
+    splitting is linear; the detector reads at most a bounded number of
+    distinct segments."""
     command = _blank_heredoc_bodies(command)
     masked = _unquoted_shell_text(command)
     if masked is None:
@@ -5299,6 +5282,8 @@ def _interpreter_runs_named(command: str) -> list[str]:
         masked = command
     found: list[str] = []
     seen: set[str] = set()
+    examined: set[str] = set()
+    detector_budget = _SEGMENT_DETECTION_LIMIT
 
     def add(label: str) -> bool:
         """Record a label; True once the cap is reached."""
@@ -5324,67 +5309,20 @@ def _interpreter_runs_named(command: str) -> list[str]:
         index, via_xargs = _skip_command_wrappers(words)
         if index >= len(words):
             continue
+        run_words = words[index : index + _SEGMENT_WORD_LIMIT]
+        key = "\0".join(run_words)
+        if key in examined:
+            continue
+        examined.add(key)
+        if detector_budget > 0:
+            detector_budget -= 1
+            labels = _segment_run_labels(run_words, cwd)
+        else:
+            labels = []
+        if not labels:
+            labels = _stdin_fed_run_label(run_words, via_xargs, "<<" in segment)
         prefix = "xargs " if via_xargs else ""
-        name = words[index].rsplit("/", 1)[-1]
-        if name.endswith(_LABELLED_SCRIPT_SUFFIXES) and "/" in words[index]:
-            # A script run by path (`./run.sh`, `/tmp/run_one.sh`).
-            if _names_managed_utility(words[index]):
-                continue
-            if add(prefix + words[index]):
-                break
-            continue
-        if _runner_does_not_execute(name, words[index + 1 :]):
-            continue  # `bash -n`, `snakemake -n`, `sbatch --test-only`: no run
-        if name in _SHELL_RUNNER_NAMES:
-            # `bash ./run.sh`, `sh -e run.sh`: a shell running a script file.
-            script = next(
-                (word for word in words[index + 1 : index + 6]
-                 if word.endswith((".sh", ".bash"))),
-                None,
-            )
-            if script is not None and _names_managed_utility(script):
-                continue
-            if script is not None and add(f"{prefix}{name} {script}"):
-                break
-            continue
-        if not _INTERPRETER_COMMAND_RX.fullmatch(name):
-            continue
-        if index + 1 < len(words) and words[index + 1].startswith("="):
-            continue  # `R = ...` in embedded code, not a command
-        # The interpreter's own options end at its payload (`-c`/`-e` code,
-        # `-m` module, `-f` file, or a script word); terminal flags and the
-        # managed-helper exclusion apply only up to and including it, never
-        # to the payload's arguments (`python -c "..." --help`).
-        option = index + 1
-        terminal = False
-        while (
-            option < len(words)
-            and words[option].startswith("-")
-            and words[option] not in _PAYLOAD_OPTIONS
-        ):
-            if words[option] in _TERMINAL_ONLY_FLAGS:
-                terminal = True
-                break
-            option += 2 if words[option] in ("-W", "-X", "--encoding") else 1
-        if terminal or (option < len(words) and words[option] in _TERMINAL_ONLY_FLAGS):
-            continue  # `python3 --version`, `jupyter --show-config`: no run
-        if _interpreter_terminal_mode(name, words[index + 1 :]):
-            continue
-        if (
-            option + 1 < len(words)
-            and words[option] == "-m"
-            and words[option + 1] in IGNORED_PYTHON_MODULES
-        ):
-            continue  # tooling (`python -u -m pytest`), as the detector treats it
-        payload = words[option] if option < len(words) else ""
-        if payload in ("-f", "--file") and option + 1 < len(words):
-            payload = words[option + 1]
-        if _names_managed_utility(payload):
-            continue  # Mycelium's own helpers are not runs (pattern 18)
-        label = prefix + " ".join(words[index : index + 2])
-        if "<<" in segment and "<<" not in label:
-            label += " <<heredoc"
-        if add(label):
+        if any(add(prefix + label) for label in labels):
             break
     return found
 
@@ -5402,7 +5340,7 @@ def _unproven_analysis_candidates(
         # The detector's per-runner work is linear but heavy (about 0.2 ms a
         # match), and these are only labels: past the bound, the cheap
         # command-position scan names them instead (pattern 42).
-        return _interpreter_runs_named(command)
+        return _interpreter_runs_named(command, cwd)
     if shell_text != command or analysis_named is None:
         analysis_named = is_analysis(shell_text)
     try:
@@ -5414,7 +5352,7 @@ def _unproven_analysis_candidates(
     except Exception:  # noqa: BLE001 - a label only; never fail the record
         detections = []
     if not detections:
-        return _interpreter_runs_named(command)
+        return _interpreter_runs_named(command, cwd)
     candidates: list[str] = []
     seen: set[str] = set()
     for script_path, inline_source, _ in detections:

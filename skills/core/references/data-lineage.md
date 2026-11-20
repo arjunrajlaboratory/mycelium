@@ -168,10 +168,17 @@ how many times the data was looked at:
   are not data;
 - interpreter runs the detector cannot prove (a heredoc-fed
   `python3 - <<'PY'`, `Rscript` inside a `for` loop, a `cd` it cannot
-  follow, a script run by path or through `xargs`), labelled in
-  `analysis_candidates`. Quoted text (`echo "python a.py"`), heredoc bodies
-  (a README written with `cat <<EOF`), `python -m pytest`-style tooling, and
-  Mycelium's own helpers are not runs.
+  follow, a script run through `xargs`), labelled in `analysis_candidates`.
+  Each simple command inside unmodelled structure is unwrapped (`time`,
+  `nohup`, `uv run`, `conda run -n`, `timeout`, `xargs`, ...) and read by
+  the detector's own grammar without the execution-proof requirement, so
+  terminal and non-executing modes (`--version`, `bash -n`, `snakemake -n`),
+  tooling modules (`python -m pytest`), and Mycelium's own helpers are
+  excluded exactly as there. Labels are the resolved script path or
+  `<interpreter> (inline)`; an interpreter reading its program from stdin
+  (heredoc, `xargs python3`) is labelled by name. Quoted text
+  (`echo "python a.py"`) and heredoc bodies (a README written with
+  `cat <<EOF`) are not runs. Labels are hints, never claims.
 
 ```json
 {"ts": "...", "kind": "data_command", "event_id": "4b0e...",
@@ -191,18 +198,36 @@ A data command never claims that an analysis ran (no `script` or
 capped at 64: they are mentions, not accesses (the word may sit in a comment,
 an `echo`, or a branch that never ran), so they carry no direction and are not
 read or hashed. `inputs` and `outputs` hold only paths whose direction shell
-syntax alone proves, hashed at hook time: the command exited 0 and is a plain
-`&&` list of literal simple commands, so every command ran and succeeded.
-Then a `<` redirection target is an input; a `>`, `>>`, `>|`, `&>`, or `&>>`
-target is an output; and `cp`/`mv` with only role-preserving flags (never `-n`, `-i`, or `-u`, which
-can skip an existing destination and still exit 0) read their
-sources and wrote their destinations (inside the destination when it is a
-directory). `cd DIR` to an existing literal directory moves where later
-relative paths resolve; any other cwd change leaves them unclaimed. Pipes,
-`;`, `||`, backgrounding, subshells, substitutions, `$` expansions, globs,
-braces, tilde, heredocs, an unknown exit status, `cp -t`, `cp -s`, long
-options, and directory copies all claim nothing. A command's own operands
-(`head data/x.csv`) are never inputs: that would need each tool's grammar.
+syntax alone proves. The command must have exited 0 and be a plain `&&` list
+of literal simple commands, so every command in it ran and succeeded:
+
+- a `<` redirection target is an input; a `>`, `>>`, `>|`, `&>`, or `&>>`
+  target is an output;
+- `cp SRC DST` with only role-preserving flags (never `-n`, `-i`, `-u`, `-t`,
+  `-s`, or a long option) read a regular-file source and wrote its
+  destination (inside it when it is a directory), and `mv SRC DST` that
+  renamed a file onto a regular file did the same. Only when every later
+  command in the list is read-only, since the destination's kind is read from
+  the final filesystem. A symlinked source or destination, a source still
+  present after `mv`, a move into a directory, and a copy onto itself claim
+  nothing;
+- `cd DIR` is followed logically (as bash does through symlinks) to an
+  existing directory; a bare name is unresolved when `CDPATH` is mentioned
+  or set. After any command that could move or remove a directory
+  (everything outside a short list of read-only and file-creating commands,
+  including `cp` and `mv`), later relative paths are unresolved.
+- `exit`, `return`, `exec`, `set`, `!`, `eval`, `source`, and wrappers
+  (`time`, `env`, `nohup`, `timeout`, `xargs`, `coproc`, ...) end what the
+  zero status proves; nothing at or after them is claimed.
+
+Pipes, `;`, `||`, backgrounding, subshells, substitutions, `$` expansions,
+globs, braces, tilde, heredocs, and an unknown exit status claim nothing. A
+command's own operands (`head data/x.csv`) are never inputs: that would need
+each tool's grammar. Files are hashed at hook time; a FIFO, device, or
+directory is recorded without being opened, and every open is non-blocking
+with a regular-file check on the descriptor. Long commands stay linear: the
+words are read by a one-pass tokenizer, and the label pass falls back to a
+command-position scan beyond 64 KB.
 
 A call with a proven analysis run gets its analysis events and no data
 command, so each Bash call yields at most one kind.

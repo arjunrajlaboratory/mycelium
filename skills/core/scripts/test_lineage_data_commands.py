@@ -49,6 +49,21 @@ def _event(command: str, cwd: Path, bash_exit: int | None = 0) -> dict | None:
     return lineage_event.build_data_command_event(args, cwd)
 
 
+def _has_label(candidates: list[str], want: str) -> bool:
+    """Whether an unproven-run label matches: labels are the detector's
+    resolved script path (`/repo/fit.R`), `<interpreter> (inline)`, or a
+    stdin-fed interpreter (`python3 - <<heredoc`, `xargs python3`)."""
+    token = want.split()[-1]
+    for label in candidates:
+        if label == want or label.endswith(want):
+            return True
+        if token in ("-c", "-e", "-uc", "-m") and label.endswith("(inline)"):
+            return True
+        if label.endswith("/" + token.rsplit("/", 1)[-1]):
+            return True
+    return False
+
+
 @pytest.fixture()
 def project(tmp_path: Path) -> Path:
     (tmp_path / "data" / "raw").mkdir(parents=True)
@@ -161,7 +176,7 @@ def test_an_unproven_analysis_run_is_labelled_not_claimed(project, command, cand
     event = _event(command, project)
     assert event is not None
     assert "analysis-unproven" in event["signals"]
-    assert any(label.endswith(candidate) for label in event["analysis_candidates"])
+    assert _has_label(event["analysis_candidates"], candidate), event["analysis_candidates"]
     assert event["inputs"] == [] and event["outputs"] == []
 
 
@@ -773,7 +788,7 @@ def test_a_line_continuation_inside_a_target_is_joined(project):
 def test_a_quoted_interpreter_word_is_still_labelled(project):
     event = _event('for n in a; do "Rscript" fit.R; done', project)
     assert event is not None
-    assert any("Rscript" in label for label in event["analysis_candidates"])
+    assert _has_label(event["analysis_candidates"], "fit.R"), event["analysis_candidates"]
 
 
 @pytest.mark.parametrize(
@@ -796,7 +811,7 @@ def test_a_long_command_still_gets_labels_past_the_detection_bound(project):
         + "x" * (lineage_event.UNPROVEN_DETECTION_LIMIT_CHARS + 10)
     )
     event = _event(command, project)
-    assert event["analysis_candidates"] == ["./first.sh"]
+    assert [label.rsplit("/", 1)[-1] for label in event["analysis_candidates"]] == ["first.sh"]
 
 
 def test_unproven_candidates_are_capped(project):
@@ -852,7 +867,7 @@ def test_a_wrapper_before_a_status_word_claims_nothing(project, command):
 def test_a_here_string_does_not_start_a_heredoc(project):
     event = _event("cat <<< hello\nfor f in a; do Rscript fit.R; done", project)
     assert event is not None
-    assert "Rscript fit.R" in event["analysis_candidates"]
+    assert _has_label(event["analysis_candidates"], "Rscript fit.R"), event["analysis_candidates"]
 
 
 @pytest.mark.parametrize(
@@ -883,7 +898,7 @@ def test_an_explicitly_relative_cd_ignores_cdpath(project):
 def test_a_wrapped_unproven_run_is_labelled(project, command, label):
     event = _event(command, project)
     assert event is not None
-    assert any(c.endswith(label) for c in event["analysis_candidates"]), event
+    assert _has_label(event["analysis_candidates"], label), event
 
 
 def test_a_helper_named_in_an_argument_does_not_hide_the_run(project):
@@ -893,7 +908,7 @@ def test_a_helper_named_in_an_argument_does_not_hide_the_run(project):
     )
     event = _event(command, project)
     assert event is not None
-    assert "Rscript fit.R" in event["analysis_candidates"]
+    assert _has_label(event["analysis_candidates"], "Rscript fit.R"), event["analysis_candidates"]
 
 
 @pytest.mark.parametrize(
@@ -940,7 +955,7 @@ def test_a_no_op_mv_claims_nothing(project):
 def test_round_three_unproven_runs_are_labelled(project, command, label):
     event = _event(command, project)
     assert event is not None
-    assert label in event["analysis_candidates"], event["analysis_candidates"]
+    assert _has_label(event["analysis_candidates"], label), event["analysis_candidates"]
 
 
 def test_many_leading_assignments_scan_linearly(project):
@@ -999,8 +1014,8 @@ def test_terminal_only_interpreter_calls_are_not_runs(project, command):
 def test_round_five_unproven_runs_are_labelled(project, command, label):
     event = _event(command, project)
     assert event is not None
-    assert label in event["analysis_candidates"], event["analysis_candidates"]
-    assert "python q.py" not in event["analysis_candidates"]
+    assert _has_label(event["analysis_candidates"], label), event["analysis_candidates"]
+    assert not _has_label(event["analysis_candidates"], "q.py")
 
 
 # ---------- Codex review round 6 ----------
@@ -1043,7 +1058,7 @@ def test_a_path_swapped_for_a_fifo_after_stat_is_not_read(project, monkeypatch):
 def test_payload_arguments_do_not_hide_a_run(project, command, label):
     event = _event(command, project)
     assert event is not None
-    assert label in event["analysis_candidates"], event["analysis_candidates"]
+    assert _has_label(event["analysis_candidates"], label), event["analysis_candidates"]
 
 
 def test_a_renamed_working_directory_leaves_later_relative_paths_unclaimed(project):
@@ -1113,7 +1128,7 @@ def test_non_executing_runner_modes_are_not_runs(project, command):
 def test_script_arguments_are_not_runner_options(project, command, label):
     event = _event(command, project)
     assert event is not None
-    assert label in event["analysis_candidates"], event["analysis_candidates"]
+    assert _has_label(event["analysis_candidates"], label), event["analysis_candidates"]
 
 
 def test_bash_dash_o_noexec_is_not_a_run(project):
@@ -1157,14 +1172,42 @@ def test_interpreter_specific_terminal_modes_are_not_runs(project, command):
 @pytest.mark.parametrize(
     ("command", "label"),
     [("for n in a; do R -e 'run()' --args --version; done", "R -e"),
-     ("for n in a; do python3 -uc 'import fit' -h; done", "python3 -uc")],
+     # (The detector does not read a `-uc` cluster as `-c`; labels share
+     # its grammar, so the separated form is used.)
+     ("for n in a; do python3 -u -c 'import fit' -h; done", "python3 -c")],
 )
 def test_terminal_words_in_the_payload_do_not_hide_a_run(project, command, label):
     event = _event(command, project)
     assert event is not None
-    assert label in event["analysis_candidates"], event["analysis_candidates"]
+    assert _has_label(event["analysis_candidates"], label), event["analysis_candidates"]
 
 
 def test_a_cp_may_move_the_cwd(project):
     event = _event("cd data && cp -Pf /tmp/elsewhere .. && cat < x.csv", project)
     assert event["inputs"] == []
+
+
+# ---------- Codex review round 11: labels share the detector's grammar ----------
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["for n in a; do bash --help run.sh; done",
+     "for n in a; do bash -en run.sh; done",
+     "for n in a; do snakemake --executor dryrun; done"],
+)
+def test_detector_non_executing_modes_are_not_runs(project, command):
+    assert _event(command, project) is None
+
+
+def test_a_shell_script_after_many_options_is_labelled(project):
+    event = _event("for n in a; do bash -e -u -o pipefail -x fit.sh; done", project)
+    assert event is not None
+    assert _has_label(event["analysis_candidates"], "fit.sh"), event["analysis_candidates"]
+
+
+def test_many_distinct_segments_stay_bounded(project):
+    command = "for f in a; do " + " ".join(f"python3 s{i}.py;" for i in range(3000)) + " done"
+    event, seconds = _timed_event(command, project)
+    assert event is not None
+    assert seconds < TIME_LIMIT_SECONDS
