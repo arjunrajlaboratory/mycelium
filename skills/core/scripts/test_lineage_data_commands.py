@@ -1244,3 +1244,25 @@ def test_a_path_missing_at_hook_time_stays_missing_at_stop(project):
     [record] = manifest["data_commands"][0]["inputs"]
     assert record.get("_missing") is True
     assert record.get("sha256") is None and "n_rows" not in record
+
+
+# ---------- Codex review round 14 ----------
+
+
+def test_a_project_inside_a_claude_worktree_still_has_data(tmp_path):
+    project = tmp_path / "repo" / ".claude" / "worktrees" / "wt"
+    (project / "data").mkdir(parents=True)
+    (project / ".git").write_text("gitdir: elsewhere\n")
+    (project / "data" / "x.csv").write_text("a\n")
+    shutil.copy(project / "data/x.csv", project / "data/y.csv")
+    absolute = _event(f"head {project}/data/x.csv", project)
+    assert absolute is not None and absolute["named_paths"] == [f"{project}/data/x.csv"]
+    copied = _event("cp data/x.csv data/y.csv", project)
+    assert [r["path"] for r in copied["outputs"]] == [str(project / "data/y.csv")]
+
+
+def test_tooling_inside_the_project_is_still_excluded(tmp_path):
+    project = tmp_path / "repo"
+    (project / ".living").mkdir(parents=True)
+    (project / ".git").mkdir()
+    assert _event(f"cat {project}/.living/notes.csv", project) is None

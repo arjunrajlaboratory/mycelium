@@ -4640,13 +4640,28 @@ DATA_COMMAND_NAMED_PATH_LIMIT = 64
 UNPROVEN_DETECTION_LIMIT_CHARS = 64 * 1024
 
 
-def _is_data_like_path(word: str) -> bool:
+@functools.lru_cache(maxsize=8)
+def _project_root(cwd: str) -> str | None:
+    """The nearest ancestor of ``cwd`` holding `.git` (a checkout or a
+    worktree), found without starting a process."""
+    path = Path(cwd)
+    for candidate in (path, *path.parents):
+        if (candidate / ".git").exists():
+            return str(candidate)
+    return None
+
+
+def _is_data_like_path(word: str, root: str | None = None) -> bool:
     """Whether a literal word names data: a data file extension, or a path
     under `data/` or `analysis/**/outputs/`. Tooling and Mycelium state are
-    not data."""
+    not data. Under the project root, only the part inside it is judged, so
+    a project that itself lives in `.claude/worktrees/<name>` still has
+    data."""
     if not word or "://" in word or word.startswith("//"):
         # A URL; the word scan splits `https:` from `//host/...`.
         return False
+    if root and word.startswith(root + "/"):
+        word = word[len(root) + 1 :]
     segments = [segment for segment in word.split("/") if segment not in ("", ".")]
     if not segments:
         return False
@@ -4673,7 +4688,7 @@ def _is_data_like_path(word: str) -> bool:
     return False
 
 
-def _data_path_mentions(command: str) -> tuple[list[str], bool]:
+def _data_path_mentions(command: str, root: str | None = None) -> tuple[list[str], bool]:
     """Literal data-like words the command text names, in first-seen order.
 
     This is a mention list, not an access list: the word may sit in a
@@ -4686,7 +4701,7 @@ def _data_path_mentions(command: str) -> tuple[list[str], bool]:
         # quoted name holding a space is read in pieces (`data/my`), which
         # still marks the call as touching data.
         word = match.group(0).replace("'", "").replace('"', "")
-        if word in seen or not _is_data_like_path(word):
+        if word in seen or not _is_data_like_path(word, root):
             continue
         if len(seen) >= DATA_COMMAND_NAMED_PATH_LIMIT:
             return list(seen), True
@@ -4953,6 +4968,7 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
     io = _ShellIO([], [])
     if bash_exit != 0:
         return io
+    root = _project_root(str(cwd))
     parts = _literal_and_list(command)
     if parts is None:
         return io
@@ -4984,7 +5000,9 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
             # that its redirections opened). Earlier commands' claims stand.
             return io
         for operator, target in redirections:
-            if not _is_data_like_path(target):
+            if not _is_data_like_path(target, root) and not _is_data_like_path(
+                str(_resolve_shell_path(target, current) or ""), root
+            ):
                 continue
             path = _resolve_shell_path(target, current)
             if path is None:
@@ -5000,7 +5018,9 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
             # only when nothing later in the list could have changed it.
             pairs = _copy_move_pairs(argv, current) if inert_after[position] else None
             for source, target in pairs or []:
-                if _is_data_like_path(str(source)) or _is_data_like_path(str(target)):
+                if _is_data_like_path(str(source), root) or _is_data_like_path(
+                    str(target), root
+                ):
                     io.inputs.append((str(source), argv[0]))
                     io.outputs.append((str(target), argv[0]))
         elif argv[0] == "cd":
@@ -5398,7 +5418,7 @@ def build_data_command_event(
     """One minimal `data_command` record for a Bash call that touches data
     and has no analysis event, or None when the call names no data and no
     analysis run."""
-    named, truncated = _data_path_mentions(args.bash_cmd)
+    named, truncated = _data_path_mentions(args.bash_cmd, _project_root(str(cwd)))
     candidates = _unproven_analysis_candidates(args.bash_cmd, cwd, analysis_named)
     if not named and not candidates:
         return None
