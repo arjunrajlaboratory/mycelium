@@ -5010,6 +5010,12 @@ _INTERPRETER_COMMAND_RX = re.compile(
 _COMMAND_POSITION_PREFIXES = frozenset(
     {"do", "then", "else", "elif", "if", "while", "until", "!", "{"}
 )
+# Flags that make an interpreter print and exit without running anything.
+_TERMINAL_ONLY_FLAGS = frozenset(
+    {"--version", "-V", "-VV", "--help", "-h", "-?", "--help-all",
+     "--show-config", "--show-config-json", "--generate-config", "--paths",
+     "RHOME"}
+)
 _LABELLED_SCRIPT_SUFFIXES = (".sh", ".bash", ".py", ".R", ".r")
 # Wrappers that run the command after their own options, and the options of
 # theirs that take a separate value (labels only; nothing here is proof).
@@ -5080,19 +5086,37 @@ def _names_managed_utility(text: str) -> bool:
     return any(suffix in text for suffix in IGNORED_SCRIPT_SUFFIXES)
 
 
-_HEREDOC_DELIMITER_RX = re.compile(
-    r"""<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|([^\s;&|<>()'"]+))"""
-)
+def _heredoc_delimiter(line: str, index: int) -> tuple[str | None, int]:
+    """Read the delimiter word after `<<` / `<<-` at ``index`` with quote
+    removal (`EOF`, `'EOF'`, `E"OF"`, `\\EOF`), returning (word, end). The
+    word is None when it is missing or a quote does not close on the line."""
+    while index < len(line) and line[index] in " \t":
+        index += 1
+    parts: list[str] = []
+    while index < len(line) and line[index] not in " \t;&|<>()":
+        char = line[index]
+        if char == "\\":
+            parts.append(line[index + 1 : index + 2])
+            index += 2
+        elif char in "'\"":
+            close = line.find(char, index + 1)
+            if close < 0:
+                return None, len(line)
+            parts.append(line[index + 1 : close])
+            index = close + 1
+        else:
+            parts.append(char)
+            index += 1
+    word = "".join(parts)
+    return (word or None), index
 
 
-def _unquoted_heredoc_starts(line: str) -> list[tuple[str, bool]] | None:
-    """Heredoc delimiters opened by unquoted `<<` on one line, in order.
-
-    None when the line's quotes do not balance, so the caller blanks
-    nothing rather than guess (a body hidden wrongly would lose a label).
-    """
+def _heredoc_starts(line: str, quote: str | None) -> tuple[list[tuple[str, bool]], str | None]:
+    """Heredoc delimiters opened by unquoted `<<` on one line, in order, and
+    the quote still open at its end. ``quote`` is the quote open at its
+    start, so a quoted multi-line argument that shows `cat <<EOF` opens
+    nothing."""
     starts: list[tuple[str, bool]] = []
-    quote: str | None = None
     index = 0
     while index < len(line):
         char = line[index]
@@ -5108,19 +5132,17 @@ def _unquoted_heredoc_starts(line: str) -> list[tuple[str, bool]] | None:
                 index += 3  # a here-string: its word is data, not a delimiter
                 continue
             elif line.startswith("<<", index):
-                match = _HEREDOC_DELIMITER_RX.match(line, index)
-                if match:
-                    word = match.group(2) or match.group(3) or match.group(4)
-                    if word is not None:
-                        starts.append((word.replace("\\", ""), bool(match.group(1))))
-                    index = match.end()
-                    continue
+                strip_tabs = line.startswith("<<-", index)
+                word, index = _heredoc_delimiter(line, index + (3 if strip_tabs else 2))
+                if word is not None:
+                    starts.append((word, strip_tabs))
+                continue
         elif char == quote:
             quote = None
         elif quote == '"' and char == "\\":
             index += 1
         index += 1
-    return None if quote is not None else starts
+    return starts, quote
 
 
 def _blank_heredoc_bodies(command: str) -> str:
@@ -5128,10 +5150,11 @@ def _blank_heredoc_bodies(command: str) -> str:
 
     A body is data for the program reading it (a script, a README), not
     shell text, so `cat > NOTES.md <<EOF` followed by `python fit.py` names
-    no run. One pass over the lines: linear in the command.
+    no run. Quote state carries across lines. One pass: linear.
     """
     lines = command.split("\n")
     pending: list[tuple[str, bool]] = []
+    quote: str | None = None
     for number, line in enumerate(lines):
         if pending:
             delimiter, strip_tabs = pending[0]
@@ -5141,7 +5164,7 @@ def _blank_heredoc_bodies(command: str) -> str:
             else:
                 lines[number] = " " * len(line)
             continue
-        pending = _unquoted_heredoc_starts(line) or []
+        pending, quote = _heredoc_starts(line, quote)
     return "\n".join(lines)
 
 
@@ -5176,7 +5199,12 @@ def _interpreter_runs_named(command: str) -> list[str]:
         # The masked text decides where segments end (a quoted `;` is not
         # one); the raw words, quotes removed, decide what runs, so a
         # quoted command word (`"Rscript" fit.R`) is still read.
-        words = [word.replace('"', "").replace("'", "") for word in raw_segment.split()]
+        decoded = _simple_command_words(raw_segment)
+        words = (
+            decoded[0]
+            if decoded is not None
+            else [word.replace('"', "").replace("'", "") for word in raw_segment.split()]
+        )
         index, via_xargs = _skip_command_wrappers(words)
         if index >= len(words):
             continue
@@ -5210,6 +5238,8 @@ def _interpreter_runs_named(command: str) -> list[str]:
             continue
         if index + 1 < len(words) and words[index + 1].startswith("="):
             continue  # `R = ...` in embedded code, not a command
+        if any(word in _TERMINAL_ONLY_FLAGS for word in words[index + 1 : index + 4]):
+            continue  # `python3 --version`, `jupyter --show-config`: no run
         option = index + 1
         while (
             option < len(words)

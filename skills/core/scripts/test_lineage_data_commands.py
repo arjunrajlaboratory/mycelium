@@ -973,3 +973,31 @@ def test_a_moved_symlink_claims_nothing(project):
 )
 def test_tooling_after_interpreter_flags_is_not_a_run(project, command):
     assert _event(command, project) is None
+
+
+# ---------- Codex review round 5 ----------
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["for n in a; do python3 --version; done", "for n in a; do python3 -h; done",
+     "for n in a; do jupyter --show-config; done", "for n in a; do R --version; done"],
+)
+def test_terminal_only_interpreter_calls_are_not_runs(project, command):
+    assert _event(command, project) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [
+        ("for x in a; do '/opt/my env/bin/python3' fit.py; done", "/opt/my env/bin/python3 fit.py"),
+        ("for x in a; do /opt/my\\ env/bin/Rscript fit.R; done", "/opt/my env/bin/Rscript fit.R"),
+        ("echo 'line one\ncat <<EOF'\nfor x in a; do Rscript fit.R; done", "Rscript fit.R"),
+        ('cat <<E"OF" > notes.md\npython q.py\nEOF\nfor x in a; do Rscript fit.R; done', "Rscript fit.R"),
+    ],
+)
+def test_round_five_unproven_runs_are_labelled(project, command, label):
+    event = _event(command, project)
+    assert event is not None
+    assert label in event["analysis_candidates"], event["analysis_candidates"]
+    assert "python q.py" not in event["analysis_candidates"]
