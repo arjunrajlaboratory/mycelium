@@ -38,6 +38,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import uuid
@@ -808,8 +809,10 @@ SEED_REGEXES = [
 
 def sha256_file(p: Path) -> str | None:
     try:
-        size = p.stat().st_size
-        if size > SIZE_LIMIT_BYTES:
+        info = p.stat()
+        # Only a regular file can be read to its end: a FIFO or device named
+        # by a command would block this hook forever.
+        if not stat.S_ISREG(info.st_mode) or info.st_size > SIZE_LIMIT_BYTES:
             return None
         h = hashlib.sha256()
         with p.open("rb") as f:
@@ -3549,10 +3552,18 @@ def _runner_environment(
         key, value = token.split("=", 1)
         env[key] = None if any(marker in value for marker in ("$", "`")) else value
         assigned[key] = assigned.get(key, 0) + 1
+    counts = _environment_key_counts(bash_cmd)
     for key in ("PATH", "SNAKEMAKE_PROFILE"):
-        if bash_cmd.count(key) > assigned.get(key, 0):
+        if counts[key] > assigned.get(key, 0):
             env[key] = None
     return env
+
+
+@functools.lru_cache(maxsize=4)
+def _environment_key_counts(bash_cmd: str) -> dict[str, int]:
+    """How often the command names each modelled variable, counted once per
+    command rather than once per runner match (pattern 42)."""
+    return {key: bash_cmd.count(key) for key in ("PATH", "SNAKEMAKE_PROFILE")}
 
 
 def _runner_detection(
@@ -4603,6 +4614,7 @@ _DATA_COMMAND_TOOLING_BASENAMES = {
 # `finditer` is linear in the command (pattern 42).
 _DATA_COMMAND_WORD_RX = re.compile(r"[^\s'\"`;|&<>(){}\[\],=:]+")
 DATA_COMMAND_NAMED_PATH_LIMIT = 64
+UNPROVEN_DETECTION_LIMIT_CHARS = 64 * 1024
 
 
 def _is_data_like_path(word: str) -> bool:
@@ -4628,11 +4640,13 @@ def _is_data_like_path(word: str) -> bool:
     # A data directory itself (`ls data/`, `find analysis/x/outputs`) or
     # anything beneath one. A bare `data` with no slash is too common a word
     # (a variable, a column) to count.
+    analysis_seen = False
     for index, segment in enumerate(segments):
         if segment == "data" and (index < len(segments) - 1 or "/" in word):
             return True
-        if segment == "outputs" and "analysis" in segments[:index]:
+        if segment == "outputs" and analysis_seen:
             return True
+        analysis_seen = analysis_seen or segment == "analysis"
     return False
 
 
@@ -4661,6 +4675,13 @@ def _data_path_mentions(command: str) -> tuple[list[str], bool]:
 _CP_FLAGS = frozenset("fpRrvaLHP")
 _MV_FLAGS = frozenset("fv")
 _INPUT_REDIRECTIONS = {"<"}
+# Command words after which a zero exit no longer proves that this or a later
+# command in the `&&` list ran, or that its redirections opened.
+_STATUS_UNPROVEN_WORDS = frozenset(
+    {"!", "exit", "return", "logout", "exec", "set", "shopt", "trap", "kill",
+     "eval", "source", ".", "builtin", "command", "enable", "alias",
+     "break", "continue"}
+)
 _OUTPUT_REDIRECTIONS = {">", ">>", ">|", "&>", "&>>"}
 # Unquoted characters that make a word's value depend on the shell (globs,
 # braces, tilde) rather than on its literal text.
@@ -4718,32 +4739,84 @@ def _literal_and_list(command: str) -> list[str] | None:
     return [part for part in parts]
 
 
+_LITERAL_OPERATORS = ("&>>", ">>", ">|", "&>", "<&", ">&", "<>", "<<", "<", ">")
+
+
 def _simple_command_words(fragment: str) -> tuple[list[str], list[tuple[str, str]]] | None:
-    """Return (argv, [(redirection operator, target)]) for one simple command."""
+    """Return (argv, [(redirection operator, target)]) for one simple command
+    of literal words (the caller already refused `$`, backticks, globs, and
+    control operators). A single linear pass: `shlex` rebuilds each token one
+    character at a time, which is quadratic on a long literal argument."""
     fragment = _strip_unquoted_shell_comments(_blank_io_numbers(fragment))
     if fragment is None:
         return None
-    fragment = _shield_quoted_punctuation(fragment)
-    try:
-        lexer = shlex.shlex(fragment, posix=True, punctuation_chars="&|<>")
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        tokens = list(lexer)
-    except ValueError:
-        return None
+    tokens: list[tuple[str, bool]] = []  # (text, is_operator)
+    word: list[str] = []
+    in_word = False
+    index = 0
+    length = len(fragment)
+    while index < length:
+        char = fragment[index]
+        if char in " \t\r":
+            if in_word:
+                tokens.append(("".join(word), False))
+                word, in_word = [], False
+            index += 1
+        elif char == "\\":
+            if index + 1 >= length:
+                return None
+            word.append(fragment[index + 1])
+            in_word = True
+            index += 2
+        elif char == "'":
+            close = fragment.find("'", index + 1)
+            if close < 0:
+                return None
+            word.append(fragment[index + 1 : close])
+            in_word = True
+            index = close + 1
+        elif char == '"':
+            index += 1
+            while index < length and fragment[index] != '"':
+                if fragment[index] == "\\" and fragment[index + 1 : index + 2] in ('"', "\\"):
+                    index += 1
+                word.append(fragment[index])
+                index += 1
+            if index >= length:
+                return None
+            in_word = True
+            index += 1
+        elif char in "<>&|":
+            if in_word:
+                tokens.append(("".join(word), False))
+                word, in_word = [], False
+            operator = next(
+                (op for op in _LITERAL_OPERATORS if fragment.startswith(op, index)),
+                None,
+            )
+            if operator is None:
+                return None
+            tokens.append((operator, True))
+            index += len(operator)
+        else:
+            word.append(char)
+            in_word = True
+            index += 1
+    if in_word:
+        tokens.append(("".join(word), False))
     argv: list[str] = []
     redirections: list[tuple[str, str]] = []
     pending: str | None = None
-    for token in tokens:
+    for text, is_operator in tokens:
         if pending is not None:
-            redirections.append((pending, token.translate(_PUNCTUATION_UNSHIELD)))
+            if is_operator:
+                return None
+            redirections.append((pending, text))
             pending = None
-        elif token in _SHELL_REDIRECTION_OPERATORS:
-            pending = token
-        elif token and set(token) <= set("&|<>"):
-            return None
+        elif is_operator:
+            pending = text
         else:
-            argv.append(token.translate(_PUNCTUATION_UNSHIELD))
+            argv.append(text)
     if pending is not None:
         return None
     return argv, redirections
@@ -4822,7 +4895,7 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
         return io
     parsed = []
     for part in parts:
-        words = _simple_command_words(part)
+        words = _simple_command_words(_join_line_continuations(part))
         if words is None:
             return io
         parsed.append(words)
@@ -4830,6 +4903,11 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
     for argv, redirections in parsed:
         while argv and _ASSIGNMENT_RX.match(argv[0]):
             argv = argv[1:]
+        if argv and argv[0] in _STATUS_UNPROVEN_WORDS:
+            # `exit 0 && ...`, `set -n && ...`, `! cmd < missing`: the final
+            # status no longer proves this or any later command ran (or
+            # that its redirections opened). Earlier commands' claims stand.
+            return io
         for operator, target in redirections:
             if not _is_data_like_path(target):
                 continue
@@ -4851,6 +4929,10 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
         elif argv[0] == "cd":
             if len(argv) == 2 and not argv[1].startswith("-"):
                 target_dir = _resolve_shell_path(argv[1], current)
+                # Plain `cd` is logical: `..` drops the last component of
+                # the path as written, not of a symlink's target.
+                if target_dir is not None:
+                    target_dir = Path(os.path.normpath(target_dir))
                 current = target_dir if target_dir is not None and target_dir.is_dir() else None
             else:
                 current = None
@@ -4973,6 +5055,15 @@ def _interpreter_runs_named(command: str) -> list[str]:
         # so read the raw text instead and accept a spurious label.
         masked = command
     found: list[str] = []
+    seen: set[str] = set()
+
+    def add(label: str) -> bool:
+        """Record a label; True once the cap is reached."""
+        if label not in seen:
+            seen.add(label)
+            found.append(label)
+        return len(found) >= DATA_COMMAND_NAMED_PATH_LIMIT
+
     start = 0
     for boundary in _SEGMENT_SPLIT_RX.finditer(masked + "\n"):
         segment = masked[start : boundary.start()]
@@ -4980,7 +5071,10 @@ def _interpreter_runs_named(command: str) -> list[str]:
         start = boundary.end()
         if _names_managed_utility(raw_segment):
             continue
-        words = segment.split()
+        # The masked text decides where segments end (a quoted `;` is not
+        # one); the raw words, quotes removed, decide what runs, so a
+        # quoted command word (`"Rscript" fit.R`) is still read.
+        words = [word.replace('"', "").replace("'", "") for word in raw_segment.split()]
         index = 0
         while index < len(words) and (
             words[index] in _COMMAND_POSITION_PREFIXES
@@ -4999,13 +5093,13 @@ def _interpreter_runs_named(command: str) -> list[str]:
                  if word.endswith(_LABELLED_SCRIPT_SUFFIXES)),
                 None,
             )
-            if script is not None and f"xargs {script}" not in found:
-                found.append(f"xargs {script}")
+            if script is not None and add(f"xargs {script}"):
+                break
             continue
         if name.endswith(_LABELLED_SCRIPT_SUFFIXES) and "/" in words[index]:
             # A script run by path (`./run.sh`, `/tmp/run_one.sh`).
-            if words[index] not in found:
-                found.append(words[index])
+            if add(words[index]):
+                break
             continue
         if not _INTERPRETER_COMMAND_RX.fullmatch(name):
             continue
@@ -5020,9 +5114,7 @@ def _interpreter_runs_named(command: str) -> list[str]:
         label = " ".join(words[index : index + 2])
         if "<<" in segment and "<<" not in label:
             label += " <<heredoc"
-        if label not in found:
-            found.append(label)
-        if len(found) >= DATA_COMMAND_NAMED_PATH_LIMIT:
+        if add(label):
             break
     return found
 
@@ -5036,6 +5128,11 @@ def _unproven_analysis_candidates(
     # Heredoc bodies are input to a program, not shell text: a README
     # written with `cat <<EOF` that shows `python fit.py` names no run.
     shell_text = _blank_heredoc_bodies(command)
+    if len(shell_text) > UNPROVEN_DETECTION_LIMIT_CHARS:
+        # The detector's per-runner work is linear but heavy (about 0.2 ms a
+        # match), and these are only labels: past the bound, the cheap
+        # command-position scan names them instead (pattern 42).
+        return _interpreter_runs_named(command)
     if shell_text != command or analysis_named is None:
         analysis_named = is_analysis(shell_text)
     try:
@@ -5049,7 +5146,10 @@ def _unproven_analysis_candidates(
     if not detections:
         return _interpreter_runs_named(command)
     candidates: list[str] = []
+    seen: set[str] = set()
     for script_path, inline_source, _ in detections:
+        if len(candidates) >= DATA_COMMAND_NAMED_PATH_LIMIT:
+            break
         if isinstance(script_path, UnresolvedScript):
             label = script_path.candidate
         elif script_path is not None:
@@ -5060,7 +5160,8 @@ def _unproven_analysis_candidates(
             label = "(inline)"
         else:
             continue
-        if label not in candidates:
+        if label not in seen:
+            seen.add(label)
             candidates.append(label)
     return candidates
 

@@ -468,9 +468,13 @@ try:
                 if os.path.islink(part):
                     raise OSError("linked lineage directory")
             os.makedirs(lineage_dir, exist_ok=True)
-            first = str(waiting[0][1].get("event_id") or "")[:12]
-            name = "".join(c if c.isalnum() or c in "._-" else "_"
-                           for c in f"data-commands-{host}-{sid}-{first}")
+            first = "".join(c for c in str(waiting[0][1].get("event_id") or "")
+                            if c in "0123456789abcdef")[:12]
+            import hashlib, re
+            sid_part = sid
+            if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", sid):
+                sid_part = "h" + hashlib.sha256(sid.encode()).hexdigest()[:16]
+            name = f"data-commands-{host}-{sid_part}-{first}"
             temp_fd, events_name = tempfile.mkstemp(prefix=".data-commands.", dir=shared)
             try:
                 with os.fdopen(temp_fd, "wb") as out:

@@ -176,6 +176,11 @@ def enrich_file_record(rec: dict[str, Any]) -> dict[str, Any]:
     if not path.exists():
         out["_missing"] = True
         return out
+    if not path.is_file():
+        # A FIFO, device, or directory: opening it to hash or count rows
+        # could block Stop forever, and it has no content snapshot anyway.
+        out.setdefault("sha256", None)
+        return out
     size = path.stat().st_size
     out.setdefault("size_bytes", size)
     if size > SIZE_LIMIT_BYTES:

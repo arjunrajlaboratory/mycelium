@@ -707,3 +707,119 @@ def test_data_commands_stay_parked_when_their_manifest_cannot_be_written(
     assert "LINEAGE GAP" not in stop.stdout
     assert [r["kind"] for r in _unowned(repo)] == ["data_command"]
     assert list(target.iterdir()) == []
+
+
+# ---------- Codex review round 1 ----------
+
+
+def test_a_fifo_target_is_recorded_without_being_opened(project):
+    fifo = project / "data" / "stream.csv"
+    os.mkfifo(fifo)
+    event, seconds = _timed_event("wc -l < data/stream.csv", project)
+    [record] = event["inputs"]
+    assert record["path"] == str(fifo)
+    assert record.get("sha256") is None
+    assert seconds < TIME_LIMIT_SECONDS
+    stream = project / "events.tmp"
+    stream.write_text(json.dumps(dict(event, ts="T")) + "\n")
+    started = time.monotonic()
+    manifest = consolidator.extract(stream, "s", str(project))
+    assert time.monotonic() - started < TIME_LIMIT_SECONDS
+    assert manifest["data_commands"][0]["inputs"][0].get("sha256") is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "exit 0 && cat < data/x.csv",
+        "! cat < data/missing.csv",
+        "set -n && sort data/x.csv > data/never.csv",
+        "exec true && sort data/x.csv > data/never.csv",
+        "return 0 && cat < data/x.csv",
+        "true && ! cp data/x.csv data/y.csv",
+    ],
+)
+def test_a_form_whose_status_does_not_prove_execution_claims_nothing(project, command):
+    (project / "data/y.csv").write_text("y\n")
+    event = _event(command, project)
+    assert event is not None
+    assert event["inputs"] == [] and event["outputs"] == []
+
+
+def test_a_logical_cd_through_a_symlink_is_followed_as_bash_does(project, tmp_path_factory):
+    other = tmp_path_factory.mktemp("other") / "child"
+    other.mkdir()
+    (project / "link").symlink_to(other)
+    (project / "result.csv").write_text("r\n")
+    event = _event("cd link && cd .. && sort data/x.csv > result.csv", project)
+    [record] = event["outputs"]
+    assert Path(record["path"]).resolve() == (project / "result.csv").resolve()
+    assert record["sha256"] is not None
+
+
+def test_a_line_continuation_inside_a_target_is_joined(project):
+    (project / "data" / "longname.csv").write_text("x\n")
+    event = _event("sort data/x.csv > data/long\\\nname.csv", project)
+    [record] = event["outputs"]
+    assert record["path"] == str(project / "data/longname.csv")
+
+
+def test_a_quoted_interpreter_word_is_still_labelled(project):
+    event = _event('for n in a; do "Rscript" fit.R; done', project)
+    assert event is not None
+    assert any("Rscript" in label for label in event["analysis_candidates"])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf %s '" + "a" * 800_000 + "' > data/input.csv",
+        "for f in a; do " + " ".join(f"./s{i}.sh;" for i in range(32_000)) + " done",
+        "echo " + "/outputs" * 100_000 + "/x",
+        "for f in a; do " + " ".join(f"xargs ./s{i}.sh;" for i in range(32_000)) + " done",
+    ],
+)
+def test_round_one_long_commands_scan_in_linear_time(project, command):
+    _event_value, seconds = _timed_event(command, project)
+    assert seconds < TIME_LIMIT_SECONDS
+
+
+def test_a_long_command_still_gets_labels_past_the_detection_bound(project):
+    command = (
+        "for f in a; do ./first.sh; done; echo "
+        + "x" * (lineage_event.UNPROVEN_DETECTION_LIMIT_CHARS + 10)
+    )
+    event = _event(command, project)
+    assert event["analysis_candidates"] == ["./first.sh"]
+
+
+def test_unproven_candidates_are_capped(project):
+    command = "for f in a; do " + " ".join(f"./s{i}.sh;" for i in range(500)) + " done"
+    event = _event(command, project)
+    assert len(event["analysis_candidates"]) <= lineage_event.DATA_COMMAND_NAMED_PATH_LIMIT
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_long_host_session_id_still_names_a_writable_manifest(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "s" * 200
+    _start(host, repo, sid)
+    _bash(host, repo, sid, "head data/x.csv")
+    stop = _stop(host, repo, sid)
+    assert not _blocked(stop), stop.stdout
+    [path] = _data_only_manifests(repo)
+    assert len(path.name) < 120
+    status = list((repo / ".living" / "log").glob(".data-lineage-status-*.json"))
+    assert all(len(p.name) < 200 for p in status)
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_long_host_session_id_flushes_parked_records(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "p" * 200
+    _accept_idle_turn(host, repo, sid)
+    _bash(host, repo, sid, "head data/x.csv")
+    _stop(host, repo, sid)
+    assert _unowned(repo) == []
+    [path] = _data_only_manifests(repo)
+    assert len(path.name) < 120

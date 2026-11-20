@@ -91,8 +91,15 @@ FIRST_EVENT_ID=$(grep -o '"event_id": "[0-9a-f]*"' "$EVENTS_FILE" 2>/dev/null \
   | head -1 | sed -E 's/.*: "([0-9a-f]*)"/\1/' | cut -c1-12 || true)
 DATA_ONLY_ID=""
 if [[ -n "$FIRST_EVENT_ID" ]]; then
-  DATA_ONLY_ID=$(printf 'data-commands-%s-%s-%s' "$(mycelium_hook_host)" \
-    "${HOST_SESSION_ID:-unknown}" "$FIRST_EVENT_ID" | tr -c 'A-Za-z0-9._-' '_')
+  # A host session ID may be up to 200 characters; past 64, or with other
+  # characters, it is replaced by a hash so the manifest, its status
+  # sentinel, and their temp names stay well under the 255-byte limit. The
+  # unowned-record flush in mycelium-hook-lib.sh applies the same rule.
+  SID_PART="${HOST_SESSION_ID:-unknown}"
+  if [[ ! "$SID_PART" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+    SID_PART="h$(python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "$SID_PART")"
+  fi
+  DATA_ONLY_ID="data-commands-$(mycelium_hook_host)-${SID_PART}-${FIRST_EVENT_ID}"
 fi
 REPLACED_DATA_ONLY_ID=""
 if ! grep -qv '"kind": "data_command"' "$EVENTS_FILE" 2>/dev/null \
