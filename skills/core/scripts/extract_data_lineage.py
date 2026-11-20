@@ -105,6 +105,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -122,12 +124,26 @@ def sha256_file(path: Path) -> str | None:
         return None
     h = hashlib.sha256()
     try:
-        with path.open("rb") as f:
+        fd = _open_regular_fd(path)
+        if fd is None:
+            return None
+        with os.fdopen(fd, "rb") as f:
             for chunk in iter(lambda: f.read(65536), b""):
                 h.update(chunk)
     except OSError:
         return None
     return h.hexdigest()
+
+
+def _open_regular_fd(path: Path) -> int | None:
+    """A read descriptor for ``path`` only if it is a regular file once
+    opened. The open never blocks, so a path swapped for a FIFO after the
+    caller's check cannot hang Stop."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    if stat.S_ISREG(os.fstat(fd).st_mode):
+        return fd
+    os.close(fd)
+    return None
 
 
 def n_rows_if_tabular(path: Path) -> int | None:
@@ -144,8 +160,10 @@ def n_rows_if_tabular(path: Path) -> int | None:
             except ImportError:
                 return None
         if suffix in (".csv", ".tsv"):
-            sep = "," if suffix == ".csv" else "\t"
-            with path.open("r", encoding="utf-8", errors="replace") as f:
+            fd = _open_regular_fd(path)
+            if fd is None:
+                return None
+            with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
                 return sum(1 for _ in f) - 1  # minus header
         if suffix == ".h5ad":
             try:

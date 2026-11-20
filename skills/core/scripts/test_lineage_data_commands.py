@@ -1001,3 +1001,54 @@ def test_round_five_unproven_runs_are_labelled(project, command, label):
     assert event is not None
     assert label in event["analysis_candidates"], event["analysis_candidates"]
     assert "python q.py" not in event["analysis_candidates"]
+
+
+# ---------- Codex review round 6 ----------
+
+
+def test_a_shared_file_replaced_by_a_fifo_fails_instead_of_hanging(project):
+    shared = project / "unowned.ndjson"
+    os.mkfifo(shared)
+    started = time.monotonic()
+    result = _main(project, "--bash-cmd", "head data/x.csv", "--check-execution",
+                   "--data-command-to", str(shared), "--host", "claude",
+                   "--host-session-id", "s1")
+    assert result.returncode == 70
+    assert time.monotonic() - started < TIME_LIMIT_SECONDS
+
+
+def test_a_path_swapped_for_a_fifo_after_stat_is_not_read(project, monkeypatch):
+    fifo = project / "data" / "swapped.csv"
+    os.mkfifo(fifo)
+    real = os.stat_result((0o100644, 0, 0, 1, 0, 0, 4, 0, 0, 0))
+    # The stat says "regular file" (as before a parallel swap); the open
+    # must still refuse the FIFO it finds.
+    monkeypatch.setattr(Path, "stat", lambda self, **kw: real)
+    started = time.monotonic()
+    assert lineage_event.sha256_file(fifo) is None
+    assert consolidator.sha256_file(fifo) is None
+    assert time.monotonic() - started < TIME_LIMIT_SECONDS
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [
+        ('for n in a; do python -c "import analysis; analysis.run()" --help; done',
+         "python -c"),
+        ("for n in a; do python -m analysis.fit --helper "
+         "/opt/mycelium/skills/core/scripts/validate_structure.py; done",
+         "python -m"),
+    ],
+)
+def test_payload_arguments_do_not_hide_a_run(project, command, label):
+    event = _event(command, project)
+    assert event is not None
+    assert label in event["analysis_candidates"], event["analysis_candidates"]
+
+
+def test_a_renamed_working_directory_leaves_later_relative_paths_unclaimed(project):
+    (project / "data" / "x.csv").write_text("replacement\n")
+    event = _event(
+        "cd data && mv ../data ../old && mkdir ../data && wc -l < x.csv", project
+    )
+    assert event["inputs"] == []

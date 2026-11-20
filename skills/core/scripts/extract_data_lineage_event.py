@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import ast
 import bisect
+import contextlib
 import fcntl
 import functools
 import hashlib
@@ -43,7 +44,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Generator, Iterator, NamedTuple
+from typing import Any, Generator, Iterator, NamedTuple
 
 SIZE_LIMIT_BYTES = 100 * 1024 * 1024
 EMBED_LIMIT_BYTES = 100 * 1024
@@ -815,12 +816,34 @@ def sha256_file(p: Path) -> str | None:
         if not stat.S_ISREG(info.st_mode) or info.st_size > SIZE_LIMIT_BYTES:
             return None
         h = hashlib.sha256()
-        with p.open("rb") as f:
+        with _open_regular(p) as f:
+            if f is None:
+                return None
             for chunk in iter(lambda: f.read(65536), b""):
                 h.update(chunk)
         return h.hexdigest()
     except OSError:
         return None
+
+
+@contextlib.contextmanager
+def _open_regular(p: Path) -> Iterator[Any]:
+    """Open ``p`` for reading only if it is a regular file when opened.
+
+    The open itself never blocks (O_NONBLOCK), and the check is on the
+    opened descriptor, so a path swapped for a FIFO between a stat and the
+    open yields None instead of a hook that waits forever."""
+    fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            yield None
+            return
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as handle:
+        yield handle
 
 
 def is_analysis(bash_cmd: str) -> bool:
@@ -4986,6 +5009,11 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
                 current = None
         elif argv[0] in _CWD_AFFECTING_BUILTINS or argv[0] in ("exec", "command", "builtin"):
             current = None
+        if argv[0] in ("mv", "rm", "rmdir", "ln", "unlink", "rename"):
+            # It may have moved or removed the working directory itself; the
+            # shell stays in the renamed directory while the remembered path
+            # now names another, so later relative paths are unresolved.
+            current = None
     return io
 
 
@@ -5010,6 +5038,7 @@ _INTERPRETER_COMMAND_RX = re.compile(
 _COMMAND_POSITION_PREFIXES = frozenset(
     {"do", "then", "else", "elif", "if", "while", "until", "!", "{"}
 )
+_PAYLOAD_OPTIONS = frozenset({"-c", "-m", "-e", "-f", "--file", "-"})
 # Flags that make an interpreter print and exit without running anything.
 _TERMINAL_ONLY_FLAGS = frozenset(
     {"--version", "-V", "-VV", "--help", "-h", "-?", "--help-all",
@@ -5208,19 +5237,12 @@ def _interpreter_runs_named(command: str) -> list[str]:
         index, via_xargs = _skip_command_wrappers(words)
         if index >= len(words):
             continue
-        # Mycelium's own helpers are not runs (pattern 18). Only the script
-        # word this command runs decides it, not any word in the segment.
-        script_word = next(
-            (word for word in words[index : index + 6]
-             if word.endswith(_LABELLED_SCRIPT_SUFFIXES)),
-            "",
-        )
-        if script_word and _names_managed_utility(script_word):
-            continue
         prefix = "xargs " if via_xargs else ""
         name = words[index].rsplit("/", 1)[-1]
         if name.endswith(_LABELLED_SCRIPT_SUFFIXES) and "/" in words[index]:
             # A script run by path (`./run.sh`, `/tmp/run_one.sh`).
+            if _names_managed_utility(words[index]):
+                continue
             if add(prefix + words[index]):
                 break
             continue
@@ -5231,6 +5253,8 @@ def _interpreter_runs_named(command: str) -> list[str]:
                  if word.endswith((".sh", ".bash"))),
                 None,
             )
+            if script is not None and _names_managed_utility(script):
+                continue
             if script is not None and add(f"{prefix}{name} {script}"):
                 break
             continue
@@ -5238,21 +5262,34 @@ def _interpreter_runs_named(command: str) -> list[str]:
             continue
         if index + 1 < len(words) and words[index + 1].startswith("="):
             continue  # `R = ...` in embedded code, not a command
-        if any(word in _TERMINAL_ONLY_FLAGS for word in words[index + 1 : index + 4]):
-            continue  # `python3 --version`, `jupyter --show-config`: no run
+        # The interpreter's own options end at its payload (`-c`/`-e` code,
+        # `-m` module, `-f` file, or a script word); terminal flags and the
+        # managed-helper exclusion apply only up to and including it, never
+        # to the payload's arguments (`python -c "..." --help`).
         option = index + 1
+        terminal = False
         while (
             option < len(words)
             and words[option].startswith("-")
-            and words[option] not in ("-m", "-c", "-")
+            and words[option] not in _PAYLOAD_OPTIONS
         ):
-            option += 2 if words[option] in ("-W", "-X") else 1
+            if words[option] in _TERMINAL_ONLY_FLAGS:
+                terminal = True
+                break
+            option += 2 if words[option] in ("-W", "-X", "--encoding") else 1
+        if terminal or (option < len(words) and words[option] in _TERMINAL_ONLY_FLAGS):
+            continue  # `python3 --version`, `jupyter --show-config`: no run
         if (
             option + 1 < len(words)
             and words[option] == "-m"
             and words[option + 1] in IGNORED_PYTHON_MODULES
         ):
             continue  # tooling (`python -u -m pytest`), as the detector treats it
+        payload = words[option] if option < len(words) else ""
+        if payload in ("-f", "--file") and option + 1 < len(words):
+            payload = words[option + 1]
+        if _names_managed_utility(payload):
+            continue  # Mycelium's own helpers are not runs (pattern 18)
         label = prefix + " ".join(words[index : index + 2])
         if "<<" in segment and "<<" not in label:
             label += " <<heredoc"
@@ -5513,10 +5550,18 @@ def write_events(lines: list[str], append_to: Path | None) -> None:
 def _append_with_stable_lock(path: Path, line: str) -> None:
     """Append under `<path>.lock`, the lock Stop takes before it rewrites
     the shared file by atomic replacement; never through a symlink."""
-    lock_fd = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    # Non-blocking opens and a regular-file check on each descriptor: a FIFO
+    # in place of either file must fail (exit 70, a recorded gap), not hang.
+    flags = os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CREAT
+    lock_fd = os.open(f"{path}.lock", os.O_RDWR | flags, 0o644)
     try:
+        if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+            raise OSError("shared lock is not a regular file")
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | flags, 0o644)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise OSError("shared file is not a regular file")
         with os.fdopen(fd, "ab") as handle:
             handle.write(line.encode("ascii"))
             handle.flush()
