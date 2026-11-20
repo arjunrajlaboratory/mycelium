@@ -4889,11 +4889,15 @@ def _copy_move_pairs(argv: list[str], cwd: Path | None) -> list[tuple[Path, Path
             # (`mv x ./x` is a no-op that exits 0) nothing moved.
             if source.exists() or source.is_symlink():
                 return None
-            # The moved file is either inside the destination directory or
-            # is the destination itself.
-            if into.is_file():
-                target = into
-            elif destination.is_file() and len(sources) == 1:
+            # Only a plain rename onto a regular file is certain. After the
+            # move, a file inside a destination directory could equally be a
+            # child of a renamed directory, and a moved symlink would hash
+            # its referent, so both claim nothing.
+            if (
+                len(sources) == 1
+                and destination.is_file()
+                and not destination.is_symlink()
+            ):
                 target = destination
             else:
                 return None
@@ -5206,12 +5210,19 @@ def _interpreter_runs_named(command: str) -> list[str]:
             continue
         if index + 1 < len(words) and words[index + 1].startswith("="):
             continue  # `R = ...` in embedded code, not a command
-        if (
-            index + 2 < len(words)
-            and words[index + 1] == "-m"
-            and words[index + 2] in IGNORED_PYTHON_MODULES
+        option = index + 1
+        while (
+            option < len(words)
+            and words[option].startswith("-")
+            and words[option] not in ("-m", "-c", "-")
         ):
-            continue  # tooling (`python -m pytest`), as the detector treats it
+            option += 2 if words[option] in ("-W", "-X") else 1
+        if (
+            option + 1 < len(words)
+            and words[option] == "-m"
+            and words[option + 1] in IGNORED_PYTHON_MODULES
+        ):
+            continue  # tooling (`python -u -m pytest`), as the detector treats it
         label = prefix + " ".join(words[index : index + 2])
         if "<<" in segment and "<<" not in label:
             label += " <<heredoc"

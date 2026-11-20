@@ -274,6 +274,12 @@ def test_a_cp_into_a_directory_writes_beneath_it(project):
     ]
 
 
+def test_a_mv_into_a_directory_claims_nothing(project):
+    os.replace(project / "data/x.csv", project / "analysis/x/outputs/x.csv")
+    event = _event("mv data/x.csv analysis/x/outputs", project)
+    assert event["inputs"] == [] and event["outputs"] == []
+
+
 def test_a_mv_records_the_gone_source_and_the_moved_file(project):
     os.replace(project / "data/x.csv", project / "data/z.csv")
     event = _event("mv data/x.csv data/z.csv", project)
@@ -942,3 +948,28 @@ def test_many_leading_assignments_scan_linearly(project):
     event, seconds = _timed_event(command, project)
     assert event["outputs"]
     assert seconds < TIME_LIMIT_SECONDS
+
+
+# ---------- Codex review round 4 ----------
+
+
+def test_a_renamed_directory_with_a_same_named_child_claims_nothing(project):
+    (project / "data" / "archive").mkdir()
+    (project / "data" / "archive" / "raw").write_text("child\n")
+    event = _event("mv data/raw data/archive", project)
+    assert event["inputs"] == [] and event["outputs"] == []
+
+
+def test_a_moved_symlink_claims_nothing(project):
+    os.symlink("x.csv", project / "data" / "moved.csv")
+    event = _event("mv data/link.csv data/moved.csv", project)
+    assert event["inputs"] == [] and event["outputs"] == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["for n in a; do python3 -u -m pytest tests -q; done",
+     "for n in a; do python3 -W ignore -m pytest; done"],
+)
+def test_tooling_after_interpreter_flags_is_not_a_run(project, command):
+    assert _event(command, project) is None
