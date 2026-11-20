@@ -1011,3 +1011,18 @@ not session work; park it without a transaction, keep it through a Stop with
 none, and move it at the next owned Stop. Bound scan time on long words,
 quoted runs, `&&` chains, many operands, and long heredocs, and replay real
 transcripts against an independent classifier.
+
+**Recurrence (#139 review, 16 Codex rounds):** two classes kept returning.
+First, every "certain direction" rule was refuted by some way a zero exit
+fails to prove it: `exit`/`set -n`/`!`/`time exit` before the command, a
+later command that renames the destination or the working directory
+(`/bin/mv`, `git mv`, `cp -P` over a symlink), `cp -n`/`-i`, `hash -p`,
+`PATH=`, `CDPATH`, a no-op `mv`, a moved symlink, a FIFO swapped in after a
+stat. What converged was an allowlist: claim only after commands known not
+to move files or change lookup, and stop at anything else. Second, a
+hand-written fallback grammar for labelling unproven runs diverged from the
+detector's on every round (terminal flags, non-executing modes, payload
+boundaries). It converged only when each segment was handed to the
+detector's own grammar (pattern 36). Separately, a record that is not
+session work must not be named by a session number that an idle turn
+releases, or the next session overwrites it.

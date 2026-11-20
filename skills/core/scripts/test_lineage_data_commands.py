@@ -1277,3 +1277,18 @@ def test_resolved_shell_io_alone_records_the_call(project):
     assert event is not None
     assert event["signals"] == ["shell-io"]
     assert [r["path"] for r in event["inputs"]] == [str(project / "data/counts")]
+
+
+# ---------- Codex review round 16 ----------
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["hash -p /usr/bin/true cp && cp data/x.csv data/y.csv",
+     "export PATH=/tmp/bin && cp data/x.csv data/y.csv",
+     "PATH=/tmp/bin cp data/x.csv data/y.csv"],
+)
+def test_a_command_lookup_change_ends_what_is_proven(project, command):
+    shutil.copy(project / "data/x.csv", project / "data/y.csv")
+    event = _event(command, project)
+    assert event["inputs"] == [] and event["outputs"] == []

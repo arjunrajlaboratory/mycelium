@@ -4726,7 +4726,11 @@ _STATUS_UNPROVEN_WORDS = frozenset(
      # A wrapper or reserved word runs something this parser does not read
      # (`time exit 0`, `coproc cmd` whose status is the shell's, `env -S`).
      "time", "coproc", "nohup", "env", "nice", "timeout", "stdbuf", "taskset",
-     "xargs", "sudo", "doas", "function", "select", "wait", "disown"}
+     "xargs", "sudo", "doas", "function", "select", "wait", "disown",
+     # These change which program a later name runs (`hash -p /bin/true cp`,
+     # `unset -f`, `export PATH=...`), so a later `cp` may not be cp.
+     "hash", "unset", "export", "declare", "typeset", "readonly", "local",
+     "unalias"}
 )
 # Commands that cannot move or remove a directory, so the remembered working
 # directory still names the shell's own after they run.
@@ -4992,6 +4996,8 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
     for position, (argv, redirections) in enumerate(parsed):
         first = 0
         while first < len(argv) and _ASSIGNMENT_RX.match(argv[first]):
+            if argv[first].startswith(("PATH=", "BASH_ENV=", "ENV=")):
+                return io  # the command name may now resolve elsewhere
             first += 1
         argv = argv[first:]
         if argv and argv[0] in _STATUS_UNPROVEN_WORDS:
