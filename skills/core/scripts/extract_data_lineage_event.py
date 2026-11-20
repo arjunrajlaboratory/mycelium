@@ -5420,12 +5420,16 @@ def build_data_command_event(
     analysis run."""
     named, truncated = _data_path_mentions(args.bash_cmd, _project_root(str(cwd)))
     candidates = _unproven_analysis_candidates(args.bash_cmd, cwd, analysis_named)
-    if not named and not candidates:
-        return None
     io = _certain_shell_io(args.bash_cmd, cwd, getattr(args, "bash_exit", None))
+    if not named and not candidates and not io.inputs and not io.outputs:
+        return None
     signals = []
     if named:
         signals.append("data-path")
+    if io.inputs or io.outputs:
+        # A redirection or copy proven to touch a data path, which may only
+        # be data-like once resolved (`cd data && wc -l < counts`).
+        signals.append("shell-io")
     if candidates:
         signals.append("analysis-unproven")
     return {

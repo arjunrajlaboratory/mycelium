@@ -1266,3 +1266,14 @@ def test_tooling_inside_the_project_is_still_excluded(tmp_path):
     (project / ".living").mkdir(parents=True)
     (project / ".git").mkdir()
     assert _event(f"cat {project}/.living/notes.csv", project) is None
+
+
+# ---------- Codex review round 15 ----------
+
+
+def test_resolved_shell_io_alone_records_the_call(project):
+    (project / "data" / "counts").write_text("1\n2\n")
+    event = _event("cd data && wc -l < counts", project)
+    assert event is not None
+    assert event["signals"] == ["shell-io"]
+    assert [r["path"] for r in event["inputs"]] == [str(project / "data/counts")]

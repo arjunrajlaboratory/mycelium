@@ -54,7 +54,7 @@ outputs/`, an inline read the detector rejects). It is NOT an action: it never
 claims that an analysis ran, so it is kept apart from `actions`:
     {"ts", "kind": "data_command", "event_id", "bash_cmd", "bash_exit", "cwd",
      "agent_id", "agent_type",
-     "signals": ["data-path", "analysis-unproven"],
+     "signals": ["data-path", "shell-io", "analysis-unproven"],
      "named_paths": [...],            # literal data-like words in the text;
                                       # mentions, not accesses; no direction
      "named_paths_truncated": bool,
