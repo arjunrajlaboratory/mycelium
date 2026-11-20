@@ -42,7 +42,9 @@ EXPECTED = {
     # The accepted Stop repeats the lineage phase and the change checks, then
     # decodes the branch, encodes the summary cell (it holds a space), and
     # runs the registry upsert, both finalizers, and a last living-changed.
-    "Stop (accepted)": (14, 2),
+    # A turn with work then snapshots the baseline the next turn of the same
+    # host session starts from (hosts run Stop after every turn).
+    "Stop (accepted)": (15, 2),
 }
 
 

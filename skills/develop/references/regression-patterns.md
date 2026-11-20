@@ -243,14 +243,17 @@ dedicated lifecycle and retain that root ID. Publish identity before the active
 marker, encode the ownership format in that marker, and fail closed when a
 required companion identity is corrupt, multiline, or missing. Retain shared
 timestamps only as an upgrade fallback for markers that identify legacy
-sessions. Once an identified transaction's marker is gone, later identified
-PostToolUse payloads are stale and must not fall back to markerless legacy mode.
+sessions. Once an identified transaction's marker is gone, a later identified
+PostToolUse payload never writes into that transaction or falls back to
+markerless legacy mode; if it carries work, it reopens a fresh transaction for
+its own host session (pattern 44).
 
 **Regression evidence:** Start a new root owner while the prior task remains
-unfinalized, then deliver late tool and Stop events from the old owner. Also
-deliver Bash/edit/read events after an accepted Stop removed the marker. Require
-the current state to remain byte-identical and no transaction state to be
-recreated; only identity-free legacy payloads may use markerless behavior.
+unfinalized, then deliver late tool and Stop events from the old owner. Require
+the current root's state to remain byte-identical. Also deliver Bash/edit/read
+events after an accepted Stop removed the marker: reads and non-work commands
+recreate nothing, and work opens only a fresh transaction of its own; only
+identity-free legacy payloads may use markerless behavior.
 
 ## 15. Terminal-only mode is treated as execution
 
@@ -936,7 +939,95 @@ statuses, variables, output, and filesystem effects on adversarial state
 (symlinks, malformed markers and owners, invalid IDs, held locks). Mutate the
 port and confirm the comparison fails.
 
-## 44. Package identity omits file modes or the build recipe
+## 44. A per-turn host event is treated as the end of the session
+
+**Failure:** Claude Code and Codex run Stop after every turn, but the
+lifecycle treated an accepted Stop as the end of the host session: it removed
+the transaction, and every later PostToolUse from that still-live session was
+classified as a late delivery and dropped without output. A session that
+accepted one idle turn recorded nothing more (no lineage, no log prompt, no
+Stop enforcement) until the next resume or compaction. An SNP-tree Claude
+session ran about 200 detectable analysis commands and recorded one lineage
+event; replaying the same commands through the same hooks one at a time
+recorded them all, so unit tests never saw it.
+
+**Invariant:** Model the host's real event cadence, not the name of the event.
+An accepted turn closes its transaction; later work in the same host session
+opens a new one through the same locked setup a start uses, and never revives
+the accepted one. Only events that carry work reopen. Every hook path that
+declines a detected command leaves a reasoned record, so silence cannot pass
+for "nothing happened".
+
+**Regression evidence:** Accept an idle turn, then run analysis, a data
+command, and a project edit; require events, a fresh log, and a blocking Stop.
+Make the first command after an idle turn an inline write and require Stop to
+block on its file (the reopen must not snapshot after the command it serves).
+Publish a valid marker between a hook's failed validation and its reopen
+check and require the hook to record; plant a corrupt marker while a reopen
+waits and require it byte-identical afterward. Commit in the reopening command
+and require Stop to count it; age the carried baseline past any plausible
+cleanup threshold and require it still used. Report unowned gaps behind a
+corrupt marker and a foreign owner, and keep every record when the shared
+file's rewrite fails. Make a turn's only work a shell edit and require Stop to
+enforce it; record a script that deleted itself as a skip, never an event
+(file existence is part of the execution trust gate); count a repeated skip
+once; put U+2028 in a skipped command and require one intact record. Reopen
+after a long idle and require a resume to keep the transaction (accounting
+time is not the liveness clock), and require a `.living`-only turn to refresh
+the carried baseline so its note cannot excuse later work.
+Accept a working turn and require its log byte-identical while the next turn
+gets a second log. Race parallel hooks through a reopen (one transaction),
+keep another live root byte-identical, refuse a symlinked run tree, and require
+reads and non-work commands to recreate nothing. Replay a real transcript
+through the hooks in order, Stops included, and compare recorded events with
+detected commands.
+
+## 45. A recorder that writes only what it can prove leaves the rest silent
+
+**Failure:** The lineage detector records an interpreter run only when it can
+prove the run executed, which is the right bar for claiming an analysis. But
+every Bash call below that bar left nothing: `head data/x.csv`, `zcat | cut`,
+`cp a.tsv outputs/`, a heredoc-fed `python3 - <<'PY'` reading a CSV, an
+`Rscript` inside a `for` loop. Replaying the SNP-tree and AP1 transcripts,
+19.6% of data-touching commands left an event; the rest were
+indistinguishable from "nothing happened", which undercounts every look at the
+data. Raising the detector's recall instead would have broken patterns 5, 13,
+15, and 33 by claiming executions from text.
+
+**Invariant:** Separate "this ran, with this I/O" from "this call touched
+data". The second gets its own record kind that no consumer can mistake for
+the first: mentions without direction, a label for unproven runs, and
+direction only where the shell's own grammar proves it (redirections and
+modelled `cp`/`mv` in an exit-0 `&&` list of literal words). The weaker record
+must not drive lifecycle decisions meant for the stronger one (reopening,
+post-action prompts, session-work accounting), and a record that waits for a
+home is not a gap.
+
+**Regression evidence:** Pair every positive with its quoted, commented,
+piped, `||`, `;`, backgrounded, expanded, globbed, heredoc, `cp -t`, and
+unknown-exit neighbor; require mentions to stay directionless and analysis
+runs to stay actions. Assert the record never reopens, never prompts, and is
+not session work; park it without a transaction, keep it through a Stop with
+none, and move it at the next owned Stop. Bound scan time on long words,
+quoted runs, `&&` chains, many operands, and long heredocs, and replay real
+transcripts against an independent classifier.
+
+**Recurrence (#139 review, 16 Codex rounds):** two classes kept returning.
+First, every "certain direction" rule was refuted by some way a zero exit
+fails to prove it: `exit`/`set -n`/`!`/`time exit` before the command, a
+later command that renames the destination or the working directory
+(`/bin/mv`, `git mv`, `cp -P` over a symlink), `cp -n`/`-i`, `hash -p`,
+`PATH=`, `CDPATH`, a no-op `mv`, a moved symlink, a FIFO swapped in after a
+stat. What converged was an allowlist: claim only after commands known not
+to move files or change lookup, and stop at anything else. Second, a
+hand-written fallback grammar for labelling unproven runs diverged from the
+detector's on every round (terminal flags, non-executing modes, payload
+boundaries). It converged only when each segment was handed to the
+detector's own grammar (pattern 36). Separately, a record that is not
+session work must not be named by a session number that an idle turn
+releases, or the next session overwrites it.
+
+## 46. Package identity omits file modes or the build recipe
 
 Package content hashes omit executable permissions, while resource-only digests
 omit the build recipe. Verify load-bearing modes before doctor/idempotent-install
@@ -944,7 +1035,7 @@ success and include generator bytes and effective guidance in source identity.
 Permission repair must be explicit, content-verified, staged and backed up; it
 must not become an override for edited files, links or malformed ownership.
 
-## 45. Initialization guidance sends the agent back into implementation discovery
+## 47. Initialization guidance sends the agent back into implementation discovery
 
 A correct initializer can remain unexecuted when the skill describes its
 outputs as separate tasks without an explicit native invocation. Give the agent
@@ -954,7 +1045,7 @@ Verify that exact documented sequence preserves user
 files and creates a valid project. This proves the recipe works offline, not
 that a selected model will follow it within a native invocation allowance.
 
-## 46. Batched delivery loses mandatory reminders
+## 48. Batched delivery loses mandatory reminders
 
 A singleton pending reminder loses earlier mandatory guidance when a native
 invocation completes several analysis commands. Persist reminders by event ID
@@ -962,7 +1053,7 @@ until each is acknowledged, including restart and older singleton migration.
 Exercise two positives before delivery, partial acknowledgement, duplicate tool
 delivery and a negative neighbor; a one-positive-then-delivery test misses this.
 
-## 47. Native asynchronous execution and finalization boundaries
+## 49. Native asynchronous execution and finalization boundaries
 
 **Failure:** An early RUNNING hook snapshots the previous output, or a lost
 Stop response causes completed work to be dispatched again. Resolving a chosen

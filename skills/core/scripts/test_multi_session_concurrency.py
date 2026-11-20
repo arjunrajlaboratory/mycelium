@@ -324,7 +324,17 @@ def test_stop_consumes_only_its_scoped_transaction(tmp_path):
     assert (_run_state(repo, "codex", "stop-b") / "active-session-log.tmp").is_file()
 
 
-def test_late_identified_event_does_not_recreate_accepted_transaction(tmp_path):
+def _only_carried_baseline(state: Path) -> bool:
+    """An accepted Stop leaves its run directory holding only the baseline
+    the next turn of the same host session starts from."""
+    return sorted(path.name for path in state.iterdir()) == [
+        "next-turn-baseline.json", "next-turn-start-ts.tmp",
+    ]
+
+
+def test_work_after_accepted_stop_opens_a_fresh_transaction(tmp_path):
+    """Hosts run Stop after every turn: later work in the same host session
+    gets a new transaction, never the accepted one back."""
     repo = _repo(tmp_path)
     session_id = "completed-root"
     payload = {"cwd": str(repo), "source": "startup", "session_id": session_id}
@@ -349,8 +359,8 @@ def test_late_identified_event_does_not_recreate_accepted_transaction(tmp_path):
     )
 
     assert late.returncode == 0
-    assert not (state / "active-session-log.tmp").exists()
-    assert not (state / "mycelium-session-activity.tmp").exists()
+    assert (state / "active-session-log.tmp").is_file()
+    assert (state / "mycelium-session-activity.tmp").read_text() == "late.py\n"
 
 
 def test_waiting_post_tool_revalidates_after_transaction_is_accepted(tmp_path):
@@ -392,14 +402,23 @@ def test_waiting_post_tool_revalidates_after_transaction_is_accepted(tmp_path):
     assert process.poll() is None, "PostToolUse bypassed the session event lock"
 
     # Model the accepted Stop critical section while PostToolUse is queued.
+    accepted_log = Path(
+        (state / "active-session-log.tmp").read_text().splitlines()[0]
+    )
+    accepted_bytes = accepted_log.read_bytes()
     (state / "active-session-log.tmp").unlink()
     (state / "active-session-owner-id.tmp").unlink()
     (lock / "owner").unlink()
     lock.rmdir()
-    returncode = process.wait(timeout=5)
+    returncode = process.wait(timeout=15)
 
     assert returncode == 0
-    assert not (state / "mycelium-session-activity.tmp").exists()
+    # The queued event revalidated after the lock and did not write into the
+    # accepted transaction; its real edit opened a fresh one.
+    assert accepted_log.read_bytes() == accepted_bytes
+    fresh_log = Path((state / "active-session-log.tmp").read_text().splitlines()[0])
+    assert fresh_log != accepted_log
+    assert (state / "mycelium-session-activity.tmp").read_text() == "raced.py\n"
 
 
 def test_accepted_scoped_handoff_is_published_to_shared_resume_pointer(tmp_path):
@@ -424,7 +443,7 @@ def test_accepted_scoped_handoff_is_published_to_shared_resume_pointer(tmp_path)
     assert '"decision": "block"' not in stopped.stdout
     scoped_state = _run_state(repo, "codex", session_id)
     shared = repo / ".mycelium" / "last-session.md"
-    assert not scoped_state.exists()
+    assert _only_carried_baseline(scoped_state)
     assert shared.is_file()
     assert "Lifecycle status: accepted by Stop" in shared.read_text()
 
@@ -516,7 +535,7 @@ def test_concurrent_stops_finalize_one_scoped_transaction_exactly_once(tmp_path)
     assert log_path.read_text().count("Session ended") == 1
     registry = (repo / ".living" / "log" / "LOG_REGISTRY.md").read_text()
     assert registry.count(f"| {log_session_id} |") == 1
-    assert not state.exists()
+    assert _only_carried_baseline(state)
 
 
 def test_blocked_stop_preserves_its_state_and_live_sibling(tmp_path):
@@ -687,6 +706,9 @@ def test_two_concurrent_accepted_roots_keep_both_registry_rows(tmp_path):
     assert all('"decision": "block"' not in result.stdout for result in results)
     registry = (repo / ".living" / "log" / "LOG_REGISTRY.md").read_text()
     assert all(registry.count(f"| {log_id} |") == 1 for log_id in log_ids)
-    assert all(not _run_state(repo, "codex", session_id).exists() for session_id in session_ids)
+    assert all(
+        _only_carried_baseline(_run_state(repo, "codex", session_id))
+        for session_id in session_ids
+    )
     shared_handoff = (repo / ".mycelium" / "last-session.md").read_text()
     assert shared_handoff.count("Lifecycle status: accepted by Stop") == 1

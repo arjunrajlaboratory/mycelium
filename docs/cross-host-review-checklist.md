@@ -167,8 +167,31 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Every PostToolUse writer resolves an existing private transaction,
       acquires its per-session lock, then revalidates owner and marker before
       mutation, so an event queued before accepted Stop cannot write afterward.
-- [ ] A host-identified PostToolUse event with no active transaction is rejected
-      as late; only identity-free legacy payloads retain markerless behavior.
+- [ ] A host-identified PostToolUse event with no active transaction never
+      writes into an accepted or another root's transaction. Hosts run Stop
+      after every turn, so an event carrying work (a proven analysis run,
+      a project edit) reopens its own host session's transaction through
+      SessionStart's locked setup (`source: reopen`); reads, non-work
+      commands, and `data_command` records never reopen. A marker found on the way is always handed back
+      to locked validation (a parallel hook's fresh transaction is used, a
+      corrupt or foreign one fails closed), and reopen mode never cleans or
+      replaces an existing marker. The reopened transaction starts from the
+      baseline and start time the accepted Stop carried forward, not a
+      snapshot or clock reading taken after the triggering command, and no
+      age-based cleanup removes a carried baseline. A Stop with no
+      transaction compares against the carried baseline and reopens when a
+      shell-only edit changed project files. A failed successor snapshot or
+      a failed move of unowned skips blocks Stop with the transaction intact
+      instead of accepting. Identity-free legacy payloads retain markerless
+      behavior.
+- [ ] Every command the lineage recorder meant to record but could not leaves
+      a skip record with its reason (raw stream `"kind": "skip"`, manifest
+      `skipped`, or shared `lineage-skips-unowned.ndjson`), and Stop reports a
+      LINEAGE GAP on every path, moving unowned records into a manifest only
+      when it holds a valid owned transaction. The shared skip file is written
+      only after a fresh containment check and rewritten by atomic
+      replacement under a stable lock; no hook path drops a detected data
+      command silently.
 - [ ] Missing or corrupt new-format ownership fails closed. Timestamp matching
       is used only for active legacy sessions that have no owner-token file;
       the active marker identifies new-format ownership so a missing companion
@@ -358,6 +381,17 @@ hook, filesystem, or lifecycle boundaries.
       and session log have been written successfully.
 - [ ] Extractor failure blocks Stop visibly and preserves the active marker,
       baseline, session ID, and raw events for a deterministic retry.
+- [ ] Every Bash call that touches data leaves an analysis event, a
+      `data_command` record, or a skip. A `data_command` never claims an
+      execution: data-like words in the text are `named_paths` without
+      direction, and `inputs`/`outputs` appear only where shell syntax proves
+      direction in a command that exited 0. It never reopens a transaction,
+      opens a post-action cycle, or counts as session work. Without a
+      transaction it is parked, keyed by host session, and that session's
+      next Stop moves it into an owned stream or writes it to a manifest of
+      its own; it is never reported or cleared as a gap. A stream of only
+      data commands is never named by a session number that an idle turn
+      releases.
 
 ## 8. Concurrency, Atomicity, and Filesystem Safety
 
@@ -531,7 +565,9 @@ exercise them.
 | Runtime state is malformed or partially written | The hook fails visibly without destructive cleanup or out-of-project writes. |
 | The abandoned raw-lineage event path is a nonempty directory or other non-regular object | SessionStart leaves the object, active marker, and owner intact and performs no archive mutation. |
 | A script names a direct relative input, or an absolute external input shares a basename with repository data | Lineage records the authoritative static path exactly once and does not claim repository recovery. |
-| A completed host task delivers Bash/edit/read PostToolUse after its marker was removed | Every shared writer exits silently without recreating reminders, activity, read telemetry, or raw lineage. |
+| A live host session runs analysis or makes a project edit after an earlier turn's Stop was accepted (including an edit queued on the session lock while Stop accepted) | The event never writes into the accepted transaction; it reopens a fresh transaction for its own host session, with a new log, lineage, and Stop enforcement. Parallel hooks for one call reopen exactly one transaction, another root's live state stays byte-identical, and reads, non-work commands, `.living`/`.mycelium` edits, and unsafe state never reopen. |
+| A Bash call touches data without a proven analysis run (`head data/x.csv`, `cp a.csv outputs/`, a heredoc-fed `python3 -`), inside a transaction and after an accepted Stop | One `data_command` record with `io_detection: "unresolved"`; direction only for redirections and modelled `cp`/`mv` in an exit-0 `&&` list; quoted, commented, piped, backgrounded, expanded, globbed, `cp -t`, `cp -n`, and unknown-exit neighbors claim nothing; no reopen, no post-action cycle, no session log; parked and written by that session's next Stop; a data-only turn's manifest survives the next session reusing its log number. |
+| The lineage extractor fails or is missing for a detected command | A skip record with the reason reaches the session's raw stream and the manifest's `skipped` list, and Stop's message carries a LINEAGE GAP line. |
 | A second identified root SessionStart arrives while the first root is live | Both roots receive distinct host-scoped run directories, markers, logs, baselines, lineage, and Stop enforcement; neither can mutate or clean the other's state. |
 | A session ID is numeric, Boolean, object/list-valued, `.`, or `..` | SessionStart creates no runtime directory, log, or shared file; a present invalid value never aliases another namespace or downgrades to legacy state. |
 | A module docstring or non-I/O call contains `ghost.csv`, or a reader consumes a file under `results/` | The unrelated literal is ignored, and the actual reader path is classified as input regardless of directory name. |

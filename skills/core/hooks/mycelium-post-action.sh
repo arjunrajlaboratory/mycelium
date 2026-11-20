@@ -61,7 +61,9 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 if [[ -z "$REPO_ROOT" ]]; then
   exit 0
 fi
-mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT" || exit 0
+# The detector above already proved this command is analysis, so a live host
+# session whose earlier turn's Stop closed its transaction reopens it.
+mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT" reopen || exit 0
 trap mycelium_release_session_lock EXIT
 
 LIVING_DIR="$REPO_ROOT/.living"

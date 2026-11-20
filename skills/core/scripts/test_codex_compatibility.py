@@ -1558,11 +1558,20 @@ def test_superseded_root_post_tool_use_cannot_mutate_new_owner_state(
     state = _host_state(repo, "new-owner")
     payload.update({"cwd": str(repo), "session_id": "old-owner"})
 
+    new_owner_before = {
+        path.name: path.read_bytes() for path in state.iterdir() if path.is_file()
+    }
+
     result = _run_hook(hook_name, repo, payload)
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
     assert not (state / unexpected_state).exists()
+    assert {
+        path.name: path.read_bytes() for path in state.iterdir() if path.is_file()
+    } == new_owner_before
+    # The old root is its own live host session: its work reopens its own
+    # namespace and never the new owner's.
+    assert (_host_state(repo, "old-owner") / "active-session-log.tmp").is_file()
 
 
 @pytest.mark.parametrize(
@@ -1609,9 +1618,13 @@ def test_superseded_root_post_tool_use_cannot_mutate_new_owner_state(
     ],
 )
 @pytest.mark.parametrize("state_preexisting", [False, True])
-def test_late_host_post_tool_use_cannot_mutate_without_an_active_transaction(
+def test_identified_post_tool_use_without_a_transaction_opens_only_its_own(
     tmp_path, hook_name, payload, unexpected_state, state_preexisting
 ):
+    """Hosts run Stop after every turn, so a host session with no transaction
+    is usually live. Work (analysis, data, a project edit) opens that
+    session's own transaction; a read never does, and shared state is never
+    rewritten."""
     repo = _repo(tmp_path)
     (repo / "analysis.py").write_text("pd.read_csv('input.csv')\n")
     state = repo / ".mycelium"
@@ -1626,13 +1639,22 @@ def test_late_host_post_tool_use_cannot_mutate_without_an_active_transaction(
     result = _run_hook(hook_name, repo, payload)
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
     if state_preexisting:
         assert anchor.read_text() == "accepted handoff\n"
-        assert sorted(path.name for path in state.iterdir()) == ["last-session.md"]
-        assert not (state / unexpected_state).exists()
-    else:
-        assert not state.exists()
+    assert not (state / unexpected_state).exists()
+    if hook_name == "mycelium-read-tracker.sh":
+        assert result.stdout == ""
+        if state_preexisting:
+            assert sorted(path.name for path in state.iterdir()) == ["last-session.md"]
+        else:
+            assert not state.exists()
+        return
+    own = _host_state(repo, "completed-session")
+    assert (own / "active-session-log.tmp").is_file()
+    assert (own / unexpected_state).exists()
+    assert sorted(path.name for path in (state / "run" / "codex").iterdir()) == [
+        "completed-session"
+    ]
 
 
 @pytest.mark.parametrize("branch_name", [None, "{yaml-like-branch}"])
@@ -2128,6 +2150,23 @@ def test_codex_post_tool_use_ignores_mycelium_control_plane_utilities(
     assert not (repo / ".mycelium" / "mycelium-data-events.tmp").exists()
 
 
+def _analysis_events(repo: Path) -> list[dict]:
+    """Analysis events in the tracker stream; data_command records, which
+    never claim an execution, are checked and left out."""
+    path = repo / ".mycelium" / "mycelium-data-events.tmp"
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text().splitlines():
+        record = json.loads(line)
+        if record.get("kind") == "data_command":
+            assert record["io_detection"] == "unresolved"
+            assert "script" not in record
+            continue
+        events.append(record)
+    return events
+
+
 def test_documented_data_contract_command_opens_no_bookkeeping(tmp_path):
     """The data-contract guide's run command is a managed utility, not analysis."""
     guide = (
@@ -2153,7 +2192,9 @@ def test_documented_data_contract_command_opens_no_bookkeeping(tmp_path):
     assert not (repo / ".mycelium" / "mycelium-reminded.tmp").exists()
     lineage = _run_hook("mycelium-data-tracker.sh", repo, payload)
     assert lineage.returncode == 0, lineage.stderr
-    assert not (repo / ".mycelium" / "mycelium-data-events.tmp").exists()
+    # It reads a contract file, so it may leave a data_command record, but
+    # never an analysis event.
+    assert _analysis_events(repo) == []
 
     # Paired positive: the same command shape on a user script is analysis.
     script = repo / "analysis" / "check.py"
@@ -2552,7 +2593,8 @@ def test_codex_data_tracker_skips_analysis_in_failed_and_chain(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert not (repo / ".mycelium" / "mycelium-data-events.tmp").exists()
+    # The unproven run is labelled in a data_command, never an action.
+    assert _analysis_events(repo) == []
 
 
 def test_codex_data_tracker_records_proven_successful_and_chain(tmp_path):

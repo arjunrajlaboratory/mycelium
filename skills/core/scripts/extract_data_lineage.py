@@ -30,10 +30,42 @@ Output:
             "total_action_count": N,
             "known_exit_count": N,
             "failed_action_count": N,
-            "scripts_executed": [...]
+            "scripts_executed": [...],
+            "skipped_count": N,              # commands the recorder could not record
+            "data_command_count": N          # other Bash calls that touched data
           },
+          "skipped": [<skip 1>, ...],
+          "data_commands": [<data command 1>, ...],
           "extraction_warnings": [...]
         }
+
+Skip shape (NDJSON, `"kind": "skip"`) — written by the tracker hook when it
+meant to record a command and could not, so a missing event is never read as
+"nothing ran":
+    {"ts", "kind": "skip", "skip_id", "skip_reason": "extractor-failed" | ...,
+     "detail": "exit 3", "bash_cmd", "bash_exit", "agent_id", "agent_type"}
+A skip_id is counted once even if a retried transfer repeated the record.
+Manifests written before skips existed have no `skipped` key; read it as
+unknown, not as zero.
+
+Data command shape (NDJSON, `"kind": "data_command"`) — one per Bash call that
+touched data without a proven analysis run (`head data/x.csv`, `cp a.tsv
+outputs/`, an inline read the detector rejects). It is NOT an action: it never
+claims that an analysis ran, so it is kept apart from `actions`:
+    {"ts", "kind": "data_command", "event_id", "bash_cmd", "bash_exit", "cwd",
+     "agent_id", "agent_type",
+     "signals": ["data-path", "shell-io", "analysis-unproven"],
+     "named_paths": [...],            # literal data-like words in the text;
+                                      # mentions, not accesses; no direction
+     "named_paths_truncated": bool,
+     "analysis_candidates": [...],    # interpreter runs named but not proven
+     "inputs":  [{"path", "sha256", "evidence": "redirection"|"cp"|"mv"}],
+     "outputs": [{"path", "sha256", "evidence": ...}],  # only where shell
+                                      # syntax proves direction, exit 0
+     "io_detection": "unresolved"}
+An event_id is counted once even if a retried transfer repeated the record.
+Manifests written before data commands existed have no `data_commands` key;
+read it as unknown, not as zero.
 
 Event shape (NDJSON, one line each) — produced by the tracker hook:
     {
@@ -73,6 +105,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -90,12 +124,26 @@ def sha256_file(path: Path) -> str | None:
         return None
     h = hashlib.sha256()
     try:
-        with path.open("rb") as f:
+        fd = _open_regular_fd(path)
+        if fd is None:
+            return None
+        with os.fdopen(fd, "rb") as f:
             for chunk in iter(lambda: f.read(65536), b""):
                 h.update(chunk)
     except OSError:
         return None
     return h.hexdigest()
+
+
+def _open_regular_fd(path: Path) -> int | None:
+    """A read descriptor for ``path`` only if it is a regular file once
+    opened. The open never blocks, so a path swapped for a FIFO after the
+    caller's check cannot hang Stop."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    if stat.S_ISREG(os.fstat(fd).st_mode):
+        return fd
+    os.close(fd)
+    return None
 
 
 def n_rows_if_tabular(path: Path) -> int | None:
@@ -112,8 +160,10 @@ def n_rows_if_tabular(path: Path) -> int | None:
             except ImportError:
                 return None
         if suffix in (".csv", ".tsv"):
-            sep = "," if suffix == ".csv" else "\t"
-            with path.open("r", encoding="utf-8", errors="replace") as f:
+            fd = _open_regular_fd(path)
+            if fd is None:
+                return None
+            with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
                 return sum(1 for _ in f) - 1  # minus header
         if suffix == ".h5ad":
             try:
@@ -138,11 +188,18 @@ def enrich_file_record(rec: dict[str, Any]) -> dict[str, Any]:
     """Fill in sha256/n_rows for a file record if missing and file exists on disk."""
     out = dict(rec)
     path_str = out.get("path")
-    if not path_str:
+    if not path_str or out.get("_missing"):
+        # The hook found nothing at this path when the command ran; a file
+        # created there later is not what the command touched.
         return out
     path = Path(path_str)
     if not path.exists():
         out["_missing"] = True
+        return out
+    if not path.is_file():
+        # A FIFO, device, or directory: opening it to hash or count rows
+        # could block Stop forever, and it has no content snapshot anyway.
+        out.setdefault("sha256", None)
         return out
     size = path.stat().st_size
     out.setdefault("size_bytes", size)
@@ -199,11 +256,49 @@ def normalize_event(
     return event
 
 
+def normalize_skip(raw: dict[str, Any]) -> dict[str, Any]:
+    """Keep a skip record's known fields; it is evidence of a gap, not I/O."""
+    return {
+        "ts": raw.get("ts"),
+        "skip_id": raw.get("skip_id"),
+        "skip_reason": raw.get("skip_reason") or "unknown",
+        "detail": raw.get("detail"),
+        "bash_cmd": raw.get("bash_cmd"),
+        "bash_exit": raw.get("bash_exit"),
+        "agent_id": raw.get("agent_id"),
+        "agent_type": raw.get("agent_type"),
+    }
+
+
+def normalize_data_command(raw: dict[str, Any]) -> dict[str, Any]:
+    """Keep a data command's known fields. Its file records were taken at
+    hook time; a hash is filled only where none was recorded, and a path
+    recorded as missing stays missing."""
+    return {
+        "ts": raw.get("ts"),
+        "event_id": raw.get("event_id"),
+        "agent_id": raw.get("agent_id"),
+        "agent_type": raw.get("agent_type"),
+        "bash_cmd": raw.get("bash_cmd"),
+        "bash_exit": raw.get("bash_exit"),
+        "cwd": raw.get("cwd"),
+        "signals": list(raw.get("signals") or []),
+        "named_paths": list(raw.get("named_paths") or []),
+        "named_paths_truncated": bool(raw.get("named_paths_truncated")),
+        "analysis_candidates": list(raw.get("analysis_candidates") or []),
+        "inputs": [enrich_file_record(r) for r in (raw.get("inputs") or [])],
+        "outputs": [enrich_file_record(r) for r in (raw.get("outputs") or [])],
+        "io_detection": "unresolved",
+    }
+
+
 def build_manifest(
     events: list[dict[str, Any]],
     session_id: str,
     repo_root: str,
     warnings: list[str],
+    skipped: list[dict[str, Any]] | None = None,
+    data_commands: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the consolidated manifest from normalized events."""
     if events:
@@ -285,7 +380,13 @@ def build_manifest(
             "known_exit_count": known_exit_count,
             "failed_action_count": failed_action_count,
             "scripts_executed": scripts_executed,
+            "skipped_count": len(skipped or []),
+            "data_command_count": len(data_commands or []),
         },
+        "skipped": sorted(skipped or [], key=lambda s: str(s.get("ts") or "")),
+        "data_commands": sorted(
+            data_commands or [], key=lambda d: str(d.get("ts") or "")
+        ),
         "extraction_warnings": warnings,
     }
 
@@ -294,6 +395,10 @@ def extract(events_file: Path, session_id: str, repo_root: str) -> dict[str, Any
     """End-to-end: read NDJSON events, normalize, build manifest."""
     warnings: list[str] = []
     events: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    seen_skip_ids: set[str] = set()
+    data_commands: list[dict[str, Any]] = []
+    seen_event_ids: set[str] = set()
     if events_file.exists():
         for idx, line in enumerate(
             events_file.read_text(encoding="utf-8").splitlines()
@@ -306,12 +411,31 @@ def extract(events_file: Path, session_id: str, repo_root: str) -> dict[str, Any
             except json.JSONDecodeError as exc:
                 warnings.append(f"event[{idx}]: invalid JSON ({exc}), skipped")
                 continue
+            if isinstance(raw, dict) and raw.get("kind") == "skip":
+                # A retried transfer can repeat a record; count each skip_id once.
+                skip_id = raw.get("skip_id")
+                if skip_id and skip_id in seen_skip_ids:
+                    continue
+                if skip_id:
+                    seen_skip_ids.add(skip_id)
+                skipped.append(normalize_skip(raw))
+                continue
+            if isinstance(raw, dict) and raw.get("kind") == "data_command":
+                event_id = raw.get("event_id")
+                if event_id and event_id in seen_event_ids:
+                    continue
+                if event_id:
+                    seen_event_ids.add(event_id)
+                data_commands.append(normalize_data_command(raw))
+                continue
             normalized = normalize_event(raw, warnings, idx)
             if normalized is not None:
                 events.append(normalized)
     else:
         warnings.append(f"events file not found: {events_file}")
-    return build_manifest(events, session_id, repo_root, warnings)
+    return build_manifest(
+        events, session_id, repo_root, warnings, skipped, data_commands
+    )
 
 
 def main() -> int:
@@ -330,7 +454,9 @@ def main() -> int:
         f"({manifest['n_actions']} actions, "
         f"{len(manifest['summary']['unique_inputs'])} inputs, "
         f"{len(manifest['summary']['unique_outputs'])} outputs, "
-        f"{len(manifest['extraction_warnings'])} warnings)"
+        f"{len(manifest['extraction_warnings'])} warnings, "
+        f"{manifest['summary']['skipped_count']} skipped, "
+        f"{manifest['summary']['data_command_count']} data commands)"
     )
     return 0
 

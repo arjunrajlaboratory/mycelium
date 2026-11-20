@@ -4,8 +4,8 @@ Per-session capture of analysis-script provenance: what scripts ran, against
 which input files, producing which outputs — with SHA-256 snapshots taken **at
 execution time** so iterative edit-run-edit-run loops don't lose history.
 
-The subsystem is independent from the rest of mycelium's logging: it fires when
-an analysis-script invocation is detected (`python`, `R`, `Rscript`, `jupyter`,
+The subsystem is independent from the rest of mycelium's logging: it records an
+event when an analysis-script invocation is detected (`python`, `R`, `Rscript`, `jupyter`,
 `uv run python`, `poetry run python`, `conda run … python`, including inline
 `-c` / `-e`). Standard shell execution wrappers (`time`, `exec`, `nice`, and
 `timeout`) may precede or nest around those interpreters.
@@ -39,7 +39,9 @@ snakemake run with no Snakefile found) the run is still recorded, with a
 descriptive `script_source` and `io_detection: "unresolved"`. The scripts these
 runners launch internally are not visible to the hook. If static scanning
 cannot resolve any file paths, the execution is retained as unresolved with an
-explicit warning rather than dropped.
+explicit warning rather than dropped. Any other Bash call that touches data
+leaves a minimal `data_command` record instead (see
+[Data commands](#data-commands)).
 
 ## Components
 
@@ -80,6 +82,184 @@ If lifecycle enforcement blocks Stop, the marker and cumulative event file stay
 in place; the next Stop attempt rebuilds the same session manifest with any
 additional analysis events. Cleanup and raw-event rotation happen only after
 the Stop check accepts the session.
+
+Claude Code and Codex run Stop after every turn, so an accepted Stop closes a
+turn, not the host session. When the tracker finds no transaction for its host
+session and the command would record lineage, it reopens that session's
+transaction through SessionStart's locked setup (`source: reopen`) and records
+the event there; the next turn's lineage therefore lands in a new manifest
+rather than being dropped. Commands the detector does not treat as analysis
+never reopen; a data command is parked instead (see
+[Data commands](#data-commands)). An accepted Stop leaves `next-turn-baseline.json` (the idle
+turn's baseline, or a fresh snapshot after a turn with work) and
+`next-turn-start-ts.tmp` (when it accepted) in the run directory. The
+reopened transaction starts from both, so the triggering command's own file
+changes and commits count as session work. A host startup of the same session
+drops them; an ended session's run directory keeps them (a few kilobytes),
+because deleting them by age would also hit a live session that idled. A
+turn whose only work was shell edits reopens nothing from PostToolUse, so a
+Stop with no transaction compares the repository (outside `.living/` and
+`.mycelium/`) against the carried baseline and, if anything changed, reopens
+and runs once more against that transaction. If only `.living/` changed, it
+refreshes the carried baseline and start time instead, so a note from a turn
+with no other work cannot count as reflection for a later turn's work. The
+carried start time bounds accounting only; the reopened marker's liveness
+timestamp is always the time of the reopen. After a turn with work, Stop takes
+the successor snapshot before removing any active state; if it cannot be
+written, Stop blocks with the transaction intact rather than leave the next
+turn without a baseline.
+
+A detected script that is gone or unreadable when the hook runs
+(`python3 tmp.py && rm tmp.py`) is not an event, since a missing file is no
+evidence of a run, but it is not silent either: the tracker records a
+`script-unreadable` skip naming the path.
+
+### Skips
+
+A command the tracker meant to record but could not leaves a skip record
+instead of nothing, so a missing event is never read as "nothing ran":
+
+| `skip_reason` | When | Where |
+|---|---|---|
+| `extractor-failed` | the per-event extractor exited nonzero (`detail`: `exit N`) | session raw stream |
+| `extractor-missing` | the extractor file is absent; recorded once per session, since no command can be classified | session raw stream, or unowned file |
+| `detector-failed` | with no transaction, the pre-reopen check crashed (`detail`: `exit N`; the detector exits 70 on an internal error, never 1, which means "not analysis") | `.mycelium/lineage-skips-unowned.ndjson` |
+| `no-transaction` | reopening was refused or failed (corrupt marker, busy lifecycle lock) | `.mycelium/lineage-skips-unowned.ndjson` |
+| `script-unreadable` | a detected script was gone or unreadable when the hook ran (`detail`: its path) | session raw stream |
+
+```json
+{"ts": "...", "kind": "skip", "skip_id": "9f1c...", "skip_reason": "extractor-failed",
+ "detail": "exit 3", "bash_cmd": "python3 analysis.py", "bash_exit": 0,
+ "agent_id": null, "agent_type": null}
+```
+
+In the session raw stream, skips are consolidated into the manifest's
+`skipped` list, and Stop's message carries a `LINEAGE GAP:` line naming the
+count and reasons. Unowned records carry `host` and `host_session_id`. That
+session's next Stop moves them into its raw stream only when it holds a valid
+transaction it owns; on every other path (no transaction, an invalid marker,
+another owner) it reports them directly in its message. The shared file is
+locked through `lineage-skips-unowned.ndjson.lock` and rewritten by atomic
+replacement, so a failed rewrite keeps every record; a rewrite that fails
+after a transfer can leave a copy in both places, so every reader counts a
+`skip_id` once, and a Stop whose move into its own stream failed blocks
+until a retry completes it, so no later turn reports the same gap again.
+Before writing to it, a hook re-checks the shared state
+directory's containment and symlinks, and refuses a payload without a valid
+host session ID. Records are ASCII-only JSON, so no Unicode line separator in
+a command can split one. A skip record holds only the command text the host already
+showed, the reason, and a short detail; never data. When the shared state
+directory itself fails its safety checks there is nowhere safe to write, and
+the skip is not recorded.
+
+### Data commands
+
+The analysis detector records only interpreter runs it can prove. Every other
+Bash call that touches data leaves one minimal record of its own kind, so a
+look at a data file or an inline read the detector rejects still counts toward
+how many times the data was looked at:
+
+- shell operations on data (`head`, `zcat`, `awk`, `cut`, `sort`, `cp`, `mv`,
+  `samtools`, …) whose text names a data-like path: a file with a data
+  extension (the scan list plus compressed and common genomics, tree, and
+  image formats), a path under `data/`, or a path under `analysis/**/outputs`.
+  Tooling and Mycelium state (`.living/`, `.mycelium/`, `.git/`, `.claude/`,
+  `.codex/`, `node_modules/`, `package.json`, `requirements.txt`, …) and URLs
+  are not data;
+- interpreter runs the detector cannot prove (a heredoc-fed
+  `python3 - <<'PY'`, `Rscript` inside a `for` loop, a `cd` it cannot
+  follow, a script run through `xargs`), labelled in `analysis_candidates`.
+  Each simple command inside unmodelled structure is unwrapped (`time`,
+  `nohup`, `uv run`, `conda run -n`, `timeout`, `xargs`, ...) and read by
+  the detector's own grammar without the execution-proof requirement, so
+  terminal and non-executing modes (`--version`, `bash -n`, `snakemake -n`),
+  tooling modules (`python -m pytest`), and Mycelium's own helpers are
+  excluded exactly as there. Labels are the resolved script path or
+  `<interpreter> (inline)`; an interpreter reading its program from stdin
+  (heredoc, `xargs python3`) is labelled by name. Quoted text
+  (`echo "python a.py"`) and heredoc bodies (a README written with
+  `cat <<EOF`) are not runs. Labels are hints, never claims.
+
+```json
+{"ts": "...", "kind": "data_command", "event_id": "4b0e...",
+ "bash_cmd": "sort data/x.csv > data/sorted.csv", "bash_exit": 0,
+ "cwd": "/path/to/repo", "agent_id": null, "agent_type": null,
+ "signals": ["data-path"], "named_paths": ["data/x.csv", "data/sorted.csv"],
+ "named_paths_truncated": false, "analysis_candidates": [],
+ "inputs": [],
+ "outputs": [{"path": "/path/to/repo/data/sorted.csv", "sha256": "...",
+              "size_bytes": 12, "evidence": "redirection"}],
+ "io_detection": "unresolved"}
+```
+
+A data command never claims that an analysis ran (no `script` or
+`script_sha256`), and `io_detection` is always `"unresolved"`.
+`named_paths` lists literal data-like words in the command text, in order,
+capped at 64: they are mentions, not accesses (the word may sit in a comment,
+an `echo`, or a branch that never ran), so they carry no direction and are not
+read or hashed. `inputs` and `outputs` hold only paths whose direction shell
+syntax alone proves. The command must have exited 0 and be a plain `&&` list
+of literal simple commands, so every command in it ran and succeeded:
+
+- a `<` redirection target is an input; a `>`, `>>`, `>|`, `&>`, or `&>>`
+  target is an output;
+- `cp SRC DST` with only role-preserving flags (never `-n`, `-i`, `-u`, `-t`,
+  `-s`, or a long option) read a regular-file source and wrote its
+  destination (inside it when it is a directory), and `mv SRC DST` that
+  renamed a file onto a regular file did the same. Only when every later
+  command in the list is read-only, since the destination's kind is read from
+  the final filesystem. A symlinked source or destination, a source still
+  present after `mv`, a move into a directory, and a copy onto itself claim
+  nothing;
+- `cd DIR` is followed logically (as bash does through symlinks) to an
+  existing directory; a bare name is unresolved when `CDPATH` is mentioned
+  or set. After any command that could move or remove a directory
+  (everything outside a short list of read-only and file-creating commands,
+  including `cp` and `mv`), later relative paths are unresolved.
+- `exit`, `return`, `exec`, `set`, `!`, `eval`, `source`, and wrappers
+  (`time`, `env`, `nohup`, `timeout`, `xargs`, `coproc`, ...) end what the
+  zero status proves; nothing at or after them is claimed.
+
+Pipes, `;`, `||`, backgrounding, subshells, substitutions, `$` expansions,
+globs, braces, tilde, heredocs, and an unknown exit status claim nothing. A
+command's own operands (`head data/x.csv`) are never inputs: that would need
+each tool's grammar. Files are hashed at hook time; a FIFO, device, or
+directory is recorded without being opened, and every open is non-blocking
+with a regular-file check on the descriptor. Long commands stay linear: the
+words are read by a one-pass tokenizer, and the label pass falls back to a
+command-position scan beyond 64 KB.
+
+A call with a proven analysis run gets its analysis events and no data
+command, so each Bash call yields at most one kind.
+
+**Lifecycle.** Data commands never reopen a transaction, never open a
+post-action cycle, and are not session work: a turn whose only lineage is
+data commands is accepted without a session log, exactly as before. With a
+transaction they go to the session's raw stream. Without one they are parked
+in `.mycelium/lineage-skips-unowned.ndjson`, keyed by `host` and
+`host_session_id` like unowned skips. That session's next Stop (hosts run it
+at the end of every turn) never leaves them waiting: with a valid transaction
+it owns, it moves them into its stream; otherwise (no transaction, an invalid
+marker, a non-owner child) it reports the skips and writes the data commands
+to a manifest of their own. If that manifest cannot be written (a linked
+lineage directory, a failed consolidation) they stay parked for the next
+Stop. A record that cannot be built becomes a `data-command-failed` skip,
+and one that cannot be written exits 70, which the tracker records as a
+`detector-failed` gap.
+
+**Data-only manifests.** A stream holding only data commands is not session
+work, so a turn with nothing else drops its session log and releases its
+`YYYY-MM-DD-NNN` number, which the next session may take again. Such a stream
+is therefore never named by that number:
+`.living/log/data-lineage/data-commands-<host>-<host session id>-<first event_id, 12 hex>.json`
+(the manifest's `session_id` is the same name). A retried Stop rewrites the
+same file. When the stream later gains an analysis event (a blocked Stop,
+then more work), the session manifest written under the session number
+replaces the data-only one, which is removed.
+
+The manifest keeps them apart from `actions` in `data_commands`, counted by
+`summary.data_command_count`; each `event_id` is counted once. Their paths do
+not enter `summary.unique_inputs`/`unique_outputs`.
 
 ## Event schema (NDJSON, one line per detected script)
 
@@ -175,11 +355,19 @@ captured.
     "total_action_count": 7,
     "known_exit_count": 5,
     "failed_action_count": 0,
-    "scripts_executed": ["analysis/foo.py", "(inline ab12cd34ef56)", ...]
+    "scripts_executed": ["analysis/foo.py", "(inline ab12cd34ef56)", ...],
+    "skipped_count": 0,
+    "data_command_count": 0
   },
+  "skipped": [<skip 1>, ...],
+  "data_commands": [<data command 1>, ...],
   "extraction_warnings": [...]
 }
 ```
+
+`skipped` and `summary.skipped_count` were added after 0.9.5. A manifest written
+earlier has neither key: read its coverage as unknown, not as zero skips. The
+same holds for `data_commands` and `summary.data_command_count`.
 
 `total_wall_seconds` sums only actions whose host payload carried a wall
 time and is `null` when none did (some hosts, including current Codex Bash

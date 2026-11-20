@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.6] - 2026-11-19
+## [0.9.6] - 2026-11-20
 
 ### Added
 
@@ -29,6 +29,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A command whose provenance cannot be verified, or that is still running when
   the bounded Stop allowance ends, is logged as unverified provenance instead
   of holding Stop.
+- **Every Bash call that touches data now leaves a lineage record.** The
+  analysis detector records only interpreter runs it can prove, so shell data
+  operations (`head`, `zcat`, `awk`, `cut`, `cp`, `mv` on data files) and
+  inline reads it rejects (heredoc-fed `python3 - <<'PY'`, `Rscript` in a
+  loop) left nothing: 15-37% of data-touching commands in the SNP-tree and
+  AP1 transcripts. Each such call now writes one `"kind": "data_command"`
+  record with `io_detection: "unresolved"`, the literal data-like paths its
+  text names (mentions, without direction), any unproven interpreter runs,
+  and `inputs`/`outputs` only where shell syntax proves direction (a
+  redirection, or `cp`/`mv`, in a command that exited 0). It never claims an
+  analysis ran. Manifests list them in a new `data_commands` key with
+  `summary.data_command_count`, apart from `actions`. Replaying the SNP-tree
+  and AP1 transcripts, 97.7% of data-touching commands now leave an event or
+  a skip (19.6% before). Data commands do not reopen a transaction (the
+  reopen above is for analysis runs and project edits), do not open a
+  post-action cycle, and are not session work. Without a transaction they
+  are parked in `.mycelium/lineage-skips-unowned.ndjson` until that
+  session's next Stop, which moves them into its own stream or, without
+  one, writes them to a manifest of their own. A stream holding only data
+  commands gets a manifest named
+  `data-commands-<host>-<host session>-<event id>.json`, never a session
+  number an idle turn releases. Older manifests lack the new keys; read
+  them as unknown. Existing projects need no migration.
 
 ### Fixed
 
@@ -39,6 +62,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Antigravity hook launchers preserve the selected Python virtual environment.
   Knowledge indexing uses the built-in offline summaries and concept labels.
 - Stop-hook source resolution works in macOS system Bash 3.2.
+- **Work after an accepted Stop is no longer dropped silently.** Claude Code
+  and Codex run Stop after every turn, and an accepted Stop removed the
+  session's transaction, so every later turn's analysis, lineage, log prompts,
+  and Stop enforcement vanished until the next resume or compaction. An
+  SNP-tree Claude session ran about 200 detectable analysis commands and
+  recorded one lineage event. Now an analysis or data command, or a project
+  edit, from a live host session with no transaction reopens that session's
+  transaction through SessionStart's own locked setup, with a fresh session
+  log; the accepted turn's log and manifest are never touched. Reads,
+  non-analysis commands, and edits under `.living`/`.mycelium` never reopen,
+  another root's live state is untouched, and unsafe state still refuses.
+  The accepted Stop leaves the next turn a baseline (the idle turn's own, or
+  a fresh snapshot after work) and its start time, so the command that
+  triggers a reopen, including a commit it makes, still counts as session
+  work. A turn whose only work was shell edits is caught at Stop by comparing
+  against that baseline. Expect one session log per working turn in long
+  interactive sessions, as resumes already produced. Existing projects need
+  no migration.
+- **Lineage gaps are recorded instead of silent.** When the lineage extractor
+  fails or is missing, the detector crashes (it now exits 70 on an internal
+  error instead of 1, which meant "not analysis"), or no transaction can be
+  opened, the tracker writes a skip record with its reason; records written
+  without a transaction are reported by that session's next Stop on every
+  path, and the shared file holding them is rewritten atomically. A script
+  that is gone by the time the hook runs (`python3 tmp.py && rm tmp.py`) now
+  leaves a `script-unreadable` skip instead of nothing. Session skips appear in the manifest's new
+  `skipped` list and `summary.skipped_count`, and Stop reports a
+  `LINEAGE GAP:` line. Older manifests lack these keys; read them as unknown
+  coverage.
 
 ## [0.9.5] - 2026-11-16
 

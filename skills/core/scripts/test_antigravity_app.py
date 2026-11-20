@@ -621,6 +621,18 @@ def test_app_strict_capture_missing_or_failing_extractor_is_nonzero(real_cycle, 
     assert ("extractor not found" if helper == "missing" else "helper exploded") in result.stderr
 
 
+def test_app_strict_capture_still_records_an_unreadable_script_gap(real_cycle):
+    """Merge of #138: strict capture fails only on a missing or failing extractor (the
+    adapter holds that outcome itself); main's script-unreadable gap record still applies."""
+    repo, payload, run, state = real_cycle
+    data = {"cwd": str(repo), "session_id": f"{CID}-turn-0", "tool_name": "Bash",
+            "tool_input": {"command": "python3 scratch.py && rm scratch.py"}, "tool_response": {}}
+    result = run_shell("mycelium-data-tracker.sh", data, repo, ag.APP_HOST, MYCELIUM_STRICT_CAPTURE="1")
+    assert result.returncode == 0 and result.stdout == "", result.stderr
+    records = [json.loads(line) for line in (run / "mycelium-data-events.tmp").read_text().splitlines()]
+    assert [(r.get("kind"), r.get("skip_reason")) for r in records] == [("skip", "script-unreadable")]
+
+
 # ---- Command line: explicit host, unknown host, receipt host ---------------------------------------
 
 def cli(*args, stdin="", env=None):

@@ -61,8 +61,14 @@ if [[ -z "$REPO_ROOT" ]]; then
   [[ "$BATCH" == 1 ]] && batch_fail "session cwd is not inside a repository" 70
   exit 0
 fi
+
+# Only enforce in mycelium-enabled repos
+if [[ ! -d "$REPO_ROOT/.living" ]]; then
+  [[ "$BATCH" == 1 ]] && batch_fail "repository has no .living opt-in" 70
+  exit 0
+fi
+
 if [[ "$BATCH" == 1 ]]; then
-  [[ -d "$REPO_ROOT/.living" ]] || batch_fail "repository has no .living opt-in" 70
   # Validate and bind the whole batch before any activity or lifecycle write.
   BATCH_RESULT=$(printf '%s' "$INPUT" | python3 -c '
 import hashlib, json, os, sys
@@ -120,23 +126,12 @@ print(json.dumps({"mycelium_activity_batch": {"id": ident, "count": len(paths), 
   BATCH_COUNT=$(printf '%s\n' "$BATCH_RESULT" | sed -n 1p)
   BATCH_ACK=$(printf '%s\n' "$BATCH_RESULT" | sed -n 2p)
 fi
-mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT" || {
-  [[ "$BATCH" == 1 ]] && batch_fail "session state or lock is unavailable" 70
-  exit 0
-}
-trap mycelium_release_session_lock EXIT
 
-# Only enforce in mycelium-enabled repos
-if [[ ! -d "$REPO_ROOT/.living" ]]; then
-  exit 0
-fi
+# --- Select the edited project files that count as work ---
 
-# --- Accumulate modified files for session summary ---
-
-mkdir -p "$STATE_DIR"
-ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
-touched=false
-recorded=0
+# Decided before the state gate: only an edit to an eligible project file may
+# reopen a live host session whose earlier turn's Stop closed its transaction.
+ELIGIBLE_PATHS=()
 while IFS= read -r FILE_PATH; do
   [[ -z "$FILE_PATH" ]] && continue
 
@@ -155,11 +150,7 @@ while IFS= read -r FILE_PATH; do
     continue
   fi
 
-  if ! grep -qxF "$FILE_PATH" "$ACTIVITY_FILE" 2>/dev/null; then
-    printf '%s\n' "$FILE_PATH" >> "$ACTIVITY_FILE"
-  fi
-  touched=true
-  recorded=$((recorded + 1))
+  ELIGIBLE_PATHS+=("$FILE_PATH")
 done < <(printf '%s' "$INPUT" | python3 -c '
 import json, os, re, sys
 try:
@@ -195,12 +186,30 @@ if isinstance(command, str):
             emit(match.group(1))
 ' "$SESSION_CWD" "$REPO_ROOT" "$BATCH")
 
-if [[ "$BATCH" == 1 && "$recorded" != "$BATCH_COUNT" ]]; then
-  batch_fail "recorded $recorded of $BATCH_COUNT entries; no acknowledgement" 70
+# A batch is acknowledged only whole: every validated entry must be eligible
+# here, checked before any state or lifecycle write.
+if [[ "$BATCH" == 1 && "${#ELIGIBLE_PATHS[@]}" != "$BATCH_COUNT" ]]; then
+  batch_fail "${#ELIGIBLE_PATHS[@]} of $BATCH_COUNT entries are eligible; no acknowledgement" 70
 fi
-if [[ "$touched" != true ]]; then
+if (( ${#ELIGIBLE_PATHS[@]} == 0 )); then
   exit 0
 fi
+
+mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT" reopen || {
+  [[ "$BATCH" == 1 ]] && batch_fail "session state or lock is unavailable" 70
+  exit 0
+}
+trap mycelium_release_session_lock EXIT
+
+# --- Accumulate modified files for session summary ---
+
+mkdir -p "$STATE_DIR"
+ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
+for FILE_PATH in "${ELIGIBLE_PATHS[@]}"; do
+  if ! grep -qxF "$FILE_PATH" "$ACTIVITY_FILE" 2>/dev/null; then
+    printf '%s\n' "$FILE_PATH" >> "$ACTIVITY_FILE"
+  fi
+done
 
 # --- Start or refresh the lifecycle work cycle ---
 
