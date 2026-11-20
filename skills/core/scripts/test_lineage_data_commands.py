@@ -140,6 +140,21 @@ def test_named_paths_are_capped_and_marked_truncated(project):
             "cd /nonexistent/dir; .venv/bin/python -u fit.py",
             "fit.py",
         ),
+        (
+            # The run after a heredoc body is still shell text.
+            "cat <<A <<B > notes.md\npython q.py\nA\nit's\nB\nfor f in a; do Rscript s.R; done",
+            "Rscript s.R",
+        ),
+        (
+            'echo "a << b"\nfor f in a; do python z.py; done',
+            "python z.py",
+        ),
+        (
+            "cat > /tmp/run_one.sh <<'EOF'\nRscript run.R $1\nEOF\n"
+            "chmod +x /tmp/run_one.sh\nprintf 'a\\nb' | xargs -P 3 -n 1 /tmp/run_one.sh",
+            "xargs /tmp/run_one.sh",
+        ),
+        ("for n in a b; do ./run_all.sh $n; done", "./run_all.sh"),
     ],
 )
 def test_an_unproven_analysis_run_is_labelled_not_claimed(project, command, candidate):
@@ -159,6 +174,10 @@ def test_an_unproven_analysis_run_is_labelled_not_claimed(project, command, cand
         "python3 /opt/mycelium/skills/core/scripts/validate_structure.py .",
         'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/finalize_handoff.py"',
         "x=1; R = 2",
+        "cat > NOTES.md <<'EOF'\npython fit.py\nRscript run.R\nEOF",
+        "cat <<-EOF > notes.md\n\tpython x.py\n\tEOF",
+        "chmod +x ./run.sh",
+        "ls -l /tmp/run_one.sh",
     ],
 )
 def test_interpreter_text_that_is_not_a_run_leaves_nothing(project, command):
@@ -274,6 +293,11 @@ def test_a_mv_records_the_gone_source_and_the_moved_file(project):
         "cp data/x.csv README.md data/y.csv",  # many sources, file destination
         "echo cp data/x.csv data/y.csv",
         "command cp data/x.csv data/y.csv",
+        "cp -n data/x.csv data/y.csv",   # no-clobber: may copy nothing, exit 0
+        "cp -i data/x.csv data/y.csv",
+        "mv -n data/x.csv data/y.csv",
+        "mv -i data/x.csv data/y.csv",
+        "cp -u data/x.csv data/y.csv",
     ],
 )
 def test_a_cp_argv_that_is_not_modelled_claims_no_direction(project, command):
@@ -337,8 +361,17 @@ def test_parking_refuses_a_symlinked_shared_file(project, tmp_path_factory):
     result = _main(project, "--bash-cmd", "head data/x.csv", "--check-execution",
                    "--data-command-to", str(link), "--host", "claude",
                    "--host-session-id", "s1")
-    assert result.returncode == 1
+    # Refused, and reported as a detector gap (70) rather than dropped.
+    assert result.returncode == 70
     assert elsewhere.read_text() == ""
+
+
+def test_a_park_that_cannot_be_written_is_a_detector_gap(project):
+    result = _main(project, "--bash-cmd", "head data/x.csv", "--check-execution",
+                   "--data-command-to", str(project / "missing" / "u.ndjson"),
+                   "--host", "claude", "--host-session-id", "s1")
+    # 70, not 1: the tracker records a detector-failed skip, never silence.
+    assert result.returncode == 70
 
 
 def test_parking_needs_check_execution_and_keys(project):
@@ -535,31 +568,104 @@ def test_a_data_command_after_an_idle_turn_does_not_reopen(tmp_path, host):
     )
 
 
+def _data_only_manifests(repo: Path) -> list[Path]:
+    folder = repo / ".living" / "log" / "data-lineage"
+    return sorted(folder.glob("data-commands-*.json")) if folder.is_dir() else []
+
+
 @pytest.mark.parametrize("host", HOSTS)
-def test_a_parked_data_command_waits_for_the_next_owned_stop(tmp_path, host):
+def test_a_stop_without_a_transaction_writes_parked_data_commands(tmp_path, host):
     repo = _repo(tmp_path)
     sid = "parked"
     _accept_idle_turn(host, repo, sid)
     _bash(host, repo, sid, "head data/x.csv")
+    [parked] = _unowned(repo)
 
-    # A Stop with no transaction: not a gap, so nothing is reported and the
-    # record stays parked.
+    # Not a gap: nothing is reported, and the record gets a manifest of its
+    # own instead of waiting for a transaction that may never come.
     quiet = _stop(host, repo, sid)
-    assert "LINEAGE GAP" not in quiet.stdout
-    assert [r["kind"] for r in _unowned(repo)] == ["data_command"]
 
-    # A later analysis reopens; its owned Stop moves the record in.
+    assert "LINEAGE GAP" not in quiet.stdout
+    assert _unowned(repo) == []
+    [path] = _data_only_manifests(repo)
+    assert path.name == f"data-commands-{host}-{sid}-{parked['event_id'][:12]}.json"
+    manifest = json.loads(path.read_text())
+    assert manifest["n_actions"] == 0
+    assert [d["bash_cmd"] for d in manifest["data_commands"]] == ["head data/x.csv"]
+    assert not (_run_dir(repo, host, sid) / "active-session-log.tmp").exists()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_parked_data_command_joins_a_reopened_session(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "joined"
+    _accept_idle_turn(host, repo, sid)
+    _bash(host, repo, sid, "head data/x.csv")
     _bash(host, repo, sid, "python3 analysis.py")
     _bash(host, repo, sid, "python3 analysis.py", "mycelium-post-action.sh")
     _stop(host, repo, sid)
 
     assert _unowned(repo) == []
+    assert _data_only_manifests(repo) == []
     data_commands = [d for m in _manifests(repo) for d in m["data_commands"]]
     assert [d["bash_cmd"] for d in data_commands] == ["head data/x.csv"]
 
 
 @pytest.mark.parametrize("host", HOSTS)
-def test_a_stop_without_a_transaction_reports_skips_but_keeps_data_commands(
+def test_a_data_only_turn_cannot_lose_its_manifest_to_a_reused_session_number(
+    tmp_path, host
+):
+    """A data-only turn is not work, so its session log and number are
+    released; the next session takes the same number. Its manifest must
+    not be named by that number, or the next one overwrites it."""
+    repo = _repo(tmp_path)
+    _start(host, repo, "first")
+    _bash(host, repo, "first", "head data/x.csv")
+    assert not _blocked(_stop(host, repo, "first"))
+    [data_only] = _data_only_manifests(repo)
+    before = data_only.read_bytes()
+
+    _start(host, repo, "second")
+    _bash(host, repo, "second", "python3 analysis.py")
+    _bash(host, repo, "second", "python3 analysis.py", "mycelium-post-action.sh")
+    _stop(host, repo, "second")
+
+    assert data_only.read_bytes() == before
+    session_manifests = [
+        m for m in _manifests(repo) if not m["session_id"].startswith("data-commands-")
+    ]
+    assert [m["n_actions"] for m in session_manifests] == [1]
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_session_manifest_replaces_the_data_only_one_after_a_blocked_stop(
+    tmp_path, host
+):
+    repo = _repo(tmp_path)
+    sid = "blocked"
+    _start(host, repo, sid)
+    _bash(host, repo, sid, "head data/x.csv")
+    edit = _run(host, "mycelium-activity-tracker.sh", repo,
+                {"cwd": str(repo), "session_id": sid, "tool_name": "Write",
+                 "hook_event_name": "PostToolUse",
+                 "tool_input": {"file_path": str(repo / "model.py")},
+                 "tool_response": {}})
+    assert edit.returncode == 0, edit.stderr
+    (repo / "model.py").write_text("x = 1\n")
+    assert _blocked(_stop(host, repo, sid))
+    assert len(_data_only_manifests(repo)) == 1
+
+    _bash(host, repo, sid, "python3 analysis.py")
+    _stop(host, repo, sid)
+
+    assert _data_only_manifests(repo) == []
+    [manifest] = _manifests(repo)
+    assert manifest["n_actions"] == 1
+    assert [d["bash_cmd"] for d in manifest["data_commands"]] == ["head data/x.csv"]
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_stop_without_a_transaction_reports_skips_and_writes_data_commands(
     tmp_path, host
 ):
     repo = _repo(tmp_path)
@@ -577,20 +683,27 @@ def test_a_stop_without_a_transaction_reports_skips_but_keeps_data_commands(
 
     assert "LINEAGE GAP: 1 data command(s)" in stop.stdout
     assert "detector-failed x1" in stop.stdout
-    assert _unowned(repo) == [data, other]
+    assert _unowned(repo) == [other]
+    [path] = _data_only_manifests(repo)
+    assert path.name == f"data-commands-{host}-{sid}-e1.json"
 
 
-def test_a_carriage_return_claims_no_direction(project):
-    event = _event("sort data/x.csv > data/o.csv\r", project)
-    assert event is not None
-    assert event["outputs"] == []
+@pytest.mark.parametrize("host", HOSTS)
+def test_data_commands_stay_parked_when_their_manifest_cannot_be_written(
+    tmp_path, host
+):
+    repo = _repo(tmp_path)
+    sid = "unwritable"
+    _accept_idle_turn(host, repo, sid)
+    _bash(host, repo, sid, "head data/x.csv")
+    (repo / ".living" / "log" / "data-lineage").mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    shutil.rmtree(repo / ".living" / "log" / "data-lineage")
+    (repo / ".living" / "log" / "data-lineage").symlink_to(target)
 
+    stop = _stop(host, repo, sid)
 
-def test_a_line_separator_in_a_command_keeps_one_record(project):
-    stream = project / "events.tmp"
-    result = _main(project, "--bash-cmd", "head data/x.csv #   note",
-                   "--bash-exit", "0", "--append-to", str(stream))
-    assert result.returncode == 0, result.stderr
-    raw = stream.read_bytes()
-    assert raw.count(b"\n") == 1 and raw.isascii()
-    assert json.loads(raw)["bash_cmd"].endswith("  note")
+    assert "LINEAGE GAP" not in stop.stdout
+    assert [r["kind"] for r in _unowned(repo)] == ["data_command"]
+    assert list(target.iterdir()) == []

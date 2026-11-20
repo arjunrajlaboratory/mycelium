@@ -57,10 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a skip (19.6% before). Data commands do not reopen a transaction (the
   reopen above is for analysis runs and project edits), do not open a
   post-action cycle, and are not session work. Without a transaction they
-  wait in `.mycelium/lineage-skips-unowned.ndjson` for the session's next
-  owned Stop; a Stop without a transaction no longer clears them. Older
-  manifests lack the new keys; read them as unknown. Existing projects need
-  no migration.
+  are parked in `.mycelium/lineage-skips-unowned.ndjson` until that
+  session's next Stop, which moves them into its own stream or, without
+  one, writes them to a manifest of their own. A stream holding only data
+  commands gets a manifest named
+  `data-commands-<host>-<host session>-<event id>.json`, never a session
+  number an idle turn releases. Older manifests lack the new keys; read
+  them as unknown. Existing projects need no migration.
 
 ## [0.9.5] - 2026-11-16
 

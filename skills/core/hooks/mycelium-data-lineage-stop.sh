@@ -80,6 +80,28 @@ if [[ -z "$SESSION_ID" ]]; then
 fi
 if [[ ! "$SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then exit 1; fi
 
+# A stream holding only data_command records is not session work: an idle
+# turn with a look at data drops its session log and releases its
+# YYYY-MM-DD-NNN number, which the next session may take again. Name its
+# manifest by host session and first event_id instead, so it can never be
+# overwritten. JSON escapes quotes inside strings, so only a record's own
+# `"event_id": "` key matches. When the stream later gains an analysis
+# event, the session manifest replaces that data-only one.
+FIRST_EVENT_ID=$(grep -o '"event_id": "[0-9a-f]*"' "$EVENTS_FILE" 2>/dev/null \
+  | head -1 | sed -E 's/.*: "([0-9a-f]*)"/\1/' | cut -c1-12 || true)
+DATA_ONLY_ID=""
+if [[ -n "$FIRST_EVENT_ID" ]]; then
+  DATA_ONLY_ID=$(printf 'data-commands-%s-%s-%s' "$(mycelium_hook_host)" \
+    "${HOST_SESSION_ID:-unknown}" "$FIRST_EVENT_ID" | tr -c 'A-Za-z0-9._-' '_')
+fi
+REPLACED_DATA_ONLY_ID=""
+if ! grep -qv '"kind": "data_command"' "$EVENTS_FILE" 2>/dev/null \
+  && [[ -n "$DATA_ONLY_ID" ]]; then
+  SESSION_ID="$DATA_ONLY_ID"
+else
+  REPLACED_DATA_ONLY_ID="$DATA_ONLY_ID"
+fi
+
 EXTRACTOR="${MYCELIUM_DATA_EXTRACTOR:-$HERE/../scripts/extract_data_lineage.py}"
 if [[ ! -f "$EXTRACTOR" ]]; then exit 1; fi
 
@@ -147,5 +169,9 @@ rm -f "$LOG_TMP"
 # without bound. Sentinels are dot-prefixed; explicit glob avoids matching
 # other hidden files.
 STATUS_DIR="$REPO_ROOT/.living/log"
+if [[ "$EXIT_CODE" -eq 0 && -n "$REPLACED_DATA_ONLY_ID" ]]; then
+  rm -f "$OUT_DIR/${REPLACED_DATA_ONLY_ID}.json" \
+    "$STATUS_DIR/.data-lineage-status-${REPLACED_DATA_ONLY_ID}.json"
+fi
 ls -t "$STATUS_DIR"/.data-lineage-status-*.json 2>/dev/null | tail -n +21 | xargs rm -f 2>/dev/null || true
 exit "$EXIT_CODE"

@@ -168,8 +168,10 @@ how many times the data was looked at:
   are not data;
 - interpreter runs the detector cannot prove (a heredoc-fed
   `python3 - <<'PY'`, `Rscript` inside a `for` loop, a `cd` it cannot
-  follow), labelled in `analysis_candidates`. Quoted text (`echo "python a.py"`),
-  `python -m pytest`-style tooling, and Mycelium's own helpers are not runs.
+  follow, a script run by path or through `xargs`), labelled in
+  `analysis_candidates`. Quoted text (`echo "python a.py"`), heredoc bodies
+  (a README written with `cat <<EOF`), `python -m pytest`-style tooling, and
+  Mycelium's own helpers are not runs.
 
 ```json
 {"ts": "...", "kind": "data_command", "event_id": "4b0e...",
@@ -192,7 +194,8 @@ read or hashed. `inputs` and `outputs` hold only paths whose direction shell
 syntax alone proves, hashed at hook time: the command exited 0 and is a plain
 `&&` list of literal simple commands, so every command ran and succeeded.
 Then a `<` redirection target is an input; a `>`, `>>`, `>|`, `&>`, or `&>>`
-target is an output; and `cp`/`mv` with only role-preserving flags read their
+target is an output; and `cp`/`mv` with only role-preserving flags (never `-n`, `-i`, or `-u`, which
+can skip an existing destination and still exit 0) read their
 sources and wrote their destinations (inside the destination when it is a
 directory). `cd DIR` to an existing literal directory moves where later
 relative paths resolve; any other cwd change leaves them unclaimed. Pipes,
@@ -207,15 +210,27 @@ command, so each Bash call yields at most one kind.
 **Lifecycle.** Data commands never reopen a transaction, never open a
 post-action cycle, and are not session work: a turn whose only lineage is
 data commands is accepted without a session log, exactly as before. With a
-transaction they go to the session's raw stream. Without one they wait in
-`.mycelium/lineage-skips-unowned.ndjson`, keyed by `host` and
-`host_session_id` like unowned skips, and the session's next Stop that holds
-a valid owned transaction moves them into its stream. Stops without one
-report the skips and leave data commands in place: they are records waiting
-for a manifest, not gaps. A host session that never reopens again (only
-looks after its last analysis), or a non-owner child session, leaves them in
-that file. A record that cannot be built becomes a `data-command-failed`
-skip there, and the check's answer is unchanged.
+transaction they go to the session's raw stream. Without one they are parked
+in `.mycelium/lineage-skips-unowned.ndjson`, keyed by `host` and
+`host_session_id` like unowned skips. That session's next Stop (hosts run it
+at the end of every turn) never leaves them waiting: with a valid transaction
+it owns, it moves them into its stream; otherwise (no transaction, an invalid
+marker, a non-owner child) it reports the skips and writes the data commands
+to a manifest of their own. If that manifest cannot be written (a linked
+lineage directory, a failed consolidation) they stay parked for the next
+Stop. A record that cannot be built becomes a `data-command-failed` skip,
+and one that cannot be written exits 70, which the tracker records as a
+`detector-failed` gap.
+
+**Data-only manifests.** A stream holding only data commands is not session
+work, so a turn with nothing else drops its session log and releases its
+`YYYY-MM-DD-NNN` number, which the next session may take again. Such a stream
+is therefore never named by that number:
+`.living/log/data-lineage/data-commands-<host>-<host session id>-<first event_id, 12 hex>.json`
+(the manifest's `session_id` is the same name). A retried Stop rewrites the
+same file. When the stream later gains an analysis event (a blocked Stop,
+then more work), the session manifest written under the session number
+replaces the data-only one, which is removed.
 
 The manifest keeps them apart from `actions` in `data_commands`, counted by
 `summary.data_command_count`; each `event_id` is counted once. Their paths do

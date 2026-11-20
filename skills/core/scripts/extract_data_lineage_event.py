@@ -4653,11 +4653,13 @@ def _data_path_mentions(command: str) -> tuple[list[str], bool]:
     return list(seen), False
 
 
-# Flags that leave `cp SRC... DST` / `mv SRC... DST` operand roles unchanged.
-# Anything else (`-t DIR`, `-T`, `-s`, `-S SUFFIX`, any long option) makes the
-# argv unmodelled, and no direction is claimed (pattern 13).
-_CP_FLAGS = frozenset("fipRrvanLHP")
-_MV_FLAGS = frozenset("fivn")
+# Flags that leave `cp SRC... DST` / `mv SRC... DST` operand roles unchanged
+# and always perform the copy or move when the command exits 0. Anything else
+# makes the argv unmodelled, and no direction is claimed (pattern 13):
+# `-t DIR`, `-T`, `-s`, `-S SUFFIX`, any long option, and `-n`/`-i`/`-u`,
+# which can skip an existing destination and still exit 0.
+_CP_FLAGS = frozenset("fpRrvaLHP")
+_MV_FLAGS = frozenset("fv")
 _INPUT_REDIRECTIONS = {"<"}
 _OUTPUT_REDIRECTIONS = {">", ">>", ">|", "&>", "&>>"}
 # Unquoted characters that make a word's value depend on the shell (globs,
@@ -4879,6 +4881,7 @@ _COMMAND_POSITION_PREFIXES = frozenset(
     {"do", "then", "else", "elif", "if", "while", "until", "!", "{",
      "time", "nohup", "exec", "command", "builtin", "env"}
 )
+_LABELLED_SCRIPT_SUFFIXES = (".sh", ".bash", ".py", ".R", ".r")
 _SEGMENT_SPLIT_RX = re.compile(r"[;&|()\n]")
 
 
@@ -4894,11 +4897,75 @@ def _names_managed_utility(text: str) -> bool:
     return any(suffix in text for suffix in IGNORED_SCRIPT_SUFFIXES)
 
 
+_HEREDOC_DELIMITER_RX = re.compile(
+    r"""<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|([^\s;&|<>()'"]+))"""
+)
+
+
+def _unquoted_heredoc_starts(line: str) -> list[tuple[str, bool]] | None:
+    """Heredoc delimiters opened by unquoted `<<` on one line, in order.
+
+    None when the line's quotes do not balance, so the caller blanks
+    nothing rather than guess (a body hidden wrongly would lose a label).
+    """
+    starts: list[tuple[str, bool]] = []
+    quote: str | None = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote is None:
+            if char == "\\":
+                index += 2
+                continue
+            if char in "'\"":
+                quote = char
+            elif char == "#" and (index == 0 or line[index - 1] in " \t;&|()"):
+                break
+            elif line.startswith("<<", index) and not line.startswith("<<<", index):
+                match = _HEREDOC_DELIMITER_RX.match(line, index)
+                if match:
+                    word = match.group(2) or match.group(3) or match.group(4)
+                    if word is not None:
+                        starts.append((word.replace("\\", ""), bool(match.group(1))))
+                    index = match.end()
+                    continue
+        elif char == quote:
+            quote = None
+        elif quote == '"' and char == "\\":
+            index += 1
+        index += 1
+    return None if quote is not None else starts
+
+
+def _blank_heredoc_bodies(command: str) -> str:
+    """The command with heredoc body lines blanked, offsets preserved.
+
+    A body is data for the program reading it (a script, a README), not
+    shell text, so `cat > NOTES.md <<EOF` followed by `python fit.py` names
+    no run. One pass over the lines: linear in the command.
+    """
+    lines = command.split("\n")
+    pending: list[tuple[str, bool]] = []
+    for number, line in enumerate(lines):
+        if pending:
+            delimiter, strip_tabs = pending[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
+                pending.pop(0)
+            else:
+                lines[number] = " " * len(line)
+            continue
+        pending = _unquoted_heredoc_starts(line) or []
+    return "\n".join(lines)
+
+
 def _interpreter_runs_named(command: str) -> list[str]:
     """Interpreter commands in command position of the unquoted shell text,
     for structure the detector does not model (`for ...; do Rscript x.R`,
     `python3 - <<'PY'`). A label of what the command names, not proof that
-    it ran. One split and one word pass: linear in the command."""
+    it ran. Heredoc bodies are not shell text and are skipped. Each pass is
+    linear in the command."""
+    command = _blank_heredoc_bodies(command)
     masked = _unquoted_shell_text(command)
     if masked is None:
         # An apostrophe in a heredoc body leaves an "unterminated" quote to
@@ -4923,6 +4990,23 @@ def _interpreter_runs_named(command: str) -> list[str]:
         if index >= len(words):
             continue
         name = words[index].rsplit("/", 1)[-1]
+        if name == "xargs":
+            # `... | xargs -P 3 -n 1 run_one.sh`: the script word runs per
+            # input line. Options are not modelled; any word naming a
+            # script file is the label.
+            script = next(
+                (word for word in words[index + 1 :]
+                 if word.endswith(_LABELLED_SCRIPT_SUFFIXES)),
+                None,
+            )
+            if script is not None and f"xargs {script}" not in found:
+                found.append(f"xargs {script}")
+            continue
+        if name.endswith(_LABELLED_SCRIPT_SUFFIXES) and "/" in words[index]:
+            # A script run by path (`./run.sh`, `/tmp/run_one.sh`).
+            if words[index] not in found:
+                found.append(words[index])
+            continue
         if not _INTERPRETER_COMMAND_RX.fullmatch(name):
             continue
         if index + 1 < len(words) and words[index + 1].startswith("="):
@@ -4943,14 +5027,21 @@ def _interpreter_runs_named(command: str) -> list[str]:
     return found
 
 
-def _unproven_analysis_candidates(command: str, cwd: Path) -> list[str]:
+def _unproven_analysis_candidates(
+    command: str, cwd: Path, analysis_named: bool | None = None
+) -> list[str]:
     """Analysis runs the command names when the detector proves none: what
     the detector finds without execution proof, else interpreter commands
     in shell structure it does not model. The command may not run them."""
+    # Heredoc bodies are input to a program, not shell text: a README
+    # written with `cat <<EOF` that shows `python fit.py` names no run.
+    shell_text = _blank_heredoc_bodies(command)
+    if shell_text != command or analysis_named is None:
+        analysis_named = is_analysis(shell_text)
     try:
         detections = (
-            _detect_scripts_with_cwd(command, cwd, require_execution_evidence=False)
-            if is_analysis(command)
+            _detect_scripts_with_cwd(shell_text, cwd, require_execution_evidence=False)
+            if analysis_named
             else []
         )
     except Exception:  # noqa: BLE001 - a label only; never fail the record
@@ -4974,12 +5065,14 @@ def _unproven_analysis_candidates(command: str, cwd: Path) -> list[str]:
     return candidates
 
 
-def build_data_command_event(args: argparse.Namespace, cwd: Path) -> dict | None:
+def build_data_command_event(
+    args: argparse.Namespace, cwd: Path, analysis_named: bool | None = None
+) -> dict | None:
     """One minimal `data_command` record for a Bash call that touches data
     and has no analysis event, or None when the call names no data and no
     analysis run."""
     named, truncated = _data_path_mentions(args.bash_cmd)
-    candidates = _unproven_analysis_candidates(args.bash_cmd, cwd)
+    candidates = _unproven_analysis_candidates(args.bash_cmd, cwd, analysis_named)
     if not named and not candidates:
         return None
     io = _certain_shell_io(args.bash_cmd, cwd, getattr(args, "bash_exit", None))
@@ -5188,17 +5281,19 @@ def _append_with_stable_lock(path: Path, line: str) -> None:
         os.close(lock_fd)
 
 
-def _record_unowned_data_command(args: argparse.Namespace, cwd: Path) -> None:
+def _record_unowned_data_command(
+    args: argparse.Namespace, cwd: Path, analysis_named: bool | None = None
+) -> None:
     """Keep a data_command for a host session that has no transaction.
 
-    It waits in the shared file until that session's next owned Stop moves
-    it into the session's stream. A record that cannot be built becomes a
-    skip there instead, so the check's answer never changes and the gap is
-    still reported.
+    It waits in the shared file until that session's next Stop. A record
+    that cannot be built becomes a skip there instead, so the gap is still
+    reported; a record that cannot be written at all exits 70, a gap the
+    tracker records.
     """
     keys = {"host": args.host, "host_session_id": args.host_session_id}
     try:
-        event = build_data_command_event(args, cwd)
+        event = build_data_command_event(args, cwd, analysis_named)
     except Exception as exc:  # noqa: BLE001 - recorded as a gap below
         event = {
             "ts": args.ts,
@@ -5214,10 +5309,9 @@ def _record_unowned_data_command(args: argparse.Namespace, cwd: Path) -> None:
     if event is None:
         return
     event.update(keys)
-    try:
-        _append_with_stable_lock(args.data_command_to, json.dumps(event) + "\n")
-    except OSError:
-        pass
+    # A failed append propagates: the guarded main exits 70, which the
+    # tracker records as a `detector-failed` gap rather than silence.
+    _append_with_stable_lock(args.data_command_to, json.dumps(event) + "\n")
 
 
 def main() -> int:
@@ -5271,7 +5365,8 @@ def main() -> int:
 
     cwd = Path(args.cwd)
     detections = []
-    if is_analysis(args.bash_cmd):
+    analysis_named = is_analysis(args.bash_cmd)
+    if analysis_named:
         detections = _detect_scripts_with_cwd(
             args.bash_cmd,
             cwd,
@@ -5283,12 +5378,12 @@ def main() -> int:
         if detections:
             return 0
         if args.data_command_to is not None:
-            _record_unowned_data_command(args, cwd)
+            _record_unowned_data_command(args, cwd, analysis_named)
         return 1
     if not detections:
         # No proven analysis: a call that still touches data leaves one
         # minimal record of its own kind, never an analysis event.
-        event = build_data_command_event(args, cwd)
+        event = build_data_command_event(args, cwd, analysis_named)
         if event is not None:
             write_events([json.dumps(event) + "\n"], args.append_to)
         return 0

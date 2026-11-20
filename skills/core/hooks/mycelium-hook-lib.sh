@@ -308,15 +308,14 @@ mycelium__prepare_locked_post_tool_state_once() {
 
 # Lineage skip records. A command the recorder meant to record but could not
 # leaves one NDJSON line saying why, so a missing event is distinguishable from
-# "nothing ran".
-# The shared file also holds `"kind": "data_command"` records the data tracker
-# wrote while its host session had no transaction (see
-# mycelium-data-tracker.sh); they carry the same host and session keys. Inside a transaction the line goes into the session's own raw
+# "nothing ran". Inside a transaction the line goes into the session's own raw
 # event stream (`"kind": "skip"`), which Stop consolidates into the manifest's
 # `skipped` list and reports. Without a transaction it goes to the shared
 # `lineage-skips-unowned.ndjson` audit file, keyed by host and host session ID.
 # Neither copies data: only the command text the host already showed, a
-# reason, and a short detail.
+# reason, and a short detail. The shared file also holds `"kind":
+# "data_command"` records the data tracker parked while its host session had
+# no transaction, under the same host and session keys.
 #
 # The session stream is locked on the file itself, like the extractor's
 # appends. The shared file is locked through a stable sibling
@@ -417,8 +416,10 @@ mycelium_record_unowned_lineage_skip() {
 # session's records out of the shared unowned-skip file. With DEST (the
 # session's raw event stream, when Stop holds a valid owned transaction) they
 # are appended there first; without it, its skips are taken and one LINEAGE
-# GAP sentence about them is printed, while its `data_command` records stay
-# in the file for the session's next owned Stop (they are not gaps). The shared file is then replaced atomically under its stable
+# GAP sentence about them is printed, and its `data_command` records (not
+# gaps) are consolidated into a manifest of their own,
+# `.living/log/data-lineage/data-commands-<host>-<sid>-<event id>.json`; if
+# that fails they stay in the file for the next Stop. The shared file is then replaced atomically under its stable
 # lock, so any failure leaves every record where it was and prints nothing.
 # A rewrite that fails after the append leaves copies in both places; each
 # carries its skip_id, and every reader counts a skip_id once.
@@ -437,22 +438,60 @@ try:
     with os.fdopen(fd, "rb") as handle:
         mode = stat.S_IMODE(os.fstat(handle.fileno()).st_mode)
         lines = handle.read().splitlines(keepends=True)
-    taken, kept = [], []
+    taken, kept, waiting = [], [], []
     for raw in lines:
         try:
             record = json.loads(raw)
         except ValueError:
             kept.append(raw)
             continue
-        if (isinstance(record, dict) and record.get("host") == host
-                and record.get("host_session_id") == sid
-                and (dest or record.get("kind") != "data_command")):
+        if not (isinstance(record, dict) and record.get("host") == host
+                and record.get("host_session_id") == sid):
+            kept.append(raw)
+        elif dest or record.get("kind") != "data_command":
             taken.append(record)
         else:
-            # A data_command is a record waiting for a stream, not a gap:
-            # without one it stays for the next owned Stop of the session.
-            kept.append(raw)
-    if not taken:
+            waiting.append((raw, record))
+    # Without a stream to join, the data commands of this session are not gaps:
+    # they get a manifest of their own, named by host session and first
+    # event_id, so a retry rewrites the same file. If it cannot be written
+    # they stay here for the next Stop.
+    flushed = []
+    if waiting:
+        lineage_dir = os.environ.get("MYCELIUM__LINEAGE_DIR", "")
+        extractor = os.environ.get("MYCELIUM__LINEAGE_EXTRACTOR", "")
+        try:
+            if not (lineage_dir and os.path.isfile(extractor)):
+                raise OSError("no lineage directory or extractor")
+            for part in (os.path.dirname(os.path.dirname(lineage_dir)),
+                         os.path.dirname(lineage_dir), lineage_dir):
+                if os.path.islink(part):
+                    raise OSError("linked lineage directory")
+            os.makedirs(lineage_dir, exist_ok=True)
+            first = str(waiting[0][1].get("event_id") or "")[:12]
+            name = "".join(c if c.isalnum() or c in "._-" else "_"
+                           for c in f"data-commands-{host}-{sid}-{first}")
+            temp_fd, events_name = tempfile.mkstemp(prefix=".data-commands.", dir=shared)
+            try:
+                with os.fdopen(temp_fd, "wb") as out:
+                    out.write(b"".join(raw if raw.endswith(b"\n") else raw + b"\n"
+                                       for raw, _ in waiting))
+                import subprocess
+                done = subprocess.run(
+                    [sys.executable, extractor, "--events-file", events_name,
+                     "--output", os.path.join(lineage_dir, name + ".json"),
+                     "--session-id", name,
+                     "--repo-root", os.path.dirname(os.path.dirname(os.path.dirname(lineage_dir)))],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                )
+            finally:
+                os.unlink(events_name)
+            if done.returncode != 0:
+                raise OSError("extractor failed")
+            flushed = waiting
+        except OSError:
+            kept.extend(raw for raw, _ in waiting)
+    if not taken and not flushed:
         raise SystemExit(0)
     if dest:
         out_fd = os.open(dest, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
@@ -479,7 +518,7 @@ try:
         raise
 finally:
     os.close(lock_fd)
-if not dest:
+if not dest and taken:
     reasons = collections.Counter(str(r.get("skip_reason") or "unknown") for r in taken)
     detail = ", ".join(f"{reason} x{count}" for reason, count in sorted(reasons.items()))
     print(
@@ -508,7 +547,9 @@ mycelium_take_unowned_lineage_skips() {
   shared=$(mycelium__checked_shared_state_dir "$repo_root") || return 0
   # A nonzero status means the records may now be in both places; the caller
   # must not accept until a retry completes the move.
-  python3 -c "$MYCELIUM__PY_TAKE_UNOWNED_SKIPS" "$shared" "$@" 2>/dev/null
+  MYCELIUM__LINEAGE_DIR="$repo_root/.living/log/data-lineage" \
+  MYCELIUM__LINEAGE_EXTRACTOR="${MYCELIUM_DATA_EXTRACTOR:-$MYCELIUM__HOOKS_DIR/../scripts/extract_data_lineage.py}" \
+    python3 -c "$MYCELIUM__PY_TAKE_UNOWNED_SKIPS" "$shared" "$@" 2>/dev/null
 }
 
 # mycelium_reopen_post_tool_transaction REPO_ROOT PAYLOAD: open a transaction
