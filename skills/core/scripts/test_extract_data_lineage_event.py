@@ -2563,7 +2563,7 @@ def test_main_rejects_missing_wrapper_working_directory(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert not target.exists()
+    assert _analysis_events(target) == []
 
 
 def test_detect_script_accepts_redirection_after_complete_shell_word(

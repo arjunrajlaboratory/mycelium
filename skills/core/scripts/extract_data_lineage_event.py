@@ -4869,6 +4869,10 @@ def _copy_move_pairs(argv: list[str], cwd: Path | None) -> list[tuple[Path, Path
     pairs: list[tuple[Path, Path]] = []
     for source in sources:
         assert source is not None
+        if source.is_symlink():
+            # `cp -a`/`-P` copies the link itself; plain `cp` reads its
+            # target. Which one happened depends on flags and platform.
+            return None
         into = destination / source.name
         if argv[0] == "cp":
             # A copied directory's destination name depends on whether the
@@ -4876,9 +4880,17 @@ def _copy_move_pairs(argv: list[str], cwd: Path | None) -> list[tuple[Path, Path
             if not source.is_file():
                 return None
             target = into if destination.is_dir() else destination
+            if target.is_symlink() or (
+                target.exists() and os.path.samefile(source, target)
+            ):
+                return None
         else:
-            # The source is gone; the moved file is either inside the
-            # destination directory or is the destination itself.
+            # The source is gone after a real move; if it is still there
+            # (`mv x ./x` is a no-op that exits 0) nothing moved.
+            if source.exists() or source.is_symlink():
+                return None
+            # The moved file is either inside the destination directory or
+            # is the destination itself.
             if into.is_file():
                 target = into
             elif destination.is_file() and len(sources) == 1:
@@ -4923,8 +4935,10 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
     cdpath_possible = "CDPATH" in command or bool(os.environ.get("CDPATH"))
     current: Path | None = cwd
     for position, (argv, redirections) in enumerate(parsed):
-        while argv and _ASSIGNMENT_RX.match(argv[0]):
-            argv = argv[1:]
+        first = 0
+        while first < len(argv) and _ASSIGNMENT_RX.match(argv[first]):
+            first += 1
+        argv = argv[first:]
         if argv and argv[0] in _STATUS_UNPROVEN_WORDS:
             # `exit 0 && ...`, `set -n && ...`, `! cmd < missing`: the final
             # status no longer proves this or any later command ran (or
@@ -4990,8 +5004,7 @@ _INTERPRETER_COMMAND_RX = re.compile(
 # Words that may precede the command word of a simple command without
 # changing which program runs.
 _COMMAND_POSITION_PREFIXES = frozenset(
-    {"do", "then", "else", "elif", "if", "while", "until", "!", "{",
-     "time", "nohup", "exec", "command", "builtin", "env"}
+    {"do", "then", "else", "elif", "if", "while", "until", "!", "{"}
 )
 _LABELLED_SCRIPT_SUFFIXES = (".sh", ".bash", ".py", ".R", ".r")
 # Wrappers that run the command after their own options, and the options of
@@ -5001,12 +5014,23 @@ _LABEL_WRAPPERS = frozenset(
      "uv", "poetry", "pipenv", "pixi", "hatch", "conda", "mamba", "micromamba",
      "srun", "sudo", "exec", "command", "builtin"}
 )
-_LABEL_WRAPPER_VALUE_OPTIONS = frozenset(
-    {"-n", "--name", "-p", "--prefix", "-P", "-L", "-I", "-s", "--signal", "-k",
-     "--kill-after", "-u", "--user", "-C", "--directory", "--project", "--with",
-     "--python", "-e", "--env", "--env-file", "-d", "--delimiter", "-a",
-     "--arg-file", "--max-args", "--max-procs"}
-)
+_CONDA_VALUE_OPTIONS = frozenset({"-n", "--name", "-p", "--prefix"})
+_LABEL_WRAPPER_VALUE_OPTIONS: dict[str, frozenset[str]] = {
+    "nice": frozenset({"-n", "--adjustment"}),
+    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    "env": frozenset({"-u", "--unset", "-C", "--chdir"}),
+    "sudo": frozenset({"-u", "--user", "-g", "--group"}),
+    "xargs": frozenset({"-n", "-P", "-L", "-I", "-s", "-d", "-a", "-E",
+                        "--max-args", "--max-procs", "--delimiter", "--arg-file"}),
+    "uv": frozenset({"--with", "--python", "-p", "--project", "--directory",
+                     "--env-file"}),
+    "poetry": frozenset({"-C", "--directory", "-P", "--project"}),
+    "conda": _CONDA_VALUE_OPTIONS,
+    "mamba": _CONDA_VALUE_OPTIONS,
+    "micromamba": _CONDA_VALUE_OPTIONS,
+    "pixi": frozenset({"-e", "--environment", "--manifest-path"}),
+    "hatch": frozenset({"-e", "--env"}),
+}
 _DURATION_RX = re.compile(r"\d+(?:\.\d+)?[smhd]?")
 
 
@@ -5024,13 +5048,14 @@ def _skip_command_wrappers(words: list[str]) -> tuple[int, bool]:
         if name not in _LABEL_WRAPPERS:
             break
         via_xargs = via_xargs or name == "xargs"
+        value_options = _LABEL_WRAPPER_VALUE_OPTIONS.get(name, frozenset())
         index += 1
         while index < len(words):
             arg = words[index]
             if arg in ("run", "exec", "--"):
                 index += 1
             elif arg.startswith("-") and arg != "-":
-                index += 2 if arg in _LABEL_WRAPPER_VALUE_OPTIONS else 1
+                index += 2 if arg in value_options else 1
             elif _ASSIGNMENT_RX.match(arg) or _DURATION_RX.fullmatch(arg):
                 index += 1
             else:
@@ -5165,6 +5190,16 @@ def _interpreter_runs_named(command: str) -> list[str]:
         if name.endswith(_LABELLED_SCRIPT_SUFFIXES) and "/" in words[index]:
             # A script run by path (`./run.sh`, `/tmp/run_one.sh`).
             if add(prefix + words[index]):
+                break
+            continue
+        if name in _SHELL_RUNNER_NAMES:
+            # `bash ./run.sh`, `sh -e run.sh`: a shell running a script file.
+            script = next(
+                (word for word in words[index + 1 : index + 6]
+                 if word.endswith((".sh", ".bash"))),
+                None,
+            )
+            if script is not None and add(f"{prefix}{name} {script}"):
                 break
             continue
         if not _INTERPRETER_COMMAND_RX.fullmatch(name):

@@ -904,3 +904,41 @@ def test_a_cp_followed_only_by_reads_still_claims(project):
     shutil.copy(project / "data/x.csv", project / "data/y.csv")
     event = _event("cp data/x.csv data/y.csv && head data/y.csv && wc -l data/y.csv", project)
     assert [r["path"] for r in event["outputs"]] == [str(project / "data/y.csv")]
+
+
+# ---------- Codex review round 3 ----------
+
+
+@pytest.mark.parametrize("command", ["cp -a data/link.csv data/copy.csv", "cp data/link.csv data/copy.csv"])
+def test_a_copied_symlink_claims_nothing(project, command):
+    (project / "data" / "link.csv").symlink_to(project / "data" / "x.csv")
+    (project / "data" / "copy.csv").write_text("a,b\n1,2\n")
+    event = _event(command, project)
+    assert event["inputs"] == [] and event["outputs"] == []
+
+
+def test_a_no_op_mv_claims_nothing(project):
+    event = _event("mv data/x.csv ./data/x.csv", project)
+    assert event["inputs"] == [] and event["outputs"] == []
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [
+        ("for n in a; do bash ./run.sh; done", "bash ./run.sh"),
+        ("for n in a; do sh -e run.sh; done", "sh run.sh"),
+        ("for n in a; do env -i python fit.py; done", "python fit.py"),
+        ("for n in a; do time -p Rscript fit.R; done", "Rscript fit.R"),
+    ],
+)
+def test_round_three_unproven_runs_are_labelled(project, command, label):
+    event = _event(command, project)
+    assert event is not None
+    assert label in event["analysis_candidates"], event["analysis_candidates"]
+
+
+def test_many_leading_assignments_scan_linearly(project):
+    command = " ".join(f"V{i}=1" for i in range(32_000)) + " sort data/x.csv > data/o.csv"
+    event, seconds = _timed_event(command, project)
+    assert event["outputs"]
+    assert seconds < TIME_LIMIT_SECONDS
