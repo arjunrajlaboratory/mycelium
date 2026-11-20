@@ -683,6 +683,11 @@ def test_real_app_verified_command_reaches_lineage_and_accepts_once(tmp_path, mo
         db.close()
     events = [json.loads(line) for line in (run / "mycelium-data-events.tmp").read_text().splitlines()]
     assert len(events) == 1 and events[0]["bash_exit"] == 0
+    # The model's next invocation injects the post-action guidance; the App records it.
+    message = app("PreInvocation", dict(payload, initialNumSteps=6))["injectSteps"][0]["ephemeralMessage"]
+    write_transcript(Path(payload["transcriptPath"]), [USER, {"step_index": 5, "source": "MODEL",
+                     "type": "GENERIC", "status": "DONE"}, {"step_index": 6, "source": "SYSTEM_SDK",
+                     "type": "EPHEMERAL_MESSAGE", "status": "DONE", "content": message}])
     # The real Stop check requires the session-end knowledge update after analysis work.
     (repo / ".living/learnings.md").write_text("# learnings\n\n- Synthetic analysis recorded.\n")
     assert app("Stop", stop(payload)) == {}
@@ -800,3 +805,63 @@ def test_command_still_running_at_the_final_stop_allowance_is_recorded_unverifie
     turn = state_of(repo)
     assert turn["status"] == "accepted" and turn["app_pending"] == {}
     assert turn["unverified_provenance"] == {"5": ag.FINAL_PENDING} and data_calls(calls) == []
+
+
+# ---- Post-action reminders queued after the last PreInvocation reach the agent at Stop ----------
+
+def remind_and_block(monkeypatch, calls, stop_blocks=0):
+    """Post-action returns a reminder; the stop-check blocks `stop_blocks` times, then accepts."""
+    remaining = [stop_blocks]
+
+    def hook(name, data, root, plugin, **kw):
+        calls.append((ag.active_host(), name, data))
+        if name == "mycelium-post-action.sh":
+            return {"hookSpecificOutput": {"additionalContext": "POST-ACTION: append to learnings"}}
+        if name == "mycelium-stop-check.sh" and remaining[0]:
+            remaining[0] -= 1
+            return {"decision": "block", "reason": "triage first"}
+        return {}
+
+    monkeypatch.setattr(ag, "run_hook", hook)
+
+
+def test_reminder_queued_after_the_last_preinvocation_is_delivered_by_one_stop_block(native, monkeypatch):
+    """Regression: Stop accepted while a post-action reminder queued by the final command
+    had never been injected (no PreInvocation ran between that command and Stop)."""
+    home, repo, payload, calls, db = native
+    remind_and_block(monkeypatch, calls)
+    db.put(5, command_payload(str(repo)))
+    app("PostToolUse", cmd(payload))
+    assert len(state_of(repo)["reminders"]) == 1
+    first = app("Stop", stop(payload))
+    assert first["decision"] == "continue" and "POST-ACTION: append to learnings" in first["reason"]
+    assert state_of(repo)["reminders"] == {}  # delivered through the Stop reason, not repeated
+    assert not any(n == "mycelium-stop-check.sh" for _, n, _ in calls)
+    assert app("Stop", stop(payload, executionNum=1)) == {}
+    assert state_of(repo)["status"] == "accepted"
+
+
+def test_reminder_already_injected_does_not_block_stop(native, monkeypatch):
+    home, repo, payload, calls, db = native
+    remind_and_block(monkeypatch, calls)
+    db.put(5, command_payload(str(repo)))
+    app("PostToolUse", cmd(payload))
+    token = next(iter(state_of(repo)["reminders"]))
+    records = [USER, {"step_index": 6, "source": "SYSTEM_SDK", "type": "EPHEMERAL_MESSAGE", "status": "DONE",
+                      "content": f"[Mycelium reminder {token}] Post-action guidance"}]
+    write_transcript(Path(payload["transcriptPath"]), records)
+    assert app("Stop", stop(payload)) == {}
+    assert state_of(repo)["status"] == "accepted"
+
+
+def test_reminder_at_the_final_stop_allowance_is_logged_not_held(native, monkeypatch):
+    home, repo, payload, calls, db = native
+    remind_and_block(monkeypatch, calls, stop_blocks=ag.MAX_STOP_RETRIES)
+    for attempt in range(ag.MAX_STOP_RETRIES):
+        assert app("Stop", stop(payload, executionNum=attempt))["decision"] == "continue"
+    db.put(5, command_payload(str(repo)))
+    app("PostToolUse", cmd(payload))
+    assert app("Stop", stop(payload, executionNum=ag.MAX_STOP_RETRIES)) == {}
+    turn = state_of(repo)
+    assert turn["status"] == "accepted" and turn["reminders"] == {}
+    assert len(turn["undelivered_reminders"]) == 1

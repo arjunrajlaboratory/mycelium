@@ -264,11 +264,8 @@ def accepted_stop(root, session_id, host=None):
     return not marker.exists()
 
 
-def append_unverified_provenance(root, session_id, label, steps, host=None):
-    """Append one explicit unverified-provenance entry to the active session log.
-
-    Returns False when no active log is available; the native state still records it.
-    """
+def append_session_log(root, session_id, entry, host=None):
+    """Append one entry to the active session log; False when no active log is available."""
     host = active_host(host)
     marker = root / ".mycelium/run" / host / session_id / "active-session-log.tmp"
     if not marker.is_file() or marker.is_symlink():
@@ -282,14 +279,28 @@ def append_unverified_provenance(root, session_id, label, steps, host=None):
     ensure_safe_regular_file(log)
     if not log.is_file():
         return False
-    entry = (f"\n### {time.strftime('%H:%M')} — Unverified command provenance ({label})\n"
-             f"- Steps: {', '.join(sorted(steps, key=int))}\n"
-             "- Mycelium could not verify where, how, or with what exit status these native command steps "
-             "ran, or they were still running when the Stop allowance ended. No lineage was recorded for "
-             "them; treat their outputs' provenance as unverified.\n")
     with log.open("a", encoding="utf-8") as stream:
         stream.write(entry)
     return True
+
+
+def append_unverified_provenance(root, session_id, label, steps, host=None):
+    """Record unverified command provenance in the active session log (native state also keeps it)."""
+    return append_session_log(root, session_id, (
+        f"\n### {time.strftime('%H:%M')} — Unverified command provenance ({label})\n"
+        f"- Steps: {', '.join(sorted(steps, key=int))}\n"
+        "- Mycelium could not verify where, how, or with what exit status these native command steps "
+        "ran, or they were still running when the Stop allowance ended. No lineage was recorded for "
+        "them; treat their outputs' provenance as unverified.\n"), host)
+
+
+def append_undelivered_reminders(root, session_id, label, tokens, host=None):
+    """Record post-action guidance that never reached the agent before the Stop allowance ended."""
+    return append_session_log(root, session_id, (
+        f"\n### {time.strftime('%H:%M')} — Undelivered post-action guidance ({label})\n"
+        f"- Reminders: {', '.join(sorted(tokens))}\n"
+        "- Mycelium queued post-action guidance for these native steps, but the Stop allowance ended "
+        "before it reached the agent. Their session-log and living-layer follow-up may be incomplete.\n"), host)
 
 
 def context(result):
@@ -892,6 +903,15 @@ def _dispatch(event, payload, plugin_root, host):
                     turn["edit_recovery"] = {"status": status, "after": user_step, "through": boundary,
                                              "credited": credited, "rejected": rejected, "reason": reason}
                     save()
+                # Reminders already injected by an earlier PreInvocation are acknowledged here too.
+                for token in {t for record in records for t in record.get("delivered_reminders", [])}:
+                    turn["reminders"].pop(token, None)
+                if turn["reminders"] and turn["retries"] >= MAX_STOP_RETRIES:
+                    # Last allowed Stop: record undelivered guidance instead of holding Stop.
+                    append_undelivered_reminders(root, session_id, profile(host)["label"], turn["reminders"])
+                    turn.setdefault("undelivered_reminders", []).extend(sorted(turn["reminders"]))
+                    turn["reminders"] = {}
+                    save()
                 if turn["retries"] >= MAX_STOP_RETRIES and not turn["uncertain"] and not capture_deferred:
                     # Last allowed Stop: commands still pending can no longer be settled.
                     unresolved = turn.setdefault("unresolved_commands", {})
@@ -915,6 +935,12 @@ def _dispatch(event, payload, plugin_root, host):
                     result = {"decision": "block", "reason": "Native analysis commands still lack terminal evidence. Wait for completion; Mycelium has not finalized output provenance."}
                 elif turn.get("app_pending"):
                     result = {"decision": "block", "reason": "Antigravity App command steps " + ", ".join(turn["app_pending"]) + " are still running. Wait for them to finish; Mycelium has not finalized their output provenance."}
+                elif turn["reminders"]:
+                    # Guidance queued after the last PreInvocation: this Stop reason delivers it once.
+                    result = {"decision": "block", "reason": "Mycelium post-action guidance arrived after your "
+                              "last step. Complete it, then end your turn again:\n" +
+                              "\n".join(turn["reminders"].values())}
+                    turn["reminders"] = {}
                 elif app and turn["edit_recovery"]["status"] == "deferred":
                     result = {"decision": "block", "reason": "No time remains to recover native edit activity before Mycelium finalization. Active state was preserved for retry."}
                 elif app_stop_deadline is not None and app_stop_deadline <= time.monotonic():

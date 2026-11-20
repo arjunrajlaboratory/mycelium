@@ -256,7 +256,11 @@ The adapter reads a bounded native transcript tail for event identity and
 structured execution status. It does not retain model reasoning. Post-action
 reminders are queued by event ID and cleared individually after native delivery
 is observed. Several analysis commands in one native invocation retain all
-undelivered guidance, including the first mandatory scientific protocol. A
+undelivered guidance, including the first mandatory scientific protocol.
+Guidance still undelivered at a natural Stop (for example from a command that
+finished during that Stop) is delivered once as the Stop reason; at the final
+Stop allowance it is written to the session log as undelivered instead of
+holding Stop. A
 schema-2 preview's retained singleton reminder migrates into that queue;
 messages already overwritten by an older build cannot be reconstructed or
 retrospectively certified. No project knowledge migration is needed.

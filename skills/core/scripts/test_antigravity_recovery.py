@@ -56,6 +56,17 @@ def stop(payload):
     return dict(payload, fullyIdle=True, terminationReason="NO_TOOL_CALL", error="", executionNum=0)
 
 
+def deliver(cycle):
+    """The model's next invocation: inject pending context and record it as the App does."""
+    repo, payload, records, write, run, state_path = cycle
+    step = records[-1]["step_index"] + 1
+    injected = ag.dispatch("PreInvocation", dict(payload, initialNumSteps=step))
+    message = injected["injectSteps"][0]["ephemeralMessage"] if injected else ""
+    records.append(dict(step_index=step, source="SYSTEM_SDK", type="EPHEMERAL_MESSAGE", status="DONE",
+                        content=message))
+    write()
+
+
 @pytest.mark.parametrize("deferred", [False, True])
 def test_batched_positive_reminders_survive_until_individual_acknowledgement(cycle, deferred):
     repo, payload, records, write, run, state_path = cycle
@@ -115,6 +126,7 @@ def test_async_outputs_are_captured_after_completion_once(cycle):
     # do not depend on a second PostToolUse for the original command.
     ag.dispatch("PreInvocation", dict(payload, initialNumSteps=4))
     ag.dispatch("PostToolUse", post)
+    deliver(cycle)
     (repo / ".living/learnings.md").write_text("# Learnings\n\nCompleted fixture.\n")
     assert ag.dispatch("Stop", stop(payload)) == {}
     assert json.loads(state_path.read_text())["turns"]["0"]["status"] == "accepted"
@@ -215,6 +227,7 @@ def test_concurrent_stop_publishes_one_real_lineage_and_receipt(cycle, monkeypat
     write()
     ag.dispatch("PostToolUse", dict(payload, stepIdx=3, error="", toolCall={"name": "run_command",
         "args": {"Cwd": str(repo), "CommandLine": "python3 analysis.py"}}))
+    deliver(cycle)
     (repo / ".living/learnings.md").write_text("# Learnings\n\nCompleted concurrent fixture.\n")
     actual = ag.subprocess.run
     calls = []
@@ -264,6 +277,7 @@ def test_literal_io_capture_positive_control(cycle):
     repo, payload, records, write, run, state_path = cycle
     ag.dispatch("PostToolUse", run_command(cycle, 3))
     assert len((run / "mycelium-data-events.tmp").read_text().splitlines()) == 1
+    deliver(cycle)
     (repo / ".living/learnings.md").write_text("# Learnings\n\nCompleted fixture.\n")
     assert ag.dispatch("Stop", stop(payload)) == {}
     turn = json.loads(state_path.read_text())["turns"]["0"]
@@ -304,6 +318,7 @@ def test_default_extractor_failure_is_retained_never_redispatched_or_accepted(cy
     write()
     ag.dispatch("PreInvocation", dict(payload, initialNumSteps=6))
     ag.dispatch("PostToolUse", run_command(cycle, 7))
+    deliver(cycle)
     (repo / ".living/learnings.md").write_text("# Learnings\n\nSecond transaction.\n")
     assert ag.dispatch("Stop", stop(payload)) == {}
     turns = json.loads(state_path.read_text())["turns"]
@@ -340,6 +355,7 @@ def test_valid_no_op_and_unresolved_capture_still_complete(cycle, kind):
         assert lines == []
     else:
         assert [json.loads(x)["io_detection"] for x in lines] == ["unresolved"]
+    deliver(cycle)
     (repo / ".living/learnings.md").write_text("# Learnings\n\nCompleted fixture.\n")
     assert ag.dispatch("Stop", stop(payload)) == {}
     turn = json.loads(state_path.read_text())["turns"]["0"]
@@ -467,10 +483,10 @@ class StopRace:
             pool.shutdown(wait=True)
 
 
-def _finished_once(repo, run, state_path, actions):
+def _finished_once(repo, run, state_path, actions, retries=0):
     turn = json.loads(state_path.read_text())["turns"]["0"]
     assert turn["status"] == "accepted" and turn["uncertain"] is False and turn["pending_commands"] == {}
-    assert turn["stop_attempt"] == {"status": "accepted", "number": 1} and turn["retries"] == 0
+    assert turn["stop_attempt"] == {"status": "accepted", "number": 1} and turn["retries"] == retries
     manifests = list((repo / ".living/log/data-lineage").glob("*.json"))
     assert len(manifests) == 1
     assert len(json.loads(manifests[0].read_text())["actions"]) == actions
@@ -488,6 +504,7 @@ def test_duplicate_stop_waits_for_holder_beyond_five_seconds(cycle, monkeypatch)
     write()
     ag.dispatch("PostToolUse", dict(payload, stepIdx=3, error="", toolCall={"name": "run_command",
         "args": {"Cwd": str(repo), "CommandLine": "python3 analysis.py"}}))
+    deliver(cycle)
     (repo / ".living/learnings.md").write_text("# Learnings\n\nCompleted delayed-holder fixture.\n")
     race = StopRace(monkeypatch, repo, payload, delays={"mycelium-stop-check.sh": HOLD_PAST_OLD_OVERRIDE})
     holder, follower = race.race()
@@ -528,12 +545,15 @@ def test_deferred_commands_complete_once_under_one_lock_beyond_one_hook_allowanc
 
     race = StopRace(monkeypatch, repo, payload, delays=delays, after=triage)
     holder, follower = race.race()
-    assert holder[0] == "ok" and holder[1] == {}, holder
+    # The commands completed inside this Stop, so their post-action guidance was never
+    # injected: the holder delivers it once as its Stop reason; the duplicate then finalizes.
+    assert holder[0] == "ok" and holder[1]["decision"] == "continue", holder
+    assert holder[1]["reason"].count("[Mycelium reminder ") == len(steps)
     assert follower[0] == "ok" and follower[1] == {}, follower
     assert follower[2] > 12
     expected = [("holder", hook) for _ in steps for hook in ("mycelium-data-tracker.sh", "mycelium-post-action.sh")]
-    assert race.hooks == expected + [("holder", "mycelium-stop-check.sh")]  # each capture exactly once
-    turn = _finished_once(repo, run, state_path, actions=3)
+    assert race.hooks == expected + [("follower", "mycelium-stop-check.sh")]  # each capture exactly once
+    turn = _finished_once(repo, run, state_path, actions=3, retries=1)
     for step in steps:
         for hook in ("mycelium-data-tracker.sh", "mycelium-post-action.sh"):
             assert turn["actions"][f"{step}:{hook}"] == "done"
