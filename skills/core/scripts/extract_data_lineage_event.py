@@ -4635,7 +4635,7 @@ _DATA_COMMAND_TOOLING_BASENAMES = {
 # A candidate word: a maximal run of characters that cannot delimit a path
 # in shell or in the code a command embeds. One negated character class, so
 # `finditer` is linear in the command (pattern 42).
-_DATA_COMMAND_WORD_RX = re.compile(r"[^\s'\"`;|&<>(){}\[\],=:]+")
+_DATA_COMMAND_WORD_RX = re.compile(r"[^\s`;|&<>(){}\[\],=:]+")
 DATA_COMMAND_NAMED_PATH_LIMIT = 64
 UNPROVEN_DETECTION_LIMIT_CHARS = 64 * 1024
 
@@ -4680,8 +4680,12 @@ def _data_path_mentions(command: str) -> tuple[list[str], bool]:
     comment, an `echo`, or an unexecuted branch. Returns (words, truncated).
     """
     seen: dict[str, None] = {}
+
     for match in _DATA_COMMAND_WORD_RX.finditer(command):
-        word = match.group(0)
+        # Quote removal joins a partly quoted word (`"data"/x.csv`). A
+        # quoted name holding a space is read in pieces (`data/my`), which
+        # still marks the call as touching data.
+        word = match.group(0).replace("'", "").replace('"', "")
         if word in seen or not _is_data_like_path(word):
             continue
         if len(seen) >= DATA_COMMAND_NAMED_PATH_LIMIT:
@@ -5047,6 +5051,19 @@ _INTERPRETER_COMMAND_RX = re.compile(
 _COMMAND_POSITION_PREFIXES = frozenset(
     {"do", "then", "else", "elif", "if", "while", "until", "!", "{"}
 )
+# Modes in which a runner checks or lists without running anything; the
+# detector treats them as non-runs, so they are not unproven runs either.
+_SHELL_NON_EXECUTING = frozenset({"-n", "--noexec"})
+_NON_EXECUTING_FLAGS: dict[str, frozenset[str]] = {
+    **{shell: _SHELL_NON_EXECUTING for shell in _SHELL_RUNNER_NAMES},
+    "snakemake": frozenset(
+        {"-n", "--dry-run", "--dryrun", "--lint", "-l", "--list", "--list-rules",
+         "-S", "--summary", "--detailed-summary", "--dag", "--rulegraph",
+         "--filegraph", "--unlock", "-D", "--d3dag"}
+    ),
+    "sbatch": frozenset({"--test-only", "-h", "--help", "-V", "--version", "--usage"}),
+    "nextflow": frozenset({"-preview", "-stub", "-stub-run", "-h", "-help"}),
+}
 _PAYLOAD_OPTIONS = frozenset({"-c", "-m", "-e", "-f", "--file", "-"})
 # Flags that make an interpreter print and exit without running anything.
 _TERMINAL_ONLY_FLAGS = frozenset(
@@ -5256,6 +5273,11 @@ def _interpreter_runs_named(command: str) -> list[str]:
             if add(prefix + words[index]):
                 break
             continue
+        if any(
+            word in _NON_EXECUTING_FLAGS.get(name, ())
+            for word in words[index + 1 : index + 8]
+        ) or (name == "nextflow" and "run" not in words[index + 1 : index + 4]):
+            continue  # `bash -n`, `snakemake -n`, `sbatch --test-only`: no run
         if name in _SHELL_RUNNER_NAMES:
             # `bash ./run.sh`, `sh -e run.sh`: a shell running a script file.
             script = next(

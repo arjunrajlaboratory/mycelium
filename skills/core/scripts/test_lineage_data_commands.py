@@ -1073,3 +1073,30 @@ def test_cwd_stable_commands_keep_relative_paths(project):
 
 def test_a_heredoc_terminator_named_like_an_interpreter_is_not_a_run(project):
     assert _event("cat <<R > notes.md\nnotes\nR", project) is None
+
+
+# ---------- Codex review round 8 ----------
+
+
+@pytest.mark.parametrize(
+    ("command", "named"),
+    [
+        ('head "data"/sample', "data/sample"),
+        ("printf x > 'data'/sample", "data/sample"),
+        ('head "data/my file.csv"', "data/my"),
+    ],
+)
+def test_partly_quoted_and_spaced_words_are_named(project, command, named):
+    event = _event(command, project)
+    assert event is not None
+    assert named in event["named_paths"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["for n in a; do bash -n run.sh; done", "for n in a; do snakemake -n; done",
+     "for n in a; do sbatch --test-only job.sh; done",
+     "for n in a; do nextflow log; done"],
+)
+def test_non_executing_runner_modes_are_not_runs(project, command):
+    assert _event(command, project) is None
