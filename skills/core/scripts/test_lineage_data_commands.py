@@ -1211,3 +1211,20 @@ def test_many_distinct_segments_stay_bounded(project):
     event, seconds = _timed_event(command, project)
     assert event is not None
     assert seconds < TIME_LIMIT_SECONDS
+
+
+# ---------- Codex review round 12 ----------
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["python3 -W ignore - <<'PY'\nprint(1)\nPY", "python3 -X utf8 - <<'PY'\nprint(1)\nPY"],
+)
+def test_stdin_fed_python_with_valued_options_is_labelled(project, command):
+    event = _event(command, project)
+    assert event is not None
+    assert any(label.endswith("<<heredoc") for label in event["analysis_candidates"])
+
+
+def test_stdin_fed_python_printing_its_version_is_not_a_run(project):
+    assert _event("printf x | xargs python3 -uV", project) is None

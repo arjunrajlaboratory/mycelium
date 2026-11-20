@@ -5097,12 +5097,30 @@ def _stdin_fed_run_label(
     if not (heredoc or via_xargs) or not _STDIN_INTERPRETER_RX.fullmatch(name):
         return []
     rest = run_words[1:]
-    if any(word in _STDIN_TERMINAL_FLAGS for word in rest):
-        return []
-    if any(not word.startswith("-") for word in rest):
-        return []
-    if any(word in ("-c", "-m", "-e", "-f") for word in rest):
-        return []
+    python = name not in ("R", "Rscript")
+    position = 0
+    while position < len(rest):
+        word = rest[position]
+        if word in ("-W", "-X", "--encoding"):
+            position += 2  # an option and its separate value
+            continue
+        if word == "-":
+            position += 1
+            continue
+        if not word.startswith("-") or word in ("-c", "-m", "-e", "-f", "--file"):
+            return []  # a payload operand: the detector's case, not stdin's
+        if word in _STDIN_TERMINAL_FLAGS:
+            return []
+        if python and not word.startswith("--"):
+            cluster = word[1:]
+            # A short cluster ends at a value-taking letter; `c`/`m` start a
+            # payload and `V`/`h` print and exit (`-uV`).
+            for letter in cluster:
+                if letter in "cm" or letter in "Vh?":
+                    return []
+                if letter in "WX":
+                    break
+        position += 1
     label = " ".join(run_words[:2]) if rest else name
     return [label + (" <<heredoc" if heredoc else "")]
 
