@@ -4719,8 +4719,8 @@ _CWD_STABLE_COMMANDS = frozenset(
     {"head", "tail", "cat", "wc", "ls", "echo", "printf", "true", "stat", "file",
      "md5", "md5sum", "shasum", "sha256sum", "sha1sum", "du", "diff", "cmp",
      "pwd", "cut", "uniq", "grep", "rg", "column", "zcat", "gzcat", "mkdir",
-     "touch", "cp", "sort", "tr", "paste", "join", "tee", "jq", "test", "["}
-)
+     "touch", "sort", "tr", "paste", "join", "tee", "jq", "test", "["}
+)  # not cp: `cp -P` can replace a symlink the working directory went through
 # Commands that, later in the same `&&` list, cannot change which file a
 # `cp`/`mv` wrote or whether it is still a directory; anything else after a
 # copy makes its destination, read from the final filesystem, uncertain.
@@ -5092,6 +5092,38 @@ def _runner_does_not_execute(name: str, args: list[str]) -> bool:
     return False
 
 
+def _interpreter_terminal_mode(name: str, args: list[str]) -> bool:
+    """Interpreter-specific print-and-exit modes the generic option scan
+    misses: R reads `--version`/`--help` anywhere before `--args`; jupyter
+    subcommands take `--show-config` and friends after the subcommand;
+    Python short clusters (`-uV`, `-Eh`) end at a payload letter."""
+    window = args[:32]
+    if name in ("R", "Rscript"):
+        for word in window:
+            if word == "--args":
+                return False
+            if word in ("--version", "--help", "-h", "RHOME"):
+                return True
+        return False
+    if name == "jupyter":
+        return any(word in _TERMINAL_ONLY_FLAGS for word in window)
+    if _PYTHON_CLUSTER_RX.fullmatch(name):
+        for word in window:
+            if not word.startswith("-") or word.startswith("--") or word == "-":
+                return False
+            cluster = word[1:]
+            for letter in cluster:
+                if letter in "cm":
+                    return False  # the payload starts; the rest is its text
+                if letter in "Vh?":
+                    return True
+            if cluster[-1:] in ("W", "X"):
+                return False  # the next word is a value; stop conservatively
+        return False
+    return False
+
+
+_PYTHON_CLUSTER_RX = re.compile(_PYTHON_EXE_NAME)
 _PAYLOAD_OPTIONS = frozenset({"-c", "-m", "-e", "-f", "--file", "-"})
 # Flags that make an interpreter print and exit without running anything.
 _TERMINAL_ONLY_FLAGS = frozenset(
@@ -5336,6 +5368,8 @@ def _interpreter_runs_named(command: str) -> list[str]:
             option += 2 if words[option] in ("-W", "-X", "--encoding") else 1
         if terminal or (option < len(words) and words[option] in _TERMINAL_ONLY_FLAGS):
             continue  # `python3 --version`, `jupyter --show-config`: no run
+        if _interpreter_terminal_mode(name, words[index + 1 :]):
+            continue
         if (
             option + 1 < len(words)
             and words[option] == "-m"

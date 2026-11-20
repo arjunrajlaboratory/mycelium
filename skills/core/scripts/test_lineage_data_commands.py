@@ -1139,3 +1139,32 @@ def test_a_data_only_turn_keeps_its_raw_archive_after_number_reuse(tmp_path, hos
 
     assert archive.read_bytes() == before
     assert len(list(prev.glob("*.tmp"))) == 2
+
+
+# ---------- Codex review round 10 ----------
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["for n in a; do jupyter nbconvert --show-config; done",
+     "for n in a; do R -e '1' --version; done",
+     "for n in a; do python3 -uV; done"],
+)
+def test_interpreter_specific_terminal_modes_are_not_runs(project, command):
+    assert _event(command, project) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [("for n in a; do R -e 'run()' --args --version; done", "R -e"),
+     ("for n in a; do python3 -uc 'import fit' -h; done", "python3 -uc")],
+)
+def test_terminal_words_in_the_payload_do_not_hide_a_run(project, command, label):
+    event = _event(command, project)
+    assert event is not None
+    assert label in event["analysis_candidates"], event["analysis_candidates"]
+
+
+def test_a_cp_may_move_the_cwd(project):
+    event = _event("cd data && cp -Pf /tmp/elsewhere .. && cat < x.csv", project)
+    assert event["inputs"] == []
