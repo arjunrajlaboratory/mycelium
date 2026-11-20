@@ -823,3 +823,84 @@ def test_a_long_host_session_id_flushes_parked_records(tmp_path, host):
     assert _unowned(repo) == []
     [path] = _data_only_manifests(repo)
     assert len(path.name) < 120
+
+
+# ---------- Codex review round 2 ----------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "time exit 0 && cat < data/x.csv",
+        "coproc cat < data/missing.csv",
+        "nohup exit 0 && cat < data/x.csv",
+        "env true && cat < data/x.csv",
+    ],
+)
+def test_a_wrapper_before_a_status_word_claims_nothing(project, command):
+    event = _event(command, project)
+    assert event is not None
+    assert event["inputs"] == [] and event["outputs"] == []
+
+
+def test_a_here_string_does_not_start_a_heredoc(project):
+    event = _event("cat <<< hello\nfor f in a; do Rscript fit.R; done", project)
+    assert event is not None
+    assert "Rscript fit.R" in event["analysis_candidates"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["CDPATH=/elsewhere cd data && cat < x.csv",
+     "CDPATH=/elsewhere && cd data && cat < x.csv"],
+)
+def test_cdpath_leaves_a_relative_cd_unresolved(project, command):
+    event = _event(command, project)
+    assert event["inputs"] == []
+
+
+def test_an_explicitly_relative_cd_ignores_cdpath(project):
+    event = _event("CDPATH=/elsewhere && cd ./data && cat < x.csv", project)
+    assert [r["path"] for r in event["inputs"]] == [str(project / "data/x.csv")]
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [
+        ("for n in a; do uv run python fit.py; done", "python fit.py"),
+        ("for n in a; do timeout 10 Rscript fit.R; done", "Rscript fit.R"),
+        ("for n in a; do conda run -n env python fit.py; done", "python fit.py"),
+        ("printf '%s\\n' fit.py | xargs python3", "python3"),
+        ("for n in a; do nice -n 5 python3 fit.py; done", "python3 fit.py"),
+    ],
+)
+def test_a_wrapped_unproven_run_is_labelled(project, command, label):
+    event = _event(command, project)
+    assert event is not None
+    assert any(c.endswith(label) for c in event["analysis_candidates"]), event
+
+
+def test_a_helper_named_in_an_argument_does_not_hide_the_run(project):
+    command = (
+        "for n in a; do Rscript fit.R --helper "
+        "/opt/mycelium/skills/core/scripts/validate_structure.py; done"
+    )
+    event = _event(command, project)
+    assert event is not None
+    assert "Rscript fit.R" in event["analysis_candidates"]
+
+
+@pytest.mark.parametrize(
+    "tail",
+    ["rm data/stage && mkdir data/stage", "mv data/stage data/old", "touch data/stage"],
+)
+def test_a_cp_followed_by_more_file_changes_claims_no_destination(project, tail):
+    (project / "data" / "stage").mkdir()
+    event = _event(f"cp data/x.csv data/stage && {tail}", project)
+    assert event["inputs"] == [] and event["outputs"] == []
+
+
+def test_a_cp_followed_only_by_reads_still_claims(project):
+    shutil.copy(project / "data/x.csv", project / "data/y.csv")
+    event = _event("cp data/x.csv data/y.csv && head data/y.csv && wc -l data/y.csv", project)
+    assert [r["path"] for r in event["outputs"]] == [str(project / "data/y.csv")]

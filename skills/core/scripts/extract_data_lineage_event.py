@@ -4680,7 +4680,19 @@ _INPUT_REDIRECTIONS = {"<"}
 _STATUS_UNPROVEN_WORDS = frozenset(
     {"!", "exit", "return", "logout", "exec", "set", "shopt", "trap", "kill",
      "eval", "source", ".", "builtin", "command", "enable", "alias",
-     "break", "continue"}
+     "break", "continue",
+     # A wrapper or reserved word runs something this parser does not read
+     # (`time exit 0`, `coproc cmd` whose status is the shell's, `env -S`).
+     "time", "coproc", "nohup", "env", "nice", "timeout", "stdbuf", "taskset",
+     "xargs", "sudo", "doas", "function", "select", "wait", "disown"}
+)
+# Commands that, later in the same `&&` list, cannot change which file a
+# `cp`/`mv` wrote or whether it is still a directory; anything else after a
+# copy makes its destination, read from the final filesystem, uncertain.
+_INERT_AFTER_COPY = frozenset(
+    {"head", "tail", "cat", "wc", "ls", "echo", "printf", "true", "stat", "file",
+     "md5", "md5sum", "shasum", "sha256sum", "sha1sum", "du", "diff", "cmp", "cd",
+     "pwd", "cut", "uniq", "grep", "rg", "column", "zcat", "gzcat"}
 )
 _OUTPUT_REDIRECTIONS = {">", ">>", ">|", "&>", "&>>"}
 # Unquoted characters that make a word's value depend on the shell (globs,
@@ -4899,8 +4911,18 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
         if words is None:
             return io
         parsed.append(words)
+    # inert_after[i]: every command after the i-th leaves files alone.
+    inert_after = [True] * len(parsed)
+    for position in range(len(parsed) - 2, -1, -1):
+        argv_next, redirections_next = parsed[position + 1]
+        words_next = [w for w in argv_next if not _ASSIGNMENT_RX.match(w)][:1]
+        inert_after[position] = inert_after[position + 1] and bool(words_next) and (
+            words_next[0] in _INERT_AFTER_COPY
+            and not any(op in _OUTPUT_REDIRECTIONS or op == "<>" for op, _ in redirections_next)
+        )
+    cdpath_possible = "CDPATH" in command or bool(os.environ.get("CDPATH"))
     current: Path | None = cwd
-    for argv, redirections in parsed:
+    for position, (argv, redirections) in enumerate(parsed):
         while argv and _ASSIGNMENT_RX.match(argv[0]):
             argv = argv[1:]
         if argv and argv[0] in _STATUS_UNPROVEN_WORDS:
@@ -4921,13 +4943,21 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
         if not argv:
             continue
         if argv[0] in ("cp", "mv"):
-            pairs = _copy_move_pairs(argv, current)
+            # The destination's kind is read from the final filesystem, so
+            # only when nothing later in the list could have changed it.
+            pairs = _copy_move_pairs(argv, current) if inert_after[position] else None
             for source, target in pairs or []:
                 if _is_data_like_path(str(source)) or _is_data_like_path(str(target)):
                     io.inputs.append((str(source), argv[0]))
                     io.outputs.append((str(target), argv[0]))
         elif argv[0] == "cd":
-            if len(argv) == 2 and not argv[1].startswith("-"):
+            relative_name = not argv[1].startswith(("/", "./", "../")) and argv[1] not in (
+                ".", "..") if len(argv) == 2 else False
+            if len(argv) == 2 and relative_name and cdpath_possible:
+                # `cd name` searches $CDPATH first, which the agent's shell
+                # may set; `./name`, `../name`, and absolute paths do not.
+                current = None
+            elif len(argv) == 2 and not argv[1].startswith("-"):
                 target_dir = _resolve_shell_path(argv[1], current)
                 # Plain `cd` is logical: `..` drops the last component of
                 # the path as written, not of a symlink's target.
@@ -4964,6 +4994,48 @@ _COMMAND_POSITION_PREFIXES = frozenset(
      "time", "nohup", "exec", "command", "builtin", "env"}
 )
 _LABELLED_SCRIPT_SUFFIXES = (".sh", ".bash", ".py", ".R", ".r")
+# Wrappers that run the command after their own options, and the options of
+# theirs that take a separate value (labels only; nothing here is proof).
+_LABEL_WRAPPERS = frozenset(
+    {"time", "nohup", "nice", "timeout", "env", "stdbuf", "taskset", "xargs",
+     "uv", "poetry", "pipenv", "pixi", "hatch", "conda", "mamba", "micromamba",
+     "srun", "sudo", "exec", "command", "builtin"}
+)
+_LABEL_WRAPPER_VALUE_OPTIONS = frozenset(
+    {"-n", "--name", "-p", "--prefix", "-P", "-L", "-I", "-s", "--signal", "-k",
+     "--kill-after", "-u", "--user", "-C", "--directory", "--project", "--with",
+     "--python", "-e", "--env", "--env-file", "-d", "--delimiter", "-a",
+     "--arg-file", "--max-args", "--max-procs"}
+)
+_DURATION_RX = re.compile(r"\d+(?:\.\d+)?[smhd]?")
+
+
+def _skip_command_wrappers(words: list[str]) -> tuple[int, bool]:
+    """Index of the command a segment's wrappers finally run, and whether
+    `xargs` was one of them. Linear in the segment's words."""
+    index = 0
+    via_xargs = False
+    while index < len(words):
+        word = words[index]
+        name = word.rsplit("/", 1)[-1]
+        if word in _COMMAND_POSITION_PREFIXES or _ASSIGNMENT_RX.match(word):
+            index += 1
+            continue
+        if name not in _LABEL_WRAPPERS:
+            break
+        via_xargs = via_xargs or name == "xargs"
+        index += 1
+        while index < len(words):
+            arg = words[index]
+            if arg in ("run", "exec", "--"):
+                index += 1
+            elif arg.startswith("-") and arg != "-":
+                index += 2 if arg in _LABEL_WRAPPER_VALUE_OPTIONS else 1
+            elif _ASSIGNMENT_RX.match(arg) or _DURATION_RX.fullmatch(arg):
+                index += 1
+            else:
+                break
+    return index, via_xargs
 _SEGMENT_SPLIT_RX = re.compile(r"[;&|()\n]")
 
 
@@ -5003,7 +5075,10 @@ def _unquoted_heredoc_starts(line: str) -> list[tuple[str, bool]] | None:
                 quote = char
             elif char == "#" and (index == 0 or line[index - 1] in " \t;&|()"):
                 break
-            elif line.startswith("<<", index) and not line.startswith("<<<", index):
+            elif line.startswith("<<<", index):
+                index += 3  # a here-string: its word is data, not a delimiter
+                continue
+            elif line.startswith("<<", index):
                 match = _HEREDOC_DELIMITER_RX.match(line, index)
                 if match:
                     word = match.group(2) or match.group(3) or match.group(4)
@@ -5069,36 +5144,27 @@ def _interpreter_runs_named(command: str) -> list[str]:
         segment = masked[start : boundary.start()]
         raw_segment = command[start : boundary.start()]
         start = boundary.end()
-        if _names_managed_utility(raw_segment):
-            continue
         # The masked text decides where segments end (a quoted `;` is not
         # one); the raw words, quotes removed, decide what runs, so a
         # quoted command word (`"Rscript" fit.R`) is still read.
         words = [word.replace('"', "").replace("'", "") for word in raw_segment.split()]
-        index = 0
-        while index < len(words) and (
-            words[index] in _COMMAND_POSITION_PREFIXES
-            or _ASSIGNMENT_RX.match(words[index])
-        ):
-            index += 1
+        index, via_xargs = _skip_command_wrappers(words)
         if index >= len(words):
             continue
-        name = words[index].rsplit("/", 1)[-1]
-        if name == "xargs":
-            # `... | xargs -P 3 -n 1 run_one.sh`: the script word runs per
-            # input line. Options are not modelled; any word naming a
-            # script file is the label.
-            script = next(
-                (word for word in words[index + 1 :]
-                 if word.endswith(_LABELLED_SCRIPT_SUFFIXES)),
-                None,
-            )
-            if script is not None and add(f"xargs {script}"):
-                break
+        # Mycelium's own helpers are not runs (pattern 18). Only the script
+        # word this command runs decides it, not any word in the segment.
+        script_word = next(
+            (word for word in words[index : index + 6]
+             if word.endswith(_LABELLED_SCRIPT_SUFFIXES)),
+            "",
+        )
+        if script_word and _names_managed_utility(script_word):
             continue
+        prefix = "xargs " if via_xargs else ""
+        name = words[index].rsplit("/", 1)[-1]
         if name.endswith(_LABELLED_SCRIPT_SUFFIXES) and "/" in words[index]:
             # A script run by path (`./run.sh`, `/tmp/run_one.sh`).
-            if add(words[index]):
+            if add(prefix + words[index]):
                 break
             continue
         if not _INTERPRETER_COMMAND_RX.fullmatch(name):
@@ -5111,7 +5177,7 @@ def _interpreter_runs_named(command: str) -> list[str]:
             and words[index + 2] in IGNORED_PYTHON_MODULES
         ):
             continue  # tooling (`python -m pytest`), as the detector treats it
-        label = " ".join(words[index : index + 2])
+        label = prefix + " ".join(words[index : index + 2])
         if "<<" in segment and "<<" not in label:
             label += " <<heredoc"
         if add(label):
