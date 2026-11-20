@@ -4709,6 +4709,14 @@ _STATUS_UNPROVEN_WORDS = frozenset(
      "time", "coproc", "nohup", "env", "nice", "timeout", "stdbuf", "taskset",
      "xargs", "sudo", "doas", "function", "select", "wait", "disown"}
 )
+# Commands that cannot move or remove a directory, so the remembered working
+# directory still names the shell's own after they run.
+_CWD_STABLE_COMMANDS = frozenset(
+    {"head", "tail", "cat", "wc", "ls", "echo", "printf", "true", "stat", "file",
+     "md5", "md5sum", "shasum", "sha256sum", "sha1sum", "du", "diff", "cmp",
+     "pwd", "cut", "uniq", "grep", "rg", "column", "zcat", "gzcat", "mkdir",
+     "touch", "cp", "sort", "tr", "paste", "join", "tee", "jq", "test", "["}
+)
 # Commands that, later in the same `&&` list, cannot change which file a
 # `cp`/`mv` wrote or whether it is still a directory; anything else after a
 # copy makes its destination, read from the final filesystem, uncertain.
@@ -5009,10 +5017,11 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
                 current = None
         elif argv[0] in _CWD_AFFECTING_BUILTINS or argv[0] in ("exec", "command", "builtin"):
             current = None
-        if argv[0] in ("mv", "rm", "rmdir", "ln", "unlink", "rename"):
-            # It may have moved or removed the working directory itself; the
-            # shell stays in the renamed directory while the remembered path
-            # now names another, so later relative paths are unresolved.
+        if argv[0] != "cd" and argv[0].rsplit("/", 1)[-1] not in _CWD_STABLE_COMMANDS:
+            # Anything else may have moved or removed the working directory
+            # (`mv`, `/bin/mv`, `git mv`, a script): the shell stays in the
+            # renamed directory while the remembered path names another, so
+            # later relative paths are unresolved. Absolute paths still are.
             current = None
     return io
 
@@ -5190,8 +5199,9 @@ def _blank_heredoc_bodies(command: str) -> str:
             candidate = line.lstrip("\t") if strip_tabs else line
             if candidate == delimiter:
                 pending.pop(0)
-            else:
-                lines[number] = " " * len(line)
+            # The terminator is not shell text either (`R` closing a heredoc
+            # is not an R run).
+            lines[number] = " " * len(line)
             continue
         pending, quote = _heredoc_starts(line, quote)
     return "\n".join(lines)

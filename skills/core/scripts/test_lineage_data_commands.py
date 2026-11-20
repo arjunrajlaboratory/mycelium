@@ -1052,3 +1052,24 @@ def test_a_renamed_working_directory_leaves_later_relative_paths_unclaimed(proje
         "cd data && mv ../data ../old && mkdir ../data && wc -l < x.csv", project
     )
     assert event["inputs"] == []
+
+
+# ---------- Codex review round 7 ----------
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["/bin/mv ../data ../old", "git mv ../data ../old", "python3 rotate.py"],
+)
+def test_any_command_that_may_move_the_cwd_unresolves_later_paths(project, mutation):
+    event = _event(f"cd data && {mutation} && mkdir ../data && wc -l < x.csv", project)
+    assert event["inputs"] == []
+
+
+def test_cwd_stable_commands_keep_relative_paths(project):
+    event = _event("cd data && mkdir -p sub && head x.csv && wc -l < x.csv", project)
+    assert [r["path"] for r in event["inputs"]] == [str(project / "data/x.csv")]
+
+
+def test_a_heredoc_terminator_named_like_an_interpreter_is_not_a_run(project):
+    assert _event("cat <<R > notes.md\nnotes\nR", project) is None
