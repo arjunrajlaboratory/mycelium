@@ -1100,3 +1100,42 @@ def test_partly_quoted_and_spaced_words_are_named(project, command, named):
 )
 def test_non_executing_runner_modes_are_not_runs(project, command):
     assert _event(command, project) is None
+
+
+# ---------- Codex review round 9 ----------
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [("for n in a; do bash fit.sh -n 100; done", "bash fit.sh"),
+     ("for n in a; do sbatch job.sh --test-only; done", "sbatch job.sh")],
+)
+def test_script_arguments_are_not_runner_options(project, command, label):
+    event = _event(command, project)
+    assert event is not None
+    assert label in event["analysis_candidates"], event["analysis_candidates"]
+
+
+def test_bash_dash_o_noexec_is_not_a_run(project):
+    assert _event("for n in a; do bash -o noexec fit.sh; done", project) is None
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_data_only_turn_keeps_its_raw_archive_after_number_reuse(tmp_path, host):
+    repo = _repo(tmp_path)
+    _start(host, repo, "first")
+    _bash(host, repo, "first", "head data/x.csv")
+    assert not _blocked(_stop(host, repo, "first"))
+    prev = repo / ".mycelium" / "mycelium-data-events-prev"
+    [archive] = list(prev.glob("*.tmp"))
+    before = archive.read_bytes()
+
+    _start(host, repo, "second")
+    _bash(host, repo, "second", "python3 analysis.py")
+    _bash(host, repo, "second", "python3 analysis.py", "mycelium-post-action.sh")
+    with (repo / ".living" / "learnings.md").open("a") as handle:
+        handle.write("\n### [2026-11-20] worked\n- noted\n")
+    assert not _blocked(_stop(host, repo, "second"))
+
+    assert archive.read_bytes() == before
+    assert len(list(prev.glob("*.tmp"))) == 2

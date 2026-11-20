@@ -5064,6 +5064,34 @@ _NON_EXECUTING_FLAGS: dict[str, frozenset[str]] = {
     "sbatch": frozenset({"--test-only", "-h", "--help", "-V", "--version", "--usage"}),
     "nextflow": frozenset({"-preview", "-stub", "-stub-run", "-h", "-help"}),
 }
+def _runner_does_not_execute(name: str, args: list[str]) -> bool:
+    """Whether a runner's own options select a mode that runs nothing.
+
+    Shells and sbatch take options only before their script word; what
+    follows are the script's arguments (`bash fit.sh -n 100`). Snakemake
+    and nextflow take options anywhere. Bounded to the first 32 words."""
+    flags = _NON_EXECUTING_FLAGS.get(name)
+    if name == "nextflow" and "run" not in args[:3]:
+        return True
+    if not flags:
+        return False
+    options_end_at_script = name in _SHELL_RUNNER_NAMES or name == "sbatch"
+    position = 0
+    while position < min(len(args), 32):
+        word = args[position]
+        if word in flags:
+            return True
+        if name in _SHELL_RUNNER_NAMES and word in ("-o", "+o"):
+            if args[position + 1 : position + 2] == ["noexec"] and word == "-o":
+                return True
+            position += 2
+            continue
+        if options_end_at_script and not word.startswith(("-", "+")):
+            return False
+        position += 1
+    return False
+
+
 _PAYLOAD_OPTIONS = frozenset({"-c", "-m", "-e", "-f", "--file", "-"})
 # Flags that make an interpreter print and exit without running anything.
 _TERMINAL_ONLY_FLAGS = frozenset(
@@ -5273,10 +5301,7 @@ def _interpreter_runs_named(command: str) -> list[str]:
             if add(prefix + words[index]):
                 break
             continue
-        if any(
-            word in _NON_EXECUTING_FLAGS.get(name, ())
-            for word in words[index + 1 : index + 8]
-        ) or (name == "nextflow" and "run" not in words[index + 1 : index + 4]):
+        if _runner_does_not_execute(name, words[index + 1 :]):
             continue  # `bash -n`, `snakemake -n`, `sbatch --test-only`: no run
         if name in _SHELL_RUNNER_NAMES:
             # `bash ./run.sh`, `sh -e run.sh`: a shell running a script file.
