@@ -39,19 +39,17 @@ REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo 
 if [[ -z "$REPO_ROOT" ]]; then
   exit 0
 fi
-mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT" || exit 0
-trap mycelium_release_session_lock EXIT
 
 # Only enforce in mycelium-enabled repos
 if [[ ! -d "$REPO_ROOT/.living" ]]; then
   exit 0
 fi
 
-# --- Accumulate modified files for session summary ---
+# --- Select the edited project files that count as work ---
 
-mkdir -p "$STATE_DIR"
-ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
-touched=false
+# Decided before the state gate: only an edit to an eligible project file may
+# reopen a live host session whose earlier turn's Stop closed its transaction.
+ELIGIBLE_PATHS=()
 while IFS= read -r FILE_PATH; do
   [[ -z "$FILE_PATH" ]] && continue
 
@@ -70,10 +68,7 @@ while IFS= read -r FILE_PATH; do
     continue
   fi
 
-  if ! grep -qxF "$FILE_PATH" "$ACTIVITY_FILE" 2>/dev/null; then
-    printf '%s\n' "$FILE_PATH" >> "$ACTIVITY_FILE"
-  fi
-  touched=true
+  ELIGIBLE_PATHS+=("$FILE_PATH")
 done < <(printf '%s' "$INPUT" | python3 -c '
 import json, os, re, sys
 try:
@@ -106,9 +101,22 @@ if isinstance(command, str):
             emit(match.group(1))
 ' "$SESSION_CWD" "$REPO_ROOT")
 
-if [[ "$touched" != true ]]; then
+if (( ${#ELIGIBLE_PATHS[@]} == 0 )); then
   exit 0
 fi
+
+mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT" reopen || exit 0
+trap mycelium_release_session_lock EXIT
+
+# --- Accumulate modified files for session summary ---
+
+mkdir -p "$STATE_DIR"
+ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
+for FILE_PATH in "${ELIGIBLE_PATHS[@]}"; do
+  if ! grep -qxF "$FILE_PATH" "$ACTIVITY_FILE" 2>/dev/null; then
+    printf '%s\n' "$FILE_PATH" >> "$ACTIVITY_FILE"
+  fi
+done
 
 # --- Start or refresh the lifecycle work cycle ---
 

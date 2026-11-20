@@ -4521,7 +4521,8 @@ def build_event_for_detection(
     ``cwd`` is the directory the run's relative I/O resolves against, or
     ``None`` when a runner moved the run somewhere unknowable; its literal
     paths are then left unresolved rather than recorded under a wrong root.
-    Returns None only if the script is unreadable or the detection is empty.
+    Returns None if the script is missing or unreadable (main() reports it so
+    the tracker records a skip) or the detection is empty.
     """
     script_path, inline_source = detection
     if isinstance(script_path, UnresolvedScript):
@@ -4551,6 +4552,10 @@ def build_event_for_detection(
     script_source_embed: str | None = None
 
     if script_path:
+        # A script that does not exist is no evidence of an execution: the
+        # existence check is part of the trust gate (`python #a.py` names a
+        # comment, not a script). main() reports such a path to the tracker,
+        # which records a skip, not an event.
         if not script_path.exists():
             return None
         try:
@@ -4724,16 +4729,42 @@ def main() -> int:
     git_sha = get_git_sha(cwd)
 
     lines: list[str] = []
+    unreadable: list[str] = []
     for script_path, inline_source, effective_cwd in detections:
         event = build_event_for_detection(
             (script_path, inline_source), args, effective_cwd, git_sha
         )
         if event is not None:
             lines.append(json.dumps(event) + "\n")
+        elif isinstance(script_path, Path):
+            unreadable.append(str(script_path))
 
     write_events(lines, args.append_to)
+    if args.append_to is not None:
+        # A detected script that is gone or unreadable at hook time (often a
+        # temporary script the command itself removed) is neither an event
+        # nor nothing: name it on stdout so the tracker records a skip.
+        for path in unreadable:
+            sys.stdout.write(json.dumps({"unreadable_script": path}) + "\n")
     return 0
 
 
+# Exit status for a crash. `--check-*` modes use 1 for "not analysis", and
+# Python's own uncaught-exception status is also 1, so a detector failure was
+# indistinguishable from a command that needs no lineage. The tracker records
+# this status as a skip instead of reading it as "nothing to record".
+EXIT_INTERNAL_ERROR = 70
+
+
+def _main_guarded() -> int:
+    try:
+        return main()
+    except Exception:  # noqa: BLE001 - any crash must be reported, not read as "no"
+        import traceback
+
+        traceback.print_exc()
+        return EXIT_INTERNAL_ERROR
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_main_guarded())
