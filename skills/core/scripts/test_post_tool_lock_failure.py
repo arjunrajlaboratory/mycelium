@@ -682,3 +682,26 @@ def test_an_unwritable_reminder_keeps_unrecorded_work(tmp_path, host):
 
     assert reason is not None and "reminder" in reason
     assert (run_dir / UNRECORDED).exists()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+@pytest.mark.parametrize("planted", ["fifo", "hard-link"])
+def test_reminder_is_published_by_replacement(tmp_path, host, planted):
+    repo = _repo(tmp_path)
+    sid = f"planted-{planted}"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    reminder = run_dir / "mycelium-reminded.tmp"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("untouched\n")
+    if planted == "fifo":
+        os.mkfifo(reminder)
+    else:
+        os.link(outside, reminder)
+    (run_dir / UNRECORDED).write_text('{"kind": "work"}\n')
+
+    reason = _block_reason(_stop(host, repo, sid))
+
+    assert reason is not None and "UNRECORDED WORK: 1" in reason
+    assert outside.read_text() == "untouched\n"
+    assert reminder.is_file() and not reminder.is_symlink()

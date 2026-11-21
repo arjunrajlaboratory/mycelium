@@ -1038,6 +1038,14 @@ failure where it is known (ownership proven, lock op failed), leaves a
 work-of-unknown-extent marker Stop enforces, and exposes the outcome so the
 data tracker does not then take its own no-transaction fallback for the same
 event. Keep the fail-open exit status: evidence, not a blocked tool call.
+Five Codex rounds then showed that an evidence channel written without the
+session lock needs the whole lifecycle discipline itself: Stop takes it under
+the file's own bounded flock and turns work into a fresh work cycle (an
+earlier `.living/` update must not satisfy it), consumes only the generation
+(inode) it took, rewrites by replace-and-rename, re-checks before every
+acceptance, keeps report-only records until an accepting Stop has reported
+them, and refuses anything but a single-link regular file reached through
+`O_NOFOLLOW` directories.
 
 ## 46. Package identity omits file modes or the build recipe
 

@@ -999,7 +999,17 @@ mycelium_start_work_cycle() {
   else
     status=1
   fi
-  if ! date +%s > "$STATE_DIR/mycelium-reminded.tmp"; then
+  # Publish by replacement: a FIFO or hard link at the name is replaced, never
+  # opened. `mv` onto a directory would move into it, so that is refused.
+  local reminder="$STATE_DIR/mycelium-reminded.tmp"
+  local temp=""
+  if [[ -d "$reminder" && ! -L "$reminder" ]] \
+    || ! temp=$(mktemp "$STATE_DIR/.mycelium-reminded.XXXXXX" 2>/dev/null) \
+    || ! date +%s > "$temp" \
+    || ! mv -f "$temp" "$reminder" 2>/dev/null; then
+    if [[ -n "$temp" ]]; then
+      rm -f "$temp"
+    fi
     status=1
   fi
   return "$status"
