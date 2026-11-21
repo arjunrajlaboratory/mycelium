@@ -37,8 +37,10 @@ def test_doctor_rejects_linked_workspace_knowledge(tmp_path):
     outside = tmp_path / 'outside'
     outside.mkdir()
     (workspace / '.living').symlink_to(outside, target_is_directory=True)
-    with pytest.raises(ValueError, match='symlink'):
-        package.doctor(target, workspace=workspace)
+    # Rejected with a readable report (doctor exits 1), not a traceback (#145).
+    report = package.doctor(target, workspace=workspace)
+    assert not report['ok'] and not report['workspace']['ok']
+    assert '.living is a symlink or not a directory' in report['workspace']['reason']
     assert list(outside.iterdir()) == []
 
 SPEC = importlib.util.spec_from_file_location("antigravity_package", Path(__file__).with_name("antigravity.py"))

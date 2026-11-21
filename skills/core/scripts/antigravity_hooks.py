@@ -45,6 +45,61 @@ _ACTIVE_HOST = contextvars.ContextVar("antigravity_host", default=HOST)
 APP_UNRESOLVED = ("Antigravity App command step without authoritative workspace, working-directory, "
                   "and exit evidence; output provenance is not recorded")
 UNRESOLVED_HOOK = "A Mycelium hook has an unresolved outcome. Inspect retained native-state.json before retrying."
+
+
+def one_line(text, limit=2000):
+    """TEXT as one printable, length-capped line for a model-facing message.
+
+    Causes carry hook stderr and host error text, which can quote
+    repository-controlled names: escape control characters (a newline could
+    forge a new instruction line) and anything else unprintable.
+    """
+    text = "".join(c if c.isprintable() else c.encode("unicode_escape", "backslashreplace").decode("ascii")
+                   for c in str(text))
+    return text if len(text) <= limit else "..." + text[-(limit - 3):]
+
+
+def mark_uncertain(turn, cause):
+    """Hold this work cycle unresolved and record why.
+
+    The first cause is kept: it is the one that made the outcome unknown,
+    and later events cannot settle it. Ordinary native errors (a command
+    that exited nonzero) never go here, so a blocked Stop cannot blame them.
+    """
+    if turn.get("uncertain") and "uncertain_cause" not in turn:
+        # Marked unresolved by a release that kept no cause: never pin a
+        # later, unrelated event on it.
+        cause = turn.get("last_hook_error") or ("not recorded (this work cycle was marked "
+                                                "unresolved by an earlier Mycelium version)")
+    elif turn.get("uncertain") is not True:
+        turn.pop("uncertain_cause", None)  # a cause never outlives its resolution
+    turn["uncertain"] = True
+    cause = str(cause)
+    if len(cause) > 2000:  # keep the head that names the step or action, and the tail
+        cause = cause[:1000] + " ... " + cause[-995:]
+    turn.setdefault("uncertain_cause", cause)
+
+
+def unresolved_reason(turn):
+    """UNRESOLVED_HOOK plus the recorded cause, so a blocked Stop says what failed."""
+    # State written before uncertain_cause existed can still name a hook error.
+    detail = turn.get("uncertain_cause") or turn.get("last_hook_error")
+    # The first cause is kept, so also name every action still unfinished:
+    # one killed later must not hide behind an earlier, unrelated failure.
+    running = sorted(action for action, value in turn.get("actions", {}).items() if value == "running")
+    return (UNRESOLVED_HOOK + (f" Cause: {one_line(detail)}" if detail else "") +
+            (" Unfinished hook actions: " + ", ".join(running) + "." if running else ""))
+
+
+def save_then_raise(save, error):
+    """Persist a recorded failure, then raise it; never let a failed save hide it."""
+    try:
+        save()
+    except Exception as save_error:
+        raise error from save_error
+    raise error
+
+
 # Leave time within the App package's 45-second Stop hook for Python startup,
 # receipt reconciliation and the final state write. Share the budget across roots.
 APP_STOP_BUDGET_SECONDS = 35
@@ -214,6 +269,13 @@ def hook_environment(host, plugin, *, batch=False):
 def run_hook(name, data, root, plugin, *, timeout=12, batch=False):
     host = active_host()
     env = hook_environment(host, plugin, batch=batch)
+    override = env.get("MYCELIUM_STATE_DIR")
+    if override and Path(root, override).resolve() != (Path(root) / ".mycelium").resolve():
+        # The adapter reads markers and receipts only under <root>/.mycelium.
+        # Base hooks would keep state elsewhere, and dropping the override
+        # instead would split the lifecycle lock from other hosts' sessions.
+        raise RuntimeError("MYCELIUM_STATE_DIR is set, but the Antigravity adapter keeps lifecycle "
+                           "state only in .mycelium/; unset it in the App or IDE environment")
     script = plugin / "skills/core/hooks" / name
     marker = root / ".mycelium/run" / host / data["session_id"] / "active-session-log.tmp"
     had_marker = marker.is_file()
@@ -223,7 +285,11 @@ def run_hook(name, data, root, plugin, *, timeout=12, batch=False):
         raise RuntimeError(f"{name} failed ({result.returncode}): {result.stderr[-1000:]}")
     decoded = json.loads(result.stdout) if result.stdout.strip() else {}
     if name == "mycelium-health.sh" and not marker.is_file():
-        raise RuntimeError("Base Mycelium did not establish an active lifecycle transaction")
+        # The base hook exits 0 when it refuses to start (for example on a
+        # symlink in the state tree); its stderr names the cause.
+        detail = result.stderr.strip()[-1000:]
+        raise RuntimeError("Base Mycelium did not establish an active lifecycle transaction" +
+                           (f": {detail}" if detail else ""))
     if (name == "mycelium-stop-check.sh" and decoded.get("decision") != "block" and
             (not had_marker or not accepted_stop(root, data["session_id"], host))):
         raise RuntimeError("Base Mycelium did not confirm transaction finalization")
@@ -345,6 +411,7 @@ def read_state(path, cid):
                 not isinstance(turn.get("reminder", ""), str) or
                 not isinstance(turn.get("reminder_id", ""), str) or
                 not isinstance(turn.get("last_hook_error", ""), str) or
+                not isinstance(turn.get("uncertain_cause", ""), str) or
                 not isinstance(turn.get("uncertain"), bool)):
             raise ValueError("Invalid native work-cycle state")
         pending = turn.get("pending_commands", {})
@@ -412,8 +479,9 @@ def read_state(path, cid):
         if state["schema"] == 1 and turn["status"] == "active":
             # Old previews could have permanently snapshotted RUNNING outputs.
             # Never certify that active history using the new completion rules.
-            turn["uncertain"] = True
             turn["reason"] = "Legacy active preview cycle requires inspection; start a fresh IDE conversation"
+            turn["uncertain"] = True  # this migration is the known cause
+            turn.setdefault("uncertain_cause", turn["reason"])
         turn.setdefault("pending_commands", {})
     state["schema"] = STATE_SCHEMA
     return state
@@ -609,7 +677,14 @@ def _dispatch(event, payload, plugin_root, host):
                 state["turns"][key] = turn
                 turn["actions"]["startup"] = "running"
                 save()
-                result = run_hook("mycelium-health.sh", data, root, plugin_root)
+                try:
+                    result = run_hook("mycelium-health.sh", data, root, plugin_root)
+                except Exception as exc:
+                    # As in apply_hooks: startup stays running and is never
+                    # redispatched, but the retained state says why.
+                    turn["last_hook_error"] = f"startup: {exc}"[-2000:]
+                    mark_uncertain(turn, turn["last_hook_error"])
+                    save_then_raise(save, exc)
                 turn["actions"]["startup"] = "done"
                 if context(result):
                     turn["context"].append(context(result))
@@ -622,13 +697,19 @@ def _dispatch(event, payload, plugin_root, host):
                     turn["status"] = "accepted"
                     if app:
                         turn["uncertain"] = False
+                        turn.pop("uncertain_cause", None)
                     turn["context"] = []
                     save()
                     continue
-                turn["uncertain"] = True
+                mark_uncertain(turn, "Stop finalization: an earlier Stop check ended before "
+                                     "recording whether it finalized this work cycle")
                 save()
-            if any(value == "running" for value in turn["actions"].values()):
-                turn["uncertain"] = True
+            running = sorted(action for action, value in turn["actions"].items() if value == "running")
+            if running:
+                # The process that ran these ended before recording an outcome.
+                # Not a hook failure, so last_hook_error stays for real ones.
+                mark_uncertain(turn, turn.get("last_hook_error") or (
+                    ", ".join(running) + ": hook outcome was not recorded"))
                 save()
 
             capture_deferred = []
@@ -658,10 +739,9 @@ def _dispatch(event, payload, plugin_root, host):
                     except Exception as exc:
                         # The action stays running: never redispatched, never
                         # accepted. Stop reports it until the bounded allowance ends.
-                        turn["uncertain"] = True
                         turn["last_hook_error"] = f"{action}: {exc}"[-2000:]
-                        save()
-                        raise
+                        mark_uncertain(turn, turn["last_hook_error"])
+                        save_then_raise(save, exc)
                     turn["actions"][action] = "done"
                     reminder = context(result)
                     if reminder:
@@ -777,9 +857,9 @@ def _dispatch(event, payload, plugin_root, host):
                     if result != {"mycelium_activity_batch": dict(batch, status="recorded")}:
                         raise RuntimeError("missing or malformed batch acknowledgement")
                 except Exception as exc:
-                    turn["uncertain"] = True
                     turn["last_hook_error"] = (f"recovery batch {batch['id']} (steps "
                                                f"{', '.join(map(str, steps))}): {exc}")[-2000:]
+                    mark_uncertain(turn, turn["last_hook_error"])
                     save()
                     return scan["status"], scan.get("reason", ""), [], rejected
                 for step in steps:
@@ -825,10 +905,18 @@ def _dispatch(event, payload, plugin_root, host):
                             "tools; do not launch Claude Code, Codex, or Gemini CLI as a substitute. "
                             f"Private handoff: {root}/.mycelium/run/{host}/{session_id}/last-session.md.")
                 injected.append(guidance + "\n" + "\n".join(turn["context"]) +
-                                ("\nMycelium capture failed and this work cycle cannot be finalized: " +
-                                 turn["last_hook_error"] + " Inspect retained native-state.json; start a new "
+                                ("\nMycelium could not start lifecycle tracking for this work cycle: " +
+                                 one_line(turn["uncertain_cause"]) + " Correct the cause, then start a new "
+                                 "explicit request."
+                                 if turn.get("actions", {}).get("startup") == "running" and
+                                 turn.get("uncertain_cause", "").startswith("startup: ") else
+                                 "\nMycelium capture failed and this work cycle cannot be finalized: " +
+                                 one_line(turn["last_hook_error"]) + " Inspect retained native-state.json; start a new "
                                  "explicit request after correcting the cause."
-                                 if turn.get("last_hook_error") else "") +
+                                 if turn.get("last_hook_error") else
+                                 "\nMycelium cannot finalize this work cycle: " +
+                                 one_line(turn["uncertain_cause"]) + " Inspect retained native-state.json."
+                                 if turn.get("uncertain") and turn.get("uncertain_cause") else "") +
                                 ("\n" + "\n".join(turn["reminders"].values()) if turn["reminders"] else "") +
                                 ("\nMycelium is waiting for terminal native evidence for command steps " +
                                  ", ".join(turn["pending_commands"]) + ". Output provenance is not finalized."
@@ -871,7 +959,8 @@ def _dispatch(event, payload, plugin_root, host):
                     if step.get("type") != "RUN_COMMAND" or step.get("status") not in {"DONE", "RUNNING"}:
                         turn["last_native_error"] = str(payload.get("error") or "Execution evidence unavailable")
                         if step.get("status") != "ERROR" or not payload.get("error"):
-                            turn["uncertain"] = True
+                            mark_uncertain(turn, f"command step {boundary}: native execution evidence "
+                                                 f"unavailable ({turn['last_native_error']})")
                         save()
                         continue
                     command = args.get("CommandLine")
@@ -933,7 +1022,7 @@ def _dispatch(event, payload, plugin_root, host):
                     record.update(unverified)
                     save()
                 if turn["uncertain"]:
-                    result = {"decision": "block", "reason": UNRESOLVED_HOOK}
+                    result = {"decision": "block", "reason": unresolved_reason(turn)}
                 elif capture_deferred:
                     result = {"decision": "block", "reason": "No time remained in this Stop to record completed native command steps. Active state was preserved; the next Stop records them."}
                 elif turn["pending_commands"]:
@@ -966,9 +1055,9 @@ def _dispatch(event, payload, plugin_root, host):
                         if accepted_stop(root, session_id):
                             result = {}
                         else:
-                            turn["uncertain"] = True
                             turn["last_native_error"] = f"App Stop outcome unavailable ({type(error).__name__})"
-                            result = {"decision": "block", "reason": UNRESOLVED_HOOK}
+                            mark_uncertain(turn, f"{turn['last_native_error']}: {one_line(error, 1000)}")
+                            result = {"decision": "block", "reason": unresolved_reason(turn)}
                     if not turn["uncertain"]:
                         turn["stop_attempt"]["status"] = "blocked" if result.get("decision") == "block" else "accepted"
                     save()

@@ -900,6 +900,15 @@ def test_empty_session_start_counts_are_single_numeric_values(tmp_path):
     assert "0\n0" not in context
 
 
+def _assert_tracking_off_warning(result, cause):
+    """A refused start changes nothing but says why (#145): one warning, no
+    lifecycle context, and the same cause on stderr."""
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert context.startswith("MYCELIUM WARNING: Session lifecycle tracking is off")
+    assert cause in context and "SESSION HANDOFF PATH" not in context
+    assert cause in result.stderr
+
+
 def test_plugin_dispatcher_refuses_symlinked_state_before_pointer_refresh(tmp_path):
     repo = _repo(tmp_path)
     victim = tmp_path / "outside-state"
@@ -915,7 +924,7 @@ def test_plugin_dispatcher_refuses_symlinked_state_before_pointer_refresh(tmp_pa
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
+    _assert_tracking_off_warning(result, ".mycelium could not be verified as a plain directory")
     assert pointer.read_text() == "do-not-overwrite\n"
     assert sorted(path.name for path in victim.iterdir()) == ["plugin-root"]
 
@@ -953,7 +962,7 @@ def test_plugin_dispatcher_refuses_symlinked_pointer_without_clobbering_target(
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
+    _assert_tracking_off_warning(result, "symlink found at .mycelium/plugin-root")
     assert victim.read_text() == "do-not-overwrite\n"
     assert not (state_dir / "active-session-log.tmp").exists()
 
@@ -971,9 +980,37 @@ def test_plugin_dispatcher_refuses_symlinked_living_before_creating_state(tmp_pa
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
+    _assert_tracking_off_warning(result, ".living is itself a symlink")
     assert list(victim.iterdir()) == []
     assert not (repo / ".mycelium").exists()
+
+
+@pytest.mark.parametrize("target", ["missing", "file"])
+def test_plugin_dispatcher_stays_silent_for_a_living_link_that_is_no_opt_in(tmp_path, target):
+    """Only a link to a directory looks like an opt-in worth warning about;
+    the globally enabled plugin stays silent for anything else."""
+    repo = _repo(tmp_path, living=False)
+    pointee = tmp_path / "pointee"
+    if target == "file":
+        pointee.write_text("not a directory\n")
+    (repo / ".living").symlink_to(pointee)
+    result = _run_plugin_hook(
+        "mycelium-health.sh", repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "not-an-opt-in"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "" and result.stderr == ""
+
+
+def test_a_managed_state_file_refusal_after_the_lock_is_explained(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / ".mycelium" / ".gitignore").mkdir(parents=True)
+    result = _run_plugin_hook(
+        "mycelium-health.sh", repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "managed-dir"},
+    )
+    assert result.returncode == 0, result.stderr
+    _assert_tracking_off_warning(result, ".mycelium/.gitignore is not a regular file")
 
 
 def test_hook_does_not_import_legacy_session_through_symlinked_claude_dir(tmp_path):
@@ -1036,7 +1073,7 @@ def test_hooks_reject_outside_state_override_before_creating_directory(tmp_path)
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
+    _assert_tracking_off_warning(result, "MYCELIUM_STATE_DIR")
     assert not victim.exists()
 
 
@@ -1054,7 +1091,7 @@ def test_hooks_reject_state_override_through_symlinked_parent(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
+    _assert_tracking_off_warning(result, "MYCELIUM_STATE_DIR")
     assert list(victim.iterdir()) == []
 
 

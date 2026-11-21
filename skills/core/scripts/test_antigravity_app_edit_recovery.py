@@ -366,8 +366,8 @@ def test_interrupted_recovered_activity_holds_stop_without_redispatch(native, mo
 
     monkeypatch.setattr(ag, "run_hook", failing)
     first = app("Stop", stop(payload))
-    assert first["decision"] == "continue" and first["reason"] == ag.UNRESOLVED_HOOK
-    assert app("Stop", stop(payload, executionNum=1))["reason"] == ag.UNRESOLVED_HOOK
+    assert first["decision"] == "continue" and first["reason"].startswith(ag.UNRESOLVED_HOOK)
+    assert app("Stop", stop(payload, executionNum=1))["reason"].startswith(ag.UNRESOLVED_HOOK)
     turn = state_of(repo)
     assert attempts == [ACTIVITY] and turn["actions"][f"6:{ACTIVITY}"] == "running" and turn["uncertain"] is True
     assert not any(n == "mycelium-stop-check.sh" for _, n, _ in calls)

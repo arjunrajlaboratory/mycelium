@@ -4,7 +4,9 @@ The bash lifecycle hooks used to start a Python interpreter for every state
 helper: shared-state preparation, private run selection, active-marker and
 owner-token parsing, ownership authorization, and each lock attempt. This
 module holds those helpers and runs an ordered list of them in a single
-interpreter. `mycelium-hook-lib.sh` (`mycelium__state`) is its only caller.
+interpreter. `mycelium-hook-lib.sh` (`mycelium__state`) is its main caller;
+`tools/antigravity.py doctor` also runs `prepare:check+reason` directly
+and parses the `ok`/`fail`/`reason` records, so keep both parsers in step.
 
 Every operation keeps the exact contract of the bash helper it replaces: the
 same checks in the same order, the same variable assignments (including the
@@ -29,7 +31,13 @@ PYTHON* variables can inject modules):
 The nine positional values are the bash variables of the same meaning, passed
 explicitly because bash may hold them unexported. The ops are:
 
-    prepare:MODE      mycelium_prepare_state_dir (write, read-only, bootstrap)
+    prepare:MODE      mycelium_prepare_state_dir (write, read-only, bootstrap),
+                      or `check`: doctor's dry run, read-only except that a
+                      missing state directory passes and the refusals the
+                      write path and run-directory selection make are checked
+    prepare:MODE+reason   the same, and on a refusal it can explain, also
+                      emit a `reason` record (walks the tree again to name
+                      the symlink, so only session start and doctor ask)
     select:MODE       mycelium_select_session_state (create, read-only)
     owns              mycelium_payload_owns_active_session
     require-marker    fail unless STATE_DIR/active-session-log.tmp exists
@@ -46,6 +54,7 @@ Output is a sequence of NUL-terminated fields:
     lock KIND DIR         bash records the acquired lock directory
     marker STATE PATH TS FORMAT
     owner STATE ID
+    reason TEXT           why the next `fail` happened (diagnostic only)
     ok INDEX | fail INDEX | busy INDEX
     end
 
@@ -56,6 +65,7 @@ process died; bash then treats the next unfinished op as failed.
 from __future__ import annotations
 
 import errno
+import shlex
 import os
 import stat
 import sys
@@ -258,6 +268,84 @@ def contains_symlink(top: str) -> bool:
             except OSError:
                 pass
         _restore_cwd(origin, origin_path)
+
+
+def first_symlink(top: str, limit: int = 100000) -> str | None:
+    """Best-effort relative path of one symlink under TOP, for a diagnostic.
+
+    Only called after contains_symlink() already refused TOP, and only when
+    a caller asked for the reason (session start), to tell a person what to
+    remove. Never follows a link. Walks iteratively in sorted order (so the
+    answer is stable and depth cannot exhaust the recursion limit), examines
+    at most LIMIT entries, and returns None when it finds nothing, for
+    example in a tree the strict scan could not fully examine, or a link
+    whose full path exceeds PATH_MAX (it opens directories by path, unlike
+    contains_symlink; the caller then gives a generic message). "." means
+    TOP itself is a link.
+    """
+    if os.path.islink(top):
+        return "."
+    seen = 0
+    pending = [""]
+    while pending:
+        relative = pending.pop()
+        try:
+            with os.scandir(os.path.join(top, relative) if relative else top) as listing:
+                entries = sorted(listing, key=lambda entry: entry.name)
+        except OSError:
+            continue
+        subdirs = []
+        for entry in entries:
+            seen += 1
+            if seen > limit:
+                return None
+            path = os.path.join(relative, entry.name) if relative else entry.name
+            try:
+                if entry.is_symlink():
+                    return path
+                if entry.is_dir(follow_symlinks=False):
+                    subdirs.append(path)
+            except OSError:
+                continue
+        # Depth first, in name order: push reversed so the first name pops first.
+        pending.extend(reversed(subdirs))
+    return None
+
+
+def shown_path(path: str, limit: int = 200) -> str:
+    """PATH made safe to show a person or a model: one printable line.
+
+    Names under .living/ and .mycelium/ come from the repository, which may
+    be untrusted. Control characters (a newline could forge a new context
+    line), undecodable bytes and other non-printables are escaped, and the
+    result is length-capped, so it is always one line of valid UTF-8.
+    """
+    text = "".join(
+        char if char.isprintable() and not 0xD800 <= ord(char) <= 0xDFFF
+        else (f"\\x{ord(char) & 0xFF:02x}" if 0xDC80 <= ord(char) <= 0xDCFF
+              else char.encode("unicode_escape").decode("ascii"))
+        for char in path
+    )
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def symlink_reason(repo_root: str, top: str, found: str | None = None) -> str:
+    """One-line explanation of a symlink refusal, naming the path when known."""
+    label = shown_path(os.path.relpath(top, repo_root))
+    if found is None:
+        found = first_symlink(top)
+    if found == ".":
+        where = f"{label} is itself a symlink"
+    elif found:
+        where = f"symlink found at {shown_path(os.path.join(os.path.relpath(top, repo_root), found))}"
+    else:
+        # Too deep or too large to name here, or not fully readable.
+        where = f"{label} contains a symlink Mycelium could not name, or could not be fully examined"
+        relative = os.path.relpath(top, repo_root)
+        if shown_path(relative) == relative:  # only suggest a command that names the real path
+            where += f" (from the repository root, list links with: find {shlex.quote(relative)} -type l)"
+    return (f"{where}. Mycelium does not keep lifecycle state in a tree that holds "
+            f"symlinks, so session tracking is off until it is removed or moved out of {label}/.")
 
 
 def _restore_cwd(origin: int | None, origin_path: str | None) -> None:
@@ -520,18 +608,41 @@ class State:
     # -- mycelium_prepare_state_dir ---------------------------------------
 
     def prepare(self, mode: str) -> None:
-        if mode not in {"write", "read-only", "bootstrap"}:
+        # "MODE+reason" also names the cause of a symlink refusal. Finding the
+        # path walks the tree again, so only session start and doctor ask.
+        # "check" is doctor's dry run: read-only, but a missing state directory
+        # passes (startup creates it) and the write-time refusals are checked.
+        mode, _, flag = mode.partition("+")
+        if mode not in {"write", "read-only", "bootstrap", "check"} or flag not in {"", "reason"}:
             raise OpFailed
+        explain = bool(flag)
         repo_root = physical_dir(self.repo_root)
         living_dir = repo_root + "/.living"
         if islink(living_dir):
+            if explain:
+                emit("reason", symlink_reason(repo_root, living_dir, "."))
             raise OpFailed
         if isdir(living_dir) and contains_symlink(living_dir):
+            if explain:
+                emit("reason", symlink_reason(repo_root, living_dir))
             raise OpFailed
 
         requested = self.requested_state or repo_root + "/.mycelium"
-        requested = self.validate_requested_state(repo_root, requested)
-        if mode == "read-only":
+        try:
+            requested = self.validate_requested_state(repo_root, requested)
+        except OpFailed:
+            if not explain:
+                raise
+            # validate_requested_state also refuses a root or component it
+            # cannot examine, so do not claim more than "not verified".
+            where = "MYCELIUM_STATE_DIR" if self.requested_state else ".mycelium"
+            emit("reason", f"{where} could not be verified as a plain directory inside the "
+                           "repository (it is outside it, a symlink, not a directory, or could not "
+                           "be examined), so session tracking is off.")
+            raise
+        if mode == "check" and not exists(requested):
+            return
+        if mode in {"read-only", "check"}:
             if not isdir(requested):
                 raise OpFailed
         else:
@@ -550,10 +661,21 @@ class State:
             raise OpFailed
         self.assign("MYCELIUM_SHARED_STATE_DIR", state_dir)
         if contains_symlink(state_dir):
+            if explain:
+                emit("reason", symlink_reason(repo_root, state_dir))
             raise OpFailed
+        if mode == "check":
+            self.check_shared_writes(repo_root, state_dir, explain)
+            for run in (state_dir + "/run", state_dir + "/run/" + self.host):
+                if exists(run) and not isdir(run):
+                    if explain:
+                        emit("reason", f"{shown_path(os.path.relpath(run, repo_root))} is not a "
+                                       "directory, so session tracking is off until it is removed.")
+                    raise OpFailed
+            return
         if mode in {"read-only", "bootstrap"}:
             return
-        self.prepare_shared_writes(repo_root, state_dir)
+        self.prepare_shared_writes(repo_root, state_dir, explain)
 
     @staticmethod
     def validate_requested_state(repo_root: str, requested: str) -> str:
@@ -593,21 +715,34 @@ class State:
             raise OpFailed
         return result
 
-    def prepare_shared_writes(self, repo_root: str, state_dir: str) -> None:
+    def check_shared_writes(self, repo_root: str, state_dir: str, explain: bool = False) -> None:
+        """The refusals prepare_shared_writes makes before it writes anything."""
         plugin_pointer = state_dir + "/plugin-root"
-        legacy_dir = repo_root + "/.claude"
-        legacy_session = legacy_dir + "/last-session.md"
+
+        def refuse(managed: str) -> None:
+            if explain:
+                emit("reason", f"{shown_path(os.path.relpath(managed, repo_root))} is not a regular "
+                               "file. Mycelium does not write through it, so session tracking is "
+                               "off until it is removed.")
+            raise OpFailed
+
         for managed in (state_dir + "/.gitignore", state_dir + "/last-session.md"):
             if (exists(managed) or islink(managed)) and (
                 not isfile(managed) or islink(managed)
             ):
-                raise OpFailed
+                refuse(managed)
         if (
             self.plugin_root
             and (exists(plugin_pointer) or islink(plugin_pointer))
             and (not isfile(plugin_pointer) or islink(plugin_pointer))
         ):
-            raise OpFailed
+            refuse(plugin_pointer)
+
+    def prepare_shared_writes(self, repo_root: str, state_dir: str, explain: bool = False) -> None:
+        plugin_pointer = state_dir + "/plugin-root"
+        legacy_dir = repo_root + "/.claude"
+        legacy_session = legacy_dir + "/last-session.md"
+        self.check_shared_writes(repo_root, state_dir, explain)
 
         gitignore = state_dir + "/.gitignore"
         if not isfile(gitignore):

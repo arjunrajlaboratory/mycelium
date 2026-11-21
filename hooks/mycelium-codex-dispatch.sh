@@ -51,6 +51,17 @@ if [[ -z "$SESSION_CWD" || ! -d "$SESSION_CWD" ]]; then
 fi
 
 REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || true)
+if [[ -n "$REPO_ROOT" && -L "$REPO_ROOT/.living" && -d "$REPO_ROOT/.living" \
+  && "$HOOK_NAME" == mycelium-health.sh ]]; then
+  # The opt-in itself is a symlink to a directory: refuse as before (nothing
+  # behind it is read or written), but say why at session start instead of
+  # going silent. A dangling or non-directory link is not an opt-in at all,
+  # so the plugin stays silent there as it does outside Mycelium repos.
+  REASON='.living is itself a symlink. Mycelium does not keep lifecycle state in a tree that holds symlinks, so session tracking is off until it is removed or moved out of .living/.'
+  printf 'Mycelium: lifecycle tracking is off: %s\n' "$REASON" >&2
+  printf '{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "MYCELIUM WARNING: Session lifecycle tracking is off for this session: %s"}}\n' "$REASON"
+  exit 0
+fi
 if [[ -z "$REPO_ROOT" || -L "$REPO_ROOT/.living" || ! -d "$REPO_ROOT/.living" ]]; then
   exit 0
 fi

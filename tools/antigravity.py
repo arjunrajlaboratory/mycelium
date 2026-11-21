@@ -130,6 +130,40 @@ def file_map(root):
     return result
 
 
+SOURCE_ROOT = Path(__file__).resolve().parent.parent
+HOOK_STATE = SOURCE_ROOT / "skills/core/hooks/mycelium_hook_state.py"
+
+
+def base_state_refusal(root, profile):
+    """Why base Mycelium would refuse to start a lifecycle at ROOT, or None.
+
+    Runs the base hooks' own dry-run prepare check (`prepare:check`: every
+    refusal startup makes, from a symlink under .living/ or .mycelium/ to a
+    managed state file that is not a regular file, without writing) in the
+    default .mycelium directory the adapter uses. It runs this checkout's
+    copy under this interpreter, never code from the package it inspects:
+    an App package lives inside the workspace, which the repository
+    controls. It creates nothing.
+    """
+    if not HOOK_STATE.is_file():
+        return f"Lifecycle state check unavailable: {HOOK_STATE} is missing"
+    host = "antigravity-app" if profile == "app" else "antigravity-ide"
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", str(HOOK_STATE), str(os.getpid()), host, "ok", "",
+             str(root), "", "", "", str(SOURCE_ROOT), "prepare:check+reason"],
+            capture_output=True, timeout=60, cwd="/")
+    except (subprocess.SubprocessError, OSError) as error:
+        # A diagnostic must not break the identity report.
+        return f"Could not check lifecycle state ({type(error).__name__}): {error}"
+    fields = result.stdout.split(b"\0")
+    if b"ok" in fields:
+        return None
+    if b"reason" in fields[:-1]:
+        return os.fsdecode(fields[fields.index(b"reason") + 1])
+    return "Base Mycelium cannot prepare lifecycle state in " + str(root / ".mycelium")
+
+
 def workspace_readiness(workspace, profile="ide"):
     """Check the adapter's Git-root/.living opt-in without creating state."""
     path = safe_path(workspace)
@@ -143,10 +177,37 @@ def workspace_readiness(workspace, profile="ide"):
     # Git ends the path with one newline; a root name may itself end in whitespace.
     out = git.stdout
     root = safe_path(Path(out[:-1] if out.endswith("\n") else out))
-    living = safe_path(root / ".living")
     result["git_root"] = str(root)
+    unsafe = root / ".living"
+    if unsafe.is_symlink() or (unsafe.exists() and not unsafe.is_dir()):
+        # The adapter's roots_for rejects every native event for any such
+        # .living, dangling link included. Checked before safe_path, which
+        # refuses a link by raising.
+        return dict(result, reason=".living is a symlink or not a directory; the Antigravity "
+                                   "adapter rejects every native event in this workspace until it "
+                                   "is a plain directory")
+    living = safe_path(root / ".living")
     if not living.is_dir():
         return dict(result, reason="Git root has no .living opt-in")
+    # Base Mycelium refuses to start a lifecycle in a .living/ or state tree
+    # holding a symlink, which leaves every native turn unresolved.
+    refusal = base_state_refusal(root, profile)
+    host = "antigravity-app" if profile == "app" else "antigravity-ide"
+    for managed in (".mycelium/locks", f".mycelium/{host}"):
+        # The adapter's own preflight directories (links are refused above).
+        if refusal is None and (root / managed).exists() and not (root / managed).is_dir():
+            refusal = (f"{managed} is not a directory; the Antigravity adapter rejects every "
+                       "native event in this workspace until it is removed")
+    if refusal:
+        return dict(result, lifecycle_opt_in=True, reason=refusal)
+    override = os.environ.get("MYCELIUM_STATE_DIR")
+    if override and Path(root, override).resolve() != (root / ".mycelium").resolve():
+        # Same test as the adapter's run_hook; this reads doctor's own
+        # environment, which may differ from the App's or IDE's.
+        result["warnings"] = ["MYCELIUM_STATE_DIR is set in the environment doctor runs in and "
+                              "names a directory other than .mycelium/. The Antigravity adapter "
+                              "keeps lifecycle state only in .mycelium/ and refuses to start a "
+                              "native work cycle if the App or IDE environment sets it too."]
     return dict(result, ok=True, lifecycle_opt_in=True,
                 note="Workspace opt-in only; native dispatch still requires a fresh "
                      f"{'App' if profile == 'app' else 'IDE'} audit")

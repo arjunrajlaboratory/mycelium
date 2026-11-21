@@ -144,7 +144,7 @@ def test_unconfirmed_batch_keeps_every_action_running_and_never_redispatches(nat
 
     monkeypatch.setattr(ag, "run_hook", hook)
     first = app("Stop", stop(payload))
-    assert first["decision"] == "continue" and first["reason"] == ag.UNRESOLVED_HOOK
+    assert first["decision"] == "continue" and first["reason"].startswith(ag.UNRESOLVED_HOOK)
     for attempt in range(1, ag.MAX_STOP_RETRIES + 1):
         app("Stop", stop(payload, executionNum=attempt))
     turn = state_of(repo)

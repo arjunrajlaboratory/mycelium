@@ -71,8 +71,12 @@ fi
 # Install the release before the call: it may wait for the session lock while
 # holding the lifecycle lock. Releasing a lock never taken does nothing.
 trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT
+# Only a real start shows the reason; a reopen from a work hook discards its
+# output, so it skips the extra walk that names the refused path.
+EXPLAIN="+reason"
+[[ "$REOPEN" == true ]] && EXPLAIN=""
 if ! mycelium__state "$REPO_ROOT" "$INPUT" \
-  prepare:bootstrap lock:stop prepare:write select:create lock:session \
+  "prepare:bootstrap$EXPLAIN" lock:stop "prepare:write$EXPLAIN" select:create lock:session \
   marker owner; then
   # The marker (op 6) and owner (op 7) reads never fail, so a failure there
   # means the process died with both locks held. An unread owner is treated
@@ -89,6 +93,16 @@ if ! mycelium__state "$REPO_ROOT" "$INPUT" \
     MYCELIUM_OWNER_ID=""
   else
     mycelium__state_release_held
+    # A refusal with a known cause (a symlink in .living/ or the state tree)
+    # silently disables lifecycle tracking for every later hook, so say why:
+    # on stderr for host logs and adapters, and as context on a real start.
+    if [[ -n "$MYCELIUM__STATE_REASON" ]]; then
+      printf 'Mycelium: lifecycle tracking is off: %s\n' "$MYCELIUM__STATE_REASON" >&2
+      if [[ "$REOPEN" != true ]]; then
+        mycelium_emit_context "SessionStart" \
+          "MYCELIUM WARNING: Session lifecycle tracking is off for this session: ${MYCELIUM__STATE_REASON}" || true
+      fi
+    fi
     exit 0
   fi
 fi

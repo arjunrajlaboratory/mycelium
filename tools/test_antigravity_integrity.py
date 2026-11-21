@@ -144,3 +144,145 @@ def test_workspace_readiness_keeps_a_trailing_space_in_the_git_root(tmp_path):
     (neighbor / '.living').mkdir()
     report = package.workspace_readiness(spaced)
     assert not report['lifecycle_opt_in']
+
+
+def test_workspace_readiness_names_a_symlink_that_blocks_lifecycle_start(tmp_path):
+    """Issue #145: a stray symlink under .mycelium/ made every native turn
+    unresolved; doctor now reports it before a session hits the Stop loop."""
+    import subprocess
+    repo = tmp_path / 'proj'
+    repo.mkdir()
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    (repo / '.living').mkdir()
+    assert package.workspace_readiness(repo)['ok']
+    scratch = repo / '.mycelium' / 'run' / 'scratch'
+    scratch.mkdir(parents=True)
+    (scratch / 'node_modules').symlink_to(tmp_path)
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and report['lifecycle_opt_in']
+    assert 'symlink found at .mycelium/run/scratch/node_modules' in report['reason']
+
+
+def _opted_in(tmp_path):
+    import subprocess
+    repo = tmp_path / 'proj'
+    repo.mkdir()
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    (repo / '.living').mkdir()
+    return repo
+
+
+def test_workspace_readiness_reports_a_symlinked_living_instead_of_raising(tmp_path):
+    repo = tmp_path / 'proj'
+    repo.mkdir()
+    import subprocess
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    (tmp_path / 'notes').mkdir()
+    (repo / '.living').symlink_to(tmp_path / 'notes', target_is_directory=True)
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and '.living is a symlink or not a directory' in report['reason']
+
+
+def test_workspace_readiness_reports_a_state_path_that_is_a_file(tmp_path):
+    repo = _opted_in(tmp_path)
+    (repo / '.mycelium').write_text('not a directory\n')
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and '.mycelium could not be verified as a plain directory' in report['reason']
+
+
+def test_workspace_readiness_checks_the_state_directory_the_adapter_uses(tmp_path, monkeypatch):
+    """The adapter only uses <root>/.mycelium and refuses an override, so
+    doctor checks that tree and warns about an inherited override."""
+    repo = _opted_in(tmp_path)
+    (repo / 'sub' / 'state').mkdir(parents=True)
+    (repo / 'sub' / 'state' / 'link').symlink_to(tmp_path)
+    monkeypatch.setenv('MYCELIUM_STATE_DIR', 'sub/state')
+    report = package.workspace_readiness(repo)
+    assert report['ok'] and 'MYCELIUM_STATE_DIR' in report['warnings'][0]
+    monkeypatch.setenv('MYCELIUM_STATE_DIR', '.mycelium')  # accepted by the adapter
+    assert 'warnings' not in package.workspace_readiness(repo)
+    (repo / '.mycelium').mkdir()
+    (repo / '.mycelium' / 'link').symlink_to(tmp_path)
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and 'symlink found at .mycelium/link' in report['reason']
+
+
+def test_workspace_readiness_reports_a_check_that_cannot_run(tmp_path, monkeypatch):
+    """A slow, failing or missing diagnostic is a readable reason, never a traceback."""
+    import subprocess
+    repo = _opted_in(tmp_path)
+    monkeypatch.setattr(package, 'HOOK_STATE', tmp_path / 'missing.py')
+    assert 'unavailable' in package.workspace_readiness(repo)['reason']
+    monkeypatch.undo()
+    real = subprocess.run
+
+    def slow(command, *args, **kwargs):
+        if str(command[-1]).startswith('prepare:'):
+            raise subprocess.TimeoutExpired(command, 60)
+        return real(command, *args, **kwargs)
+
+    monkeypatch.setattr(package.subprocess, 'run', slow)
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and report['reason'].startswith('Could not check lifecycle state (TimeoutExpired)')
+
+
+@pytest.mark.parametrize('path, kind, expected', [
+    ('.mycelium/plugin-root', 'dir', '.mycelium/plugin-root is not a regular file'),
+    ('.mycelium/.gitignore', 'dir', '.mycelium/.gitignore is not a regular file'),
+    ('.mycelium/run/antigravity-ide', 'file', '.mycelium/run/antigravity-ide is not a directory'),
+    ('.mycelium/locks', 'file', '.mycelium/locks is not a directory'),
+    ('.mycelium/antigravity-ide', 'file', '.mycelium/antigravity-ide is not a directory'),
+])
+def test_workspace_readiness_reports_refusals_startup_makes_when_writing(tmp_path, path, kind, expected):
+    """doctor's dry run covers the write-time refusals, not only read-only ones."""
+    repo = _opted_in(tmp_path)
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.mkdir() if kind == 'dir' else target.write_text('x\n')
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and expected in report['reason']
+
+
+@pytest.mark.parametrize('kind', ['dangling', 'file'])
+def test_workspace_readiness_reports_every_living_the_adapter_rejects(tmp_path, kind):
+    """roots_for rejects any .living link (dangling too) and a .living file,
+    failing every native event, so doctor must not call it "no opt-in"."""
+    import subprocess
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'antigravity_hooks_for_doctor', package.SOURCE_ROOT / 'skills/core/scripts/antigravity_hooks.py')
+    hooks = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hooks)
+    repo = tmp_path / 'proj'
+    repo.mkdir()
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    if kind == 'dangling':
+        (repo / '.living').symlink_to(tmp_path / 'missing')
+    else:
+        (repo / '.living').write_text('x\n')
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and 'rejects every native event' in report['reason']
+    with pytest.raises(ValueError, match='Unsafe Mycelium opt-in directory'):
+        hooks.roots_for({'workspacePaths': [str(repo)]})
+
+
+def test_workspace_readiness_survives_a_very_deep_state_tree(tmp_path, monkeypatch):
+    """The diagnostic walk is iterative: depth cannot exhaust recursion."""
+    repo = _opted_in(tmp_path)
+    deep = repo / '.mycelium'
+    deep.mkdir()
+    import os
+    monkeypatch.chdir(deep)  # restored after the test
+    for _ in range(1100):
+        os.mkdir('d')
+        os.chdir('d')
+    os.symlink('/', 'link')
+    monkeypatch.chdir(tmp_path)
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and report['reason'].startswith('symlink found at .mycelium/d/d/')
+
+
+def test_workspace_readiness_creates_no_state(tmp_path):
+    repo = _opted_in(tmp_path)
+    assert package.workspace_readiness(repo)['ok']
+    assert not (repo / '.mycelium').exists()
