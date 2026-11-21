@@ -337,7 +337,7 @@ fi
 UNRECORDED_FILE="$STATE_DIR/mycelium-unrecorded-events.tmp"
 UNRECORDED_MSG=""
 UNRECORDED_KEPT=0
-UNRECORDED_KEPT_INODE=0
+UNRECORDED_KEPT_GEN=0
 if [[ -e "$UNRECORDED_FILE" || -L "$UNRECORDED_FILE" ]]; then
   _UNRECORDED_STATUS=0
   _UNRECORDED_TAKEN=$(mycelium_unrecorded_events take "$UNRECORDED_FILE" 2>/dev/null) \
@@ -350,12 +350,12 @@ if [[ -e "$UNRECORDED_FILE" || -L "$UNRECORDED_FILE" ]]; then
   _UNRECORDED_WORK=1
   _UNRECORDED_OTHER=0
   _UNRECORDED_SIZE=""
-  _UNRECORDED_INODE=""
-  if [[ "$_UNRECORDED_TAKEN" =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)\ ([0-9]+)$ ]]; then
+  _UNRECORDED_GEN=""
+  if [[ "$_UNRECORDED_TAKEN" =~ ^([0-9]+)\ ([0-9]+)\ ([0-9]+)\ ([0-9a-f]+)$ ]]; then
     _UNRECORDED_WORK="${BASH_REMATCH[1]}"
     _UNRECORDED_OTHER="${BASH_REMATCH[2]}"
     _UNRECORDED_SIZE="${BASH_REMATCH[3]}"
-    _UNRECORDED_INODE="${BASH_REMATCH[4]}"
+    _UNRECORDED_GEN="${BASH_REMATCH[4]}"
   fi
   if (( _UNRECORDED_WORK > 0 )); then
     if ! mycelium_start_work_cycle "$REPO_ROOT" \
@@ -375,15 +375,15 @@ if [[ -e "$UNRECORDED_FILE" || -L "$UNRECORDED_FILE" ]]; then
   if [[ -n "$_UNRECORDED_SIZE" ]]; then
     _UNRECORDED_STATUS=0
     _UNRECORDED_KEPT=$(mycelium_unrecorded_events consume-work "$UNRECORDED_FILE" \
-      "$_UNRECORDED_SIZE" "$_UNRECORDED_INODE" 2>/dev/null) || _UNRECORDED_STATUS=$?
+      "$_UNRECORDED_SIZE" "$_UNRECORDED_GEN" 2>/dev/null) || _UNRECORDED_STATUS=$?
     if (( _UNRECORDED_STATUS != 0 )) \
-      || [[ ! "$_UNRECORDED_KEPT" =~ ^([0-9]+)\ ([0-9]+)$ ]]; then
+      || [[ ! "$_UNRECORDED_KEPT" =~ ^([0-9]+)\ ([0-9a-f]+)$ ]]; then
       mycelium_emit_stop_block \
         "STOP BLOCKED — evidence of an event a post-tool hook could not record could not be updated. It was preserved; retry Stop." || true
       exit 0
     fi
     UNRECORDED_KEPT="${BASH_REMATCH[1]}"
-    UNRECORDED_KEPT_INODE="${BASH_REMATCH[2]}"
+    UNRECORDED_KEPT_GEN="${BASH_REMATCH[2]}"
   elif ! rm -f "$UNRECORDED_FILE" 2>/dev/null; then
     # Unreadable and unremovable (a directory, say). The work cycle above
     # already stands in for it, but it would block every retry: say so.
@@ -393,17 +393,17 @@ if [[ -e "$UNRECORDED_FILE" || -L "$UNRECORDED_FILE" ]]; then
   fi
 fi
 # The file now holds only the UNRECORDED_KEPT bytes (generation
-# UNRECORDED_KEPT_INODE) of the lineage and read records this Stop reports.
+# UNRECORDED_KEPT_GEN) of the lineage and read records this Stop reports.
 # Anything else means a hook failed while this Stop ran: evidence this Stop
 # has not accounted for, so ask for a retry that will.
 mycelium_block_for_late_unrecorded() {
   local taken=""
   [[ -e "$UNRECORDED_FILE" || -L "$UNRECORDED_FILE" ]] || return 1
   taken=$(mycelium_unrecorded_events take "$UNRECORDED_FILE" 2>/dev/null) || taken=""
-  if [[ "$taken" =~ ^0\ [0-9]+\ ([0-9]+)\ ([0-9]+)$ \
+  if [[ "$taken" =~ ^0\ [0-9]+\ ([0-9]+)\ ([0-9a-f]+)$ \
     && "${BASH_REMATCH[1]}" == "$UNRECORDED_KEPT" ]] \
     && { (( UNRECORDED_KEPT == 0 )) \
-      || [[ "${BASH_REMATCH[2]}" == "$UNRECORDED_KEPT_INODE" ]]; }; then
+      || [[ "${BASH_REMATCH[2]}" == "$UNRECORDED_KEPT_GEN" ]]; }; then
     return 1
   fi
   mycelium_emit_stop_block \
@@ -415,7 +415,7 @@ mycelium_block_for_late_unrecorded() {
 mycelium_consume_reported_unrecorded() {
   if (( UNRECORDED_KEPT > 0 )); then
     mycelium_unrecorded_events consume "$UNRECORDED_FILE" "$UNRECORDED_KEPT" \
-      "$UNRECORDED_KEPT_INODE" >/dev/null 2>&1 || true
+      "$UNRECORDED_KEPT_GEN" >/dev/null 2>&1 || true
   fi
 }
 # mycelium_with_unrecorded REASON FILE_COUNT: append the unrecorded-work

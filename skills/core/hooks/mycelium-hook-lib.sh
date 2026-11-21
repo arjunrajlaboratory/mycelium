@@ -317,17 +317,21 @@ mycelium_prepare_locked_post_tool_state() {
 #       redirect the write. After taking the flock it checks that its
 #       descriptor is still the file at that name: Stop may have consumed or
 #       replaced it meanwhile, and a line written there would be lost.
-#   take PATH      Print "WORK OTHER SIZE INODE" ("0 0 0 0" when absent).
+#   take PATH      Print "WORK OTHER SIZE GEN" ("0 0 0 0" when absent).
 #       A line whose kind is `lineage` or `read` is OTHER; any other line is
 #       WORK. An empty file is nothing yet: a writer may have created it and
-#       not yet taken the flock, and its line will follow.
-#   consume-work PATH SIZE INODE   Drop the WORK lines among the first SIZE
+#       not yet taken the flock, and its line will follow. A file holding
+#       events is stamped, once, with a random generation line `{"gen": ...}`
+#       that GEN names; an inode cannot name it, because Linux hands a freed
+#       inode straight to the next file created.
+#   consume-work PATH SIZE GEN   Drop the WORK lines among the first SIZE
 #       bytes (Stop has turned them into a work cycle), keep their OTHER
 #       lines until a Stop reports them, keep any line appended since, and
-#       print "KEPT_SIZE INODE" for what remains ("0 0" when nothing does).
-#   consume PATH SIZE INODE   The same, keeping no taken line.
-#       Both act only on the generation (INODE) that was taken; a file that
-#       has since been replaced is left whole, for the next look to find.
+#       print "KEPT_SIZE GEN" for the new generation's stamp and kept lines
+#       ("0 0" when no taken line is kept).
+#   consume PATH SIZE GEN   The same, keeping no taken line.
+#       Both act only on the generation that was taken; a file that has
+#       since been replaced is left whole, for the next look to find.
 #       What remains is written to a new file renamed over the old one, so a
 #       failed write leaves the old file intact.
 #   drain-other PATH    Stop without a transaction, holding no session
@@ -355,6 +359,18 @@ def single_regular(fd):
     if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
         raise SystemExit(1)
     return opened
+
+def generation(raw):
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    if isinstance(value, dict) and "kind" not in value and isinstance(value.get("gen"), str):
+        return value["gen"]
+    return None
+
+def gen_line(value):
+    return (json.dumps({"gen": value}) + "\n").encode("ascii")
 
 def is_other(raw):
     try:
@@ -421,39 +437,50 @@ try:
             break
         data += chunk
     lines = [raw for raw in data.splitlines(True) if raw.strip()]
+    gens = [generation(raw) for raw in lines]
+    gen = next((value for value in gens if value), None)
+    events = [raw for raw, value in zip(lines, gens) if not value]
     try:
         current = os.stat(path, follow_symlinks=False)
         same = (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
     except FileNotFoundError:
         same = False
     if mode == "take":
-        other = sum(1 for raw in lines if is_other(raw))
-        print(len(lines) - other, other, len(data), opened.st_ino)
+        other = sum(1 for raw in events if is_other(raw))
+        if events and gen is None and same:
+            gen = os.urandom(8).hex()
+            stamp = gen_line(gen)
+            os.lseek(fd, 0, os.SEEK_END)
+            os.write(fd, stamp)
+            data += stamp
+        print(len(events) - other, other, len(data), gen or 0)
     elif mode == "drain-other":
-        other = sum(1 for raw in lines if is_other(raw))
-        if lines and other == len(lines) and same:
+        other = sum(1 for raw in events if is_other(raw))
+        if events and other == len(events) and same:
             os.unlink(path)
             print(other)
         else:
             print(0)
     elif mode in ("consume-work", "consume"):
-        size, inode = int(sys.argv[3]), int(sys.argv[4])
-        if not same or opened.st_ino != inode:
+        size, token = int(sys.argv[3]), sys.argv[4]
+        if not same or str(gen or 0) != token:
             print("0 0")
             raise SystemExit(0)
         kept = b""
         if mode == "consume-work":
             kept = b"".join(raw for raw in data[:size].splitlines(True)
-                            if raw.strip() and is_other(raw))
-        remaining = kept + data[size:]
-        if not remaining:
+                            if raw.strip() and not generation(raw) and is_other(raw))
+        tail = data[size:]
+        if not kept and not tail:
             os.unlink(path)
             print("0 0")
             raise SystemExit(0)
+        fresh = os.urandom(8).hex()
+        head = gen_line(fresh) + kept
         temp_fd, temp = tempfile.mkstemp(prefix=".unrecorded.", dir=os.path.dirname(path))
         try:
             with os.fdopen(temp_fd, "wb") as handle:
-                handle.write(remaining)
+                handle.write(head + tail)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.chmod(temp, 0o644)
@@ -464,7 +491,7 @@ try:
             except OSError:
                 pass
             raise
-        print(len(kept), os.stat(path, follow_symlinks=False).st_ino if kept else 0)
+        print(len(head), fresh) if kept else print("0 0")
     else:
         raise SystemExit(1)
 finally:

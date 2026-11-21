@@ -632,29 +632,54 @@ def _lib(*args, cwd=None):
 def test_consume_never_applies_a_count_to_a_replaced_generation(tmp_path):
     evidence = tmp_path / UNRECORDED
     evidence.write_text('{"kind": "read"}\n{"kind": "read"}\n')
-    work, other, size, inode = _lib("take", evidence).stdout.split()
+    work, other, size, gen = _lib("take", evidence).stdout.split()
     evidence.unlink()  # a duplicate Stop drained it
     evidence.write_text('{"kind": "work", "hook": "new"}\n')  # a new failure
 
-    result = _lib("consume-work", evidence, size, inode)
+    result = _lib("consume-work", evidence, size, gen)
 
     assert result.returncode == 0
     assert result.stdout.split() == ["0", "0"]
     assert evidence.read_text() == '{"kind": "work", "hook": "new"}\n'
 
 
+def test_a_reused_inode_is_not_the_taken_generation(tmp_path):
+    """Linux gives a freed inode to the next file created, so a drained and
+    recreated evidence file can carry the taken inode. Rewriting the same
+    inode in place models that on every platform."""
+    evidence = tmp_path / UNRECORDED
+    evidence.write_text('{"kind": "read"}\n{"kind": "read"}\n')
+    inode = evidence.stat().st_ino
+    work, other, size, gen = _lib("take", evidence).stdout.split()
+    with evidence.open("w") as handle:
+        handle.write('{"kind": "work", "hook": "new"}\n')
+    assert evidence.stat().st_ino == inode
+
+    result = _lib("consume-work", evidence, size, gen)
+
+    assert result.stdout.split() == ["0", "0"]
+    assert evidence.read_text() == '{"kind": "work", "hook": "new"}\n'
+    assert _lib("take", evidence).stdout.split()[0] == "1"
+
+
 def test_consume_rewrites_by_replacement_keeping_the_tail(tmp_path):
     evidence = tmp_path / UNRECORDED
     evidence.write_text('{"kind": "work"}\n{"kind": "read"}\n')
-    work, other, size, inode = _lib("take", evidence).stdout.split()
+    inode = evidence.stat().st_ino
+    work, other, size, gen = _lib("take", evidence).stdout.split()
     with evidence.open("a") as handle:
         handle.write('{"kind": "work", "hook": "late"}\n')
 
-    kept_size, kept_inode = _lib("consume-work", evidence, size, inode).stdout.split()
+    kept_size, kept_gen = _lib("consume-work", evidence, size, gen).stdout.split()
 
-    assert evidence.read_text() == '{"kind": "read"}\n{"kind": "work", "hook": "late"}\n'
-    assert int(kept_size) == len('{"kind": "read"}\n')
-    assert int(kept_inode) == evidence.stat().st_ino
+    lines = evidence.read_text().splitlines(True)
+    assert lines[0] == '{"gen": "%s"}\n' % kept_gen
+    assert lines[1:] == ['{"kind": "read"}\n', '{"kind": "work", "hook": "late"}\n']
+    assert kept_gen != gen
+    assert int(kept_size) == len(lines[0] + lines[1])
+    assert evidence.stat().st_ino != inode
+    # The late line is evidence this Stop did not take.
+    assert _lib("take", evidence).stdout.split()[:2] == ["1", "1"]
 
 
 def test_a_held_evidence_flock_is_bounded(tmp_path):
