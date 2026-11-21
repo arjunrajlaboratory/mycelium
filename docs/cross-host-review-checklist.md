@@ -350,6 +350,10 @@ hook, filesystem, or lifecycle boundaries.
       for a change.
 - [ ] Pre-existing dirty and untracked files use a content identity, so a
       same-size rewrite whose mtime is restored still counts as session work.
+- [ ] Every lifecycle hook resolves the repository from the payload's session
+      `cwd`, not the hook process's directory, and falls back to the process
+      directory only when the session's repository is not opted in. A session
+      in a linked worktree is judged on, and writes into, that worktree.
 
 ## 7. Data Lineage Integrity
 
@@ -564,6 +568,7 @@ exercise them.
 | Session work updates an existing finding file | The content change is detected even if the parent directory mtime is unchanged. |
 | `apply_patch` fails | No successful activity is recorded for the failed patch. |
 | Tool cwd uses a symlinked or nested path | Valid in-project changes are attributed to the canonical project root. |
+| A session works in a linked worktree while the host runs hooks in the main checkout, which holds another session's dirty work | Stop judges only the worktree's changes, accepts reflection in the worktree's `.living/`, and leaves the main checkout byte-identical; a missing `.mycelium/plugin-root` is seeded in the worktree. |
 | Bash creates or modifies a project file without `apply_patch` | Stop enforces the living-repository update requirement. |
 | First Stop is blocked, more work occurs, then Stop succeeds | State remains active after the block, and the final log includes the later work. |
 | Multiple Stop hooks run concurrently | Exactly one finalization, registry row, lineage extraction, and cleanup occurs. |

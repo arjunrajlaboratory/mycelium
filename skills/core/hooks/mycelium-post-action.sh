@@ -57,7 +57,9 @@ fi
 
 # --- Repo and .living/ checks ---
 
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+# The session's directory, not the hook process's: a host may run hooks in
+# the main checkout while the session works in a linked worktree (issue #144).
+REPO_ROOT=$(mycelium_session_repo_root "$SESSION_CWD")
 if [[ -z "$REPO_ROOT" ]]; then
   exit 0
 fi

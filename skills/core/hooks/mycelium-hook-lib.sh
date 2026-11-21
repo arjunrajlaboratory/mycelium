@@ -1779,6 +1779,26 @@ mycelium__payload_cached() {
   return 0
 }
 
+# mycelium_session_repo_root CWD: print the repository root a session hook
+# acts on. The session's own directory (the payload `cwd`) wins when its
+# repository is opted in: a host may run hooks in the main checkout while the
+# session works in a linked worktree (issue #144). Otherwise fall back to the
+# hook process's directory, so a turn that ended after `cd` into a nested
+# repository without .living/, or outside any repository, is still judged
+# where it was before. Prints nothing outside a repository.
+mycelium_session_repo_root() {
+  local cwd="${1:-}"
+  local root=""
+  if [[ -n "$cwd" && -d "$cwd" ]]; then
+    root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)
+    if [[ -n "$root" && -d "$root/.living" ]]; then
+      printf '%s\n' "$root"
+      return 0
+    fi
+  fi
+  git rev-parse --show-toplevel 2>/dev/null || true
+}
+
 # mycelium_json_get PATH [VAR]: print a scalar field of the payload held in
 # variable VAR, or read from stdin when VAR is omitted.
 mycelium_json_get() {

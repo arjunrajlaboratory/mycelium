@@ -1089,3 +1089,25 @@ selected interpreter's invocation path while validating its executable target.
 response loss after real Stop effects; assert final hashes, one action, and no
 redispatch. Test the generated hook launcher and child Python against venv-only
 packages. Retain unresolved outcomes when the required evidence is unavailable.
+
+## 50. A hook resolves the repository from its own process directory
+
+**Failure:** Claude Code runs a linked-worktree session's hooks in the main
+checkout. Hooks that called a bare `git rev-parse --show-toplevel` judged the
+session against the main checkout while others recorded its edits in the
+worktree: Stop charged another session's dirty files to it, could not see
+reflection in the worktree's `.living/`, and blocked until the agent wrote into
+the main checkout (#144).
+
+**Invariant:** One session, one root. Every lifecycle hook resolves the
+repository through `mycelium_session_repo_root` from the payload's `cwd`, and
+falls back to the process directory only when that repository is not opted in
+(a turn that ended after `cd` into a nested repository or outside any).
+Machine-local state that guidance dereferences, such as `.mycelium/plugin-root`,
+must exist in whichever checkout the session uses.
+
+**Regression evidence:** Run the real hooks with the process directory in the
+main checkout and the payload `cwd` in a linked worktree; dirty the main
+checkout from "another session"; assert Stop's reason names only worktree
+files, accepts worktree reflection, and leaves the main checkout byte-identical.
+Pair it with a negative neighbor whose `cwd` is a nested non-opted repository.
