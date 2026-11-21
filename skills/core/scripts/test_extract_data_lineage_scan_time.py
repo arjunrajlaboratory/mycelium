@@ -21,15 +21,17 @@ sys.path.insert(0, str(Path(__file__).parent))
 import extract_data_lineage_event as lineage_event  # noqa: E402
 from extract_data_lineage_event import detect_scripts, is_analysis  # noqa: E402
 
+# CPU seconds, not wall time: under pytest -n auto a linear scan can wait
+# several seconds for a core (see test_lineage_data_commands.py).
 TIME_LIMIT_SECONDS = 5.0
 
 SCANNED_PATTERNS = lineage_event.ANALYSIS_PATTERNS + lineage_event.RUNNER_PATTERNS
 
 
 def _timed(function, *args):
-    started = time.monotonic()
+    started = time.process_time()
     result = function(*args)
-    return result, time.monotonic() - started
+    return result, time.process_time() - started
 
 
 def _detect_proven(command: str, cwd: Path, bash_exit: int | None):
