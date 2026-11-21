@@ -33,6 +33,7 @@ HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 HOSTS = ["claude", "codex"]
 SID = "moving-session"
 OTHER = "main-owner-session"
+EXTRA_ENV: dict[str, str] = {}
 
 
 def _git(*args: str) -> None:
@@ -62,6 +63,7 @@ def _checkouts(tmp_path: Path) -> tuple[Path, Path]:
 def _run(host: str, name: str, cwd: Path, payload: dict):
     env = os.environ.copy()
     env["MYCELIUM_HOOK_HOST"] = host
+    env.update(EXTRA_ENV)
     # The host runs hooks in the session's current directory.
     return subprocess.run(
         [str(HOOKS_DIR / name)],
@@ -279,3 +281,100 @@ def test_an_unrelated_repository_is_not_searched(tmp_path):
 
     assert stub.is_file()
     assert (_run_dir(main, "claude") / "active-session-log.tmp").is_file()
+
+
+def _resume(host: str, cwd: Path, sid: str = SID):
+    result = _run(host, "mycelium-health.sh", cwd,
+                  {"cwd": str(cwd), "session_id": sid, "source": "resume",
+                   "hook_event_name": "SessionStart"})
+    assert result.returncode == 0, result.stderr
+    return result
+
+
+def test_stop_survives_a_long_moved_change_list(tmp_path):
+    """A moved-change list larger than a pipe buffer must not kill Stop with
+    SIGPIPE (exit 141, empty stdout), which would fail open on every retry."""
+    main, worktree = _checkouts(tmp_path)
+    _start("claude", main)
+    _edit("claude", worktree, worktree / "analysis.py", "x = 2\n")
+    long_dir = "d" * 100
+    (_run_dir(worktree, "claude") / "moved-checkout-changes.tmp").write_text(
+        "".join(f"{main}/{long_dir}/file_{i:05d}.py\n" for i in range(3000))
+    )
+    stop = _stop("claude", worktree, active=False)
+    assert _blocked(stop), stop.stdout
+    reason = json.loads(stop.stdout)["reason"]
+    assert "3000 project file(s)" in reason and "(+2985 more)" in reason
+    # The record is consumed into a work cycle: a retry still blocks.
+    stop = _stop("claude", worktree, active=True)
+    assert _blocked(stop), stop.stdout
+
+
+def test_moving_back_keeps_owed_reflection(tmp_path):
+    """main -> worktree -> main: the reminder the worktree's Stop started for
+    changes left in main must survive the move back."""
+    main, worktree = _checkouts(tmp_path)
+    _start("claude", main)
+    (main / "report.py").write_text("y = 2\n")  # shell edit, no hook
+    stop = _stop("claude", worktree, active=False)
+    assert _blocked(stop), stop.stdout
+
+    stop = _stop("claude", main, active=True)
+    assert _blocked(stop), stop.stdout
+    assert "report.py" in json.loads(stop.stdout)["reason"] \
+        or "MOVED SESSION" in json.loads(stop.stdout)["reason"]
+    assert not _run_dir(worktree, "claude").exists()
+
+
+def test_moving_back_keeps_pending_moved_changes(tmp_path):
+    """A moved-change record not yet enforced is carried on the next move."""
+    main, worktree = _checkouts(tmp_path)
+    _start("claude", main)
+    (main / "report.py").write_text("y = 2\n")
+    _resume("claude", worktree)
+    assert (_run_dir(worktree, "claude") / "moved-checkout-changes.tmp").exists()
+    _resume("claude", main)
+
+    stop = _stop("claude", main, active=False)
+    assert _blocked(stop), stop.stdout
+    assert "report.py" in json.loads(stop.stdout)["reason"]
+
+
+def test_a_handoff_that_cannot_move_is_kept(tmp_path):
+    main, worktree = _checkouts(tmp_path)
+    _start("claude", main)
+    (_run_dir(main, "claude") / "last-session.md").write_text("FROM MAIN\n")
+    dest = _run_dir(worktree, "claude")
+    dest.mkdir(parents=True)
+    (dest / "last-session.md").write_text("ALREADY HERE\n")
+
+    _edit("claude", worktree, worktree / "analysis.py", "x = 2\n")
+
+    text = (dest / "last-session.md").read_text()
+    assert "ALREADY HERE" in text and "FROM MAIN" in text
+
+
+def test_a_relative_state_dir_override_is_followed(tmp_path, monkeypatch):
+    monkeypatch.setitem(EXTRA_ENV, "MYCELIUM_STATE_DIR", ".mycelium-alt")
+    main, worktree = _checkouts(tmp_path)
+    _start("claude", main)
+    alt_run = main / ".mycelium-alt" / "run" / "claude" / SID
+    assert (alt_run / "active-session-log.tmp").is_file()
+
+    _edit("claude", worktree, worktree / "analysis.py", "x = 2\n")
+
+    assert not alt_run.exists()
+    assert _session_logs(main) == []
+
+
+def test_a_malformed_owner_token_is_not_taken(tmp_path):
+    main, worktree = _checkouts(tmp_path)
+    _start("claude", main)
+    stub = _owned_log(main, "claude")
+    owner = _run_dir(main, "claude") / "active-session-owner-id.tmp"
+    owner.write_text(f"{SID}\nextra\n")
+
+    _edit("claude", worktree, worktree / "analysis.py", "x = 2\n")
+
+    assert stub.is_file()
+    assert owner.is_file()

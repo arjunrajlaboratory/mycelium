@@ -412,17 +412,23 @@ fi
 # keeps a retry enforced until .living/ is updated.
 MOVED_CHANGES_FILE="$STATE_DIR/moved-checkout-changes.tmp"
 if [[ -f "$MOVED_CHANGES_FILE" && ! -L "$MOVED_CHANGES_FILE" ]]; then
-  _MOVED_FROM=$(head -1 "$MOVED_CHANGES_FILE" 2>/dev/null || true)
-  _MOVED_COUNT=$(tail -n +2 "$MOVED_CHANGES_FILE" 2>/dev/null | grep -c . || true)
-  _MOVED_NAMES=$(tail -n +2 "$MOVED_CHANGES_FILE" 2>/dev/null | head -15 \
-    | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+  # One reader per value, each reading the whole file: a `| head` consumer
+  # that exits early would kill its producer with SIGPIPE and, under
+  # pipefail, this whole hook with it (exit 141, failing open on every retry).
+  _MOVED_COUNT=$(awk 'NF { n++ } END { print n + 0 }' "$MOVED_CHANGES_FILE" 2>/dev/null || true)
+  _MOVED_NAMES=$(awk 'NF && ++n <= 15 { printf "%s%s", (n > 1 ? ", " : ""), $0 }' \
+    "$MOVED_CHANGES_FILE" 2>/dev/null || true)
   if ! mycelium_start_work_cycle "$REPO_ROOT" \
     "${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"; then
     mycelium_emit_stop_block \
       "STOP BLOCKED — changes this session left in the checkout it moved from need a fresh .living/ fingerprint and reminder, and writing them failed. The evidence was preserved; repair ${STATE_DIR} if needed, then retry Stop." || true
     exit 0
   fi
-  _MOVED_MSG="MOVED SESSION: this session started in ${_MOVED_FROM} and moved here. ${_MOVED_COUNT:-0} project file(s) changed there after it started (${_MOVED_NAMES}); they are not in the counts above. Triage them if they are this session's work."
+  _MOVED_MORE=""
+  if [[ "${_MOVED_COUNT:-0}" =~ ^[0-9]+$ ]] && (( _MOVED_COUNT > 15 )); then
+    _MOVED_MORE=" (+$((_MOVED_COUNT - 15)) more)"
+  fi
+  _MOVED_MSG="MOVED SESSION: this session moved here from another checkout of this repository. ${_MOVED_COUNT:-0} project file(s) changed there after it started, or still owed reflection, and are not in the counts above: ${_MOVED_NAMES}${_MOVED_MORE}. Triage them if they are this session's work."
   UNRECORDED_MSG="${UNRECORDED_MSG:+$UNRECORDED_MSG }$_MOVED_MSG"
   rm -f "$MOVED_CHANGES_FILE"
 fi

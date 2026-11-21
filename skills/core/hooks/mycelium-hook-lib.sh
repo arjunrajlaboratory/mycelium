@@ -928,21 +928,29 @@ mycelium_take_moved_transaction() {
   local here=""
   local line=""
   local other=""
+  local shared=""
   local run=""
+  local override="${MYCELIUM_STATE_DIR:-}"
   MYCELIUM_MOVED_FROM=""
   MYCELIUM_MOVED_START_TS=""
   mycelium_valid_session_id "$sid" || return 1
+  # A relative state override resolves against each checkout, as the state
+  # runner resolves it. An absolute one is a single directory every checkout
+  # shares, so there is no sibling copy to find.
+  [[ "$override" != /* ]] || return 1
   host=$(mycelium_hook_host)
   here=$(cd "$repo_root" 2>/dev/null && pwd -P) || return 1
   while IFS= read -r line; do
     [[ "$line" == "worktree "* ]] || continue
     other=$(cd "${line#worktree }" 2>/dev/null && pwd -P) || continue
     [[ "$other" != "$here" ]] || continue
-    run="$other/.mycelium/run/$host/$sid"
+    shared="$other/${override:-.mycelium}"
+    shared="${shared%/}"
+    run="$shared/run/$host/$sid"
     [[ -d "$other/.living" && ! -L "$other/.living" \
-      && -d "$other/.mycelium" && ! -L "$other/.mycelium" \
-      && -d "$other/.mycelium/run" && ! -L "$other/.mycelium/run" \
-      && -d "$other/.mycelium/run/$host" && ! -L "$other/.mycelium/run/$host" \
+      && -d "$shared" && ! -L "$shared" \
+      && -d "$shared/run" && ! -L "$shared/run" \
+      && -d "$shared/run/$host" && ! -L "$shared/run/$host" \
       && -d "$run" && ! -L "$run" \
       && -f "$run/active-session-log.tmp" \
       && ! -L "$run/active-session-log.tmp" ]] || continue
@@ -950,7 +958,7 @@ mycelium_take_moved_transaction() {
       MYCELIUM_MOVED_FROM="$other"
       return 0
     fi
-    if mycelium__take_moved_from "$other" "$run" "$sid" "$mode"; then
+    if mycelium__take_moved_from "$other" "$shared" "$run" "$sid" "$mode"; then
       MYCELIUM_MOVED_FROM="$other"
       return 0
     fi
@@ -992,23 +1000,43 @@ for line, pattern in zip(seen, allowed):
         sys.exit(1)
 '
 
+# mycelium__moved_evidence RUN: succeed when RUN holds work this takeover
+# cannot carry: edit activity, unrecorded or data events, or a handoff
+# finalization in progress. Those stay for that checkout's own Stop.
+mycelium__moved_evidence() {
+  local work=""
+  for work in mycelium-session-activity.tmp mycelium-unrecorded-events.tmp \
+    mycelium-data-events.tmp handoff-finalization-pending.tmp; do
+    if [[ -s "$1/$work" || -L "$1/$work" ]]; then
+      return 0
+    fi
+  done
+  [[ -e "$1/mycelium-session-activity.tmp" \
+    || -e "$1/handoff-finalization-pending.tmp" ]]
+}
+
 mycelium__take_moved_from() {
   local other="$1"
-  local run="$2"
-  local sid="$3"
-  local mode="$4"
+  local shared="$2"
+  local run="$3"
+  local sid="$4"
+  local mode="$5"
   local log=""
-  local owner=""
-  local work=""
-  local start_ts=""
-  local entry=""
+  local text=""
+  local marker_ts=""
+  local carried=""
   local changes=""
   local helper=""
   local collect_args=()
+  local start_ts=""
+  local entry=""
+  local session_lock=""
+  local index_script=""
   local attempts="${MYCELIUM_MOVED_LOCK_MAX_ATTEMPTS:-100}"
   local status=1
 
-  mycelium_acquire_directory_lock "$other/.mycelium" "mycelium-stop.lock" \
+  [[ -n "$shared" && -n "$run" ]] || return 1
+  mycelium_acquire_directory_lock "$shared" "mycelium-stop.lock" \
     MYCELIUM__MOVED_STOP_LOCK "$attempts" || return 1
   if ! mycelium_acquire_directory_lock "$run" "mycelium-session.lock" \
     MYCELIUM__MOVED_SESSION_LOCK "$attempts"; then
@@ -1016,36 +1044,42 @@ mycelium__take_moved_from() {
     return 1
   fi
   while true; do
-    [[ -f "$run/active-session-log.tmp" && ! -L "$run/active-session-log.tmp" \
-      && -f "$run/active-session-owner-id.tmp" \
-      && ! -L "$run/active-session-owner-id.tmp" ]] || break
-    owner=$(head -1 "$run/active-session-owner-id.tmp" 2>/dev/null || true)
-    [[ "$owner" == "$sid" ]] || break
-    log=$(head -1 "$run/active-session-log.tmp" 2>/dev/null || true)
+    # The same shapes the state runner's owner and marker readers accept:
+    # exactly the session ID on one line, and a marker of the log path, a
+    # numeric owner time and the owner-id-v1 format line.
+    [[ -f "$run/active-session-owner-id.tmp" \
+      && ! -L "$run/active-session-owner-id.tmp" \
+      && -f "$run/active-session-log.tmp" \
+      && ! -L "$run/active-session-log.tmp" ]] || break
+    text=$(cat "$run/active-session-owner-id.tmp" 2>/dev/null && printf x) || break
+    [[ "$text" == "$sid"$'\n'x ]] || break
+    text=$(cat "$run/active-session-log.tmp" 2>/dev/null && printf x) || break
+    log="${text%%$'\n'*}"
+    text="${text#*$'\n'}"
+    marker_ts="${text%%$'\n'*}"
+    [[ "$marker_ts" =~ ^[0-9]{1,18}$ \
+      && "${text#*$'\n'}" == "owner-id-v1"$'\n'x ]] || break
     [[ "$log" == "$other/.living/log/"*.md \
       && "${log#"$other/.living/log/"}" != */* \
       && -f "$log" && ! -L "$log" \
       && -d "$other/.living/log" && ! -L "$other/.living/log" ]] || break
-    for work in mycelium-session-activity.tmp mycelium-unrecorded-events.tmp \
-      mycelium-data-events.tmp handoff-finalization-pending.tmp; do
-      if [[ -s "$run/$work" || -L "$run/$work" ]]; then
-        break 2
-      fi
-    done
-    [[ ! -e "$run/mycelium-session-activity.tmp" \
-      && ! -e "$run/handoff-finalization-pending.tmp" ]] || break
+    mycelium__moved_evidence "$run" && break
     if git -C "$other" ls-files --error-unmatch -- "$log" >/dev/null 2>&1; then
       break
     fi
     python3 -I -S -c "$MYCELIUM__PY_STUB_LOG" "$log" 2>/dev/null || break
 
     if [[ "$mode" == adopt ]]; then
+      [[ -n "${STATE_DIR:-}" && -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] || break
+      # Everything that checkout still owed reflection for moves with the
+      # session, as absolute paths (or a note naming that checkout), into
+      # STATE_DIR/moved-checkout-changes.tmp for this checkout's Stop.
       # Shell commands (`sed -i`, `printf >`) record no activity, so compare
-      # that checkout with its session baseline, as its own Stop would have.
-      # Changes, or a comparison that cannot run, are carried here for this
-      # checkout's Stop to enforce; another session's concurrent edits there
-      # cost one triage, never silence about this session's.
-      changes=""
+      # that checkout with its session baseline, as its own Stop would have;
+      # another session's concurrent edits there cost one triage, never
+      # silence about this session's. A record it carried from an earlier move
+      # comes along, and so does a work cycle its Stop started and did not see
+      # reflected (mycelium-reminded.tmp).
       helper="${MYCELIUM_SESSION_CHANGES_HELPER:-$MYCELIUM__HOOKS_DIR/../scripts/session_file_changes.py}"
       start_ts=$(head -1 "$run/session-start-ts.tmp" 2>/dev/null || true)
       collect_args=(collect --repo-root "$other" \
@@ -1056,23 +1090,50 @@ mycelium__take_moved_from() {
       if [[ ! -f "$run/session-file-baseline.json" \
         || -L "$run/session-file-baseline.json" || ! -f "$helper" ]] \
         || ! changes=$(python3 "$helper" "${collect_args[@]}" 2>/dev/null); then
-        changes="(could not compare with this session's baseline)"
+        carried="$other (could not compare with this session's baseline)"$'\n'
+      else
+        while IFS= read -r entry; do
+          [[ -n "$entry" ]] && carried="$carried$other/$entry"$'\n'
+        done <<<"$changes"
       fi
-      if [[ -n "$changes" ]]; then
-        [[ -n "${STATE_DIR:-}" && -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] || break
-        { printf '%s\n' "$other"; printf '%s\n' "$changes"; } \
-          > "$STATE_DIR/moved-checkout-changes.tmp" 2>/dev/null || break
+      if [[ -f "$run/moved-checkout-changes.tmp" \
+        && ! -L "$run/moved-checkout-changes.tmp" ]]; then
+        text=$(cat "$run/moved-checkout-changes.tmp" 2>/dev/null && printf x) \
+          || break
+        carried="$carried${text%x}"
+      elif [[ -e "$run/moved-checkout-changes.tmp" \
+        || -L "$run/moved-checkout-changes.tmp" ]]; then
+        break
+      fi
+      if [[ -e "$run/mycelium-reminded.tmp" || -L "$run/mycelium-reminded.tmp" ]]; then
+        carried="$carried$other (work whose .living/ reflection was still owed there)"$'\n'
+      fi
+      # A post-tool hook that timed out on the session lock records its event
+      # outside that lock; look once more just before anything moves.
+      mycelium__moved_evidence "$run" && break
+      if [[ -n "$carried" ]]; then
+        printf '%s' "$carried" >> "$STATE_DIR/moved-checkout-changes.tmp" \
+          2>/dev/null || break
       fi
       if [[ "$start_ts" =~ ^[0-9]{1,18}$ ]]; then
         MYCELIUM_MOVED_START_TS="$start_ts"
       fi
-      if [[ -f "$run/last-session.md" && ! -L "$run/last-session.md" \
-        && -n "${STATE_DIR:-}" && -d "$STATE_DIR" && ! -L "$STATE_DIR" \
-        && ! -e "$STATE_DIR/last-session.md" \
-        && ! -L "$STATE_DIR/last-session.md" ]]; then
-        mv "$run/last-session.md" "$STATE_DIR/last-session.md" 2>/dev/null \
-          || break
+      # The handoff the agent wrote at the path SessionStart announced. When
+      # this checkout already holds one, append it rather than lose either.
+      if [[ -f "$run/last-session.md" && ! -L "$run/last-session.md" ]]; then
+        if [[ ! -e "$STATE_DIR/last-session.md" && ! -L "$STATE_DIR/last-session.md" ]]; then
+          mv "$run/last-session.md" "$STATE_DIR/last-session.md" 2>/dev/null \
+            || break
+        elif [[ -f "$STATE_DIR/last-session.md" && ! -L "$STATE_DIR/last-session.md" ]]; then
+          { printf '\n\n<!-- Handoff carried from %s -->\n\n' "$other"
+            cat "$run/last-session.md"; } >> "$STATE_DIR/last-session.md" \
+            2>/dev/null || break
+        else
+          break
+        fi
       fi
+    else
+      mycelium__moved_evidence "$run" && break
     fi
     rm -f "$log"
     for entry in "$run"/* "$run"/.[!.]*; do
@@ -1084,15 +1145,15 @@ mycelium__take_moved_from() {
     status=0
     break
   done
-  local session_lock="$MYCELIUM__MOVED_SESSION_LOCK"
+  session_lock="$MYCELIUM__MOVED_SESSION_LOCK"
   MYCELIUM__MOVED_SESSION_LOCK=""
   mycelium_release_directory_lock "$session_lock"
   if (( status == 0 )); then
-    rmdir "$run" "$other/.mycelium/run/$(mycelium_hook_host)" \
-      "$other/.mycelium/run" 2>/dev/null || true
+    rmdir "${run:?}" "${shared:?}/run/$(mycelium_hook_host)" "${shared:?}/run" \
+      2>/dev/null || true
     # SessionStart's INDEX refresh counted the stub; recount without it, as
     # SessionStart does (no LLM, <1s), still under that checkout's lock.
-    local index_script="$MYCELIUM__HOOKS_DIR/../scripts/generate_index.py"
+    index_script="$MYCELIUM__HOOKS_DIR/../scripts/generate_index.py"
     if [[ -f "$other/.living/INDEX.md" && ! -L "$other/.living/INDEX.md" \
       && -f "$index_script" ]]; then
       python3 "$index_script" --living-dir "$other/.living" --summary-heuristic \

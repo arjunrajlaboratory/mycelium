@@ -38,7 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stub log and run state and recounts that checkout's INDEX. A Stop with no
   work in the worktree does the same before it decides. Files that changed in
   the old checkout after the session started (a shell edit records no
-  activity) are named in the worktree's Stop and triaged once. A reservation
+  activity) are named in the worktree's Stop and triaged once, and moving back
+  carries any reflection still owed rather than erasing it. A reservation
   that already recorded work is left for its own checkout's Stop. Existing
   projects need no migration.
 - A post-tool hook that could not take its session's lock (a slow Stop,

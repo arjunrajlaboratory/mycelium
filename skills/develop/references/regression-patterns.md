@@ -1142,7 +1142,12 @@ transaction in its own checkout but a reservation in a sibling reopens here so
 the takeover happens, then runs once more. Shell edits record no activity, so
 files that changed in the old checkout since its baseline are carried into
 the new transaction and enforced by its Stop; another session's concurrent
-edits cost one triage, never silence. A reservation with recorded work
+edits cost one triage, never silence. So is anything the old checkout still
+owed (a carried record not yet enforced, a reminder its Stop started), so a
+move back cannot erase it, and a handoff the destination already holds is
+appended to, never dropped. Read the moved record without `| head` under
+pipefail: an early-exiting consumer kills Stop with SIGPIPE (141) and fails
+open on every retry. A reservation with recorded work
 (activity, data or unrecorded events, a log the agent wrote into, a tracked
 log) is never removed; it stays for its own checkout's Stop. Take that
 checkout's lifecycle and session locks before checking and removing, and leave
@@ -1154,6 +1159,9 @@ the main checkout; assert exactly one finalized log across both, the main
 checkout byte-identical to its state before this session started, no
 `.mycelium/run/<host>/<sid>/` left there, and the carried `started:` and
 handoff. Pair it with an idle move (Stop only), a file changed in the main
-checkout after the start (named in the worktree's Stop, left in place), a move
+checkout after the start (named in the worktree's Stop, left in place), a
+main -> worktree -> main move with reflection still owed, a moved record larger
+than a pipe buffer, an existing destination handoff, a relative
+`MYCELIUM_STATE_DIR`, a malformed owner token (never taken), a move
 after recorded work in the main checkout (kept and still judged there), and
 an unrelated repository (never searched).
