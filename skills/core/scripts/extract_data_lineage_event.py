@@ -807,6 +807,194 @@ SEED_REGEXES = [
     re.compile(r"""np\.random\.default_rng\s*\(\s*(\d+)\s*\)"""),
 ]
 
+# --- R readers and writers ---
+#
+# Call form only, with a literal path: the first argument for readers (or a
+# named path argument), and for writers the argument after a simple object
+# (or a named path argument anywhere in the call). Anything computed
+# (`file.path(...)`, `paste0(...)`, a call as the object) claims nothing,
+# so the event stays unresolved rather than naming a guessed path. The
+# lookbehind keeps methods and look-alikes (`obj$read.csv`, `my.read.csv`,
+# `pd.read_parquet`) out; an explicit `pkg::` prefix is allowed.
+_R_LITERAL = r"""["']([^"'\n]+)["']\s*(?=[,)])"""
+_R_OBJECT = r"[A-Za-z.][\w.]*(?:\$[\w.]+|\[[^\[\]()\"'\n]*\])*"
+
+
+def _r_call(names: str, path_args: str, namespace: str = r"[A-Za-z][\w.]*") -> str:
+    return (
+        rf"(?<![\w.$@:])(?:{namespace}::)?(?:{names})\s*\(\s*"
+        rf"(?:(?:{path_args})\s*=\s*)?{_R_LITERAL}"
+    )
+
+
+def _r_writer(names: str, path_args: str) -> list[re.Pattern]:
+    call = rf"(?<![\w.$@:])(?:[A-Za-z][\w.]*::)?(?:{names})\s*\("
+    return [
+        # write.csv(df, "out.csv"), saveRDS(object = fit, "x.rds")
+        re.compile(
+            rf"{call}\s*(?:[A-Za-z.][\w.]*\s*=\s*)?{_R_OBJECT}\s*,\s*"
+            rf"(?:(?:{path_args})\s*=\s*)?{_R_LITERAL}"
+        ),
+        # write.csv(df[df$x > 1, ], file = "out.csv"): a named path argument
+        # at depth one, after arguments with no nested call or string.
+        re.compile(rf"{call}[^()\"'\n]*?\b(?:{path_args})\s*=\s*{_R_LITERAL}"),
+    ]
+
+
+R_INPUT_REGEXES = [
+    re.compile(_r_call(r"read\.(?:csv2?|table|delim2?|fwf|dcf)", "file")),
+    re.compile(
+        _r_call(r"read_(?:csv2?|tsv|delim|table|fwf|lines|rds|file|excel|xlsx?|parquet|feather)",
+                "file|path")
+    ),
+    re.compile(_r_call(r"fread", "file|input")),
+    re.compile(_r_call(r"readRDS|load|readMM|h5read|vroom", "file")),
+    re.compile(_r_call(r"Read10X(?:_h5)?", r"data\.dir|filename")),
+]
+R_OUTPUT_REGEXES = [
+    *_r_writer(r"write\.(?:csv2?|table)", "file"),
+    *_r_writer(
+        r"write_(?:csv2?|tsv|delim|rds|lines|excel_csv|parquet|feather)", "file|path|sink"
+    ),
+    *_r_writer(r"fwrite|saveRDS|h5write", "file"),
+    # save(a, b, file = "x.RData"): the path is only ever named.
+    re.compile(
+        r"(?<![\w.$@:])(?:base::)?save\s*\([^()\"'\n]*?\bfile\s*=\s*" + _R_LITERAL
+    ),
+    re.compile(_r_call(r"ggsave", "filename")),
+    re.compile(
+        r"(?<![\w.$@:])(?:[A-Za-z][\w.]*::)?ggsave\s*\([^()\"'\n]*?\bfilename\s*=\s*"
+        + _R_LITERAL
+    ),
+    re.compile(_r_call(r"pdf|png|jpeg|tiff|bmp|svg|cairo_pdf", "file|filename")),
+]
+
+
+def _blank(source: str, spans: list[tuple[int, int]]) -> str:
+    """Replace each span with spaces, keeping newlines and offsets."""
+    if not spans:
+        return source
+    chars = list(source)
+    for start, end in spans:
+        for index in range(start, end):
+            if chars[index] != "\n":
+                chars[index] = " "
+    return "".join(chars)
+
+
+class _SourceSpans(NamedTuple):
+    comments: list[tuple[int, int]]
+    strings: list[tuple[int, int]]
+
+
+def _python_spans(source: str) -> _SourceSpans | None:
+    """Comment and string spans from Python's own tokenizer, or None.
+
+    An f-string or t-string counts as one string span from its start token
+    to its matching end token, so a call inside its replacement field is not
+    claimed (a missed path stays unresolved; it is never invented).
+    """
+    import io
+    import tokenize
+
+    line_starts = [0]
+    for line in source.splitlines(keepends=True):
+        line_starts.append(line_starts[-1] + len(line))
+
+    def offset(position: tuple[int, int]) -> int:
+        return line_starts[position[0] - 1] + position[1]
+
+    starts = {getattr(tokenize, name) for name in ("FSTRING_START", "TSTRING_START")
+              if hasattr(tokenize, name)}
+    ends = {getattr(tokenize, name) for name in ("FSTRING_END", "TSTRING_END")
+            if hasattr(tokenize, name)}
+    comments: list[tuple[int, int]] = []
+    strings: list[tuple[int, int]] = []
+    open_starts: list[int] = []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type == tokenize.COMMENT:
+                comments.append((offset(token.start), offset(token.end)))
+            elif token.type == tokenize.STRING and not open_starts:
+                strings.append((offset(token.start), offset(token.end)))
+            elif token.type in starts:
+                open_starts.append(offset(token.start))
+            elif token.type in ends and open_starts:
+                begin = open_starts.pop()
+                if not open_starts:
+                    strings.append((begin, offset(token.end)))
+    except (tokenize.TokenError, IndentationError, SyntaxError, IndexError):
+        return None
+    return _SourceSpans(comments, strings)
+
+
+_R_RAW_STRING_RX = re.compile(r"""[rR](["'])(-*)([(\[{])""")
+_R_RAW_CLOSERS = {"(": ")", "[": "]", "{": "}"}
+
+
+def _r_spans(source: str) -> _SourceSpans | None:
+    """Comment and string spans of R source, or None when one never ends.
+
+    Strings ('...', "..." with backslash escapes), raw strings (r"(...)",
+    with optional dashes and any of the three bracket pairs, R >= 4.0) and
+    backtick names are skipped; `#` outside them starts a comment.
+    """
+    comments: list[tuple[int, int]] = []
+    strings: list[tuple[int, int]] = []
+    index = 0
+    length = len(source)
+    while index < length:
+        char = source[index]
+        if char == "#":
+            end = source.find("\n", index)
+            end = length if end == -1 else end
+            comments.append((index, end))
+            index = end
+            continue
+        if char in "rR" and (index == 0 or not (source[index - 1].isalnum()
+                                                or source[index - 1] in "._")):
+            raw = _R_RAW_STRING_RX.match(source, index)
+            if raw:
+                closer = _R_RAW_CLOSERS[raw.group(3)] + raw.group(2) + raw.group(1)
+                end = source.find(closer, raw.end())
+                if end == -1:
+                    return None
+                strings.append((index, end + len(closer)))
+                index = end + len(closer)
+                continue
+        if char in "\"'`":
+            begin = index
+            index += 1
+            while index < length and source[index] != char:
+                index += 2 if source[index] == "\\" and char != "`" else 1
+            if index >= length:
+                return None
+            index += 1
+            if char != "`":
+                strings.append((begin, index))
+            continue
+        index += 1
+    return _SourceSpans(comments, strings)
+
+
+def _source_spans(source: str, language: str | None) -> _SourceSpans | None:
+    """Spans for a known language; None when unknown or the lexer fails.
+
+    A lexer that cannot finish (unterminated string, a tokenizer error)
+    yields None, so the source is scanned as written and a real call is
+    never hidden by a confused lexer.
+    """
+    if language == "python":
+        return _python_spans(source)
+    if language == "r":
+        return _r_spans(source)
+    return None
+
+
+def _inside(spans: list[tuple[int, int]], index: int) -> bool:
+    position = bisect.bisect_right(spans, (index, float("inf"))) - 1
+    return position >= 0 and spans[position][0] <= index < spans[position][1]
+
 
 def sha256_file(p: Path) -> str | None:
     try:
@@ -3721,6 +3909,7 @@ def _detect_scripts_with_cwd(
     seen_inline: set[tuple[str, Path | None]] = set()
     inline_patterns = (RX_PYTHON_C, RX_R_E, RX_RSCRIPT_E) if include_inline else ()
     for pattern in inline_patterns:
+        inline_language = "python" if pattern is RX_PYTHON_C else "r"
         for m in _scan_word_pattern(pattern, bash_cmd):
             if not _match_has_expected_executable(m, pattern):
                 continue
@@ -3749,6 +3938,7 @@ def _detect_scripts_with_cwd(
                 continue
             if r_argv is not None and r_argv.expressions:
                 src = "\n".join(r_argv.expressions)
+            src = InlineSource(src, inline_language)
             identity = (src, effective_cwd)
             if identity not in seen_inline:
                 out.append((None, src, effective_cwd))
@@ -3899,15 +4089,65 @@ def _dedupe(seq: list[str]) -> list[str]:
     return out
 
 
-def scan_source(source: str) -> tuple[list[str], list[str], list[str], list[int]]:
-    inputs: list[str] = []
-    outputs: list[str] = []
+class InlineSource(str):
+    """Inline source (`python -c`, `R -e`) that remembers its language, so
+    the scan applies only that language's lexer and reader/writer calls."""
+
+    language: str | None
+
+    def __new__(cls, value: str, language: str | None) -> "InlineSource":
+        instance = super().__new__(cls, value)
+        instance.language = language
+        return instance
+
+
+def source_language(script_path: Path | None) -> str | None:
+    """The language whose comments can be stripped exactly, if known."""
+    if script_path is None:
+        return None
+    suffix = script_path.suffix
+    if suffix == ".py":
+        return "python"
+    if suffix in (".R", ".r"):
+        return "r"
+    return None
+
+
+def scan_source(
+    source: str, language: str | None = None
+) -> tuple[list[str], list[str], list[str], list[int]]:
+    """Literal I/O paths, filters, and seeds named by reader/writer calls.
+
+    With a known ``language``, comments are blanked first, so a commented-
+    out call is not evidence. Without one, the source is scanned as written.
+    Python and R patterns both apply either way: each matches only its own
+    call forms.
+    """
+    spans = _source_spans(source, language)
+    strings: list[tuple[int, int]] = []
+    if spans is not None:
+        source = _blank(source, spans.comments)
+        strings = spans.strings
+
+    def calls(regexes: list[re.Pattern]) -> list[str]:
+        # A call that starts inside a string literal is text, not a call.
+        return [
+            m.group(1)
+            for rx in regexes
+            for m in rx.finditer(source)
+            if not _inside(strings, m.start())
+        ]
+
+    # Each language's calls only on its own source: a Python helper named
+    # `read_csv` is not R's readr. An unknown language gets both.
+    input_rx = {"python": INPUT_REGEXES, "r": R_INPUT_REGEXES}.get(
+        language, [*INPUT_REGEXES, *R_INPUT_REGEXES])
+    output_rx = {"python": OUTPUT_REGEXES, "r": R_OUTPUT_REGEXES}.get(
+        language, [*OUTPUT_REGEXES, *R_OUTPUT_REGEXES])
+    inputs: list[str] = calls(input_rx)
+    outputs: list[str] = calls(output_rx)
     filters: list[str] = []
     seeds: list[int] = []
-    for rx in INPUT_REGEXES:
-        inputs.extend(m.group(1) for m in rx.finditer(source))
-    for rx in OUTPUT_REGEXES:
-        outputs.extend(m.group(1) for m in rx.finditer(source))
     for rx in FILTER_REGEXES:
         filters.extend(m.group(1) for m in rx.finditer(source))
     for rx in SEED_REGEXES:
@@ -5427,9 +5667,23 @@ def build_data_command_event(
     named, truncated = _data_path_mentions(args.bash_cmd, _project_root(str(cwd)))
     candidates = _unproven_analysis_candidates(args.bash_cmd, cwd, analysis_named)
     io = _certain_shell_io(args.bash_cmd, cwd, getattr(args, "bash_exit", None))
-    if not named and not candidates and not io.inputs and not io.outputs:
+    observation = getattr(args, "observation", None) or {}
+    observed_change = bool(observation.get("changed"))
+    observation_failed = observation.get("status") == "unavailable"
+    if (not named and not candidates and not io.inputs and not io.outputs
+            and not observed_change and not observation_failed):
         return None
     signals = []
+    if observed_change:
+        # The call changed watched files. Without this record an output
+        # written by a command nothing else recognises would leave no
+        # lineage at all; the changes themselves are in the observation.
+        signals.append("observed-change")
+    if observation_failed:
+        # Whether this call changed files is unknown (no Pre snapshot, a
+        # walk over its bound, a lock timeout). Recorded so the gap is
+        # visible in the manifest rather than reading as "nothing happened".
+        signals.append("observation-unavailable")
     if named:
         signals.append("data-path")
     if io.inputs or io.outputs:
@@ -5451,9 +5705,10 @@ def build_data_command_event(
         "named_paths": named,
         "named_paths_truncated": truncated,
         "analysis_candidates": candidates,
-        "inputs": _io_records(io.inputs, cwd),
-        "outputs": _io_records(io.outputs, cwd),
+        "inputs": _label_sources(_io_records(io.inputs, cwd), "inferred-shell"),
+        "outputs": _label_sources(_io_records(io.outputs, cwd), "inferred-shell"),
         "io_detection": "unresolved",
+        **_observation_fields(args),
     }
 
 
@@ -5519,7 +5774,11 @@ def build_event_for_detection(
     else:
         return None
 
-    inputs, outputs, filters, seeds = scan_source(source)
+    inputs, outputs, filters, seeds = scan_source(
+        source,
+        source_language(script_path if isinstance(script_path, Path) else None)
+        or getattr(inline_source, "language", None),
+    )
     if cwd is None:
         return _event_dict(
             args,
@@ -5554,14 +5813,24 @@ def build_event_for_detection(
             "resolve paths dynamically or delegate I/O through imports."
         )
 
+    recovered = set(added_inputs) | set(added_outputs)
+
+    def labelled(path: str) -> dict:
+        # Which inference produced the path: the reader/writer call scan,
+        # or the repository recovery of a dynamic path. Never "observed":
+        # observations live in the call's observation record.
+        record = file_record(path, cwd)
+        record["source"] = "inferred-repository" if path in recovered else "inferred-static"
+        return record
+
     return _event_dict(
         args,
         script_path,
         script_sha,
         script_source_embed,
         git_sha,
-        inputs=[file_record(p, cwd) for p in inputs],
-        outputs=[file_record(p, cwd) for p in outputs],
+        inputs=[labelled(p) for p in inputs],
+        outputs=[labelled(p) for p in outputs],
         io_detection=io_detection,
         lineage_warnings=lineage_warnings,
         filters=filters,
@@ -5602,6 +5871,7 @@ def _event_dict(
         "lineage_warnings": lineage_warnings,
         "filters_detected": filters,
         "seeds_detected": seeds,
+        **_observation_fields(args),
     }
 
 
@@ -5679,6 +5949,126 @@ def _record_unowned_data_command(
     _append_with_stable_lock(args.data_command_to, json.dumps(event) + "\n")
 
 
+_OBSERVATION_STATUSES = frozenset({"no-known-overlap", "overlap", "background", "unavailable"})
+
+
+def _parse_observation(raw: str | None) -> dict | None:
+    """The observer's one-line summary, reduced to typed known fields.
+
+    A summary that does not parse still says an observation was attempted:
+    it becomes `unavailable` with a reason, never silently nothing.
+    """
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        value = None
+    if not isinstance(value, dict):
+        return {"status": "unavailable", "reason": "observation-summary-unreadable"}
+    status = value.get("status")
+    observation = {
+        "observation_id": value.get("observation_id")
+        if isinstance(value.get("observation_id"), str) else None,
+        "host_session_id": value.get("host_session_id")
+        if isinstance(value.get("host_session_id"), str) else None,
+        "status": status if status in _OBSERVATION_STATUSES else "unavailable",
+        "reason": value.get("reason") if isinstance(value.get("reason"), str) else None,
+        "changed": value.get("changed") is True,
+    }
+    for key in ("pre_snapshot", "state_dir"):
+        if isinstance(value.get(key), str) and "\0" not in value[key]:
+            observation[key] = value[key]
+    return observation
+
+
+def _observation_fields(args: argparse.Namespace) -> dict:
+    """The fields every lineage record carries about its call's observation.
+
+    Absent (no PreToolUse support, an older install) is null, which readers
+    must treat as "not observed", never as "nothing changed".
+    """
+    observation = getattr(args, "observation", None)
+    outcome = getattr(args, "outcome", None)
+    if not observation:
+        fields = {"observation_id": None, "observation_status": None,
+                  "observation_session": None}
+        if outcome:
+            fields["tool_outcome"] = outcome
+        return fields
+    fields = {
+        "observation_id": observation.get("observation_id"),
+        "observation_status": observation.get("status"),
+        "observation_session": observation.get("host_session_id"),
+    }
+    if observation.get("reason"):
+        fields["observation_reason"] = observation["reason"]
+    if outcome:
+        # "failure" with a null bash_exit: the host reported a failed call
+        # (interrupt, timeout) without an exit code.
+        fields["tool_outcome"] = outcome
+    return fields
+
+
+def _discard_retired_snapshot(args: argparse.Namespace) -> None:
+    """Delete the call's retired Pre snapshot when nothing will prove
+    inputs against it (its observation is already published)."""
+    snapshot = (getattr(args, "observation", None) or {}).get("pre_snapshot")
+    if snapshot and snapshot.endswith(".done"):
+        try:
+            os.unlink(snapshot)
+        except OSError:
+            pass
+
+
+def _label_sources(records: list[dict], source: str) -> list[dict]:
+    for record in records:
+        record.setdefault("source", source)
+    return records
+
+
+def _apply_input_proofs(events: list[dict], args: argparse.Namespace, cwd: Path) -> None:
+    """Prove each inferred input's pre-run content against the call's
+    retired Pre snapshot, where the observer left one."""
+    observation = getattr(args, "observation", None) or {}
+    snapshot = observation.get("pre_snapshot")
+    state_dir = observation.get("state_dir")
+    root = _repository_root(cwd)
+    if not snapshot or not state_dir or root is None:
+        return
+    paths = [r["path"] for e in events for r in e.get("inputs", []) if r.get("path")]
+    if not paths:
+        try:
+            os.unlink(snapshot)
+        except OSError:
+            pass
+        return
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import io_observer
+
+    proofs = io_observer.prove_inputs(Path(state_dir), Path(snapshot), root, paths)
+    for event in events:
+        for record in event.get("inputs", []):
+            proof = proofs.get(record.get("path"))
+            if not proof:
+                continue
+            record["pre_run_proven"] = proof["pre_run_proven"]
+            if proof.get("reason"):
+                record["proof_reason"] = proof["reason"]
+            if proof.get("hash_status"):
+                # The protocol's result replaces the unchecked digest,
+                # including when it is null (unstable, pending): a digest
+                # the protocol could not stand behind is not kept.
+                record["hash_status"] = proof["hash_status"]
+                record["sha256"] = proof.get("sha256")
+                if "size_bytes" in proof:
+                    record["size_bytes"] = proof["size_bytes"]
+            elif record.get("sha256"):
+                # No protocol hash was attempted (outside the watched scope,
+                # a symlinked path): the digest is of the content at Post.
+                record["hash_status"] = "hashed-at-post"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cwd", required=True)
@@ -5722,7 +6112,18 @@ def main() -> int:
     )
     ap.add_argument("--host", default=None)
     ap.add_argument("--host-session-id", default=None)
+    ap.add_argument(
+        "--observation-json",
+        default=None,
+        help=(
+            "The io_observer summary for this call: every record names its "
+            "observation, and a call that changed files without any other "
+            "record gets an observed-change data_command."
+        ),
+    )
+    ap.add_argument("--outcome", choices=("success", "failure", "unknown"), default=None)
     args = ap.parse_args()
+    args.observation = _parse_observation(args.observation_json)
     if args.data_command_to is not None and not (
         args.check_execution and args.host and args.host_session_id
     ):
@@ -5741,33 +6142,40 @@ def main() -> int:
         )
     if args.check_execution or args.check_post_action:
         if detections:
+            # The tracker reopens and runs the owned extraction next; it
+            # proves inputs against the retired snapshot and deletes it.
             return 0
         if args.data_command_to is not None:
             _record_unowned_data_command(args, cwd, analysis_named)
+        _discard_retired_snapshot(args)
         return 1
     if not detections:
         # No proven analysis: a call that still touches data leaves one
         # minimal record of its own kind, never an analysis event.
         event = build_data_command_event(args, cwd, analysis_named)
         if event is not None:
+            _apply_input_proofs([event], args, cwd)
             write_events([json.dumps(event) + "\n"], args.append_to)
+        else:
+            _apply_input_proofs([], args, cwd)
         return 0
 
     # git_sha is the same for every detection in this command — compute once.
     git_sha = get_git_sha(cwd)
 
-    lines: list[str] = []
+    events: list[dict] = []
     unreadable: list[str] = []
     for script_path, inline_source, effective_cwd in detections:
         event = build_event_for_detection(
             (script_path, inline_source), args, effective_cwd, git_sha
         )
         if event is not None:
-            lines.append(json.dumps(event) + "\n")
+            events.append(event)
         elif isinstance(script_path, Path):
             unreadable.append(str(script_path))
 
-    write_events(lines, args.append_to)
+    _apply_input_proofs(events, args, cwd)
+    write_events([json.dumps(event) + "\n" for event in events], args.append_to)
     if args.append_to is not None:
         # A detected script that is gone or unreadable at hook time (often a
         # temporary script the command itself removed) is neither an event

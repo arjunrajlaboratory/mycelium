@@ -156,3 +156,57 @@ def test_each_hook_starts_the_pinned_number_of_interpreters(tmp_path):
     assert not (repo / ".mycelium" / "run" / "claude" / "s1" / "active-session-log.tmp").exists()
 
     assert observed == EXPECTED
+
+
+# The same pin for a session where observation is active (payloads carry
+# `tool_use_id`, as Claude Code and Codex send them).
+EXPECTED_OBSERVED: dict[str, tuple[int, int]] = {
+    "SessionStart": (5, 1),
+    # payload preload, state runner (shared-state check), the observer.
+    "observer Pre (Bash)": (3, 1),
+    "observer Pre (Edit)": (3, 1),
+    "observer Post (Edit)": (3, 1),
+    # The unobserved tracker's three, plus the shared-state check and the
+    # observer's Post (walk, diff, hashing) before session gating.
+    "data tracker (observed)": (5, 2),
+    # A Stop with lineage to consolidate, plus the shared-state check and
+    # the observer's turn-end (Claude only, and only once `io/` exists).
+    "Stop (observed)": (13, 3),
+}
+
+
+def test_observation_hooks_start_the_pinned_number_of_interpreters(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".living").mkdir()
+    for name in ("learnings.md", "decisions.md", "conventions.md"):
+        (repo / ".living" / name).write_text(f"# {name}\n")
+    (repo / "a.py").write_text("import pandas as pd\npd.read_csv('data/x.csv')\n")
+    env, log = _shim(tmp_path)
+    base = {"session_id": "s1", "cwd": str(repo)}
+    steps = [
+        ("SessionStart", "mycelium-health.sh",
+         {**base, "hook_event_name": "SessionStart", "source": "startup"}),
+        ("observer Pre (Bash)", "mycelium-io-observer.sh",
+         {**base, "hook_event_name": "PreToolUse", "tool_name": "Bash",
+          "tool_use_id": "t1", "tool_input": {"command": "python a.py"}}),
+        ("data tracker (observed)", "mycelium-data-tracker.sh",
+         {**base, "hook_event_name": "PostToolUse", "tool_name": "Bash",
+          "tool_use_id": "t1", "tool_input": {"command": "python a.py"},
+          "tool_response": {"exit_code": 0}}),
+        ("observer Pre (Edit)", "mycelium-io-observer.sh",
+         {**base, "hook_event_name": "PreToolUse", "tool_name": "Edit",
+          "tool_use_id": "t2", "tool_input": {"file_path": str(repo / "a.py")}}),
+        ("observer Post (Edit)", "mycelium-io-observer.sh",
+         {**base, "hook_event_name": "PostToolUse", "tool_name": "Edit",
+          "tool_use_id": "t2", "tool_input": {"file_path": str(repo / "a.py")}}),
+        ("Stop (observed)", "mycelium-stop-check.sh",
+         {**base, "hook_event_name": "Stop"}),
+    ]
+    observed: dict[str, tuple[int, int]] = {}
+    for label, hook, payload in steps:
+        result, counts = _run(hook, payload, env, repo, log)
+        assert result.returncode == 0, (label, result.stderr)
+        observed[label] = counts
+    assert observed == EXPECTED_OBSERVED, observed

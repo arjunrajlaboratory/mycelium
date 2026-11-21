@@ -700,9 +700,14 @@ MYCELIUM_HOOK_BASENAMES = {
     "mycelium-activity-tracker.sh",
     "mycelium-read-tracker.sh",
     "mycelium-data-tracker.sh",
+    "mycelium-io-observer.sh",
 }
 
 LEGACY_MYCELIUM_HOOK_BASENAMES = {"mycelium-data-lineage-stop.sh"}
+
+# Tools whose calls change files: the observer journals their intervals so a
+# Bash call that ran beside one is marked as overlapping.
+CLAUDE_EDIT_TOOLS_MATCHER = "Edit|Write|MultiEdit|NotebookEdit"
 ALL_MYCELIUM_HOOK_BASENAMES = (
     MYCELIUM_HOOK_BASENAMES | LEGACY_MYCELIUM_HOOK_BASENAMES
 )
@@ -713,6 +718,12 @@ CLAUDE_HOOK_SPECS = (
     ("PostToolUse", "Edit|Write", "mycelium-activity-tracker.sh"),
     ("PostToolUse", "Read", "mycelium-read-tracker.sh"),
     ("PostToolUse", "Bash", "mycelium-data-tracker.sh"),
+    # Claude delivers a failed Bash call only to PostToolUseFailure; the
+    # tracker branches on the event name and never reads it as exit 0.
+    ("PostToolUseFailure", "Bash", "mycelium-data-tracker.sh"),
+    ("PreToolUse", f"Bash|{CLAUDE_EDIT_TOOLS_MATCHER}", "mycelium-io-observer.sh"),
+    ("PostToolUse", CLAUDE_EDIT_TOOLS_MATCHER, "mycelium-io-observer.sh"),
+    ("PostToolUseFailure", CLAUDE_EDIT_TOOLS_MATCHER, "mycelium-io-observer.sh"),
     ("Stop", "", "mycelium-stop-check.sh"),
 )
 
@@ -856,8 +867,18 @@ def _consolidate_duplicate_hooks(
 
 
 def _normalize_claude_hook_locations(hooks: dict) -> None:
-    """Keep each Mycelium Claude hook once, under its canonical matcher."""
+    """Keep each Mycelium Claude hook exactly once under each of its
+    canonical (event, matcher) specs.
+
+    Most hooks have one spec; a hook registered for several events (the
+    observer, and the data tracker's failure event) gets one handler per
+    spec, each a copy of the same selected command.
+    """
+    specs_by_basename: dict[str, list[tuple[str, str]]] = {}
     for expected_event, expected_matcher, basename in CLAUDE_HOOK_SPECS:
+        specs_by_basename.setdefault(basename, []).append((expected_event, expected_matcher))
+
+    for basename, specs in specs_by_basename.items():
         candidates: list[tuple[str, dict]] = []
         emptied_group_ids: set[int] = set()
 
@@ -874,19 +895,8 @@ def _normalize_claude_hook_locations(hooks: dict) -> None:
                     group["hooks"] = retained
                     if not retained:
                         emptied_group_ids.add(id(group))
-
-        target_groups = hooks.setdefault(expected_event, [])
-        target = next(
-            (
-                group
-                for group in target_groups
-                if group.get("matcher", "") == expected_matcher
-            ),
-            None,
-        )
-        if target is None:
-            target = {"matcher": expected_matcher, "hooks": []}
-            target_groups.append(target)
+        if not candidates:
+            continue
 
         live = [
             item for item in candidates if _hook_command_path(item[1]["command"]).exists()
@@ -894,17 +904,35 @@ def _normalize_claude_hook_locations(hooks: dict) -> None:
         marketplace = [
             item for item in live if "/marketplaces/" in item[1]["command"]
         ]
-        correctly_scoped = [item for item in live if item[0] == expected_event]
-        selected = (marketplace or correctly_scoped or live or candidates)[0][1]
-        target.setdefault("hooks", []).append(selected)
+        targets: list[dict] = []
+        for expected_event, expected_matcher in specs:
+            target_groups = hooks.setdefault(expected_event, [])
+            target = next(
+                (
+                    group
+                    for group in target_groups
+                    if group.get("matcher", "") == expected_matcher
+                ),
+                None,
+            )
+            if target is None:
+                target = {"matcher": expected_matcher, "hooks": []}
+                target_groups.append(target)
+            correctly_scoped = [item for item in live if item[0] == expected_event]
+            selected = (marketplace or correctly_scoped or live or candidates)[0][1]
+            target.setdefault("hooks", []).append(
+                selected if len(specs) == 1 else dict(selected)
+            )
+            targets.append(target)
 
         # Remove only groups this pass emptied. User-authored empty groups are
-        # preserved, and the target group remains even if it was moved in place.
+        # preserved, and the target groups remain even if moved in place.
+        target_ids = {id(target) for target in targets}
         for event, groups in hooks.items():
             hooks[event] = [
                 group
                 for group in groups
-                if group is target
+                if id(group) in target_ids
                 or id(group) not in emptied_group_ids
                 or group.get("hooks")
             ]
@@ -1074,6 +1102,28 @@ def install_claude_hooks(target_dir: Path):
         bash_entry["hooks"].append(_hook_entry(data_tracker_hook))
         print("  Registered: PostToolUse (Bash) → mycelium-data-tracker.sh")
 
+    # --- PreToolUse: mycelium-io-observer.sh (Bash and edit tools) ---
+    # Observation only: it never prints and never emits a permission
+    # decision. The location pass below also registers it on the edit
+    # tools' PostToolUse/PostToolUseFailure, and the data tracker on Bash's
+    # PostToolUseFailure, from this one entry.
+    io_observer_hook = str(hooks_dir / "mycelium-io-observer.sh")
+    pre_tool = hooks.setdefault("PreToolUse", [])
+    if (hooks_dir / "mycelium-io-observer.sh").exists() and not any(
+        _has_hook(groups, "mycelium-io-observer.sh") for groups in hooks.values()
+    ):
+        pre_entry = next(
+            (e for e in pre_tool if e.get("matcher") == f"Bash|{CLAUDE_EDIT_TOOLS_MATCHER}"),
+            None,
+        )
+        if pre_entry is None:
+            pre_entry = {"matcher": f"Bash|{CLAUDE_EDIT_TOOLS_MATCHER}", "hooks": []}
+            pre_tool.append(pre_entry)
+        pre_entry["hooks"].append(_hook_entry(io_observer_hook))
+        print("  Registered: PreToolUse (Bash and edit tools) → mycelium-io-observer.sh")
+    if not pre_tool:
+        del hooks["PreToolUse"]
+
     # --- Stop: mycelium-stop-check.sh ---
     stop = hooks.setdefault("Stop", [])
     if not _has_hook(stop, "mycelium-stop-check.sh"):
@@ -1168,7 +1218,7 @@ def install_codex_hooks(target_dir: Path):
     print("  Codex hooks are bundled with the Mycelium plugin via PLUGIN_ROOT.")
     print(
         "  Codex action required after plugin install or upgrade: trust all "
-        "five Mycelium hooks, exit Codex, and restart it. On Codex 0.169.0, "
+        "eight Mycelium hooks, exit Codex, and restart it. On Codex 0.169.0, "
         "approve them from the desktop app: the CLI's /hooks was observed to "
         "save an incomplete approval that still skips the hooks. If you use "
         "the CLI, open /hooks (run codex update if it is absent). Codex binds "

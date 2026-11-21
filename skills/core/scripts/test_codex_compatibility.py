@@ -299,7 +299,7 @@ def test_codex_plugin_bundles_stable_dynamic_hooks():
         for group in groups
         for handler in group["hooks"]
     ]
-    assert len(commands) == 5
+    assert len(commands) == 8
     assert all("${PLUGIN_ROOT}" in command for command in commands)
     assert all("mycelium-codex-dispatch.sh" in command for command in commands)
     assert all('${PLUGIN_ROOT:-}' in command for command in commands)
@@ -326,7 +326,7 @@ def test_readme_documents_codex_install_update_and_migration():
     assert "Use `$mycelium:core` to migrate" in readme
     assert "Migration is idempotent" in readme
     assert "open `/hooks`" in readme
-    assert "trust all five Mycelium command hooks" in normalized
+    assert "trust all eight Mycelium command hooks" in normalized
     assert "codex update" in readme
 
 
@@ -546,7 +546,7 @@ def test_init_uses_plugin_bundled_codex_hooks_and_agent_guidance(tmp_path, capsy
     assert not (repo / ".codex" / "hooks.json").exists()
     assert "bundled with the Mycelium plugin via PLUGIN_ROOT" in install_output
     assert "open /hooks" in install_output
-    assert "trust all five Mycelium hooks" in install_output
+    assert "trust all eight Mycelium hooks" in install_output
     assert "every plugin upgrade or reinstall needs this review again" in (
         " ".join(install_output.split())
     )

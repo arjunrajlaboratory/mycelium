@@ -30,6 +30,26 @@ REPO_ROOT=$(mycelium_session_repo_root "$(mycelium_json_get 'cwd' INPUT)" \
 if [ -z "$REPO_ROOT" ]; then
   exit 0
 fi
+# Claude Code runs no foreground tool call past the end of its turn, so this
+# session's calls that never got a Post (denied or interrupted) are closed in
+# the observation journal now; left open, they would mark every later call
+# as overlapping for a day. Codex calls can outlive a turn as background
+# terminals, so Codex keeps them open until completion or expiry. Runs on
+# every Stop path, transaction or not; observation is never session work.
+IO_STATE_HINT="${MYCELIUM_STATE_DIR:-$REPO_ROOT/.mycelium}"
+if [[ "$IO_STATE_HINT" != /* ]]; then IO_STATE_HINT="$REPO_ROOT/$IO_STATE_HINT"; fi
+# The `io` directory test comes first and starts no interpreter, so a
+# repository that has never observed a call pays nothing here.
+if [[ "$(mycelium_hook_host)" == "claude" && -n "$HOST_SESSION_ID" \
+  && -d "$IO_STATE_HINT/io" \
+  && -d "$REPO_ROOT/.living" && ! -L "$REPO_ROOT/.living" ]] \
+  && mycelium_valid_session_id "$HOST_SESSION_ID" \
+  && IO_SHARED=$(mycelium__checked_shared_state_dir "$REPO_ROOT" 2>/dev/null) \
+  && [[ -d "$IO_SHARED/io" && ! -L "$IO_SHARED/io" ]]; then
+  python3 "${MYCELIUM_IO_OBSERVER:-$HERE/../scripts/io_observer.py}" turn-end \
+    --state-dir "$IO_SHARED" --host claude --session "$HOST_SESSION_ID" \
+    >/dev/null 2>&1 || true
+fi
 # Report, and clear, the skips this host session's hooks recorded while it had
 # no transaction it owned. Used on the paths that end Stop without one. With
 # `own-run`, STATE_DIR is this host session's own run directory with no

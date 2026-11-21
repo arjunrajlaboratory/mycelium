@@ -48,9 +48,19 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Every shared skill has valid `agents/openai.yaml` metadata.
 - [ ] `hooks/hooks.json` parses and remains the plugin-level source of Codex
       lifecycle registration.
-- [ ] The Codex hook configuration contains the intended five command
-      registrations: SessionStart, two Bash PostToolUse handlers, one
-      `apply_patch` PostToolUse handler, and Stop.
+- [ ] The Codex hook configuration contains the intended eight command
+      registrations: SessionStart; the I/O observer on PreToolUse for Bash
+      and for `apply_patch`; two Bash PostToolUse handlers; the activity
+      tracker and the I/O observer on `apply_patch` PostToolUse; and Stop.
+- [ ] Every PreToolUse handler is observation only: it prints nothing,
+      emits no permission decision, exits 0 on every path, and writes only
+      under `.mycelium/io/` after the shared-state containment check.
+- [ ] A Bash call's observation runs before session gating, so a lock
+      timeout, a missing transaction, or a foreign owner never costs it; an
+      observation that cannot be made says `unavailable` with a reason and
+      never reads as "nothing changed". Claude's PostToolUseFailure reaches
+      the data tracker, which takes the exit from `error` and never
+      defaults it to 0.
 - [ ] Hook commands dispatch through `${PLUGIN_ROOT}` and do not contain a
       versioned cache path, a developer-machine path, or a repository-local
       installation assumption.

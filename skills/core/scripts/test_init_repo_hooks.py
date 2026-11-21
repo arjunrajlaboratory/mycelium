@@ -377,10 +377,11 @@ class TestInstallClaudeHooksIdempotent:
 
         result = json.loads((repo / ".claude" / "settings.local.json").read_text())
         cmds = _flatten_hook_commands(result["hooks"])
-        # Exactly the six active Claude registrations remain.
-        assert len(cmds) == len(ir.MYCELIUM_HOOK_BASENAMES)
+        # Exactly one handler per active Claude registration remains; the
+        # observer, new since this install, is added from the hooks dir.
+        assert len(cmds) == len(ir.CLAUDE_HOOK_SPECS)
         for cmd in cmds:
-            if Path(cmd).name != "mycelium-stop-check.sh":
+            if Path(cmd).name not in ("mycelium-stop-check.sh", "mycelium-io-observer.sh"):
                 assert "/marketplaces/" in cmd
         stop_handlers = result["hooks"]["Stop"][0]["hooks"]
         assert [Path(handler["command"]).name for handler in stop_handlers] == [
@@ -460,9 +461,9 @@ class TestInstallClaudeHooksIdempotent:
         result = json.loads((repo / ".claude" / "settings.local.json").read_text())
         cmds = _flatten_hook_commands(result["hooks"])
         basenames = {Path(c).name for c in cmds}
-        # All mycelium hooks present, exactly once each
+        # All mycelium hooks present, exactly once per registration
         assert basenames == ir.MYCELIUM_HOOK_BASENAMES
-        assert len(cmds) == len(ir.MYCELIUM_HOOK_BASENAMES)
+        assert len(cmds) == len(ir.CLAUDE_HOOK_SPECS)
 
         # Pre-existing 3 hooks consolidated to marketplace path
         for bn in (
