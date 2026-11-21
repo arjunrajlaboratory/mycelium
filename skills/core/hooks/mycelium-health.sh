@@ -47,6 +47,20 @@ if [ -z "$REPO_ROOT" ]; then
   exit 0  # Not in a git repo
 fi
 
+# Generated guidance runs `$(cat .mycelium/plugin-root)`. Initialization writes
+# that machine-local pointer in the checkout it ran in, so a linked worktree
+# (issue #144) or a fresh clone has none. Seed a missing pointer with this hook
+# bundle's own root, the same path init derives from its script location. The
+# state call's shared-write step writes it atomically and refuses a linked or
+# special file. A Codex dispatcher's live PLUGIN_ROOT, and an existing pointer,
+# are left alone.
+if [[ -z "${MYCELIUM_PLUGIN_ROOT:-}" && -d "$REPO_ROOT/.living" \
+  && ! -e "$REPO_ROOT/.mycelium/plugin-root" \
+  && ! -L "$REPO_ROOT/.mycelium/plugin-root" ]]; then
+  MYCELIUM_PLUGIN_ROOT=$(cd "$HERE/../../.." 2>/dev/null && pwd -P) \
+    || MYCELIUM_PLUGIN_ROOT=""
+fi
+
 # SessionStart and Stop both mutate the active-log ownership transaction.
 # Serialize them with the same repository-local lock so concurrent primary and
 # subagent starts cannot reserve separate logs or overwrite one another's

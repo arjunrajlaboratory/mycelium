@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Claude Code session working in a linked git worktree (such as the
+  desktop app's `.claude/worktrees/<name>/` side sessions) is now judged on
+  that worktree. Stop and the Bash post-action hook took the repository root
+  from the hook process's directory, which is the main checkout, while the
+  other hooks used the session's `cwd`. Stop charged the main checkout's files,
+  including another session's uncommitted work, to the session, ignored
+  reflection written in the worktree's `.living/`, and blocked until the agent
+  wrote into the main checkout. Every hook now uses the session's `cwd`. Stop
+  and the post-action hook take the nearest opted-in repository at or above
+  it, so a turn that ends after `cd` into a nested repository without
+  `.living/` is still judged on the enclosing worktree. They fall back to the
+  process directory only when no enclosing repository has `.living/`. SessionStart also writes a missing `.mycelium/plugin-root` in
+  the worktree, so `$(cat .mycelium/plugin-root)` commands work there.
+  Existing projects need no migration. (#144)
 - A post-tool hook that could not take its session's lock (a slow Stop,
   parallel subagent hooks, a loaded machine) no longer drops the edit, read,
   or analysis run silently. It still exits 0 so the tool call is never
