@@ -485,3 +485,69 @@ def test_stale_transaction_cleanup_keeps_unrecorded_work(tmp_path, host):
 
     reason = _block_reason(_stop(host, repo, sid))
     assert reason is not None and "UNRECORDED WORK: 1" in reason
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_note_survives_a_failed_successor_snapshot(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "snapshot-fails"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    payloads = _payloads(repo, sid)
+    (repo / "model.py").write_text("x = 1\n")
+    assert _run(host, "mycelium-activity-tracker.sh", repo,
+                payloads["mycelium-activity-tracker.sh"]).returncode == 0
+    lock = _hold_session_lock(run_dir)
+    assert _run(host, "mycelium-read-tracker.sh", repo,
+                payloads["mycelium-read-tracker.sh"],
+                extra_env=FAST_TIMEOUT).returncode == 0
+    (lock / "owner").unlink()
+    lock.rmdir()
+    with (repo / ".living" / "learnings.md").open("a") as handle:
+        handle.write("\n### [2026-11-20] triaged\n- noted\n")
+    wrapper = tmp_path / "no_snapshot.py"
+    wrapper.write_text(
+        "import os, sys\n"
+        "if sys.argv[1:2] == ['snapshot']:\n"
+        "    raise SystemExit(3)\n"
+        f"os.execv(sys.executable, [sys.executable, {str(SESSION_CHANGES)!r}] + sys.argv[1:])\n"
+    )
+    failed = _run(host, "mycelium-stop-check.sh", repo,
+                  {"cwd": str(repo), "session_id": sid, "hook_event_name": "Stop",
+                   "stop_hook_active": False},
+                  extra_env={"MYCELIUM_SESSION_CHANGES_HELPER": str(wrapper)})
+    assert _block_reason(failed) is not None, failed.stdout
+    assert (run_dir / UNRECORDED).exists()
+
+    accepted = _stop(host, repo, sid)
+    assert _block_reason(accepted) is None, accepted.stdout
+    assert "UNRECORDED EVENTS: 1" in accepted.stdout
+    assert not (run_dir / UNRECORDED).exists()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_an_empty_evidence_file_is_not_work(tmp_path, host):
+    """A writer that created the file but has not yet taken its flock."""
+    repo = _repo(tmp_path)
+    sid = "empty-evidence"
+    _start(host, repo, sid)
+    (_run_dir(repo, host, sid) / UNRECORDED).write_text("")
+    assert _block_reason(_stop(host, repo, sid)) is None
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_read_record_left_after_an_accepted_stop_is_reported(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "late-read"
+    _start(host, repo, sid)
+    assert _block_reason(_stop(host, repo, sid)) is None
+    run_dir = _run_dir(repo, host, sid)
+    (run_dir / UNRECORDED).write_text(
+        '{"kind": "read", "hook": "mycelium-read-tracker.sh"}\n')
+
+    stop = _stop(host, repo, sid)
+
+    assert _block_reason(stop) is None, stop.stdout
+    assert "UNRECORDED EVENTS: 1" in stop.stdout
+    assert not (run_dir / UNRECORDED).exists()
+    assert not (run_dir / "active-session-log.tmp").exists()

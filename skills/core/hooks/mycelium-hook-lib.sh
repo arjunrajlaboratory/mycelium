@@ -316,8 +316,9 @@ mycelium_prepare_locked_post_tool_state() {
 #       descriptor is still the file at that name: Stop may have consumed
 #       (unlinked) it meanwhile, and a line written there would be lost.
 #   take PATH      Stop, under the session lock: print "WORK OTHER SIZE".
-#       A line whose kind is `lineage` or `read` is OTHER; any other line,
-#       or an existing file with no line at all, is WORK.
+#       A line whose kind is `lineage` or `read` is OTHER; any other line is
+#       WORK. An empty file is nothing yet: a writer may have created it and
+#       not yet taken the flock, and its line will follow.
 #   consume-work PATH SIZE   Drop the WORK lines among the first SIZE bytes
 #       (Stop has turned them into a work cycle), keep their OTHER lines
 #       until a Stop reports them, keep any line appended since, and print
@@ -397,10 +398,7 @@ try:
     lines = [raw for raw in data.splitlines(True) if raw.strip()]
     if mode == "take":
         other = sum(1 for raw in lines if is_other(raw))
-        work = len(lines) - other
-        if not lines:
-            work = 1
-        print(work, other, len(data))
+        print(len(lines) - other, other, len(data))
         raise SystemExit(0)
     size = int(sys.argv[3])
     if mode == "consume-work":

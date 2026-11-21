@@ -28,11 +28,27 @@ if [ -z "$REPO_ROOT" ]; then
   exit 0
 fi
 # Report, and clear, the skips this host session's hooks recorded while it had
-# no transaction it owned. Used on the paths that end Stop without one.
+# no transaction it owned. Used on the paths that end Stop without one. With
+# `own-run`, STATE_DIR is this host session's own run directory with no
+# transaction: lineage and read records a hook left there after the previous
+# Stop accepted are reported and cleared too (work records reopen instead,
+# before this runs).
 mycelium_report_unowned_lineage_gaps() {
   local gap=""
+  local taken=""
+  local file="${STATE_DIR:-}/mycelium-unrecorded-events.tmp"
   gap=$(mycelium_take_unowned_lineage_skips \
     "$REPO_ROOT" "$(mycelium_hook_host)" "$HOST_SESSION_ID") || gap=""
+  if [[ "${1:-}" == own-run && "${MYCELIUM_SESSION_SCOPED:-false}" == true \
+    && -n "${STATE_DIR:-}" && "$STATE_DIR" != "${MYCELIUM_SHARED_STATE_DIR:-}" \
+    && -f "$file" && ! -L "$file" ]]; then
+    taken=$(mycelium_unrecorded_events take "$file" 2>/dev/null) || taken=""
+    if [[ "$taken" =~ ^0\ ([1-9][0-9]*)\ ([0-9]+)$ ]]; then
+      gap="${gap:+$gap }UNRECORDED EVENTS: ${BASH_REMATCH[1]} data-lineage or .living read record(s) this session were dropped because the session lock was unavailable; treat their provenance as unknown."
+      mycelium_unrecorded_events consume "$file" "${BASH_REMATCH[2]}" \
+        >/dev/null 2>&1 || true
+    fi
+  fi
   if [[ -n "$gap" ]]; then
     mycelium_emit_context "Stop" "$gap"
   fi
@@ -172,7 +188,7 @@ if ! mycelium__state "$REPO_ROOT" "$INPUT" "${_STOP_OPS[@]}"; then
     fi
     # Commands its hooks could not record were kept in the shared unowned-
     # skip file; report them now rather than end the turn in silence.
-    mycelium_report_unowned_lineage_gaps
+    mycelium_report_unowned_lineage_gaps own-run
   fi
   exit 0
 fi
@@ -365,14 +381,13 @@ mycelium_block_for_late_unrecorded() {
     "STOP BLOCKED — a post-tool hook could not record its event while this Stop ran. Active state was preserved; retry Stop so that event is accounted for." || true
   return 0
 }
-# At acceptance, after the same check: the reported records are done with.
-mycelium_accept_unrecorded() {
-  mycelium_block_for_late_unrecorded && return 1
+# Once acceptance can no longer fail before it reports them, the kept
+# lineage and read records are done with.
+mycelium_consume_reported_unrecorded() {
   if (( UNRECORDED_KEPT > 0 )); then
     mycelium_unrecorded_events consume "$UNRECORDED_FILE" "$UNRECORDED_KEPT" \
       >/dev/null 2>&1 || true
   fi
-  return 0
 }
 # mycelium_with_unrecorded REASON FILE_COUNT: append the unrecorded-work
 # sentence. When no file change was seen at all, the "0 files changed" lead
@@ -990,13 +1005,14 @@ fi
 REMINDER_FILE="$STATE_DIR/mycelium-reminded.tmp"
 ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
 if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
-  if ! mycelium_accept_unrecorded; then
+  if mycelium_block_for_late_unrecorded; then
     exit 0
   fi
   if ! mycelium_prepare_carried_baseline; then
     mycelium_block_for_carried_baseline
     exit 0
   fi
+  mycelium_consume_reported_unrecorded
   rm -f "$ACTIVE_LOG_FILE"
   rm -f "$ACTIVE_OWNER_FILE"
   rm -f "$STATE_DIR/handoff-finalization-pending.tmp"
@@ -1047,13 +1063,14 @@ fi
 
 # If any was updated after the post-action hook fired, protocol was followed
 if [ "$LIVING_UPDATED" = true ]; then
-  if ! mycelium_accept_unrecorded; then
+  if mycelium_block_for_late_unrecorded; then
     exit 0
   fi
   if ! mycelium_prepare_carried_baseline; then
     mycelium_block_for_carried_baseline
     exit 0
   fi
+  mycelium_consume_reported_unrecorded
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
