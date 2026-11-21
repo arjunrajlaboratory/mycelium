@@ -35,7 +35,14 @@ import extract_data_lineage_event as lineage_event  # noqa: E402
 EXTRACTOR = Path(__file__).parent / "extract_data_lineage_event.py"
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 HOSTS = ["claude", "codex"]
-TIME_LIMIT_SECONDS = 5.0
+# Linear-scan tests time this process's CPU, not the wall clock. CI runs the
+# suite on every core at once (pytest -n auto), and on shared macOS runners a
+# linear scan took 5-8 s of wall time while waiting for a core, against about
+# 0.25 s of CPU. Oversubscribing a machine 4x multiplied wall time by about 6
+# and CPU time by about 1.3, so the bound below keeps its old strictness.
+SCAN_CPU_LIMIT_SECONDS = 5.0
+# Wall-clock bound for calls that must return rather than block (FIFOs).
+HANG_LIMIT_SECONDS = 30.0
 
 
 def _event(command: str, cwd: Path, bash_exit: int | None = 0) -> dict | None:
@@ -430,9 +437,10 @@ def test_the_manifest_keeps_data_commands_apart_from_actions(tmp_path):
 
 
 def _timed_event(command: str, cwd: Path, bash_exit: int | None = 0):
-    started = time.monotonic()
+    """Build the event and return it with the CPU seconds the scan used."""
+    started = time.process_time()
     event = _event(command, cwd, bash_exit)
-    return event, time.monotonic() - started
+    return event, time.process_time() - started
 
 
 @pytest.mark.parametrize(
@@ -454,7 +462,7 @@ def _timed_event(command: str, cwd: Path, bash_exit: int | None = 0):
 def test_long_commands_scan_in_linear_time(project, command):
     event, seconds = _timed_event(command, project)
     assert event is not None
-    assert seconds < TIME_LIMIT_SECONDS
+    assert seconds < SCAN_CPU_LIMIT_SECONDS
 
 
 def test_doubling_a_command_roughly_doubles_the_scan(project):
@@ -740,12 +748,12 @@ def test_a_fifo_target_is_recorded_without_being_opened(project):
     [record] = event["inputs"]
     assert record["path"] == str(fifo)
     assert record.get("sha256") is None
-    assert seconds < TIME_LIMIT_SECONDS
+    assert seconds < SCAN_CPU_LIMIT_SECONDS
     stream = project / "events.tmp"
     stream.write_text(json.dumps(dict(event, ts="T")) + "\n")
     started = time.monotonic()
     manifest = consolidator.extract(stream, "s", str(project))
-    assert time.monotonic() - started < TIME_LIMIT_SECONDS
+    assert time.monotonic() - started < HANG_LIMIT_SECONDS
     assert manifest["data_commands"][0]["inputs"][0].get("sha256") is None
 
 
@@ -802,7 +810,7 @@ def test_a_quoted_interpreter_word_is_still_labelled(project):
 )
 def test_round_one_long_commands_scan_in_linear_time(project, command):
     _event_value, seconds = _timed_event(command, project)
-    assert seconds < TIME_LIMIT_SECONDS
+    assert seconds < SCAN_CPU_LIMIT_SECONDS
 
 
 def test_a_long_command_still_gets_labels_past_the_detection_bound(project):
@@ -962,7 +970,7 @@ def test_many_leading_assignments_scan_linearly(project):
     command = " ".join(f"V{i}=1" for i in range(32_000)) + " sort data/x.csv > data/o.csv"
     event, seconds = _timed_event(command, project)
     assert event["outputs"]
-    assert seconds < TIME_LIMIT_SECONDS
+    assert seconds < SCAN_CPU_LIMIT_SECONDS
 
 
 # ---------- Codex review round 4 ----------
@@ -1029,7 +1037,7 @@ def test_a_shared_file_replaced_by_a_fifo_fails_instead_of_hanging(project):
                    "--data-command-to", str(shared), "--host", "claude",
                    "--host-session-id", "s1")
     assert result.returncode == 70
-    assert time.monotonic() - started < TIME_LIMIT_SECONDS
+    assert time.monotonic() - started < HANG_LIMIT_SECONDS
 
 
 def test_a_path_swapped_for_a_fifo_after_stat_is_not_read(project, monkeypatch):
@@ -1042,7 +1050,7 @@ def test_a_path_swapped_for_a_fifo_after_stat_is_not_read(project, monkeypatch):
     started = time.monotonic()
     assert lineage_event.sha256_file(fifo) is None
     assert consolidator.sha256_file(fifo) is None
-    assert time.monotonic() - started < TIME_LIMIT_SECONDS
+    assert time.monotonic() - started < HANG_LIMIT_SECONDS
 
 
 @pytest.mark.parametrize(
@@ -1210,7 +1218,7 @@ def test_many_distinct_segments_stay_bounded(project):
     command = "for f in a; do " + " ".join(f"python3 s{i}.py;" for i in range(3000)) + " done"
     event, seconds = _timed_event(command, project)
     assert event is not None
-    assert seconds < TIME_LIMIT_SECONDS
+    assert seconds < SCAN_CPU_LIMIT_SECONDS
 
 
 # ---------- Codex review round 12 ----------

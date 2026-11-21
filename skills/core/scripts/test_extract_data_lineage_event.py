@@ -4356,9 +4356,9 @@ def test_backslash_runs_do_not_backtrack_exponentially() -> None:
     40 backslashes took hours to reject."""
     import time
 
-    started = time.monotonic()
+    started = time.process_time()
     assert not is_analysis("R " + "\\" * 40 + "x")
-    assert time.monotonic() - started < 2
+    assert time.process_time() - started < 2
 
 
 def test_quoted_suffix_on_args_is_not_the_boundary(tmp_path: Path) -> None:
