@@ -33,15 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `uncertain_cause` field, so an unrelated failed command is never blamed).
   A hook left `running` with no recorded error is named too, and a failed
   state save no longer hides the original error.
-  `tools/antigravity.py doctor --workspace` runs the installed hooks' own
-  check and reports the cause instead of raising on a symlinked `.living`.
-  Only session start names the path, so other hooks pay no extra cost, and
-  the name is escaped and length-capped because the repository controls it.
-  Removing the link restores tracking; the refusal itself is unchanged. The
-  Antigravity adapter now runs its base hooks with the default `.mycelium`
-  state directory even when `MYCELIUM_STATE_DIR` is inherited; the adapter
-  only ever read state there, so an override used to fail every startup.
-  (#145)
+  `tools/antigravity.py doctor --workspace` dry-runs the same checks startup
+  makes (including write-time ones such as a `.mycelium/plugin-root` that
+  is not a regular file) and reports the cause instead of raising on a
+  symlinked `.living`; it runs its own checkout's check, never code from the
+  workspace. Only session start names the path, so other hooks pay no extra
+  cost, and every model-facing cause is escaped and length-capped because
+  the repository can control it. Removing the link restores tracking; the
+  refusal itself is unchanged. The Antigravity adapter, which only reads
+  state under `.mycelium/`, now refuses an inherited `MYCELIUM_STATE_DIR`
+  with that explanation instead of failing every startup opaquely. (#145)
 
 ## [0.9.6] - 2026-11-20
 

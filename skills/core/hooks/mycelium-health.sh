@@ -57,8 +57,12 @@ fi
 # Install the release before the call: it may wait for the session lock while
 # holding the lifecycle lock. Releasing a lock never taken does nothing.
 trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT
+# Only a real start shows the reason; a reopen from a work hook discards its
+# output, so it skips the extra walk that names the refused path.
+EXPLAIN="+reason"
+[[ "$REOPEN" == true ]] && EXPLAIN=""
 if ! mycelium__state "$REPO_ROOT" "$INPUT" \
-  prepare:bootstrap+reason lock:stop prepare:write+reason select:create lock:session \
+  "prepare:bootstrap$EXPLAIN" lock:stop "prepare:write$EXPLAIN" select:create lock:session \
   marker owner; then
   # The marker (op 6) and owner (op 7) reads never fail, so a failure there
   # means the process died with both locks held. An unread owner is treated

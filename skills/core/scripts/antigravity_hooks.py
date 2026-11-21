@@ -71,6 +71,8 @@ def mark_uncertain(turn, cause):
         # later, unrelated event on it.
         cause = turn.get("last_hook_error") or ("not recorded (this work cycle was marked "
                                                 "unresolved by an earlier Mycelium version)")
+    elif turn.get("uncertain") is not True:
+        turn.pop("uncertain_cause", None)  # a cause never outlives its resolution
     turn["uncertain"] = True
     turn.setdefault("uncertain_cause", str(cause)[-2000:])
 
@@ -251,10 +253,6 @@ def hook_environment(host, plugin, *, batch=False):
     env = dict(os.environ, MYCELIUM_HOOK_HOST=host, MYCELIUM_PLUGIN_ROOT=str(plugin),
                MYCELIUM_STRICT_CAPTURE="1")
     env.pop(ACTIVITY_BATCH_ENV, None)
-    # This adapter finds the base marker and receipts under <root>/.mycelium,
-    # so the base hooks must use that default too. An inherited override
-    # would put the marker elsewhere and fail every startup.
-    env.pop("MYCELIUM_STATE_DIR", None)
     if batch:
         env[ACTIVITY_BATCH_ENV] = "1"
     # The shared hooks call plain `python3`; the installed package's shim runs
@@ -268,6 +266,13 @@ def hook_environment(host, plugin, *, batch=False):
 def run_hook(name, data, root, plugin, *, timeout=12, batch=False):
     host = active_host()
     env = hook_environment(host, plugin, batch=batch)
+    override = env.get("MYCELIUM_STATE_DIR")
+    if override and Path(root, override).resolve() != (Path(root) / ".mycelium").resolve():
+        # The adapter reads markers and receipts only under <root>/.mycelium.
+        # Base hooks would keep state elsewhere, and dropping the override
+        # instead would split the lifecycle lock from other hosts' sessions.
+        raise RuntimeError("MYCELIUM_STATE_DIR is set, but the Antigravity adapter keeps lifecycle "
+                           "state only in .mycelium/; unset it in the App or IDE environment")
     script = plugin / "skills/core/hooks" / name
     marker = root / ".mycelium/run" / host / data["session_id"] / "active-session-log.tmp"
     had_marker = marker.is_file()
@@ -472,7 +477,8 @@ def read_state(path, cid):
             # Old previews could have permanently snapshotted RUNNING outputs.
             # Never certify that active history using the new completion rules.
             turn["reason"] = "Legacy active preview cycle requires inspection; start a fresh IDE conversation"
-            mark_uncertain(turn, turn["reason"])
+            turn["uncertain"] = True  # this migration is the known cause
+            turn.setdefault("uncertain_cause", turn["reason"])
         turn.setdefault("pending_commands", {})
     state["schema"] = STATE_SCHEMA
     return state
@@ -697,11 +703,10 @@ def _dispatch(event, payload, plugin_root, host):
                 save()
             running = sorted(action for action, value in turn["actions"].items() if value == "running")
             if running:
-                if not turn.get("last_hook_error"):
-                    # The process that ran these ended before recording an outcome.
-                    turn["last_hook_error"] = (", ".join(running) + ": hook outcome was never "
-                                               "recorded (its process ended first)")[-2000:]
-                mark_uncertain(turn, turn["last_hook_error"])
+                # The process that ran these ended before recording an outcome.
+                # Not a hook failure, so last_hook_error stays for real ones.
+                mark_uncertain(turn, turn.get("last_hook_error") or (
+                    ", ".join(running) + ": hook outcome was never recorded (its process ended first)"))
                 save()
 
             capture_deferred = []
@@ -900,7 +905,10 @@ def _dispatch(event, payload, plugin_root, host):
                                 ("\nMycelium capture failed and this work cycle cannot be finalized: " +
                                  one_line(turn["last_hook_error"]) + " Inspect retained native-state.json; start a new "
                                  "explicit request after correcting the cause."
-                                 if turn.get("last_hook_error") else "") +
+                                 if turn.get("last_hook_error") else
+                                 "\nMycelium cannot finalize this work cycle: " +
+                                 one_line(turn["uncertain_cause"]) + " Inspect retained native-state.json."
+                                 if turn.get("uncertain") and turn.get("uncertain_cause") else "") +
                                 ("\n" + "\n".join(turn["reminders"].values()) if turn["reminders"] else "") +
                                 ("\nMycelium is waiting for terminal native evidence for command steps " +
                                  ", ".join(turn["pending_commands"]) + ". Output provenance is not finalized."

@@ -335,8 +335,10 @@ def symlink_reason(repo_root: str, top: str, found: str | None = None) -> str:
         where = f"symlink found at {shown_path(os.path.join(os.path.relpath(top, repo_root), found))}"
     else:
         # Too deep or too large to name here, or not fully readable.
-        where = (f"{label} contains a symlink Mycelium could not name, or could not be fully "
-                 f"examined (list links with: find {shlex.quote(label)} -type l)")
+        where = f"{label} contains a symlink Mycelium could not name, or could not be fully examined"
+        relative = os.path.relpath(top, repo_root)
+        if shown_path(relative) == relative:  # only suggest a command that names the real path
+            where += f" (from the repository root, list links with: find {shlex.quote(relative)} -type l)"
     return (f"{where}. Mycelium does not keep lifecycle state in a tree that holds "
             f"symlinks, so session tracking is off until it is removed or moved out of {label}/.")
 
@@ -603,8 +605,10 @@ class State:
     def prepare(self, mode: str) -> None:
         # "MODE+reason" also names the cause of a symlink refusal. Finding the
         # path walks the tree again, so only session start and doctor ask.
+        # "check" is doctor's dry run: read-only, but a missing state directory
+        # passes (startup creates it) and the write-time refusals are checked.
         mode, _, flag = mode.partition("+")
-        if mode not in {"write", "read-only", "bootstrap"} or flag not in {"", "reason"}:
+        if mode not in {"write", "read-only", "bootstrap", "check"} or flag not in {"", "reason"}:
             raise OpFailed
         explain = bool(flag)
         repo_root = physical_dir(self.repo_root)
@@ -624,15 +628,16 @@ class State:
         except OpFailed:
             if not explain:
                 raise
-            if self.requested_state:
-                emit("reason", "MYCELIUM_STATE_DIR names a path outside the repository, or one "
-                               "through a symlink or non-directory, so session tracking is off.")
-            else:
-                emit("reason", ".mycelium is a symlink or not a directory. Mycelium does not keep "
-                               "lifecycle state there, so session tracking is off until it is a "
-                               "plain directory.")
+            # validate_requested_state also refuses a root or component it
+            # cannot examine, so do not claim more than "not verified".
+            where = "MYCELIUM_STATE_DIR" if self.requested_state else ".mycelium"
+            emit("reason", f"{where} could not be verified as a plain directory inside the "
+                           "repository (it is outside it, a symlink, not a directory, or could not "
+                           "be examined), so session tracking is off.")
             raise
-        if mode == "read-only":
+        if mode == "check" and not exists(requested):
+            return
+        if mode in {"read-only", "check"}:
             if not isdir(requested):
                 raise OpFailed
         else:
@@ -654,6 +659,15 @@ class State:
             if explain:
                 emit("reason", symlink_reason(repo_root, state_dir))
             raise OpFailed
+        if mode == "check":
+            self.check_shared_writes(repo_root, state_dir, explain)
+            for run in (state_dir + "/run", state_dir + "/run/" + self.host):
+                if exists(run) and not isdir(run):
+                    if explain:
+                        emit("reason", f"{shown_path(os.path.relpath(run, repo_root))} is not a "
+                                       "directory, so session tracking is off until it is removed.")
+                    raise OpFailed
+            return
         if mode in {"read-only", "bootstrap"}:
             return
         self.prepare_shared_writes(repo_root, state_dir, explain)
@@ -696,10 +710,9 @@ class State:
             raise OpFailed
         return result
 
-    def prepare_shared_writes(self, repo_root: str, state_dir: str, explain: bool = False) -> None:
+    def check_shared_writes(self, repo_root: str, state_dir: str, explain: bool = False) -> None:
+        """The refusals prepare_shared_writes makes before it writes anything."""
         plugin_pointer = state_dir + "/plugin-root"
-        legacy_dir = repo_root + "/.claude"
-        legacy_session = legacy_dir + "/last-session.md"
 
         def refuse(managed: str) -> None:
             if explain:
@@ -719,6 +732,12 @@ class State:
             and (not isfile(plugin_pointer) or islink(plugin_pointer))
         ):
             refuse(plugin_pointer)
+
+    def prepare_shared_writes(self, repo_root: str, state_dir: str, explain: bool = False) -> None:
+        plugin_pointer = state_dir + "/plugin-root"
+        legacy_dir = repo_root + "/.claude"
+        legacy_session = legacy_dir + "/last-session.md"
+        self.check_shared_writes(repo_root, state_dir, explain)
 
         gitignore = state_dir + "/.gitignore"
         if not isfile(gitignore):

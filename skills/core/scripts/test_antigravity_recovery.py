@@ -688,9 +688,38 @@ def test_a_later_unfinished_action_is_named_beside_an_earlier_cause(cycle):
     assert "Unfinished hook actions: 3:mycelium-data-tracker.sh." in reason
 
 
-def test_base_hooks_use_the_state_directory_the_adapter_reads(monkeypatch, tmp_path):
+def test_an_inherited_state_directory_override_is_refused_with_its_cause(cycle, monkeypatch):
+    """The adapter only reads base state under .mycelium/: an override must be
+    named, not silently split from other hosts' lifecycle lock."""
+    repo, payload, records, write, run, state_path = cycle
     monkeypatch.setenv("MYCELIUM_STATE_DIR", "elsewhere")
-    assert "MYCELIUM_STATE_DIR" not in ag.hook_environment("antigravity-app", tmp_path)
+    records.append(dict(step_index=10, source="USER_EXPLICIT", type="USER_INPUT", status="DONE"))
+    write()
+    with pytest.raises(RuntimeError, match="MYCELIUM_STATE_DIR is set"):
+        ag.dispatch("PreInvocation", dict(payload, initialNumSteps=11))
+    assert not (repo / "elsewhere").exists()
+    turn = json.loads(state_path.read_text())["turns"]["10"]
+    assert "MYCELIUM_STATE_DIR" in turn["uncertain_cause"]
+
+
+def test_an_override_naming_the_default_directory_is_accepted(cycle, monkeypatch):
+    repo, payload, records, write, run, state_path = cycle
+    monkeypatch.setenv("MYCELIUM_STATE_DIR", ".mycelium")
+    records.append(dict(step_index=10, source="USER_EXPLICIT", type="USER_INPUT", status="DONE"))
+    write()
+    ag.dispatch("PreInvocation", dict(payload, initialNumSteps=11))
+    assert json.loads(state_path.read_text())["turns"]["10"]["actions"]["startup"] == "done"
+
+
+def test_an_unknown_hook_outcome_is_not_reported_as_a_capture_failure(cycle):
+    repo, payload, records, write, run, state_path = cycle
+    state = json.loads(state_path.read_text())
+    state["turns"]["0"]["actions"]["3:mycelium-data-tracker.sh"] = "running"
+    state_path.write_text(json.dumps(state))
+    injected = ag.dispatch("PreInvocation", dict(payload, initialNumSteps=2))["injectSteps"][0]["ephemeralMessage"]
+    assert "capture failed" not in injected
+    assert "cannot finalize this work cycle: 3:mycelium-data-tracker.sh: hook outcome was never recorded" in injected
+    assert "last_hook_error" not in json.loads(state_path.read_text())["turns"]["0"]
 
 
 def test_a_cause_quoting_hostile_text_stays_one_line(cycle):

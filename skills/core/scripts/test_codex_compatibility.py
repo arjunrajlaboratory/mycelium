@@ -924,7 +924,7 @@ def test_plugin_dispatcher_refuses_symlinked_state_before_pointer_refresh(tmp_pa
     )
 
     assert result.returncode == 0, result.stderr
-    _assert_tracking_off_warning(result, ".mycelium is a symlink")
+    _assert_tracking_off_warning(result, ".mycelium could not be verified as a plain directory")
     assert pointer.read_text() == "do-not-overwrite\n"
     assert sorted(path.name for path in victim.iterdir()) == ["plugin-root"]
 

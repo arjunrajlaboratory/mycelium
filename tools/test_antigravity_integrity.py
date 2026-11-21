@@ -187,17 +187,18 @@ def test_workspace_readiness_reports_a_state_path_that_is_a_file(tmp_path):
     repo = _opted_in(tmp_path)
     (repo / '.mycelium').write_text('not a directory\n')
     report = package.workspace_readiness(repo)
-    assert not report['ok'] and '.mycelium is a symlink or not a directory' in report['reason']
+    assert not report['ok'] and '.mycelium could not be verified as a plain directory' in report['reason']
 
 
 def test_workspace_readiness_checks_the_state_directory_the_adapter_uses(tmp_path, monkeypatch):
-    """The adapter pins <root>/.mycelium for its base hooks, so an inherited
-    MYCELIUM_STATE_DIR neither hides nor invents a refusal here."""
+    """The adapter only uses <root>/.mycelium and refuses an override, so
+    doctor checks that tree and warns about an inherited override."""
     repo = _opted_in(tmp_path)
     (repo / 'sub' / 'state').mkdir(parents=True)
     (repo / 'sub' / 'state' / 'link').symlink_to(tmp_path)
     monkeypatch.setenv('MYCELIUM_STATE_DIR', 'sub/state')
-    assert package.workspace_readiness(repo)['ok']
+    report = package.workspace_readiness(repo)
+    assert report['ok'] and 'MYCELIUM_STATE_DIR' in report['warnings'][0]
     (repo / '.mycelium').mkdir()
     (repo / '.mycelium' / 'link').symlink_to(tmp_path)
     report = package.workspace_readiness(repo)
@@ -205,10 +206,12 @@ def test_workspace_readiness_checks_the_state_directory_the_adapter_uses(tmp_pat
 
 
 def test_workspace_readiness_reports_a_check_that_cannot_run(tmp_path, monkeypatch):
-    """A slow or failing diagnostic is a readable reason, never a traceback."""
+    """A slow, failing or missing diagnostic is a readable reason, never a traceback."""
     import subprocess
     repo = _opted_in(tmp_path)
-    assert 'unavailable' in package.workspace_readiness(repo, package=tmp_path / 'empty')['reason']
+    monkeypatch.setattr(package, 'HOOK_STATE', tmp_path / 'missing.py')
+    assert 'unavailable' in package.workspace_readiness(repo)['reason']
+    monkeypatch.undo()
     real = subprocess.run
 
     def slow(command, *args, **kwargs):
@@ -219,6 +222,31 @@ def test_workspace_readiness_reports_a_check_that_cannot_run(tmp_path, monkeypat
     monkeypatch.setattr(package.subprocess, 'run', slow)
     report = package.workspace_readiness(repo)
     assert not report['ok'] and report['reason'].startswith('Could not check lifecycle state (TimeoutExpired)')
+
+
+@pytest.mark.parametrize('path, kind, expected', [
+    ('.mycelium/plugin-root', 'dir', '.mycelium/plugin-root is not a regular file'),
+    ('.mycelium/.gitignore', 'dir', '.mycelium/.gitignore is not a regular file'),
+    ('.mycelium/run/antigravity-ide', 'file', '.mycelium/run/antigravity-ide is not a directory'),
+])
+def test_workspace_readiness_reports_refusals_startup_makes_when_writing(tmp_path, path, kind, expected):
+    """doctor's dry run covers the write-time refusals, not only read-only ones."""
+    repo = _opted_in(tmp_path)
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.mkdir() if kind == 'dir' else target.write_text('x\n')
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and expected in report['reason']
+
+
+def test_workspace_readiness_treats_a_dangling_living_link_as_no_opt_in(tmp_path):
+    import subprocess
+    repo = tmp_path / 'proj'
+    repo.mkdir()
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    (repo / '.living').symlink_to(tmp_path / 'missing')
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and report['reason'] == 'Git root has no .living opt-in'
 
 
 def test_workspace_readiness_survives_a_very_deep_state_tree(tmp_path, monkeypatch):
@@ -241,26 +269,3 @@ def test_workspace_readiness_creates_no_state(tmp_path):
     repo = _opted_in(tmp_path)
     assert package.workspace_readiness(repo)['ok']
     assert not (repo / '.mycelium').exists()
-
-
-def test_workspace_readiness_accepts_an_installed_release_without_the_reason_flag(tmp_path):
-    """An older installed state module refuses `+reason` itself; a clean
-    workspace must still read as ready instead of as a refusal."""
-    import subprocess
-    repo = _opted_in(tmp_path)
-    (repo / '.mycelium').mkdir()
-    old = tmp_path / 'old-package'
-    hooks = old / 'skills' / 'core' / 'hooks'
-    hooks.mkdir(parents=True)
-    source = Path(package.__file__).resolve().parent.parent / package.HOOK_STATE
-    text = source.read_text()
-    # Simulate the release before this change: no +reason support at all.
-    text = text.replace('mode, _, flag = mode.partition("+")', 'flag = ""')
-    (hooks / 'mycelium_hook_state.py').write_text(text)
-    assert subprocess.run(['python3', '-I', '-S', str(hooks / 'mycelium_hook_state.py'), '1', 'x', 'ok', '',
-                           str(repo), '', '', '', '', 'prepare:read-only+reason'],
-                          capture_output=True).stdout.split(b'\0')[:2] == [b'fail', b'1']
-    assert package.workspace_readiness(repo, package=old)['ok']
-    (repo / '.mycelium' / 'link').symlink_to(tmp_path)
-    report = package.workspace_readiness(repo, package=old)
-    assert not report['ok'] and 'cannot prepare lifecycle state' in report['reason']
