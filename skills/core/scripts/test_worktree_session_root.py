@@ -9,9 +9,10 @@ against the main checkout: other sessions' uncommitted work there counted as
 this session's, reflection written in the worktree's `.living/` was invisible,
 and Stop blocked until the agent wrote into the main checkout.
 
-Every hook now resolves the root from the payload's `cwd`. Stop and the Bash
-post-action hook take the nearest opted-in repository at or above it, and fall
-back to the process directory only when none is opted in.
+Every hook now resolves the root from the payload's `cwd`. When that
+repository is not opted in, Stop and the Bash post-action hook take an
+enclosing opted-in repository only if it already holds the session's run
+directory, and otherwise fall back to the process directory.
 """
 
 from __future__ import annotations
@@ -201,6 +202,72 @@ def test_stop_keeps_the_worktree_after_cd_into_a_nested_repository(tmp_path):
     assert _blocked(stop), stop.stdout
     assert "analysis.py" in json.loads(stop.stdout)["reason"]
     assert not (main / ".mycelium" / "run").exists()
+    assert not (nested / ".mycelium").exists()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_lineage_is_published_in_the_worktree_after_cd_into_a_nested_repository(
+    tmp_path, host
+):
+    """Stop runs the lineage finalizer in-process with the same payload; it
+    must land on the root Stop chose, or Stop accepts and archives the raw
+    events without publishing a manifest."""
+    main, worktree = _checkouts(tmp_path)
+    (worktree / "analysis.py").write_text(
+        "import pandas as pd\npd.read_csv('input.csv')\n"
+    )
+    nested = worktree / "vendor" / "lib"
+    nested.mkdir(parents=True)
+    _git("init", "-q", str(nested))
+    base = {"cwd": str(worktree), "session_id": SID}
+    start = _run(host, "mycelium-health.sh", main,
+                 {**base, "source": "startup", "hook_event_name": "SessionStart"})
+    assert start.returncode == 0, start.stderr
+    tracked = _run(host, "mycelium-data-tracker.sh", main,
+                   {**base, "tool_name": "Bash", "hook_event_name": "PostToolUse",
+                    "tool_input": {"command": "python3 analysis.py"},
+                    "tool_response": {"exit_code": 0}})
+    assert tracked.returncode == 0, tracked.stderr
+    with (worktree / ".living" / "learnings.md").open("a") as handle:
+        handle.write("\n### Worktree learning\n- noted\n")
+
+    stop = _run(host, "mycelium-stop-check.sh", main,
+                {"cwd": str(nested), "session_id": SID,
+                 "hook_event_name": "Stop", "stop_hook_active": False})
+    assert stop.returncode == 0, stop.stderr
+    assert not _blocked(stop), stop.stdout
+    manifests = list((worktree / ".living" / "log" / "data-lineage").glob("*.json"))
+    assert manifests, "Stop accepted without publishing the lineage manifest"
+    assert not (nested / ".living").exists()
+
+
+def test_post_action_does_not_adopt_an_unrelated_enclosing_project(tmp_path):
+    """A session working in one project that runs analysis inside a
+    non-opted repository nested in a different opted-in project must not
+    open state in that other project: it holds nothing of this session's."""
+    main, _ = _checkouts(tmp_path)
+    other = tmp_path / "other"
+    (other / ".living").mkdir(parents=True)
+    _git("init", "-q", str(other))
+    nested = other / "vendor" / "lib"
+    nested.mkdir(parents=True)
+    _git("init", "-q", str(nested))
+    (nested / "analysis.py").write_text(
+        "import pandas as pd\npd.read_csv('input.csv')\n"
+    )
+    start = _run("claude", "mycelium-health.sh", main,
+                 {"cwd": str(main), "session_id": SID, "source": "startup",
+                  "hook_event_name": "SessionStart"})
+    assert start.returncode == 0, start.stderr
+
+    result = _run("claude", "mycelium-post-action.sh", main,
+                  {"cwd": str(nested), "session_id": SID,
+                   "tool_name": "Bash", "hook_event_name": "PostToolUse",
+                   "tool_input": {"command": "python3 analysis.py"},
+                   "tool_response": {"exit_code": 0}})
+    assert result.returncode == 0, result.stderr
+    assert not (other / ".mycelium").exists()
+    assert not (other / ".living" / "log").exists()
     assert not (nested / ".mycelium").exists()
 
 

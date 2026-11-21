@@ -30,7 +30,10 @@ SESSION_CWD=$(mycelium_json_get 'cwd' INPUT)
 HOST_SESSION_ID=$(mycelium_json_get_optional_string 'session_id' INPUT) || exit 0
 if [[ -z "$SESSION_CWD" ]] || [[ ! -d "$SESSION_CWD" ]]; then exit 0; fi
 
-REPO_ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null || echo "")
+# The same root Stop chose (Stop runs this in-process with its payload): after
+# `cd` into a nested repository without .living/, the session's enclosing
+# worktree, not the nested repository (issue #144).
+REPO_ROOT=$(mycelium_session_repo_root "$SESSION_CWD" "$HOST_SESSION_ID")
 if [[ -z "$REPO_ROOT" ]] || [[ ! -d "$REPO_ROOT/.living" ]]; then exit 0; fi
 # One state call resolves and authorizes the transaction and reads its marker.
 # A dead marker read (op 4) reads as an invalid marker, as the old helper's

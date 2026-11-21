@@ -1788,29 +1788,40 @@ mycelium__payload_cached() {
   return 0
 }
 
-# mycelium_session_repo_root CWD: print the repository root a session hook
-# acts on: the nearest repository at or above the session's own directory (the
-# payload `cwd`) that is opted in. A host may run hooks in the main checkout
-# while the session works in a linked worktree (issue #144), so the process
-# directory is the wrong default. Walking outward keeps a turn that ended after
-# `cd` into a nested repository without .living/ (a vendored checkout, a
-# submodule) on the enclosing project, which holds the session's transaction.
-# Only when no enclosing repository is opted in, or the payload names no
-# directory, fall back to the hook process's directory. Prints nothing outside
-# a repository.
+# mycelium_session_repo_root CWD [SESSION_ID]: print the repository root a
+# session hook acts on. A host may run hooks in the main checkout while the
+# session works in a linked worktree (issue #144), so the session's own
+# directory (the payload `cwd`) wins when its repository is opted in. When it
+# is not (a turn that ended after `cd` into a vendored checkout or submodule),
+# walk outward and take an enclosing opted-in repository only if it already
+# holds this session's run directory: the worktree that started the session
+# keeps it, while an unrelated project that merely encloses the directory gains
+# no state. Otherwise fall back to the hook process's directory. Prints nothing
+# outside a repository.
 mycelium_session_repo_root() {
   local dir="${1:-}"
+  local sid="${2:-}"
   local root=""
+  local host=""
   if [[ -n "$dir" && -d "$dir" ]]; then
-    while root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) \
-      && [[ -n "$root" ]]; do
-      if [[ -d "$root/.living" ]]; then
-        printf '%s\n' "$root"
-        return 0
-      fi
-      [[ "$root" == "/" ]] && break
-      dir=$(dirname "$root")
-    done
+    root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)
+    if [[ -n "$root" && -d "$root/.living" ]]; then
+      printf '%s\n' "$root"
+      return 0
+    fi
+    if [[ -n "$root" ]] && mycelium_valid_session_id "$sid"; then
+      host=$(mycelium_hook_host)
+      while [[ "$root" != "/" ]]; do
+        dir=$(dirname "$root")
+        root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || break
+        [[ -n "$root" ]] || break
+        if [[ -d "$root/.living" && -d "$root/.mycelium/run/$host/$sid" \
+          && ! -L "$root/.mycelium/run/$host/$sid" ]]; then
+          printf '%s\n' "$root"
+          return 0
+        fi
+      done
+    fi
   fi
   git rev-parse --show-toplevel 2>/dev/null || true
 }
