@@ -302,6 +302,19 @@ if [[ "$SOURCE" != "startup" && "${MYCELIUM_SESSION_SCOPED:-false}" == true ]] \
   fi
 fi
 
+# A session that moved here from a sibling checkout of this repository (a
+# `cd` into a linked worktree, or EnterWorktree) still holds the reservation
+# SessionStart made there. Take it over before reserving here, so the session
+# has one transaction: carry its start and any handoff written at the path
+# SessionStart announced, and remove the stub log and run state it left.
+if [ ! -f "$ACTIVE_LOG_FILE" ] && [[ "${MYCELIUM_SESSION_SCOPED:-false}" == true ]] \
+  && mycelium_take_moved_transaction "$REPO_ROOT" "$HOST_SESSION_ID" adopt; then
+  if [[ -n "$MYCELIUM_MOVED_START_TS" ]] && (( MYCELIUM_MOVED_START_TS <= NOW_TS )); then
+    CARRIED_START_TS="$MYCELIUM_MOVED_START_TS"
+  fi
+  MESSAGES="${MESSAGES}SESSION MOVED: This session's transaction moved here from ${MYCELIUM_MOVED_FROM}; its handoff path is now ${STATE_DIR}/last-session.md.\n\n"
+fi
+
 # Record session-start timestamp — only for primary sessions (not subagents).
 # After the cleanup above, a remaining active-session-log.tmp implies a
 # genuine in-progress primary session, so we preserve its start ts.
