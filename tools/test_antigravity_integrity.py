@@ -159,5 +159,67 @@ def test_workspace_readiness_names_a_symlink_that_blocks_lifecycle_start(tmp_pat
     scratch.mkdir(parents=True)
     (scratch / 'node_modules').symlink_to(tmp_path)
     report = package.workspace_readiness(repo)
-    assert not report['ok'] and report['symlink'] == '.mycelium/run/scratch/node_modules'
-    assert '.mycelium/run/scratch/node_modules' in report['reason']
+    assert not report['ok'] and report['lifecycle_opt_in']
+    assert 'symlink found at .mycelium/run/scratch/node_modules' in report['reason']
+
+
+def _opted_in(tmp_path):
+    import subprocess
+    repo = tmp_path / 'proj'
+    repo.mkdir()
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    (repo / '.living').mkdir()
+    return repo
+
+
+def test_workspace_readiness_reports_a_symlinked_living_instead_of_raising(tmp_path):
+    repo = tmp_path / 'proj'
+    repo.mkdir()
+    import subprocess
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    (tmp_path / 'notes').mkdir()
+    (repo / '.living').symlink_to(tmp_path / 'notes', target_is_directory=True)
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and '.living is itself a symlink' in report['reason']
+
+
+def test_workspace_readiness_reports_a_state_path_that_is_a_file(tmp_path):
+    repo = _opted_in(tmp_path)
+    (repo / '.mycelium').write_text('not a directory\n')
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and '.mycelium is a symlink or not a directory' in report['reason']
+
+
+def test_workspace_readiness_checks_the_configured_state_directory(tmp_path, monkeypatch):
+    repo = _opted_in(tmp_path)
+    (repo / 'sub' / 'state').mkdir(parents=True)
+    (repo / 'sub' / 'state' / 'link').symlink_to(tmp_path)
+    monkeypatch.setenv('MYCELIUM_STATE_DIR', 'sub/state')
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and 'symlink found at sub/state/link' in report['reason']
+    monkeypatch.delenv('MYCELIUM_STATE_DIR')
+    assert package.workspace_readiness(repo)['ok']  # the default tree is clean
+
+
+def test_workspace_readiness_survives_a_very_deep_state_tree(tmp_path):
+    """The diagnostic walk is iterative: depth cannot exhaust recursion."""
+    repo = _opted_in(tmp_path)
+    deep = repo / '.mycelium'
+    deep.mkdir()
+    import os
+    os.chdir(deep)
+    try:
+        for _ in range(1100):
+            os.mkdir('d')
+            os.chdir('d')
+        os.symlink('/', 'link')
+    finally:
+        os.chdir(tmp_path)
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and report['reason'].startswith('symlink found at .mycelium/d/d/')
+
+
+def test_workspace_readiness_creates_no_state(tmp_path):
+    repo = _opted_in(tmp_path)
+    assert package.workspace_readiness(repo)['ok']
+    assert not (repo / '.mycelium').exists()

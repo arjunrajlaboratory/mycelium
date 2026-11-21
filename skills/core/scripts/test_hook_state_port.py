@@ -1196,3 +1196,26 @@ def test_session_start_names_the_symlink_that_disabled_tracking(tmp_path, where)
     result = _hook("mycelium-health.sh", start, repo, env)
     assert result.returncode == 0 and "symlink" not in result.stderr
     assert (repo / ".mycelium" / "run" / "claude" / "s1" / "active-session-log.tmp").exists()
+
+
+def test_only_a_request_for_the_reason_walks_the_tree_again(tmp_path, capsysbinary, monkeypatch):
+    """Every hook runs prepare; only session start asks why it refused, so
+    the others never pay for the diagnostic walk."""
+    module = _state_module()
+    repo = tmp_path / "repo"
+    (repo / ".mycelium" / "run").mkdir(parents=True)
+    (repo / ".mycelium" / "run" / "link").symlink_to(tmp_path)
+    walks = []
+    real = module.first_symlink
+    monkeypatch.setattr(module, "first_symlink", lambda top: walks.append(top) or real(top))
+
+    def prepare(op):
+        module.State(["1", "claude", "ok", "s1", str(repo), "", "", "", "", op]).run()
+        return capsysbinary.readouterr().out.split(b"\0")
+
+    plain = prepare("prepare:read-only")
+    assert b"reason" not in plain and b"fail" in plain and walks == []
+    explained = prepare("prepare:read-only+reason")
+    assert explained[explained.index(b"reason") + 1].startswith(b"symlink found at .mycelium/run/link")
+    assert len(walks) == 1
+    assert b"fail" in prepare("prepare:read-only+bogus")

@@ -630,3 +630,46 @@ def test_an_action_left_running_without_an_error_is_named(cycle):
     state_path.write_text(json.dumps(state))
     reason = ag.dispatch("Stop", stop(payload))["reason"]
     assert "3:mycelium-data-tracker.sh: hook outcome was never recorded" in reason
+
+
+def test_a_blocked_stop_names_its_own_cause_not_an_earlier_failed_command(cycle):
+    """An ordinary failed command sets last_native_error but never makes the
+    cycle uncertain, so a later unresolved Stop must not blame it."""
+    repo, payload, records, write, run, state_path = cycle
+    records.append(dict(step_index=3, source="MODEL", type="RUN_COMMAND", status="ERROR"))
+    write()
+    ag.dispatch("PostToolUse", dict(payload, stepIdx=3, error="exit 1: file not found", toolCall={
+        "name": "run_command", "args": {"Cwd": str(repo), "CommandLine": "python3 missing.py"}}))
+    turn = json.loads(state_path.read_text())["turns"]["0"]
+    assert turn["last_native_error"] == "exit 1: file not found" and turn["uncertain"] is False
+    # A Stop check that was killed before it recorded its outcome.
+    state = json.loads(state_path.read_text())
+    state["turns"]["0"]["stop_attempt"] = {"status": "running", "number": 1}
+    state_path.write_text(json.dumps(state))
+    reason = ag.dispatch("Stop", stop(payload))["reason"]
+    assert reason.startswith(ag.UNRESOLVED_HOOK) and "Stop finalization" in reason
+    assert "file not found" not in reason
+
+
+def test_a_failed_save_does_not_hide_the_startup_error(cycle, monkeypatch):
+    repo, payload, records, write, run, state_path = cycle
+    records.append(dict(step_index=10, source="USER_EXPLICIT", type="USER_INPUT", status="DONE"))
+    write()
+
+    def refused(*args, **kwargs):
+        raise RuntimeError("Base Mycelium did not establish an active lifecycle transaction: symlink")
+
+    monkeypatch.setattr(ag, "run_hook", refused)
+    writes = []
+    real_write = ag.atomic_write_text
+
+    def bounded(path, text, **kwargs):
+        writes.append(text)
+        if "last_hook_error" in text:
+            raise ValueError("Native state safety bound reached")
+        return real_write(path, text, **kwargs)
+
+    monkeypatch.setattr(ag, "atomic_write_text", bounded)
+    with pytest.raises(RuntimeError, match="did not establish") as raised:
+        ag.dispatch("PreInvocation", dict(payload, initialNumSteps=11))
+    assert "safety bound" in str(raised.value.__cause__)

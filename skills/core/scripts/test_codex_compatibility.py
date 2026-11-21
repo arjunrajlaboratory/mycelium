@@ -980,7 +980,7 @@ def test_plugin_dispatcher_refuses_symlinked_living_before_creating_state(tmp_pa
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
+    _assert_tracking_off_warning(result, ".living is itself a symlink")
     assert list(victim.iterdir()) == []
     assert not (repo / ".mycelium").exists()
 

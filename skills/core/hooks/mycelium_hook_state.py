@@ -263,22 +263,40 @@ def contains_symlink(top: str) -> bool:
 def first_symlink(top: str, limit: int = 100000) -> str | None:
     """Best-effort relative path of one symlink under TOP, for a diagnostic.
 
-    Only called after contains_symlink() already refused TOP, to tell a
-    person what to remove. It never follows a link, examines at most LIMIT
-    entries, and returns None when it finds nothing (for example a tree the
-    strict scan could not fully examine). "." means TOP itself is a link.
+    Only called after contains_symlink() already refused TOP, and only when
+    a caller asked for the reason (session start), to tell a person what to
+    remove. Never follows a link. Walks iteratively in sorted order (so the
+    answer is stable and depth cannot exhaust the recursion limit), examines
+    at most LIMIT entries, and returns None when it finds nothing, for
+    example in a tree the strict scan could not fully examine. "." means TOP
+    itself is a link.
     """
     if os.path.islink(top):
         return "."
     seen = 0
-    for current, dirnames, filenames in os.walk(top, followlinks=False):
-        for name in sorted(dirnames) + sorted(filenames):
+    pending = [""]
+    while pending:
+        relative = pending.pop()
+        try:
+            with os.scandir(os.path.join(top, relative) if relative else top) as listing:
+                entries = sorted(listing, key=lambda entry: entry.name)
+        except OSError:
+            continue
+        subdirs = []
+        for entry in entries:
             seen += 1
             if seen > limit:
                 return None
-            path = os.path.join(current, name)
-            if os.path.islink(path):
-                return os.path.relpath(path, top)
+            path = os.path.join(relative, entry.name) if relative else entry.name
+            try:
+                if entry.is_symlink():
+                    return path
+                if entry.is_dir(follow_symlinks=False):
+                    subdirs.append(path)
+            except OSError:
+                continue
+        # Depth first, in name order: push reversed so the first name pops first.
+        pending.extend(reversed(subdirs))
     return None
 
 
@@ -557,21 +575,29 @@ class State:
     # -- mycelium_prepare_state_dir ---------------------------------------
 
     def prepare(self, mode: str) -> None:
-        if mode not in {"write", "read-only", "bootstrap"}:
+        # "MODE+reason" also names the cause of a symlink refusal. Finding the
+        # path walks the tree again, so only session start and doctor ask.
+        mode, _, flag = mode.partition("+")
+        if mode not in {"write", "read-only", "bootstrap"} or flag not in {"", "reason"}:
             raise OpFailed
+        explain = bool(flag)
         repo_root = physical_dir(self.repo_root)
         living_dir = repo_root + "/.living"
         if islink(living_dir):
-            emit("reason", symlink_reason(repo_root, living_dir, "."))
+            if explain:
+                emit("reason", symlink_reason(repo_root, living_dir, "."))
             raise OpFailed
         if isdir(living_dir) and contains_symlink(living_dir):
-            emit("reason", symlink_reason(repo_root, living_dir))
+            if explain:
+                emit("reason", symlink_reason(repo_root, living_dir))
             raise OpFailed
 
         requested = self.requested_state or repo_root + "/.mycelium"
         try:
             requested = self.validate_requested_state(repo_root, requested)
         except OpFailed:
+            if not explain:
+                raise
             if self.requested_state:
                 emit("reason", "MYCELIUM_STATE_DIR names a path outside the repository, or one "
                                "through a symlink or non-directory, so session tracking is off.")
@@ -599,7 +625,8 @@ class State:
             raise OpFailed
         self.assign("MYCELIUM_SHARED_STATE_DIR", state_dir)
         if contains_symlink(state_dir):
-            emit("reason", symlink_reason(repo_root, state_dir))
+            if explain:
+                emit("reason", symlink_reason(repo_root, state_dir))
             raise OpFailed
         if mode in {"read-only", "bootstrap"}:
             return

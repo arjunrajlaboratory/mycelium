@@ -130,17 +130,35 @@ def file_map(root):
     return result
 
 
-def first_symlink(top, limit=100000):
-    """One symlink at or under TOP (never followed), or None; bounded scan."""
-    if top.is_symlink():
-        return top
-    for count, (current, dirnames, filenames) in enumerate(os.walk(top, followlinks=False)):
-        if count > limit:
-            return None
-        for name in sorted(dirnames) + sorted(filenames):
-            if (Path(current) / name).is_symlink():
-                return Path(current) / name
-    return None
+HOOK_STATE = Path(__file__).resolve().parent.parent / "skills/core/hooks/mycelium_hook_state.py"
+
+
+def base_state_refusal(root, profile):
+    """Why base Mycelium would refuse to start a lifecycle at ROOT, or None.
+
+    Runs the base hooks' own read-only prepare check (the one that refuses a
+    symlink under .living/ or the state tree, honoring MYCELIUM_STATE_DIR)
+    so doctor and the hooks cannot disagree. It creates nothing: a state
+    directory that does not exist yet is fine, since startup creates it.
+    """
+    if not HOOK_STATE.is_file():
+        return None
+    host = "antigravity-app" if profile == "app" else "antigravity-ide"
+    requested = os.environ.get("MYCELIUM_STATE_DIR", "")
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(HOOK_STATE), str(os.getpid()), host, "ok", "",
+         str(root), "", "", requested, "", "prepare:read-only+reason"],
+        capture_output=True, timeout=60, cwd="/")
+    fields = result.stdout.split(b"\0")
+    if b"ok" in fields:
+        return None
+    if b"reason" in fields:
+        return os.fsdecode(fields[fields.index(b"reason") + 1])
+    state = Path(requested) if requested else Path(".mycelium")
+    state = state if state.is_absolute() else root / state
+    if not os.path.lexists(state):
+        return None  # read-only refuses only because startup has not created it yet
+    return "Base Mycelium cannot prepare lifecycle state in " + str(state)
 
 
 def workspace_readiness(workspace, profile="ide"):
@@ -156,18 +174,19 @@ def workspace_readiness(workspace, profile="ide"):
     # Git ends the path with one newline; a root name may itself end in whitespace.
     out = git.stdout
     root = safe_path(Path(out[:-1] if out.endswith("\n") else out))
-    living = safe_path(root / ".living")
     result["git_root"] = str(root)
+    if (root / ".living").is_symlink():
+        # Checked before safe_path, which refuses the link by raising.
+        return dict(result, reason=".living is itself a symlink; base Mycelium refuses to start "
+                                   "a lifecycle until it is a plain directory")
+    living = safe_path(root / ".living")
     if not living.is_dir():
         return dict(result, reason="Git root has no .living opt-in")
-    # Base Mycelium refuses to start a lifecycle in a .living/ or .mycelium/
-    # tree holding a symlink, which leaves every native turn unresolved.
-    for tree in (".living", ".mycelium"):
-        link = first_symlink(root / tree)
-        if link is not None:
-            return dict(result, lifecycle_opt_in=True, symlink=str(link.relative_to(root)),
-                        reason=f"Symlink at {link.relative_to(root)} stops base Mycelium from "
-                               "starting a lifecycle; remove it or move it out of " + tree + "/")
+    # Base Mycelium refuses to start a lifecycle in a .living/ or state tree
+    # holding a symlink, which leaves every native turn unresolved.
+    refusal = base_state_refusal(root, profile)
+    if refusal:
+        return dict(result, lifecycle_opt_in=True, reason=refusal)
     return dict(result, ok=True, lifecycle_opt_in=True,
                 note="Workspace opt-in only; native dispatch still requires a fresh "
                      f"{'App' if profile == 'app' else 'IDE'} audit")

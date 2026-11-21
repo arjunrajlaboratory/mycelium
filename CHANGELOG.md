@@ -22,16 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The data tracker no longer also files such an event as a no-transaction
   lineage gap. Claude Code, Codex and Antigravity hooks all share the fix;
   existing projects need no migration. (#137)
-- A symlink anywhere under `.living/` or `.mycelium/` (for example a
-  `node_modules` link left in `.mycelium/run/` by a scratch run) no longer
-  turns lifecycle tracking off silently. Session start now names the link on
-  stderr and, for Claude Code and Codex, in a MYCELIUM WARNING in the session
-  context. On the Antigravity App and IDE, a refused startup records
-  `last_hook_error` in `native-state.json`, the next invocation explains it,
-  and a blocked Stop gives the recorded cause instead of only "unresolved
-  outcome". A hook left `running` with no recorded error is named too.
-  `tools/antigravity.py doctor --workspace` reports such a symlink before a
-  session starts. Removing the link restores tracking; the symlink refusal
+- A symlink anywhere under `.living/` or the state directory (for example a
+  `node_modules` link left in `.mycelium/run/` by a scratch run), or a
+  `.living` that is itself a symlink, no longer turns lifecycle tracking off
+  silently. Session start names the link on stderr and, for Claude Code and
+  Codex, in a MYCELIUM WARNING in the session context. On the Antigravity App
+  and IDE, a refused startup records `last_hook_error` in
+  `native-state.json`, the next invocation explains it, and a blocked
+  "unresolved outcome" Stop now states its recorded cause (a new
+  `uncertain_cause` field, so an unrelated failed command is never blamed).
+  A hook left `running` with no recorded error is named too, and a failed
+  state save no longer hides the original error.
+  `tools/antigravity.py doctor --workspace` runs the hooks' own check
+  (honoring `MYCELIUM_STATE_DIR`) and reports the cause instead of raising
+  on a symlinked `.living`. Only session start names the path, so other
+  hooks pay no extra cost. Removing the link restores tracking; the refusal
   itself is unchanged. (#145)
 
 ## [0.9.6] - 2026-11-20

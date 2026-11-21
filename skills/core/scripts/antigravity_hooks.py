@@ -47,10 +47,31 @@ APP_UNRESOLVED = ("Antigravity App command step without authoritative workspace,
 UNRESOLVED_HOOK = "A Mycelium hook has an unresolved outcome. Inspect retained native-state.json before retrying."
 
 
+def mark_uncertain(turn, cause):
+    """Hold this work cycle unresolved and record why.
+
+    The first cause is kept: it is the one that made the outcome unknown,
+    and later events cannot settle it. Ordinary native errors (a command
+    that exited nonzero) never go here, so a blocked Stop cannot blame them.
+    """
+    turn["uncertain"] = True
+    turn.setdefault("uncertain_cause", str(cause)[-2000:])
+
+
 def unresolved_reason(turn):
     """UNRESOLVED_HOOK plus the recorded cause, so a blocked Stop says what failed."""
-    detail = turn.get("last_hook_error") or turn.get("last_native_error")
-    return UNRESOLVED_HOOK + (f" Last error: {detail}" if detail else "")
+    # State written before uncertain_cause existed can still name a hook error.
+    detail = turn.get("uncertain_cause") or turn.get("last_hook_error")
+    return UNRESOLVED_HOOK + (f" Cause: {detail}" if detail else "")
+
+
+def save_then_raise(save, error):
+    """Persist a recorded failure, then raise it; never let a failed save hide it."""
+    try:
+        save()
+    except Exception as save_error:
+        raise error from save_error
+    raise error
 
 
 # Leave time within the App package's 45-second Stop hook for Python startup,
@@ -357,6 +378,7 @@ def read_state(path, cid):
                 not isinstance(turn.get("reminder", ""), str) or
                 not isinstance(turn.get("reminder_id", ""), str) or
                 not isinstance(turn.get("last_hook_error", ""), str) or
+                not isinstance(turn.get("uncertain_cause", ""), str) or
                 not isinstance(turn.get("uncertain"), bool)):
             raise ValueError("Invalid native work-cycle state")
         pending = turn.get("pending_commands", {})
@@ -424,8 +446,8 @@ def read_state(path, cid):
         if state["schema"] == 1 and turn["status"] == "active":
             # Old previews could have permanently snapshotted RUNNING outputs.
             # Never certify that active history using the new completion rules.
-            turn["uncertain"] = True
             turn["reason"] = "Legacy active preview cycle requires inspection; start a fresh IDE conversation"
+            mark_uncertain(turn, turn["reason"])
         turn.setdefault("pending_commands", {})
     state["schema"] = STATE_SCHEMA
     return state
@@ -626,10 +648,9 @@ def _dispatch(event, payload, plugin_root, host):
                 except Exception as exc:
                     # As in apply_hooks: startup stays running and is never
                     # redispatched, but the retained state says why.
-                    turn["uncertain"] = True
                     turn["last_hook_error"] = f"startup: {exc}"[-2000:]
-                    save()
-                    raise
+                    mark_uncertain(turn, turn["last_hook_error"])
+                    save_then_raise(save, exc)
                 turn["actions"]["startup"] = "done"
                 if context(result):
                     turn["context"].append(context(result))
@@ -642,18 +663,20 @@ def _dispatch(event, payload, plugin_root, host):
                     turn["status"] = "accepted"
                     if app:
                         turn["uncertain"] = False
+                        turn.pop("uncertain_cause", None)
                     turn["context"] = []
                     save()
                     continue
-                turn["uncertain"] = True
+                mark_uncertain(turn, "Stop finalization: an earlier Stop check ended before "
+                                     "recording whether it finalized this work cycle")
                 save()
             running = sorted(action for action, value in turn["actions"].items() if value == "running")
             if running:
-                turn["uncertain"] = True
                 if not turn.get("last_hook_error"):
                     # The process that ran these ended before recording an outcome.
                     turn["last_hook_error"] = (", ".join(running) + ": hook outcome was never "
                                                "recorded (its process ended first)")[-2000:]
+                mark_uncertain(turn, turn["last_hook_error"])
                 save()
 
             capture_deferred = []
@@ -683,10 +706,9 @@ def _dispatch(event, payload, plugin_root, host):
                     except Exception as exc:
                         # The action stays running: never redispatched, never
                         # accepted. Stop reports it until the bounded allowance ends.
-                        turn["uncertain"] = True
                         turn["last_hook_error"] = f"{action}: {exc}"[-2000:]
-                        save()
-                        raise
+                        mark_uncertain(turn, turn["last_hook_error"])
+                        save_then_raise(save, exc)
                     turn["actions"][action] = "done"
                     reminder = context(result)
                     if reminder:
@@ -802,9 +824,9 @@ def _dispatch(event, payload, plugin_root, host):
                     if result != {"mycelium_activity_batch": dict(batch, status="recorded")}:
                         raise RuntimeError("missing or malformed batch acknowledgement")
                 except Exception as exc:
-                    turn["uncertain"] = True
                     turn["last_hook_error"] = (f"recovery batch {batch['id']} (steps "
                                                f"{', '.join(map(str, steps))}): {exc}")[-2000:]
+                    mark_uncertain(turn, turn["last_hook_error"])
                     save()
                     return scan["status"], scan.get("reason", ""), [], rejected
                 for step in steps:
@@ -896,7 +918,8 @@ def _dispatch(event, payload, plugin_root, host):
                     if step.get("type") != "RUN_COMMAND" or step.get("status") not in {"DONE", "RUNNING"}:
                         turn["last_native_error"] = str(payload.get("error") or "Execution evidence unavailable")
                         if step.get("status") != "ERROR" or not payload.get("error"):
-                            turn["uncertain"] = True
+                            mark_uncertain(turn, f"command step {boundary}: native execution evidence "
+                                                 f"unavailable ({turn['last_native_error']})")
                         save()
                         continue
                     command = args.get("CommandLine")
@@ -991,8 +1014,8 @@ def _dispatch(event, payload, plugin_root, host):
                         if accepted_stop(root, session_id):
                             result = {}
                         else:
-                            turn["uncertain"] = True
                             turn["last_native_error"] = f"App Stop outcome unavailable ({type(error).__name__})"
+                            mark_uncertain(turn, turn["last_native_error"])
                             result = {"decision": "block", "reason": unresolved_reason(turn)}
                     if not turn["uncertain"]:
                         turn["stop_attempt"]["status"] = "blocked" if result.get("decision") == "block" else "accepted"
