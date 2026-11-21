@@ -230,6 +230,8 @@ def test_workspace_readiness_reports_a_check_that_cannot_run(tmp_path, monkeypat
     ('.mycelium/plugin-root', 'dir', '.mycelium/plugin-root is not a regular file'),
     ('.mycelium/.gitignore', 'dir', '.mycelium/.gitignore is not a regular file'),
     ('.mycelium/run/antigravity-ide', 'file', '.mycelium/run/antigravity-ide is not a directory'),
+    ('.mycelium/locks', 'file', '.mycelium/locks is not a directory'),
+    ('.mycelium/antigravity-ide', 'file', '.mycelium/antigravity-ide is not a directory'),
 ])
 def test_workspace_readiness_reports_refusals_startup_makes_when_writing(tmp_path, path, kind, expected):
     """doctor's dry run covers the write-time refusals, not only read-only ones."""

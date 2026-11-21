@@ -192,6 +192,12 @@ def workspace_readiness(workspace, profile="ide"):
     # Base Mycelium refuses to start a lifecycle in a .living/ or state tree
     # holding a symlink, which leaves every native turn unresolved.
     refusal = base_state_refusal(root, profile)
+    host = "antigravity-app" if profile == "app" else "antigravity-ide"
+    for managed in (".mycelium/locks", f".mycelium/{host}"):
+        # The adapter's own preflight directories (links are refused above).
+        if refusal is None and (root / managed).exists() and not (root / managed).is_dir():
+            refusal = (f"{managed} is not a directory; the Antigravity adapter rejects every "
+                       "native event in this workspace until it is removed")
     if refusal:
         return dict(result, lifecycle_opt_in=True, reason=refusal)
     override = os.environ.get("MYCELIUM_STATE_DIR")

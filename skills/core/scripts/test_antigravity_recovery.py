@@ -630,7 +630,7 @@ def test_an_action_left_running_without_an_error_is_named(cycle):
     state["turns"]["0"]["actions"]["3:mycelium-data-tracker.sh"] = "running"
     state_path.write_text(json.dumps(state))
     reason = ag.dispatch("Stop", stop(payload))["reason"]
-    assert "3:mycelium-data-tracker.sh: hook outcome was never recorded" in reason
+    assert "3:mycelium-data-tracker.sh: hook outcome was not recorded" in reason
 
 
 def test_a_blocked_stop_names_its_own_cause_not_an_earlier_failed_command(cycle):
@@ -719,7 +719,7 @@ def test_an_unknown_hook_outcome_is_not_reported_as_a_capture_failure(cycle):
     state_path.write_text(json.dumps(state))
     injected = ag.dispatch("PreInvocation", dict(payload, initialNumSteps=2))["injectSteps"][0]["ephemeralMessage"]
     assert "capture failed" not in injected
-    assert "cannot finalize this work cycle: 3:mycelium-data-tracker.sh: hook outcome was never recorded" in injected
+    assert "cannot finalize this work cycle: 3:mycelium-data-tracker.sh: hook outcome was not recorded" in injected
     assert "last_hook_error" not in json.loads(state_path.read_text())["turns"]["0"]
 
 
@@ -743,3 +743,21 @@ def test_a_cycle_left_unresolved_by_an_earlier_release_is_not_blamed_on_a_later_
     state_path.write_text(json.dumps(state))
     reason = ag.dispatch("Stop", stop(payload))["reason"]
     assert "Cause: not recorded" in reason and "Stop finalization" not in reason
+
+
+def test_a_refused_startup_stays_reported_as_such_after_later_hook_failures(cycle):
+    repo, payload, records, write, run, state_path = cycle
+    state = json.loads(state_path.read_text())
+    turn = state["turns"]["0"]
+    turn["actions"]["startup"] = "running"
+    turn.update(uncertain=True, uncertain_cause="startup: refused because of a symlink",
+                last_hook_error="3:mycelium-read-tracker.sh: refused again")
+    state_path.write_text(json.dumps(state))
+    injected = ag.dispatch("PreInvocation", dict(payload, initialNumSteps=2))["injectSteps"][0]["ephemeralMessage"]
+    assert "could not start lifecycle tracking for this work cycle: startup: refused" in injected
+
+
+def test_a_long_cause_keeps_the_step_it_names():
+    turn = {"uncertain": False}
+    ag.mark_uncertain(turn, "command step 7: native execution evidence unavailable (" + "x" * 3000 + ")")
+    assert turn["uncertain_cause"].startswith("command step 7:") and len(turn["uncertain_cause"]) <= 2000

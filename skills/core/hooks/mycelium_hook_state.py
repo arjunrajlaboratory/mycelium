@@ -278,8 +278,10 @@ def first_symlink(top: str, limit: int = 100000) -> str | None:
     remove. Never follows a link. Walks iteratively in sorted order (so the
     answer is stable and depth cannot exhaust the recursion limit), examines
     at most LIMIT entries, and returns None when it finds nothing, for
-    example in a tree the strict scan could not fully examine. "." means TOP
-    itself is a link.
+    example in a tree the strict scan could not fully examine, or a link
+    whose full path exceeds PATH_MAX (it opens directories by path, unlike
+    contains_symlink; the caller then gives a generic message). "." means
+    TOP itself is a link.
     """
     if os.path.islink(top):
         return "."

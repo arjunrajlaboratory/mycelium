@@ -74,7 +74,10 @@ def mark_uncertain(turn, cause):
     elif turn.get("uncertain") is not True:
         turn.pop("uncertain_cause", None)  # a cause never outlives its resolution
     turn["uncertain"] = True
-    turn.setdefault("uncertain_cause", str(cause)[-2000:])
+    cause = str(cause)
+    if len(cause) > 2000:  # keep the head that names the step or action, and the tail
+        cause = cause[:1000] + " ... " + cause[-995:]
+    turn.setdefault("uncertain_cause", cause)
 
 
 def unresolved_reason(turn):
@@ -706,7 +709,7 @@ def _dispatch(event, payload, plugin_root, host):
                 # The process that ran these ended before recording an outcome.
                 # Not a hook failure, so last_hook_error stays for real ones.
                 mark_uncertain(turn, turn.get("last_hook_error") or (
-                    ", ".join(running) + ": hook outcome was never recorded (its process ended first)"))
+                    ", ".join(running) + ": hook outcome was not recorded"))
                 save()
 
             capture_deferred = []
@@ -903,10 +906,10 @@ def _dispatch(event, payload, plugin_root, host):
                             f"Private handoff: {root}/.mycelium/run/{host}/{session_id}/last-session.md.")
                 injected.append(guidance + "\n" + "\n".join(turn["context"]) +
                                 ("\nMycelium could not start lifecycle tracking for this work cycle: " +
-                                 one_line(turn["last_hook_error"]) + " Correct the cause, then start a new "
+                                 one_line(turn["uncertain_cause"]) + " Correct the cause, then start a new "
                                  "explicit request."
                                  if turn.get("actions", {}).get("startup") == "running" and
-                                 turn.get("last_hook_error", "").startswith("startup: ") else
+                                 turn.get("uncertain_cause", "").startswith("startup: ") else
                                  "\nMycelium capture failed and this work cycle cannot be finalized: " +
                                  one_line(turn["last_hook_error"]) + " Inspect retained native-state.json; start a new "
                                  "explicit request after correcting the cause."
