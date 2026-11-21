@@ -20,10 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removes the previous generation after a verified update. Hooks run on the
   interpreter selected with `--python`. See the README for installation and
   setup.
-- Native App 2.31.0 tracking for verified sandboxed commands and supported edits,
-  including bounded recovery of missed edit callbacks at Stop. Edit tracking
-  assumes an inferred `FileEdit` record type; an edit record of another shape
-  is reported to the model and by `doctor --profile app` instead of being
+- Native App tracking for verified sandboxed commands and supported edits,
+  including bounded recovery of missed edit callbacks at Stop, written against
+  App 2.31.0 and confirmed in live audits on App 2.32.1 and 2.33.0. Edit
+  tracking expects the App's `FileEdit` record type; an edit record of another
+  shape is reported to the model and by `doctor --profile app` instead of being
   dropped silently. The App's conversation stores are read through a private
   snapshot, so no App file (including SQLite's `-shm` index) is ever written.
   A command whose provenance cannot be verified, or that is still running when

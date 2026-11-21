@@ -108,13 +108,15 @@ python3 tools/antigravity.py doctor --profile app \
 
 Open the project in the App under the Default permission mode, start a new
 conversation, and ask it to set up Mycelium. Then rerun `doctor` with
-`--workspace /absolute/project` to confirm opt-in. The App's step-record format
-is pinned to App 2.31.0. See the [App section](docs/antigravity-ide.md#standalone-antigravity-app-separate-profile)
+`--workspace /absolute/project` to confirm opt-in. The adapter reads the App's
+step record in the shape of App 2.31.0, which live audits confirmed on App
+2.32.1 and 2.33.0. A newer App version needs fresh native verification before
+you rely on it. See the [App section](docs/antigravity-ide.md#standalone-antigravity-app-separate-profile)
 for updates, removal and limitations.
 
 **Antigravity IDE (development preview):**
 
-From a checkout of this branch, with Python 3.11 or newer:
+From a clone of this repository, with Python 3.11 or newer:
 
 ```bash
 python3 tools/antigravity.py install --dry-run
