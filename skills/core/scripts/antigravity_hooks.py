@@ -47,6 +47,18 @@ APP_UNRESOLVED = ("Antigravity App command step without authoritative workspace,
 UNRESOLVED_HOOK = "A Mycelium hook has an unresolved outcome. Inspect retained native-state.json before retrying."
 
 
+def one_line(text, limit=2000):
+    """TEXT as one printable, length-capped line for a model-facing message.
+
+    Causes carry hook stderr and host error text, which can quote
+    repository-controlled names: escape control characters (a newline could
+    forge a new instruction line) and anything else unprintable.
+    """
+    text = "".join(c if c.isprintable() else c.encode("unicode_escape", "backslashreplace").decode("ascii")
+                   for c in str(text))
+    return text if len(text) <= limit else "..." + text[-(limit - 3):]
+
+
 def mark_uncertain(turn, cause):
     """Hold this work cycle unresolved and record why.
 
@@ -54,6 +66,11 @@ def mark_uncertain(turn, cause):
     and later events cannot settle it. Ordinary native errors (a command
     that exited nonzero) never go here, so a blocked Stop cannot blame them.
     """
+    if turn.get("uncertain") and "uncertain_cause" not in turn:
+        # Marked unresolved by a release that kept no cause: never pin a
+        # later, unrelated event on it.
+        cause = turn.get("last_hook_error") or ("not recorded (this work cycle was marked "
+                                                "unresolved by an earlier Mycelium version)")
     turn["uncertain"] = True
     turn.setdefault("uncertain_cause", str(cause)[-2000:])
 
@@ -65,7 +82,7 @@ def unresolved_reason(turn):
     # The first cause is kept, so also name every action still unfinished:
     # one killed later must not hide behind an earlier, unrelated failure.
     running = sorted(action for action, value in turn.get("actions", {}).items() if value == "running")
-    return (UNRESOLVED_HOOK + (f" Cause: {detail}" if detail else "") +
+    return (UNRESOLVED_HOOK + (f" Cause: {one_line(detail)}" if detail else "") +
             (" Unfinished hook actions: " + ", ".join(running) + "." if running else ""))
 
 
@@ -881,7 +898,7 @@ def _dispatch(event, payload, plugin_root, host):
                             f"Private handoff: {root}/.mycelium/run/{host}/{session_id}/last-session.md.")
                 injected.append(guidance + "\n" + "\n".join(turn["context"]) +
                                 ("\nMycelium capture failed and this work cycle cannot be finalized: " +
-                                 turn["last_hook_error"] + " Inspect retained native-state.json; start a new "
+                                 one_line(turn["last_hook_error"]) + " Inspect retained native-state.json; start a new "
                                  "explicit request after correcting the cause."
                                  if turn.get("last_hook_error") else "") +
                                 ("\n" + "\n".join(turn["reminders"].values()) if turn["reminders"] else "") +

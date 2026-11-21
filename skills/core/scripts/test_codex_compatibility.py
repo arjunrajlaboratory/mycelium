@@ -985,6 +985,34 @@ def test_plugin_dispatcher_refuses_symlinked_living_before_creating_state(tmp_pa
     assert not (repo / ".mycelium").exists()
 
 
+@pytest.mark.parametrize("target", ["missing", "file"])
+def test_plugin_dispatcher_stays_silent_for_a_living_link_that_is_no_opt_in(tmp_path, target):
+    """Only a link to a directory looks like an opt-in worth warning about;
+    the globally enabled plugin stays silent for anything else."""
+    repo = _repo(tmp_path, living=False)
+    pointee = tmp_path / "pointee"
+    if target == "file":
+        pointee.write_text("not a directory\n")
+    (repo / ".living").symlink_to(pointee)
+    result = _run_plugin_hook(
+        "mycelium-health.sh", repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "not-an-opt-in"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "" and result.stderr == ""
+
+
+def test_a_managed_state_file_refusal_after_the_lock_is_explained(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / ".mycelium" / ".gitignore").mkdir(parents=True)
+    result = _run_plugin_hook(
+        "mycelium-health.sh", repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "managed-dir"},
+    )
+    assert result.returncode == 0, result.stderr
+    _assert_tracking_off_warning(result, ".mycelium/.gitignore is not a regular file")
+
+
 def test_hook_does_not_import_legacy_session_through_symlinked_claude_dir(tmp_path):
     repo = _repo(tmp_path)
     outside_claude = tmp_path / "outside-claude"

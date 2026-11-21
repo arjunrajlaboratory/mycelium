@@ -150,19 +150,26 @@ def base_state_refusal(root, profile, package=None, python=None):
         return f"Lifecycle state check unavailable: {check} is missing"
     interpreter = python if python is not None and Path(python).is_file() else sys.executable
     host = "antigravity-app" if profile == "app" else "antigravity-ide"
-    try:
+
+    def prepare(op):
         result = subprocess.run(
             [str(interpreter), "-I", "-S", str(check), str(os.getpid()), host, "ok", "",
-             str(root), "", "", "", "", "prepare:read-only+reason"],
-            capture_output=True, timeout=60, cwd="/")
+             str(root), "", "", "", "", op], capture_output=True, timeout=60, cwd="/")
+        return result.stdout.split(b"\0")
+
+    try:
+        fields = prepare("prepare:read-only+reason")
+        if b"ok" in fields:
+            return None
+        if b"reason" in fields[:-1]:
+            return os.fsdecode(fields[fields.index(b"reason") + 1])
+        # An installed release older than the +reason flag refuses the op
+        # itself; ask it the plain question before reporting a refusal.
+        if b"ok" in prepare("prepare:read-only"):
+            return None
     except (subprocess.SubprocessError, OSError) as error:
         # A diagnostic must not break the identity report.
         return f"Could not check lifecycle state ({type(error).__name__}): {error}"
-    fields = result.stdout.split(b"\0")
-    if b"ok" in fields:
-        return None
-    if b"reason" in fields[:-1]:
-        return os.fsdecode(fields[fields.index(b"reason") + 1])
     if not os.path.lexists(root / ".mycelium"):
         return None  # read-only refuses only because startup has not created it yet
     return "Base Mycelium cannot prepare lifecycle state in " + str(root / ".mycelium")

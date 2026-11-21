@@ -241,3 +241,26 @@ def test_workspace_readiness_creates_no_state(tmp_path):
     repo = _opted_in(tmp_path)
     assert package.workspace_readiness(repo)['ok']
     assert not (repo / '.mycelium').exists()
+
+
+def test_workspace_readiness_accepts_an_installed_release_without_the_reason_flag(tmp_path):
+    """An older installed state module refuses `+reason` itself; a clean
+    workspace must still read as ready instead of as a refusal."""
+    import subprocess
+    repo = _opted_in(tmp_path)
+    (repo / '.mycelium').mkdir()
+    old = tmp_path / 'old-package'
+    hooks = old / 'skills' / 'core' / 'hooks'
+    hooks.mkdir(parents=True)
+    source = Path(package.__file__).resolve().parent.parent / package.HOOK_STATE
+    text = source.read_text()
+    # Simulate the release before this change: no +reason support at all.
+    text = text.replace('mode, _, flag = mode.partition("+")', 'flag = ""')
+    (hooks / 'mycelium_hook_state.py').write_text(text)
+    assert subprocess.run(['python3', '-I', '-S', str(hooks / 'mycelium_hook_state.py'), '1', 'x', 'ok', '',
+                           str(repo), '', '', '', '', 'prepare:read-only+reason'],
+                          capture_output=True).stdout.split(b'\0')[:2] == [b'fail', b'1']
+    assert package.workspace_readiness(repo, package=old)['ok']
+    (repo / '.mycelium' / 'link').symlink_to(tmp_path)
+    report = package.workspace_readiness(repo, package=old)
+    assert not report['ok'] and 'cannot prepare lifecycle state' in report['reason']

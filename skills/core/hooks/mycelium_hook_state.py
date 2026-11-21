@@ -62,6 +62,7 @@ process died; bash then treats the next unfinished op as failed.
 from __future__ import annotations
 
 import errno
+import shlex
 import os
 import stat
 import sys
@@ -335,7 +336,7 @@ def symlink_reason(repo_root: str, top: str, found: str | None = None) -> str:
     else:
         # Too deep or too large to name here, or not fully readable.
         where = (f"{label} contains a symlink Mycelium could not name, or could not be fully "
-                 f"examined (list links with: find {label} -type l)")
+                 f"examined (list links with: find {shlex.quote(label)} -type l)")
     return (f"{where}. Mycelium does not keep lifecycle state in a tree that holds "
             f"symlinks, so session tracking is off until it is removed or moved out of {label}/.")
 
@@ -655,7 +656,7 @@ class State:
             raise OpFailed
         if mode in {"read-only", "bootstrap"}:
             return
-        self.prepare_shared_writes(repo_root, state_dir)
+        self.prepare_shared_writes(repo_root, state_dir, explain)
 
     @staticmethod
     def validate_requested_state(repo_root: str, requested: str) -> str:
@@ -695,21 +696,29 @@ class State:
             raise OpFailed
         return result
 
-    def prepare_shared_writes(self, repo_root: str, state_dir: str) -> None:
+    def prepare_shared_writes(self, repo_root: str, state_dir: str, explain: bool = False) -> None:
         plugin_pointer = state_dir + "/plugin-root"
         legacy_dir = repo_root + "/.claude"
         legacy_session = legacy_dir + "/last-session.md"
+
+        def refuse(managed: str) -> None:
+            if explain:
+                emit("reason", f"{shown_path(os.path.relpath(managed, repo_root))} is not a regular "
+                               "file. Mycelium does not write through it, so session tracking is "
+                               "off until it is removed.")
+            raise OpFailed
+
         for managed in (state_dir + "/.gitignore", state_dir + "/last-session.md"):
             if (exists(managed) or islink(managed)) and (
                 not isfile(managed) or islink(managed)
             ):
-                raise OpFailed
+                refuse(managed)
         if (
             self.plugin_root
             and (exists(plugin_pointer) or islink(plugin_pointer))
             and (not isfile(plugin_pointer) or islink(plugin_pointer))
         ):
-            raise OpFailed
+            refuse(plugin_pointer)
 
         gitignore = state_dir + "/.gitignore"
         if not isfile(gitignore):

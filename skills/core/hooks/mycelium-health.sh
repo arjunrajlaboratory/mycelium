@@ -58,7 +58,7 @@ fi
 # holding the lifecycle lock. Releasing a lock never taken does nothing.
 trap 'mycelium_release_session_lock; mycelium_release_stop_lock' EXIT
 if ! mycelium__state "$REPO_ROOT" "$INPUT" \
-  prepare:bootstrap+reason lock:stop prepare:write select:create lock:session \
+  prepare:bootstrap+reason lock:stop prepare:write+reason select:create lock:session \
   marker owner; then
   # The marker (op 6) and owner (op 7) reads never fail, so a failure there
   # means the process died with both locks held. An unread owner is treated
