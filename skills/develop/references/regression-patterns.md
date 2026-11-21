@@ -1100,9 +1100,12 @@ reflection in the worktree's `.living/`, and blocked until the agent wrote into
 the main checkout (#144).
 
 **Invariant:** One session, one root. Every lifecycle hook resolves the
-repository through `mycelium_session_repo_root` from the payload's `cwd`, and
-falls back to the process directory only when that repository is not opted in
-(a turn that ended after `cd` into a nested repository or outside any).
+repository from the payload's `cwd`, never a bare process-directory
+`git rev-parse`. Stop and the post-action hook use `mycelium_session_repo_root`,
+which takes the nearest opted-in repository at or above that `cwd`: a turn that
+ended after `cd` into a nested repository without `.living/` stays on the
+enclosing project that holds the session's transaction. Only when no enclosing
+repository is opted in does it fall back to the process directory.
 Machine-local state that guidance dereferences, such as `.mycelium/plugin-root`,
 must exist in whichever checkout the session uses.
 
@@ -1110,4 +1113,6 @@ must exist in whichever checkout the session uses.
 main checkout and the payload `cwd` in a linked worktree; dirty the main
 checkout from "another session"; assert Stop's reason names only worktree
 files, accepts worktree reflection, and leaves the main checkout byte-identical.
-Pair it with a negative neighbor whose `cwd` is a nested non-opted repository.
+Pair it with neighbors whose `cwd` is a nested non-opted repository inside the
+main checkout and inside the worktree; the second must still block on the
+worktree's changes.

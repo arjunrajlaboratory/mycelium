@@ -1780,21 +1780,28 @@ mycelium__payload_cached() {
 }
 
 # mycelium_session_repo_root CWD: print the repository root a session hook
-# acts on. The session's own directory (the payload `cwd`) wins when its
-# repository is opted in: a host may run hooks in the main checkout while the
-# session works in a linked worktree (issue #144). Otherwise fall back to the
-# hook process's directory, so a turn that ended after `cd` into a nested
-# repository without .living/, or outside any repository, is still judged
-# where it was before. Prints nothing outside a repository.
+# acts on: the nearest repository at or above the session's own directory (the
+# payload `cwd`) that is opted in. A host may run hooks in the main checkout
+# while the session works in a linked worktree (issue #144), so the process
+# directory is the wrong default. Walking outward keeps a turn that ended after
+# `cd` into a nested repository without .living/ (a vendored checkout, a
+# submodule) on the enclosing project, which holds the session's transaction.
+# Only when no enclosing repository is opted in, or the payload names no
+# directory, fall back to the hook process's directory. Prints nothing outside
+# a repository.
 mycelium_session_repo_root() {
-  local cwd="${1:-}"
+  local dir="${1:-}"
   local root=""
-  if [[ -n "$cwd" && -d "$cwd" ]]; then
-    root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)
-    if [[ -n "$root" && -d "$root/.living" ]]; then
-      printf '%s\n' "$root"
-      return 0
-    fi
+  if [[ -n "$dir" && -d "$dir" ]]; then
+    while root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) \
+      && [[ -n "$root" ]]; do
+      if [[ -d "$root/.living" ]]; then
+        printf '%s\n' "$root"
+        return 0
+      fi
+      [[ "$root" == "/" ]] && break
+      dir=$(dirname "$root")
+    done
   fi
   git rev-parse --show-toplevel 2>/dev/null || true
 }

@@ -9,8 +9,9 @@ against the main checkout: other sessions' uncommitted work there counted as
 this session's, reflection written in the worktree's `.living/` was invisible,
 and Stop blocked until the agent wrote into the main checkout.
 
-Every hook now resolves the root from the payload's `cwd`, falling back to the
-process directory only when the payload names none.
+Every hook now resolves the root from the payload's `cwd`. Stop and the Bash
+post-action hook take the nearest opted-in repository at or above it, and fall
+back to the process directory only when none is opted in.
 """
 
 from __future__ import annotations
@@ -171,6 +172,35 @@ def test_stop_falls_back_when_the_session_cwd_is_not_opted_in(tmp_path):
                      "hook_event_name": "Stop", "stop_hook_active": False})
         assert stop.returncode == 0, stop.stderr
         assert _blocked(stop), (cwd, stop.stdout)
+    assert not (nested / ".mycelium").exists()
+
+
+def test_stop_keeps_the_worktree_after_cd_into_a_nested_repository(tmp_path):
+    """A worktree session whose turn ends after `cd` into a nested repository
+    without .living/ (a vendored checkout, a submodule) is still judged on the
+    enclosing worktree, not on the main checkout the hook process runs in,
+    which holds no transaction for it and would let Stop pass silently."""
+    main, worktree = _checkouts(tmp_path)
+    nested = worktree / "vendor" / "lib"
+    nested.mkdir(parents=True)
+    _git("init", "-q", str(nested))
+    base = {"cwd": str(worktree), "session_id": SID}
+    start = _run("claude", "mycelium-health.sh", main,
+                 {**base, "source": "startup", "hook_event_name": "SessionStart"})
+    assert start.returncode == 0, start.stderr
+    (worktree / "analysis.py").write_text("x = 2\n")
+    _run("claude", "mycelium-activity-tracker.sh", main,
+         {**base, "tool_name": "Edit", "hook_event_name": "PostToolUse",
+          "tool_input": {"file_path": str(worktree / "analysis.py")},
+          "tool_response": {"exit_code": 0}})
+
+    stop = _run("claude", "mycelium-stop-check.sh", main,
+                {"cwd": str(nested), "session_id": SID,
+                 "hook_event_name": "Stop", "stop_hook_active": False})
+    assert stop.returncode == 0, stop.stderr
+    assert _blocked(stop), stop.stdout
+    assert "analysis.py" in json.loads(stop.stdout)["reason"]
+    assert not (main / ".mycelium" / "run").exists()
     assert not (nested / ".mycelium").exists()
 
 
