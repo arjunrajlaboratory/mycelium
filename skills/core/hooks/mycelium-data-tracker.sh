@@ -41,6 +41,8 @@ fi
 # unrecorded-event diagnostic, use the original stream.
 exec 3>&2
 MYCELIUM_HOOK_DIAG_FD=3
+# An event this hook could not record is lineage, not session work.
+MYCELIUM_POST_TOOL_EVENT_KIND=lineage
 
 {
   INPUT=$(cat)

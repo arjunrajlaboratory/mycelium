@@ -289,7 +289,7 @@ mycelium_prepare_locked_post_tool_state() {
   fi
   if (( status == 2 )); then
     MYCELIUM_POST_TOOL_UNRECORDED=1
-    mycelium__record_unrecorded_event "$2"
+    mycelium__record_unrecorded_event "$1" "$2"
     return 1
   fi
   [[ "$allow_reopen" == reopen ]] || return 1
@@ -299,57 +299,170 @@ mycelium_prepare_locked_post_tool_state() {
   mycelium__prepare_locked_post_tool_state_once "$1" "$2" || status=$?
   if (( status == 2 )); then
     MYCELIUM_POST_TOOL_UNRECORDED=1
-    mycelium__record_unrecorded_event "$2"
+    mycelium__record_unrecorded_event "$1" "$2"
   fi
   (( status == 0 ))
 }
 
-# One NDJSON line per event a hook could not record, appended to the owning
-# transaction's directory without the session lock (that lock is what was
-# unavailable). The append is locked on the file itself and refuses a link.
-MYCELIUM__PY_UNRECORDED_EVENT='
-import fcntl, json, os, sys
-path, ts, hook, reason, host = sys.argv[1:6]
-tool = None
+# Unrecorded post-tool events: one NDJSON line per event a hook could not
+# record, in the owning transaction's directory. Every reader and writer
+# holds flock(2) on the file itself; the session lock is what was
+# unavailable, so it cannot serialize them.
+#
+#   append SHARED REL KIND HOOK REASON HOST TS  (payload on stdin)
+#       Writer. Walks SHARED/REL with O_NOFOLLOW directory descriptors, so a
+#       managed ancestor swapped for a link while the hook waited cannot
+#       redirect the write. After taking the flock it checks that its
+#       descriptor is still the file at that name: Stop may have consumed
+#       (unlinked) it meanwhile, and a line written there would be lost.
+#   take PATH      Stop, under the session lock: print "WORK OTHER SIZE".
+#       A line whose kind is `lineage` or `read` is OTHER; any other line,
+#       or an existing file with no line at all, is WORK.
+#   consume PATH SIZE   Remove the first SIZE bytes Stop took, keeping any
+#       line appended since.
+MYCELIUM__PY_UNRECORDED_EVENTS='
+import fcntl, json, os, stat, sys
+NAME = "mycelium-unrecorded-events.tmp"
+mode = sys.argv[1]
+if mode == "append":
+    shared, rel, kind, hook, reason, host, ts = sys.argv[2:9]
+    tool = None
+    try:
+        payload = json.loads(sys.stdin.read())
+        if isinstance(payload, dict) and isinstance(payload.get("tool_name"), str):
+            tool = payload["tool_name"][:200]
+    except ValueError:
+        pass
+    line = (json.dumps({"ts": ts, "kind": kind, "hook": hook, "reason": reason,
+                        "host": host, "tool_name": tool}) + "\n").encode("ascii")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory = os.open(shared, flags)
+    try:
+        for part in [part for part in rel.split("/") if part]:
+            if part in (".", ".."):
+                raise SystemExit(1)
+            child = os.open(part, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        for _ in range(20):
+            fd = os.open(NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
+                         0o644, dir_fd=directory)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                held = os.fstat(fd)
+                try:
+                    current = os.stat(NAME, dir_fd=directory, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino) \
+                        or not stat.S_ISREG(current.st_mode):
+                    continue
+                os.write(fd, line)
+                raise SystemExit(0)
+            finally:
+                os.close(fd)
+        raise SystemExit(1)
+    finally:
+        os.close(directory)
+
+path = sys.argv[2]
 try:
-    payload = json.loads(sys.stdin.read())
-    if isinstance(payload, dict) and isinstance(payload.get("tool_name"), str):
-        tool = payload["tool_name"][:200]
-except ValueError:
-    pass
-record = {"ts": ts, "hook": hook, "reason": reason, "host": host, "tool_name": tool}
-fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+except FileNotFoundError:
+    if mode == "take":
+        print("0 0 0")
+    raise SystemExit(0)
 try:
     fcntl.flock(fd, fcntl.LOCK_EX)
-    os.write(fd, (json.dumps(record) + "\n").encode("ascii"))
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise SystemExit(1)
+    data = b""
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        data += chunk
+    if mode == "take":
+        work = other = 0
+        for raw in data.splitlines():
+            if not raw.strip():
+                continue
+            try:
+                kind = json.loads(raw).get("kind")
+            except (ValueError, AttributeError):
+                kind = None
+            if kind in ("lineage", "read"):
+                other += 1
+            else:
+                work += 1
+        if work == 0 and other == 0:
+            work = 1
+        print(work, other, len(data))
+    elif mode == "consume":
+        size = int(sys.argv[3])
+        if len(data) <= size:
+            os.unlink(path)
+        else:
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, data[size:])
+    else:
+        raise SystemExit(1)
 finally:
     os.close(fd)
 '
 
-# mycelium__record_unrecorded_event PAYLOAD: called only after a state call
-# proved this event owns the transaction in STATE_DIR. Best effort: a failure
-# here must not change the hook's fail-open exit status.
+mycelium_unrecorded_events() {
+  python3 -c "$MYCELIUM__PY_UNRECORDED_EVENTS" "$@"
+}
+
+# mycelium__record_unrecorded_event REPO_ROOT PAYLOAD: called only after a
+# state call proved this event owns the transaction in STATE_DIR. Best
+# effort: a failure here must not change the hook's fail-open exit status.
+# The record's kind is the caller's MYCELIUM_POST_TOOL_EVENT_KIND: `work`
+# (the default: a project edit or proven analysis run, which Stop enforces),
+# `lineage`, or `read`.
 mycelium__record_unrecorded_event() {
-  local input="$1"
+  local repo_root="$1"
+  local input="$2"
+  local kind="${MYCELIUM_POST_TOOL_EVENT_KIND:-work}"
   local hook=""
   local reason=session-lock-unavailable
   local diag_fd="${MYCELIUM_HOOK_DIAG_FD:-2}"
+  local run_dir="${STATE_DIR:-}"
+  local shared=""
+  local rel=""
   hook=$(basename "${0:-hook}")
   if (( MYCELIUM__STATE_DIED == 1 )); then
     reason=state-check-died
   fi
   [[ "$diag_fd" =~ ^[0-9]+$ ]] || diag_fd=2
-  if [[ -n "${STATE_DIR:-}" && -d "$STATE_DIR" && ! -L "$STATE_DIR" ]]; then
-    printf '%s' "$input" | python3 -c "$MYCELIUM__PY_UNRECORDED_EVENT" \
-      "$STATE_DIR/mycelium-unrecorded-events.tmp" \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$hook" "$reason" \
-      "$(mycelium_hook_host)" >/dev/null 2>&1 || true
+  case "$kind" in
+    work|lineage|read) ;;
+    *) kind=work ;;
+  esac
+  # The waited-on state may have changed: re-prepare the shared directory
+  # and require the run directory inside it before the walk.
+  if [[ -n "$run_dir" ]] \
+    && shared=$(mycelium__checked_shared_state_dir "$repo_root"); then
+    if [[ "$run_dir" == "$shared" ]]; then
+      rel=""
+    elif [[ "$run_dir" == "$shared"/* ]]; then
+      rel="${run_dir#"$shared"/}"
+    else
+      shared=""
+    fi
+    if [[ -n "$shared" ]]; then
+      printf '%s' "$input" | mycelium_unrecorded_events append "$shared" "$rel" \
+        "$kind" "$hook" "$reason" "$(mycelium_hook_host)" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1 || true
+    fi
   fi
   if [[ "$reason" == session-lock-unavailable ]]; then
-    printf 'Mycelium: %s could not take the session lock; this tool event was not recorded. Stop will ask for triage of this turn'"'"'s work.\n' \
+    printf 'Mycelium: %s could not take the session lock; this tool event was not recorded; Stop will report it.\n' \
       "$hook" >&"$diag_fd" || true
   else
-    printf 'Mycelium: %s lost its state check while taking the session lock; this tool event was not recorded. Stop will ask for triage of this turn'"'"'s work.\n' \
+    printf 'Mycelium: %s lost its state check while taking the session lock; this tool event was not recorded; Stop will report it.\n' \
       "$hook" >&"$diag_fd" || true
   fi
 }
@@ -806,15 +919,24 @@ mycelium_refresh_work_cycle() {
   if [[ "$should_refresh" != true ]]; then
     return 1
   fi
+  mycelium_start_work_cycle "$repo_root" "$helper"
+  return 0
+}
 
+# mycelium_start_work_cycle REPO_ROOT HELPER: fingerprint .living/ now and
+# stamp the reminder, so only a .living/ update made after this point can
+# satisfy Stop. The caller holds the session lock.
+mycelium_start_work_cycle() {
+  local repo_root="$1"
+  local helper="$2"
+  local baseline_file="$STATE_DIR/living-reminder-baseline.json"
   if [[ -f "$helper" ]]; then
     python3 "$helper" living-snapshot \
       --repo-root "$repo_root" \
       --output "$baseline_file" >/dev/null 2>&1 \
       || rm -f "$baseline_file"
   fi
-  date +%s > "$reminder_file"
-  return 0
+  date +%s > "$STATE_DIR/mycelium-reminded.tmp"
 }
 
 # Contenders claim reaping inside the lock directory itself; release must wait

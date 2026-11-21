@@ -206,9 +206,17 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
       _REM_MTIME=$(mycelium_file_mtime "$_REMINDED_FILE")
       _REM_AGE=$(( _NOW - _REM_MTIME ))
     fi
-    # Clean only if BOTH activity signals are also old (> 2h). If either is
+    # Clean only if every activity signal is also old (> 2h). If any is
     # fresh, assume the session is still alive.
-    if [ "$_ACT_AGE" -gt 7200 ] && [ "$_REM_AGE" -gt 7200 ]; then
+    # A hook that could not record its event is activity too.
+    _UNREC_FILE="$STATE_DIR/mycelium-unrecorded-events.tmp"
+    _UNREC_AGE=999999999
+    if [ -f "$_UNREC_FILE" ]; then
+      _UNREC_MTIME=$(mycelium_file_mtime "$_UNREC_FILE")
+      _UNREC_AGE=$(( _NOW - _UNREC_MTIME ))
+    fi
+    if [ "$_ACT_AGE" -gt 7200 ] && [ "$_REM_AGE" -gt 7200 ] \
+      && [ "$_UNREC_AGE" -gt 7200 ]; then
       _SHOULD_CLEAN=true
     fi
   fi

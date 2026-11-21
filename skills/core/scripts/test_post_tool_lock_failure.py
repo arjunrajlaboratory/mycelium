@@ -10,8 +10,10 @@ without asking for triage of work it never heard of.
 A failure after ownership is proven now appends one line to the owning
 transaction's `mycelium-unrecorded-events.tmp`, prints a diagnostic on
 stderr, and still exits 0 so the host tool call is never blocked. Stop
-treats that file as work of unknown extent: it blocks until `.living/` is
-updated and says why. An intentional no-op leaves neither.
+treats a `work` line (an edit or proven analysis run) as work of unknown
+extent: it blocks until `.living/` is updated and says why. A `lineage` or
+`read` line is not session work, as its recorded counterpart is not; Stop
+reports it as unknown provenance. An intentional no-op leaves neither.
 """
 
 from __future__ import annotations
@@ -123,13 +125,13 @@ FAST_TIMEOUT = {"MYCELIUM_SESSION_LOCK_MAX_ATTEMPTS": "2"}
 
 
 @pytest.mark.parametrize("host", HOSTS)
-@pytest.mark.parametrize("hook", [
-    "mycelium-activity-tracker.sh",
-    "mycelium-post-action.sh",
-    "mycelium-data-tracker.sh",
-    "mycelium-read-tracker.sh",
+@pytest.mark.parametrize(("hook", "kind"), [
+    ("mycelium-activity-tracker.sh", "work"),
+    ("mycelium-post-action.sh", "work"),
+    ("mycelium-data-tracker.sh", "lineage"),
+    ("mycelium-read-tracker.sh", "read"),
 ])
-def test_lock_timeout_leaves_marker_and_diagnostic(tmp_path, host, hook):
+def test_lock_timeout_leaves_marker_and_diagnostic(tmp_path, host, hook, kind):
     repo = _repo(tmp_path)
     sid = "contended-session"
     _start(host, repo, sid)
@@ -147,6 +149,7 @@ def test_lock_timeout_leaves_marker_and_diagnostic(tmp_path, host, hook):
     assert len(lines) == 1
     record = json.loads(lines[0])
     assert record["hook"] == hook
+    assert record["kind"] == kind
     assert record["reason"] == "session-lock-unavailable"
     # The other hook's lock is untouched: still held by its live owner.
     assert lock.is_dir()
@@ -173,9 +176,12 @@ def test_stop_asks_for_triage_after_an_unrecorded_event(tmp_path, host):
 
     reason = _block_reason(_stop(host, repo, sid))
     assert reason is not None, "Stop accepted a turn with an unrecorded edit"
-    assert "could not be recorded" in reason
+    assert "UNRECORDED WORK: 1 edit or analysis hook run(s)" in reason
     assert "0 files changed" not in reason
-    assert (run_dir / UNRECORDED).is_file()
+    # Taken into a fresh work cycle: only a later .living update satisfies it.
+    assert not (run_dir / UNRECORDED).exists()
+    assert (run_dir / "mycelium-reminded.tmp").is_file()
+    assert _block_reason(_stop(host, repo, sid)) is not None
 
     # Triage clears it like any other work signal.
     with (repo / ".living" / "learnings.md").open("a") as handle:
@@ -203,7 +209,34 @@ def test_unrecorded_note_joins_a_files_changed_block(tmp_path, host):
     reason = _block_reason(_stop(host, repo, sid))
     assert reason is not None
     assert "model.py" in reason
-    assert "UNRECORDED WORK: 1 tool event(s)" in reason
+    assert "UNRECORDED EVENTS: 1 data-lineage or .living read record(s)" in reason
+    assert "UNRECORDED WORK" not in reason
+
+
+@pytest.mark.parametrize("host", HOSTS)
+@pytest.mark.parametrize("hook", ["mycelium-data-tracker.sh", "mycelium-read-tracker.sh"])
+def test_dropped_lineage_or_read_is_reported_without_forcing_triage(
+    tmp_path, host, hook
+):
+    """A data command or `.living` read is not session work when recorded,
+    so losing its record does not oblige triage; Stop still says it was lost."""
+    repo = _repo(tmp_path)
+    sid = "dropped-record"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    lock = _hold_session_lock(run_dir)
+    payload = dict(_payloads(repo, sid)[hook])
+    if hook == "mycelium-data-tracker.sh":
+        payload["tool_input"] = {"command": "head analysis.py"}
+    assert _run(host, hook, repo, payload, extra_env=FAST_TIMEOUT).returncode == 0
+    (lock / "owner").unlink()
+    lock.rmdir()
+
+    stop = _stop(host, repo, sid)
+
+    assert _block_reason(stop) is None, stop.stdout
+    assert "UNRECORDED EVENTS: 1" in stop.stdout
+    assert not (run_dir / UNRECORDED).exists()
 
 
 @pytest.mark.parametrize("host", HOSTS)
@@ -254,3 +287,130 @@ def test_unrecorded_marker_is_not_followed_through_a_symlink(tmp_path, host):
 
     assert result.returncode == 0
     assert outside.read_text() == "untouched\n"
+
+
+SESSION_CHANGES = HOOKS_DIR.parent / "scripts" / "session_file_changes.py"
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_evidence_appended_while_stop_runs_is_not_accepted(tmp_path, host):
+    """A hook that times out while a slow Stop holds the lock appends after
+    Stop took the file. That Stop must not accept; the retry enforces it."""
+    repo = _repo(tmp_path)
+    sid = "late-evidence"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    once = tmp_path / "appended"
+    wrapper = tmp_path / "slow_changes.py"
+    wrapper.write_text(
+        "import json, os, sys\n"
+        f"once = {str(once)!r}\n"
+        "if not os.path.exists(once):\n"
+        "    open(once, 'w').close()\n"
+        f"    with open({str(run_dir / UNRECORDED)!r}, 'a') as handle:\n"
+        "        handle.write(json.dumps({'kind': 'work', 'hook': 'late'}) + '\\n')\n"
+        f"os.execv(sys.executable, [sys.executable, {str(SESSION_CHANGES)!r}] + sys.argv[1:])\n"
+    )
+    env = {"MYCELIUM_SESSION_CHANGES_HELPER": str(wrapper)}
+    stop = _run(host, "mycelium-stop-check.sh", repo,
+                {"cwd": str(repo), "session_id": sid, "hook_event_name": "Stop",
+                 "stop_hook_active": False}, extra_env=env)
+    assert once.exists(), "the helper never ran inside Stop"
+    reason = _block_reason(stop)
+    assert reason is not None and "while this Stop ran" in reason, stop.stdout
+
+    retry = _block_reason(_stop(host, repo, sid))
+    assert retry is not None and "UNRECORDED WORK: 1" in retry
+    with (repo / ".living" / "learnings.md").open("a") as handle:
+        handle.write("\n### [2026-11-20] triaged late work\n- noted\n")
+    assert _block_reason(_stop(host, repo, sid)) is None
+    assert not (run_dir / UNRECORDED).exists()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_earlier_triage_does_not_cover_later_unrecorded_work(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "stale-triage"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    payloads = _payloads(repo, sid)
+    (repo / "model.py").write_text("x = 1\n")
+    assert _run(host, "mycelium-activity-tracker.sh", repo,
+                payloads["mycelium-activity-tracker.sh"]).returncode == 0
+    with (repo / ".living" / "learnings.md").open("a") as handle:
+        handle.write("\n### [2026-11-20] first edit\n- noted\n")
+    lock = _hold_session_lock(run_dir)
+    second = dict(payloads["mycelium-activity-tracker.sh"],
+                  tool_input={"file_path": str(repo / "other.py")})
+    (repo / "other.py").write_text("y = 2\n")
+    assert _run(host, "mycelium-activity-tracker.sh", repo, second,
+                extra_env=FAST_TIMEOUT).returncode == 0
+    (lock / "owner").unlink()
+    lock.rmdir()
+
+    reason = _block_reason(_stop(host, repo, sid))
+    assert reason is not None, "an earlier triage satisfied later lost work"
+    assert "UNRECORDED WORK: 1" in reason
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_fresh_unrecorded_evidence_keeps_an_old_transaction_alive(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "old-but-alive"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    marker = run_dir / "active-session-log.tmp"
+    lines = marker.read_text().splitlines()
+    marker.write_text(f"{lines[0]}\n{int(time.time()) - 7300}\n{lines[2]}\n")
+    (run_dir / UNRECORDED).write_text('{"kind": "work"}\n')
+
+    result = _run(host, "mycelium-health.sh", repo,
+                  {"cwd": str(repo), "source": "resume", "session_id": sid,
+                   "hook_event_name": "SessionStart"})
+
+    assert result.returncode == 0, result.stderr
+    assert "INCOMPLETE SESSION LOG" not in result.stdout
+    assert marker.read_text().splitlines()[0] == lines[0]
+    assert (run_dir / UNRECORDED).exists()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_record_refuses_a_linked_ancestor_swapped_in_during_the_wait(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "swapped-ancestor"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    outside = tmp_path / "outside"
+    (outside / sid).mkdir(parents=True)
+    host_dir = run_dir.parent
+    host_dir.rename(tmp_path / "moved-host-dir")
+    host_dir.symlink_to(outside)
+    command = (
+        f'source "{HOOKS_DIR / "mycelium-hook-lib.sh"}"\n'
+        f'STATE_DIR="{run_dir}"\n'
+        f'mycelium__record_unrecorded_event "{repo}" \'{{"tool_name": "Edit"}}\'\n'
+    )
+    result = subprocess.run(["bash", "-c", command], capture_output=True, text=True,
+                            env={**os.environ, "MYCELIUM_HOOK_HOST": host},
+                            check=False, timeout=30)
+    assert result.returncode == 0
+    assert "could not take the session lock" in result.stderr
+    assert not (outside / sid / UNRECORDED).exists()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_work_left_after_an_accepted_stop_reopens_and_is_enforced(tmp_path, host):
+    """A hook whose wait outlasted the previous Stop's acceptance writes into
+    a run directory with no transaction; the next Stop must not ignore it."""
+    repo = _repo(tmp_path)
+    sid = "after-accept"
+    _start(host, repo, sid)
+    assert _block_reason(_stop(host, repo, sid)) is None
+    run_dir = _run_dir(repo, host, sid)
+    assert not (run_dir / "active-session-log.tmp").exists()
+    (run_dir / UNRECORDED).write_text(
+        '{"kind": "work", "hook": "mycelium-activity-tracker.sh"}\n')
+
+    reason = _block_reason(_stop(host, repo, sid))
+    assert reason is not None and "UNRECORDED WORK: 1" in reason
+    assert (run_dir / "active-session-log.tmp").exists()

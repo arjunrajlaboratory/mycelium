@@ -493,9 +493,11 @@ hook, filesystem, or lifecycle boundaries.
       state that appears successfully finalized.
 - [ ] A fail-open exit separates an intentional no-op from a failure. A
       post-tool hook that proved it owns a live transaction but could not take
-      its session lock leaves evidence Stop treats as work (an unrecorded-event
-      line) plus a stderr diagnostic, still exits 0, and does not then take a
-      no-transaction fallback (reopen, unowned skip) for the same event.
+      its session lock leaves an unrecorded-event line and a stderr diagnostic,
+      still exits 0, and does not then take a no-transaction fallback
+      (reopen, unowned skip) for the same event. Stop enforces a lost edit or
+      analysis run as work and reports a lost lineage or read record without
+      treating it as work its recorded form never was.
 - [ ] Registry values derived from filenames, branches, commits, or frontmatter
       cannot break the Markdown table; a rejected registry upsert blocks Stop
       and an eventual retry does not duplicate the session-end footer.
@@ -572,7 +574,7 @@ exercise them.
 | A script names a direct relative input, or an absolute external input shares a basename with repository data | Lineage records the authoritative static path exactly once and does not claim repository recovery. |
 | A live host session runs analysis or makes a project edit after an earlier turn's Stop was accepted (including an edit queued on the session lock while Stop accepted) | The event never writes into the accepted transaction; it reopens a fresh transaction for its own host session, with a new log, lineage, and Stop enforcement. Parallel hooks for one call reopen exactly one transaction, another root's live state stays byte-identical, and reads, non-work commands, `.living`/`.mycelium` edits, and unsafe state never reopen. |
 | A Bash call touches data without a proven analysis run (`head data/x.csv`, `cp a.csv outputs/`, a heredoc-fed `python3 -`), inside a transaction and after an accepted Stop | One `data_command` record with `io_detection: "unresolved"`; direction only for redirections and modelled `cp`/`mv` in an exit-0 `&&` list; quoted, commented, piped, backgrounded, expanded, globbed, `cp -t`, `cp -n`, and unknown-exit neighbors claim nothing; no reopen, no post-action cycle, no session log; parked and written by that session's next Stop; a data-only turn's manifest survives the next session reusing its log number. |
-| A post-tool hook times out on its owned session's lock (a live holder, such as a slow Stop or parallel subagent hooks) | The hook exits 0, prints a diagnostic on stderr, and appends one line to that run directory's `mycelium-unrecorded-events.tmp`; it writes nothing through the lock it never held and records no unowned skip. Stop blocks with an UNRECORDED WORK reason until `.living/` is updated, then removes the file. Another session's event and an uncontended event leave nothing. |
+| A post-tool hook times out on its owned session's lock (a live holder, such as a slow Stop or parallel subagent hooks) | The hook exits 0, prints a diagnostic on stderr, and appends one line to that run directory's `mycelium-unrecorded-events.tmp`; it writes nothing through the lock it never held and records no unowned skip. For an edit or analysis hook, Stop takes the record into a fresh work cycle and blocks with an UNRECORDED WORK reason until `.living/` is updated after it (an earlier update does not count); evidence appended while Stop runs blocks that Stop for a retry, and evidence left after an accepted Stop reopens the session at the next Stop; for the data or read tracker, Stop accepts with an UNRECORDED EVENTS note. Either way it then removes the file. Another session's event and an uncontended event leave nothing. |
 | The lineage extractor fails or is missing for a detected command | A skip record with the reason reaches the session's raw stream and the manifest's `skipped` list, and Stop's message carries a LINEAGE GAP line. |
 | A second identified root SessionStart arrives while the first root is live | Both roots receive distinct host-scoped run directories, markers, logs, baselines, lineage, and Stop enforcement; neither can mutate or clean the other's state. |
 | A session ID is numeric, Boolean, object/list-valued, `.`, or `..` | SessionStart creates no runtime directory, log, or shared file; a present invalid value never aliases another namespace or downgrades to legacy state. |
