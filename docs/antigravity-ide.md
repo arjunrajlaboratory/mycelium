@@ -161,9 +161,9 @@ Start a new App conversation after any package change.
 
 Limitations of the App preview:
 
-- The adapter reads the App's own step record, whose shape is pinned to App
-  2.31.0. Another App version needs fresh native verification before relying
-  on it.
+- The adapter reads the App's own step record in the shape of App 2.31.0.
+  Live audits confirmed that shape on App 2.32.1 and 2.33.0. Another App
+  version needs fresh native verification before relying on it.
 - Commands are credited only when that record shows a built-in `run_command`
   that ran in the sandbox, with its working directory inside the project and
   an explicit exit status. Prefer synchronous commands. A supported
@@ -182,8 +182,8 @@ Limitations of the App preview:
 - Edit tracking assumes the App records a completed edit as a typed
   `exa.cortex.core.tools.FileEdit` result with the CREATE/OVERWRITE/EDIT kinds
   and argument keys listed in `antigravity_app_store.py`. That type name was
-  inferred, not observed in a captured App row, and the tests use hand-built
-  rows. If a real edit record has another shape, the edit is not tracked, the
+  first inferred; live audits on App 2.32.1 and 2.33.0 then recorded real edits
+  in exactly this shape. If a real edit record has another shape, the edit is not tracked, the
   model is told so at its next step (naming the step), and
   `doctor --profile app` reports `app_edit_records.status: "unrecognized"` with
   a warning after reading the newest App conversation stores read-only. Run
