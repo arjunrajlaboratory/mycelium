@@ -621,3 +621,64 @@ def test_drain_other_leaves_a_file_holding_work(tmp_path):
                             text=True, check=False, timeout=30)
     assert result.stdout.strip() == "0"
     assert evidence.read_text().count("\n") == 2
+
+
+def _lib(*args, cwd=None):
+    command = f'source "{HOOKS_DIR / "mycelium-hook-lib.sh"}"\nmycelium_unrecorded_events "$@"\n'
+    return subprocess.run(["bash", "-c", command, "lib", *map(str, args)],
+                          capture_output=True, text=True, check=False, timeout=30)
+
+
+def test_consume_never_applies_a_count_to_a_replaced_generation(tmp_path):
+    evidence = tmp_path / UNRECORDED
+    evidence.write_text('{"kind": "read"}\n{"kind": "read"}\n')
+    work, other, size, inode = _lib("take", evidence).stdout.split()
+    evidence.unlink()  # a duplicate Stop drained it
+    evidence.write_text('{"kind": "work", "hook": "new"}\n')  # a new failure
+
+    result = _lib("consume-work", evidence, size, inode)
+
+    assert result.returncode == 0
+    assert result.stdout.split() == ["0", "0"]
+    assert evidence.read_text() == '{"kind": "work", "hook": "new"}\n'
+
+
+def test_consume_rewrites_by_replacement_keeping_the_tail(tmp_path):
+    evidence = tmp_path / UNRECORDED
+    evidence.write_text('{"kind": "work"}\n{"kind": "read"}\n')
+    work, other, size, inode = _lib("take", evidence).stdout.split()
+    with evidence.open("a") as handle:
+        handle.write('{"kind": "work", "hook": "late"}\n')
+
+    kept_size, kept_inode = _lib("consume-work", evidence, size, inode).stdout.split()
+
+    assert evidence.read_text() == '{"kind": "read"}\n{"kind": "work", "hook": "late"}\n'
+    assert int(kept_size) == len('{"kind": "read"}\n')
+    assert int(kept_inode) == evidence.stat().st_ino
+
+
+def test_a_held_evidence_flock_is_bounded(tmp_path):
+    import fcntl
+    evidence = tmp_path / UNRECORDED
+    evidence.write_text('{"kind": "work"}\n')
+    with evidence.open("r") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        started = time.monotonic()
+        result = _lib("take", evidence)
+    assert result.returncode == 75
+    assert time.monotonic() - started < 20
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_an_unwritable_reminder_keeps_unrecorded_work(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "bad-reminder"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    (run_dir / UNRECORDED).write_text('{"kind": "work"}\n')
+    (run_dir / "mycelium-reminded.tmp").mkdir()
+
+    reason = _block_reason(_stop(host, repo, sid))
+
+    assert reason is not None and "reminder" in reason
+    assert (run_dir / UNRECORDED).exists()

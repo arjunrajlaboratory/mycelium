@@ -307,24 +307,29 @@ mycelium_prepare_locked_post_tool_state() {
 # Unrecorded post-tool events: one NDJSON line per event a hook could not
 # record, in the owning transaction's directory. Every reader and writer
 # holds flock(2) on the file itself; the session lock is what was
-# unavailable, so it cannot serialize them.
+# unavailable, so it cannot serialize them. The flock is bounded (about five
+# seconds): a holder that is stopped must not hang a hook that already timed
+# out, or Stop. A busy flock exits 75.
 #
 #   append SHARED REL KIND HOOK REASON HOST TS  (payload on stdin)
 #       Writer. Walks SHARED/REL with O_NOFOLLOW directory descriptors, so a
 #       managed ancestor swapped for a link while the hook waited cannot
 #       redirect the write. After taking the flock it checks that its
-#       descriptor is still the file at that name: Stop may have consumed
-#       (unlinked) it meanwhile, and a line written there would be lost.
-#   take PATH      Stop, under the session lock: print "WORK OTHER SIZE".
+#       descriptor is still the file at that name: Stop may have consumed or
+#       replaced it meanwhile, and a line written there would be lost.
+#   take PATH      Print "WORK OTHER SIZE INODE" ("0 0 0 0" when absent).
 #       A line whose kind is `lineage` or `read` is OTHER; any other line is
 #       WORK. An empty file is nothing yet: a writer may have created it and
 #       not yet taken the flock, and its line will follow.
-#   consume-work PATH SIZE   Drop the WORK lines among the first SIZE bytes
-#       (Stop has turned them into a work cycle), keep their OTHER lines
-#       until a Stop reports them, keep any line appended since, and print
-#       the size of what remains.
-#   consume PATH SIZE   Remove the first SIZE bytes, keeping any line
-#       appended since.
+#   consume-work PATH SIZE INODE   Drop the WORK lines among the first SIZE
+#       bytes (Stop has turned them into a work cycle), keep their OTHER
+#       lines until a Stop reports them, keep any line appended since, and
+#       print "KEPT_SIZE INODE" for what remains ("0 0" when nothing does).
+#   consume PATH SIZE INODE   The same, keeping no taken line.
+#       Both act only on the generation (INODE) that was taken; a file that
+#       has since been replaced is left whole, for the next look to find.
+#       What remains is written to a new file renamed over the old one, so a
+#       failed write leaves the old file intact.
 #   drain-other PATH    Stop without a transaction, holding no session
 #       lock: in one flock, when the file holds only lineage and read lines,
 #       remove it and print their count; otherwise print 0 and leave it.
@@ -332,8 +337,31 @@ mycelium_prepare_locked_post_tool_state() {
 # single link, so a FIFO cannot hang a hook that already timed out and a hard
 # link cannot carry a write outside the repository.
 MYCELIUM__PY_UNRECORDED_EVENTS='
-import fcntl, json, os, stat, sys
+import fcntl, json, os, stat, sys, tempfile, time
 NAME = "mycelium-unrecorded-events.tmp"
+BUSY = 75
+
+def lock(fd):
+    for _ in range(100):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            time.sleep(0.05)
+    raise SystemExit(BUSY)
+
+def single_regular(fd):
+    opened = os.fstat(fd)
+    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+        raise SystemExit(1)
+    return opened
+
+def is_other(raw):
+    try:
+        return json.loads(raw).get("kind") in ("lineage", "read")
+    except (ValueError, AttributeError):
+        return False
+
 mode = sys.argv[1]
 if mode == "append":
     shared, rel, kind, hook, reason, host, ts = sys.argv[2:9]
@@ -359,17 +387,15 @@ if mode == "append":
             fd = os.open(NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
                          | os.O_NONBLOCK, 0o644, dir_fd=directory)
             try:
-                opened = os.fstat(fd)
-                if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-                    raise SystemExit(1)
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                single_regular(fd)
+                lock(fd)
                 held = os.fstat(fd)
                 try:
                     current = os.stat(NAME, dir_fd=directory, follow_symlinks=False)
                 except FileNotFoundError:
                     continue
                 if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino) \
-                        or not stat.S_ISREG(current.st_mode):
+                        or current.st_nlink != 1 or not stat.S_ISREG(current.st_mode):
                     continue
                 os.write(fd, line)
                 raise SystemExit(0)
@@ -383,58 +409,64 @@ path = sys.argv[2]
 try:
     fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
 except FileNotFoundError:
-    print("0 0 0" if mode == "take" else "0")
+    print({"take": "0 0 0 0", "drain-other": "0"}.get(mode, "0 0"))
     raise SystemExit(0)
 try:
-    opened = os.fstat(fd)
-    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-        raise SystemExit(1)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    opened = single_regular(fd)
+    lock(fd)
     data = b""
     while True:
         chunk = os.read(fd, 65536)
         if not chunk:
             break
         data += chunk
-    def is_other(raw):
-        try:
-            return json.loads(raw).get("kind") in ("lineage", "read")
-        except (ValueError, AttributeError):
-            return False
     lines = [raw for raw in data.splitlines(True) if raw.strip()]
+    try:
+        current = os.stat(path, follow_symlinks=False)
+        same = (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
+    except FileNotFoundError:
+        same = False
     if mode == "take":
         other = sum(1 for raw in lines if is_other(raw))
-        print(len(lines) - other, other, len(data))
-        raise SystemExit(0)
-    if mode == "drain-other":
+        print(len(lines) - other, other, len(data), opened.st_ino)
+    elif mode == "drain-other":
         other = sum(1 for raw in lines if is_other(raw))
-        try:
-            current = os.stat(path, follow_symlinks=False)
-        except FileNotFoundError:
-            current = None
-        if lines and other == len(lines) and current is not None \
-                and (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino):
+        if lines and other == len(lines) and same:
             os.unlink(path)
             print(other)
         else:
             print(0)
-        raise SystemExit(0)
-    size = int(sys.argv[3])
-    if mode == "consume-work":
-        kept = b"".join(raw for raw in data[:size].splitlines(True)
-                        if raw.strip() and is_other(raw))
-    elif mode == "consume":
+    elif mode in ("consume-work", "consume"):
+        size, inode = int(sys.argv[3]), int(sys.argv[4])
+        if not same or opened.st_ino != inode:
+            print("0 0")
+            raise SystemExit(0)
         kept = b""
+        if mode == "consume-work":
+            kept = b"".join(raw for raw in data[:size].splitlines(True)
+                            if raw.strip() and is_other(raw))
+        remaining = kept + data[size:]
+        if not remaining:
+            os.unlink(path)
+            print("0 0")
+            raise SystemExit(0)
+        temp_fd, temp = tempfile.mkstemp(prefix=".unrecorded.", dir=os.path.dirname(path))
+        try:
+            with os.fdopen(temp_fd, "wb") as handle:
+                handle.write(remaining)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temp, 0o644)
+            os.rename(temp, path)
+        except BaseException:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+            raise
+        print(len(kept), os.stat(path, follow_symlinks=False).st_ino if kept else 0)
     else:
         raise SystemExit(1)
-    remaining = kept + data[size:]
-    if remaining:
-        os.ftruncate(fd, 0)
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, remaining)
-    else:
-        os.unlink(path)
-    print(len(kept))
 finally:
     os.close(fd)
 '
@@ -967,7 +999,9 @@ mycelium_start_work_cycle() {
   else
     status=1
   fi
-  date +%s > "$STATE_DIR/mycelium-reminded.tmp"
+  if ! date +%s > "$STATE_DIR/mycelium-reminded.tmp"; then
+    status=1
+  fi
   return "$status"
 }
 
