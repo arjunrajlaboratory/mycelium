@@ -42,11 +42,11 @@ mycelium_report_unowned_lineage_gaps() {
   if [[ "${1:-}" == own-run && "${MYCELIUM_SESSION_SCOPED:-false}" == true \
     && -n "${STATE_DIR:-}" && "$STATE_DIR" != "${MYCELIUM_SHARED_STATE_DIR:-}" \
     && -f "$file" && ! -L "$file" ]]; then
-    taken=$(mycelium_unrecorded_events take "$file" 2>/dev/null) || taken=""
-    if [[ "$taken" =~ ^0\ ([1-9][0-9]*)\ ([0-9]+)$ ]]; then
-      gap="${gap:+$gap }UNRECORDED EVENTS: ${BASH_REMATCH[1]} data-lineage or .living read record(s) this session were dropped because the session lock was unavailable; treat their provenance as unknown."
-      mycelium_unrecorded_events consume "$file" "${BASH_REMATCH[2]}" \
-        >/dev/null 2>&1 || true
+    # One flock for the read and the removal: a duplicate Stop holds no
+    # session lock here either.
+    taken=$(mycelium_unrecorded_events drain-other "$file" 2>/dev/null) || taken=""
+    if [[ "$taken" =~ ^[1-9][0-9]*$ ]]; then
+      gap="${gap:+$gap }UNRECORDED EVENTS: ${taken} data-lineage or .living read record(s) this session were dropped because the session lock was unavailable; treat their provenance as unknown."
     fi
   fi
   if [[ -n "$gap" ]]; then
@@ -349,8 +349,14 @@ if [[ -e "$UNRECORDED_FILE" || -L "$UNRECORDED_FILE" ]]; then
     _UNRECORDED_SIZE="${BASH_REMATCH[3]}"
   fi
   if (( _UNRECORDED_WORK > 0 )); then
-    mycelium_start_work_cycle "$REPO_ROOT" \
-      "${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"
+    if ! mycelium_start_work_cycle "$REPO_ROOT" \
+      "${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"; then
+      # Without a fresh fingerprint an earlier .living/ update could satisfy
+      # this work. Keep the evidence and retry.
+      mycelium_emit_stop_block \
+        "STOP BLOCKED — work a post-tool hook could not record needs a fresh .living/ fingerprint, and taking it failed. The evidence was preserved; retry Stop." || true
+      exit 0
+    fi
     UNRECORDED_MSG="UNRECORDED WORK: ${_UNRECORDED_WORK} edit or analysis hook run(s) this session could not record their event because the session lock was unavailable. That work is not in the counts above; triage this turn's work as if it ran."
   fi
   if (( _UNRECORDED_OTHER > 0 )); then
@@ -361,10 +367,12 @@ if [[ -e "$UNRECORDED_FILE" || -L "$UNRECORDED_FILE" ]]; then
     UNRECORDED_KEPT=$(mycelium_unrecorded_events consume-work "$UNRECORDED_FILE" \
       "$_UNRECORDED_SIZE" 2>/dev/null) || UNRECORDED_KEPT=""
     [[ "$UNRECORDED_KEPT" =~ ^[0-9]+$ ]] || UNRECORDED_KEPT=0
-  else
-    # Unreadable (not a regular file): its content cannot be trusted, and the
-    # work cycle above already stands in for it.
-    rm -f "$UNRECORDED_FILE"
+  elif ! rm -f "$UNRECORDED_FILE" 2>/dev/null; then
+    # Unreadable and unremovable (a directory, say). The work cycle above
+    # already stands in for it, but it would block every retry: say so.
+    mycelium_emit_stop_block \
+      "STOP BLOCKED — ${UNRECORDED_FILE} is not a regular file Mycelium can read or remove. Remove it, then retry Stop." || true
+    exit 0
   fi
 fi
 # The file now holds only the UNRECORDED_KEPT bytes of reported lineage and

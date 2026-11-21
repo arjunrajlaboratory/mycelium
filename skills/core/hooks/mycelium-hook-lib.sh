@@ -325,8 +325,12 @@ mycelium_prepare_locked_post_tool_state() {
 #       the size of what remains.
 #   consume PATH SIZE   Remove the first SIZE bytes, keeping any line
 #       appended since.
-# Every open is nonblocking and refuses anything but a regular file, so a
-# FIFO planted at the name cannot hang a hook that already timed out.
+#   drain-other PATH    Stop without a transaction, holding no session
+#       lock: in one flock, when the file holds only lineage and read lines,
+#       remove it and print their count; otherwise print 0 and leave it.
+# Every open is nonblocking and refuses anything but a regular file with a
+# single link, so a FIFO cannot hang a hook that already timed out and a hard
+# link cannot carry a write outside the repository.
 MYCELIUM__PY_UNRECORDED_EVENTS='
 import fcntl, json, os, stat, sys
 NAME = "mycelium-unrecorded-events.tmp"
@@ -355,7 +359,8 @@ if mode == "append":
             fd = os.open(NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
                          | os.O_NONBLOCK, 0o644, dir_fd=directory)
             try:
-                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                opened = os.fstat(fd)
+                if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
                     raise SystemExit(1)
                 fcntl.flock(fd, fcntl.LOCK_EX)
                 held = os.fstat(fd)
@@ -381,7 +386,8 @@ except FileNotFoundError:
     print("0 0 0" if mode == "take" else "0")
     raise SystemExit(0)
 try:
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+    opened = os.fstat(fd)
+    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
         raise SystemExit(1)
     fcntl.flock(fd, fcntl.LOCK_EX)
     data = b""
@@ -399,6 +405,19 @@ try:
     if mode == "take":
         other = sum(1 for raw in lines if is_other(raw))
         print(len(lines) - other, other, len(data))
+        raise SystemExit(0)
+    if mode == "drain-other":
+        other = sum(1 for raw in lines if is_other(raw))
+        try:
+            current = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            current = None
+        if lines and other == len(lines) and current is not None \
+                and (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino):
+            os.unlink(path)
+            print(other)
+        else:
+            print(0)
         raise SystemExit(0)
     size = int(sys.argv[3])
     if mode == "consume-work":
@@ -927,24 +946,29 @@ mycelium_refresh_work_cycle() {
   if [[ "$should_refresh" != true ]]; then
     return 1
   fi
-  mycelium_start_work_cycle "$repo_root" "$helper"
+  mycelium_start_work_cycle "$repo_root" "$helper" || true
   return 0
 }
 
 # mycelium_start_work_cycle REPO_ROOT HELPER: fingerprint .living/ now and
 # stamp the reminder, so only a .living/ update made after this point can
-# satisfy Stop. The caller holds the session lock.
+# satisfy Stop. The caller holds the session lock. Returns nonzero when the
+# fingerprint could not be taken (the reminder is still stamped).
 mycelium_start_work_cycle() {
   local repo_root="$1"
   local helper="$2"
   local baseline_file="$STATE_DIR/living-reminder-baseline.json"
+  local status=0
   if [[ -f "$helper" ]]; then
     python3 "$helper" living-snapshot \
       --repo-root "$repo_root" \
       --output "$baseline_file" >/dev/null 2>&1 \
-      || rm -f "$baseline_file"
+      || { rm -f "$baseline_file"; status=1; }
+  else
+    status=1
   fi
   date +%s > "$STATE_DIR/mycelium-reminded.tmp"
+  return "$status"
 }
 
 # Contenders claim reaping inside the lock directory itself; release must wait

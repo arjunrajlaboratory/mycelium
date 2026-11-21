@@ -551,3 +551,73 @@ def test_read_record_left_after_an_accepted_stop_is_reported(tmp_path, host):
     assert "UNRECORDED EVENTS: 1" in stop.stdout
     assert not (run_dir / UNRECORDED).exists()
     assert not (run_dir / "active-session-log.tmp").exists()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_hard_linked_evidence_file_is_never_written(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "hard-link"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("untouched\n")
+    os.link(outside, run_dir / UNRECORDED)
+    lock = _hold_session_lock(run_dir)
+
+    result = _run(host, "mycelium-activity-tracker.sh", repo,
+                  _payloads(repo, sid)["mycelium-activity-tracker.sh"],
+                  extra_env=FAST_TIMEOUT)
+    assert result.returncode == 0
+    assert outside.read_text() == "untouched\n"
+    (lock / "owner").unlink()
+    lock.rmdir()
+
+    stop = _stop(host, repo, sid)
+    assert _block_reason(stop) is not None
+    assert outside.read_text() == "untouched\n"
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_directory_at_the_evidence_name_blocks_instead_of_crashing(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "dir-evidence"
+    _start(host, repo, sid)
+    (_run_dir(repo, host, sid) / UNRECORDED).mkdir()
+    reason = _block_reason(_stop(host, repo, sid))
+    assert reason is not None and "not a regular file" in reason
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_failed_fingerprint_keeps_unrecorded_work(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "no-fingerprint"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    (run_dir / UNRECORDED).write_text('{"kind": "work"}\n')
+    wrapper = tmp_path / "no_living_snapshot.py"
+    wrapper.write_text(
+        "import os, sys\n"
+        "if sys.argv[1:2] == ['living-snapshot']:\n"
+        "    raise SystemExit(3)\n"
+        f"os.execv(sys.executable, [sys.executable, {str(SESSION_CHANGES)!r}] + sys.argv[1:])\n"
+    )
+    stop = _run(host, "mycelium-stop-check.sh", repo,
+                {"cwd": str(repo), "session_id": sid, "hook_event_name": "Stop",
+                 "stop_hook_active": False},
+                extra_env={"MYCELIUM_SESSION_CHANGES_HELPER": str(wrapper)})
+    reason = _block_reason(stop)
+    assert reason is not None and "fingerprint" in reason
+    assert (run_dir / UNRECORDED).exists()
+    retry = _block_reason(_stop(host, repo, sid))
+    assert retry is not None and "UNRECORDED WORK: 1" in retry
+
+
+def test_drain_other_leaves_a_file_holding_work(tmp_path):
+    evidence = tmp_path / UNRECORDED
+    evidence.write_text('{"kind": "read"}\n{"kind": "work"}\n')
+    command = (f'source "{HOOKS_DIR / "mycelium-hook-lib.sh"}"\n'
+               f'mycelium_unrecorded_events drain-other "{evidence}"\n')
+    result = subprocess.run(["bash", "-c", command], capture_output=True,
+                            text=True, check=False, timeout=30)
+    assert result.stdout.strip() == "0"
+    assert evidence.read_text().count("\n") == 2
