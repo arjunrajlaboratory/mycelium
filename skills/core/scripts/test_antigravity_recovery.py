@@ -597,3 +597,36 @@ def test_shared_lock_wait_policy_default_configured_and_fallback(monkeypatch, ra
     else:
         monkeypatch.setenv("MYCELIUM_DURABLE_LOCK_TIMEOUT", raw)
     assert mycelium_locks._timeout_seconds() == expected
+
+
+def test_startup_refused_by_a_state_symlink_records_why_and_stop_reports_it(cycle):
+    """Issue #145: a symlink under .mycelium/ makes base startup refuse silently.
+    The adapter must retain the cause and surface it, not loop on an opaque Stop."""
+    repo, payload, records, write, run, state_path = cycle
+    scratch = repo / ".mycelium/run/scratch"
+    scratch.mkdir(parents=True)
+    (scratch / "node_modules").symlink_to(repo / "analysis.py")
+    records.append(dict(step_index=10, source="USER_EXPLICIT", type="USER_INPUT", status="DONE"))
+    write()
+    turn_payload = dict(payload, initialNumSteps=11)
+    with pytest.raises(RuntimeError, match="symlink found at .mycelium/run/scratch/node_modules"):
+        ag.dispatch("PreInvocation", turn_payload)
+    turn = json.loads(state_path.read_text())["turns"]["10"]
+    assert turn["actions"]["startup"] == "running" and turn["uncertain"] is True
+    assert turn["last_hook_error"].startswith("startup: Base Mycelium did not establish")
+    assert ".mycelium/run/scratch/node_modules" in turn["last_hook_error"]
+    # Startup is never redispatched; later invocations explain the failure.
+    injected = ag.dispatch("PreInvocation", turn_payload)["injectSteps"][0]["ephemeralMessage"]
+    assert "capture failed" in injected and "scratch/node_modules" in injected
+    reason = ag.dispatch("Stop", stop(turn_payload))["reason"]
+    assert reason.startswith(ag.UNRESOLVED_HOOK) and "scratch/node_modules" in reason
+
+
+def test_an_action_left_running_without_an_error_is_named(cycle):
+    """A hook process killed before it recorded anything still leaves a cause."""
+    repo, payload, records, write, run, state_path = cycle
+    state = json.loads(state_path.read_text())
+    state["turns"]["0"]["actions"]["3:mycelium-data-tracker.sh"] = "running"
+    state_path.write_text(json.dumps(state))
+    reason = ag.dispatch("Stop", stop(payload))["reason"]
+    assert "3:mycelium-data-tracker.sh: hook outcome was never recorded" in reason

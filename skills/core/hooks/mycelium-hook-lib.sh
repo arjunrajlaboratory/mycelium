@@ -18,6 +18,10 @@ MYCELIUM_OWNER_ID=""
 MYCELIUM__STATE_FAILED=0
 MYCELIUM__STATE_DIED=0
 MYCELIUM__STATE_HELD=""
+# Why the last mycelium__state call refused, when an op could say (for
+# example the symlink that made prepare refuse the state tree). Empty
+# otherwise; diagnostic only, never a control signal.
+MYCELIUM__STATE_REASON=""
 # Lock directories this process acquired. A value inherited from the
 # environment names someone else's lock: never let a release remove it.
 MYCELIUM_STOP_LOCK_DIR=""
@@ -51,6 +55,7 @@ mycelium__state() {
   MYCELIUM__STATE_FAILED=0
   MYCELIUM__STATE_DIED=0
   MYCELIUM__STATE_HELD=""
+  MYCELIUM__STATE_REASON=""
   (( ${#ops[@]} > 0 )) || return 0
   for op in "${ops[@]}"; do
     case "$op" in
@@ -112,6 +117,10 @@ mycelium__state() {
           IFS= read -r -d '' b || break
           MYCELIUM_OWNER_STATE="$a"
           MYCELIUM_OWNER_ID="$b"
+          ;;
+        reason)
+          IFS= read -r -d '' a || break
+          MYCELIUM__STATE_REASON="$a"
           ;;
         ok|fail|busy)
           IFS= read -r -d '' a || break

@@ -130,6 +130,19 @@ def file_map(root):
     return result
 
 
+def first_symlink(top, limit=100000):
+    """One symlink at or under TOP (never followed), or None; bounded scan."""
+    if top.is_symlink():
+        return top
+    for count, (current, dirnames, filenames) in enumerate(os.walk(top, followlinks=False)):
+        if count > limit:
+            return None
+        for name in sorted(dirnames) + sorted(filenames):
+            if (Path(current) / name).is_symlink():
+                return Path(current) / name
+    return None
+
+
 def workspace_readiness(workspace, profile="ide"):
     """Check the adapter's Git-root/.living opt-in without creating state."""
     path = safe_path(workspace)
@@ -147,6 +160,14 @@ def workspace_readiness(workspace, profile="ide"):
     result["git_root"] = str(root)
     if not living.is_dir():
         return dict(result, reason="Git root has no .living opt-in")
+    # Base Mycelium refuses to start a lifecycle in a .living/ or .mycelium/
+    # tree holding a symlink, which leaves every native turn unresolved.
+    for tree in (".living", ".mycelium"):
+        link = first_symlink(root / tree)
+        if link is not None:
+            return dict(result, lifecycle_opt_in=True, symlink=str(link.relative_to(root)),
+                        reason=f"Symlink at {link.relative_to(root)} stops base Mycelium from "
+                               "starting a lifecycle; remove it or move it out of " + tree + "/")
     return dict(result, ok=True, lifecycle_opt_in=True,
                 note="Workspace opt-in only; native dispatch still requires a fresh "
                      f"{'App' if profile == 'app' else 'IDE'} audit")

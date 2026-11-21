@@ -45,6 +45,14 @@ _ACTIVE_HOST = contextvars.ContextVar("antigravity_host", default=HOST)
 APP_UNRESOLVED = ("Antigravity App command step without authoritative workspace, working-directory, "
                   "and exit evidence; output provenance is not recorded")
 UNRESOLVED_HOOK = "A Mycelium hook has an unresolved outcome. Inspect retained native-state.json before retrying."
+
+
+def unresolved_reason(turn):
+    """UNRESOLVED_HOOK plus the recorded cause, so a blocked Stop says what failed."""
+    detail = turn.get("last_hook_error") or turn.get("last_native_error")
+    return UNRESOLVED_HOOK + (f" Last error: {detail}" if detail else "")
+
+
 # Leave time within the App package's 45-second Stop hook for Python startup,
 # receipt reconciliation and the final state write. Share the budget across roots.
 APP_STOP_BUDGET_SECONDS = 35
@@ -223,7 +231,11 @@ def run_hook(name, data, root, plugin, *, timeout=12, batch=False):
         raise RuntimeError(f"{name} failed ({result.returncode}): {result.stderr[-1000:]}")
     decoded = json.loads(result.stdout) if result.stdout.strip() else {}
     if name == "mycelium-health.sh" and not marker.is_file():
-        raise RuntimeError("Base Mycelium did not establish an active lifecycle transaction")
+        # The base hook exits 0 when it refuses to start (for example on a
+        # symlink in the state tree); its stderr names the cause.
+        detail = result.stderr.strip()[-1000:]
+        raise RuntimeError("Base Mycelium did not establish an active lifecycle transaction" +
+                           (f": {detail}" if detail else ""))
     if (name == "mycelium-stop-check.sh" and decoded.get("decision") != "block" and
             (not had_marker or not accepted_stop(root, data["session_id"], host))):
         raise RuntimeError("Base Mycelium did not confirm transaction finalization")
@@ -609,7 +621,15 @@ def _dispatch(event, payload, plugin_root, host):
                 state["turns"][key] = turn
                 turn["actions"]["startup"] = "running"
                 save()
-                result = run_hook("mycelium-health.sh", data, root, plugin_root)
+                try:
+                    result = run_hook("mycelium-health.sh", data, root, plugin_root)
+                except Exception as exc:
+                    # As in apply_hooks: startup stays running and is never
+                    # redispatched, but the retained state says why.
+                    turn["uncertain"] = True
+                    turn["last_hook_error"] = f"startup: {exc}"[-2000:]
+                    save()
+                    raise
                 turn["actions"]["startup"] = "done"
                 if context(result):
                     turn["context"].append(context(result))
@@ -627,8 +647,13 @@ def _dispatch(event, payload, plugin_root, host):
                     continue
                 turn["uncertain"] = True
                 save()
-            if any(value == "running" for value in turn["actions"].values()):
+            running = sorted(action for action, value in turn["actions"].items() if value == "running")
+            if running:
                 turn["uncertain"] = True
+                if not turn.get("last_hook_error"):
+                    # The process that ran these ended before recording an outcome.
+                    turn["last_hook_error"] = (", ".join(running) + ": hook outcome was never "
+                                               "recorded (its process ended first)")[-2000:]
                 save()
 
             capture_deferred = []
@@ -933,7 +958,7 @@ def _dispatch(event, payload, plugin_root, host):
                     record.update(unverified)
                     save()
                 if turn["uncertain"]:
-                    result = {"decision": "block", "reason": UNRESOLVED_HOOK}
+                    result = {"decision": "block", "reason": unresolved_reason(turn)}
                 elif capture_deferred:
                     result = {"decision": "block", "reason": "No time remained in this Stop to record completed native command steps. Active state was preserved; the next Stop records them."}
                 elif turn["pending_commands"]:
@@ -968,7 +993,7 @@ def _dispatch(event, payload, plugin_root, host):
                         else:
                             turn["uncertain"] = True
                             turn["last_native_error"] = f"App Stop outcome unavailable ({type(error).__name__})"
-                            result = {"decision": "block", "reason": UNRESOLVED_HOOK}
+                            result = {"decision": "block", "reason": unresolved_reason(turn)}
                     if not turn["uncertain"]:
                         turn["stop_attempt"]["status"] = "blocked" if result.get("decision") == "block" else "accepted"
                     save()

@@ -900,6 +900,15 @@ def test_empty_session_start_counts_are_single_numeric_values(tmp_path):
     assert "0\n0" not in context
 
 
+def _assert_tracking_off_warning(result, cause):
+    """A refused start changes nothing but says why (#145): one warning, no
+    lifecycle context, and the same cause on stderr."""
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert context.startswith("MYCELIUM WARNING: Session lifecycle tracking is off")
+    assert cause in context and "SESSION HANDOFF PATH" not in context
+    assert cause in result.stderr
+
+
 def test_plugin_dispatcher_refuses_symlinked_state_before_pointer_refresh(tmp_path):
     repo = _repo(tmp_path)
     victim = tmp_path / "outside-state"
@@ -915,7 +924,7 @@ def test_plugin_dispatcher_refuses_symlinked_state_before_pointer_refresh(tmp_pa
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
+    _assert_tracking_off_warning(result, ".mycelium is a symlink")
     assert pointer.read_text() == "do-not-overwrite\n"
     assert sorted(path.name for path in victim.iterdir()) == ["plugin-root"]
 
@@ -953,7 +962,7 @@ def test_plugin_dispatcher_refuses_symlinked_pointer_without_clobbering_target(
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
+    _assert_tracking_off_warning(result, "symlink found at .mycelium/plugin-root")
     assert victim.read_text() == "do-not-overwrite\n"
     assert not (state_dir / "active-session-log.tmp").exists()
 
@@ -1036,7 +1045,7 @@ def test_hooks_reject_outside_state_override_before_creating_directory(tmp_path)
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
+    _assert_tracking_off_warning(result, "MYCELIUM_STATE_DIR")
     assert not victim.exists()
 
 
@@ -1054,7 +1063,7 @@ def test_hooks_reject_state_override_through_symlinked_parent(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
+    _assert_tracking_off_warning(result, "MYCELIUM_STATE_DIR")
     assert list(victim.iterdir()) == []
 
 

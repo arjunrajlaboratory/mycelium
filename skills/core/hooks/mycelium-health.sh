@@ -75,6 +75,16 @@ if ! mycelium__state "$REPO_ROOT" "$INPUT" \
     MYCELIUM_OWNER_ID=""
   else
     mycelium__state_release_held
+    # A refusal with a known cause (a symlink in .living/ or the state tree)
+    # silently disables lifecycle tracking for every later hook, so say why:
+    # on stderr for host logs and adapters, and as context on a real start.
+    if [[ -n "$MYCELIUM__STATE_REASON" ]]; then
+      printf 'Mycelium: lifecycle tracking is off: %s\n' "$MYCELIUM__STATE_REASON" >&2
+      if [[ "$REOPEN" != true ]]; then
+        mycelium_emit_context "SessionStart" \
+          "MYCELIUM WARNING: Session lifecycle tracking is off for this session: ${MYCELIUM__STATE_REASON}" || true
+      fi
+    fi
     exit 0
   fi
 fi

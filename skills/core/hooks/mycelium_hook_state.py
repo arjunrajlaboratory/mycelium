@@ -260,6 +260,43 @@ def contains_symlink(top: str) -> bool:
         _restore_cwd(origin, origin_path)
 
 
+def first_symlink(top: str, limit: int = 100000) -> str | None:
+    """Best-effort relative path of one symlink under TOP, for a diagnostic.
+
+    Only called after contains_symlink() already refused TOP, to tell a
+    person what to remove. It never follows a link, examines at most LIMIT
+    entries, and returns None when it finds nothing (for example a tree the
+    strict scan could not fully examine). "." means TOP itself is a link.
+    """
+    if os.path.islink(top):
+        return "."
+    seen = 0
+    for current, dirnames, filenames in os.walk(top, followlinks=False):
+        for name in sorted(dirnames) + sorted(filenames):
+            seen += 1
+            if seen > limit:
+                return None
+            path = os.path.join(current, name)
+            if os.path.islink(path):
+                return os.path.relpath(path, top)
+    return None
+
+
+def symlink_reason(repo_root: str, top: str, found: str | None = None) -> str:
+    """One-line explanation of a symlink refusal, naming the path when known."""
+    label = os.path.relpath(top, repo_root)
+    if found is None:
+        found = first_symlink(top)
+    if found == ".":
+        where = f"{label} is itself a symlink"
+    elif found:
+        where = f"symlink found at {os.path.join(label, found)}"
+    else:
+        where = f"{label} contains a symlink or could not be fully examined"
+    return (f"{where}. Mycelium does not keep lifecycle state in a tree that holds "
+            f"symlinks, so session tracking is off until it is removed or moved out of {label}/.")
+
+
 def _restore_cwd(origin: int | None, origin_path: str | None) -> None:
     """Leave the scanned tree: back to the original cwd, or to / when that is
     no longer reachable. Later ops use absolute paths only, but no cwd may
@@ -525,12 +562,24 @@ class State:
         repo_root = physical_dir(self.repo_root)
         living_dir = repo_root + "/.living"
         if islink(living_dir):
+            emit("reason", symlink_reason(repo_root, living_dir, "."))
             raise OpFailed
         if isdir(living_dir) and contains_symlink(living_dir):
+            emit("reason", symlink_reason(repo_root, living_dir))
             raise OpFailed
 
         requested = self.requested_state or repo_root + "/.mycelium"
-        requested = self.validate_requested_state(repo_root, requested)
+        try:
+            requested = self.validate_requested_state(repo_root, requested)
+        except OpFailed:
+            if self.requested_state:
+                emit("reason", "MYCELIUM_STATE_DIR names a path outside the repository, or one "
+                               "through a symlink or non-directory, so session tracking is off.")
+            else:
+                emit("reason", ".mycelium is a symlink or not a directory. Mycelium does not keep "
+                               "lifecycle state there, so session tracking is off until it is a "
+                               "plain directory.")
+            raise
         if mode == "read-only":
             if not isdir(requested):
                 raise OpFailed
@@ -550,6 +599,7 @@ class State:
             raise OpFailed
         self.assign("MYCELIUM_SHARED_STATE_DIR", state_dir)
         if contains_symlink(state_dir):
+            emit("reason", symlink_reason(repo_root, state_dir))
             raise OpFailed
         if mode in {"read-only", "bootstrap"}:
             return

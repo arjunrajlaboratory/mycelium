@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The data tracker no longer also files such an event as a no-transaction
   lineage gap. Claude Code, Codex and Antigravity hooks all share the fix;
   existing projects need no migration. (#137)
+- A symlink anywhere under `.living/` or `.mycelium/` (for example a
+  `node_modules` link left in `.mycelium/run/` by a scratch run) no longer
+  turns lifecycle tracking off silently. Session start now names the link on
+  stderr and, for Claude Code and Codex, in a MYCELIUM WARNING in the session
+  context. On the Antigravity App and IDE, a refused startup records
+  `last_hook_error` in `native-state.json`, the next invocation explains it,
+  and a blocked Stop gives the recorded cause instead of only "unresolved
+  outcome". A hook left `running` with no recorded error is named too.
+  `tools/antigravity.py doctor --workspace` reports such a symlink before a
+  session starts. Removing the link restores tracking; the symlink refusal
+  itself is unchanged. (#145)
 
 ## [0.9.6] - 2026-11-20
 

@@ -144,3 +144,20 @@ def test_workspace_readiness_keeps_a_trailing_space_in_the_git_root(tmp_path):
     (neighbor / '.living').mkdir()
     report = package.workspace_readiness(spaced)
     assert not report['lifecycle_opt_in']
+
+
+def test_workspace_readiness_names_a_symlink_that_blocks_lifecycle_start(tmp_path):
+    """Issue #145: a stray symlink under .mycelium/ made every native turn
+    unresolved; doctor now reports it before a session hits the Stop loop."""
+    import subprocess
+    repo = tmp_path / 'proj'
+    repo.mkdir()
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    (repo / '.living').mkdir()
+    assert package.workspace_readiness(repo)['ok']
+    scratch = repo / '.mycelium' / 'run' / 'scratch'
+    scratch.mkdir(parents=True)
+    (scratch / 'node_modules').symlink_to(tmp_path)
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and report['symlink'] == '.mycelium/run/scratch/node_modules'
+    assert '.mycelium/run/scratch/node_modules' in report['reason']

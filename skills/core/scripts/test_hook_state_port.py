@@ -1171,3 +1171,28 @@ mycelium_release_session_lock
 """
     result = subprocess.run(["bash", "-c", script, "probe", str(LIB)], capture_output=True, text=True, check=True)
     assert result.stdout == "stop=[] session=[]\nstop=[] session=[]\n"
+
+
+@pytest.mark.parametrize("where", [".mycelium/run/scratch/node_modules", ".living/log/link"])
+def test_session_start_names_the_symlink_that_disabled_tracking(tmp_path, where):
+    """Issue #145: a symlink in the state or living tree used to turn lifecycle
+    tracking off with no output at all. Start now says which path did it."""
+    repo = _git_repo(tmp_path)
+    link = repo / where
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(repo / ".living" / "learnings.md")
+    env = os.environ.copy()
+    env.pop("MYCELIUM_STATE_DIR", None)
+    env["MYCELIUM_HOOK_HOST"] = "claude"
+    start = {"session_id": "s1", "cwd": str(repo), "hook_event_name": "SessionStart", "source": "startup"}
+    result = _hook("mycelium-health.sh", start, repo, env)
+    assert result.returncode == 0, result.stderr
+    assert f"symlink found at {where}" in result.stderr
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "lifecycle tracking is off" in context and where in context
+    assert not (repo / ".mycelium" / "run" / "claude" / "s1" / "active-session-log.tmp").exists()
+    # The diagnostic never changes the decision: removing the link restores startup.
+    link.unlink()
+    result = _hook("mycelium-health.sh", start, repo, env)
+    assert result.returncode == 0 and "symlink" not in result.stderr
+    assert (repo / ".mycelium" / "run" / "claude" / "s1" / "active-session-log.tmp").exists()
