@@ -59,7 +59,9 @@ fi
 
 # The session's directory, not the hook process's: a host may run hooks in
 # the main checkout while the session works in a linked worktree (issue #144).
-REPO_ROOT=$(mycelium_session_repo_root "$SESSION_CWD")
+HOST_SESSION_ID=$(mycelium_json_get_optional_string 'session_id' INPUT) \
+  || HOST_SESSION_ID=""
+REPO_ROOT=$(mycelium_session_repo_root "$SESSION_CWD" "$HOST_SESSION_ID")
 if [[ -z "$REPO_ROOT" ]]; then
   exit 0
 fi

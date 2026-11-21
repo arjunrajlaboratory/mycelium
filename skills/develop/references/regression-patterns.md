@@ -1101,11 +1101,13 @@ the main checkout (#144).
 
 **Invariant:** One session, one root. Every lifecycle hook resolves the
 repository from the payload's `cwd`, never a bare process-directory
-`git rev-parse`. Stop and the post-action hook use `mycelium_session_repo_root`,
-which takes the nearest opted-in repository at or above that `cwd`: a turn that
-ended after `cd` into a nested repository without `.living/` stays on the
-enclosing project that holds the session's transaction. Only when no enclosing
-repository is opted in does it fall back to the process directory.
+`git rev-parse`. Stop, the lineage finalizer Stop runs in-process, and the
+post-action hook all use `mycelium_session_repo_root`, so they agree:
+the `cwd`'s own repository wins when opted in; after `cd` into a nested
+repository without `.living/`, an enclosing opted-in repository is taken only
+when it already holds `.mycelium/run/<host>/<session_id>/`, so the worktree
+keeps the session and an unrelated enclosing project is never adopted.
+Otherwise it falls back to the process directory.
 Machine-local state that guidance dereferences, such as `.mycelium/plugin-root`,
 must exist in whichever checkout the session uses.
 
@@ -1114,5 +1116,7 @@ main checkout and the payload `cwd` in a linked worktree; dirty the main
 checkout from "another session"; assert Stop's reason names only worktree
 files, accepts worktree reflection, and leaves the main checkout byte-identical.
 Pair it with neighbors whose `cwd` is a nested non-opted repository inside the
-main checkout and inside the worktree; the second must still block on the
-worktree's changes.
+main checkout and inside the worktree (the second must still block on the
+worktree's changes and publish the worktree's lineage manifest), and one inside
+an unrelated opted-in project, which must gain no `.mycelium/` or
+`.living/log/`.

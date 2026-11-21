@@ -351,11 +351,13 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Pre-existing dirty and untracked files use a content identity, so a
       same-size rewrite whose mtime is restored still counts as session work.
 - [ ] Every lifecycle hook resolves the repository from the payload's session
-      `cwd`, not the hook process's directory. Stop takes the nearest opted-in
-      repository at or above that `cwd`, so `cd` into a nested non-opted
-      repository keeps the enclosing project, and falls back to the process
-      directory only when none is opted in. A session in a linked worktree is
-      judged on, and writes into, that worktree.
+      `cwd`, not the hook process's directory. After `cd` into a nested
+      non-opted repository, Stop, its in-process lineage finalizer and
+      post-action take an enclosing opted-in
+      repository only if it already holds the session's run directory, and
+      otherwise fall back to the process directory; an unrelated enclosing
+      project gains no state. A session in a linked worktree is judged on, and
+      writes into, that worktree.
 
 ## 7. Data Lineage Integrity
 

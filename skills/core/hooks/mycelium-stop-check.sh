@@ -25,7 +25,8 @@ HOST_SESSION_ID=$(mycelium_json_get_optional_string 'session_id' INPUT) || exit 
 # Determine repo root early (used by both log finalization and .living/ checks)
 # from the session's own directory, as SessionStart and the PostToolUse
 # trackers do (issue #144: a worktree session's hooks run in the main checkout).
-REPO_ROOT=$(mycelium_session_repo_root "$(mycelium_json_get 'cwd' INPUT)")
+REPO_ROOT=$(mycelium_session_repo_root "$(mycelium_json_get 'cwd' INPUT)" \
+  "$HOST_SESSION_ID")
 if [ -z "$REPO_ROOT" ]; then
   exit 0
 fi
