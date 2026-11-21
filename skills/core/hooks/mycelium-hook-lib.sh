@@ -318,8 +318,14 @@ mycelium_prepare_locked_post_tool_state() {
 #   take PATH      Stop, under the session lock: print "WORK OTHER SIZE".
 #       A line whose kind is `lineage` or `read` is OTHER; any other line,
 #       or an existing file with no line at all, is WORK.
-#   consume PATH SIZE   Remove the first SIZE bytes Stop took, keeping any
-#       line appended since.
+#   consume-work PATH SIZE   Drop the WORK lines among the first SIZE bytes
+#       (Stop has turned them into a work cycle), keep their OTHER lines
+#       until a Stop reports them, keep any line appended since, and print
+#       the size of what remains.
+#   consume PATH SIZE   Remove the first SIZE bytes, keeping any line
+#       appended since.
+# Every open is nonblocking and refuses anything but a regular file, so a
+# FIFO planted at the name cannot hang a hook that already timed out.
 MYCELIUM__PY_UNRECORDED_EVENTS='
 import fcntl, json, os, stat, sys
 NAME = "mycelium-unrecorded-events.tmp"
@@ -345,9 +351,11 @@ if mode == "append":
             os.close(directory)
             directory = child
         for _ in range(20):
-            fd = os.open(NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
-                         0o644, dir_fd=directory)
+            fd = os.open(NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+                         | os.O_NONBLOCK, 0o644, dir_fd=directory)
             try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise SystemExit(1)
                 fcntl.flock(fd, fcntl.LOCK_EX)
                 held = os.fstat(fd)
                 try:
@@ -367,47 +375,49 @@ if mode == "append":
 
 path = sys.argv[2]
 try:
-    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
 except FileNotFoundError:
-    if mode == "take":
-        print("0 0 0")
+    print("0 0 0" if mode == "take" else "0")
     raise SystemExit(0)
 try:
-    fcntl.flock(fd, fcntl.LOCK_EX)
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         raise SystemExit(1)
+    fcntl.flock(fd, fcntl.LOCK_EX)
     data = b""
     while True:
         chunk = os.read(fd, 65536)
         if not chunk:
             break
         data += chunk
+    def is_other(raw):
+        try:
+            return json.loads(raw).get("kind") in ("lineage", "read")
+        except (ValueError, AttributeError):
+            return False
+    lines = [raw for raw in data.splitlines(True) if raw.strip()]
     if mode == "take":
-        work = other = 0
-        for raw in data.splitlines():
-            if not raw.strip():
-                continue
-            try:
-                kind = json.loads(raw).get("kind")
-            except (ValueError, AttributeError):
-                kind = None
-            if kind in ("lineage", "read"):
-                other += 1
-            else:
-                work += 1
-        if work == 0 and other == 0:
+        other = sum(1 for raw in lines if is_other(raw))
+        work = len(lines) - other
+        if not lines:
             work = 1
         print(work, other, len(data))
+        raise SystemExit(0)
+    size = int(sys.argv[3])
+    if mode == "consume-work":
+        kept = b"".join(raw for raw in data[:size].splitlines(True)
+                        if raw.strip() and is_other(raw))
     elif mode == "consume":
-        size = int(sys.argv[3])
-        if len(data) <= size:
-            os.unlink(path)
-        else:
-            os.ftruncate(fd, 0)
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.write(fd, data[size:])
+        kept = b""
     else:
         raise SystemExit(1)
+    remaining = kept + data[size:]
+    if remaining:
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, remaining)
+    else:
+        os.unlink(path)
+    print(len(kept))
 finally:
     os.close(fd)
 '

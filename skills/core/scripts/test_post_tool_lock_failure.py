@@ -414,3 +414,74 @@ def test_work_left_after_an_accepted_stop_reopens_and_is_enforced(tmp_path, host
     reason = _block_reason(_stop(host, repo, sid))
     assert reason is not None and "UNRECORDED WORK: 1" in reason
     assert (run_dir / "active-session-log.tmp").exists()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_lineage_note_survives_a_blocked_stop_until_reported(tmp_path, host):
+    """A Stop that blocks (or fails finalization) must not consume a note it
+    has not delivered on an accepting Stop."""
+    repo = _repo(tmp_path)
+    sid = "note-kept"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    payloads = _payloads(repo, sid)
+    (repo / "model.py").write_text("x = 1\n")
+    assert _run(host, "mycelium-activity-tracker.sh", repo,
+                payloads["mycelium-activity-tracker.sh"]).returncode == 0
+    lock = _hold_session_lock(run_dir)
+    assert _run(host, "mycelium-read-tracker.sh", repo,
+                payloads["mycelium-read-tracker.sh"],
+                extra_env=FAST_TIMEOUT).returncode == 0
+    (lock / "owner").unlink()
+    lock.rmdir()
+
+    assert _block_reason(_stop(host, repo, sid)) is not None
+    assert (run_dir / UNRECORDED).exists()
+    with (repo / ".living" / "learnings.md").open("a") as handle:
+        handle.write("\n### [2026-11-20] triaged\n- noted\n")
+    accepted = _stop(host, repo, sid)
+    assert _block_reason(accepted) is None, accepted.stdout
+    assert "UNRECORDED EVENTS: 1" in accepted.stdout
+    assert not (run_dir / UNRECORDED).exists()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_fifo_at_the_evidence_name_cannot_hang_the_hook(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "fifo-evidence"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    _hold_session_lock(run_dir)
+    os.mkfifo(run_dir / UNRECORDED)
+
+    started = time.monotonic()
+    result = _run(host, "mycelium-activity-tracker.sh", repo,
+                  _payloads(repo, sid)["mycelium-activity-tracker.sh"],
+                  extra_env=FAST_TIMEOUT)
+
+    assert result.returncode == 0
+    assert time.monotonic() - started < 30
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_stale_transaction_cleanup_keeps_unrecorded_work(tmp_path, host):
+    repo = _repo(tmp_path)
+    sid = "stale-evidence"
+    _start(host, repo, sid)
+    run_dir = _run_dir(repo, host, sid)
+    marker = run_dir / "active-session-log.tmp"
+    lines = marker.read_text().splitlines()
+    old = int(time.time()) - 7300
+    marker.write_text(f"{lines[0]}\n{old}\n{lines[2]}\n")
+    evidence = run_dir / UNRECORDED
+    evidence.write_text('{"kind": "work", "hook": "mycelium-post-action.sh"}\n')
+    os.utime(evidence, (old, old))
+
+    resumed = _run(host, "mycelium-health.sh", repo,
+                   {"cwd": str(repo), "source": "resume", "session_id": sid,
+                    "hook_event_name": "SessionStart"})
+    assert resumed.returncode == 0, resumed.stderr
+    assert evidence.exists()
+
+    reason = _block_reason(_stop(host, repo, sid))
+    assert reason is not None and "UNRECORDED WORK: 1" in reason
