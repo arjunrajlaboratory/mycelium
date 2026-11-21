@@ -19,6 +19,9 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    # Fail a hung run instead of waiting for GitHub's 6-hour default.
+    # Recent green runs take at most ~7 min (Linux) and ~12 min (macOS).
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -155,6 +158,7 @@ jobs:
     # Platform-sensitive subset only; metadata validation and Markdown lint
     # are platform-neutral and stay in the Ubuntu job (issue #66).
     runs-on: macos-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
