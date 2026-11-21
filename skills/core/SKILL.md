@@ -39,6 +39,14 @@ For analysis, report generation, idea brainstorming, and code review, direct the
 
 **Purpose**: Scaffold a new or existing repo into a mycelium-enabled living repository.
 
+**Antigravity IDE or App**: Use the short, executable sequence in
+`skills/core/references/antigravity-init.md` for an authorized initial scaffold.
+The shared initializer already creates the structure, manifests, guidance,
+core convention packs and skillpacks directory listed below; do those once.
+For an existing repo, step 3 still applies: audit, propose the plan, and get
+the user's confirmation before running the sequence. Complete the remaining
+knowledge and optional domain steps below after the base scaffold succeeds.
+
 **Steps**:
 1. Check if repo already has mycelium structure (look for `.living/` directory).
 2. **New repo**: Run full scaffold using `skills/core/scripts/init_repo.py`.

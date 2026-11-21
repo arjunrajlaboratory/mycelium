@@ -692,15 +692,19 @@ class State:
         if not valid_session_id(sid):
             raise OpFailed
         host = self.host
-        if host not in {"claude", "codex"}:
+        if host not in {"claude", "codex", "antigravity-ide", "antigravity-app"}:
             raise OpFailed
 
         run_state = f"{shared}/run/{host}/{sid}"
         flat_marker_file = shared + "/active-session-log.tmp"
         # Rolling-upgrade compatibility: a task started by the prior build
         # may still own the flat transaction. Route only an exact owner match.
+        # Antigravity App never wrote the flat layout, and its session
+        # identities can equal another Antigravity host's, so it never adopts
+        # flat state.
         if (
-            not exists(run_state)
+            host != "antigravity-app"
+            and not exists(run_state)
             and not islink(run_state)
             and isfile(flat_marker_file)
             and not islink(flat_marker_file)

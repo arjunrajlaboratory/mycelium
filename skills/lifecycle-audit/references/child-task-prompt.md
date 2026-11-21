@@ -4,7 +4,7 @@ Launch the fresh host task with this prompt, substituting only the
 host-specific edit tool. Every probe below is required; the 0.6.1
 post-release audits omitted the nested-subagent probe on both hosts, so the
 template now carries it — mark its evidence row N/A only when the host
-genuinely exposes no native subagent/task mechanism (current Claude Code and
+genuinely exposes no applicable general coding child mechanism (current Claude Code and
 Codex both expose one), and say so explicitly in the report.
 
 Host substitutions:
@@ -16,6 +16,20 @@ Host substitutions:
   subagent mechanism is the native subtask/collaborator tool exposed by the
   CLI build under test — if the build exposes none, record N/A with the CLI
   version as evidence.
+
+- **Antigravity IDE**: edit tool is `write_to_file`, with `ArtifactMetadata`
+  omitted for repository files, including `.living` and `.mycelium`. Deletion uses the same
+  narrow `rm -- MYCELIUM_HOOK_AUDIT_DISPOSABLE.tmp` exception when no native
+  unlink tool exists. Use a general coding child only if exposed by the IDE;
+  a browser child is not an applicable substitute. Record N/A and the observed
+  tool limitation. Capture native transcript events and accepted Stop receipts
+  as specified in `antigravity-ide.md`.
+- **Antigravity App**: edit tools are `write_file` (`Path`, `Content`,
+  `Overwrite`) and `edit_file` (`Path`, `Replacement`, `Target`); commands use
+  `run_command` in the App sandbox without `BypassSandbox`. Use a coding child
+  only if the App exposes one; otherwise record N/A and the observed limitation.
+  Capture native evidence and accepted Stop receipts as specified in
+  `antigravity-app.md`, not the IDE profile.
 
 Probe substitutions — the launcher selects these per the protocol's "Probe
 selection" section and must ensure the positive entry point exists in the
@@ -53,12 +67,14 @@ first action. If none, write NONE.
 STEP 3: Under a section "SUBAGENT PROBE", first report the current contents
 of any active-session marker identity you were told about in the session
 context (do NOT read .mycelium state directly — quote only what the
-injected context already told you). Then use {SUBAGENT_TOOL} to launch one
-child task whose entire instruction is: "Print pwd and nothing else. Do not
-edit any file or invoke any skill." Wait for it to finish, then report
-whether any new session-start or session-end context for the CHILD appeared
-in your own conversation, verbatim. If the host has no such tool, write N/A
-and the reason.
+injected context already told you). Determine from your exposed tool definitions
+whether {SUBAGENT_TOOL} is available for a general coding child. If it is not,
+write N/A with the observed limitation and proceed to STEP 4 without launching
+any child. A browser-only child cannot run this probe. If an applicable tool is
+available, launch exactly one child whose entire instruction is: "Print pwd and
+nothing else. Do not edit any file or invoke any skill." Wait for it to finish,
+then report whether any new session-start or session-end context for the CHILD
+appeared in your own conversation, verbatim.
 
 STEP 4: Run exactly this shell command:
 {POSITIVE_COMMAND}
@@ -89,7 +105,8 @@ your turn again and report under "STOP RETRY" what the blocking message
 said, verbatim.
 
 Produce the report sections in order. Do not perform any other repository
-mutations.
+mutations. Report only blocking messages and retries that you actually observe.
+If no Stop block was observed, say NOT OBSERVED; do not infer a successful retry.
 ```
 
 Launcher notes:

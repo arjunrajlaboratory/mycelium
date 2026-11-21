@@ -60,7 +60,7 @@ mycelium__state() {
     esac
   done
   case "${MYCELIUM_HOOK_HOST:-}" in
-    codex|claude) host="$MYCELIUM_HOOK_HOST" ;;
+    codex|claude|antigravity-ide|antigravity-app) host="$MYCELIUM_HOOK_HOST" ;;
   esac
 
   while true; do
@@ -1002,7 +1002,7 @@ mycelium_file_size() {
 
 mycelium_hook_host() {
   case "${MYCELIUM_HOOK_HOST:-}" in
-    codex|claude) printf '%s\n' "$MYCELIUM_HOOK_HOST" ;;
+    codex|claude|antigravity-ide|antigravity-app) printf '%s\n' "$MYCELIUM_HOOK_HOST" ;;
     *) printf '%s\n' "claude" ;;
   esac
 }

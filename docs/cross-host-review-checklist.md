@@ -85,6 +85,9 @@ hook, filesystem, or lifecycle boundaries.
 
 ## 3. Installation, Upgrade, and Migration
 
+- [ ] Selecting a virtual-environment interpreter preserves its invocation
+      path, `sys.prefix`, packages, and child interpreter resolution; validating
+      the executable target must not replace the selected environment.
 - [ ] A fresh repository initializes successfully for each supported host.
 - [ ] Re-running initialization is idempotent.
 - [ ] Dry-run migration performs no writes.
@@ -127,9 +130,21 @@ hook, filesystem, or lifecycle boundaries.
       which on Codex 0.169.0 showed hooks as active while skipping them;
       generated guidance keeps a start-of-task, hedged in-context hook health
       check whose sentinel text matches what SessionStart actually emits.
+- [ ] Native-host setup instructions identify the installed package, selected
+      interpreter and intended workspace, and distinguish initializer-owned
+      steps from remaining user choices. Execute the documented commands in an
+      isolated existing Git project; do not infer model compliance from that pass.
 
 ## 4. Lifecycle State Machine
 
+- [ ] Multiple positive native tools completed before the next model invocation
+      retain all mandatory guidance. Pending reminders are keyed by event ID,
+      survive restart/legacy migration, and clear only on individual native
+      acknowledgement; duplicate events and negative controls cannot erase or
+      resurrect other messages.
+- [ ] A finalizer attempt is durable before dispatch. If its result is lost,
+      an identity-bound acceptance receipt permits reconciliation without
+      redispatch; absence of a marker alone cannot fabricate acceptance.
 - [ ] SessionStart handles fresh, resumed, cleared, compacted, and stale-crash
       sessions.
 - [ ] Session identifiers and log names are unique under rapid or concurrent
@@ -338,6 +353,9 @@ hook, filesystem, or lifecycle boundaries.
 
 ## 7. Data Lineage Integrity
 
+- [ ] An in-progress native command cannot publish preexisting output hashes
+      as completed execution provenance. Terminal evidence reconciles the same
+      command once, and missing completion evidence remains unresolved.
 - [ ] Exactly one lineage manifest is produced for an accepted session that
       executed tracked analysis.
 - [ ] Raw events accumulate across a blocked Stop and are not discarded before
@@ -516,11 +534,24 @@ hook, filesystem, or lifecycle boundaries.
 
 ## Required Adversarial Regression Matrix
 
+For Antigravity packaging, verify file modes alongside bytes, include generator
+and effective host guidance in source identity, and keep the selected interpreter
+path separate. A permission-only repair must preserve the old package and refuse
+changed content, extra files, links and malformed ownership.
+
 These cases are mandatory because ordinary happy-path tests are unlikely to
 exercise them.
 
 | Case | Expected result |
 | --- | --- |
+| Two positive native commands finish in one invocation, followed by partial acknowledgement | Mandatory first-command guidance and later context both survive; only the acknowledged ID is removed, including after restart. |
+| An owned Antigravity hook loses its executable bit | Doctor and ordinary install fail; explicit permission repair retains the old package and restores a working hook. |
+| Only the Antigravity package generator, guidance or source permission mode changes | The development source digest changes; a different selected Python path alone does not change source identity. |
+| An async native command overwrites an existing output after its first hook | No output snapshot is finalized while RUNNING; matching terminal evidence produces one action with the final observed hash, while unavailable completion remains unresolved. |
+| A Stop result is lost after the real finalizer completes | The adapter reconciles an identity-bound acceptance receipt without dispatching again; a missing or mismatched receipt retains an uncertain outcome. |
+| A native host's SQLite store is read while its writer is live, and after it exits | Every App file (database, `-wal`, `-shm`) is byte- and mtime-identical afterwards and no file is created: reads go through a private snapshot, because a `mode=ro` WAL reader still writes `-shm`. |
+| A Claude or Codex edit mentions an adapter-only field name, or reaches the Antigravity package through the shared plugin-root pointer | Host-specific modes are chosen from adapter-set environment, never payload text or a package marker that overrides an explicit host. |
+| The selected Python launcher is a venv symlink | Both the generated hook and its child python3 preserve the selected environment and can import its packages. |
 | `.mycelium` or `.living` is a symlink outside the project | The hook refuses the unsafe state and writes nothing outside the project. |
 | Session work updates `.living` within the same timestamp second | A valid update is accepted. |
 | Session work updates an existing finding file | The content change is detected even if the parent directory mtime is unchanged. |

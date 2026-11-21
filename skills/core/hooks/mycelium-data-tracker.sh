@@ -19,11 +19,26 @@
 # Input: JSON on stdin: {tool_input:{command}, cwd, agent_id?, agent_type?, ...}
 # Output: Silent (no stdout, no additionalContext).
 # Env override: MYCELIUM_DATA_HELPER may point at an alternate event extractor.
+# Strict capture: only the durable Antigravity adapters set
+# MYCELIUM_STRICT_CAPTURE=1 with MYCELIUM_HOOK_HOST=antigravity-ide or
+# antigravity-app. Then a missing or failing extractor in an owned transaction
+# exits nonzero with its diagnostic on stderr, so the adapter retains an
+# unresolved outcome instead of the skip record other hosts get (the adapter
+# reports that gap itself). Every other host keeps the fail-open behavior
+# below; intentional no-ops and gaps recorded as skips still exit 0.
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/mycelium-hook-lib.sh"
+
+STRICT_CAPTURE=0
+if [[ "${MYCELIUM_STRICT_CAPTURE:-}" == "1" ]] \
+  && [[ "$(mycelium_hook_host)" == "antigravity-ide" || "$(mycelium_hook_host)" == "antigravity-app" ]]; then
+  STRICT_CAPTURE=1
+fi
+# The block below silences stderr; strict diagnostics use the original stream.
+exec 3>&2
 
 {
   INPUT=$(cat)
@@ -116,6 +131,10 @@ source "$HERE/mycelium-hook-lib.sh"
   mkdir -p "$STATE_DIR"
 
   if [[ ! -f "$HELPER" ]]; then
+    if [[ "$STRICT_CAPTURE" == "1" ]]; then
+      printf 'Mycelium data capture failed: extractor not found: %s\n' "$HELPER" >&3
+      exit 70
+    fi
     # Without the extractor no command can be classified, so this is one gap
     # for the session, recorded once, not a lost data command per Bash call.
     mycelium_record_lineage_skip "$EVENTS_FILE" "$TS" "$COMMAND" \
@@ -132,13 +151,26 @@ source "$HERE/mycelium-hook-lib.sh"
   # A failed extractor used to vanish here; it now leaves a skip record in
   # the same stream, so the manifest shows the gap instead of nothing.
   EXTRACTOR_STATUS=0
+  EXTRACTOR_ERR=/dev/null
+  if [[ "$STRICT_CAPTURE" == "1" ]]; then
+    EXTRACTOR_ERR=$(mktemp "${TMPDIR:-/tmp}/mycelium-extractor-err.XXXXXX")
+  fi
   EXTRACTOR_OUT=$(python3 "$HELPER" \
     --cwd "$SESSION_CWD" \
     --ts "$TS" \
     --bash-cmd "$COMMAND" \
     --append-to "$EVENTS_FILE" \
     ${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"} \
-    ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} 2>/dev/null) || EXTRACTOR_STATUS=$?
+    ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} 2>"$EXTRACTOR_ERR") || EXTRACTOR_STATUS=$?
+  if [[ "$STRICT_CAPTURE" == "1" ]]; then
+    EXTRACTOR_DIAG=$(tail -c 1500 "$EXTRACTOR_ERR" 2>/dev/null || true)
+    rm -f "$EXTRACTOR_ERR"
+    if (( EXTRACTOR_STATUS != 0 )); then
+      printf 'Mycelium data capture failed: extractor exited %s: %s\n' \
+        "$EXTRACTOR_STATUS" "$EXTRACTOR_DIAG" >&3
+      exit 70
+    fi
+  fi
   if (( EXTRACTOR_STATUS != 0 )); then
     mycelium_record_lineage_skip "$EVENTS_FILE" "$TS" "$COMMAND" \
       "extractor-failed" "exit $EXTRACTOR_STATUS" \

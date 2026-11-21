@@ -1026,3 +1026,46 @@ boundaries). It converged only when each segment was handed to the
 detector's own grammar (pattern 36). Separately, a record that is not
 session work must not be named by a session number that an idle turn
 releases, or the next session overwrites it.
+
+## 46. Package identity omits file modes or the build recipe
+
+Package content hashes omit executable permissions, while resource-only digests
+omit the build recipe. Verify load-bearing modes before doctor/idempotent-install
+success and include generator bytes and effective guidance in source identity.
+Permission repair must be explicit, content-verified, staged and backed up; it
+must not become an override for edited files, links or malformed ownership.
+
+## 47. Initialization guidance sends the agent back into implementation discovery
+
+A correct initializer can remain unexecuted when the skill describes its
+outputs as separate tasks without an explicit native invocation. Give the agent
+the installed package path, selected interpreter, explicit workspace and a
+short fail-fast command sequence. Identify steps the initializer already owns.
+Verify that exact documented sequence preserves user
+files and creates a valid project. This proves the recipe works offline, not
+that a selected model will follow it within a native invocation allowance.
+
+## 48. Batched delivery loses mandatory reminders
+
+A singleton pending reminder loses earlier mandatory guidance when a native
+invocation completes several analysis commands. Persist reminders by event ID
+until each is acknowledged, including restart and older singleton migration.
+Exercise two positives before delivery, partial acknowledgement, duplicate tool
+delivery and a negative neighbor; a one-positive-then-delivery test misses this.
+
+## 49. Native asynchronous execution and finalization boundaries
+
+**Failure:** An early RUNNING hook snapshots the previous output, or a lost
+Stop response causes completed work to be dispatched again. Resolving a chosen
+venv launcher to its base executable also changes the execution environment.
+
+**Invariant:** Completion evidence, output observation, and durable finalization
+acknowledgement are separate facts. Keep in-progress commands pending, correlate
+terminal evidence to the same step, journal finalizer attempts before dispatch,
+and reconcile identity-bound receipts after uncertain delivery. Preserve the
+selected interpreter's invocation path while validating its executable target.
+
+**Regression evidence:** Run actual base hooks with an async overwrite and
+response loss after real Stop effects; assert final hashes, one action, and no
+redispatch. Test the generated hook launcher and child Python against venv-only
+packages. Retain unresolved outcomes when the required evidence is unavailable.
