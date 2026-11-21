@@ -25,6 +25,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Otherwise they fall back to the process directory. SessionStart also writes a missing `.mycelium/plugin-root` in
   the worktree, so `$(cat .mycelium/plugin-root)` commands work there.
   Existing projects need no migration. (#144)
+- A Claude Code session that starts in the main checkout and then moves into
+  a linked worktree (`cd .claude/worktrees/<name>`, or EnterWorktree) now
+  keeps one lifecycle transaction. SessionStart had reserved the session log
+  and run state in the main checkout, the first work hook in the worktree
+  opened a second transaction that Stop finalized, and the main checkout kept
+  an untracked stub log, an inflated INDEX count and stale
+  `.mycelium/run/<host>/<session_id>/` state in another session's working
+  tree. The hook that opens the transaction in the worktree now takes over the
+  reservation from the repository's other checkout: it carries the start time
+  and any handoff written at the path SessionStart announced, then removes the
+  stub log and run state and recounts that checkout's INDEX. A Stop with no
+  work in the worktree does the same before it decides. Files that changed in
+  the old checkout after the session started (a shell edit records no
+  activity) are named in the worktree's Stop and triaged once. A reservation
+  that already recorded work is left for its own checkout's Stop. Existing
+  projects need no migration.
 - A post-tool hook that could not take its session's lock (a slow Stop,
   parallel subagent hooks, a loaded machine) no longer drops the edit, read,
   or analysis run silently. It still exits 0 so the tool call is never

@@ -887,6 +887,225 @@ mycelium_reopen_post_tool_transaction() {
     | "$MYCELIUM__HOOKS_DIR/mycelium-health.sh" >/dev/null 2>&1
 }
 
+# mycelium_take_moved_transaction REPO_ROOT SID MODE: take over this host
+# session's reservation from a sibling checkout of the same repository.
+#
+# A session can start in the main checkout and then move into a linked
+# worktree (`cd .claude/worktrees/<name>`, or the EnterWorktree tool), or the
+# reverse. SessionStart reserved its log and run state in the checkout it
+# started in; every later hook resolves the checkout it moved to. Without this,
+# the first work hook there opened a second transaction, Stop finalized that
+# one, and the first checkout kept an untracked stub log and run state that
+# nothing finalized or removed, in the working tree of whatever other session
+# owns that checkout.
+#
+# Only linked worktrees of REPO_ROOT's repository (`git worktree list`) are
+# searched, never an unrelated enclosing or nearby project. A reservation is
+# taken only while it is untouched: its owner token is SID, its log is the
+# untracked, unfinalized stub SessionStart wrote, and it holds no recorded work
+# (no activity, data or unrecorded events, no pending handoff finalization).
+# Work recorded in the other checkout stays there for its own Stop to judge.
+# Both of that checkout's locks are held while it checks and removes, and a
+# busy lock leaves the reservation alone.
+#
+# MODE `adopt` runs in SessionStart or a reopen, under REPO_ROOT's locks, with
+# STATE_DIR set to this session's new run directory. It moves a handoff the
+# agent wrote at the path SessionStart announced into STATE_DIR, unless one is
+# already there; sets MYCELIUM_MOVED_START_TS to the session's original start
+# so duration covers the whole session; and writes any project files changed
+# in the other checkout since its baseline to STATE_DIR/moved-checkout-
+# changes.tmp (that checkout on line 1), which Stop enforces. MODE `probe`
+# changes nothing and only reports whether there is a reservation to take.
+# Returns 0 after taking (or, for `probe`, finding) a reservation and sets
+# MYCELIUM_MOVED_FROM to its checkout; returns 1 when there is none.
+MYCELIUM_MOVED_FROM=""
+MYCELIUM_MOVED_START_TS=""
+mycelium_take_moved_transaction() {
+  local repo_root="$1"
+  local sid="$2"
+  local mode="$3"
+  local host=""
+  local here=""
+  local line=""
+  local other=""
+  local run=""
+  MYCELIUM_MOVED_FROM=""
+  MYCELIUM_MOVED_START_TS=""
+  mycelium_valid_session_id "$sid" || return 1
+  host=$(mycelium_hook_host)
+  here=$(cd "$repo_root" 2>/dev/null && pwd -P) || return 1
+  while IFS= read -r line; do
+    [[ "$line" == "worktree "* ]] || continue
+    other=$(cd "${line#worktree }" 2>/dev/null && pwd -P) || continue
+    [[ "$other" != "$here" ]] || continue
+    run="$other/.mycelium/run/$host/$sid"
+    [[ -d "$other/.living" && ! -L "$other/.living" \
+      && -d "$other/.mycelium" && ! -L "$other/.mycelium" \
+      && -d "$other/.mycelium/run" && ! -L "$other/.mycelium/run" \
+      && -d "$other/.mycelium/run/$host" && ! -L "$other/.mycelium/run/$host" \
+      && -d "$run" && ! -L "$run" \
+      && -f "$run/active-session-log.tmp" \
+      && ! -L "$run/active-session-log.tmp" ]] || continue
+    if [[ "$mode" == probe ]]; then
+      MYCELIUM_MOVED_FROM="$other"
+      return 0
+    fi
+    if mycelium__take_moved_from "$other" "$run" "$sid" "$mode"; then
+      MYCELIUM_MOVED_FROM="$other"
+      return 0
+    fi
+  done < <(git -C "$repo_root" worktree list --porcelain 2>/dev/null)
+  return 1
+}
+
+MYCELIUM__MOVED_STOP_LOCK=""
+MYCELIUM__MOVED_SESSION_LOCK=""
+mycelium__release_moved_locks() {
+  local lock_dir="$MYCELIUM__MOVED_SESSION_LOCK"
+  MYCELIUM__MOVED_SESSION_LOCK=""
+  mycelium_release_directory_lock "$lock_dir"
+  lock_dir="$MYCELIUM__MOVED_STOP_LOCK"
+  MYCELIUM__MOVED_STOP_LOCK=""
+  mycelium_release_directory_lock "$lock_dir"
+}
+
+# The stub SessionStart writes: frontmatter, then only `## Session Log`, one
+# `### HH:MM — Session started` heading, and its Branch and Resuming lines.
+# Anything else means the agent wrote into it.
+MYCELIUM__PY_STUB_LOG='
+import re
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+parts = text.split("---\n", 2)
+if len(parts) != 3 or parts[0] != "":
+    sys.exit(1)
+front, body = parts[1], parts[2]
+if re.search(r"^ended: *\S", front, re.M):
+    sys.exit(1)
+allowed = (r"## Session Log", r"### \d\d:\d\d \u2014 Session started",
+           r"- Branch: .*", r"- Resuming from: .*")
+seen = [line for line in body.splitlines() if line.strip()]
+if len(seen) != len(allowed):
+    sys.exit(1)
+for line, pattern in zip(seen, allowed):
+    if not re.fullmatch(pattern, line):
+        sys.exit(1)
+'
+
+mycelium__take_moved_from() {
+  local other="$1"
+  local run="$2"
+  local sid="$3"
+  local mode="$4"
+  local log=""
+  local owner=""
+  local work=""
+  local start_ts=""
+  local entry=""
+  local changes=""
+  local helper=""
+  local collect_args=()
+  local attempts="${MYCELIUM_MOVED_LOCK_MAX_ATTEMPTS:-100}"
+  local status=1
+
+  mycelium_acquire_directory_lock "$other/.mycelium" "mycelium-stop.lock" \
+    MYCELIUM__MOVED_STOP_LOCK "$attempts" || return 1
+  if ! mycelium_acquire_directory_lock "$run" "mycelium-session.lock" \
+    MYCELIUM__MOVED_SESSION_LOCK "$attempts"; then
+    mycelium__release_moved_locks
+    return 1
+  fi
+  while true; do
+    [[ -f "$run/active-session-log.tmp" && ! -L "$run/active-session-log.tmp" \
+      && -f "$run/active-session-owner-id.tmp" \
+      && ! -L "$run/active-session-owner-id.tmp" ]] || break
+    owner=$(head -1 "$run/active-session-owner-id.tmp" 2>/dev/null || true)
+    [[ "$owner" == "$sid" ]] || break
+    log=$(head -1 "$run/active-session-log.tmp" 2>/dev/null || true)
+    [[ "$log" == "$other/.living/log/"*.md \
+      && "${log#"$other/.living/log/"}" != */* \
+      && -f "$log" && ! -L "$log" \
+      && -d "$other/.living/log" && ! -L "$other/.living/log" ]] || break
+    for work in mycelium-session-activity.tmp mycelium-unrecorded-events.tmp \
+      mycelium-data-events.tmp handoff-finalization-pending.tmp; do
+      if [[ -s "$run/$work" || -L "$run/$work" ]]; then
+        break 2
+      fi
+    done
+    [[ ! -e "$run/mycelium-session-activity.tmp" \
+      && ! -e "$run/handoff-finalization-pending.tmp" ]] || break
+    if git -C "$other" ls-files --error-unmatch -- "$log" >/dev/null 2>&1; then
+      break
+    fi
+    python3 -I -S -c "$MYCELIUM__PY_STUB_LOG" "$log" 2>/dev/null || break
+
+    if [[ "$mode" == adopt ]]; then
+      # Shell commands (`sed -i`, `printf >`) record no activity, so compare
+      # that checkout with its session baseline, as its own Stop would have.
+      # Changes, or a comparison that cannot run, are carried here for this
+      # checkout's Stop to enforce; another session's concurrent edits there
+      # cost one triage, never silence about this session's.
+      changes=""
+      helper="${MYCELIUM_SESSION_CHANGES_HELPER:-$MYCELIUM__HOOKS_DIR/../scripts/session_file_changes.py}"
+      start_ts=$(head -1 "$run/session-start-ts.tmp" 2>/dev/null || true)
+      collect_args=(collect --repo-root "$other" \
+        --baseline "$run/session-file-baseline.json" \
+        --exclude ".living/log/LOG_REGISTRY.md" --exclude-prefix ".living/log/" \
+        --exclude ".living/INDEX.md")
+      [[ "$start_ts" =~ ^[0-9]{1,18}$ ]] && collect_args+=(--start-ts "$start_ts")
+      if [[ ! -f "$run/session-file-baseline.json" \
+        || -L "$run/session-file-baseline.json" || ! -f "$helper" ]] \
+        || ! changes=$(python3 "$helper" "${collect_args[@]}" 2>/dev/null); then
+        changes="(could not compare with this session's baseline)"
+      fi
+      if [[ -n "$changes" ]]; then
+        [[ -n "${STATE_DIR:-}" && -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] || break
+        { printf '%s\n' "$other"; printf '%s\n' "$changes"; } \
+          > "$STATE_DIR/moved-checkout-changes.tmp" 2>/dev/null || break
+      fi
+      if [[ "$start_ts" =~ ^[0-9]{1,18}$ ]]; then
+        MYCELIUM_MOVED_START_TS="$start_ts"
+      fi
+      if [[ -f "$run/last-session.md" && ! -L "$run/last-session.md" \
+        && -n "${STATE_DIR:-}" && -d "$STATE_DIR" && ! -L "$STATE_DIR" \
+        && ! -e "$STATE_DIR/last-session.md" \
+        && ! -L "$STATE_DIR/last-session.md" ]]; then
+        mv "$run/last-session.md" "$STATE_DIR/last-session.md" 2>/dev/null \
+          || break
+      fi
+    fi
+    rm -f "$log"
+    for entry in "$run"/* "$run"/.[!.]*; do
+      [[ -e "$entry" || -L "$entry" ]] || continue
+      [[ "$entry" == "$MYCELIUM__MOVED_SESSION_LOCK" ]] && continue
+      [[ -d "$entry" && ! -L "$entry" ]] && continue
+      rm -f "$entry"
+    done
+    status=0
+    break
+  done
+  local session_lock="$MYCELIUM__MOVED_SESSION_LOCK"
+  MYCELIUM__MOVED_SESSION_LOCK=""
+  mycelium_release_directory_lock "$session_lock"
+  if (( status == 0 )); then
+    rmdir "$run" "$other/.mycelium/run/$(mycelium_hook_host)" \
+      "$other/.mycelium/run" 2>/dev/null || true
+    # SessionStart's INDEX refresh counted the stub; recount without it, as
+    # SessionStart does (no LLM, <1s), still under that checkout's lock.
+    local index_script="$MYCELIUM__HOOKS_DIR/../scripts/generate_index.py"
+    if [[ -f "$other/.living/INDEX.md" && ! -L "$other/.living/INDEX.md" \
+      && -f "$index_script" ]]; then
+      python3 "$index_script" --living-dir "$other/.living" --summary-heuristic \
+        >/dev/null 2>&1 \
+        || python3 "$index_script" --living-dir "$other/.living" --counts-only \
+          >/dev/null 2>&1 \
+        || true
+    fi
+  fi
+  mycelium__release_moved_locks
+  return "$status"
+}
+
 # Filters stdin into one Markdown table cell. A value of letters, digits,
 # `.`, `_`, `/`, and `-` (plus trailing newlines) is already its own cell, so
 # it skips the interpreter; anything else, including a NUL byte, goes to it.
