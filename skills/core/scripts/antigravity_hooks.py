@@ -62,7 +62,11 @@ def unresolved_reason(turn):
     """UNRESOLVED_HOOK plus the recorded cause, so a blocked Stop says what failed."""
     # State written before uncertain_cause existed can still name a hook error.
     detail = turn.get("uncertain_cause") or turn.get("last_hook_error")
-    return UNRESOLVED_HOOK + (f" Cause: {detail}" if detail else "")
+    # The first cause is kept, so also name every action still unfinished:
+    # one killed later must not hide behind an earlier, unrelated failure.
+    running = sorted(action for action, value in turn.get("actions", {}).items() if value == "running")
+    return (UNRESOLVED_HOOK + (f" Cause: {detail}" if detail else "") +
+            (" Unfinished hook actions: " + ", ".join(running) + "." if running else ""))
 
 
 def save_then_raise(save, error):
@@ -230,6 +234,10 @@ def hook_environment(host, plugin, *, batch=False):
     env = dict(os.environ, MYCELIUM_HOOK_HOST=host, MYCELIUM_PLUGIN_ROOT=str(plugin),
                MYCELIUM_STRICT_CAPTURE="1")
     env.pop(ACTIVITY_BATCH_ENV, None)
+    # This adapter finds the base marker and receipts under <root>/.mycelium,
+    # so the base hooks must use that default too. An inherited override
+    # would put the marker elsewhere and fail every startup.
+    env.pop("MYCELIUM_STATE_DIR", None)
     if batch:
         env[ACTIVITY_BATCH_ENV] = "1"
     # The shared hooks call plain `python3`; the installed package's shim runs

@@ -130,38 +130,45 @@ def file_map(root):
     return result
 
 
-HOOK_STATE = Path(__file__).resolve().parent.parent / "skills/core/hooks/mycelium_hook_state.py"
+HOOK_STATE = "skills/core/hooks/mycelium_hook_state.py"
 
 
-def base_state_refusal(root, profile):
+def base_state_refusal(root, profile, package=None, python=None):
     """Why base Mycelium would refuse to start a lifecycle at ROOT, or None.
 
     Runs the base hooks' own read-only prepare check (the one that refuses a
-    symlink under .living/ or the state tree, honoring MYCELIUM_STATE_DIR)
-    so doctor and the hooks cannot disagree. It creates nothing: a state
-    directory that does not exist yet is fine, since startup creates it.
+    symlink under .living/ or .mycelium/) from PACKAGE, the installed copy
+    being diagnosed, under its recorded PYTHON, so doctor and the hooks
+    cannot disagree; without a package it uses this source checkout. The
+    adapter pins the default .mycelium state directory, so this does too. It
+    creates nothing: a state directory that does not exist yet is fine,
+    since startup creates it.
     """
-    if not HOOK_STATE.is_file():
-        return None
+    package = Path(package) if package is not None else Path(__file__).resolve().parent.parent
+    check = package / HOOK_STATE
+    if not check.is_file():
+        return f"Lifecycle state check unavailable: {check} is missing"
+    interpreter = python if python is not None and Path(python).is_file() else sys.executable
     host = "antigravity-app" if profile == "app" else "antigravity-ide"
-    requested = os.environ.get("MYCELIUM_STATE_DIR", "")
-    result = subprocess.run(
-        [sys.executable, "-I", "-S", str(HOOK_STATE), str(os.getpid()), host, "ok", "",
-         str(root), "", "", requested, "", "prepare:read-only+reason"],
-        capture_output=True, timeout=60, cwd="/")
+    try:
+        result = subprocess.run(
+            [str(interpreter), "-I", "-S", str(check), str(os.getpid()), host, "ok", "",
+             str(root), "", "", "", "", "prepare:read-only+reason"],
+            capture_output=True, timeout=60, cwd="/")
+    except (subprocess.SubprocessError, OSError) as error:
+        # A diagnostic must not break the identity report.
+        return f"Could not check lifecycle state ({type(error).__name__}): {error}"
     fields = result.stdout.split(b"\0")
     if b"ok" in fields:
         return None
-    if b"reason" in fields:
+    if b"reason" in fields[:-1]:
         return os.fsdecode(fields[fields.index(b"reason") + 1])
-    state = Path(requested) if requested else Path(".mycelium")
-    state = state if state.is_absolute() else root / state
-    if not os.path.lexists(state):
+    if not os.path.lexists(root / ".mycelium"):
         return None  # read-only refuses only because startup has not created it yet
-    return "Base Mycelium cannot prepare lifecycle state in " + str(state)
+    return "Base Mycelium cannot prepare lifecycle state in " + str(root / ".mycelium")
 
 
-def workspace_readiness(workspace, profile="ide"):
+def workspace_readiness(workspace, profile="ide", *, package=None, python=None):
     """Check the adapter's Git-root/.living opt-in without creating state."""
     path = safe_path(workspace)
     result = {"ok": False, "path": str(path), "lifecycle_opt_in": False}
@@ -184,7 +191,7 @@ def workspace_readiness(workspace, profile="ide"):
         return dict(result, reason="Git root has no .living opt-in")
     # Base Mycelium refuses to start a lifecycle in a .living/ or state tree
     # holding a symlink, which leaves every native turn unresolved.
-    refusal = base_state_refusal(root, profile)
+    refusal = base_state_refusal(root, profile, package, python)
     if refusal:
         return dict(result, lifecycle_opt_in=True, reason=refusal)
     return dict(result, ok=True, lifecycle_opt_in=True,
@@ -269,7 +276,10 @@ def doctor(destination, *, workspace=None, profile="ide"):
                 "Some completed App edit records do not have the FileEdit shape edit tracking assumes "
                 "(pinned to App 2.31.0); those edits are not tracked. See app_edit_records.")
     if workspace is not None:
-        report["workspace"] = workspace_readiness(workspace, profile)
+        # Check with the installed hooks when they are intact, else this source.
+        report["workspace"] = workspace_readiness(
+            workspace, profile, package=target if content_ok else None,
+            python=manifest.get("python") if content_ok else None)
         report["ok"] = report["ok"] and report["workspace"]["ok"]
     return report
 

@@ -673,3 +673,21 @@ def test_a_failed_save_does_not_hide_the_startup_error(cycle, monkeypatch):
     with pytest.raises(RuntimeError, match="did not establish") as raised:
         ag.dispatch("PreInvocation", dict(payload, initialNumSteps=11))
     assert "safety bound" in str(raised.value.__cause__)
+
+
+def test_a_later_unfinished_action_is_named_beside_an_earlier_cause(cycle):
+    repo, payload, records, write, run, state_path = cycle
+    state = json.loads(state_path.read_text())
+    turn = state["turns"]["0"]
+    turn.update(uncertain=True, uncertain_cause="recovery batch 1 (steps 4, 5): failed",
+                last_hook_error="recovery batch 1 (steps 4, 5): failed")
+    turn["actions"]["3:mycelium-data-tracker.sh"] = "running"
+    state_path.write_text(json.dumps(state))
+    reason = ag.dispatch("Stop", stop(payload))["reason"]
+    assert "Cause: recovery batch 1" in reason
+    assert "Unfinished hook actions: 3:mycelium-data-tracker.sh." in reason
+
+
+def test_base_hooks_use_the_state_directory_the_adapter_reads(monkeypatch, tmp_path):
+    monkeypatch.setenv("MYCELIUM_STATE_DIR", "elsewhere")
+    assert "MYCELIUM_STATE_DIR" not in ag.hook_environment("antigravity-app", tmp_path)

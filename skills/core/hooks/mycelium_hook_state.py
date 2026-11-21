@@ -4,7 +4,9 @@ The bash lifecycle hooks used to start a Python interpreter for every state
 helper: shared-state preparation, private run selection, active-marker and
 owner-token parsing, ownership authorization, and each lock attempt. This
 module holds those helpers and runs an ordered list of them in a single
-interpreter. `mycelium-hook-lib.sh` (`mycelium__state`) is its only caller.
+interpreter. `mycelium-hook-lib.sh` (`mycelium__state`) is its main caller;
+`tools/antigravity.py doctor` also runs `prepare:read-only+reason` directly
+and parses the `ok`/`fail`/`reason` records, so keep both parsers in step.
 
 Every operation keeps the exact contract of the bash helper it replaces: the
 same checks in the same order, the same variable assignments (including the
@@ -30,6 +32,9 @@ The nine positional values are the bash variables of the same meaning, passed
 explicitly because bash may hold them unexported. The ops are:
 
     prepare:MODE      mycelium_prepare_state_dir (write, read-only, bootstrap)
+    prepare:MODE+reason   the same, and on a refusal it can explain, also
+                      emit a `reason` record (walks the tree again to name
+                      the symlink, so only session start and doctor ask)
     select:MODE       mycelium_select_session_state (create, read-only)
     owns              mycelium_payload_owns_active_session
     require-marker    fail unless STATE_DIR/active-session-log.tmp exists
@@ -46,6 +51,7 @@ Output is a sequence of NUL-terminated fields:
     lock KIND DIR         bash records the acquired lock directory
     marker STATE PATH TS FORMAT
     owner STATE ID
+    reason TEXT           why the next `fail` happened (diagnostic only)
     ok INDEX | fail INDEX | busy INDEX
     end
 
@@ -300,17 +306,36 @@ def first_symlink(top: str, limit: int = 100000) -> str | None:
     return None
 
 
+def shown_path(path: str, limit: int = 200) -> str:
+    """PATH made safe to show a person or a model: one printable line.
+
+    Names under .living/ and .mycelium/ come from the repository, which may
+    be untrusted. Control characters (a newline could forge a new context
+    line), undecodable bytes and other non-printables are escaped, and the
+    result is length-capped, so it is always one line of valid UTF-8.
+    """
+    text = "".join(
+        char if char.isprintable() and not 0xD800 <= ord(char) <= 0xDFFF
+        else (f"\\x{ord(char) & 0xFF:02x}" if 0xDC80 <= ord(char) <= 0xDCFF
+              else char.encode("unicode_escape").decode("ascii"))
+        for char in path
+    )
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 def symlink_reason(repo_root: str, top: str, found: str | None = None) -> str:
     """One-line explanation of a symlink refusal, naming the path when known."""
-    label = os.path.relpath(top, repo_root)
+    label = shown_path(os.path.relpath(top, repo_root))
     if found is None:
         found = first_symlink(top)
     if found == ".":
         where = f"{label} is itself a symlink"
     elif found:
-        where = f"symlink found at {os.path.join(label, found)}"
+        where = f"symlink found at {shown_path(os.path.join(os.path.relpath(top, repo_root), found))}"
     else:
-        where = f"{label} contains a symlink or could not be fully examined"
+        # Too deep or too large to name here, or not fully readable.
+        where = (f"{label} contains a symlink Mycelium could not name, or could not be fully "
+                 f"examined (list links with: find {label} -type l)")
     return (f"{where}. Mycelium does not keep lifecycle state in a tree that holds "
             f"symlinks, so session tracking is off until it is removed or moved out of {label}/.")
 

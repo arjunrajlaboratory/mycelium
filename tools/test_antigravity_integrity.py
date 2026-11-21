@@ -190,31 +190,49 @@ def test_workspace_readiness_reports_a_state_path_that_is_a_file(tmp_path):
     assert not report['ok'] and '.mycelium is a symlink or not a directory' in report['reason']
 
 
-def test_workspace_readiness_checks_the_configured_state_directory(tmp_path, monkeypatch):
+def test_workspace_readiness_checks_the_state_directory_the_adapter_uses(tmp_path, monkeypatch):
+    """The adapter pins <root>/.mycelium for its base hooks, so an inherited
+    MYCELIUM_STATE_DIR neither hides nor invents a refusal here."""
     repo = _opted_in(tmp_path)
     (repo / 'sub' / 'state').mkdir(parents=True)
     (repo / 'sub' / 'state' / 'link').symlink_to(tmp_path)
     monkeypatch.setenv('MYCELIUM_STATE_DIR', 'sub/state')
+    assert package.workspace_readiness(repo)['ok']
+    (repo / '.mycelium').mkdir()
+    (repo / '.mycelium' / 'link').symlink_to(tmp_path)
     report = package.workspace_readiness(repo)
-    assert not report['ok'] and 'symlink found at sub/state/link' in report['reason']
-    monkeypatch.delenv('MYCELIUM_STATE_DIR')
-    assert package.workspace_readiness(repo)['ok']  # the default tree is clean
+    assert not report['ok'] and 'symlink found at .mycelium/link' in report['reason']
 
 
-def test_workspace_readiness_survives_a_very_deep_state_tree(tmp_path):
+def test_workspace_readiness_reports_a_check_that_cannot_run(tmp_path, monkeypatch):
+    """A slow or failing diagnostic is a readable reason, never a traceback."""
+    import subprocess
+    repo = _opted_in(tmp_path)
+    assert 'unavailable' in package.workspace_readiness(repo, package=tmp_path / 'empty')['reason']
+    real = subprocess.run
+
+    def slow(command, *args, **kwargs):
+        if str(command[-1]).startswith('prepare:'):
+            raise subprocess.TimeoutExpired(command, 60)
+        return real(command, *args, **kwargs)
+
+    monkeypatch.setattr(package.subprocess, 'run', slow)
+    report = package.workspace_readiness(repo)
+    assert not report['ok'] and report['reason'].startswith('Could not check lifecycle state (TimeoutExpired)')
+
+
+def test_workspace_readiness_survives_a_very_deep_state_tree(tmp_path, monkeypatch):
     """The diagnostic walk is iterative: depth cannot exhaust recursion."""
     repo = _opted_in(tmp_path)
     deep = repo / '.mycelium'
     deep.mkdir()
     import os
-    os.chdir(deep)
-    try:
-        for _ in range(1100):
-            os.mkdir('d')
-            os.chdir('d')
-        os.symlink('/', 'link')
-    finally:
-        os.chdir(tmp_path)
+    monkeypatch.chdir(deep)  # restored after the test
+    for _ in range(1100):
+        os.mkdir('d')
+        os.chdir('d')
+    os.symlink('/', 'link')
+    monkeypatch.chdir(tmp_path)
     report = package.workspace_readiness(repo)
     assert not report['ok'] and report['reason'].startswith('symlink found at .mycelium/d/d/')
 
