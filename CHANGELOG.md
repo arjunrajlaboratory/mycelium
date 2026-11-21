@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A post-tool hook that could not take its session's lock (a slow Stop,
+  parallel subagent hooks, a loaded machine) no longer drops the edit, read,
+  or analysis run silently. It still exits 0 so the tool call is never
+  blocked, but it prints a diagnostic on stderr and records the event in
+  `mycelium-unrecorded-events.tmp`. For a lost edit or analysis run, Stop
+  starts a fresh work cycle and asks for triage with an UNRECORDED WORK note
+  instead of accepting work it never saw; an event that fails while Stop
+  runs, or after it accepted, is enforced on the retry or the next Stop. A
+  lost data-lineage or `.living` read record does not force triage (neither
+  is session work when recorded), but Stop reports it as unknown provenance.
+  The data tracker no longer also files such an event as a no-transaction
+  lineage gap. Claude Code, Codex and Antigravity hooks all share the fix;
+  existing projects need no migration. (#137)
+
 ## [0.9.6] - 2026-11-20
 
 ### Added

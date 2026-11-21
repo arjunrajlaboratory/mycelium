@@ -37,8 +37,12 @@ if [[ "${MYCELIUM_STRICT_CAPTURE:-}" == "1" ]] \
   && [[ "$(mycelium_hook_host)" == "antigravity-ide" || "$(mycelium_hook_host)" == "antigravity-app" ]]; then
   STRICT_CAPTURE=1
 fi
-# The block below silences stderr; strict diagnostics use the original stream.
+# The block below silences stderr; strict diagnostics, and the shared
+# unrecorded-event diagnostic, use the original stream.
 exec 3>&2
+MYCELIUM_HOOK_DIAG_FD=3
+# An event this hook could not record is lineage, not session work.
+MYCELIUM_POST_TOOL_EVENT_KIND=lineage
 
 {
   INPUT=$(cat)
@@ -79,6 +83,12 @@ exec 3>&2
   fi
 
   if ! mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT"; then
+    # The transaction exists but its session lock was unavailable: the
+    # helper already left the evidence Stop reports. Reopening would only
+    # wait on the same lock again.
+    if [[ "$MYCELIUM_POST_TOOL_UNRECORDED" == 1 ]]; then
+      exit 0
+    fi
     # No transaction for this host session. Hosts run Stop after every turn,
     # so a live session whose earlier turn was accepted lands here. Reopen it
     # only for a command that would record lineage (a proven analysis run).
@@ -119,6 +129,11 @@ exec 3>&2
     fi
     if ! mycelium_reopen_post_tool_transaction "$REPO_ROOT" "$INPUT" \
       || ! mycelium_prepare_locked_post_tool_state "$REPO_ROOT" "$INPUT"; then
+      # A reopened transaction whose lock was then unavailable already holds
+      # its evidence; only a refused reopen is an unowned gap.
+      if [[ "$MYCELIUM_POST_TOOL_UNRECORDED" == 1 ]]; then
+        exit 0
+      fi
       mycelium_record_unowned_lineage_skip "$REPO_ROOT" "$INPUT" "$COMMAND" \
         "no-transaction" "reopen refused or failed"
       exit 0

@@ -16,6 +16,7 @@ MYCELIUM_MARKER_FORMAT=""
 MYCELIUM_OWNER_STATE=""
 MYCELIUM_OWNER_ID=""
 MYCELIUM__STATE_FAILED=0
+MYCELIUM__STATE_DIED=0
 MYCELIUM__STATE_HELD=""
 # Lock directories this process acquired. A value inherited from the
 # environment names someone else's lock: never let a release remove it.
@@ -27,6 +28,8 @@ MYCELIUM_SESSION_LOCK_DIR=""
 # MYCELIUM_SHARED_STATE_DIR, MYCELIUM_SESSION_*, the lock directories, and the
 # marker and owner reads), sets MYCELIUM__STATE_FAILED to the 1-based index of
 # the failed op (0 when none failed), and returns nonzero on failure.
+# MYCELIUM__STATE_DIED is 1 when that failure was an interpreter that died
+# before finishing, rather than an op that checked and refused.
 #
 # A lock op makes one mkdir(2) attempt in Python. When the lock is held, this
 # runs the unchanged bash acquisition loop (dead-owner reaping, retries) and
@@ -46,6 +49,7 @@ mycelium__state() {
   local last_ok=0 failed=0 busy=0 ended=false
 
   MYCELIUM__STATE_FAILED=0
+  MYCELIUM__STATE_DIED=0
   MYCELIUM__STATE_HELD=""
   (( ${#ops[@]} > 0 )) || return 0
   for op in "${ops[@]}"; do
@@ -133,6 +137,7 @@ mycelium__state() {
     if [[ "$ended" != true ]]; then
       failed=$((last_ok + 1))
       busy=0
+      MYCELIUM__STATE_DIED=1
     fi
     if (( failed > 0 )); then
       MYCELIUM__STATE_FAILED=$((offset + failed))
@@ -260,16 +265,292 @@ mycelium_prepare_post_tool_state() {
 # Stop after every turn, and an accepted Stop removes the transaction, so
 # without this every later turn of a live session was dropped silently until
 # the next SessionStart. Reads and non-work events never pass `reopen`.
+#
+# Returning 1 covers two different outcomes, and callers exit 0 on both. An
+# intentional no-op (no transaction, another session's event, Stop accepted
+# while this event waited) leaves nothing. A failed session lock op after
+# this event's ownership of a live transaction was proven (a timeout behind
+# a live holder, or a dead interpreter) means work this hook should have
+# recorded was dropped: it leaves one line in that transaction's
+# unrecorded-events file, which Stop treats as work of unknown extent, and a
+# diagnostic on stderr. It never reopens: the transaction exists and only its
+# lock was unavailable. MYCELIUM_POST_TOOL_UNRECORDED is 1 after such a
+# failure (0 otherwise), so a caller with its own no-transaction fallback
+# does not mistake it for a missing transaction.
+MYCELIUM_POST_TOOL_UNRECORDED=0
 mycelium_prepare_locked_post_tool_state() {
   local allow_reopen="${3:-}"
+  local status=0
+  MYCELIUM_POST_TOOL_UNRECORDED=0
   mycelium__post_tool_prepare_mode "$2" || return 1
-  if mycelium__prepare_locked_post_tool_state_once "$1" "$2"; then
+  mycelium__prepare_locked_post_tool_state_once "$1" "$2" || status=$?
+  if (( status == 0 )); then
     return 0
+  fi
+  if (( status == 2 )); then
+    MYCELIUM_POST_TOOL_UNRECORDED=1
+    mycelium__record_unrecorded_event "$1" "$2"
+    return 1
   fi
   [[ "$allow_reopen" == reopen ]] || return 1
   mycelium_reopen_post_tool_transaction "$1" "$2" || return 1
   mycelium__post_tool_prepare_mode "$2" || return 1
-  mycelium__prepare_locked_post_tool_state_once "$1" "$2"
+  status=0
+  mycelium__prepare_locked_post_tool_state_once "$1" "$2" || status=$?
+  if (( status == 2 )); then
+    MYCELIUM_POST_TOOL_UNRECORDED=1
+    mycelium__record_unrecorded_event "$1" "$2"
+  fi
+  (( status == 0 ))
+}
+
+# Unrecorded post-tool events: one NDJSON line per event a hook could not
+# record, in the owning transaction's directory. Every reader and writer
+# holds flock(2) on the file itself; the session lock is what was
+# unavailable, so it cannot serialize them. The flock is bounded (about five
+# seconds): a holder that is stopped must not hang a hook that already timed
+# out, or Stop. A busy flock exits 75.
+#
+#   append SHARED REL KIND HOOK REASON HOST TS  (payload on stdin)
+#       Writer. Walks SHARED/REL with O_NOFOLLOW directory descriptors, so a
+#       managed ancestor swapped for a link while the hook waited cannot
+#       redirect the write. After taking the flock it checks that its
+#       descriptor is still the file at that name: Stop may have consumed or
+#       replaced it meanwhile, and a line written there would be lost.
+#   take PATH      Print "WORK OTHER SIZE GEN" ("0 0 0 0" when absent).
+#       A line whose kind is `lineage` or `read` is OTHER; any other line is
+#       WORK. An empty file is nothing yet: a writer may have created it and
+#       not yet taken the flock, and its line will follow. A file holding
+#       events is stamped, once, with a random generation line `{"gen": ...}`
+#       that GEN names; an inode cannot name it, because Linux hands a freed
+#       inode straight to the next file created.
+#   consume-work PATH SIZE GEN   Drop the WORK lines among the first SIZE
+#       bytes (Stop has turned them into a work cycle), keep their OTHER
+#       lines until a Stop reports them, keep any line appended since, and
+#       print "KEPT_SIZE GEN" for the new generation's stamp and kept lines
+#       ("0 0" when no taken line is kept).
+#   consume PATH SIZE GEN   The same, keeping no taken line.
+#       Both act only on the generation that was taken; a file that has
+#       since been replaced is left whole, for the next look to find.
+#       What remains is written to a new file renamed over the old one, so a
+#       failed write leaves the old file intact.
+#   drain-other PATH    Stop without a transaction, holding no session
+#       lock: in one flock, when the file holds only lineage and read lines,
+#       remove it and print their count; otherwise print 0 and leave it.
+# Every open is nonblocking and refuses anything but a regular file with a
+# single link, so a FIFO cannot hang a hook that already timed out and a hard
+# link cannot carry a write outside the repository.
+MYCELIUM__PY_UNRECORDED_EVENTS='
+import fcntl, json, os, stat, sys, tempfile, time
+NAME = "mycelium-unrecorded-events.tmp"
+BUSY = 75
+
+def lock(fd):
+    for _ in range(100):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            time.sleep(0.05)
+    raise SystemExit(BUSY)
+
+def single_regular(fd):
+    opened = os.fstat(fd)
+    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+        raise SystemExit(1)
+    return opened
+
+def generation(raw):
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    if isinstance(value, dict) and "kind" not in value and isinstance(value.get("gen"), str):
+        return value["gen"]
+    return None
+
+def gen_line(value):
+    return (json.dumps({"gen": value}) + "\n").encode("ascii")
+
+def is_other(raw):
+    try:
+        return json.loads(raw).get("kind") in ("lineage", "read")
+    except (ValueError, AttributeError):
+        return False
+
+mode = sys.argv[1]
+if mode == "append":
+    shared, rel, kind, hook, reason, host, ts = sys.argv[2:9]
+    tool = None
+    try:
+        payload = json.loads(sys.stdin.read())
+        if isinstance(payload, dict) and isinstance(payload.get("tool_name"), str):
+            tool = payload["tool_name"][:200]
+    except ValueError:
+        pass
+    line = (json.dumps({"ts": ts, "kind": kind, "hook": hook, "reason": reason,
+                        "host": host, "tool_name": tool}) + "\n").encode("ascii")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory = os.open(shared, flags)
+    try:
+        for part in [part for part in rel.split("/") if part]:
+            if part in (".", ".."):
+                raise SystemExit(1)
+            child = os.open(part, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        for _ in range(20):
+            fd = os.open(NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+                         | os.O_NONBLOCK, 0o644, dir_fd=directory)
+            try:
+                single_regular(fd)
+                lock(fd)
+                held = os.fstat(fd)
+                try:
+                    current = os.stat(NAME, dir_fd=directory, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino) \
+                        or current.st_nlink != 1 or not stat.S_ISREG(current.st_mode):
+                    continue
+                os.write(fd, line)
+                raise SystemExit(0)
+            finally:
+                os.close(fd)
+        raise SystemExit(1)
+    finally:
+        os.close(directory)
+
+path = sys.argv[2]
+try:
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+except FileNotFoundError:
+    print({"take": "0 0 0 0", "drain-other": "0"}.get(mode, "0 0"))
+    raise SystemExit(0)
+try:
+    opened = single_regular(fd)
+    lock(fd)
+    data = b""
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        data += chunk
+    lines = [raw for raw in data.splitlines(True) if raw.strip()]
+    gens = [generation(raw) for raw in lines]
+    gen = next((value for value in gens if value), None)
+    events = [raw for raw, value in zip(lines, gens) if not value]
+    try:
+        current = os.stat(path, follow_symlinks=False)
+        same = (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
+    except FileNotFoundError:
+        same = False
+    if mode == "take":
+        other = sum(1 for raw in events if is_other(raw))
+        if events and gen is None and same:
+            gen = os.urandom(8).hex()
+            stamp = gen_line(gen)
+            os.lseek(fd, 0, os.SEEK_END)
+            os.write(fd, stamp)
+            data += stamp
+        print(len(events) - other, other, len(data), gen or 0)
+    elif mode == "drain-other":
+        other = sum(1 for raw in events if is_other(raw))
+        if events and other == len(events) and same:
+            os.unlink(path)
+            print(other)
+        else:
+            print(0)
+    elif mode in ("consume-work", "consume"):
+        size, token = int(sys.argv[3]), sys.argv[4]
+        if not same or str(gen or 0) != token:
+            print("0 0")
+            raise SystemExit(0)
+        kept = b""
+        if mode == "consume-work":
+            kept = b"".join(raw for raw in data[:size].splitlines(True)
+                            if raw.strip() and not generation(raw) and is_other(raw))
+        tail = data[size:]
+        if not kept and not tail:
+            os.unlink(path)
+            print("0 0")
+            raise SystemExit(0)
+        fresh = os.urandom(8).hex()
+        head = gen_line(fresh) + kept
+        temp_fd, temp = tempfile.mkstemp(prefix=".unrecorded.", dir=os.path.dirname(path))
+        try:
+            with os.fdopen(temp_fd, "wb") as handle:
+                handle.write(head + tail)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temp, 0o644)
+            os.rename(temp, path)
+        except BaseException:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+            raise
+        print(len(head), fresh) if kept else print("0 0")
+    else:
+        raise SystemExit(1)
+finally:
+    os.close(fd)
+'
+
+mycelium_unrecorded_events() {
+  python3 -c "$MYCELIUM__PY_UNRECORDED_EVENTS" "$@"
+}
+
+# mycelium__record_unrecorded_event REPO_ROOT PAYLOAD: called only after a
+# state call proved this event owns the transaction in STATE_DIR. Best
+# effort: a failure here must not change the hook's fail-open exit status.
+# The record's kind is the caller's MYCELIUM_POST_TOOL_EVENT_KIND: `work`
+# (the default: a project edit or proven analysis run, which Stop enforces),
+# `lineage`, or `read`.
+mycelium__record_unrecorded_event() {
+  local repo_root="$1"
+  local input="$2"
+  local kind="${MYCELIUM_POST_TOOL_EVENT_KIND:-work}"
+  local hook=""
+  local reason=session-lock-unavailable
+  local diag_fd="${MYCELIUM_HOOK_DIAG_FD:-2}"
+  local run_dir="${STATE_DIR:-}"
+  local shared=""
+  local rel=""
+  hook=$(basename "${0:-hook}")
+  if (( MYCELIUM__STATE_DIED == 1 )); then
+    reason=state-check-died
+  fi
+  [[ "$diag_fd" =~ ^[0-9]+$ ]] || diag_fd=2
+  case "$kind" in
+    work|lineage|read) ;;
+    *) kind=work ;;
+  esac
+  # The waited-on state may have changed: re-prepare the shared directory
+  # and require the run directory inside it before the walk.
+  if [[ -n "$run_dir" ]] \
+    && shared=$(mycelium__checked_shared_state_dir "$repo_root"); then
+    if [[ "$run_dir" == "$shared" ]]; then
+      rel=""
+    elif [[ "$run_dir" == "$shared"/* ]]; then
+      rel="${run_dir#"$shared"/}"
+    else
+      shared=""
+    fi
+    if [[ -n "$shared" ]]; then
+      printf '%s' "$input" | mycelium_unrecorded_events append "$shared" "$rel" \
+        "$kind" "$hook" "$reason" "$(mycelium_hook_host)" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1 || true
+    fi
+  fi
+  if [[ "$reason" == session-lock-unavailable ]]; then
+    printf 'Mycelium: %s could not take the session lock; this tool event was not recorded; Stop will report it.\n' \
+      "$hook" >&"$diag_fd" || true
+  else
+    printf 'Mycelium: %s lost its state check while taking the session lock; this tool event was not recorded; Stop will report it.\n' \
+      "$hook" >&"$diag_fd" || true
+  fi
 }
 
 # mycelium__checked_shared_state_dir REPO_ROOT: print the shared state
@@ -288,6 +569,11 @@ mycelium__checked_shared_state_dir() {
   )
 }
 
+# Returns 0 when locked and authorized, 1 for an intentional no-op, and 2
+# when this event owned the transaction (ops 1-3 passed, so STATE_DIR is its
+# run directory) but the lock op (4) failed: timed out, or its interpreter
+# died. A failed revalidation (5-7) is Stop having accepted meanwhile, a
+# no-op; those ops also reassign STATE_DIR, so no evidence is written there.
 mycelium__prepare_locked_post_tool_state_once() {
   if ! mycelium__state "$1" "$2" \
     "prepare:$MYCELIUM__PREPARE_MODE" select:read-only owns \
@@ -301,6 +587,9 @@ mycelium__prepare_locked_post_tool_state_once() {
       return 0
     fi
     mycelium__state_release_held
+    if (( MYCELIUM__STATE_FAILED == 4 )); then
+      return 2
+    fi
     return 1
   fi
   return 0
@@ -716,15 +1005,41 @@ mycelium_refresh_work_cycle() {
   if [[ "$should_refresh" != true ]]; then
     return 1
   fi
+  mycelium_start_work_cycle "$repo_root" "$helper" || true
+  return 0
+}
 
+# mycelium_start_work_cycle REPO_ROOT HELPER: fingerprint .living/ now and
+# stamp the reminder, so only a .living/ update made after this point can
+# satisfy Stop. The caller holds the session lock. Returns nonzero when the
+# fingerprint could not be taken (the reminder is still stamped).
+mycelium_start_work_cycle() {
+  local repo_root="$1"
+  local helper="$2"
+  local baseline_file="$STATE_DIR/living-reminder-baseline.json"
+  local status=0
   if [[ -f "$helper" ]]; then
     python3 "$helper" living-snapshot \
       --repo-root "$repo_root" \
       --output "$baseline_file" >/dev/null 2>&1 \
-      || rm -f "$baseline_file"
+      || { rm -f "$baseline_file"; status=1; }
+  else
+    status=1
   fi
-  date +%s > "$reminder_file"
-  return 0
+  # Publish by replacement: a FIFO or hard link at the name is replaced, never
+  # opened. `mv` onto a directory would move into it, so that is refused.
+  local reminder="$STATE_DIR/mycelium-reminded.tmp"
+  local temp=""
+  if [[ -d "$reminder" && ! -L "$reminder" ]] \
+    || ! temp=$(mktemp "$STATE_DIR/.mycelium-reminded.XXXXXX" 2>/dev/null) \
+    || ! date +%s > "$temp" \
+    || ! mv -f "$temp" "$reminder" 2>/dev/null; then
+    if [[ -n "$temp" ]]; then
+      rm -f "$temp"
+    fi
+    status=1
+  fi
+  return "$status"
 }
 
 # Contenders claim reaping inside the lock directory itself; release must wait
