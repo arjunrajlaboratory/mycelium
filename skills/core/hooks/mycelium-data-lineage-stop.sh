@@ -121,6 +121,19 @@ OUT_FILE="$OUT_DIR/${SESSION_ID}.json"
 STATUS_FILE="$REPO_ROOT/.living/log/.data-lineage-status-${SESSION_ID}.json"
 LOG_TMP=$(mktemp)
 
+OBSERVATION_FLAGS=()
+if [[ -n "${MYCELIUM_SHARED_STATE_DIR:-}" && -d "$MYCELIUM_SHARED_STATE_DIR" \
+  && ! -L "$MYCELIUM_SHARED_STATE_DIR" ]]; then
+  # Observations live in the shared state directory, which a state-dir
+  # override may move away from <repo>/.mycelium.
+  OBSERVATION_FLAGS=(--observations-dir "$MYCELIUM_SHARED_STATE_DIR/io/obs")
+fi
+if [[ -n "$REPLACED_DATA_ONLY_ID" ]]; then
+  # This manifest replaces the transaction's earlier data-only one, so the
+  # unresolved calls that one claimed are still this transaction's.
+  OBSERVATION_FLAGS+=(--replaces "$REPLACED_DATA_ONLY_ID")
+fi
+
 START=$(date +%s)
 set +e
 python3 "$EXTRACTOR" \
@@ -128,6 +141,7 @@ python3 "$EXTRACTOR" \
   --output "$OUT_FILE" \
   --session-id "$SESSION_ID" \
   --repo-root "$REPO_ROOT" \
+  ${OBSERVATION_FLAGS[@]+"${OBSERVATION_FLAGS[@]}"} \
   > "$LOG_TMP" 2>&1
 EXIT_CODE=$?
 set -e

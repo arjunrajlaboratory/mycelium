@@ -1,0 +1,1766 @@
+#!/usr/bin/env python3
+"""Observe which files one tool call changed, for data lineage.
+
+PreToolUse records the call in a repository call journal and, for Bash, takes
+a stat snapshot of the watched scope. The matching Post walks again, diffs
+the two snapshots, hashes what changed under a stability protocol, and writes
+one observation record. A hook cannot see reads, so an observation lists
+changes only; inputs are inferred elsewhere and only their pre-run content is
+checked here (``input_proofs``).
+
+No clock is compared with a file timestamp: a change is a difference between
+two stat identities taken by this process. What the observation cannot prove
+(an overlapping call, a background job, a missing snapshot, an unwatched
+directory) is recorded as such, never as "nothing changed".
+
+Subcommands (all exit 0 unless the arguments are malformed; failures are
+written into the record or reported on stderr for the calling hook):
+
+  pre   --state-dir D --host H --session S --call-id ID --tool T
+        [--agent-id A] [--snapshot] [--repo-root R]
+  post  --state-dir D --host H --session S --call-id ID --tool T
+        [--agent-id A] [--repo-root R] [--outcome success|failure|unknown]
+        [--bash-exit N] [--bash-cmd C] [--background] [--inputs-json P]
+        [--record-to F]
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import marshal
+import os
+import re
+import stat
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Iterator, NamedTuple
+
+SNAPSHOT_VERSION = 2
+OBSERVATION_VERSION = 1
+
+DEFAULT_ENTRY_CAP = 250_000
+DEFAULT_WALK_SECONDS = 3.0
+DEFAULT_HASH_SECONDS = 2.0
+DEFAULT_CHANGE_CAP = 1_000
+HASH_CHUNK = 1 << 20
+# A conservative read+hash throughput used to decide, before opening a
+# file, whether the remaining budget can finish it.
+HASH_BYTES_PER_SECOND = 300 * 1024 * 1024
+
+# Directory names never walked, wherever they appear.
+EXCLUDED_DIR_NAMES = frozenset(
+    {
+        ".git",
+        ".mycelium",
+        ".living",
+        ".claude",
+        ".codex",
+        "node_modules",
+        "__pycache__",
+        ".ipynb_checkpoints",
+        ".snakemake",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+    }
+)
+# File names never listed.
+EXCLUDED_FILE_NAMES = frozenset({".DS_Store"})
+# A directory holding one of these is an environment or another repository,
+# not project data.
+_ENVIRONMENT_MARKERS = ("pyvenv.cfg", "conda-meta", ".git")
+
+_SAFE_ID = re.compile(r"[A-Za-z0-9._-]{1,128}")
+SF_DATALESS = 0x40000000  # macOS: content not materialized locally
+
+
+class Identity(NamedTuple):
+    dev: int
+    ino: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    mode: int
+
+
+def identity_of(st: os.stat_result) -> Identity:
+    return Identity(
+        st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_mode
+    )
+
+
+class Snapshot(NamedTuple):
+    entries: dict[str, Identity]
+    unwatched: list[dict[str, Any]]
+    truncated: bool
+    timed_out: bool
+    walk_ms: int
+    coarse_devices: frozenset[int]
+
+
+# --------------------------------------------------------------------------
+# Scope and walking
+
+
+def _scope_overrides(repo_root: Path) -> tuple[list[str], list[str]]:
+    """Extra excludes and roots from `.mycelium/io/scope`, one per line:
+    `exclude <relative path>` or `root <relative path>`. Anything else, and
+    any path that escapes the repository, is ignored."""
+    path = repo_root / ".mycelium" / "io" / "scope"
+    excludes: list[str] = []
+    roots: list[str] = []
+    try:
+        if path.is_symlink() or not path.is_file():
+            return excludes, roots
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return excludes, roots
+    for line in text.splitlines():
+        word, _, value = line.strip().partition(" ")
+        value = value.strip().strip("/")
+        if not value or value.startswith("..") or "/../" in f"/{value}/" or "\0" in value:
+            continue
+        if word == "exclude":
+            excludes.append(value)
+        elif word == "root":
+            roots.append(value)
+    return excludes, roots
+
+
+def _is_environment_dir(path: str) -> bool:
+    return any(os.path.lexists(os.path.join(path, marker)) for marker in _ENVIRONMENT_MARKERS)
+
+
+def walk(
+    repo_root: Path,
+    *,
+    entry_cap: int = DEFAULT_ENTRY_CAP,
+    seconds: float = DEFAULT_WALK_SECONDS,
+) -> Snapshot:
+    """Stat every regular file and symlink in the watched scope.
+
+    Symlinked directories and other devices are not followed; they are
+    listed in ``unwatched`` so a consumer knows changes there are unseen.
+    """
+    started = time.monotonic()
+    deadline = started + seconds
+    root = os.path.realpath(repo_root)
+    try:
+        root_dev = os.lstat(root).st_dev
+    except OSError:
+        return Snapshot({}, [], False, False, 0, frozenset())
+    extra_excludes, extra_roots = _scope_overrides(Path(root))
+    excluded_rel = {e.rstrip("/") for e in extra_excludes}
+    entries: dict[str, Identity] = {}
+    unwatched: list[dict[str, Any]] = []
+    truncated = False
+    timed_out = False
+    sub_second: dict[int, bool] = {}
+    stack: list[str] = [root]
+    stack.extend(os.path.join(root, r) for r in extra_roots)
+    seen_dirs: set[tuple[int, int]] = set()
+    prefix_len = len(root) + 1
+    while stack:
+        directory = stack.pop()
+        if time.monotonic() > deadline:
+            timed_out = True
+            break
+        try:
+            dir_st = os.lstat(directory)
+        except OSError:
+            continue
+        key = (dir_st.st_dev, dir_st.st_ino)
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
+        try:
+            iterator = os.scandir(directory)
+        except OSError:
+            unwatched.append({"path": directory[prefix_len:] or ".", "why": "unreadable"})
+            continue
+        with iterator:
+            for count, entry in enumerate(iterator):
+                # The bound holds inside a directory too: one huge flat
+                # directory on slow storage must not stall the tool call.
+                if count % 256 == 255 and time.monotonic() > deadline:
+                    timed_out = True
+                    break
+                name = entry.name
+                rel = entry.path[prefix_len:]
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                mode = st.st_mode
+                if stat.S_ISDIR(mode):
+                    if name in EXCLUDED_DIR_NAMES:
+                        continue  # a fixed rule; `watch_status` applies it too
+                    if rel in excluded_rel:
+                        unwatched.append({"path": rel, "why": "scope-exclude"})
+                        continue
+                    if st.st_dev != root_dev:
+                        unwatched.append({"path": rel, "why": "other-device"})
+                        continue
+                    if _is_environment_dir(entry.path):
+                        why = ("nested-repository"
+                               if os.path.lexists(os.path.join(entry.path, ".git"))
+                               else "environment")
+                        unwatched.append({"path": rel, "why": why})
+                        continue
+                    stack.append(entry.path)
+                    continue
+                if name in EXCLUDED_FILE_NAMES or name.startswith("._"):
+                    continue
+                if rel in excluded_rel:
+                    unwatched.append({"path": rel, "why": "scope-exclude"})
+                    continue
+                if stat.S_ISLNK(mode):
+                    try:
+                        if os.path.isdir(entry.path):
+                            unwatched.append({"path": rel, "why": "symlink",
+                                              "target": os.readlink(entry.path)})
+                    except OSError:
+                        pass
+                elif not stat.S_ISREG(mode):
+                    continue
+                if len(entries) >= entry_cap:
+                    truncated = True
+                    break
+                entries[rel] = identity_of(st)
+                # Judge the device's timestamp granularity by ctime, which no
+                # user call can set: `cp -p`, `rsync -a`, `tar x` and utime
+                # leave whole-second mtimes on fine-grained filesystems.
+                if st.st_ctime_ns % 1_000_000_000:
+                    sub_second[st.st_dev] = True
+                else:
+                    sub_second.setdefault(st.st_dev, False)
+        if truncated or timed_out:
+            # A walk stopped early is incomplete and is never trusted; one
+            # that finished, however long it took, listed everything.
+            break
+    coarse = frozenset(dev for dev, fine in sub_second.items() if not fine)
+    walk_ms = int((time.monotonic() - started) * 1000)
+    unwatched.sort(key=lambda item: item["path"])
+    return Snapshot(entries, unwatched, truncated, timed_out, walk_ms, coarse)
+
+
+def watch_status(rel: str, unwatched: list[dict[str, Any]]) -> str:
+    """Whether a repository-relative path lies in the watched scope.
+
+    `outside-scope` (escapes the repository), `unwatched` (under a fixed
+    excluded name, an excluded file name, or any unwatched directory the
+    walk recorded), or `watched`. A change to a path that is not watched
+    can never appear in an observation, so "absent from the change list"
+    means "unchanged" only for a watched path.
+    """
+    if not rel or rel == "." or rel == ".." or rel.startswith("../") or os.path.isabs(rel):
+        return "outside-scope"
+    parts = rel.split("/")
+    if any(part in EXCLUDED_DIR_NAMES for part in parts[:-1]):
+        return "unwatched"
+    if parts[-1] in EXCLUDED_FILE_NAMES or parts[-1].startswith("._"):
+        return "unwatched"
+    for item in unwatched:
+        prefix = item.get("path") if isinstance(item, dict) else None
+        if isinstance(prefix, str) and (rel == prefix or rel.startswith(prefix + "/")):
+            return "unwatched"
+    return "watched"
+
+
+# --------------------------------------------------------------------------
+# State files (snapshot, journal, cache)
+
+
+def _check_dir(io_root: Path, path: Path) -> None:
+    """Create ``path`` (at or below ``io_root``) one component at a time,
+    refusing any component that is a symlink or not a directory *before*
+    anything is created beneath it.
+
+    ``io_root`` is ``<state dir>/io``. The state directory above it was
+    validated by the calling hook's shared-state check, so only components
+    from ``io`` downward are judged here; a repository under a symlinked
+    home directory stays usable. The anchor is explicit: a session or host
+    named ``io`` cannot move it.
+    """
+    try:
+        relative = path.relative_to(io_root)
+    except ValueError:
+        raise OSError(f"not below the io state root: {path}") from None
+    if any(part in ("", ".", "..") for part in relative.parts):
+        raise OSError(f"unsafe io state path: {path}")
+    current = io_root.parent
+    for part in ("io", *relative.parts):
+        current = current / part
+        try:
+            os.mkdir(current, 0o755)
+        except FileExistsError:
+            pass
+        info = os.lstat(current)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise OSError(f"refusing unsafe state directory: {current}")
+
+
+def _safe_component(value: str) -> str:
+    if not _SAFE_ID.fullmatch(value) or value in (".", ".."):
+        return "h" + hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()[:32]
+    return value
+
+
+def snapshot_path(state_dir: Path, host: str, session: str, call_id: str) -> Path:
+    return (
+        state_dir
+        / "io"
+        / "pre"
+        / _safe_component(host)
+        / _safe_component(session)
+        / f"{_safe_component(call_id)}.snap"
+    )
+
+
+def write_snapshot(
+    path: Path, snapshot: Snapshot, meta: dict[str, Any], *, io_root: Path
+) -> None:
+    _check_dir(io_root, path.parent)
+    payload = marshal.dumps(
+        {
+            "version": SNAPSHOT_VERSION,
+            "meta": meta,
+            "entries": {k: tuple(v) for k, v in snapshot.entries.items()},
+            "unwatched": snapshot.unwatched,
+            "truncated": snapshot.truncated,
+            "timed_out": snapshot.timed_out,
+            "walk_ms": snapshot.walk_ms,
+            "coarse_devices": sorted(snapshot.coarse_devices),
+        }
+    )
+    fd, temp = tempfile.mkstemp(prefix=".snap.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.replace(temp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temp)
+        raise
+
+
+def read_snapshot(path: Path) -> tuple[Snapshot, dict[str, Any]] | None:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            data = marshal.loads(handle.read())
+    except (OSError, EOFError, ValueError, TypeError):
+        return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if not isinstance(data, dict) or data.get("version") != SNAPSHOT_VERSION:
+        return None
+    try:
+        entries = {str(k): Identity(*v) for k, v in data["entries"].items()}
+        snapshot = Snapshot(
+            entries,
+            list(data["unwatched"]),
+            bool(data["truncated"]),
+            bool(data["timed_out"]),
+            int(data["walk_ms"]),
+            frozenset(int(d) for d in data["coarse_devices"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    return snapshot, meta
+
+
+LOCK_WAIT_SECONDS = 2.0
+
+
+class LockTimeout(OSError):
+    """A state lock stayed busy past the bound; the caller records a gap."""
+
+
+@contextlib.contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Hold the stable `<path>.lock` (never through a symlink), waiting at
+    most LOCK_WAIT_SECONDS: a hook must not stall behind another hook."""
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(f"{path}.lock", flags, 0o644)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("lock is not a regular file")
+        deadline = time.monotonic() + LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise LockTimeout(f"lock busy: {path}.lock") from None
+                time.sleep(0.005)
+        yield
+    finally:
+        os.close(fd)
+
+
+def append_line(path: Path, record: dict[str, Any], *, io_root: Path) -> None:
+    """Append one JSON line under the file's stable lock."""
+    _check_dir(io_root, path.parent)
+    line = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+    with _locked(path):
+        fd = os.open(
+            path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError("not a regular file")
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+
+
+def _read_lines(path: Path) -> list[dict[str, Any]]:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return []
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return []
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            raw = handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    records = []
+    for line in raw.splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return records
+
+
+def journal_path(state_dir: Path) -> Path:
+    return state_dir / "io" / "calls.ndjson"
+
+
+def cache_path(state_dir: Path) -> Path:
+    return state_dir / "io" / "hash-cache.marshal"
+
+
+def observations_path(state_dir: Path, host: str, session: str) -> Path:
+    return (
+        state_dir / "io" / "obs" / _safe_component(host) / f"{_safe_component(session)}.ndjson"
+    )
+
+
+# --------------------------------------------------------------------------
+# Call journal
+#
+# One line per event: {"seq", "ev": "pre"|"post"|"expire", "call", "host",
+# "session", "agent", "tool", "background", "wall_ns"}. `seq` is assigned
+# under the journal lock from a counter kept in the same file, so intervals
+# from separate processes are ordered without trusting their clocks. A call
+# whose `pre` has no `post` is open. Two intervals overlap when each starts
+# before the other ends (an open interval never ends).
+
+# One bound for every open interval. A shorter bound for "ordinary" calls
+# would close a call that is still running (a Codex command that became a
+# background terminal is never flagged at Pre), letting its writes pass as
+# another call's. Claude calls are closed earlier, at the end of their
+# turn, where no foreground call can still be running (`turn_end`).
+OPEN_INTERVAL_MAX_SECONDS = 24 * 3600
+JOURNAL_COMPACT_LINES = 4_000
+
+
+class Interval(NamedTuple):
+    call: str
+    host: str
+    session: str
+    tool: str
+    background: bool
+    pre_seq: int
+    post_seq: int | None  # None while open
+    expired: bool
+    pre_wall_ns: int
+    agent: str | None = None  # a subagent's id; None for the main agent
+
+
+def _journal_records(path: Path) -> list[dict[str, Any]]:
+    return [r for r in _read_lines(path) if isinstance(r.get("seq"), int)]
+
+
+def _intervals(records: list[dict[str, Any]]) -> dict[str, Interval]:
+    calls: dict[str, Interval] = {}
+    for record in sorted(records, key=lambda r: r["seq"]):
+        key = str(record.get("call"))
+        event = record.get("ev")
+        if event == "pre":
+            calls[key] = Interval(
+                key,
+                str(record.get("host") or ""),
+                str(record.get("session") or ""),
+                str(record.get("tool") or ""),
+                bool(record.get("background")),
+                0 if record.get("start_unknown") else record["seq"],
+                None,
+                False,
+                int(record.get("wall_ns") or 0),
+                record.get("agent") if isinstance(record.get("agent"), str) else None,
+            )
+        elif event == "launch" and key in calls:
+            # A background call's own Post: the job may still be running,
+            # so the interval stays open.
+            calls[key] = calls[key]._replace(background=True)
+        elif event in ("post", "expire") and key in calls and calls[key].post_seq is None:
+            current = calls[key]
+            calls[key] = current._replace(
+                post_seq=record["seq"],
+                expired=event == "expire",
+                background=current.background or bool(record.get("background")),
+            )
+    return calls
+
+
+def _rewrite(path: Path, records: list[dict[str, Any]]) -> None:
+    fd, temp = tempfile.mkstemp(prefix=".calls.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
+        os.replace(temp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temp)
+        raise
+
+
+def journal_event(
+    state_dir: Path,
+    event: str,
+    call: str,
+    *,
+    host: str = "",
+    session: str = "",
+    agent: str | None = None,
+    tool: str = "",
+    background: bool = False,
+    now_ns: int | None = None,
+) -> tuple[int, dict[str, Interval], list[Interval]]:
+    """Append one event under the journal lock.
+
+    Returns its sequence number, every interval known afterwards, and the
+    intervals this call expired (open past their age bound). Expiry and
+    compaction run here, in whichever hook holds the lock, so no Stop branch
+    has to run for the journal to stay bounded.
+    """
+    path = journal_path(state_dir)
+    _check_dir(state_dir / "io", path.parent)
+    now_ns = time.time_ns() if now_ns is None else now_ns
+    with _locked(path):
+        records = _journal_records(path)
+        existing = len(records)
+        seq = max((r["seq"] for r in records), default=0) + 1
+        intervals = _intervals(records)
+        expired: list[Interval] = []
+        for interval in intervals.values():
+            if interval.post_seq is not None or interval.call == call:
+                continue
+            if now_ns - interval.pre_wall_ns > OPEN_INTERVAL_MAX_SECONDS * 1_000_000_000:
+                records.append({"seq": seq, "ev": "expire", "call": interval.call,
+                                "wall_ns": now_ns})
+                expired.append(interval)
+                seq += 1
+        if event in ("post", "launch") and call not in intervals:
+            # This call's Pre never reached the journal (its append timed
+            # out). Record it as having started before everything still in
+            # the journal: every call it may have run beside then lists it,
+            # even after its lock-free open marker is gone.
+            records.append({"seq": seq, "ev": "pre", "call": call, "host": host,
+                            "session": session, "agent": agent, "tool": tool,
+                            "background": background, "wall_ns": now_ns,
+                            "start_unknown": True})
+            seq += 1
+        records.append(
+            {
+                "seq": seq,
+                "ev": event,
+                "call": call,
+                "host": host,
+                "session": session,
+                "agent": agent,
+                "tool": tool,
+                "background": background,
+                "wall_ns": now_ns,
+            }
+        )
+        intervals = _intervals(records)
+        if expired or len(records) > JOURNAL_COMPACT_LINES:
+            # Keep every open interval and every closed one that ends after
+            # the earliest open start: only those can still overlap a call
+            # whose observation is not yet written.
+            open_starts = [i.pre_seq for i in intervals.values() if i.post_seq is None]
+            horizon = min(open_starts, default=seq)
+            keep = {
+                i.call
+                for i in intervals.values()
+                if i.post_seq is None or i.post_seq >= horizon
+            }
+            kept = [r for r in records if str(r.get("call")) in keep]
+            if not kept or kept[-1]["seq"] != seq:
+                # The counter lives in the file: keep the newest line so
+                # sequence numbers never restart after compaction.
+                kept.append(records[-1])
+            _rewrite(path, kept)
+        else:
+            # Nothing expired: append only the lines this call added.
+            line = "".join(json.dumps(r, sort_keys=True) + "\n" for r in records[existing:])
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+                         | os.O_NONBLOCK, 0o644)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise OSError("journal is not a regular file")
+                os.write(fd, line.encode("utf-8"))
+            finally:
+                os.close(fd)
+    return seq, intervals, expired
+
+
+def turn_end(state_dir: Path, *, host: str, session: str) -> int:
+    """Close a finished turn's foreground calls that never got a Post.
+
+    Only for hosts where no foreground tool call outlives its turn (Claude
+    Code: a call is denied, interrupted, or completed before Stop). Each
+    still-open, non-background interval of this host session is closed as
+    expired, its open marker removed, and a snapshot it left becomes an
+    `unavailable: call-unresolved` observation. Background intervals stay
+    open. Returns how many calls were closed.
+    """
+    path = journal_path(state_dir)
+    io_root = state_dir / "io"
+    closed: list[str] = []
+    if path.exists():
+        _check_dir(io_root, path.parent)
+        with _locked(path):
+            records = _journal_records(path)
+            seq = max((r["seq"] for r in records), default=0)
+            now_ns = time.time_ns()
+            lines = []
+            for interval in _intervals(records).values():
+                # Main-agent calls only: a background subagent carries the
+                # parent's session and may still be running its calls.
+                if (interval.post_seq is None and not interval.background
+                        and interval.agent is None
+                        and interval.host == host and interval.session == session):
+                    seq += 1
+                    record = {"seq": seq, "ev": "expire", "call": interval.call,
+                              "wall_ns": now_ns, "reason": "turn-ended"}
+                    lines.append(json.dumps(record, sort_keys=True) + "\n")
+                    closed.append(interval.call)
+            if lines:
+                fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
+                try:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        raise OSError("journal is not a regular file")
+                    os.write(fd, "".join(lines).encode("utf-8"))
+                finally:
+                    os.close(fd)
+    # Unjournaled foreground calls of this session (their Pre lost the
+    # journal lock) cannot be running after the turn either.
+    marker_dir = io_root / "open" / _safe_component(host) / _safe_component(session)
+    markers = []
+    if _io_dir_chain_safe(io_root, marker_dir):
+        with contextlib.suppress(OSError):
+            markers = list(os.scandir(marker_dir))
+    for marker in markers:
+        if not marker.is_file(follow_symlinks=False):
+            continue
+        data = _read_marker(marker.path)
+        if data is None:
+            continue
+        if data.get("background") or data.get("agent"):
+            continue
+        call = data.get("call") if isinstance(data.get("call"), str) else marker.name
+        if call not in closed:
+            closed.append(call)
+        with contextlib.suppress(OSError):
+            os.unlink(marker.path)
+    for call in closed:
+        clear_open_marker(state_dir, host, session, call)
+        snap = snapshot_path(state_dir, host, session, call)
+        if snap.exists() and not snap.is_symlink():
+            record = {
+                "kind": "observation",
+                "version": OBSERVATION_VERSION,
+                "observation_id": f"{host}:{call}",
+                "host": host,
+                "host_session_id": session,
+                "status": "unavailable",
+                "reason": "call-unresolved",
+                "detail": "the turn ended without a Post for this call "
+                          "(denied, interrupted, or the hook did not run)",
+                "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "changes": None,
+            }
+            with contextlib.suppress(OSError):
+                append_line(observations_path(state_dir, host, session), record,
+                            io_root=io_root)
+                # A small stand-in replaces the snapshot, so the session's
+                # next manifest still lists the call as unresolved (and then
+                # claims it) instead of the gap disappearing here.
+                stand_in = snap.with_name(snap.name[: -len(".snap")] + ".unresolved")
+                fd = os.open(stand_in, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+                             | os.O_NONBLOCK, 0o644)
+                try:
+                    os.write(fd, json.dumps({"call": call, "reason": "turn-ended"}).encode())
+                finally:
+                    os.close(fd)
+                os.unlink(snap)
+    return len(closed)
+
+
+def overlapping(intervals: dict[str, Interval], call: str) -> list[dict[str, Any]]:
+    """Every other interval that intersects this call's [pre, post]."""
+    own = intervals.get(call)
+    if own is None:
+        return []
+    own_end = own.post_seq if own.post_seq is not None else float("inf")
+    found = []
+    for other in intervals.values():
+        if other.call == call:
+            continue
+        other_end = other.post_seq if other.post_seq is not None else float("inf")
+        if other.pre_seq < own_end and own.pre_seq < other_end:
+            found.append(
+                {
+                    "call": other.call,
+                    "host": other.host,
+                    "session": other.session,
+                    "tool": other.tool,
+                    "background": other.background,
+                    "open": other.post_seq is None,
+                    "expired": other.expired,
+                }
+            )
+    return sorted(found, key=lambda item: item["call"])
+
+
+# --------------------------------------------------------------------------
+# Hashing
+
+
+class HashResult(NamedTuple):
+    sha256: str | None
+    status: str  # hashed | cached | pending | unstable | dataless | unavailable
+
+
+def _cache_key(identity: Identity) -> str:
+    return f"{identity.dev}:{identity.ino}:{identity.size}:{identity.mtime_ns}:{identity.ctime_ns}"
+
+
+CACHE_MAX_ENTRIES = 50_000
+
+
+def _read_cache_file(path: Path) -> dict[str, str]:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return {}
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return {}
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            data = marshal.loads(handle.read())
+    except (OSError, EOFError, ValueError, TypeError):
+        return {}
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if not isinstance(data, dict):
+        return {}
+    return {
+        k: v
+        for k, v in data.items()
+        if isinstance(k, str) and isinstance(v, str) and len(v) == 64
+    }
+
+
+def load_cache(state_dir: Path) -> dict[str, str]:
+    return _read_cache_file(cache_path(state_dir))
+
+
+def is_racy(identity: Identity, now_ns: int, coarse: bool) -> bool:
+    """True when a write in the same timestamp tick could hide behind this
+    identity (git's racily-clean rule)."""
+    granularity = 2_000_000_000 if coarse else 10_000_000
+    return identity.ctime_ns >= now_ns - granularity or identity.mtime_ns >= now_ns - granularity
+
+
+def stable_hash(
+    path: Path,
+    expected: Identity | None,
+    *,
+    deadline: float,
+    cache: dict[str, str],
+    new_cache: dict[str, str],
+    coarse: bool = False,
+) -> tuple[HashResult, Identity | None]:
+    """Hash ``path`` only if its content provably did not change meanwhile.
+
+    The opened descriptor must be a regular file whose identity is the same
+    before and after reading, equal to the path's ``lstat`` identity, and
+    equal to ``expected`` when given. Anything else is ``unstable``.
+    """
+    try:
+        lst = os.lstat(path)
+    except (OSError, ValueError):
+        return HashResult(None, "unavailable"), None
+    if not stat.S_ISREG(lst.st_mode):
+        return HashResult(None, "unavailable"), None
+    current = identity_of(lst)
+    if expected is not None and current != expected:
+        return HashResult(None, "unstable"), current
+    if getattr(lst, "st_flags", 0) & SF_DATALESS:
+        return HashResult(None, "dataless"), current
+    key = _cache_key(current)
+    if key in cache:
+        return HashResult(cache[key], "cached"), current
+    if key in new_cache:
+        return HashResult(new_cache[key], "cached"), current
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or current.size > remaining * HASH_BYTES_PER_SECOND:
+        # Never start a read the budget cannot finish: a hook the host
+        # kills for running long loses its whole record, not just a hash.
+        return HashResult(None, "pending"), current
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except (OSError, ValueError):
+        return HashResult(None, "unavailable"), current
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or identity_of(before) != current:
+            return HashResult(None, "unstable"), current
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, HASH_CHUNK)
+            if not chunk:
+                break
+            digest.update(chunk)
+            if time.monotonic() > deadline:
+                # Slower storage than estimated: stop at the budget.
+                return HashResult(None, "pending"), current
+        after = os.fstat(fd)
+    except OSError:
+        return HashResult(None, "unavailable"), current
+    finally:
+        os.close(fd)
+    try:
+        relst = os.lstat(path)
+    except OSError:
+        return HashResult(None, "unstable"), current
+    if identity_of(after) != current or identity_of(relst) != current:
+        return HashResult(None, "unstable"), current
+    value = digest.hexdigest()
+    if not is_racy(current, time.time_ns(), coarse):
+        new_cache[key] = value
+    return HashResult(value, "hashed"), current
+
+
+def flush_cache(state_dir: Path, new_cache: dict[str, str]) -> None:
+    if not new_cache:
+        return
+    path = cache_path(state_dir)
+    _check_dir(state_dir / "io", path.parent)
+    with _locked(path):
+        # Merge under the lock so parallel Posts never drop each other's
+        # entries; the oldest entries go first once the cap is reached.
+        merged = _read_cache_file(path)
+        for key in new_cache:
+            merged.pop(key, None)
+        merged.update(new_cache)
+        if len(merged) > CACHE_MAX_ENTRIES:
+            merged = dict(list(merged.items())[-CACHE_MAX_ENTRIES:])
+        fd, temp = tempfile.mkstemp(prefix=".hash-cache.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(marshal.dumps(merged))
+            os.replace(temp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temp)
+            raise
+
+
+# --------------------------------------------------------------------------
+# Diff
+
+
+class Diff(NamedTuple):
+    created: list[str]
+    modified: list[str]
+    deleted: list[str]
+    rename_candidates: list[tuple[str, str]]
+
+
+def diff(pre: dict[str, Identity], post: dict[str, Identity]) -> Diff:
+    created = sorted(set(post) - set(pre))
+    deleted = sorted(set(pre) - set(post))
+    modified = sorted(p for p in set(pre) & set(post) if pre[p] != post[p])
+    by_identity: dict[tuple[int, int, int, int], list[str]] = {}
+    for path in deleted:
+        ident = pre[path]
+        by_identity.setdefault((ident.dev, ident.ino, ident.size, ident.mtime_ns), []).append(path)
+    renames: list[tuple[str, str]] = []
+    for path in created:
+        ident = post[path]
+        sources = by_identity.get((ident.dev, ident.ino, ident.size, ident.mtime_ns))
+        if sources and len(sources) == 1:
+            renames.append((sources[0], path))
+    return Diff(created, modified, deleted, renames)
+
+
+# --------------------------------------------------------------------------
+# Pre and Post
+
+
+def pre(
+    state_dir: Path,
+    *,
+    host: str,
+    session: str,
+    call_id: str,
+    tool: str,
+    agent: str | None = None,
+    repo_root: Path | None = None,
+    snapshot: bool = False,
+    background: bool = False,
+) -> None:
+    """Open the call's interval; for Bash, snapshot the watched scope.
+
+    A lock-free open-call marker is written first, so a call whose journal
+    append fails (a lock timeout under parallel hooks) is still visible to
+    every other call's overlap check instead of silently letting another
+    call take credit for its writes. The snapshot is taken after the
+    journal entry, so any call whose Pre lands while it is being taken
+    overlaps this one; it is taken even when the journal failed, and then
+    says so.
+    """
+    io_root = state_dir / "io"
+    write_open_marker(state_dir, host, session, call_id, tool=tool, background=background,
+                      agent=agent)
+    seq: int | None = None
+    journal_error: str | None = None
+    try:
+        seq, _, _ = journal_event(
+            state_dir, "pre", call_id, host=host, session=session, agent=agent,
+            tool=tool, background=background,
+        )
+    except LockTimeout:
+        journal_error = "lock-timeout"
+    if not snapshot or repo_root is None:
+        if journal_error is not None:
+            raise LockTimeout(journal_error)
+        return
+    taken_ns = time.time_ns()
+    snap = walk(repo_root)
+    write_snapshot(
+        snapshot_path(state_dir, host, session, call_id),
+        snap,
+        {"pre_seq": seq, "taken_ns": taken_ns, "repo_root": str(repo_root),
+         "journal_error": journal_error},
+        io_root=io_root,
+    )
+
+
+# --------------------------------------------------------------------------
+# Open-call markers: one empty file per call between its Pre and its Post,
+# written without any lock so a Pre whose journal append fails still leaves
+# evidence that it is running.
+
+OPEN_MARKER_MAX_SECONDS = 24 * 3600
+
+
+def _open_marker_path(state_dir: Path, host: str, session: str, call_id: str) -> Path:
+    return (
+        state_dir / "io" / "open" / _safe_component(host) / _safe_component(session)
+        / _safe_component(call_id)
+    )
+
+
+def write_open_marker(
+    state_dir: Path, host: str, session: str, call_id: str, *, tool: str, background: bool,
+    agent: str | None = None,
+) -> None:
+    path = _open_marker_path(state_dir, host, session, call_id)
+    _check_dir(state_dir / "io", path.parent)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                 0o644)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("open marker is not a regular file")
+        os.write(fd, json.dumps({"call": call_id, "host": host, "session": session,
+                                 "tool": tool, "background": background,
+                                 "agent": agent}).encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def _io_dir_chain_safe(io_root: Path, path: Path) -> bool:
+    """Every component from ``io_root`` down to ``path`` exists as a real
+    directory (no symlink, nothing created). For readers and deleters."""
+    try:
+        relative = path.relative_to(io_root)
+    except ValueError:
+        return False
+    current = io_root
+    for part in ("", *relative.parts):
+        current = current / part if part else current
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return False
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            return False
+    return True
+
+
+def _read_marker(path: str) -> dict[str, Any] | None:
+    """A marker's JSON, read without following links or blocking on a FIFO."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = json.loads(os.read(fd, 4096) or b"{}")
+    except (OSError, ValueError):
+        return {}
+    finally:
+        os.close(fd)
+    return data if isinstance(data, dict) else {}
+
+
+def clear_open_marker(state_dir: Path, host: str, session: str, call_id: str) -> None:
+    with contextlib.suppress(OSError):
+        os.unlink(_open_marker_path(state_dir, host, session, call_id))
+
+
+def unjournaled_open_calls(
+    state_dir: Path, intervals: dict[str, Interval], own_call: str, *, now: float | None = None
+) -> list[dict[str, Any]]:
+    """Open-call markers for calls the journal does not know.
+
+    Each is a call that is running (or died) without a journal interval;
+    its writes could be in anyone's diff, so it overlaps every observation
+    while its marker lives (at most OPEN_MARKER_MAX_SECONDS).
+    """
+    base = state_dir / "io" / "open"
+    now = time.time() if now is None else now
+    found: list[dict[str, Any]] = []
+    if not _io_dir_chain_safe(state_dir / "io", base):
+        return found
+    for host_entry in os.scandir(base):
+        if not host_entry.is_dir(follow_symlinks=False):
+            continue
+        for session_entry in os.scandir(host_entry.path):
+            if not session_entry.is_dir(follow_symlinks=False):
+                continue
+            for marker in os.scandir(session_entry.path):
+                try:
+                    info = marker.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                if now - info.st_mtime > OPEN_MARKER_MAX_SECONDS:
+                    # Past the journal's own bound: the call is over by any
+                    # measure, and the marker would only cost every Post.
+                    with contextlib.suppress(OSError):
+                        os.unlink(marker.path)
+                    continue
+                data = _read_marker(marker.path)
+                if data is None:
+                    continue
+                call = data.get("call") if isinstance(data.get("call"), str) else marker.name
+                if call == own_call or call in intervals:
+                    continue
+                found.append({
+                    "call": call,
+                    "host": str(data.get("host") or host_entry.name),
+                    "session": str(data.get("session") or session_entry.name),
+                    "tool": str(data.get("tool") or ""),
+                    "background": bool(data.get("background")),
+                    "open": True,
+                    "expired": False,
+                    "unjournaled": True,
+                })
+    return sorted(found, key=lambda item: item["call"])
+
+
+def filter_unjournaled(
+    markers: list[dict[str, Any]], intervals: dict[str, Interval]
+) -> list[dict[str, Any]]:
+    """Markers scanned *before* the journal was read, minus the calls the
+    journal now knows. A call leaves the marker set only after entering the
+    journal, so scanning first means no call can fall between the two."""
+    return [marker for marker in markers if marker["call"] not in intervals]
+
+
+def _entry(path: str, before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict:
+    return {"path": path, "before": before, "after": after}
+
+
+def _state(ident: Identity | None, result: HashResult | None) -> dict[str, Any] | None:
+    if ident is None:
+        return None
+    state: dict[str, Any] = {
+        "sha256": result.sha256 if result else None,
+        "size_bytes": ident.size,
+        "hash_status": result.status if result else "not-captured",
+    }
+    if result is not None and result.status == "pending":
+        # Enough to resolve the hash later, only if the file still has
+        # exactly this identity (never a hash of later content).
+        state["identity"] = {"dev": ident.dev, "ino": ident.ino, "size": ident.size,
+                             "mtime_ns": ident.mtime_ns, "ctime_ns": ident.ctime_ns}
+    return state
+
+
+def _before_state(ident: Identity, cache: dict[str, str]) -> dict[str, Any]:
+    digest = cache.get(_cache_key(ident))
+    return _state(ident, HashResult(digest, "cached") if digest else None)
+
+
+def repo_relative_unfollowed(raw: str, root_real: str) -> tuple[str | None, str | None]:
+    """The repository-relative path of ``raw``, never through a symlink.
+
+    The repository root is found among the path's own ancestors (so an
+    alias above it, such as macOS /var for /private/var, still works);
+    below the root no component may be a symlink. A symlinked file or
+    directory can be retargeted during a call, so the content behind it
+    afterwards says nothing about what was read: such a path gets
+    `symlinked-path`, never a proof. Returns (rel, None) or (None, reason).
+    """
+    if ".." in Path(raw).parts:
+        # The kernel resolves `..` against a symlink's target, a lexical
+        # normalisation against the link's parent: they can name different
+        # files, so a path that climbs is never proven.
+        return None, "parent-traversal"
+    lexical = os.path.normpath(os.path.abspath(raw))
+    ancestor = lexical
+    rel = None
+    while True:
+        if os.path.realpath(ancestor) == root_real:
+            rel = os.path.relpath(lexical, ancestor)
+            break
+        parent = os.path.dirname(ancestor)
+        if parent == ancestor:
+            return None, "outside-scope"
+        ancestor = parent
+    if rel == ".":
+        return None, "outside-scope"
+    current = root_real
+    for part in rel.split(os.sep):
+        current = os.path.join(current, part)
+        if os.path.islink(current):
+            return None, "symlinked-path"
+    return rel, None
+
+
+def _input_proofs(
+    inputs: list[str],
+    repo_root: Path,
+    pre_snap: Snapshot,
+    post_snap: Snapshot,
+    taken_ns: int,
+    *,
+    deadline: float,
+    cache: dict[str, str],
+    new_cache: dict[str, str],
+) -> list[dict[str, Any]]:
+    """For each inferred input: its hash and whether that hash is provably
+    the content it had when the call started."""
+    root = os.path.realpath(repo_root)
+    proofs = []
+    for raw in inputs:
+        record: dict[str, Any] = {"path": raw, "pre_run_proven": False}
+        try:
+            rel, reason = repo_relative_unfollowed(raw, root)
+        except (OSError, ValueError):
+            rel, reason = None, "unresolvable"
+        if rel is None:
+            record["reason"] = reason
+            proofs.append(record)
+            continue
+        before = pre_snap.entries.get(rel)
+        after = post_snap.entries.get(rel)
+        if before is None or after is None:
+            record["reason"] = (
+                "outside-scope" if watch_status(rel, pre_snap.unwatched) != "watched"
+                else "not-in-snapshot"
+            )
+            proofs.append(record)
+            continue
+        coarse = before.dev in pre_snap.coarse_devices
+        result, _ = stable_hash(
+            Path(root) / rel, after, deadline=deadline, cache=cache,
+            new_cache=new_cache, coarse=coarse,
+        )
+        record.update({"sha256": result.sha256, "hash_status": result.status,
+                       "size_bytes": after.size})
+        if before != after:
+            record["reason"] = "changed-during-call"
+        elif is_racy(before, taken_ns, coarse):
+            record["reason"] = "racy-timestamp"
+        elif result.sha256 is None:
+            record["reason"] = f"not-hashed:{result.status}"
+        else:
+            record["pre_run_proven"] = True
+        proofs.append(record)
+    return proofs
+
+
+def post(
+    state_dir: Path,
+    *,
+    host: str,
+    session: str,
+    call_id: str,
+    tool: str,
+    repo_root: Path | None = None,
+    agent: str | None = None,
+    outcome: str = "unknown",
+    bash_exit: int | None = None,
+    bash_cmd: str | None = None,
+    background: bool = False,
+    inputs: list[str] | None = None,
+    hash_seconds: float = DEFAULT_HASH_SECONDS,
+    change_cap: int = DEFAULT_CHANGE_CAP,
+) -> dict[str, Any] | None:
+    """Close the call's interval and, for Bash, build its observation.
+
+    The walk runs before the interval is closed: a call whose Pre lands
+    during the walk still overlaps this one. Returns the observation (also
+    appended to the session's observation store), or None for a tool call
+    that only needed its interval closed.
+    """
+    if bash_cmd and starts_background_job(bash_cmd):
+        background = True
+    snap_file = snapshot_path(state_dir, host, session, call_id)
+    loaded = read_snapshot(snap_file) if repo_root is not None else None
+    post_snap = walk(repo_root) if loaded is not None else None
+    # Open markers are scanned before the journal is read (see
+    # `filter_unjournaled`), after the walk so a call starting during the
+    # walk is still seen in one of the two.
+    markers = unjournaled_open_calls(state_dir, {}, call_id) if repo_root is not None else []
+    journal_error: str | None = None
+    intervals: dict[str, Interval] = {}
+    try:
+        _, intervals, _ = journal_event(
+            state_dir, "launch" if background else "post", call_id, host=host,
+            session=session, agent=agent, tool=tool, background=background,
+        )
+    except LockTimeout:
+        journal_error = "lock-timeout"
+    except OSError:
+        journal_error = "journal-unavailable"
+    if not background and journal_error is None:
+        # A background job may still be running: its marker stays until
+        # the journal expires the interval or a late completion arrives.
+        clear_open_marker(state_dir, host, session, call_id)
+    if repo_root is None:
+        return None
+    with contextlib.suppress(OSError):
+        sweep_stale_snapshots(state_dir, keep=snap_file)
+    observation: dict[str, Any] = {
+        "kind": "observation",
+        "version": OBSERVATION_VERSION,
+        "observation_id": f"{host}:{call_id}",
+        "host": host,
+        "host_session_id": session,
+        "agent_id": agent,
+        "tool": tool,
+        "bash_cmd": bash_cmd,
+        "outcome": outcome,
+        "bash_exit": bash_exit,
+        "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "overlapping": overlapping(intervals, call_id)
+        + filter_unjournaled(markers, intervals),
+        "status": None,
+        "reason": None,
+        "scope": None,
+        "changes": None,
+        "input_proofs": [],
+    }
+    own = intervals.get(call_id)
+    if own is not None and own.background:
+        background = True
+    if loaded is None or journal_error is not None:
+        # Without the snapshot there is no "before"; without the journal
+        # there is no overlap evidence. Either way, no change list is
+        # claimed.
+        observation["status"] = "unavailable"
+        observation["reason"] = journal_error or "no-pre-snapshot"
+        _publish(state_dir, host, session, observation, snap_file)
+        return observation
+    pre_snap, meta = loaded
+    assert post_snap is not None
+    if own is None or meta.get("journal_error"):
+        # This call's own Pre never reached the journal, so which calls
+        # overlapped it is unknown: no change list is claimed as its own.
+        observation["status"] = "unavailable"
+        observation["reason"] = "own-interval-unjournaled"
+        _publish(state_dir, host, session, observation, snap_file)
+        return observation
+    observation["scope"] = {
+        "entries": len(post_snap.entries),
+        "unwatched": post_snap.unwatched,
+        "walk_ms": [pre_snap.walk_ms, post_snap.walk_ms],
+    }
+    for label, snap in (("pre", pre_snap), ("post", post_snap)):
+        if snap.truncated or snap.timed_out:
+            observation["status"] = "unavailable"
+            observation["reason"] = (
+                f"{label}-scope-too-large" if snap.truncated else f"{label}-walk-timeout"
+            )
+            _publish(state_dir, host, session, observation, snap_file)
+            return observation
+
+    deadline = time.monotonic() + hash_seconds
+    cache = load_cache(state_dir)
+    new_cache: dict[str, str] = {}
+    result = diff(pre_snap.entries, post_snap.entries)
+    root = Path(os.path.realpath(repo_root))
+    taken_ns = int(meta.get("taken_ns") or 0)
+
+    def after_state(path: str) -> dict[str, Any] | None:
+        ident = post_snap.entries[path]
+        coarse = ident.dev in post_snap.coarse_devices
+        hashed, _ = stable_hash(root / path, ident, deadline=deadline, cache=cache,
+                                new_cache=new_cache, coarse=coarse)
+        return _state(ident, hashed)
+
+    created = [_entry(p, None, after_state(p)) for p in result.created[:change_cap]]
+    deleted = [_entry(p, _before_state(pre_snap.entries[p], cache), None)
+               for p in result.deleted[:change_cap]]
+    modified: list[dict] = []
+    metadata_only: list[str] = []
+    for path in result.modified[:change_cap]:
+        before = _before_state(pre_snap.entries[path], cache)
+        after = after_state(path)
+        if (before and after and before["sha256"] and before["sha256"] == after["sha256"]):
+            metadata_only.append(path)
+        else:
+            modified.append(_entry(path, before, after))
+    capped = any(
+        len(items) > change_cap for items in (result.created, result.deleted, result.modified)
+    )
+    observation["changes"] = {
+        "created": created,
+        "modified": modified,
+        "deleted": deleted,
+        "metadata_only": metadata_only,
+        "rename_candidates": [
+            {"from": a, "to": b} for a, b in result.rename_candidates[:change_cap]
+        ],
+        "counts": {
+            "created": len(result.created),
+            "modified": len(result.modified) - len(metadata_only),
+            "deleted": len(result.deleted),
+        },
+        "capped": capped,
+    }
+    if capped:
+        observation["changes"]["top_level"] = _top_level_counts(result)
+    if pre_snap.coarse_devices:
+        # On a coarse-timestamp device a same-size rewrite within the tick
+        # of the Pre stat leaves the stat identity unchanged, so these
+        # paths' "unchanged" is unknown rather than proven.
+        racy = sorted(
+            path for path, ident in pre_snap.entries.items()
+            if ident.dev in pre_snap.coarse_devices
+            and post_snap.entries.get(path) == ident
+            and is_racy(ident, taken_ns, coarse=True)
+        )
+        if racy:
+            observation["changes"]["racy_unknown"] = racy[:change_cap]
+            observation["changes"]["counts"]["racy_unknown"] = len(racy)
+    observation["input_proofs"] = _input_proofs(
+        inputs or [], root, pre_snap, post_snap, taken_ns,
+        deadline=deadline, cache=cache, new_cache=new_cache,
+    )
+    if background:
+        observation["status"] = "background"
+    elif own.expired:
+        # The journal gave up on this call while it ran: overlap past the
+        # expiry point is unknown.
+        observation["status"] = "overlap"
+        observation["reason"] = "own-interval-expired"
+    elif observation["overlapping"]:
+        observation["status"] = "overlap"
+    else:
+        observation["status"] = "no-known-overlap"
+    with contextlib.suppress(OSError):
+        flush_cache(state_dir, new_cache)
+    _publish(state_dir, host, session, observation, snap_file)
+    return observation
+
+
+def prove_inputs(
+    state_dir: Path,
+    done_snapshot: Path,
+    repo_root: Path,
+    inputs: list[str],
+    *,
+    hash_seconds: float = DEFAULT_HASH_SECONDS,
+) -> dict[str, dict[str, Any]]:
+    """Input proofs against a retired Pre snapshot, keyed by input path.
+
+    An input whose identity is the same now as in the Pre snapshot (ctime
+    only moves forward, so equal identities mean no write in between), and
+    was not racy when the snapshot was taken, has its current hash proven
+    to be its pre-run content. The snapshot is deleted afterwards.
+    """
+    loaded = read_snapshot(done_snapshot)
+    if loaded is None:
+        return {path: {"pre_run_proven": False, "reason": "no-pre-snapshot"} for path in inputs}
+    pre_snap, meta = loaded
+    current: dict[str, Identity] = {}
+    root = os.path.realpath(repo_root)
+    for path in inputs:
+        with contextlib.suppress(OSError, ValueError):
+            # The same resolution as `_input_proofs`: no symlink followed.
+            rel, _ = repo_relative_unfollowed(path, root)
+            if rel is not None:
+                current[rel] = identity_of(os.lstat(os.path.join(root, rel)))
+    post_like = Snapshot(current, pre_snap.unwatched, False, False, 0, pre_snap.coarse_devices)
+    cache = load_cache(state_dir)
+    new_cache: dict[str, str] = {}
+    proofs = _input_proofs(
+        inputs, Path(root), pre_snap, post_like, int(meta.get("taken_ns") or 0),
+        deadline=time.monotonic() + hash_seconds, cache=cache, new_cache=new_cache,
+    )
+    with contextlib.suppress(OSError):
+        flush_cache(state_dir, new_cache)
+    with contextlib.suppress(OSError):
+        os.unlink(done_snapshot)
+    return {proof["path"]: proof for proof in proofs}
+
+
+# --------------------------------------------------------------------------
+# Hook entry: decode one host payload in this process.
+
+_SESSION_ID_RX = re.compile(r"[A-Za-z0-9._-]{1,200}")
+_EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"})
+_QUOTED_RX = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*"|\\.""", re.S)
+_BACKGROUND_AMP_RX = re.compile(r"(?<![&>|<])&(?![&>])")
+_BACKGROUND_WORD_RX = re.compile(
+    r"(?:^|[;&|(\n]|&&|\|\|)\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"(?:nohup|setsid|disown|sbatch|qsub|bsub|screen\s+-d|tmux\s+new(?:-session)?\s+-d)\b"
+)
+
+
+def starts_background_job(command: str) -> bool:
+    """True when the shell text may leave a job running after the call.
+
+    Deliberately broad: a false positive only downgrades the observation
+    to `background`; a miss would let a still-running job's later writes
+    pass as nothing.
+    """
+    unquoted = _QUOTED_RX.sub(" ", command)
+    unquoted = re.sub(r"#[^\n]*", " ", unquoted)
+    return bool(_BACKGROUND_AMP_RX.search(unquoted) or _BACKGROUND_WORD_RX.search(unquoted))
+
+
+def _payload_string(payload: dict[str, Any], *keys: str) -> str | None:
+    value: Any = payload
+    for key in keys:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value if isinstance(value, str) and value and "\0" not in value else None
+
+
+def hook(state_dir: Path, repo_root: Path, host: str, raw: str) -> int:
+    """PreToolUse for Bash and edit tools; Post for edit tools only (the
+    Bash Post runs from the data tracker so its record can link the
+    observation). Never blocks a tool and never prints."""
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    session = payload.get("session_id")
+    if not isinstance(session, str) or not _SESSION_ID_RX.fullmatch(session) or session in (
+        ".", ".."
+    ):
+        return 0  # a present invalid identity never falls back to anything
+    call_id = _payload_string(payload, "tool_use_id")
+    tool = _payload_string(payload, "tool_name")
+    event = _payload_string(payload, "hook_event_name")
+    if call_id is None or tool is None or event is None:
+        return 0
+    agent = _payload_string(payload, "agent_id")
+    is_bash = tool == "Bash"
+    if not is_bash and tool not in _EDIT_TOOLS:
+        return 0
+    if event == "PreToolUse":
+        background = False
+        if is_bash:
+            tool_input = payload.get("tool_input")
+            tool_input = tool_input if isinstance(tool_input, dict) else {}
+            command = tool_input.get("command")
+            background = tool_input.get("run_in_background") is True or (
+                isinstance(command, str) and starts_background_job(command)
+            )
+        pre(state_dir, host=host, session=session, call_id=call_id, tool=tool, agent=agent,
+            repo_root=repo_root, snapshot=is_bash, background=background)
+    elif event in ("PostToolUse", "PostToolUseFailure") and not is_bash:
+        post(state_dir, host=host, session=session, call_id=call_id, tool=tool, agent=agent)
+    return 0
+
+
+def _top_level_counts(result: Diff) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for path in (*result.created, *result.modified, *result.deleted):
+        top = path.split("/", 1)[0]
+        counts[top] = counts.get(top, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: -item[1])[:50])
+
+
+SNAPSHOT_MAX_AGE_SECONDS = 24 * 3600
+DONE_SNAPSHOT_MAX_AGE_SECONDS = 3600
+
+
+def sweep_stale_snapshots(
+    state_dir: Path, *, keep: Path | None = None, now: float | None = None
+) -> int:
+    """Turn Pre snapshots no Post ever claimed into recorded gaps.
+
+    Any session's snapshot older than the bound (a denied or interrupted
+    call, a crashed session, a background run that never reported back)
+    becomes an `unavailable: call-unresolved` observation in that session's
+    store, and only then is deleted. Returns how many were swept.
+    """
+    base = state_dir / "io" / "pre"
+    now = time.time() if now is None else now
+    swept = 0
+    try:
+        hosts = list(os.scandir(base))
+    except OSError:
+        return 0
+    for host_entry in hosts:
+        if not host_entry.is_dir(follow_symlinks=False):
+            continue
+        for session_entry in os.scandir(host_entry.path):
+            if not session_entry.is_dir(follow_symlinks=False):
+                continue
+            for snap_entry in os.scandir(session_entry.path):
+                path = Path(snap_entry.path)
+                if keep is not None and path == keep:
+                    continue
+                try:
+                    info = snap_entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                if snap_entry.name.startswith(".snap."):
+                    # A temp file from a writer killed mid-write.
+                    if now - info.st_mtime >= DONE_SNAPSHOT_MAX_AGE_SECONDS:
+                        with contextlib.suppress(OSError):
+                            os.unlink(path)
+                    continue
+                if snap_entry.name.endswith(".done"):
+                    # Its observation is already published; only the
+                    # extractor's input proof was still to use it.
+                    if now - info.st_mtime >= DONE_SNAPSHOT_MAX_AGE_SECONDS:
+                        with contextlib.suppress(OSError):
+                            os.unlink(path)
+                    continue
+                if snap_entry.name.endswith(".unresolved"):
+                    # Its gap is already in the observation store; this
+                    # stand-in only waited for a manifest to list it.
+                    if now - info.st_mtime >= SNAPSHOT_MAX_AGE_SECONDS:
+                        with contextlib.suppress(OSError):
+                            os.unlink(path)
+                    continue
+                if not snap_entry.name.endswith(".snap"):
+                    continue
+                if now - info.st_mtime < SNAPSHOT_MAX_AGE_SECONDS:
+                    continue
+                call_id = snap_entry.name[: -len(".snap")]
+                record = {
+                    "kind": "observation",
+                    "version": OBSERVATION_VERSION,
+                    "observation_id": f"{host_entry.name}:{call_id}",
+                    "host": host_entry.name,
+                    "host_session_id": session_entry.name,
+                    "status": "unavailable",
+                    "reason": "call-unresolved",
+                    "detail": "a Pre snapshot was never claimed by a Post within 24 h "
+                              "(denied, interrupted, or never reported complete)",
+                    "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "changes": None,
+                }
+                try:
+                    append_line(
+                        state_dir / "io" / "obs" / host_entry.name
+                        / f"{session_entry.name}.ndjson",
+                        record,
+                        io_root=state_dir / "io",
+                    )
+                    os.unlink(path)
+                    swept += 1
+                except OSError:
+                    continue
+            with contextlib.suppress(OSError):
+                os.rmdir(session_entry.path)  # only succeeds when empty
+    _sweep_temp_files(state_dir / "io", now)
+    return swept
+
+
+def _sweep_temp_files(io_root: Path, now: float) -> None:
+    """Remove temp files a killed writer left beside the journal or cache."""
+    with contextlib.suppress(OSError):
+        for entry in os.scandir(io_root):
+            if not entry.name.startswith((".calls.", ".hash-cache.")):
+                continue
+            with contextlib.suppress(OSError):
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISREG(info.st_mode) and now - info.st_mtime >= DONE_SNAPSHOT_MAX_AGE_SECONDS:
+                    os.unlink(entry.path)
+
+
+def done_snapshot_path(snap_file: Path) -> Path:
+    return snap_file.with_name(snap_file.name[: -len(".snap")] + ".done")
+
+
+def _publish(
+    state_dir: Path, host: str, session: str, observation: dict[str, Any], snap_file: Path
+) -> None:
+    """Append the observation to its session's store, then retire the
+    snapshot: it is renamed to `.done` only once its observation is
+    durable, so the extractor can still prove its inferred inputs against
+    it, and the sweep never mistakes it for an unresolved call."""
+    append_line(observations_path(state_dir, host, session), observation,
+                io_root=state_dir / "io")
+    with contextlib.suppress(OSError):
+        os.replace(snap_file, done_snapshot_path(snap_file))
+
+
+# --------------------------------------------------------------------------
+# CLI
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    h = sub.add_parser("hook", help="Decode a host payload on stdin (Pre, edit-tool Post).")
+    h.add_argument("--state-dir", type=Path, required=True)
+    h.add_argument("--repo-root", type=Path, required=True)
+    h.add_argument("--host", required=True)
+    t = sub.add_parser("turn-end", help="Close a finished turn's calls that got no Post.")
+    t.add_argument("--state-dir", type=Path, required=True)
+    t.add_argument("--host", required=True)
+    t.add_argument("--session", required=True)
+    for name in ("pre", "post"):
+        p = sub.add_parser(name)
+        p.add_argument("--state-dir", type=Path, required=True)
+        p.add_argument("--host", required=True)
+        p.add_argument("--session", required=True)
+        p.add_argument("--call-id", required=True)
+        p.add_argument("--tool", required=True)
+        p.add_argument("--agent-id")
+        p.add_argument("--repo-root", type=Path)
+        p.add_argument("--background", action="store_true")
+        if name == "pre":
+            p.add_argument("--snapshot", action="store_true")
+        else:
+            p.add_argument("--outcome", default="unknown",
+                           choices=("success", "failure", "unknown"))
+            p.add_argument("--bash-exit", type=int)
+            p.add_argument("--bash-cmd")
+            p.add_argument("--inputs-json", type=Path,
+                           help="File holding a JSON list of inferred input paths.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    if args.command == "hook":
+        return hook(args.state_dir, args.repo_root, args.host, sys.stdin.read())
+    if args.command == "turn-end":
+        if not _SESSION_ID_RX.fullmatch(args.session) or args.session in (".", ".."):
+            return 64
+        turn_end(args.state_dir, host=args.host, session=args.session)
+        return 0
+    for value in (args.host, args.session, args.call_id):
+        if "\0" in value or not value:
+            print("io_observer: empty or NUL identity", file=sys.stderr)
+            return 64
+    if args.command == "pre":
+        pre(args.state_dir, host=args.host, session=args.session, call_id=args.call_id,
+            tool=args.tool, agent=args.agent_id, repo_root=args.repo_root,
+            snapshot=args.snapshot, background=args.background)
+        return 0
+    inputs: list[str] = []
+    if args.inputs_json is not None:
+        try:
+            value = json.loads(args.inputs_json.read_text(encoding="utf-8"))
+            inputs = [v for v in value if isinstance(v, str) and "\0" not in v]
+        except (OSError, ValueError, TypeError):
+            inputs = []
+    observation = post(
+        args.state_dir, host=args.host, session=args.session, call_id=args.call_id,
+        tool=args.tool, agent=args.agent_id, repo_root=args.repo_root,
+        outcome=args.outcome, bash_exit=args.bash_exit, bash_cmd=args.bash_cmd,
+        background=args.background, inputs=inputs,
+    )
+    if observation is not None:
+        # The calling hook reads this one line to link its lineage record.
+        summary = {
+            "observation_id": observation["observation_id"],
+            "host_session_id": observation["host_session_id"],
+            "status": observation["status"],
+            "reason": observation["reason"],
+            "changed": bool(observation["changes"]) and any(
+                observation["changes"]["counts"].values()
+            ),
+        }
+        done = done_snapshot_path(snapshot_path(args.state_dir, args.host, args.session,
+                                                args.call_id))
+        if done.exists():
+            # The extractor proves its inferred inputs against this, then
+            # deletes it.
+            summary["pre_snapshot"] = str(done)
+            summary["state_dir"] = str(args.state_dir)
+        print(json.dumps(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001 - the hook records this as a gap
+        print(f"io_observer: {type(exc).__name__}: {exc}", file=sys.stderr)
+        sys.exit(70)

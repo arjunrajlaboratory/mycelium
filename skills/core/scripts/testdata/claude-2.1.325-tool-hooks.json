@@ -1,0 +1,81 @@
+{
+  "_source": "Captured from Claude Code 2.1.325 (claude -p, model haiku) on 2026-11-21 with a stdin-dumping hook on PreToolUse, PostToolUse, and PostToolUseFailure. Session, transcript, scratchpad, prompt, and cwd values are replaced; field names, nesting, and value types are as captured.",
+  "bash_pre": {
+    "session_id": "00000000-0000-4000-8000-000000000001",
+    "transcript_path": "/tmp/transcript.jsonl",
+    "cwd": "/tmp/repo",
+    "prompt_id": "00000000-0000-4000-8000-000000000002",
+    "permission_mode": "auto",
+    "effort": {"level": "medium"},
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {"command": "echo hi > out.txt", "description": "Write \"hi\" into out.txt"},
+    "tool_use_id": "toolu_016tCXfaWYBkL92yCZAC1fzF"
+  },
+  "bash_post": {
+    "session_id": "00000000-0000-4000-8000-000000000001",
+    "transcript_path": "/tmp/transcript.jsonl",
+    "cwd": "/tmp/repo",
+    "prompt_id": "00000000-0000-4000-8000-000000000002",
+    "permission_mode": "auto",
+    "effort": {"level": "medium"},
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {"command": "echo hi > out.txt", "description": "Write \"hi\" into out.txt"},
+    "tool_response": {"stdout": "", "stderr": "", "interrupted": false, "isImage": false, "noOutputExpected": false},
+    "tool_use_id": "toolu_016tCXfaWYBkL92yCZAC1fzF",
+    "duration_ms": 514
+  },
+  "bash_pre_failing": {
+    "session_id": "00000000-0000-4000-8000-000000000001",
+    "transcript_path": "/tmp/transcript.jsonl",
+    "cwd": "/tmp/repo",
+    "prompt_id": "00000000-0000-4000-8000-000000000002",
+    "permission_mode": "auto",
+    "effort": {"level": "medium"},
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {"command": "ls /definitely/missing", "description": "List a path that should not exist"},
+    "tool_use_id": "toolu_016c1uG1VVJ7utNdaLCrXMRQ"
+  },
+  "bash_failure": {
+    "session_id": "00000000-0000-4000-8000-000000000001",
+    "transcript_path": "/tmp/transcript.jsonl",
+    "cwd": "/tmp/repo",
+    "prompt_id": "00000000-0000-4000-8000-000000000002",
+    "permission_mode": "auto",
+    "effort": {"level": "medium"},
+    "hook_event_name": "PostToolUseFailure",
+    "tool_name": "Bash",
+    "tool_input": {"command": "ls /definitely/missing", "description": "List a path that should not exist"},
+    "tool_use_id": "toolu_016c1uG1VVJ7utNdaLCrXMRQ",
+    "error": "Exit code 1\nls: /definitely/missing: No such file or directory",
+    "is_interrupt": false,
+    "duration_ms": 24
+  },
+  "bash_post_background": {
+    "session_id": "00000000-0000-4000-8000-000000000001",
+    "transcript_path": "/tmp/transcript.jsonl",
+    "cwd": "/tmp/repo",
+    "prompt_id": "00000000-0000-4000-8000-000000000002",
+    "permission_mode": "auto",
+    "effort": {"level": "medium"},
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {"command": "sleep 1; echo bg", "description": "Sleep one second then echo bg", "run_in_background": true},
+    "tool_response": {"stdout": "", "stderr": "", "interrupted": false, "isImage": false, "noOutputExpected": false, "backgroundTaskId": "b8ucc9n3i"},
+    "tool_use_id": "toolu_012k6FWmxcZtXsoqtS9YT1Cx"
+  },
+  "write_pre": {
+    "session_id": "00000000-0000-4000-8000-000000000001",
+    "transcript_path": "/tmp/transcript.jsonl",
+    "cwd": "/tmp/repo",
+    "prompt_id": "00000000-0000-4000-8000-000000000002",
+    "permission_mode": "auto",
+    "effort": {"level": "medium"},
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Write",
+    "tool_input": {"file_path": "/tmp/repo/note.txt", "content": "x"},
+    "tool_use_id": "toolu_01JwJq3RbRGEbHvVFSbM2GPf"
+  }
+}

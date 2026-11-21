@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Data lineage now observes which files each Bash call changed, instead of
+  only guessing from script source. A PreToolUse hook
+  (`mycelium-io-observer.sh`) takes a stat snapshot of the repository
+  (gitignored data included; environments, nested repositories and tooling
+  directories excluded); the Bash Post diffs it and writes one observation
+  per call to `.mycelium/io/obs/<host>/<session>.ndjson`: created, modified
+  and deleted files with before/after SHA-256 (taken only when the file
+  provably did not change while it was read), rename candidates, and every
+  other tool call that overlapped it. Analysis events and data commands
+  carry the `observation_id`; Stop joins the observations into the
+  manifest. A hook cannot see reads, so inputs stay inferred, but each
+  inferred input is labelled with its source and carries `pre_run_proven`
+  when its hash is provably its content at the start of the call. A call
+  that changed files with no other lineage record gets an `observed-change`
+  data command. What cannot be observed (no PreToolUse, a background job, a
+  walk over its time bound, a symlinked data directory) is recorded as such,
+  never as "nothing changed".
+- The static I/O scan recognises R readers and writers (`read.csv`,
+  `readr::read_*`, `fread`, `readRDS`, `read_excel`, `Read10X`, `readMM`,
+  `write.csv`, `write_*`, `fwrite`, `saveRDS`, `save`, `ggsave`, graphics
+  devices, Arrow) in call form with a literal path, and no longer counts a
+  commented-out or quoted call (Python or R) as I/O.
+
 ### Fixed
 
 - A Claude Code session working in a linked git worktree (such as the
@@ -25,6 +50,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Otherwise they fall back to the process directory. SessionStart also writes a missing `.mycelium/plugin-root` in
   the worktree, so `$(cat .mycelium/plugin-root)` commands work there.
   Existing projects need no migration. (#144)
+- On Claude Code, a failed Bash call reached no lineage hook at all: Claude
+  sends failures only to `PostToolUseFailure`. The data tracker is now
+  registered there too and takes the exit code from the failure's `error`
+  text, leaving it unknown (never 0) for an interrupt.
+- Stop-time consolidation no longer hashes a recorded file again from its
+  current content when the hook already recorded its hash, or recorded why
+  there is none.
+- The hooks no longer read a command's own printed output as its exit
+  status. A command that printed "exit code 0" and then failed (or a Claude
+  Code command whose output began "Exit code 7") was recorded with that
+  number; only the host's own header or a structured exit field counts now,
+  and anything else stays unknown.
 - A Claude Code session that starts in the main checkout and then moves into
   a linked worktree (`cd .claude/worktrees/<name>`, or EnterWorktree) now
   keeps one lifecycle transaction. SessionStart had reserved the session log
@@ -76,6 +113,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusal itself is unchanged. The Antigravity adapter, which only reads
   state under `.mycelium/`, now refuses an inherited `MYCELIUM_STATE_DIR`
   with that explanation instead of failing every startup opaquely. (#145)
+
+### Upgrading
+
+- Claude Code: re-run initialization or `$mycelium:core` migration to
+  register the new PreToolUse and PostToolUseFailure hooks. Codex: the
+  plugin now bundles eight hooks instead of five, so trust them again (from
+  the desktop app on Codex 0.169.0) and restart Codex.
 
 ## [0.9.6] - 2026-11-20
 

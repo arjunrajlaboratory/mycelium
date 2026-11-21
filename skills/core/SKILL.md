@@ -67,7 +67,7 @@ knowledge and optional domain steps below after the base scaffold succeeds.
 11. **Bootstrap knowledge system**: If `~/.mycelium/knowledge/` does not exist, run `skills/core/scripts/init_knowledge.py` to set up the global progressive disclosure knowledge system. The script also appends the Global Knowledge Domains routing table to every `~/.claude/projects/*/memory/MEMORY.md` (idempotent — skips files where the header is already present). Generate `.living/INDEX.md` for the newly scaffolded project using `skills/core/scripts/generate_index.py --summary-heuristic`.
 12. Create `todo/` directory with `TODO_REGISTRY.md` (registry table) and `TODO_ITEM_TEMPLATE.md` (template for individual items). Copy these from the mycelium `todo/` directory.
 13. After completion: run `skills/core/scripts/validate_structure.py` to confirm everything is correct.
-14. **Codex only**: Mycelium's five command hooks are bundled with the plugin and use
+14. **Codex only**: Mycelium's eight command hooks are bundled with the plugin and use
     Codex's dynamic `PLUGIN_ROOT`; initialization must not write versioned
     plugin-cache paths into `.codex/hooks.json`. Codex binds hook approval to
     the installed plugin's contents, so after every plugin install, upgrade, or
@@ -287,7 +287,7 @@ knowledge and optional domain steps below after the base scaffold succeeds.
 2. Each action is idempotent — re-running on an already-migrated repo is a no-op.
 3. Use `--dry-run` first to preview changes.
 4. **Codex only**: after a real migration following plugin install or upgrade,
-   tell the user to review and trust all five Mycelium plugin hooks (from the
+   tell the user to review and trust all eight Mycelium plugin hooks (from the
    Codex desktop app; see step 14 of init), fully exit Codex, and restart it.
 
 ---
@@ -407,7 +407,7 @@ Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 
 Codex requires each exact plugin command hook to be reviewed and trusted, and
 it binds each approval to the installed plugin's contents, so after first
-install and after every plugin upgrade or reinstall, approve all five Mycelium
+install and after every plugin upgrade or reinstall, approve all eight Mycelium
 hooks, fully exit Codex, and restart it. Until then Codex skips the hooks
 without any warning inside the task. On Codex 0.169.0 (observed on one machine),
 trusting in the terminal CLI's `/hooks` saved an incomplete approval: `/hooks`

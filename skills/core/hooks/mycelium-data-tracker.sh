@@ -46,7 +46,9 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
 
 {
   INPUT=$(cat)
-  mycelium_payload_preload INPUT 'get:tool_input.command' 'get:cwd' 'opt:session_id' 'get:agent_id' 'get:agent_type' 'exit:'
+  mycelium_payload_preload INPUT 'get:tool_input.command' 'get:cwd' 'opt:session_id' \
+    'get:agent_id' 'get:agent_type' 'exit:' 'opt:tool_use_id' 'opt:hook_event_name' \
+    'get:tool_input.run_in_background' 'opt:error' 'get:tool_response.backgroundTaskId'
 
   COMMAND=$(mycelium_json_get 'tool_input.command' INPUT)
   if [[ -z "$COMMAND" ]]; then exit 0; fi
@@ -61,12 +63,67 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
 
   AGENT_ID=$(mycelium_json_get 'agent_id' INPUT)
   AGENT_TYPE=$(mycelium_json_get 'agent_type' INPUT)
-  BASH_EXIT=$(mycelium_bash_exit INPUT)
-  if [[ -z "$BASH_EXIT" && "$(mycelium_hook_host)" == "claude" ]]; then
-    # Claude Code invokes this PostToolUse registration only for successful
-    # Bash calls; failures use its separate failure event.
+  HOOK_EVENT=$(mycelium_json_get_optional_string 'hook_event_name' INPUT) || HOOK_EVENT=""
+  OUTCOME=unknown
+  if [[ "$HOOK_EVENT" == "PostToolUseFailure" ]]; then
+    # Claude Code's failure event carries no tool_response; its `error`
+    # text starts "Exit code N" for an ordinary nonzero exit. An interrupt
+    # or timeout may carry no code: the exit stays unknown, never 0.
+    OUTCOME=failure
+    FAILURE_TEXT=$(mycelium_json_get_optional_string 'error' INPUT) || FAILURE_TEXT=""
+    BASH_EXIT=""
+    if [[ "$FAILURE_TEXT" =~ ^Exit\ code\ (-?[0-9]+) ]]; then
+      BASH_EXIT="${BASH_REMATCH[1]}"
+    fi
+  elif [[ "$(mycelium_hook_host)" == "claude" \
+    && ( -z "$HOOK_EVENT" || "$HOOK_EVENT" == "PostToolUse" ) ]]; then
+    # Claude Code invokes PostToolUse only for successful Bash calls;
+    # failures arrive through PostToolUseFailure, handled above. Its
+    # response carries no exit field, so any decoded number would come from
+    # the command's own output: the event itself is the exit evidence.
     BASH_EXIT=0
+  else
+    BASH_EXIT=$(mycelium_bash_exit INPUT)
   fi
+  if [[ "$BASH_EXIT" == 0 ]]; then
+    OUTCOME=success
+  elif [[ "$BASH_EXIT" =~ ^-?[0-9]+$ ]]; then
+    OUTCOME=failure
+  fi
+
+  # Observe which files this call changed, before any session gating: a
+  # session-lock timeout, a missing transaction, or a foreign owner must
+  # not cost the observation. It needs no transaction and is not session
+  # work; its record goes to this host session's own observation store.
+  OBSERVATION_FLAGS=()
+  OBS_SID=$(mycelium_json_get_optional_string 'session_id' INPUT) || OBS_SID=""
+  OBS_CALL=$(mycelium_json_get_optional_string 'tool_use_id' INPUT) || OBS_CALL=""
+  OBSERVER="${MYCELIUM_IO_OBSERVER:-$HERE/../scripts/io_observer.py}"
+  if [[ -n "$OBS_SID" && -n "$OBS_CALL" && -f "$OBSERVER" ]] \
+    && mycelium_valid_session_id "$OBS_SID" \
+    && OBS_SHARED=$(mycelium__checked_shared_state_dir "$REPO_ROOT"); then
+    OBS_ARGS=(post --state-dir "$OBS_SHARED" --host "$(mycelium_hook_host)"
+      --session "$OBS_SID" --call-id "$OBS_CALL" --tool Bash
+      --repo-root "$REPO_ROOT" --outcome "$OUTCOME" --bash-cmd "$COMMAND")
+    if [[ -n "$AGENT_ID" ]]; then OBS_ARGS+=(--agent-id "$AGENT_ID"); fi
+    if [[ "$BASH_EXIT" =~ ^-?[0-9]+$ ]]; then OBS_ARGS+=(--bash-exit "$BASH_EXIT"); fi
+    # Background evidence from either side: the agent asked for it, or the
+    # host moved a long foreground command to the background at its
+    # timeout (Claude Code then returns a backgroundTaskId). Either way the
+    # job may still be writing, so its interval stays open.
+    if [[ "$(mycelium_json_get 'tool_input.run_in_background' INPUT)" == "True" \
+      || -n "$(mycelium_json_get 'tool_response.backgroundTaskId' INPUT)" ]]; then
+      OBS_ARGS+=(--background)
+    fi
+    OBS_SUMMARY=$(python3 "$OBSERVER" "${OBS_ARGS[@]}" 2>/dev/null) \
+      || OBS_SUMMARY='{"status": "unavailable", "reason": "observer-failed"}'
+    [[ -n "$OBS_SUMMARY" ]] \
+      || OBS_SUMMARY='{"status": "unavailable", "reason": "observer-silent"}'
+    OBSERVATION_FLAGS=(--observation-json "$OBS_SUMMARY")
+  fi
+  # The call's outcome reaches the lineage record even without an exit
+  # code (an interrupted or timed-out call is a failure, not a success).
+  OBSERVATION_FLAGS+=(--outcome "$OUTCOME")
 
   # Locate the Python extractor helper. Default: sibling in skills/core/scripts/.
   HELPER="${MYCELIUM_DATA_HELPER:-$HERE/../scripts/extract_data_lineage_event.py}"
@@ -119,7 +176,8 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
       --bash-cmd "$COMMAND" \
       --check-execution \
       ${DATA_COMMAND_FLAGS[@]+"${DATA_COMMAND_FLAGS[@]}"} \
-      ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} >/dev/null 2>&1 || CHECK_STATUS=$?
+      ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} \
+      ${OBSERVATION_FLAGS[@]+"${OBSERVATION_FLAGS[@]}"} >/dev/null 2>&1 || CHECK_STATUS=$?
     if (( CHECK_STATUS == 1 )); then
       exit 0
     elif (( CHECK_STATUS != 0 )); then
@@ -176,7 +234,8 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
     --bash-cmd "$COMMAND" \
     --append-to "$EVENTS_FILE" \
     ${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"} \
-    ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} 2>"$EXTRACTOR_ERR") || EXTRACTOR_STATUS=$?
+    ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} \
+    ${OBSERVATION_FLAGS[@]+"${OBSERVATION_FLAGS[@]}"} 2>"$EXTRACTOR_ERR") || EXTRACTOR_STATUS=$?
   if [[ "$STRICT_CAPTURE" == "1" ]]; then
     EXTRACTOR_DIAG=$(tail -c 1500 "$EXTRACTOR_ERR" 2>/dev/null || true)
     rm -f "$EXTRACTOR_ERR"

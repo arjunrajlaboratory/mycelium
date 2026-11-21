@@ -19,7 +19,7 @@ fi
 
 HOOK_NAME="${1:-}"
 case "$HOOK_NAME" in
-  mycelium-health.sh|mycelium-post-action.sh|mycelium-data-tracker.sh|mycelium-activity-tracker.sh|mycelium-data-lineage-stop.sh|mycelium-stop-check.sh)
+  mycelium-health.sh|mycelium-post-action.sh|mycelium-data-tracker.sh|mycelium-activity-tracker.sh|mycelium-io-observer.sh|mycelium-data-lineage-stop.sh|mycelium-stop-check.sh)
     ;;
   *)
     printf 'Unknown Mycelium Codex hook: %s\n' "$HOOK_NAME" >&2

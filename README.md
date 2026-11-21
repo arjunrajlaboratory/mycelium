@@ -59,7 +59,7 @@ codex plugin add mycelium@mycelium
 Start a new task after installation. Codex can invoke the bundled skills
 implicitly, through the plugin picker, or explicitly by skill name.
 
-Before the first Mycelium task, review and trust all five Mycelium plugin
+Before the first Mycelium task, review and trust all eight Mycelium plugin
 hooks, then fully exit Codex and restart it so the approved `SessionStart` hook
 is present from process startup. The hooks are bundled with the plugin and
 resolve through Codex's dynamic `PLUGIN_ROOT`; they do not embed a versioned
@@ -142,7 +142,7 @@ memory layer, canonical `MYCELIUM.md` guidance, and thin `CLAUDE.md` and
 `report-generator`, and `idea-generator`) are installed automatically.
 
 **Codex hook approval:** if you did not approve the plugin hooks during
-installation, trust all five Mycelium command hooks now—from the Codex desktop
+installation, trust all eight Mycelium command hooks now—from the Codex desktop
 app on Codex 0.169.0 (see "Where to approve" above), or open `/hooks` in a
 current CLI (run `codex update` if it is absent) and confirm with `hooks/list`.
 Fully exit Codex and restart it before opening the initialized project. Codex
@@ -300,7 +300,7 @@ Claude hooks are registered per repository by `init_repo.py`. Codex hooks are
 bundled once with the plugin in `hooks/hooks.json`; a small dispatcher no-ops
 outside Mycelium repositories, refreshes `.mycelium/plugin-root`, and invokes
 the shared scripts through Codex's dynamic `PLUGIN_ROOT`. Codex users must
-trust all five Mycelium command hooks (from the desktop app on Codex 0.169.0;
+trust all eight Mycelium command hooks (from the desktop app on Codex 0.169.0;
 see "Where to approve"), then fully exit and restart Codex, and repeat this
 after every Mycelium upgrade or reinstall. Codex exposes shell and unified-exec work
 under the `Bash` matcher and file edits as `apply_patch`; read telemetry is

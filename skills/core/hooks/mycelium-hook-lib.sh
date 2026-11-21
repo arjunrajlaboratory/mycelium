@@ -1686,7 +1686,11 @@ def find_structured(value):
 
 def find_textual(value):
     if isinstance(value, dict):
-        for candidate in value.values():
+        # stdout and stderr are what the command printed, never a host
+        # header: a command whose output starts "Exit code 7" exited 0.
+        for key, candidate in value.items():
+            if key in ("stdout", "stderr"):
+                continue
             found = find_textual(candidate)
             if found is not None:
                 return found
@@ -1704,12 +1708,21 @@ def find_textual(value):
             found = find_textual(decoded)
             if found is not None:
                 return found
-        match = re.search(
-            r"(?:exit(?:ed)?(?:[ _-]with)?(?:[ _-]code)?|return(?:[ _-]code)?)"
-            r"[\":= ]+(-?\d+)",
-            value,
-            re.IGNORECASE,
+        # Only the hosts own header is exit evidence: a line of the header
+        # block before an "Output:" line (Codex puts "Process exited with
+        # code N" after Chunk ID and Wall time lines), or, with no such
+        # block, a header at the very start. The same words anywhere in the
+        # captured output of the command are not: one that prints "exit
+        # code 0" and then fails must not be recorded as a success.
+        exit_rx = (
+            r"(?:process\s+)?(?:exit(?:ed)?(?:[ _-]with)?(?:[ _-]code)?|return(?:[ _-]code)?)"
+            r"[\":= ]+(-?\d+)"
         )
+        header, has_output, _rest = value.partition("\nOutput:")
+        if has_output:
+            match = re.search(r"(?mi)^[ \t]*" + exit_rx, header)
+        else:
+            match = re.match(r"\s*" + exit_rx, value, re.IGNORECASE)
         if match:
             return int(match.group(1))
     return None
@@ -1761,7 +1774,9 @@ def structured_exit_code(value):
 
 def textual_exit_code(value):
     if isinstance(value, dict):
-        for candidate in value.values():
+        for key, candidate in value.items():
+            if key in ("stdout", "stderr"):
+                continue  # printed output, never a host header
             found = textual_exit_code(candidate)
             if found is not None:
                 return found
@@ -1785,12 +1800,21 @@ def textual_exit_code(value):
             re.IGNORECASE,
         ):
             return 1
-        match = re.search(
-            r"(?:exit(?:ed)?(?:[ _-]with)?(?:[ _-]code)?|return(?:[ _-]code)?)"
-            r"[\":= ]+(-?\d+)",
-            value,
-            re.IGNORECASE,
+        # Only the hosts own header is exit evidence: a line of the header
+        # block before an "Output:" line (Codex puts "Process exited with
+        # code N" after Chunk ID and Wall time lines), or, with no such
+        # block, a header at the very start. The same words anywhere in the
+        # captured output of the command are not: one that prints "exit
+        # code 0" and then fails must not be recorded as a success.
+        exit_rx = (
+            r"(?:process\s+)?(?:exit(?:ed)?(?:[ _-]with)?(?:[ _-]code)?|return(?:[ _-]code)?)"
+            r"[\":= ]+(-?\d+)"
         )
+        header, has_output, _rest = value.partition("\nOutput:")
+        if has_output:
+            match = re.search(r"(?mi)^[ \t]*" + exit_rx, header)
+        else:
+            match = re.match(r"\s*" + exit_rx, value, re.IGNORECASE)
         if match:
             return int(match.group(1))
     return None

@@ -119,7 +119,7 @@ The PostToolUse hook ensures the protocol runs automatically after analysis/data
 
 Codex requires approval for each plugin command hook, and it binds that
 approval to the installed plugin's contents. After every Mycelium install,
-upgrade, or reinstall, review and trust all five Mycelium hooks, fully exit
+upgrade, or reinstall, review and trust all eight Mycelium hooks, fully exit
 Codex, then start a fresh task. Until approval, Codex skips the plugin-bundled
 commands without any warning inside the task. On Codex 0.169.0, trusting the
 hooks in the terminal CLI's `/hooks` was observed to save an incomplete
