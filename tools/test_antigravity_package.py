@@ -40,7 +40,7 @@ def test_doctor_rejects_linked_workspace_knowledge(tmp_path):
     # Rejected with a readable report (doctor exits 1), not a traceback (#145).
     report = package.doctor(target, workspace=workspace)
     assert not report['ok'] and not report['workspace']['ok']
-    assert '.living is itself a symlink' in report['workspace']['reason']
+    assert '.living is a symlink or not a directory' in report['workspace']['reason']
     assert list(outside.iterdir()) == []
 
 SPEC = importlib.util.spec_from_file_location("antigravity_package", Path(__file__).with_name("antigravity.py"))

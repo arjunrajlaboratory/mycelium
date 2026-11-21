@@ -617,7 +617,8 @@ def test_startup_refused_by_a_state_symlink_records_why_and_stop_reports_it(cycl
     assert ".mycelium/run/scratch/node_modules" in turn["last_hook_error"]
     # Startup is never redispatched; later invocations explain the failure.
     injected = ag.dispatch("PreInvocation", turn_payload)["injectSteps"][0]["ephemeralMessage"]
-    assert "capture failed" in injected and "scratch/node_modules" in injected
+    assert "could not start lifecycle tracking" in injected and "capture failed" not in injected
+    assert "scratch/node_modules" in injected
     reason = ag.dispatch("Stop", stop(turn_payload))["reason"]
     assert reason.startswith(ag.UNRESOLVED_HOOK) and "scratch/node_modules" in reason
 

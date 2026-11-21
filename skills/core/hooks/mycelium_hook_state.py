@@ -5,7 +5,7 @@ helper: shared-state preparation, private run selection, active-marker and
 owner-token parsing, ownership authorization, and each lock attempt. This
 module holds those helpers and runs an ordered list of them in a single
 interpreter. `mycelium-hook-lib.sh` (`mycelium__state`) is its main caller;
-`tools/antigravity.py doctor` also runs `prepare:read-only+reason` directly
+`tools/antigravity.py doctor` also runs `prepare:check+reason` directly
 and parses the `ok`/`fail`/`reason` records, so keep both parsers in step.
 
 Every operation keeps the exact contract of the bash helper it replaces: the
@@ -31,7 +31,10 @@ PYTHON* variables can inject modules):
 The nine positional values are the bash variables of the same meaning, passed
 explicitly because bash may hold them unexported. The ops are:
 
-    prepare:MODE      mycelium_prepare_state_dir (write, read-only, bootstrap)
+    prepare:MODE      mycelium_prepare_state_dir (write, read-only, bootstrap),
+                      or `check`: doctor's dry run, read-only except that a
+                      missing state directory passes and the refusals the
+                      write path and run-directory selection make are checked
     prepare:MODE+reason   the same, and on a refusal it can explain, also
                       emit a `reason` record (walks the tree again to name
                       the symlink, so only session start and doctor ask)

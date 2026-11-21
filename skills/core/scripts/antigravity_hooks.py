@@ -902,7 +902,12 @@ def _dispatch(event, payload, plugin_root, host):
                             "tools; do not launch Claude Code, Codex, or Gemini CLI as a substitute. "
                             f"Private handoff: {root}/.mycelium/run/{host}/{session_id}/last-session.md.")
                 injected.append(guidance + "\n" + "\n".join(turn["context"]) +
-                                ("\nMycelium capture failed and this work cycle cannot be finalized: " +
+                                ("\nMycelium could not start lifecycle tracking for this work cycle: " +
+                                 one_line(turn["last_hook_error"]) + " Correct the cause, then start a new "
+                                 "explicit request."
+                                 if turn.get("actions", {}).get("startup") == "running" and
+                                 turn.get("last_hook_error", "").startswith("startup: ") else
+                                 "\nMycelium capture failed and this work cycle cannot be finalized: " +
                                  one_line(turn["last_hook_error"]) + " Inspect retained native-state.json; start a new "
                                  "explicit request after correcting the cause."
                                  if turn.get("last_hook_error") else
@@ -1048,7 +1053,7 @@ def _dispatch(event, payload, plugin_root, host):
                             result = {}
                         else:
                             turn["last_native_error"] = f"App Stop outcome unavailable ({type(error).__name__})"
-                            mark_uncertain(turn, turn["last_native_error"])
+                            mark_uncertain(turn, f"{turn['last_native_error']}: {one_line(error, 1000)}")
                             result = {"decision": "block", "reason": unresolved_reason(turn)}
                     if not turn["uncertain"]:
                         turn["stop_attempt"]["status"] = "blocked" if result.get("decision") == "block" else "accepted"

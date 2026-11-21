@@ -180,7 +180,7 @@ def test_workspace_readiness_reports_a_symlinked_living_instead_of_raising(tmp_p
     (tmp_path / 'notes').mkdir()
     (repo / '.living').symlink_to(tmp_path / 'notes', target_is_directory=True)
     report = package.workspace_readiness(repo)
-    assert not report['ok'] and '.living is itself a symlink' in report['reason']
+    assert not report['ok'] and '.living is a symlink or not a directory' in report['reason']
 
 
 def test_workspace_readiness_reports_a_state_path_that_is_a_file(tmp_path):
@@ -199,6 +199,8 @@ def test_workspace_readiness_checks_the_state_directory_the_adapter_uses(tmp_pat
     monkeypatch.setenv('MYCELIUM_STATE_DIR', 'sub/state')
     report = package.workspace_readiness(repo)
     assert report['ok'] and 'MYCELIUM_STATE_DIR' in report['warnings'][0]
+    monkeypatch.setenv('MYCELIUM_STATE_DIR', '.mycelium')  # accepted by the adapter
+    assert 'warnings' not in package.workspace_readiness(repo)
     (repo / '.mycelium').mkdir()
     (repo / '.mycelium' / 'link').symlink_to(tmp_path)
     report = package.workspace_readiness(repo)
@@ -239,14 +241,27 @@ def test_workspace_readiness_reports_refusals_startup_makes_when_writing(tmp_pat
     assert not report['ok'] and expected in report['reason']
 
 
-def test_workspace_readiness_treats_a_dangling_living_link_as_no_opt_in(tmp_path):
+@pytest.mark.parametrize('kind', ['dangling', 'file'])
+def test_workspace_readiness_reports_every_living_the_adapter_rejects(tmp_path, kind):
+    """roots_for rejects any .living link (dangling too) and a .living file,
+    failing every native event, so doctor must not call it "no opt-in"."""
     import subprocess
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'antigravity_hooks_for_doctor', package.SOURCE_ROOT / 'skills/core/scripts/antigravity_hooks.py')
+    hooks = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hooks)
     repo = tmp_path / 'proj'
     repo.mkdir()
     subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-    (repo / '.living').symlink_to(tmp_path / 'missing')
+    if kind == 'dangling':
+        (repo / '.living').symlink_to(tmp_path / 'missing')
+    else:
+        (repo / '.living').write_text('x\n')
     report = package.workspace_readiness(repo)
-    assert not report['ok'] and report['reason'] == 'Git root has no .living opt-in'
+    assert not report['ok'] and 'rejects every native event' in report['reason']
+    with pytest.raises(ValueError, match='Unsafe Mycelium opt-in directory'):
+        hooks.roots_for({'workspacePaths': [str(repo)]})
 
 
 def test_workspace_readiness_survives_a_very_deep_state_tree(tmp_path, monkeypatch):
