@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A post-tool hook that could not take its session's lock (a slow Stop,
+  parallel subagent hooks, a loaded machine) no longer drops the edit, read,
+  or analysis run silently. It still exits 0 so the tool call is never
+  blocked, but it prints a diagnostic on stderr and records the event in
+  `mycelium-unrecorded-events.tmp`. Stop then asks for triage of the turn,
+  with an UNRECORDED WORK note, instead of accepting work it never saw. The
+  data tracker no longer also files such an event as a no-transaction lineage
+  gap. Claude Code, Codex and Antigravity hooks all share the fix; existing
+  projects need no migration. (#137)
+
 ## [0.9.6] - 2026-11-20
 
 ### Added

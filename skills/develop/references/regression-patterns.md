@@ -1027,6 +1027,18 @@ detector's own grammar (pattern 36). Separately, a record that is not
 session work must not be named by a session number that an idle turn
 releases, or the next session overwrites it.
 
+**Recurrence (#137):** the same silence one layer up. All four post-tool
+hooks ran `mycelium_prepare_locked_post_tool_state ... || exit 0`, and that
+helper returned 1 both for "this event is not ours" and for "this event is
+ours but the session lock timed out". Under lock contention an edit or an
+analysis run vanished, and Stop accepted a turn whose only work it never
+heard of (a live `claude -p` with the lock held during an analysis run was
+accepted with only a mislabeled lineage-gap note). The fix classifies the
+failure where it is known (ownership proven, lock op failed), leaves a
+work-of-unknown-extent marker Stop enforces, and exposes the outcome so the
+data tracker does not then take its own no-transaction fallback for the same
+event. Keep the fail-open exit status: evidence, not a blocked tool call.
+
 ## 46. Package identity omits file modes or the build recipe
 
 Package content hashes omit executable permissions, while resource-only digests

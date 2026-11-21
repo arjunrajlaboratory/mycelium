@@ -291,6 +291,33 @@ fi
 if [[ -n "$UNOWNED_GAP_MSG" ]]; then
   LINEAGE_GAP_MSG="${LINEAGE_GAP_MSG:+$LINEAGE_GAP_MSG }$UNOWNED_GAP_MSG"
 fi
+# Post-tool events of this transaction that a hook could not record (its
+# session lock was unavailable) are work of unknown extent: they oblige
+# triage like any recorded work, and the block reason says why.
+UNRECORDED_FILE="$STATE_DIR/mycelium-unrecorded-events.tmp"
+UNRECORDED_COUNT=0
+UNRECORDED_MSG=""
+if [[ -f "$UNRECORDED_FILE" && ! -L "$UNRECORDED_FILE" ]]; then
+  UNRECORDED_COUNT=$(grep -c . "$UNRECORDED_FILE" 2>/dev/null || true)
+  [[ "$UNRECORDED_COUNT" =~ ^[0-9]+$ ]] || UNRECORDED_COUNT=0
+  # An empty file is still evidence that a hook tried and failed.
+  (( UNRECORDED_COUNT > 0 )) || UNRECORDED_COUNT=1
+  UNRECORDED_MSG="UNRECORDED WORK: ${UNRECORDED_COUNT} tool event(s) this session could not be recorded because the session lock was unavailable. Their edits, analysis runs, or data lineage are not in the counts above; triage this turn's work as if they ran."
+fi
+# mycelium_with_unrecorded REASON FILE_COUNT: append the unrecorded-work
+# sentence. When no file change was seen at all, the "0 files changed" lead
+# would contradict it, so the lead is replaced.
+mycelium_with_unrecorded() {
+  local reason="$1"
+  if [[ -z "$UNRECORDED_MSG" ]]; then
+    printf '%s' "$reason"
+    return 0
+  fi
+  if [[ "${2:-0}" == 0 ]]; then
+    reason="STOP BLOCKED — work this turn could not be fully recorded and .living/ was not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update ${HANDOFF_PATH}."
+  fi
+  printf '%s\n\n%s' "$reason" "$UNRECORDED_MSG"
+}
 mycelium_with_lineage_gap() {
   if [[ -n "$LINEAGE_GAP_MSG" ]]; then
     printf '%s\n\n%s' "$1" "$LINEAGE_GAP_MSG"
@@ -542,7 +569,8 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
     ENFORCEMENT_REQUIRED=0
     if [ "$ACTIVITY_COUNT" -gt 0 ] \
       || [ "$REMINDER_COUNT" -gt 0 ] \
-      || [ "$FILES_CHANGED" -gt 0 ]; then
+      || [ "$FILES_CHANGED" -gt 0 ] \
+      || [ "$UNRECORDED_COUNT" -gt 0 ]; then
       ENFORCEMENT_REQUIRED=1
     fi
     TURN_HAD_WORK=$ENFORCEMENT_REQUIRED
@@ -559,6 +587,7 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
           | while IFS= read -r changed_path; do basename "$changed_path"; done \
           | tr '\n' ',' | sed 's/,$//; s/,/, /g')
         REASON="STOP BLOCKED — ${FILES_CHANGED} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update ${HANDOFF_PATH}."
+        REASON=$(mycelium_with_unrecorded "$REASON" "$FILES_CHANGED")
         REASON=$(mycelium_with_lineage_gap "$REASON")
         ESCAPED_REASON=$(mycelium_json_dumps_stdin "$REASON" 2>/dev/null)
         mycelium__fast_write "{\"decision\": \"block\", \"reason\": $ESCAPED_REASON}"$'\n' || true
@@ -571,6 +600,7 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
     if [ "$ACTIVITY_COUNT" -eq 0 ] \
       && [ "$REMINDER_COUNT" -eq 0 ] \
       && [ "$FILES_CHANGED" -eq 0 ] \
+      && [ "$UNRECORDED_COUNT" -eq 0 ] \
       && [ "$LINEAGE_EVENT_COUNT" -eq 0 ]; then
       rm -f "$LOG_PATH"
       rm -f "$ACTIVE_LOG_FILE"
@@ -873,6 +903,7 @@ LIVING_DIR="$REPO_ROOT/.living"
 if [ ! -d "$LIVING_DIR" ]; then
   rm -f "$ACTIVE_LOG_FILE"
   rm -f "$ACTIVE_OWNER_FILE"
+  rm -f "$UNRECORDED_FILE"
   rm -f "$STATE_DIR/handoff-finalization-pending.tmp"
   rm -f "$STATE_DIR/session-file-baseline.json"
   rm -f "$STATE_DIR/living-reminder-baseline.json"
@@ -882,10 +913,13 @@ if [ ! -d "$LIVING_DIR" ]; then
 fi
 
 # Check if any work was done this session.
-# Work detected by: mycelium-reminded.tmp (analysis or Edit/Write) or mycelium-session-activity.tmp
+# Work detected by: mycelium-reminded.tmp (analysis or Edit/Write),
+# mycelium-session-activity.tmp, or mycelium-unrecorded-events.tmp (an event
+# a hook could not record).
 REMINDER_FILE="$STATE_DIR/mycelium-reminded.tmp"
 ACTIVITY_FILE="$STATE_DIR/mycelium-session-activity.tmp"
-if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
+if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ] \
+  && [ "$UNRECORDED_COUNT" -eq 0 ]; then
   if ! mycelium_prepare_carried_baseline; then
     mycelium_block_for_carried_baseline
     exit 0
@@ -947,6 +981,7 @@ if [ "$LIVING_UPDATED" = true ]; then
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
   rm -f "$ACTIVITY_FILE"
+  rm -f "$UNRECORDED_FILE"
   rm -f "$ACTIVE_LOG_FILE"
   rm -f "$ACTIVE_OWNER_FILE"
   rm -f "$STATE_DIR/handoff-finalization-pending.tmp"
@@ -964,6 +999,7 @@ fi
 
 # Block: work happened but .living/ was never updated
 REASON="STOP BLOCKED — ${FILE_COUNT} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update ${HANDOFF_PATH}."
+REASON=$(mycelium_with_unrecorded "$REASON" "$FILE_COUNT")
 REASON=$(mycelium_with_lineage_gap "$REASON")
 
 ESCAPED_REASON=$(mycelium_json_dumps_stdin "$REASON" 2>/dev/null)

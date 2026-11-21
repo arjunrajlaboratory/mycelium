@@ -13,6 +13,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/mycelium-hook-lib.sh"
 
+# The guard below silences stderr; an event the session lock kept from
+# being recorded still reports on the original stream.
+exec 3>&2
+MYCELIUM_HOOK_DIAG_FD=3
+
 # Wrap everything in a guard — if anything fails, exit 0 silently
 {
   INPUT=$(cat)

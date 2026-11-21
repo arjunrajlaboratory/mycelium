@@ -16,6 +16,7 @@ MYCELIUM_MARKER_FORMAT=""
 MYCELIUM_OWNER_STATE=""
 MYCELIUM_OWNER_ID=""
 MYCELIUM__STATE_FAILED=0
+MYCELIUM__STATE_DIED=0
 MYCELIUM__STATE_HELD=""
 # Lock directories this process acquired. A value inherited from the
 # environment names someone else's lock: never let a release remove it.
@@ -27,6 +28,8 @@ MYCELIUM_SESSION_LOCK_DIR=""
 # MYCELIUM_SHARED_STATE_DIR, MYCELIUM_SESSION_*, the lock directories, and the
 # marker and owner reads), sets MYCELIUM__STATE_FAILED to the 1-based index of
 # the failed op (0 when none failed), and returns nonzero on failure.
+# MYCELIUM__STATE_DIED is 1 when that failure was an interpreter that died
+# before finishing, rather than an op that checked and refused.
 #
 # A lock op makes one mkdir(2) attempt in Python. When the lock is held, this
 # runs the unchanged bash acquisition loop (dead-owner reaping, retries) and
@@ -46,6 +49,7 @@ mycelium__state() {
   local last_ok=0 failed=0 busy=0 ended=false
 
   MYCELIUM__STATE_FAILED=0
+  MYCELIUM__STATE_DIED=0
   MYCELIUM__STATE_HELD=""
   (( ${#ops[@]} > 0 )) || return 0
   for op in "${ops[@]}"; do
@@ -133,6 +137,7 @@ mycelium__state() {
     if [[ "$ended" != true ]]; then
       failed=$((last_ok + 1))
       busy=0
+      MYCELIUM__STATE_DIED=1
     fi
     if (( failed > 0 )); then
       MYCELIUM__STATE_FAILED=$((offset + failed))
@@ -260,16 +265,93 @@ mycelium_prepare_post_tool_state() {
 # Stop after every turn, and an accepted Stop removes the transaction, so
 # without this every later turn of a live session was dropped silently until
 # the next SessionStart. Reads and non-work events never pass `reopen`.
+#
+# Returning 1 covers two different outcomes, and callers exit 0 on both. An
+# intentional no-op (no transaction, another session's event, Stop accepted
+# while this event waited) leaves nothing. A failed session lock op after
+# this event's ownership of a live transaction was proven (a timeout behind
+# a live holder, or a dead interpreter) means work this hook should have
+# recorded was dropped: it leaves one line in that transaction's
+# unrecorded-events file, which Stop treats as work of unknown extent, and a
+# diagnostic on stderr. It never reopens: the transaction exists and only its
+# lock was unavailable. MYCELIUM_POST_TOOL_UNRECORDED is 1 after such a
+# failure (0 otherwise), so a caller with its own no-transaction fallback
+# does not mistake it for a missing transaction.
+MYCELIUM_POST_TOOL_UNRECORDED=0
 mycelium_prepare_locked_post_tool_state() {
   local allow_reopen="${3:-}"
+  local status=0
+  MYCELIUM_POST_TOOL_UNRECORDED=0
   mycelium__post_tool_prepare_mode "$2" || return 1
-  if mycelium__prepare_locked_post_tool_state_once "$1" "$2"; then
+  mycelium__prepare_locked_post_tool_state_once "$1" "$2" || status=$?
+  if (( status == 0 )); then
     return 0
+  fi
+  if (( status == 2 )); then
+    MYCELIUM_POST_TOOL_UNRECORDED=1
+    mycelium__record_unrecorded_event "$2"
+    return 1
   fi
   [[ "$allow_reopen" == reopen ]] || return 1
   mycelium_reopen_post_tool_transaction "$1" "$2" || return 1
   mycelium__post_tool_prepare_mode "$2" || return 1
-  mycelium__prepare_locked_post_tool_state_once "$1" "$2"
+  status=0
+  mycelium__prepare_locked_post_tool_state_once "$1" "$2" || status=$?
+  if (( status == 2 )); then
+    MYCELIUM_POST_TOOL_UNRECORDED=1
+    mycelium__record_unrecorded_event "$2"
+  fi
+  (( status == 0 ))
+}
+
+# One NDJSON line per event a hook could not record, appended to the owning
+# transaction's directory without the session lock (that lock is what was
+# unavailable). The append is locked on the file itself and refuses a link.
+MYCELIUM__PY_UNRECORDED_EVENT='
+import fcntl, json, os, sys
+path, ts, hook, reason, host = sys.argv[1:6]
+tool = None
+try:
+    payload = json.loads(sys.stdin.read())
+    if isinstance(payload, dict) and isinstance(payload.get("tool_name"), str):
+        tool = payload["tool_name"][:200]
+except ValueError:
+    pass
+record = {"ts": ts, "hook": hook, "reason": reason, "host": host, "tool_name": tool}
+fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    os.write(fd, (json.dumps(record) + "\n").encode("ascii"))
+finally:
+    os.close(fd)
+'
+
+# mycelium__record_unrecorded_event PAYLOAD: called only after a state call
+# proved this event owns the transaction in STATE_DIR. Best effort: a failure
+# here must not change the hook's fail-open exit status.
+mycelium__record_unrecorded_event() {
+  local input="$1"
+  local hook=""
+  local reason=session-lock-unavailable
+  local diag_fd="${MYCELIUM_HOOK_DIAG_FD:-2}"
+  hook=$(basename "${0:-hook}")
+  if (( MYCELIUM__STATE_DIED == 1 )); then
+    reason=state-check-died
+  fi
+  [[ "$diag_fd" =~ ^[0-9]+$ ]] || diag_fd=2
+  if [[ -n "${STATE_DIR:-}" && -d "$STATE_DIR" && ! -L "$STATE_DIR" ]]; then
+    printf '%s' "$input" | python3 -c "$MYCELIUM__PY_UNRECORDED_EVENT" \
+      "$STATE_DIR/mycelium-unrecorded-events.tmp" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$hook" "$reason" \
+      "$(mycelium_hook_host)" >/dev/null 2>&1 || true
+  fi
+  if [[ "$reason" == session-lock-unavailable ]]; then
+    printf 'Mycelium: %s could not take the session lock; this tool event was not recorded. Stop will ask for triage of this turn'"'"'s work.\n' \
+      "$hook" >&"$diag_fd" || true
+  else
+    printf 'Mycelium: %s lost its state check while taking the session lock; this tool event was not recorded. Stop will ask for triage of this turn'"'"'s work.\n' \
+      "$hook" >&"$diag_fd" || true
+  fi
 }
 
 # mycelium__checked_shared_state_dir REPO_ROOT: print the shared state
@@ -288,6 +370,11 @@ mycelium__checked_shared_state_dir() {
   )
 }
 
+# Returns 0 when locked and authorized, 1 for an intentional no-op, and 2
+# when this event owned the transaction (ops 1-3 passed, so STATE_DIR is its
+# run directory) but the lock op (4) failed: timed out, or its interpreter
+# died. A failed revalidation (5-7) is Stop having accepted meanwhile, a
+# no-op; those ops also reassign STATE_DIR, so no evidence is written there.
 mycelium__prepare_locked_post_tool_state_once() {
   if ! mycelium__state "$1" "$2" \
     "prepare:$MYCELIUM__PREPARE_MODE" select:read-only owns \
@@ -301,6 +388,9 @@ mycelium__prepare_locked_post_tool_state_once() {
       return 0
     fi
     mycelium__state_release_held
+    if (( MYCELIUM__STATE_FAILED == 4 )); then
+      return 2
+    fi
     return 1
   fi
   return 0

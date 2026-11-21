@@ -242,6 +242,7 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
     rm -f "$STATE_DIR/data-lineage-session-id.tmp"
     rm -f "$STATE_DIR/mycelium-reminded.tmp"
     rm -f "$STATE_DIR/mycelium-session-activity.tmp"
+    rm -f "$STATE_DIR/mycelium-unrecorded-events.tmp"
     rm -f "$STATE_DIR/living-reminder-baseline.json"
     rm -f "$STATE_DIR/session-file-baseline.json"
   fi
