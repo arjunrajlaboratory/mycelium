@@ -189,6 +189,16 @@ if ! mycelium__state "$REPO_ROOT" "$INPUT" "${_STOP_OPS[@]}"; then
       export MYCELIUM__STOP_REOPENED=1
       exec "$HERE/mycelium-stop-check.sh" <<<"$INPUT"
     fi
+    # A session that moved here from another checkout of this repository and
+    # did no work here since still holds its reservation there. Reopen here,
+    # which takes it over (or leaves it if it recorded work), and run this
+    # Stop once more against the transaction that now holds the session.
+    if [[ -z "${MYCELIUM__STOP_REOPENED:-}" ]] \
+      && mycelium_take_moved_transaction "$REPO_ROOT" "$HOST_SESSION_ID" probe \
+      && mycelium_reopen_post_tool_transaction "$REPO_ROOT" "$INPUT"; then
+      export MYCELIUM__STOP_REOPENED=1
+      exec "$HERE/mycelium-stop-check.sh" <<<"$INPUT"
+    fi
     # Commands its hooks could not record were kept in the shared unowned-
     # skip file; report them now rather than end the turn in silence.
     mycelium_report_unowned_lineage_gaps own-run
@@ -394,6 +404,33 @@ if [[ -e "$UNRECORDED_FILE" || -L "$UNRECORDED_FILE" ]]; then
       "STOP BLOCKED — ${UNRECORDED_FILE} is not a regular file Mycelium can read or remove. Remove it, then retry Stop." || true
     exit 0
   fi
+fi
+# Project files that changed in the checkout this session moved from, before
+# its reservation moved here (mycelium_take_moved_transaction). That checkout's
+# Stop will never run for this session, so this one enforces them: start a work
+# cycle, as for unrecorded work, then consume the record. The cycle's reminder
+# keeps a retry enforced until .living/ is updated.
+MOVED_CHANGES_FILE="$STATE_DIR/moved-checkout-changes.tmp"
+if [[ -f "$MOVED_CHANGES_FILE" && ! -L "$MOVED_CHANGES_FILE" ]]; then
+  # One reader per value, each reading the whole file: a `| head` consumer
+  # that exits early would kill its producer with SIGPIPE and, under
+  # pipefail, this whole hook with it (exit 141, failing open on every retry).
+  _MOVED_COUNT=$(awk 'NF { n++ } END { print n + 0 }' "$MOVED_CHANGES_FILE" 2>/dev/null || true)
+  _MOVED_NAMES=$(awk 'NF && ++n <= 15 { printf "%s%s", (n > 1 ? ", " : ""), $0 }' \
+    "$MOVED_CHANGES_FILE" 2>/dev/null || true)
+  if ! mycelium_start_work_cycle "$REPO_ROOT" \
+    "${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"; then
+    mycelium_emit_stop_block \
+      "STOP BLOCKED — changes this session left in the checkout it moved from need a fresh .living/ fingerprint and reminder, and writing them failed. The evidence was preserved; repair ${STATE_DIR} if needed, then retry Stop." || true
+    exit 0
+  fi
+  _MOVED_MORE=""
+  if [[ "${_MOVED_COUNT:-0}" =~ ^[0-9]+$ ]] && (( _MOVED_COUNT > 15 )); then
+    _MOVED_MORE=" (+$((_MOVED_COUNT - 15)) more)"
+  fi
+  _MOVED_MSG="MOVED SESSION: this session moved here from another checkout of this repository. ${_MOVED_COUNT:-0} project file(s) changed there after it started, or still owed reflection, and are not in the counts above: ${_MOVED_NAMES}${_MOVED_MORE}. Triage them if they are this session's work."
+  UNRECORDED_MSG="${UNRECORDED_MSG:+$UNRECORDED_MSG }$_MOVED_MSG"
+  rm -f "$MOVED_CHANGES_FILE"
 fi
 # The file now holds only the UNRECORDED_KEPT bytes (generation
 # UNRECORDED_KEPT_GEN) of the lineage and read records this Stop reports.

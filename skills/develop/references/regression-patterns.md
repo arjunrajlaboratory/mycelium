@@ -1120,3 +1120,48 @@ main checkout and inside the worktree (the second must still block on the
 worktree's changes and publish the worktree's lineage manifest), and one inside
 an unrelated opted-in project, which must gain no `.mycelium/` or
 `.living/log/`.
+
+## 51. A session that changes checkout splits its transaction
+
+**Failure:** A Claude Code session started in the main checkout, then moved
+into a linked worktree (`cd .claude/worktrees/<name>`, or EnterWorktree).
+SessionStart had reserved its log and run state in the main checkout; every
+later hook resolved the worktree. The first work hook there opened a second
+transaction, Stop finalized that one, and the main checkout kept an untracked
+stub log, an INDEX count that included it, and stale
+`.mycelium/run/<host>/<sid>/` state in another session's working tree. The
+agent also saw two handoff paths.
+
+**Invariant:** One session, one transaction. Whatever opens a transaction in
+a checkout (SessionStart, or a work hook's reopen) first looks for this
+session's reservation in the repository's other linked worktrees
+(`git worktree list`, never an unrelated project) and takes it over: carry the
+start time and a handoff written at the announced path, remove the stub log
+and run state, and recount that checkout's INDEX. A Stop that finds no
+transaction in its own checkout but a reservation in a sibling reopens here so
+the takeover happens, then runs once more. Shell edits record no activity, so
+files that changed in the old checkout since its baseline are carried into
+the new transaction and enforced by its Stop; another session's concurrent
+edits cost one triage, never silence. So is anything the old checkout still
+owed (a carried record not yet enforced, a reminder its Stop started), so a
+move back cannot erase it, and a handoff the destination already holds is
+appended to, never dropped. Read the moved record without `| head` under
+pipefail: an early-exiting consumer kills Stop with SIGPIPE (141) and fails
+open on every retry. A reservation with recorded work
+(activity, data or unrecorded events, a log the agent wrote into, a tracked
+log) is never removed; it stays for its own checkout's Stop. Take that
+checkout's lifecycle and session locks before checking and removing, and leave
+it alone when either is busy.
+
+**Regression evidence:** Run the real hooks with SessionStart in the main
+checkout and later events in a linked worktree while "another session" owns
+the main checkout; assert exactly one finalized log across both, the main
+checkout byte-identical to its state before this session started, no
+`.mycelium/run/<host>/<sid>/` left there, and the carried `started:` and
+handoff. Pair it with an idle move (Stop only), a file changed in the main
+checkout after the start (named in the worktree's Stop, left in place), a
+main -> worktree -> main move with reflection still owed, a moved record larger
+than a pipe buffer, an existing destination handoff, a relative
+`MYCELIUM_STATE_DIR`, a malformed owner token (never taken), a move
+after recorded work in the main checkout (kept and still judged there), and
+an unrelated repository (never searched).
