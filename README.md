@@ -78,9 +78,13 @@ Trusting the hooks in the terminal CLI's `/hooks` saved an incomplete approval
 active with nothing to review while Codex still skips every one of them. The
 only complete approvals were saved while the Codex desktop app was running, so
 for now approve the Mycelium hooks from the desktop app. In the desktop app
-(ChatGPT.app, November 2026), approval is in **Settings → Hooks → Trust all**,
+(ChatGPT.app, November 2026), approval is in **Settings → Hooks**, where the
+Mycelium hooks are listed under **From Plugins** with a **Trust all** button,
 or in a project chat's composer through the **Review hooks · N need approval**
-chip → **Allow all**. It is not on the plugin's own page. Do not take `/hooks`
+chip. Approve only Mycelium's hooks: if other hooks are pending too, select the
+`mycelium@mycelium` ones and use **Allow selected** rather than **Allow all**,
+which would also approve unrelated commands. It is not on the plugin's own
+page. Do not take `/hooks`
 alone as proof. The reliable check is the `hooks/list` request to
 `codex app-server`: every `mycelium@mycelium` hook must report `trustStatus`
 `trusted`. Initialized projects also tell the agent to check, at the start of
@@ -95,7 +99,7 @@ That changed the installed contents and voided any approval given before it.
 So, after `codex plugin add`:
 
 1. Fully quit the desktop app if it is running, then open it.
-2. Trust all the Mycelium hooks.
+2. Trust the eight Mycelium hooks, and only those (see "Where to approve").
 3. Fully quit and reopen the app, and restart any open Codex CLI sessions.
 4. Confirm that the hooks are still trusted: Settings → Hooks should show
    nothing left to approve, and `hooks/list` from `codex app-server` should
@@ -106,9 +110,9 @@ and the approval held.
 
 **Keep the marketplace on GitHub.** If the marketplace source is a local
 folder, such as a Mycelium working checkout, every desktop-app launch re-copies
-the plugin from that marketplace source, uncommitted files included. Any change
-in the folder since you approved, even an uncommitted edit, then changes the
-installed copy and voids the approval. If you once added a local folder as the
+the plugin from that marketplace source, uncommitted files included. A change
+since you approved to any file that gets copied into the plugin, even an
+uncommitted edit, then changes the installed copy and voids the approval. If you once added a local folder as the
 `mycelium` marketplace, switch it back:
 
 ```bash
@@ -237,8 +241,10 @@ codex plugin marketplace upgrade mycelium
 codex plugin add mycelium@mycelium
 ```
 
-The first command refreshes the configured Git marketplace; the second updates
-the installed plugin cache. Then approve the `mycelium@mycelium` hooks again,
+The first command refreshes the configured Git marketplace. When the snapshot
+changed, Codex 0.169.0's upgrade may already reinstall the plugin; the second
+command is an explicit reinstall that makes sure the installed copy matches.
+Then approve the `mycelium@mycelium` hooks again,
 using the four steps under "Approve after the first start" above. Until you do,
 Codex skips the updated plugin's hooks, even if `/hooks` shows them as active.
 Start a new task afterward so Codex picks up the updated skills and hooks.
@@ -322,8 +328,8 @@ Mycelium ships eight hook scripts and registers the supported subset for each ho
 | `mycelium-activity-tracker.sh` | PostToolUse (file edits) | Silently tracks file modifications so edit-only sessions are also enforced |
 | `mycelium-read-tracker.sh` | PostToolUse (Read) | Logs `.living/` file access for consumption telemetry |
 | `mycelium-stop-check.sh` | Stop | Serializes data-lineage consolidation, auto-finalizes session logs, blocks session end if `.living/` wasn't updated after significant work, reminds about session summary |
-| `mycelium-io-observer.sh` | PreToolUse (shell, file edits); PostToolUse (file edits) | Takes a stat snapshot of the repository before each call and records which files the call created, modified, or deleted, for data lineage. Silent; never blocks a tool call. |
-| `mycelium-data-tracker.sh` | PostToolUse (shell) | Captures analysis data-lineage events, joining each with the file observation for that call |
+| `mycelium-io-observer.sh` | PreToolUse (shell, file edits); PostToolUse (file edits; Claude also PostToolUseFailure) | Before each shell call, takes a stat snapshot of the watched repository scope; the shell PostToolUse diffs it to record which files the call created, modified, or deleted, for data lineage. File-edit calls are only journaled (start and end), so overlapping calls can be flagged; they get no snapshot. Silent; never blocks a tool call. |
+| `mycelium-data-tracker.sh` | PostToolUse (shell; Claude also PostToolUseFailure) | Captures analysis data-lineage events, joining each with the file observation for that call |
 | `mycelium-data-lineage-stop.sh` | Internal Stop phase | Consolidates session data-lineage events synchronously inside `mycelium-stop-check.sh`; it is not registered as a sibling command hook |
 
 Each identified Claude Code or Codex root receives a private runtime directory

@@ -168,7 +168,9 @@ Operational gotchas, all of which have cost a full cycle:
   `trusted_content_hash`; `/hooks` then showed every hook as active while
   Codex skipped them all. The complete entries were written while the Codex
   desktop app was running, so approve from the desktop app (Settings → Hooks →
-  Trust all). With a local marketplace source, launching the desktop app
+  From Plugins → Trust all, or the composer chip with only the
+  `mycelium@mycelium` hooks selected → Allow selected; never approve other
+  pending hooks along with them). With a local marketplace source, launching the desktop app
   re-copies the plugin from that marketplace source, so any change in that
   folder since the approval replaces the installed candidate and needs
   approval again—verify the installed hash after launching it.
@@ -176,12 +178,16 @@ Operational gotchas, all of which have cost a full cycle:
   (`codex plugin marketplace add arjunrajlaboratory/mycelium`), never the
   working checkout: a local source copies uncommitted files into the install
   on every desktop-app launch. To audit a candidate:
-  1. Back up `~/.codex/config.toml`.
-  2. Make a clean clone or `git archive` export of the candidate, then run
-     `codex plugin marketplace remove mycelium` and
-     `codex plugin marketplace add <export-path>`.
-  3. Run `codex plugin add mycelium@mycelium`, open the desktop app once,
-     trust all, quit, then verify the hashes and `hooks/list` before the audit.
+  1. Fully quit the desktop app, and back up `~/.codex/config.toml`.
+  2. Extract a `git archive` export of the exact candidate commit and bump the
+     `+codex.<timestamp>` cachebuster in its `.codex-plugin/plugin.json` (the
+     cachebuster above still applies; the reinstall below does not replace
+     it). Then run `codex plugin marketplace remove mycelium` and
+     `codex plugin marketplace add <absolute-export-path>`.
+  3. Run `codex plugin add mycelium@mycelium`. Launch the desktop app, trust
+     only the `mycelium@mycelium` hooks, then quit and relaunch it. Only then
+     verify the installed hashes and that `hooks/list` for the audit project
+     shows all eight hooks `trusted`.
   4. Afterwards, switch back with `codex plugin marketplace remove mycelium`
      and `codex plugin marketplace add arjunrajlaboratory/mycelium`, run
      `codex plugin add mycelium@mycelium` again, and follow the README's four
