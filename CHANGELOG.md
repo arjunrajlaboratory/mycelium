@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-11-21
+
 ### Added
 
 - Data lineage now observes which files each Bash call changed, instead of
