@@ -71,12 +71,18 @@ knowledge and optional domain steps below after the base scaffold succeeds.
     Codex's dynamic `PLUGIN_ROOT`; initialization must not write versioned
     plugin-cache paths into `.codex/hooks.json`. Codex binds hook approval to
     the installed plugin's contents, so after every plugin install, upgrade, or
-    reinstall tell the user to review and trust the five plugin hooks, fully
+    reinstall tell the user to review and trust the eight plugin hooks, fully
     exit Codex, and restart it so the approved hook set is loaded at
     SessionStart. On Codex 0.169.0, terminal `/hooks` was observed to save an
     incomplete approval (the hooks show as trusted but are still skipped);
     only approvals made while the Codex desktop app was running were complete,
-    so point the user to the desktop app for now.
+    so point the user to the desktop app for now (Settings → Hooks, Mycelium
+    under From Plugins; approve only the `mycelium@mycelium` hooks, not other
+    pending ones). Also on 0.169.0, the first desktop-app start after a GitHub-marketplace
+    install or upgrade changed the installed plugin and voided earlier
+    approval, so the user should fully quit the app if it is running and open
+    it again, then trust, then quit and reopen it (the README's "Approve after
+    the first start" steps).
 
 **References to consult**:
 - `skills/core/references/folder-structure.md` — canonical target structure
@@ -288,7 +294,8 @@ knowledge and optional domain steps below after the base scaffold succeeds.
 3. Use `--dry-run` first to preview changes.
 4. **Codex only**: after a real migration following plugin install or upgrade,
    tell the user to review and trust all eight Mycelium plugin hooks (from the
-   Codex desktop app; see step 14 of init), fully exit Codex, and restart it.
+   Codex desktop app, after its first start following the install; see step
+   14 of init), fully exit Codex, and restart it.
 
 ---
 
@@ -391,8 +398,8 @@ The session log the post-action hook names (`.living/log/<date>-<nnn>-<project>.
 ### Automated Enforcement (Claude Code and Codex Hooks)
 
 Mycelium ships shared hook scripts in `skills/core/hooks/`. `init_repo.py`
-registers Claude hooks in `.claude/settings.local.json`. Codex discovers five
-plugin-bundled registrations from `hooks/hooks.json`; their dispatcher uses
+registers Claude hooks in `.claude/settings.local.json`. Codex discovers eight
+plugin-bundled command hooks from `hooks/hooks.json`; their dispatcher uses
 Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 
 | Hook | Event | Purpose |
@@ -408,7 +415,10 @@ Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 Codex requires each exact plugin command hook to be reviewed and trusted, and
 it binds each approval to the installed plugin's contents, so after first
 install and after every plugin upgrade or reinstall, approve all eight Mycelium
-hooks, fully exit Codex, and restart it. Until then Codex skips the hooks
+hooks in order: fully quit the desktop app if it is running and start it again,
+trust only the `mycelium@mycelium`
+hooks, then fully exit and restart it (on 0.169.0 the first start after a
+GitHub-marketplace install changed the plugin and voided earlier approval). Until then Codex skips the hooks
 without any warning inside the task. On Codex 0.169.0 (observed on one machine),
 trusting in the terminal CLI's `/hooks` saved an incomplete approval: `/hooks`
 showed every hook as active while Codex still skipped them. Approvals saved
@@ -445,8 +455,8 @@ Quick checks an agent or human can run to confirm mycelium is wired correctly:
 
 | Check | Command / location | Expected |
 |-------|--------------------|----------|
-| Claude hooks installed | `cat .claude/settings.local.json` | SessionStart, PostToolUse, and Stop registrations present |
-| Codex hooks bundled | Inspect the installed plugin's `hooks/hooks.json` | Five `PLUGIN_ROOT`-based SessionStart, PostToolUse, and Stop registrations present |
+| Claude hooks installed | `cat .claude/settings.local.json` | SessionStart, PreToolUse, PostToolUse, PostToolUseFailure, and Stop registrations present |
+| Codex hooks bundled | Inspect the installed plugin's `hooks/hooks.json` | Eight `PLUGIN_ROOT`-based SessionStart, PreToolUse, PostToolUse, and Stop command hooks present |
 | Codex hooks trusted | Send `hooks/list` to `codex app-server` (terminal `/hooks` can show hooks as active while they are skipped) | Every `mycelium@mycelium` hook reports `trustStatus` `trusted`; recheck after every plugin upgrade or reinstall |
 | Hooks dispatching | Start a fresh root task in the project | Its context contains a `SESSION HANDOFF PATH:` line from SessionStart |
 | INDEX.md has knowledge summary | `grep "BEGIN KNOWLEDGE SUMMARY" .living/INDEX.md` | Match present |

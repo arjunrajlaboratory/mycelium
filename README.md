@@ -56,14 +56,15 @@ codex plugin marketplace add arjunrajlaboratory/mycelium
 codex plugin add mycelium@mycelium
 ```
 
-Start a new task after installation. Codex can invoke the bundled skills
-implicitly, through the plugin picker, or explicitly by skill name.
+After approving the hooks (below), start a new task. Codex can invoke the
+bundled skills implicitly, through the plugin picker, or explicitly by skill
+name.
 
-Before the first Mycelium task, review and trust all eight Mycelium plugin
-hooks, then fully exit Codex and restart it so the approved `SessionStart` hook
-is present from process startup. The hooks are bundled with the plugin and
-resolve through Codex's dynamic `PLUGIN_ROOT`; they do not embed a versioned
-cache path into your repositories.
+Before the first Mycelium task, approve all eight Mycelium plugin hooks with
+the four steps under "Approve after the first start" below, so the approved
+`SessionStart` hook is present from process startup. The hooks are bundled
+with the plugin and resolve through Codex's dynamic `PLUGIN_ROOT`; they do not
+embed a versioned cache path into your repositories.
 
 Current Codex binds each hook approval to the installed plugin's contents, a
 hash of every file in the installed plugin. Repeat the review after every
@@ -76,15 +77,53 @@ Trusting the hooks in the terminal CLI's `/hooks` saved an incomplete approval
 (no plugin-content hash). Afterwards `/hooks` may show the hooks as trusted or
 active with nothing to review while Codex still skips every one of them. The
 only complete approvals were saved while the Codex desktop app was running, so
-for now approve the Mycelium hooks from the desktop app. Launching the desktop
-app also re-copies the plugin from its marketplace source—for a local
-development marketplace, that is your working checkout—which replaces the
-installed copy and needs approval again. Do not take `/hooks` alone as proof.
-The reliable check is the `hooks/list` request to `codex app-server`: every
-`mycelium@mycelium` hook must report `trustStatus` `trusted`. Initialized
-projects also tell the agent to check, at the start of each task, for the
-`SESSION HANDOFF PATH` line that SessionStart adds to its context and to warn
-you when the line is missing.
+for now approve the Mycelium hooks from the desktop app. In the desktop app
+(ChatGPT.app, November 2026), approval is in **Settings → Hooks**, where the
+Mycelium hooks are listed under **From Plugins** with a **Trust all** button,
+or in a project chat's composer through the **Review hooks · N need approval**
+chip. Approve only Mycelium's hooks: if other hooks are pending too, select the
+`mycelium@mycelium` ones and use **Allow selected** rather than **Allow all**,
+which would also approve unrelated commands. It is not on the plugin's own
+page. Do not take `/hooks`
+alone as proof. The reliable check is the `hooks/list` request to
+`codex app-server`: every `mycelium@mycelium` hook must report `trustStatus`
+`trusted`. Initialized projects also tell the agent to check, at the start of
+each task, for the `SESSION HANDOFF PATH` line that SessionStart adds to its
+context and to warn you when the line is missing.
+
+**Approve after the first start, not right after installing (observed on
+Codex 0.169.0, one machine, November 2026).** With the GitHub marketplace, the first time
+the desktop app (or `codex app-server`) started after an install or upgrade,
+Codex added a `.codex-marketplace-install.json` record to the installed plugin.
+That changed the installed contents and voided any approval given before it.
+So, after `codex plugin add`:
+
+1. Fully quit the desktop app if it is running, then open it.
+2. Trust the eight Mycelium hooks, and only those (see "Where to approve").
+3. Fully quit and reopen the app, and restart any open Codex CLI sessions.
+4. Confirm that the Mycelium hooks are still trusted: in Settings → Hooks, the
+   Mycelium hooks under From Plugins should need no review (other hooks you
+   left pending don't matter), and `hooks/list` from `codex app-server` for
+   your project should list all eight `mycelium@mycelium` hooks, each with
+   `trustStatus` `trusted`.
+
+In that observation, the installed copy then stayed the same across restarts
+and the approval held.
+
+**Keep the marketplace on GitHub.** If the marketplace source is a local
+folder, such as a Mycelium working checkout, every desktop-app launch re-copies
+the plugin from that marketplace source, uncommitted files included. A change
+since you approved to any file that gets copied into the plugin, even an
+uncommitted edit, then changes the installed copy and voids the approval. If you once added a local folder as the
+`mycelium` marketplace, switch it back:
+
+```bash
+codex plugin marketplace remove mycelium
+codex plugin marketplace add arjunrajlaboratory/mycelium
+codex plugin add mycelium@mycelium
+```
+
+Then follow the four approval steps above.
 
 **Local Claude development install:**
 
@@ -142,13 +181,14 @@ memory layer, canonical `MYCELIUM.md` guidance, and thin `CLAUDE.md` and
 `report-generator`, and `idea-generator`) are installed automatically.
 
 **Codex hook approval:** if you did not approve the plugin hooks during
-installation, trust all eight Mycelium command hooks now—from the Codex desktop
-app on Codex 0.169.0 (see "Where to approve" above), or open `/hooks` in a
-current CLI (run `codex update` if it is absent) and confirm with `hooks/list`.
-Fully exit Codex and restart it before opening the initialized project. Codex
-deliberately skips untrusted command hooks. Approve again after every plugin
-upgrade or reinstall: Codex invalidates the approval whenever the installed
-plugin's files change, even though repositories no longer retain a cache path.
+installation, trust all eight Mycelium command hooks now with the four steps
+under "Approve after the first start" above, and confirm with `hooks/list`.
+You can open `/hooks` in a current CLI (run `codex update` if it is absent) to
+look at them, but on Codex 0.169.0 approving there saved incomplete approvals
+(see "Where to approve" above). Codex deliberately skips untrusted command
+hooks. Approve again after every plugin upgrade or reinstall: Codex invalidates
+the approval whenever the installed plugin's files change, even though
+repositories no longer retain a cache path.
 
 ### 3. Install domain conventions (optional)
 
@@ -203,12 +243,16 @@ codex plugin marketplace upgrade mycelium
 codex plugin add mycelium@mycelium
 ```
 
-The first command refreshes the configured Git marketplace; the second updates
-the installed plugin cache. Then trust the `mycelium@mycelium` hooks again (see
-"Where to approve" above): Codex skips the updated plugin's hooks until you
-approve them, even if `/hooks` shows them as active. Fully exit Codex and start
-a new task afterward so the updated skills and hooks are discovered. You can
-confirm the installed version with:
+The first command refreshes the configured Git marketplace. When the snapshot
+changed, Codex 0.169.0's upgrade may already reinstall the plugin; the second
+command is an explicit reinstall that makes sure the installed copy matches.
+Then check and, if needed, approve the `mycelium@mycelium` hooks again,
+using the four steps under "Approve after the first start" above. When the
+installed files changed, Codex skips the updated plugin's hooks until you do,
+even if `/hooks` shows them as active; a reinstall of identical files can keep
+the approval.
+Start a new task afterward so Codex picks up the updated skills and hooks.
+You can confirm the installed version with:
 
 ```bash
 codex plugin list --json
@@ -279,7 +323,7 @@ Every directory has a descriptive manifest — a registry of its contents with s
 
 ## Hooks — Automated Enforcement
 
-Mycelium ships seven hook scripts and registers the supported subset for each host:
+Mycelium ships eight hook scripts and registers the supported subset for each host:
 
 | Hook | Event | Purpose |
 |------|-------|---------|
@@ -288,7 +332,8 @@ Mycelium ships seven hook scripts and registers the supported subset for each ho
 | `mycelium-activity-tracker.sh` | PostToolUse (file edits) | Silently tracks file modifications so edit-only sessions are also enforced |
 | `mycelium-read-tracker.sh` | PostToolUse (Read) | Logs `.living/` file access for consumption telemetry |
 | `mycelium-stop-check.sh` | Stop | Serializes data-lineage consolidation, auto-finalizes session logs, blocks session end if `.living/` wasn't updated after significant work, reminds about session summary |
-| `mycelium-data-tracker.sh` | PostToolUse (shell) | Captures analysis data-lineage events |
+| `mycelium-io-observer.sh` | PreToolUse (shell, file edits); PostToolUse (file edits; Claude also PostToolUseFailure) | Before each shell call, takes a stat snapshot of the watched repository scope; the shell PostToolUse (and, on Claude, PostToolUseFailure) diffs it to record which files were created, modified, or deleted during the call, for data lineage. These are changes observed while the call ran, not proof that it caused them; overlapping hooked calls are flagged. File-edit calls are only journaled (start and end), so overlapping calls can be flagged; they get no snapshot. Silent; never blocks a tool call. |
+| `mycelium-data-tracker.sh` | PostToolUse (shell; Claude also PostToolUseFailure) | Captures analysis data-lineage events, joining each with the file observation for that call |
 | `mycelium-data-lineage-stop.sh` | Internal Stop phase | Consolidates session data-lineage events synchronously inside `mycelium-stop-check.sh`; it is not registered as a sibling command hook |
 
 Each identified Claude Code or Codex root receives a private runtime directory
@@ -300,9 +345,9 @@ Claude hooks are registered per repository by `init_repo.py`. Codex hooks are
 bundled once with the plugin in `hooks/hooks.json`; a small dispatcher no-ops
 outside Mycelium repositories, refreshes `.mycelium/plugin-root`, and invokes
 the shared scripts through Codex's dynamic `PLUGIN_ROOT`. Codex users must
-trust all eight Mycelium command hooks (from the desktop app on Codex 0.169.0;
-see "Where to approve"), then fully exit and restart Codex, and repeat this
-after every Mycelium upgrade or reinstall. Codex exposes shell and unified-exec work
+trust all eight Mycelium command hooks (from the desktop app on Codex 0.169.0,
+after its first start following the install; see "Approve after the first
+start"), and repeat this after every Mycelium upgrade or reinstall. Codex exposes shell and unified-exec work
 under the `Bash` matcher and file edits as `apply_patch`; read telemetry is
 Claude-only because Codex does not expose its internal file reads to
 `PostToolUse`.

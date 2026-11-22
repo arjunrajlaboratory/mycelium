@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The README's Codex install section now says where to approve hooks in the
+  desktop app (Settings → Hooks, under From Plugins, or the composer's
+  "Review hooks" chip), and to approve only the `mycelium@mycelium` hooks
+  (Allow selected, not Allow all, when other hooks are pending). It also says to approve only after the first app start following a
+  GitHub-marketplace install or upgrade (observed on Codex 0.169.0): that start
+  added `.codex-marketplace-install.json` and voided earlier approval. The
+  first-install, project-initialization and update steps now point at that
+  four-step flow. It recommends keeping the marketplace on GitHub rather than a local
+  checkout, and shows how to switch back. `mycelium:develop` documents the
+  candidate-audit recipe that restores the GitHub source, and what a
+  GitHub-source install contains beyond the packaged files. `mycelium:core`
+  now gives the Codex hook count as eight, not five, in both places. The
+  agent-facing approval guidance (`mycelium:core`, the `MYCELIUM.md` template,
+  and `init_repo.py`'s Codex message) now also says to approve only after the
+  first desktop-app start, in that order. The README's hooks table lists eight
+  scripts, adding the missing `mycelium-io-observer.sh` row, and the
+  `MYCELIUM.md` template and the core skill's verification table give the
+  current hook counts (seven Claude scripts, eight Codex command hooks).
+
 ## [0.9.7] - 2026-11-21
 
 ### Added
