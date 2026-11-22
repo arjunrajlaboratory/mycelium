@@ -8,7 +8,11 @@ The subsystem is independent from the rest of mycelium's logging: it records an
 event when an analysis-script invocation is detected (`python`, `R`, `Rscript`, `jupyter`,
 `uv run python`, `poetry run python`, `conda run … python`, including inline
 `-c` / `-e`). Standard shell execution wrappers (`time`, `exec`, `nice`, and
-`timeout`) may precede or nest around those interpreters.
+`timeout`) may precede or nest around those interpreters. An interpreter held
+in a variable counts when the same command assigns it plainly first
+(`PY=/x/venv/bin/python; $PY run.py`). That means an unconditional,
+top-level `NAME=literal` statement, optionally `export`ed, whose value names
+python, Rscript or R. The event keeps the command as written.
 
 Pipeline runners are detected too, recording their entry point as the event's
 script: a shell script run as `bash`/`sh`/`zsh run.sh` or `./run.sh`, the

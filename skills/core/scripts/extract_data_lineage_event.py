@@ -528,6 +528,75 @@ _ROOT_ASSIGNMENT_RX = re.compile(
 )
 
 
+# An interpreter held in a variable: `PY=/x/venv/bin/python; $PY run.py`.
+_INTERPRETER_VAR_USE_RX = re.compile(
+    r"(?:^|(?<=[;&|\n(])|(?<=&&)|(?<=\|\|))(?P<lead>[ \t]*)"
+    r"(?P<ref>\"?\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))\"?)"
+    r"(?=[ \t])")
+_INTERPRETER_BASENAME_RX = re.compile(r"python(?:\d+(?:\.\d+)*)?|Rscript|R")
+_LITERAL_VALUE_RX = re.compile(r"'([^']*)'|\"([^\"$`\\]*)\"|([^\s;&|<>()'\"$`\\*?\[\]{}~]+)")
+
+
+def _expand_interpreter_variables(command: str) -> str:
+    """The command with each `$VAR` used as an interpreter replaced by the
+    literal it was assigned earlier in the same command, so `PY=/x/python;
+    $PY run.py` is detected as the analysis run it is. Only a plain,
+    unconditional assignment statement counts: `NAME=literal` (optionally
+    `export`ed) at the top level, ended by `;` or a newline, the last one to
+    that name before the use, with no expansion in its value, and a value
+    whose basename is python, Rscript, or R. Anything else is left as
+    written (and stays undetected, as before)."""
+    if "$" not in command or "=" not in command:
+        return command
+    out: list[str] = []
+    last = 0
+    for use in _INTERPRETER_VAR_USE_RX.finditer(command):
+        name = use.group("braced") or use.group("bare")
+        value = _interpreter_assignment(command[:use.start("ref")], name)
+        if value is None:
+            continue
+        out.append(command[last:use.start("ref")])
+        out.append(shlex.quote(value))
+        last = use.end("ref")
+    if not out:
+        return command
+    out.append(command[last:])
+    return "".join(out)
+
+
+def _interpreter_assignment(prefix: str, name: str) -> str | None:
+    """The literal of the last assignment statement to ``name`` in
+    ``prefix``, when it is plain and unconditional and names an
+    interpreter; None otherwise."""
+    # Every way the name may be set or changed; the last one decides.
+    any_set = re.compile(
+        rf"(?P<boundary>^|&&|\|\||[;&|\n(])[ \t]*"
+        rf"(?P<modifier>(?:export|declare|local|readonly|typeset|unset|read)[ \t]+(?:-\w+[ \t]+)*)?"
+        rf"{re.escape(name)}(?P<op>\+?=|(?=[\s;&|)]|$))")
+    found = None
+    for found in any_set.finditer(prefix):
+        pass
+    if found is None or found.group("op") != "=":
+        return None
+    if found.group("boundary") not in ("", ";", "\n"):
+        return None  # conditional (`&&`, `||`), piped, backgrounded or nested
+    if found.group("modifier") and not found.group("modifier").startswith("export"):
+        return None
+    head = prefix[:found.start()]
+    if head.count("(") != head.count(")") or head.count("`") % 2:
+        return None  # inside a subshell or substitution
+    literal = _LITERAL_VALUE_RX.match(prefix, found.end())
+    if literal is None:
+        return None
+    rest = prefix[literal.end():]
+    if not re.match(r"[ \t]*(?:;|\n)", rest):
+        return None  # a prefix assignment (`PY=x cmd`) or more words follow
+    value = next(g for g in literal.groups() if g is not None)
+    if not value or _INTERPRETER_BASENAME_RX.fullmatch(os.path.basename(value)) is None:
+        return None
+    return value
+
+
 def _variable_script_path(command: str, offset: int, raw_path: str,
                           cwd: Path | None) -> Path | None:
     """`$P/skills/...` resolved through an assignment earlier in the same
@@ -6166,7 +6235,7 @@ def build_data_command_event(
         "event_id": uuid.uuid4().hex,
         "agent_id": args.agent_id or None,
         "agent_type": args.agent_type or None,
-        "bash_cmd": args.bash_cmd,
+        "bash_cmd": getattr(args, "recorded_bash_cmd", args.bash_cmd),
         "bash_exit": getattr(args, "bash_exit", None),
         "cwd": str(cwd),
         "signals": signals,
@@ -7072,7 +7141,7 @@ def _event_dict(
         "ts": args.ts,
         "agent_id": args.agent_id or None,
         "agent_type": args.agent_type or None,
-        "bash_cmd": args.bash_cmd,
+        "bash_cmd": getattr(args, "recorded_bash_cmd", args.bash_cmd),
         "bash_exit": getattr(args, "bash_exit", None),
         "bash_wall_s": None,
         "script": str(script_path) if script_path else None,
@@ -7305,7 +7374,7 @@ def _record_unowned_data_command(
             "skip_id": uuid.uuid4().hex,
             "skip_reason": "data-command-failed",
             "detail": type(exc).__name__,
-            "bash_cmd": args.bash_cmd,
+            "bash_cmd": getattr(args, "recorded_bash_cmd", args.bash_cmd),
             "agent_id": args.agent_id or None,
             "agent_type": args.agent_type or None,
             "bash_exit": args.bash_exit,
@@ -7567,6 +7636,10 @@ def main() -> int:
     ap.add_argument("--outcome", choices=("success", "failure", "unknown"), default=None)
     args = ap.parse_args()
     args.observation = _parse_observation(args.observation_json)
+    # Detection reads `$PY run.py` as the interpreter it was assigned; the
+    # record keeps the command as written.
+    args.recorded_bash_cmd = args.bash_cmd
+    args.bash_cmd = _expand_interpreter_variables(args.bash_cmd)
     if args.data_command_to is not None and not (
         args.check_execution and args.host and args.host_session_id
     ):
