@@ -379,7 +379,10 @@ Read from the detected stage's own text, never guessed:
 - `params` (snakemake): the `--config`/`-C` `KEY=VALUE` overrides, verbatim,
   with the value of a secret-named key redacted.
 - `seeds`: literal seeds from argv (`--seed N`) and source (`np.random.seed`,
-  `set.seed`), with their origin.
+  `set.seed`), with their origin. Argv seeds, like `params` and config
+  operands, are read from the redacted arguments: in
+  `fit.py --password --seed=482731` the parser takes `--seed=482731` as the
+  password, so it is masked and never recorded as a seed.
 
 Two runs of one script with different arguments are two events. Identical
 stages (a loop body) are one. A call with more than 64 analysis stages records
@@ -403,8 +406,18 @@ Every stored command text goes through one policy (`lineage_redact.py`):
 - `Authorization:` header values;
 - quoted secret literals in code.
 
+A shell script's body (a `.sh`, `.bash`, `.zsh` or `.ksh` file, or one with a
+shell shebang, such as an sbatch job file) gets the full command redaction, so
+`export HF_TOKEN=...` is caught as well as quoted literals. Other scripts
+(Python, R) get only the quoted-literal rule, since code names secret
+variables all the time.
+
 Nothing is hashed, because a short secret's digest can be guessed. A
-redacted embedded source has `script_sha256_of: "sanitized"`.
+redacted embedded source has `script_sha256_of: "sanitized"`, and its
+`script_sha256` is the digest of the sanitized text. A script too large to
+embed follows the same rule for its digest. Manifest consolidation applies
+the same rule, choosing the shell redaction by the `.sh`/`.bash`/`.zsh`/`.ksh`
+suffix of the event's `script` or a shell shebang.
 
 `argv`, `script_args`, `params`, and a data command's `argv` keep at most
 4 KiB per word (`…[truncated]`). Each whole argv is redacted before any word

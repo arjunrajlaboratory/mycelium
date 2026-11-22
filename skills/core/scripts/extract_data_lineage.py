@@ -335,16 +335,43 @@ def normalize_event(
     return event
 
 
+_SHELL_SOURCE_SUFFIXES = (".sh", ".bash", ".zsh", ".ksh")
+_SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+
+def _shell_shebang(text: str) -> bool:
+    """`#!/bin/bash`, `#!/usr/bin/env -S zsh`, … (an sbatch job file)."""
+    if not text.startswith("#!"):
+        return False
+    words = text[2:].split("\n", 1)[0].split()
+    if not words:
+        return False
+    names = [os.path.basename(words[0])]
+    if names[0] == "env":
+        names = [w for w in words[1:] if not w.startswith("-")][:1]
+    return bool(names) and names[0] in _SHELL_NAMES
+
+
+def _redact_script_text(script: Any, text: str) -> str:
+    """A shell script's body (`run.sh`) takes the command redaction, since
+    `export HF_TOKEN=…` is a shell word, not a quoted literal; any other
+    script the source-literal one. The extractor applies the same rule."""
+    import lineage_redact
+
+    if (isinstance(script, str) and script.endswith(_SHELL_SOURCE_SUFFIXES)) or _shell_shebang(
+            text):
+        return lineage_redact.redact_command(text)
+    return lineage_redact.redact_source(text)
+
+
 def _sanitize_embedded_source(event: dict) -> None:
     """A pre-v2 event (recorded by 0.9.7, finalized after an upgrade) still
     carries its raw source and digest: redact it here, and hash and label
     the sanitized text, so no secret or digest of one is published."""
-    import lineage_redact
-
     source = event.get("script_source")
     if not isinstance(source, str):
         return
-    sanitized = lineage_redact.redact_source(source)
+    sanitized = _redact_script_text(event.get("script"), source)
     if sanitized != source:
         event["script_source"] = sanitized
         event["script_sha256"] = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
@@ -356,8 +383,6 @@ def _digest_script_file(event: dict, script_path: Path) -> None:
     source: one bounded read from a descriptor proven to be a regular file
     (a FIFO or device never blocks Stop), and a sanitized, labelled digest
     when the text holds a secret."""
-    import lineage_redact
-
     try:
         fd = _open_regular_fd(script_path)
     except OSError:
@@ -372,7 +397,7 @@ def _digest_script_file(event: dict, script_path: Path) -> None:
     if len(data) > SIZE_LIMIT_BYTES:
         return
     text = data.decode("utf-8", errors="replace")
-    sanitized = lineage_redact.redact_source(text)
+    sanitized = _redact_script_text(event.get("script"), text)
     if sanitized != text:
         event["script_sha256"] = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
         event["script_sha256_of"] = "sanitized"

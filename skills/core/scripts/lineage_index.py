@@ -1144,13 +1144,21 @@ def query_hash(index: Index, sha256: str, *, disk: bool = True,
 
 def query_path(index: Index, path: str, *, disk: bool = True,
                max_bytes: int = DEFAULT_MAX_BYTES) -> dict[str, Any]:
+    selector = path
+    if path and not os.path.isabs(path) and ".." not in path.split("/"):
+        # An existing file is looked up in the spelling its directory lists
+        # (the one the record uses): `readme.md` on a case-insensitive
+        # volume is `README.md`'s history, not an empty one.
+        spelled = io_observer.canonical_spelling(index.root_real, path)
+        if spelled:
+            path = spelled
     writes = index.writes_at(path)
     readers = [r for r in index.reads if r["path"] == path]
     history = [{**_write_summary(w, index), **index.write_status(w, disk=disk,
                                                                  max_bytes=max_bytes)}
                for w in writes]
     result: dict[str, Any] = {
-        "schema": QUERY_SCHEMA, "selector": {"path": path},
+        "schema": QUERY_SCHEMA, "selector": {"path": selector},
         "found": bool(writes or readers), "writes": history,
         "readers": [{**r, "event": index.events.get(r["event_id"])} for r in readers],
         "coverage": _coverage(index),

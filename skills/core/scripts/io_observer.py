@@ -1815,10 +1815,16 @@ def hook(state_dir: Path, repo_root: Path, host: str, raw: str) -> int:
     elif event in ("PostToolUse", "PostToolUseFailure") and not is_bash:
         edited = None
         edit_result = "success"
+        cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+        if event == "PostToolUseFailure":
+            # A failed edit credits no write, but it may have left changed
+            # bytes (a partial write): its targets become uncertain.
+            edited = edit_targets(tool, payload.get("tool_input"), cwd)
+            if edited is not None:
+                edited = [(path, "uncertain") for path, _ in edited]
+                edit_result = "failure"
         if event == "PostToolUse":
-            # A successful edit names the files it wrote; a failed one wrote
-            # nothing to attribute, and only its interval is closed.
-            cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+            # A successful edit names the files it wrote.
             edited = edit_targets(tool, payload.get("tool_input"), cwd)
             if edited is not None and host != "claude":
                 # Claude sends PostToolUse only for edits that succeeded. Elsewhere

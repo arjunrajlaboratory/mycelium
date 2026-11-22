@@ -45,25 +45,34 @@ _URL_QUERY_SECRET_RX = re.compile(
 # The whole header value goes, not its first token: a Digest header carries
 # its response in later fields. Unquoted text stops at a quote or line end;
 # a header inside a shell word is handled on the decoded word first.
-_AUTH_HEADER_RX = re.compile(r"(?i)(authorization\s*:\s*)([^\n'\"]+)")
+# The value stops before a backslash too, so an escaped quote inside a
+# double-quoted header (`"Authorization: Digest a=\"b\""`) keeps its
+# escape and the word pass still sees one word, which it redacts whole.
+_AUTH_HEADER_RX = re.compile(r"(?i)(authorization\s*:\s*)([^\n'\"\\]+)")
 _AUTH_WORD_RX = re.compile(r"(?i)\s*authorization\s*:")
 _OPERATORS = set(";&|<>()\n")
 
 
-_URL_SPAN_RX = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,30}://[^\s'\"<>`]*")
+# A URL span; an earlier pass's `<redacted>` inside it does not end it.
+_URL_SPAN_RX = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,30}://(?:<redacted>|[^\s'\"<>`])*")
+
+
+def _redact_url_span(url: str) -> str:
+    url = _URL_USERINFO_RX.sub(lambda m: f"{m.group(1)}{REDACTED}@", url)
+    if "?" in url:
+        url = _URL_QUERY_SECRET_RX.sub(lambda q: f"{q.group(1)}{REDACTED}", url)
+    return url
 
 
 def _redact_urls(text: str) -> str:
     """URL credentials: the whole userinfo, and query parameters named like
-    secrets (`?key=…`, `&X-Amz-Signature=…`). Query parameters are looked
-    for only inside URL spans, found once: text full of `?` that is not a
-    URL (SQL placeholders) is never rescanned from each one."""
-    out = _URL_USERINFO_RX.sub(lambda m: f"{m.group(1)}{REDACTED}@", text)
-    if "://" not in out:
-        return out
-    return _URL_SPAN_RX.sub(
-        lambda m: _URL_QUERY_SECRET_RX.sub(lambda q: f"{q.group(1)}{REDACTED}", m.group(0))
-        if "?" in m.group(0) else m.group(0), out)
+    secrets (`?key=…`, `&X-Amz-Signature=…`), both in one pass over each
+    URL span of the original text. Query parameters are looked for only
+    inside URL spans: text full of `?` that is not a URL (SQL placeholders)
+    is never rescanned from each one."""
+    if "://" not in text:
+        return text
+    return _URL_SPAN_RX.sub(lambda m: _redact_url_span(m.group(0)), text)
 
 
 _LONG_OPTION_RX = re.compile(r"--[A-Za-z][A-Za-z0-9_-]*(?:=|\Z)")

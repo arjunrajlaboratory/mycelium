@@ -6244,11 +6244,12 @@ def build_event_for_detection(
             return None
         script_sha = sha256_file(script_path)
         if len(source.encode("utf-8")) < EMBED_LIMIT_BYTES:
+            # Sanitized, with its digest, by _redact_record (a shell body by
+            # the command redaction, which `export HF_TOKEN=…` needs).
             script_source_embed = source
         else:
-            import lineage_redact
-
-            sanitized = lineage_redact.redact_source(source)
+            # Not embedded: the digest alone, under the same rule.
+            sanitized = _sanitize_script_text(script_path, source)
             if sanitized != source:
                 script_sha = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
                 sanitized_digest = True
@@ -6900,6 +6901,11 @@ def build_step(
                 operand_index = index + 1
                 break
     script_args = argv[operand_index:] if operand_index is not None else []
+    # Every field read from the arguments reads the redacted list, the one
+    # stored: a word a secret flag consumed (`--password --seed=482731`,
+    # where the option parser takes `--seed=482731` as the password) is
+    # masked there, so it never surfaces as a seed or a parameter.
+    redacted_script_args = lineage_redact.redact_argv(list(script_args))
     step["argv"], truncated = _redacted_clipped_argv(shown)
     step["executable"] = argv[0]
     step["interpreter"] = interpreter
@@ -6909,7 +6915,7 @@ def build_step(
     if wrappers:
         step["wrappers"] = lineage_redact.redact_argv(wrappers)
     if interpreter == "snakemake":
-        params = _snakemake_params(argv[1:])
+        params = _snakemake_params(lineage_redact.redact_argv(argv[1:]))
         if params:
             step["params"] = params
     # Config files: the operands after the script for script runners, the
@@ -6985,7 +6991,10 @@ def build_step(
         step["config_files"] = configs
     seeds: list[dict[str, Any]] = []
     expect_seed = False
-    for token in script_args:
+    for token in redacted_script_args:
+        if not isinstance(token, str):
+            expect_seed = False
+            continue
         if expect_seed:
             expect_seed = False
             if re.fullmatch(r"-?\d{1,19}", token):
@@ -7176,17 +7185,38 @@ def _redact_command_cached(text: str) -> str:
     return lineage_redact.redact_command(text)
 
 
+_SHELL_SOURCE_SUFFIXES = (".sh", ".bash", ".zsh", ".ksh")
+_SHELL_SHEBANG_RX = re.compile(r"#![ \t]*\S*/(?:env[ \t]+(?:-\S+[ \t]+)*)?(?:ba|z|da|k)?sh\b")
+
+
+def _is_shell_source(script: Any, source: str | None) -> bool:
+    """A script body the shell runs: named `.sh`/`.bash`/`.zsh`/`.ksh`, or
+    opening with a shell shebang (an sbatch job file). Its secrets are shell
+    words (`export HF_TOKEN=…`), not only quoted literals, so it takes the
+    command redaction rather than the source-literal one."""
+    if isinstance(script, (str, Path)) and str(script).endswith(_SHELL_SOURCE_SUFFIXES):
+        return True
+    return isinstance(source, str) and bool(_SHELL_SHEBANG_RX.match(source))
+
+
+def _sanitize_script_text(script: Any, source: str) -> str:
+    """The one redaction a script body gets before it is embedded or hashed."""
+    import lineage_redact
+
+    if _is_shell_source(script, source):
+        return lineage_redact.redact_command(source)
+    return lineage_redact.redact_source(source)
+
+
 def _redact_record(record: dict) -> None:
     """Apply the one redaction policy to every command text the record
     keeps. A changed embedded source gets the hash of the sanitized text,
     labelled, so no digest of a secret-bearing body is stored."""
-    import lineage_redact
-
     if isinstance(record.get("bash_cmd"), str):
         record["bash_cmd"] = _redact_command_cached(record["bash_cmd"])
     source = record.get("script_source")
     if isinstance(source, str):
-        sanitized = lineage_redact.redact_source(source)
+        sanitized = _sanitize_script_text(record.get("script"), source)
         if sanitized != source:
             record["script_source"] = sanitized
             record["script_sha256"] = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
