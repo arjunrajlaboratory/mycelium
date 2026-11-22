@@ -1619,15 +1619,18 @@ class _RWord(NamedTuple):
 
 
 class UnresolvedScript(NamedTuple):
-    """An R script run whose script this scan cannot name with certainty.
+    """A script run whose script this scan cannot name with certainty.
 
     ``candidate`` is the file word as written on the command line; shell
     syntax (or, for ``R CMD BATCH``, ``R_BATCH_OPTIONS``) may make R read a
-    different file.
+    different file. With ``cwd_unknown`` the word is a relative path and
+    the directory it resolves against is not modeled (``pushd``, ``cd -``,
+    a CDPATH-searched ``cd``, ...), whatever the interpreter.
     """
 
     candidate: str
     batch: bool = False  # an `R CMD BATCH` run rather than `R -f`
+    cwd_unknown: bool = False
 
 
 def _decode_r_word(raw: str) -> str | None:
@@ -2077,6 +2080,8 @@ def _r_batch_script(command: str, match: re.Match[str]) -> _RWord | None:
 
 
 _CWD_AFFECTING_BUILTINS = {"pushd", "popd", "source", ".", "eval"}
+# The builtins whose whole job is to move the cwd (`cd` is modeled apart).
+_CWD_DIRECTORY_BUILTINS = {"pushd", "popd"}
 _BUILTIN_LAUNCHER_PREFIXES = {"command", "builtin", "time"}
 _REDIRECTION_TOKEN_RE = re.compile(r"^(?:\d+|&)?(?:>>|>\||<>|>|<)")
 
@@ -2125,13 +2130,24 @@ def _strip_command_prefix_words(
     return tokens, stripped_any
 
 
-def _segment_cwd_is_modeled(segment: list[str], cwd: Path, cdpath: bool = False) -> bool:
+def _segment_cwd_is_modeled(
+    segment: list[str], cwd: Path, cdpath: bool = False, *, directory_builtins_only: bool = False
+) -> bool:
     """True when a completed segment cannot change the cwd in unmodeled ways.
 
     ``cd`` with a statically known status is modeled; other cwd-affecting
     builtins (and ``command``-prefixed forms of them) are not — a following
     trust decision must not assume the working directory it computed.
+
+    ``directory_builtins_only`` asks the narrower question the cwd-unknown
+    flag needs: only the directory builtins (``cd`` forms the walk cannot
+    apply, ``pushd``, ``popd``) count, while code run through ``source`` /
+    ``.`` / ``eval`` is left to the CDPATH check (``source venv/bin/activate
+    && python a.py`` keeps its relative script).
     """
+    builtins = (
+        _CWD_DIRECTORY_BUILTINS if directory_builtins_only else _CWD_AFFECTING_BUILTINS
+    )
     stripped = _strip_assignments(segment)
     if not stripped:
         return True
@@ -2142,12 +2158,12 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path, cdpath: bool = False)
         return True
     name = stripped[0]
     if had_redirection and name in (
-        {"cd"} | _CWD_AFFECTING_BUILTINS | _BUILTIN_LAUNCHER_PREFIXES
+        {"cd"} | builtins | _BUILTIN_LAUNCHER_PREFIXES
     ):
         # `>log cd nested` still changes the cwd, but the cwd walker's
         # _apply_cd never tracks redirection-prefixed segments — unmodeled.
         return False
-    if name in _CWD_AFFECTING_BUILTINS:
+    if name in builtins:
         return False
     if name in _BUILTIN_LAUNCHER_PREFIXES:
         # `command cd`, `builtin cd`, `builtin source`, and the `time`
@@ -2184,7 +2200,7 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path, cdpath: bool = False)
                 return False
         follower = rest[0] if rest else ""
         return follower not in (
-            {"cd"} | _CWD_AFFECTING_BUILTINS | _BUILTIN_LAUNCHER_PREFIXES
+            {"cd"} | builtins | _BUILTIN_LAUNCHER_PREFIXES
         )
     if name == "cd":
         status, _ = _simple_cd_status(segment, cwd, cdpath)
@@ -2420,9 +2436,18 @@ class _CwdFoldState(NamedTuple):
     chain_has_or: bool
     # An earlier segment may have set CDPATH (never cleared: conservative).
     cdpath: bool = False
-    # A `cd` that may have searched CDPATH ran in this shell: the remembered
-    # cwd is a guess, so nothing relative may be proven against it.
+    # A directory change the walk cannot apply ran (or may have run) in this
+    # shell — a CDPATH-searched `cd`, `pushd`/`popd`, `cd -`, `cd $DIR`, a
+    # skipped conditional `cd` — so the remembered cwd is a guess and nothing
+    # relative may be proven against it.
     cwd_unknown: bool = False
+    # The operator before the current segment in its AND-OR list (``None``
+    # for the list's first command), and the list's exit status so far when
+    # statically known: together they say whether a conditional `cd` ran.
+    pending_op: str | None = None
+    chain_status: bool | None = None
+    # The current segment follows a `|`: in bash it runs in a subshell.
+    in_pipeline: bool = False
 
 
 def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
@@ -2435,13 +2460,53 @@ def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
     chain_has_or = state.chain_has_or
     cdpath = state.cdpath
     cwd_unknown = state.cwd_unknown
+    pending_op = state.pending_op
+    chain_status = state.chain_status
+    in_pipeline = state.in_pipeline
 
     def complete_segment() -> None:
         nonlocal fully_modeled, cwd_unknown
         if not _segment_cwd_is_modeled(segment, cwd, cdpath):
             fully_modeled = False
-        if _cd_is_cdpath_uncertain(segment, cdpath):
+        # The remembered cwd is a guess once this shell ran a directory change
+        # the walk cannot apply: a CDPATH-searched `cd`, `pushd`/`popd`,
+        # `cd -`, `cd $DIR`, a flagged or launcher-prefixed `cd`, ...
+        if _cd_is_cdpath_uncertain(segment, cdpath) or not _segment_cwd_is_modeled(
+            segment, cwd, cdpath, directory_builtins_only=True
+        ):
             cwd_unknown = True
+
+    def segment_runs() -> bool | None:
+        """Whether the current segment ran, as far as the text proves."""
+        if pending_op is None:
+            return True
+        if chain_status is None:
+            return None
+        return chain_status == (pending_op == "&&")
+
+    def advance_chain(runs: bool | None) -> None:
+        nonlocal chain_status
+        status = _simple_command_status(segment, cwd, cdpath) if segment else None
+        if runs is True:
+            chain_status = status
+        elif runs is None and status != chain_status:
+            chain_status = None
+
+    def unapplied_cd(runs: bool | None) -> None:
+        # A `cd` the walk does not apply: when it ran (`true && cd sub;
+        # python a.py` runs Python in sub) and is not inside a pipeline, it
+        # moves the shell; when it may have run, the cwd is a guess.
+        nonlocal cwd, cwd_unknown, fully_modeled
+        if runs is False:
+            return
+        status, target = _simple_cd_status(segment, cwd, cdpath)
+        if status is not True or target == cwd:
+            return
+        if runs is True and not in_pipeline:
+            cwd = target
+        else:
+            cwd_unknown = True
+            fully_modeled = False
 
     def after_segment() -> None:
         nonlocal cdpath
@@ -2451,7 +2516,13 @@ def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
     for token in tokens:
         if token in {"&&", "||"}:
             complete_segment()
-            if not segment_is_conditional:
+            runs = segment_runs()
+            advance_chain(runs)
+            if in_pipeline:
+                # `echo | cd sub && ...`: bash runs the cd in a subshell,
+                # zsh in this shell.
+                unapplied_cd(None)
+            elif not segment_is_conditional:
                 # The first segment in an AND-OR list always executes.
                 cwd = _apply_cd(segment, cwd, cdpath)
             elif token == "&&" and not chain_has_or:
@@ -2459,42 +2530,75 @@ def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
                 # AND chain proves that each earlier segment in that chain ran
                 # successfully. A mixed OR chain is ambiguous: for
                 # ``true || cd sub && python a.py``, Python runs while cd does
-                # not, so retain the prior cwd in that case.
+                # not, so it is applied only when the text proves it ran.
                 cwd = _apply_cd(segment, cwd, cdpath)
+            else:
+                unapplied_cd(runs)
             after_segment()
             segment = []
             segment_is_conditional = True
+            pending_op = token
+            in_pipeline = False
             if token == "||":
                 chain_has_or = True
         elif token in {";", "\n"}:
             complete_segment()
-            if not segment_is_conditional:
+            runs = segment_runs()
+            if in_pipeline:
+                unapplied_cd(None)
+            elif not segment_is_conditional:
                 cwd = _apply_cd(segment, cwd, cdpath)
+            else:
+                unapplied_cd(runs)
             after_segment()
             segment = []
             segment_is_conditional = False
             chain_has_or = False
-        elif token in {"|", "&"}:
-            # A cd in a pipeline/subshell does not reliably affect the parent.
+            pending_op = None
+            chain_status = None
+            in_pipeline = False
+        elif token == "|":
+            # A cd in a pipeline does not reliably affect the parent. The
+            # pipeline runs exactly when its first command does, so the
+            # AND-OR state carries over to its last command.
             complete_segment()
             after_segment()
             segment = []
+            in_pipeline = True
+        elif token == "&":
+            # A backgrounded command runs in a subshell and ends the list.
+            complete_segment()
+            after_segment()
+            segment = []
+            pending_op = None
+            chain_status = None
+            in_pipeline = False
         elif token == "(":
             complete_segment()
             after_segment()
             segment = []
             subshell_states = (
-                (cwd, segment_is_conditional, chain_has_or, cwd_unknown),
+                (cwd, segment_is_conditional, chain_has_or, cwd_unknown,
+                 pending_op, chain_status, in_pipeline),
                 subshell_states,
             )
+            # A subshell's first command runs whenever the subshell does, so
+            # `a && (cd sub; python x.py)` runs Python in sub.
+            segment_is_conditional = False
+            chain_has_or = False
+            pending_op = None
+            chain_status = None
+            in_pipeline = False
         elif token == ")":
             complete_segment()
             after_segment()
             segment = []
             if subshell_states is not None:
-                (cwd, segment_is_conditional, chain_has_or, cwd_unknown), subshell_states = (
-                    subshell_states
-                )
+                (
+                    (cwd, segment_is_conditional, chain_has_or, cwd_unknown,
+                     pending_op, chain_status, in_pipeline),
+                    subshell_states,
+                ) = subshell_states
         else:
             segment.append(token)
     return _CwdFoldState(
@@ -2506,6 +2610,9 @@ def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
         chain_has_or,
         cdpath,
         cwd_unknown,
+        pending_op,
+        chain_status,
+        in_pipeline,
     )
 
 
@@ -2538,9 +2645,11 @@ def _cwd_fold(bash_cmd: str, offset: int, initial_cwd: Path) -> _CwdFoldState | 
 
 
 def _effective_cwd_unknown(bash_cmd: str, offset: int, initial_cwd: Path) -> bool:
-    """True when a ``cd`` before ``offset`` may have searched CDPATH, so the
-    inferred cwd is a guess: relative paths resolved against it prove
-    nothing (an unlexable prefix counts as unknown too)."""
+    """True when a directory change before ``offset`` is not modeled (a
+    CDPATH-searched ``cd``, ``pushd``/``popd``, ``cd -``, ``cd $DIR``, a
+    flagged or skipped conditional ``cd``), so the inferred cwd is a guess:
+    relative paths resolved against it prove nothing (an unlexable prefix
+    counts as unknown too)."""
     state = _cwd_fold(bash_cmd, offset, initial_cwd)
     return state is None or state.cwd_unknown
 
@@ -2549,7 +2658,7 @@ def _known_io_cwd(
     bash_cmd: str, offset: int, initial_cwd: Path, effective_cwd: Path
 ) -> Path | None:
     """The directory a detection's relative I/O resolves against, or
-    ``None`` when a CDPATH-searched ``cd`` made it a guess."""
+    ``None`` when an unmodeled directory change made it a guess."""
     return None if _effective_cwd_unknown(bash_cmd, offset, initial_cwd) else effective_cwd
 
 
@@ -4037,7 +4146,8 @@ def _detect_runners(
             )
             if run is None:
                 continue
-            # A `cd` that may have searched CDPATH: the run's directory is a
+            # An unmodeled directory change (a CDPATH-searched `cd`, `pushd`,
+            # `cd -`, ...): the run's directory is a
             # guess, so its relative I/O and entry file prove nothing.
             cwd_unknown = _effective_cwd_unknown(bash_cmd, m.start(), cwd)
             if run.run_dir_unknown or cwd_unknown:
@@ -4231,19 +4341,31 @@ def _detect_scripts_with_cwd(
             # form means the pointer's directory is unknown (issue #71).
             expanded = None
             _, prefix_cwd_modeled = _effective_cwd_state(bash_cmd, m.start(), cwd)
-            if prefix_cwd_modeled:
+            cwd_unknown = _effective_cwd_unknown(bash_cmd, m.start(), cwd)
+            if prefix_cwd_modeled and not cwd_unknown:
                 expanded = _accessor_expanded_script_path(
                     m.group("path"), raw_path, effective_cwd
                 )
-            cwd_unknown = _effective_cwd_unknown(bash_cmd, m.start(), cwd)
             if expanded is not None:
                 unresolved = expanded
             else:
                 unresolved = Path(raw_path)
                 if not unresolved.is_absolute():
                     if cwd_unknown:
-                        # `cd run` may have gone to $CDPATH/run: which
-                        # script ran is unknown, so none is claimed.
+                        # `cd run` may have gone to $CDPATH/run, `pushd`
+                        # somewhere the walk does not follow: which file
+                        # ran is unknown, so the run is recorded under its
+                        # word alone, with nothing read, hashed or proven.
+                        unresolved_key = (
+                            UnresolvedScript(raw_path, cwd_unknown=True),
+                            effective_cwd,
+                            _stage_key(bash_cmd, m.start()),
+                        )
+                        if unresolved_key not in seen_unresolved:
+                            out.append((unresolved_key[0], None, None))
+                            record(m.start(), "unresolved", raw_path,
+                                   "r-file" if pattern is RX_R_FILE_PATH else None)
+                            seen_unresolved.add(unresolved_key)
                         continue
                     unresolved = effective_cwd / unresolved
             # Judge trust on the canonical filesystem path of the UNCOLLAPSED
@@ -6074,8 +6196,21 @@ def build_event_for_detection(
     """
     script_path, inline_source = detection
     if isinstance(script_path, UnresolvedScript):
-        # The run happened, but R may have read a file other than the one
-        # named, so nothing is read, hashed, or scanned.
+        # The run happened, but the interpreter may have read a file other
+        # than the one named, so nothing is read, hashed, or scanned.
+        if script_path.cwd_unknown:
+            warning = (
+                "A script ran, but an earlier directory change (pushd, cd -, "
+                "a CDPATH search, ...) left the working directory unknown, so "
+                f"which file {script_path.candidate} names is unknown."
+            )
+        else:
+            warning = (
+                "R ran a script, but shell syntax"
+                + (" or R_BATCH_OPTIONS" if script_path.batch else "")
+                + " may have changed which one; the command names "
+                + f"{script_path.candidate}."
+            )
         return _event_dict(
             args,
             None,
@@ -6085,12 +6220,7 @@ def build_event_for_detection(
             inputs=[],
             outputs=[],
             io_detection="unresolved",
-            lineage_warnings=[
-                "R ran a script, but shell syntax"
-                + (" or R_BATCH_OPTIONS" if script_path.batch else "")
-                + " may have changed which one; the command names "
-                + f"{script_path.candidate}."
-            ],
+            lineage_warnings=[warning],
             filters=[],
             seeds=[],
             script_candidate=script_path.candidate,

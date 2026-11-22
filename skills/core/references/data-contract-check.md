@@ -123,9 +123,9 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   nothing. Ledger contracts set `"min_levels": 2`. Without `min_levels`, a
   pairing keeps the 0.9.7 behavior: the listed levels (or, with no list, the
   levels present) are the sides, so `"levels": ["baseline"]` with every unit
-  seen at baseline passes. The one exception is a list of two or more
-  entries that collapse to one distinct level (`["A", "A"]`), which names
-  two sides that are one and blocks. With
+  seen at baseline passes, and so does a list that repeats one level
+  (`["control", "control"]`): the distinct-level minimum applies only when
+  `min_levels` is given. With
   `"exact_levels": true` (which needs `levels`), it also blocks when the table
   has a level not listed, or lacks a listed one. Ledger contracts set this when
   the pairing licenses units across groups.
@@ -206,7 +206,12 @@ opens them (a table `latest/../samples.tsv` with `latest` a symlink names
 the file beside the link's target, not beside the ledger), and that one
 path is the one read, checked, guarded and written. It also refuses (exit 1,
 nothing written) a destination that already exists, since that is usually
-the analysis's extended contract; pass `--overwrite` to replace it. The
+the analysis's extended contract; pass `--overwrite` to replace it. Without
+`--overwrite` the contract is published only if the name is still free at
+that moment (a hard link, or on a filesystem without hard links an
+exclusive create written in place, which a concurrent reader may see
+partly written), so a file another process published in between is never
+replaced. The
 checks run first, then the validated contract is published in one step. It
 is written even when the checks block or gap, because the analysis extends
 it and the alerts are reported alongside, but never when the sample table

@@ -354,7 +354,9 @@ def _blocks(alerts: list) -> bool:
 @pytest.mark.parametrize("levels", [["A", "A"], ["28", 28]])
 def test_a_level_listed_twice_is_one_side(tmp_path: Path, levels) -> None:
     value = str(levels[0])
-    _, alerts = _pairing(tmp_path, f"p1\t{value}\np2\t{value}\n", levels=levels)
+    # With an explicit minimum, a level listed twice counts once.
+    _, alerts = _pairing(tmp_path, f"p1\t{value}\np2\t{value}\n", levels=levels,
+                         min_levels=2)
     assert _blocks(alerts)
 
 

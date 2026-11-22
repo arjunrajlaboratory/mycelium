@@ -447,16 +447,12 @@ def check_pairing(check, columns, rows):
     # level, and a level listed twice is still one side of the pairing.
     listed = distinct_levels(check.get("levels"))
     levels = listed or observed_levels
-    # How many distinct sides the pairing must have. Only `min_levels` sets a
-    # minimum (ledger contracts set it to 2): a 0.9.7 contract listing one
-    # level (`levels: ["baseline"]`) keeps its 0.9.7 behavior, where every
-    # unit seen at the listed levels passes. The one exception is a list of
-    # two or more entries that collapse to fewer distinct levels
-    # (`["A", "A"]`, `["28", 28]`): it names two sides that are one, which
-    # pairs nothing, so it needs two distinct levels.
+    # How many distinct sides the pairing must have. Only an explicit
+    # `min_levels` sets a minimum (ledger contracts set it to 2). Without it,
+    # any `levels` list keeps its 0.9.7 behavior, where every unit seen at
+    # the listed levels passes: `levels: ["baseline"]` and a list that
+    # collapses to one level (`["control", "control"]`) alike.
     minimum = check.get("min_levels") or 0
-    if len(as_list(check.get("levels"))) >= 2:
-        minimum = max(minimum, 2)
     if check.get("exact_levels") and check.get("levels"):
         extra = [lvl for lvl in observed_levels if lvl not in levels]
         absent = [lvl for lvl in levels if lvl not in observed_levels]
@@ -1227,12 +1223,37 @@ def refuse_input_alias(destination, inputs):
                                     destination, source))
 
 
+def _write_exclusive(path, text, exists):
+    """Create `path` only if no file (or link) has that name, then write
+    `text` into it and fsync. A partial file left by a failed write is
+    removed: it is this call's own file, since the exclusive create proved
+    nothing else had the name."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    except FileExistsError:
+        raise exists
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+
+
 def write_atomic_json(path, document, replace=True):
     """Write through a temporary file in the destination's directory and
     replace: a failure leaves the old file (or none), never a truncated one.
     With replace=False the file is published only if `path` still does not
     exist (a hard link fails on an existing name), so a file created since
-    the caller looked is never clobbered."""
+    the caller looked is never clobbered. Without hard links the file is
+    created exclusively (O_CREAT|O_EXCL) and written in place: never a
+    check-then-replace, which could clobber a file published in between."""
+    text = json.dumps(document, indent=2) + "\n"
     # The directory the OS will publish into: resolved without collapsing
     # `..` lexically first (`out/latest/../c.json` under a symlinked
     # `latest` is not out/c.json), so the replace stays in one directory.
@@ -1241,8 +1262,7 @@ def write_atomic_json(path, document, replace=True):
                                dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(document, handle, indent=2)
-            handle.write("\n")
+            handle.write(text)
         umask = os.umask(0)
         os.umask(umask)
         os.chmod(tmp, 0o666 & ~umask)  # as open() would create it, not mkstemp's 0600
@@ -1256,12 +1276,11 @@ def write_atomic_json(path, document, replace=True):
             except FileExistsError:
                 raise exists
             except OSError:
-                # A filesystem without hard links: check, then replace.
-                if os.path.lexists(path):
-                    raise exists
-                os.replace(tmp, path)
-            else:
-                os.unlink(tmp)
+                # A filesystem without hard links: os.replace would clobber a
+                # file another process published after any existence check,
+                # so create the destination exclusively and write into it.
+                _write_exclusive(path, text, exists)
+            os.unlink(tmp)
     except BaseException:
         try:
             os.unlink(tmp)

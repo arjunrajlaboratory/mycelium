@@ -125,23 +125,41 @@ def source_path(root: Path, state_dir: Path, name: str) -> Path:
 def list_sources(root: Path, state_dir: Path) -> dict[str, str]:
     """{source name: identity key} for every manifest and observation store."""
     sources: dict[str, str] = {}
-    manifest_dir = root / MANIFEST_DIR
-    with contextlib.suppress(OSError):
-        for entry in sorted(os.scandir(manifest_dir), key=lambda e: e.name):
-            if entry.name.endswith(".json") and not entry.name.startswith("."):
-                key = _identity_key(Path(entry.path))
+
+    def listing(path: Path, label: str) -> list[os.DirEntry]:
+        # A directory that is absent holds no records; one that cannot be
+        # listed may hold any, so it becomes a source that is all gap.
+        try:
+            return sorted(os.scandir(path), key=lambda e: e.name)
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            sources[f"unreadable:{label}"] = f"unreadable:{type(exc).__name__}"
+            return []
+
+    for entry in listing(root / MANIFEST_DIR, "manifests"):
+        if entry.name.endswith(".json") and not entry.name.startswith("."):
+            key = _identity_key(Path(entry.path))
+            if key:
+                sources[f"manifest:{entry.name}"] = key
+            else:
+                sources[f"unreadable:manifest/{entry.name}"] = "unreadable:irregular"
+    for host in listing(state_dir / "io" / "obs", "stores"):
+        try:
+            is_dir = host.is_dir(follow_symlinks=False)
+        except OSError:
+            is_dir = False
+        if not is_dir:
+            sources[f"unreadable:store/{host.name}"] = "unreadable:irregular"
+            continue
+        for store in listing(Path(host.path), f"store/{host.name}"):
+            if store.name.endswith(".ndjson"):
+                key = _identity_key(Path(store.path))
                 if key:
-                    sources[f"manifest:{entry.name}"] = key
-    obs_root = state_dir / "io" / "obs"
-    with contextlib.suppress(OSError):
-        for host in sorted(os.scandir(obs_root), key=lambda e: e.name):
-            if not host.is_dir(follow_symlinks=False):
-                continue
-            for store in sorted(os.scandir(host.path), key=lambda e: e.name):
-                if store.name.endswith(".ndjson"):
-                    key = _identity_key(Path(store.path))
-                    if key:
-                        sources[f"store:{host.name}/{store.name}"] = key
+                    sources[f"store:{host.name}/{store.name}"] = key
+                else:
+                    sources[f"unreadable:store/{host.name}/{store.name}"] = \
+                        "unreadable:irregular"
     return sources
 
 
@@ -416,6 +434,10 @@ def _slim_observation(record: dict[str, Any]) -> dict[str, Any]:
 
 def contribution(root: Path, state_dir: Path, name: str) -> dict[str, Any]:
     root_real = os.path.realpath(root)
+    if name.startswith("unreadable:"):
+        out = _empty()
+        out["gaps"].append({"kind": "source-unreadable", "scope": "repo", "source": name})
+        return out
     path = source_path(root, state_dir, name)
     if name.startswith("manifest:"):
         return _manifest_contribution(path, name.partition(":")[2], root_real)

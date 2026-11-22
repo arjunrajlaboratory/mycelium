@@ -33,7 +33,8 @@ REDACTED = "<redacted>"
 _SECRET_WORD = (r"(?:token|secret|passw(?:or)?d?|pwd|api[_-]?key|private[_-]?key|credential"
                 r"|auth(?!or)|cookie|session)")
 SECRET_NAME_RX = re.compile(rf"(?i){_SECRET_WORD}")
-_NAME_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+# A shell variable, or an argument's key (`db.password=X`, `api-key=X`).
+_NAME_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
 # The whole userinfo goes: a token may sit in the username
 # (`https://ghp_x@host`, `https://TOKEN:x-oauth-basic@host`) as easily as
 # in the password. And query parameters whose name looks secret.
@@ -49,11 +50,20 @@ _AUTH_WORD_RX = re.compile(r"(?i)\s*authorization\s*:")
 _OPERATORS = set(";&|<>()\n")
 
 
+_URL_SPAN_RX = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,30}://[^\s'\"<>`]*")
+
+
 def _redact_urls(text: str) -> str:
     """URL credentials: the whole userinfo, and query parameters named like
-    secrets (`?key=…`, `&X-Amz-Signature=…`)."""
+    secrets (`?key=…`, `&X-Amz-Signature=…`). Query parameters are looked
+    for only inside URL spans, found once: text full of `?` that is not a
+    URL (SQL placeholders) is never rescanned from each one."""
     out = _URL_USERINFO_RX.sub(lambda m: f"{m.group(1)}{REDACTED}@", text)
-    return _URL_QUERY_SECRET_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", out)
+    if "://" not in out:
+        return out
+    return _URL_SPAN_RX.sub(
+        lambda m: _URL_QUERY_SECRET_RX.sub(lambda q: f"{q.group(1)}{REDACTED}", m.group(0))
+        if "?" in m.group(0) else m.group(0), out)
 
 
 _LONG_OPTION_RX = re.compile(r"--[A-Za-z][A-Za-z0-9_-]*(?:=|\Z)")
@@ -90,6 +100,11 @@ def _words(text: str) -> list[tuple[int, int]]:
                 start = i
             if c in "'\"":
                 quote = c
+            elif c == "`" or (c == "$" and i + 1 < n and text[i + 1] == "("):
+                # A command substitution belongs to the word around it:
+                # `TOKEN=$(printf %s x)` is one assignment.
+                i = _substitution_end(text, i)
+                continue
         elif quote == "'":
             if c == "'":
                 quote = None
@@ -99,10 +114,68 @@ def _words(text: str) -> list[tuple[int, int]]:
                 continue
             if c == '"':
                 quote = None
+            elif c == "`" or (c == "$" and i + 1 < n and text[i + 1] == "("):
+                i = _substitution_end(text, i)
+                continue
         i += 1
     if start is not None:
         spans.append((start, n))
     return spans
+
+
+def _substitution_end(text: str, i: int) -> int:
+    """The index just past a `$( … )` or backtick substitution starting at
+    ``i`` (the end of the text when it is unclosed). Quotes inside are
+    skipped so a `)` in a string does not close it."""
+    n = len(text)
+    if text[i] == "`":
+        j = i + 1
+        while j < n:
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text[j] == "`":
+                return j + 1
+            j += 1
+        return n
+    depth = 0
+    j = i + 1
+    quote = None
+    while j < n:
+        c = text[j]
+        if quote:
+            if c == "\\" and quote == '"':
+                j += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c == "\\":
+            j += 2
+            continue
+        elif c in "'\"":
+            quote = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return n
+
+
+# A secret-named key nested inside a value: `--config=api_token=X`,
+# `-C db.password=X`, `opts=a=1,token=X`.
+_NESTED_SECRET_RX = re.compile(
+    rf"(?i)[=,:;]\s*[A-Za-z0-9_.-]*{_SECRET_WORD}[A-Za-z0-9_.-]*=")
+
+
+def _nested_secret_cut(decoded: str) -> str | None:
+    """The decoded word cut after a nested secret name's `=`, or None."""
+    match = _NESTED_SECRET_RX.search(decoded)
+    if match is None:
+        return None
+    return decoded[:match.end()] + REDACTED
 
 
 def _unquoted_head(word: str) -> str:
@@ -182,6 +255,8 @@ def redact_text(text: str) -> str:
             replacements.append((start, end, f"{name}={REDACTED}"))
         elif not eq and head.startswith("-") and SECRET_NAME_RX.search(head):
             redact_next = True
+        elif eq and (cut := _nested_secret_cut(head)) is not None:
+            replacements.append((start, end, shlex.quote(cut)))
     out = text
     for start, end, new in reversed(replacements):
         out = out[:start] + new + out[end:]
@@ -221,7 +296,9 @@ _SOURCE_LITERAL_RX = re.compile(
     # `key: Final[str] = …`).
     rf"""(["']?\]?(?:\s*:\s*(?:[A-Za-z_][\w.\[\], |]*?|"[^"\n]*"|'[^'\n]*')(?=\s*=))?"""
     rf"""\s*(?:=|:|<-|,)\s*)"""
-    rf"""({_LITERAL})"""
+    # A parenthesized value, and adjacent literals that concatenate
+    # (`("abc" "def")`), go whole.
+    rf"""(\(\s*)?({_LITERAL}(?:\s*{_LITERAL})*)"""
 )
 
 
@@ -247,7 +324,7 @@ def redact_source(text: str) -> str:
     out = _redact_urls(text)
     out = _AUTH_HEADER_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", out)
     return _SOURCE_LITERAL_RX.sub(
-        lambda m: _keep_quotes(m.group(1) + m.group(2), m.group(3)), out
+        lambda m: _keep_quotes(m.group(1) + m.group(2) + (m.group(3) or ""), m.group(4)), out
     )
 
 
@@ -268,11 +345,28 @@ def redact_argv(argv: list[Any]) -> list[Any]:
     """
     out: list[Any] = []
     redact_next = False
+    # A secret value that opens a command substitution a naive split broke
+    # up (`TOKEN=$(printf %s x)` as three tokens): its tokens are redacted
+    # until the substitution closes.
+    open_depth = 0
     for token in argv:
+        if open_depth and isinstance(token, str):
+            open_depth += token.count("(") - token.count(")")
+            if token.count("`") % 2:
+                open_depth = 0 if open_depth <= 1 else open_depth - 1
+            open_depth = max(open_depth, 0)
+            out.append(REDACTED)
+            continue
         if not isinstance(token, str):
             out.append(token)
             redact_next = False
             continue
+        name_part, eq_part, value_part = token.partition("=")
+        if (eq_part and SECRET_NAME_RX.search(name_part)
+                and (value_part.startswith("$(") or value_part.startswith("`"))):
+            depth = value_part.count("(") - value_part.count(")")
+            ticks = value_part.count("`") % 2
+            open_depth = max(depth, 1 if ticks else 0)
         if redact_next and not _LONG_OPTION_RX.match(token):
             out.append(REDACTED)
             redact_next = False
@@ -289,6 +383,8 @@ def redact_argv(argv: list[Any]) -> list[Any]:
         elif token.startswith("-") and not eq and SECRET_NAME_RX.search(token):
             out.append(token)
             redact_next = True
+        elif eq and (cut := _nested_secret_cut(token)) is not None:
+            out.append(cut)
         else:
             out.append(redact_command(token))
     return out

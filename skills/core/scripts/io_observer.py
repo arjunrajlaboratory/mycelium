@@ -1943,6 +1943,41 @@ EDIT_HASH_SECONDS = 0.5
 EDIT_HASH_MAX_BYTES = 50 * 1024 * 1024
 
 
+def canonical_spelling(root_real: str, rel: str) -> str | None:
+    """``rel`` spelled as the directory listings spell it (the walk's
+    spelling). On a case- or normalization-insensitive volume a tool may
+    name `CHANGELOG.md` as `changelog.md`. A component that does not exist
+    keeps its spelling (nothing to disagree with); None when a component
+    matches no listed name, or several, or cannot be listed."""
+    import unicodedata
+
+    def fold(name: str) -> str:
+        return unicodedata.normalize("NFC", name).casefold()
+
+    parts = rel.split("/")
+    current = root_real
+    out: list[str] = []
+    for index, part in enumerate(parts):
+        candidate = os.path.join(current, part)
+        if not os.path.lexists(candidate):
+            out.extend(parts[index:])  # created later, or absent: as named
+            break
+        try:
+            names = os.listdir(current)
+        except OSError:
+            return None
+        if part in names:
+            chosen = part
+        else:
+            matches = [n for n in names if fold(n) == fold(part)]
+            if len(matches) != 1:
+                return None
+            chosen = matches[0]
+        out.append(chosen)
+        current = os.path.join(current, chosen)
+    return "/".join(out)
+
+
 def _edit_referent(raw: str, root_real: str) -> dict[str, Any]:
     """Where an edit through a link landed, as a refusal the index turns
     into a gap: `edit-via-link` at the in-checkout file, `edit-target-
@@ -1982,6 +2017,17 @@ def _edit_changes(
                 # the referent cannot be established.
                 refused.append(_edit_referent(raw, root_real))
             continue
+        if action != "deleted":
+            # The spelling the filesystem lists, so `changelog.md` and
+            # `CHANGELOG.md` on a case-insensitive volume are one history.
+            canonical = canonical_spelling(root_real, rel)
+            if canonical is None:
+                # Which entry the edit wrote cannot be named: the whole
+                # checkout is uncertain for this call.
+                refused.append({"path": None, "reason": "edit-target-unknown",
+                                "detail": "spelling-unknown"})
+                continue
+            rel = canonical
         if action == "uncertain":
             refused.append({"path": rel, "reason": "edit-failed"})
             continue

@@ -351,11 +351,24 @@ Read from the detected stage's own text, never guessed:
     the hook cannot know when CDPATH may be set: in the hook's own
     environment, by a prefix (`CDPATH=x cd run`), or by anything earlier in
     the command that mentions CDPATH, runs `source`/`.`/`eval`, or sets a
-    variable with a computed name. Such a `cd` is unmodeled. A script named
-    relative to it is not claimed (which file ran is unknown), and the
-    stage's relative config operands and I/O are `hash_status: unresolved`
-    and unresolved; absolute paths still resolve. Without any of those
-    signals `cd run` is followed as usual.
+    variable with a computed name. Such a `cd` is unmodeled. Without any of
+    those signals `cd run` is followed as usual.
+  - Any directory change the cwd walk cannot follow leaves the stage's
+    working directory unknown: a CDPATH-searched `cd` (above), `pushd` and
+    `popd` (also through `builtin`/`command`/`time`), `cd -`, `cd "$DIR"`,
+    an undocumented `cd` flag, a redirection- or launcher-prefixed `cd`, a
+    `cd` after `|`, and a conditional `cd` the text cannot prove ran or was
+    skipped (`test -d x && cd x; ...`; `true && cd x; ...` and `false || cd
+    x; ...` are followed, `false && cd x; ...` is not). A script named by a
+    relative path is then recorded without proofs (`script: null`, the word
+    in `script_candidate`, nothing read or hashed), and the stage's relative
+    config operands and I/O are `hash_status: unresolved` and unresolved;
+    absolute paths still resolve. A change inside a closed subshell (`(pushd
+    x); python a.py`) does not leave the outer stage unknown, and a
+    subshell's first `cd` always runs when the subshell does. Code run by
+    `source`/`.`/`eval` is not treated as a directory change here
+    (`source venv/bin/activate && python fit.py` keeps `fit.py`), though it
+    makes a later unqualified `cd` CDPATH-uncertain.
   - A URL operand (`--config https://host/c.yaml`) is never resolved against
     the directory or hashed. A flag's URL value is kept as `hash_status:
     remote` with `rel_path: null`, its userinfo, query and fragment
