@@ -184,10 +184,12 @@ Operational gotchas, all of which have cost a full cycle:
      cachebuster above still applies; the reinstall below does not replace
      it). Then run `codex plugin marketplace remove mycelium` and
      `codex plugin marketplace add <absolute-export-path>`.
-  3. Run `codex plugin add mycelium@mycelium`. Launch the desktop app, trust
-     only the `mycelium@mycelium` hooks, then quit and relaunch it. Only then
-     verify the installed hashes and that `hooks/list` for the audit project
-     shows all eight hooks `trusted`.
+  3. Run `codex plugin add mycelium@mycelium` and hash the installed copy
+     against the export before launching anything. Launch the desktop app and
+     hash again before approving (the launch may refresh the install). Trust
+     only the `mycelium@mycelium` hooks, then quit and relaunch it, and hash a
+     third time. Then confirm that `hooks/list` for the audit project contains
+     all eight `mycelium@mycelium` hooks, each `trusted`.
   4. Afterwards, switch back with `codex plugin marketplace remove mycelium`
      and `codex plugin marketplace add arjunrajlaboratory/mycelium`, run
      `codex plugin add mycelium@mycelium` again, and follow the README's four

@@ -80,8 +80,9 @@ knowledge and optional domain steps below after the base scaffold succeeds.
     under From Plugins; approve only the `mycelium@mycelium` hooks, not other
     pending ones). Also on 0.169.0, the first desktop-app start after a GitHub-marketplace
     install or upgrade changed the installed plugin and voided earlier
-    approval, so the user should open the app once, then trust, then quit and
-    reopen it (the README's "Approve after the first start" steps).
+    approval, so the user should fully quit the app if it is running and open
+    it again, then trust, then quit and reopen it (the README's "Approve after
+    the first start" steps).
 
 **References to consult**:
 - `skills/core/references/folder-structure.md` — canonical target structure
@@ -414,7 +415,8 @@ Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 Codex requires each exact plugin command hook to be reviewed and trusted, and
 it binds each approval to the installed plugin's contents, so after first
 install and after every plugin upgrade or reinstall, approve all eight Mycelium
-hooks in order: start the desktop app once, trust only the `mycelium@mycelium`
+hooks in order: fully quit the desktop app if it is running and start it again,
+trust only the `mycelium@mycelium`
 hooks, then fully exit and restart it (on 0.169.0 the first start after a
 GitHub-marketplace install changed the plugin and voided earlier approval). Until then Codex skips the hooks
 without any warning inside the task. On Codex 0.169.0 (observed on one machine),

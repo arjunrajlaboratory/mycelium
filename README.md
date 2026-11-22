@@ -101,9 +101,11 @@ So, after `codex plugin add`:
 1. Fully quit the desktop app if it is running, then open it.
 2. Trust the eight Mycelium hooks, and only those (see "Where to approve").
 3. Fully quit and reopen the app, and restart any open Codex CLI sessions.
-4. Confirm that the hooks are still trusted: Settings → Hooks should show
-   nothing left to approve, and `hooks/list` from `codex app-server` should
-   report every `mycelium@mycelium` hook as `trustStatus` `trusted`.
+4. Confirm that the Mycelium hooks are still trusted: in Settings → Hooks, the
+   Mycelium hooks under From Plugins should need no review (other hooks you
+   left pending don't matter), and `hooks/list` from `codex app-server` for
+   your project should list all eight `mycelium@mycelium` hooks, each with
+   `trustStatus` `trusted`.
 
 In that observation, the installed copy then stayed the same across restarts
 and the approval held.
@@ -244,9 +246,11 @@ codex plugin add mycelium@mycelium
 The first command refreshes the configured Git marketplace. When the snapshot
 changed, Codex 0.169.0's upgrade may already reinstall the plugin; the second
 command is an explicit reinstall that makes sure the installed copy matches.
-Then approve the `mycelium@mycelium` hooks again,
-using the four steps under "Approve after the first start" above. Until you do,
-Codex skips the updated plugin's hooks, even if `/hooks` shows them as active.
+Then check and, if needed, approve the `mycelium@mycelium` hooks again,
+using the four steps under "Approve after the first start" above. When the
+installed files changed, Codex skips the updated plugin's hooks until you do,
+even if `/hooks` shows them as active; a reinstall of identical files can keep
+the approval.
 Start a new task afterward so Codex picks up the updated skills and hooks.
 You can confirm the installed version with:
 
@@ -328,7 +332,7 @@ Mycelium ships eight hook scripts and registers the supported subset for each ho
 | `mycelium-activity-tracker.sh` | PostToolUse (file edits) | Silently tracks file modifications so edit-only sessions are also enforced |
 | `mycelium-read-tracker.sh` | PostToolUse (Read) | Logs `.living/` file access for consumption telemetry |
 | `mycelium-stop-check.sh` | Stop | Serializes data-lineage consolidation, auto-finalizes session logs, blocks session end if `.living/` wasn't updated after significant work, reminds about session summary |
-| `mycelium-io-observer.sh` | PreToolUse (shell, file edits); PostToolUse (file edits; Claude also PostToolUseFailure) | Before each shell call, takes a stat snapshot of the watched repository scope; the shell PostToolUse diffs it to record which files the call created, modified, or deleted, for data lineage. File-edit calls are only journaled (start and end), so overlapping calls can be flagged; they get no snapshot. Silent; never blocks a tool call. |
+| `mycelium-io-observer.sh` | PreToolUse (shell, file edits); PostToolUse (file edits; Claude also PostToolUseFailure) | Before each shell call, takes a stat snapshot of the watched repository scope; the shell PostToolUse (and, on Claude, PostToolUseFailure) diffs it to record which files were created, modified, or deleted during the call, for data lineage. These are changes observed while the call ran, not proof that it caused them; overlapping hooked calls are flagged. File-edit calls are only journaled (start and end), so overlapping calls can be flagged; they get no snapshot. Silent; never blocks a tool call. |
 | `mycelium-data-tracker.sh` | PostToolUse (shell; Claude also PostToolUseFailure) | Captures analysis data-lineage events, joining each with the file observation for that call |
 | `mycelium-data-lineage-stop.sh` | Internal Stop phase | Consolidates session data-lineage events synchronously inside `mycelium-stop-check.sh`; it is not registered as a sibling command hook |
 

@@ -1217,8 +1217,9 @@ def install_codex_hooks(target_dir: Path):
 
     print("  Codex hooks are bundled with the Mycelium plugin via PLUGIN_ROOT.")
     print(
-        "  Codex action required after plugin install or upgrade: open the "
-        "Codex desktop app once, then trust all eight Mycelium hooks (only "
+        "  Codex action required after plugin install or upgrade: fully quit "
+        "the Codex desktop app if it is running and open it again, then trust "
+        "all eight Mycelium hooks (only "
         "the mycelium@mycelium ones), then exit Codex and restart it. On "
         "Codex 0.169.0 the first desktop-app start after an install changed "
         "the installed plugin and voided earlier approval, and the CLI's "
