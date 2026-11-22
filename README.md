@@ -313,7 +313,7 @@ Every directory has a descriptive manifest — a registry of its contents with s
 
 ## Hooks — Automated Enforcement
 
-Mycelium ships seven hook scripts and registers the supported subset for each host:
+Mycelium ships eight hook scripts and registers the supported subset for each host:
 
 | Hook | Event | Purpose |
 |------|-------|---------|
@@ -322,7 +322,8 @@ Mycelium ships seven hook scripts and registers the supported subset for each ho
 | `mycelium-activity-tracker.sh` | PostToolUse (file edits) | Silently tracks file modifications so edit-only sessions are also enforced |
 | `mycelium-read-tracker.sh` | PostToolUse (Read) | Logs `.living/` file access for consumption telemetry |
 | `mycelium-stop-check.sh` | Stop | Serializes data-lineage consolidation, auto-finalizes session logs, blocks session end if `.living/` wasn't updated after significant work, reminds about session summary |
-| `mycelium-data-tracker.sh` | PostToolUse (shell) | Captures analysis data-lineage events |
+| `mycelium-io-observer.sh` | PreToolUse (shell, file edits); PostToolUse (file edits) | Takes a stat snapshot of the repository before each call and records which files the call created, modified, or deleted, for data lineage. Silent; never blocks a tool call. |
+| `mycelium-data-tracker.sh` | PostToolUse (shell) | Captures analysis data-lineage events, joining each with the file observation for that call |
 | `mycelium-data-lineage-stop.sh` | Internal Stop phase | Consolidates session data-lineage events synchronously inside `mycelium-stop-check.sh`; it is not registered as a sibling command hook |
 
 Each identified Claude Code or Codex root receives a private runtime directory
@@ -334,9 +335,9 @@ Claude hooks are registered per repository by `init_repo.py`. Codex hooks are
 bundled once with the plugin in `hooks/hooks.json`; a small dispatcher no-ops
 outside Mycelium repositories, refreshes `.mycelium/plugin-root`, and invokes
 the shared scripts through Codex's dynamic `PLUGIN_ROOT`. Codex users must
-trust all eight Mycelium command hooks (from the desktop app on Codex 0.169.0;
-see "Where to approve"), then fully exit and restart Codex, and repeat this
-after every Mycelium upgrade or reinstall. Codex exposes shell and unified-exec work
+trust all eight Mycelium command hooks (from the desktop app on Codex 0.169.0,
+after its first start following the install; see "Approve after the first
+start"), and repeat this after every Mycelium upgrade or reinstall. Codex exposes shell and unified-exec work
 under the `Bash` matcher and file edits as `apply_patch`; read telemetry is
 Claude-only because Codex does not expose its internal file reads to
 `PostToolUse`.

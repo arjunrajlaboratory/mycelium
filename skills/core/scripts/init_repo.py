@@ -1223,7 +1223,9 @@ def install_codex_hooks(target_dir: Path):
         "save an incomplete approval that still skips the hooks. If you use "
         "the CLI, open /hooks (run codex update if it is absent). Codex binds "
         "hook approval to the installed plugin's contents, so every plugin "
-        "upgrade or reinstall needs this review again."
+        "upgrade or reinstall needs this review again. Approve only after the "
+        "desktop app has started once since the install: on 0.169.0 that "
+        "first start changed the installed plugin and voided earlier approval."
     )
     return changed
 

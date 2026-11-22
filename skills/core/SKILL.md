@@ -76,7 +76,11 @@ knowledge and optional domain steps below after the base scaffold succeeds.
     SessionStart. On Codex 0.169.0, terminal `/hooks` was observed to save an
     incomplete approval (the hooks show as trusted but are still skipped);
     only approvals made while the Codex desktop app was running were complete,
-    so point the user to the desktop app for now.
+    so point the user to the desktop app for now (Settings → Hooks → Trust
+    all). Also on 0.169.0, the first desktop-app start after a GitHub-marketplace
+    install or upgrade changed the installed plugin and voided earlier
+    approval, so the user should open the app once, then trust, then quit and
+    reopen it (the README's "Approve after the first start" steps).
 
 **References to consult**:
 - `skills/core/references/folder-structure.md` — canonical target structure
@@ -288,7 +292,8 @@ knowledge and optional domain steps below after the base scaffold succeeds.
 3. Use `--dry-run` first to preview changes.
 4. **Codex only**: after a real migration following plugin install or upgrade,
    tell the user to review and trust all eight Mycelium plugin hooks (from the
-   Codex desktop app; see step 14 of init), fully exit Codex, and restart it.
+   Codex desktop app, after its first start following the install; see step
+   14 of init), fully exit Codex, and restart it.
 
 ---
 

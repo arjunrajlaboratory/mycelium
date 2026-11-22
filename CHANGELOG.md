@@ -19,7 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkout, and shows how to switch back. `mycelium:develop` documents the
   candidate-audit recipe that restores the GitHub source, and what a
   GitHub-source install contains beyond the packaged files. `mycelium:core`
-  now gives the Codex hook count as eight, not five, in both places.
+  now gives the Codex hook count as eight, not five, in both places. The
+  agent-facing approval guidance (`mycelium:core`, the `MYCELIUM.md` template,
+  and `init_repo.py`'s Codex message) now also says to approve only after the
+  first desktop-app start. The README's hooks table lists eight scripts,
+  including the `mycelium-io-observer.sh` row it was missing.
 
 ## [0.9.7] - 2026-11-21
 

@@ -125,7 +125,10 @@ commands without any warning inside the task. On Codex 0.169.0, trusting the
 hooks in the terminal CLI's `/hooks` was observed to save an incomplete
 approval: `/hooks` may show the hooks as trusted or active while Codex still
 skips them. Only approvals saved while the Codex desktop app was running were
-complete, so approve the hooks from the desktop app for now.
+complete, so approve the hooks from the desktop app for now. Also on 0.169.0,
+the first desktop-app start after a GitHub-marketplace install or upgrade
+changed the installed plugin and voided any approval given before it: open the
+app once, then trust the hooks, then quit and reopen it.
 
 **Hook health check.** Mycelium's SessionStart hook puts a line beginning
 `SESSION HANDOFF PATH:` into the context of every root task whose host supplies
