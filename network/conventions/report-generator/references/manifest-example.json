@@ -1,6 +1,6 @@
 {
   "_description": "Worked example of a Phase-1 source-of-truth manifest. Drawn from a small SNP-tree-flavoured differential-expression-with-clone-recovery analysis. Every numeric token that appears in the corresponding report draft has an entry here; every coined term that the report uses has a plain-English rendering; every worked-example table cell has row-level provenance. Phase 6 (blind numerical re-verify) cross-checks the draft against this file. NOTE on field names: each numbers[*] entry uses 'id' (not 'key'). The register_value helper writes 'key' into the analysis-side outputs/numbers.json fragment; Phase 1 renames 'key' -> 'id' when merging fragments into this manifest, because render_report_values_tex.py keys macros off 'id'. NOTE on confidence intervals: CI bounds are modelled as their own scalar numbers[*] entries (e.g. exact_accuracy_test_ci_low / _ci_high), not as a nested 'uncertainty' object — register_value emits scalars only, and a bound bundled in a nested object would get no \\SciVal macro and so escape scitexlintr drift detection. NOTE on display fields: a numbers[*] entry may carry optional unit/precision/display fields that control only how value is rendered in prose (unit:'percent' renders the stored fraction 0.978 as 97.8\\%); value itself is never edited and stays the verification anchor — see frac_de_genes_upregulated.",
-  "_schema_version": "0.4.0",
+  "_schema_version": "0.5.0",
 
   "linters": {
     "_note": "Written by check_linter_versions.py --record in Phase 7: the linter versions that certified this report. Not hand-edited.",
@@ -37,6 +37,15 @@
       "label_aliases_forbidden": ["accuracy", "support-weighted F1", "weighted F1", "F1w2"],
       "provenance": "outputs/tables/test_metrics.csv:row=overall,col=exact_accuracy",
       "computed_at": "scripts/03_evaluate.R:L142",
+      "source": {
+        "_note": "Written by register_value(..., source=...) and copied unedited in Phase 1. check_report_values.py flags the number stale when the file no longer has this sha256; the fix is to rerun the analysis, never to refresh the hash.",
+        "path": "analysis/snp-tree/outputs/tables/test_metrics.csv",
+        "root": "repo",
+        "sha256": "3f1c0d8e5b2a9c4f7e6d1b0a8c3e5f2d9b7a4c6e1f0d3b8a5c2e9f7d4b1a6c03",
+        "size_bytes": 2184,
+        "locator": {"row": "overall", "column": "exact_accuracy"},
+        "hashed_at": "2026-11-22T10:00:00Z"
+      },
       "appears_in_sections": ["abstract", "results.headline", "conclusions"]
     },
     {

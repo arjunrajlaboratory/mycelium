@@ -217,7 +217,7 @@ def n_rows_if_tabular(path: Path) -> int | None:
 # any of them was captured by an observing recorder: its hash (or its
 # explicit absence) describes the content at the time of the call, so Stop
 # never fills or replaces it from what the file holds now.
-_PROTOCOL_KEYS = ("hash_status", "source", "pre_run_proven")
+_PROTOCOL_KEYS = ("hash_status", "source", "pre_run_proven", "rel_path")
 _OBSERVATION_FIELDS = (
     "observation_id",
     "observation_status",
@@ -264,6 +264,24 @@ def enrich_file_record(rec: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _redact(text: Any) -> Any:
+    """Command text through the shared redaction policy. v2 records were
+    redacted at hook time; this also covers v1 records re-consolidated
+    here and skips written by the shell hooks."""
+    if not isinstance(text, str) or not text:
+        return text
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lineage_redact
+
+    return lineage_redact.redact_command(text)
+
+
+def _redact_observation(observation: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(observation, dict) and isinstance(observation.get("bash_cmd"), str):
+        return {**observation, "bash_cmd": _redact(observation["bash_cmd"])}
+    return observation
+
+
 def normalize_event(
     raw: dict[str, Any], warnings: list[str], idx: int
 ) -> dict[str, Any] | None:
@@ -279,7 +297,7 @@ def normalize_event(
         "ts": raw["ts"],
         "agent_id": raw.get("agent_id"),
         "agent_type": raw.get("agent_type"),
-        "bash_cmd": raw.get("bash_cmd"),
+        "bash_cmd": _redact(raw.get("bash_cmd")),
         "bash_exit": raw.get("bash_exit"),
         "bash_wall_s": raw.get("bash_wall_s"),
         "script": raw.get("script"),
@@ -295,7 +313,19 @@ def normalize_event(
         "filters_detected": list(raw.get("filters_detected") or []),
         "seeds_detected": list(raw.get("seeds_detected") or []),
         **_observation_link(raw),
+        **_identity(raw),
     }
+    if "filters_detected" not in raw:
+        # v2 recorders no longer collect it (unevaluated regex text); a
+        # historical record keeps whatever it had.
+        del event["filters_detected"]
+    if isinstance(raw.get("step"), dict):
+        event["step"] = raw["step"]
+    if raw.get("script_sha256_of") == "sanitized":
+        # The digest is of the redacted source: the label must travel with it.
+        event["script_sha256_of"] = "sanitized"
+    if isinstance(raw.get("stages_not_recorded"), int):
+        event["stages_not_recorded"] = raw["stages_not_recorded"]
 
     if event["script"] and event["script_sha256"] is None:
         script_path = Path(event["script"])
@@ -312,10 +342,11 @@ def normalize_skip(raw: dict[str, Any]) -> dict[str, Any]:
         "skip_id": raw.get("skip_id"),
         "skip_reason": raw.get("skip_reason") or "unknown",
         "detail": raw.get("detail"),
-        "bash_cmd": raw.get("bash_cmd"),
+        "bash_cmd": _redact(raw.get("bash_cmd")),
         "bash_exit": raw.get("bash_exit"),
         "agent_id": raw.get("agent_id"),
         "agent_type": raw.get("agent_type"),
+        **_identity(raw, minted=False),
     }
 
 
@@ -323,12 +354,12 @@ def normalize_data_command(raw: dict[str, Any]) -> dict[str, Any]:
     """Keep a data command's known fields. Its file records were taken at
     hook time; a hash is filled only where none was recorded, and a path
     recorded as missing stays missing."""
-    return {
+    record = {
         "ts": raw.get("ts"),
         "event_id": raw.get("event_id"),
         "agent_id": raw.get("agent_id"),
         "agent_type": raw.get("agent_type"),
-        "bash_cmd": raw.get("bash_cmd"),
+        "bash_cmd": _redact(raw.get("bash_cmd")),
         "bash_exit": raw.get("bash_exit"),
         "cwd": raw.get("cwd"),
         "signals": list(raw.get("signals") or []),
@@ -339,7 +370,24 @@ def normalize_data_command(raw: dict[str, Any]) -> dict[str, Any]:
         "outputs": [enrich_file_record(r) for r in (raw.get("outputs") or [])],
         "io_detection": "unresolved",
         **_observation_link(raw),
+        **_identity(raw, minted=False),
     }
+    if isinstance(raw.get("step"), dict):
+        record["step"] = raw["step"]
+    return record
+
+
+# v2 identity and frame fields. A field the record does not carry is left
+# out rather than written as null, so a v1 record re-consolidated into a v2
+# manifest still reads as v1 (no identity), never as "no host".
+_IDENTITY_FIELDS = ("host", "host_session_id", "ts_ns", "repo_root")
+
+
+def _identity(raw: dict[str, Any], *, minted: bool = True) -> dict[str, Any]:
+    out = {key: raw[key] for key in _IDENTITY_FIELDS if key in raw}
+    if minted and isinstance(raw.get("event_id"), str):
+        out["event_id"] = raw["event_id"]
+    return out
 
 
 def _observation_link(raw: dict[str, Any]) -> dict[str, Any]:
@@ -550,13 +598,25 @@ def _mark_observed_changes(
         scope = observation.get("scope") if isinstance(observation.get("scope"), dict) else {}
         unwatched = [u for u in scope.get("unwatched") or [] if isinstance(u, dict)]
         kinds: dict[str, str] = {}
+        after: dict[str, dict[str, Any]] = {}
         for kind in ("created", "modified", "deleted"):
             for entry in changes.get(kind) or []:
                 if isinstance(entry, dict) and isinstance(entry.get("path"), str):
                     kinds[entry["path"]] = kind
+                    if isinstance(entry.get("after"), dict):
+                        after[entry["path"]] = entry["after"]
         for output in record.get("outputs") or []:
             path = output.get("path")
             if not isinstance(path, str):
+                continue
+            if "rel_path" in output:
+                # A v2 record's own frame, set at hook time with the
+                # observer's rules; an explicit null means it could not be
+                # framed, so no observation entry is matched to it.
+                rel = output["rel_path"]
+                if not isinstance(rel, str):
+                    continue
+                _mark_one(output, rel, kinds, after, changes, unwatched, io_observer)
                 continue
             try:
                 # Lexically first: a symlinked directory inside the
@@ -567,24 +627,43 @@ def _mark_observed_changes(
                     rel = os.path.relpath(os.path.realpath(path), root)
             except ValueError:
                 continue
-            if rel in kinds:
-                output["observed_change"] = kinds[rel]
-                continue
-            # Absent from the change list means "unchanged" only where the
-            # observation could have seen a change.
-            status = io_observer.watch_status(rel, unwatched)
-            racy = changes.get("racy_unknown") or []
-            racy_count = (changes.get("counts") or {}).get("racy_unknown", 0)
-            if status != "watched":
-                output["observed_change"] = status
-            elif rel in racy:
-                # A coarse-timestamp identity the observer could not prove
-                # unchanged: a same-size rewrite in the same tick hides.
-                output["observed_change"] = "unknown-racy"
-            elif changes.get("capped") or (isinstance(racy_count, int) and racy_count > len(racy)):
-                output["observed_change"] = "unknown-capped"
-            else:
-                output["observed_change"] = "unchanged"
+            _mark_one(output, rel, kinds, after, changes, unwatched, io_observer)
+
+
+def _mark_one(
+    output: dict[str, Any],
+    rel: str,
+    kinds: dict[str, str],
+    after: dict[str, dict[str, Any]],
+    changes: dict[str, Any],
+    unwatched: list[dict[str, Any]],
+    io_observer: Any,
+) -> None:
+    if rel in kinds:
+        output["observed_change"] = kinds[rel]
+        side = after.get(rel)
+        if side is not None:
+            # The protocol hash of the bytes the call left, taken only when
+            # the file was provably stable; null (with its status) when it
+            # was not. Never the hook digest.
+            output["observed_sha256"] = side.get("sha256")
+            output["observed_hash_status"] = side.get("hash_status")
+        return
+    # Absent from the change list means "unchanged" only where the
+    # observation could have seen a change.
+    status = io_observer.watch_status(rel, unwatched)
+    racy = changes.get("racy_unknown") or []
+    racy_count = (changes.get("counts") or {}).get("racy_unknown", 0)
+    if status != "watched":
+        output["observed_change"] = status
+    elif rel in racy:
+        # A coarse-timestamp identity the observer could not prove
+        # unchanged: a same-size rewrite in the same tick hides.
+        output["observed_change"] = "unknown-racy"
+    elif changes.get("capped") or (isinstance(racy_count, int) and racy_count > len(racy)):
+        output["observed_change"] = "unknown-capped"
+    else:
+        output["observed_change"] = "unchanged"
 
 
 def build_manifest(
@@ -686,6 +765,42 @@ def build_manifest(
     }
 
 
+# The manifest's record shape. Absent means v1 (0.9.7 and earlier): no
+# event identity, no path frame, no step settings.
+MANIFEST_SCHEMA = "mycelium.data_lineage.manifest.v2"
+
+
+def write_manifest_atomic(path: Path, manifest: dict[str, Any]) -> None:
+    """Publish the manifest whole: a reader (the lineage index, another
+    session's query) sees the old file or the new one, never a torn one."""
+    import os
+    import stat
+    import tempfile
+
+    try:
+        # An existing manifest keeps its mode (a private 0600 stays private);
+        # a new one gets what a plain create would under the umask.
+        mode = stat.S_IMODE(os.stat(path, follow_symlinks=False).st_mode)
+    except OSError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    fd, temp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(manifest, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp, mode)
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
 def extract(
     events_file: Path,
     session_id: str,
@@ -738,6 +853,13 @@ def extract(
                 continue
             normalized = normalize_event(raw, warnings, idx)
             if normalized is not None:
+                # v2 events carry an id: a record repeated by a retried
+                # transfer counts once. v1 events have none and are kept.
+                event_id = normalized.get("event_id")
+                if event_id and event_id in seen_event_ids:
+                    continue
+                if event_id:
+                    seen_event_ids.add(event_id)
                 events.append(normalized)
     else:
         warnings.append(f"events file not found: {events_file}")
@@ -747,10 +869,11 @@ def extract(
         [*events, *data_commands], observations_dir, repo_root, warnings, consume, session_id,
         claim_aliases,
     )
-    manifest = build_manifest(
-        events, session_id, repo_root, warnings, skipped, data_commands
-    )
-    manifest["observations"] = observations
+    manifest = {
+        "schema": MANIFEST_SCHEMA,
+        **build_manifest(events, session_id, repo_root, warnings, skipped, data_commands),
+    }
+    manifest["observations"] = [_redact_observation(o) for o in observations]
     counts: dict[str, int] = {}
     for observation in observations:
         status = str(observation.get("status") or "unknown")
@@ -788,7 +911,7 @@ def main() -> int:
         tuple(args.replaces),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    write_manifest_atomic(args.output, manifest)
     # Listed in a written manifest: claimed by it, so a blocked Stop's retry
     # (which rewrites this manifest) still lists them and a later
     # transaction does not report them again.

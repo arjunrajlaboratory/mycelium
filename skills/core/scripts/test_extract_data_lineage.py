@@ -117,7 +117,7 @@ def test_normalize_minimal_event_with_ts() -> None:
     assert e["ts"] == "2026-05-26T12:00:00Z"
     assert e["inputs"] == []
     assert e["outputs"] == []
-    assert e["filters_detected"] == []
+    assert "filters_detected" not in e  # v2: kept only where a record carried it
     assert e["agent_id"] is None
     assert warnings == []
 

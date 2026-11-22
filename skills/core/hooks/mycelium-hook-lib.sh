@@ -620,10 +620,20 @@ mycelium__prepare_locked_post_tool_state_once() {
 # (`lineage-skips-unowned.ndjson.lock`) because Stop rewrites it by atomic
 # replacement: a failed rewrite leaves the original records in place.
 MYCELIUM__PY_LINEAGE_SKIP='
-import fcntl, json, os, sys, uuid
+import fcntl, json, os, sys, time, uuid
 path, ts, command, reason, detail = sys.argv[1:6]
 # skip_id makes a record countable once however often a retry moves it.
-record = {"ts": ts, "kind": "skip", "skip_id": uuid.uuid4().hex,
+# ts_ns places the gap among the records of the same second.
+# The command passes through the shared redaction policy before it is
+# stored anywhere; if that policy cannot be loaded, the command is omitted
+# rather than written raw.
+try:
+    sys.path.insert(0, os.environ["MYCELIUM__SCRIPTS_DIR"])
+    import lineage_redact
+    command = lineage_redact.redact_command(command)
+except Exception:
+    command = "<command omitted: redaction unavailable>"
+record = {"ts": ts, "ts_ns": time.time_ns(), "kind": "skip", "skip_id": uuid.uuid4().hex,
           "skip_reason": reason, "detail": detail,
           "bash_cmd": command, "agent_id": None, "agent_type": None,
           "bash_exit": None}
@@ -683,7 +693,8 @@ finally:
 # mycelium_record_lineage_skip EVENTS_FILE TS COMMAND REASON DETAIL [FLAGS...]
 # Caller holds the session lock and owns the transaction.
 mycelium_record_lineage_skip() {
-  python3 -c "$MYCELIUM__PY_LINEAGE_SKIP" "$@" >/dev/null 2>&1 || true
+  MYCELIUM__SCRIPTS_DIR="$MYCELIUM__HOOKS_DIR/../scripts" \
+    python3 -c "$MYCELIUM__PY_LINEAGE_SKIP" "$@" >/dev/null 2>&1 || true
 }
 
 # mycelium_record_unowned_lineage_skip REPO_ROOT PAYLOAD COMMAND REASON DETAIL
@@ -737,6 +748,12 @@ try:
         mode = stat.S_IMODE(os.fstat(handle.fileno()).st_mode)
         lines = handle.read().splitlines(keepends=True)
     taken, kept, waiting = [], [], []
+    # A shared state directory can serve several checkouts: a v2 record
+    # names its own, and only this checkout takes it.
+    this_root = ""
+    if os.environ.get("MYCELIUM__LINEAGE_DIR"):
+        this_root = os.path.realpath(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.environ["MYCELIUM__LINEAGE_DIR"]))))
     for raw in lines:
         try:
             record = json.loads(raw)
@@ -745,6 +762,9 @@ try:
             continue
         if not (isinstance(record, dict) and record.get("host") == host
                 and record.get("host_session_id") == sid):
+            kept.append(raw)
+        elif (this_root and isinstance(record.get("repo_root"), str)
+              and os.path.realpath(record["repo_root"]) != this_root):
             kept.append(raw)
         elif dest or record.get("kind") != "data_command":
             taken.append(record)

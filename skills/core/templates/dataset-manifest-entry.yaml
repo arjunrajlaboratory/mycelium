@@ -15,6 +15,7 @@
 # raw_path: data/raw/[dataset-name]/
 # processed_path: data/processed/[dataset-name]/   # Delete if no processed version
 # metadata_path: data/metadata/[dataset-name]/
+# sample_ledger: data/metadata/[dataset-name]/samples.ledger.json   # Delete if no samples
 # status: [raw|validated|processed|archived]
 # known_issues:
 #   - [Issue 1]

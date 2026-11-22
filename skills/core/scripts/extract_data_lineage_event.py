@@ -42,6 +42,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Generator, Iterator, NamedTuple
@@ -520,6 +521,40 @@ def _is_managed_utility_path(resolved: Path) -> bool:
     return False
 
 
+_ROOT_ASSIGNMENT_RX = re.compile(
+    r"""(?:^|[;&|\n(]|&&|\|\|)\s*([A-Za-z_][A-Za-z0-9_]*)="""
+    r"""(?:"\$\(cat \.mycelium/plugin-root\)"|\$\(cat \.mycelium/plugin-root\)"""
+    r"""|'?(/[^\s;&|$'"`]+)'?)(?=[\s;&|]|$)"""
+)
+
+
+def _variable_script_path(command: str, offset: int, raw_path: str,
+                          cwd: Path | None) -> Path | None:
+    """`$P/skills/...` resolved through an assignment earlier in the same
+    command: `P=$(cat .mycelium/plugin-root)` (read from the working
+    directory) or `P=/literal/path`. None for anything else; this is used
+    only to recognize Mycelium's own helpers, never to infer analysis I/O."""
+    match = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(/.*)", raw_path)
+    if match is None:
+        return None
+    name, rest = match.groups()
+    value = None
+    for assignment in _ROOT_ASSIGNMENT_RX.finditer(command[:offset]):
+        if assignment.group(1) != name:
+            continue
+        literal = assignment.group(2)
+        if literal is not None:
+            value = literal
+        elif cwd is not None:
+            try:
+                value = (cwd / ".mycelium" / "plugin-root").read_text(encoding="utf-8").strip()
+            except OSError:
+                value = None
+    if not value or "\0" in value:
+        return None
+    return Path(os.path.realpath(value + rest))
+
+
 IGNORED_SCRIPT_BASENAMES = {"setup.py"}
 ANALYSIS_PATTERNS = (
     RX_PYTHON_C,
@@ -805,6 +840,9 @@ SEED_REGEXES = [
         r"""(?:np\.random\.seed|random\.seed|torch\.manual_seed)\s*\(\s*(\d+)\s*\)"""
     ),
     re.compile(r"""np\.random\.default_rng\s*\(\s*(\d+)\s*\)"""),
+]
+R_SEED_REGEXES = [
+    re.compile(r"""(?<![\w.])set\.seed\s*\(\s*(?:seed\s*=\s*)?(\d+)L?\s*[,)]"""),
 ]
 
 # --- R readers and writers ---
@@ -3895,6 +3933,7 @@ def _detect_scripts_with_cwd(
     bash_exit: int | None = None,
     require_execution_evidence: bool = False,
     include_inline: bool = True,
+    invocations: list[dict[str, Any]] | None = None,
 ) -> list[tuple[Path | UnresolvedScript | None, str | None, Path | None]]:
     """Return (script_path, inline_source, effective_cwd) detections.
 
@@ -3902,11 +3941,21 @@ def _detect_scripts_with_cwd(
     script cannot be named with certainty. ``include_inline=False`` drops
     inline one-liners (``python -c``, ``R -e``, ``Rscript -e``) for the
     post-action check; lineage keeps them.
+
+    Detections are deduplicated per shell stage: ``python a.py --seed 1 &&
+    python a.py --seed 2`` is two runs. With ``invocations``, one dict per
+    detection (same order) records where it matched (``offset``), its kind,
+    and the script word, so the step's settings can be read from that
+    stage's own argv.
     """
     out: list[tuple[Path | UnresolvedScript | None, str | None, Path | None]] = []
-    seen_paths: set[Path] = set()
-    seen_unresolved: set[tuple[UnresolvedScript, Path]] = set()
-    seen_inline: set[tuple[str, Path | None]] = set()
+    seen_paths: set[tuple[Path, Any]] = set()
+    seen_unresolved: set[tuple[UnresolvedScript, Path, str]] = set()
+    seen_inline: set[tuple[str, Path | None, Any]] = set()
+
+    def record(offset: int | None, kind: str, word: str | None = None) -> None:
+        if invocations is not None:
+            invocations.append({"offset": offset, "kind": kind, "script_word": word})
     inline_patterns = (RX_PYTHON_C, RX_R_E, RX_RSCRIPT_E) if include_inline else ()
     for pattern in inline_patterns:
         inline_language = "python" if pattern is RX_PYTHON_C else "r"
@@ -3939,9 +3988,10 @@ def _detect_scripts_with_cwd(
             if r_argv is not None and r_argv.expressions:
                 src = "\n".join(r_argv.expressions)
             src = InlineSource(src, inline_language)
-            identity = (src, effective_cwd)
+            identity = (src, effective_cwd, _stage_key(bash_cmd, m.start()))
             if identity not in seen_inline:
                 out.append((None, src, effective_cwd))
+                record(m.start(), "inline")
                 seen_inline.add(identity)
     for m in _scan_word_pattern(RX_PYTHON_M, bash_cmd):
         if not _match_has_expected_executable(m, RX_PYTHON_M):
@@ -3957,9 +4007,10 @@ def _detect_scripts_with_cwd(
         if module in IGNORED_PYTHON_MODULES:
             continue
         source = f"# Python module execution: {module}"
-        identity = (source, effective_cwd)
+        identity = (source, effective_cwd, _stage_key(bash_cmd, m.start()))
         if identity not in seen_inline:
             out.append((None, source, effective_cwd))
+            record(m.start(), "module", module)
             seen_inline.add(identity)
     for pattern in (
         RX_PYTHON_SCRIPT_PATH,
@@ -3998,9 +4049,11 @@ def _detect_scripts_with_cwd(
                             r_script.text, pattern is RX_R_CMD_BATCH_PATH
                         ),
                         effective_cwd,
+                        _stage_key(bash_cmd, m.start()),
                     )
                     if unresolved_key not in seen_unresolved:
                         out.append((unresolved_key[0], None, effective_cwd))
+                        record(m.start(), "unresolved", r_script.text)
                         seen_unresolved.add(unresolved_key)
                     continue
                 path_word = shlex.quote(r_script.text)
@@ -4013,6 +4066,12 @@ def _detect_scripts_with_cwd(
             raw_path = path_words[0]
             if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES:
                 continue
+            if "$" in raw_path:
+                # `P=$(cat .mycelium/plugin-root); python3 $P/skills/core/...`
+                # runs a bundled helper: managed, not an unreadable script.
+                via_variable = _variable_script_path(bash_cmd, m.start(), raw_path, effective_cwd)
+                if via_variable is not None and _is_managed_utility_path(via_variable):
+                    continue
             # The accessor dereferences a pointer relative to the effective
             # cwd, so it may resolve only when every cwd change in the prefix
             # was fully modeled; an unmodeled `pushd`/`source`/flagged-cd
@@ -4043,23 +4102,86 @@ def _detect_scripts_with_cwd(
                 continue
             if _is_managed_utility_path(canonical):
                 continue
-            if path not in seen_paths:
+            stage_key = (path, _stage_key(bash_cmd, m.start()))
+            if stage_key not in seen_paths:
                 out.append((path, None, effective_cwd))
-                seen_paths.add(path)
+                record(m.start(), "script", raw_path)
+                seen_paths.add(stage_key)
     for path, source, io_cwd in _detect_runners(
         bash_cmd,
         cwd,
         bash_exit=bash_exit,
         require_execution_evidence=require_execution_evidence,
     ):
+        # A runner's own argv is not captured (its detection carries no
+        # stage); its step is recorded as partial.
         if path is not None:
-            if path not in seen_paths:
+            if not any(seen == path for seen, _ in seen_paths):
                 out.append((path, None, io_cwd))
-                seen_paths.add(path)
-        elif (source, io_cwd) not in seen_inline:
+                record(None, "runner", None)
+                seen_paths.add((path, -1))
+        elif not any(seen[:2] == (source, io_cwd) for seen in seen_inline):
             out.append((None, source, io_cwd))
-            seen_inline.add((source, io_cwd))
+            record(None, "runner", None)
+            seen_inline.add((source, io_cwd, -1))
     return out
+
+
+@functools.lru_cache(maxsize=8)
+def _stage_starts(command: str) -> tuple[int, ...]:
+    """Every index where a simple command can begin: 0, and just after each
+    unquoted control operator (``;``, newline, ``&&``, ``||``, ``|``,
+    ``&``, a parenthesis). One linear scan per command, cached, so many
+    matches in one long command cost a bisect each."""
+    starts = [0]
+    quote: str | None = None
+    index = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if quote is None:
+            if char == "\\":
+                index += 2
+                continue
+            if char in ("'", '"'):
+                quote = char
+            elif char in ";\n()":
+                starts.append(index + 1)
+            elif char == "&":
+                previous = command[index - 1] if index > 0 else ""
+                following = command[index + 1] if index + 1 < length else ""
+                if previous not in "<>" and following != ">":
+                    starts.append(index + 1)
+            elif char == "|":
+                if index == 0 or command[index - 1] != ">":
+                    starts.append(index + 1)
+        elif quote == "'":
+            if char == "'":
+                quote = None
+        elif char == "\\":
+            index += 2
+            continue
+        elif char == '"':
+            quote = None
+        index += 1
+    return tuple(starts)
+
+
+def _simple_command_start(command: str, offset: int) -> int:
+    """Where the simple command containing ``offset`` begins."""
+    starts = _stage_starts(command)
+    return starts[bisect.bisect_right(starts, offset) - 1]
+
+
+def _stage_key(command: str, offset: int) -> str:
+    """The full text of the stage a match sits in (assignments and wrappers
+    included). Identical stages are one run's settings repeated (a loop
+    body); stages that differ in any argument are separate runs."""
+    start = _simple_command_start(command, offset)
+    starts = _stage_starts(command)
+    following = bisect.bisect_right(starts, offset)
+    stop = starts[following] if following < len(starts) else len(command)
+    return command[start:stop].strip(" \t;&|\n()")
 
 
 def detect_scripts(
@@ -4146,17 +4268,22 @@ def scan_source(
         language, [*OUTPUT_REGEXES, *R_OUTPUT_REGEXES])
     inputs: list[str] = calls(input_rx)
     outputs: list[str] = calls(output_rx)
+    # Filters are no longer collected: the regex text was never evaluated
+    # and had false positives. The slot stays in the return value so callers
+    # keep their shape; it is always empty.
     filters: list[str] = []
     seeds: list[int] = []
-    for rx in FILTER_REGEXES:
-        filters.extend(m.group(1) for m in rx.finditer(source))
-    for rx in SEED_REGEXES:
+    seed_rx = {"python": SEED_REGEXES, "r": R_SEED_REGEXES}.get(
+        language, [*SEED_REGEXES, *R_SEED_REGEXES])
+    for rx in seed_rx:
         for m in rx.finditer(source):
+            if _inside(strings, m.start()):
+                continue  # a seed call quoted in a string is text
             try:
                 seeds.append(int(m.group(1)))
             except ValueError:
                 pass
-    return _dedupe(inputs), _dedupe(outputs), _dedupe(filters), sorted(set(seeds))
+    return _dedupe(inputs), _dedupe(outputs), filters, sorted(set(seeds))
 
 
 _DATA_FILE_SUFFIXES = {
@@ -5838,6 +5965,373 @@ def build_event_for_detection(
     )
 
 
+# --- Step settings (v2): what the matched stage actually ran with ---
+#
+# Read from the detected stage's own text: its argv, the assignments and
+# wrappers before the interpreter, config files it names, and literal seeds.
+# Nothing is expanded or guessed; what the parser cannot model is marked
+# `partial`. Every string passes through one redaction policy first.
+
+_CONFIG_SUFFIXES = frozenset({".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"})
+_SCRIPT_CONFIG_FLAGS = frozenset({
+    "--config", "--config-file", "--configfile", "--params", "--params-file", "--settings",
+})
+_SNAKEMAKE_CONFIG_FLAGS = frozenset({"--configfile", "--configfiles"})
+_NEXTFLOW_CONFIG_FLAGS = frozenset({"-params-file", "-c", "-config", "-C"})
+_SEED_FLAGS = frozenset({"--seed", "--random-state", "--random_state", "--random-seed"})
+CONFIG_MAX_FILES = 8
+MAX_EVENTS_PER_CALL = 64
+CONFIG_MAX_BYTES = 5 * 1024 * 1024
+CONFIG_BUDGET_SECONDS = 0.25
+STEP_TOKEN_MAX = 4096
+_NAME_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NON_RUN_WORDS = frozenset({"cd", "pushd", "popd", "export", "set", "source", ".", "unset"})
+
+
+_RUNNER_WORD_RX = re.compile(r"(?:^|[\s;&|(])((?:[\w./-]*/)?(?:snakemake|nextflow|sbatch))(?=\s|$)")
+
+
+def _interpreter_name(token: str) -> str:
+    name = os.path.basename(token)
+    for prefix in ("python", "Rscript", "R", "jupyter", "snakemake", "nextflow", "sbatch"):
+        if name == prefix or (prefix == "python" and re.fullmatch(r"python[0-9.]*", name)):
+            return "python" if prefix == "python" else prefix
+    return name
+
+
+def _prefix_settings(prefix: str) -> tuple[dict[str, Any], list[str], bool]:
+    """(env, wrappers, partial) from the words before the interpreter."""
+    env: dict[str, Any] = {}
+    wrappers: list[str] = []
+    try:
+        words = shlex.split(prefix, comments=False, posix=True)
+    except ValueError:
+        return env, wrappers, True
+    in_env = False
+    for word in words:
+        name, eq, value = word.partition("=")
+        if eq and _NAME_RX.fullmatch(name):
+            env[name] = _env_value(name, value)
+            continue
+        if word == "env":
+            in_env = True
+            wrappers.append(word)
+            continue
+        if in_env and word.startswith("-"):
+            wrappers.append(word)
+            continue
+        wrappers.append(word)
+    return env, wrappers, False
+
+
+def _env_value(name: str, value: str) -> Any:
+    import lineage_redact
+
+    if lineage_redact.is_secret_name(name):
+        return {"redacted": True}
+    value = lineage_redact.redact_command(value)
+    if "$" in value or "`" in value:
+        return {"text": value, "expanded": False}
+    return value
+
+
+def _inline_placeholder(body: str) -> dict[str, Any]:
+    import lineage_redact
+
+    sanitized = lineage_redact.redact_source(body)
+    placeholder: dict[str, Any] = {
+        "inline_sha256": hashlib.sha256(sanitized.encode("utf-8")).hexdigest(),
+        "length": len(body),
+    }
+    if sanitized != body:
+        placeholder["sha256_of"] = "sanitized"
+    return placeholder
+
+
+def _resolve(token: str, base: Path | None) -> Path | None:
+    if not token or "\0" in token or "$" in token or "`" in token:
+        return None
+    path = Path(token)
+    if not path.is_absolute():
+        if base is None:
+            return None
+        path = base / path
+    return path
+
+
+def _config_candidates(interpreter: str, args: list[str]) -> list[tuple[str, str]]:
+    """(token, via) pairs naming config files, by interpreter-specific
+    operand rules. `.json` counts only after a config flag (a JSON operand
+    is as often data); python's `-c` is code and snakemake's `-c` is cores,
+    so neither is a config flag."""
+    flags = {
+        "snakemake": _SNAKEMAKE_CONFIG_FLAGS,
+        "nextflow": _NEXTFLOW_CONFIG_FLAGS,
+    }.get(interpreter, _SCRIPT_CONFIG_FLAGS)
+    found: list[tuple[str, str]] = []
+    expect: str | None = None
+    for token in args:
+        if not isinstance(token, str):
+            expect = None
+            continue
+        if expect is not None:
+            if token.startswith("-"):
+                expect = None
+            else:
+                found.append((token, expect))
+                if expect != "--configfiles":
+                    expect = None
+                continue
+        name, eq, value = token.partition("=")
+        if name in flags:
+            if eq:
+                found.append((value, name))
+            else:
+                expect = name
+            continue
+        if interpreter == "snakemake" and name == "--profile":
+            target = value if eq else None
+            if target:
+                found.append((str(Path(target) / "config.yaml"), "--profile"))
+            else:
+                expect = "--profile-dir"
+            continue
+        if not token.startswith("-") and Path(token).suffix.lower() in _CONFIG_SUFFIXES:
+            found.append((token, "suffix"))
+    return [(str(Path(t) / "config.yaml"), "--profile") if via == "--profile-dir" else (t, via)
+            for t, via in found]
+
+
+class ConfigBudget:
+    """One budget for every config file a call names, across all its stages:
+    at most CONFIG_MAX_FILES files and CONFIG_BUDGET_SECONDS in total."""
+
+    def __init__(self) -> None:
+        self.deadline = time.monotonic() + CONFIG_BUDGET_SECONDS
+        self.files_left = CONFIG_MAX_FILES
+
+    def take(self) -> bool:
+        if self.files_left <= 0 or time.monotonic() >= self.deadline:
+            return False
+        self.files_left -= 1
+        return True
+
+
+def _hash_config(path: Path, deadline: float) -> dict[str, Any]:
+    """Hash one config file: regular file only, opened without blocking or
+    following a final symlink, within the size cap and the call's budget,
+    and only if it provably did not change while it was read."""
+    record: dict[str, Any] = {"path": str(path)}
+    if time.monotonic() >= deadline:
+        record.update(sha256=None, hash_status="skipped-budget")
+        return record
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        record.update(sha256=None, hash_status="missing")
+        return record
+    except OSError:
+        record.update(sha256=None, hash_status="unavailable")
+        return record
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            record.update(sha256=None, hash_status="not-a-regular-file")
+            return record
+        record["size_bytes"] = st.st_size
+        if st.st_size > CONFIG_MAX_BYTES:
+            record.update(sha256=None, hash_status="too-large")
+            return record
+        digest = hashlib.sha256()
+        read = 0
+        while True:
+            if time.monotonic() >= deadline:
+                record.update(sha256=None, hash_status="skipped-budget")
+                return record
+            chunk = os.read(fd, min(1 << 20, CONFIG_MAX_BYTES + 1 - read))
+            if not chunk:
+                break
+            read += len(chunk)
+            if read > CONFIG_MAX_BYTES:
+                record.update(sha256=None, hash_status="too-large")
+                return record
+            digest.update(chunk)
+        ident = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        after = os.fstat(fd)
+        try:
+            on_path = os.stat(path, follow_symlinks=False)
+        except OSError:
+            on_path = None
+        if on_path is None or any(
+                (x.st_dev, x.st_ino, x.st_size, x.st_mtime_ns, x.st_ctime_ns) != ident
+                for x in (after, on_path)):
+            record.update(sha256=None, hash_status="unstable")
+            return record
+        record.update(sha256=digest.hexdigest(), hash_status="hashed-at-post",
+                      hash_origin="hook-post")
+        return record
+    finally:
+        os.close(fd)
+
+
+def build_step(
+    bash_cmd: str,
+    invocation: dict[str, Any] | None,
+    inline_source: str | None,
+    io_cwd: Path | None,
+    budget: "ConfigBudget | None" = None,
+) -> dict[str, Any]:
+    """The `step` object for one detection: argv, interpreter, script
+    arguments, environment assignments, config files, and literal seeds of
+    the stage that ran it. Partial, with a reason, where it cannot tell."""
+    import lineage_redact
+
+    if invocation and invocation.get("kind") == "runner" and invocation.get("offset") is None:
+        # Only an unambiguous runner stage is used: with several runner
+        # words, which stage this detection ran is not known here.
+        found = list(_RUNNER_WORD_RX.finditer(bash_cmd))
+        if len(found) == 1:
+            invocation = {**invocation, "offset": found[0].start(1)}
+        elif len(found) > 1:
+            return {"partial": True, "reason": "runner-stage-ambiguous"}
+    if not invocation or invocation.get("offset") is None:
+        kind = (invocation or {}).get("kind") or "unknown"
+        return {"partial": True, "reason": f"{kind}-argv-not-captured"}
+    offset = invocation["offset"]
+    start = _simple_command_start(bash_cmd, offset)
+    suffix = _simple_command_suffix(bash_cmd, offset)
+    argv = _simple_command_argv(suffix) if suffix is not None else None
+    step: dict[str, Any] = {}
+    if not argv:
+        return {"partial": True, "reason": "unmodeled-shell-structure"}
+    env, wrappers, prefix_partial = _prefix_settings(bash_cmd[start:offset])
+    interpreter = _interpreter_name(argv[0])
+    kind = invocation.get("kind")
+    # Where the step's own operands begin.
+    operand_index: int | None = None
+    shown: list[Any] = list(argv)
+    if kind == "inline":
+        body_flags = {"-c"} if interpreter == "python" else {"-e", "--eval"}
+        for index, token in enumerate(argv[:-1]):
+            if token in body_flags:
+                shown[index + 1] = _inline_placeholder(argv[index + 1])
+                operand_index = index + 2
+    elif kind == "module":
+        for index, token in enumerate(argv[:-1]):
+            if token == "-m" and argv[index + 1] == invocation.get("script_word"):
+                operand_index = index + 2
+                break
+    elif kind in ("script", "unresolved"):
+        word = invocation.get("script_word")
+        for index, token in enumerate(argv[1:], start=1):
+            if token == word:
+                operand_index = index + 1
+                break
+    script_args = argv[operand_index:] if operand_index is not None else []
+    truncated = False
+    clipped: list[Any] = []
+    for token in shown:
+        if isinstance(token, str) and len(token) > STEP_TOKEN_MAX:
+            clipped.append(token[:STEP_TOKEN_MAX] + "…[truncated]")
+            truncated = True
+        else:
+            clipped.append(token)
+    step["argv"] = lineage_redact.redact_argv(clipped)
+    step["executable"] = argv[0]
+    step["interpreter"] = interpreter
+    step["script_args"] = lineage_redact.redact_argv(
+        [t if len(t) <= STEP_TOKEN_MAX else t[:STEP_TOKEN_MAX] + "…[truncated]"
+         for t in script_args])
+    if env:
+        step["env"] = env
+    if wrappers:
+        step["wrappers"] = lineage_redact.redact_argv(wrappers)
+    # Config files: the operands after the script for script runners, the
+    # whole argv for runners driven by flags.
+    candidates = _config_candidates(interpreter, script_args if operand_index else argv[1:])
+    budget = budget or ConfigBudget()
+    configs: list[dict[str, Any]] = []
+    skipped = 0
+    for token, via in candidates:
+        path = _resolve(token, io_cwd)
+        if path is None:
+            configs.append({"path": token, "via": via, "sha256": None,
+                            "hash_status": "unresolved"})
+            continue
+        if via == "suffix" and not path.exists():
+            continue  # a config-like operand that is not a file may be an output
+        if not budget.take():
+            skipped += 1
+            configs.append({"path": str(path), "via": via, "sha256": None,
+                            "hash_status": "skipped-budget"})
+            continue
+        record = _hash_config(path, budget.deadline)
+        record["via"] = via
+        configs.append(record)
+    if skipped:
+        step["config_files_over_budget"] = skipped
+    if configs:
+        step["config_files"] = configs
+    seeds: list[dict[str, Any]] = []
+    expect_seed = False
+    for token in script_args:
+        if expect_seed:
+            expect_seed = False
+            if re.fullmatch(r"-?\d+", token):
+                seeds.append({"value": int(token), "origin": "argv"})
+            continue
+        name, eq, value = token.partition("=")
+        if name in _SEED_FLAGS:
+            if eq and re.fullmatch(r"-?\d+", value):
+                seeds.append({"value": int(value), "origin": "argv"})
+            elif not eq:
+                expect_seed = True
+    if seeds:
+        step["seeds"] = seeds
+    if truncated:
+        step["truncated"] = True
+    if prefix_partial:
+        step["partial"] = True
+        step["reason"] = "unparsed-prefix"
+    return step
+
+
+def data_command_step(bash_cmd: str, named_paths: list[str] | None = None) -> dict[str, Any] | None:
+    """The argv of the data command's working stage: the first stage that
+    names one of the data paths the record lists, else the first stage that
+    does something other than change directory or set variables."""
+    import lineage_redact
+
+    named = [p for p in named_paths or [] if isinstance(p, str) and p]
+    fallback: dict[str, Any] | None = None
+    offset = 0
+    stages = 0
+    while offset < len(bash_cmd) and stages < 256:
+        stages += 1
+        suffix = _simple_command_suffix(bash_cmd, offset)
+        if suffix is None:
+            return fallback or {"partial": True, "reason": "unmodeled-shell-structure"}
+        argv = _simple_command_argv(suffix)
+        if argv:
+            words = [w for w in argv if not (_NAME_RX.fullmatch(w.partition("=")[0])
+                                              and "=" in w)]
+            if words and words[0] not in _NON_RUN_WORDS:
+                record = {"argv": lineage_redact.redact_argv(
+                    [w if len(w) <= STEP_TOKEN_MAX else w[:STEP_TOKEN_MAX] + "…[truncated]"
+                     for w in argv]), "executable": words[0]}
+                if named and any(any(p in w or w in p for p in named) for w in argv[1:]
+                                 if len(w) > 1):
+                    return {**record, "stage": "names-data"}
+                if fallback is None:
+                    fallback = {**record, "stage": "first-run-stage"}
+                if not named:
+                    return fallback
+        offset += len(suffix) + 1
+        while offset < len(bash_cmd) and bash_cmd[offset] in " \t;&|\n":
+            offset += 1
+    return fallback
+
+
 def _event_dict(
     args: argparse.Namespace,
     script_path: Path | None,
@@ -5869,10 +6363,133 @@ def _event_dict(
         "outputs": outputs,
         "io_detection": io_detection,
         "lineage_warnings": lineage_warnings,
-        "filters_detected": filters,
+        # `filters_detected` is no longer written (v2): it held unevaluated
+        # regex text. Evaluated row/feature access is a separate, in-process
+        # record (docs/plans/row-feature-access.md).
         "seeds_detected": seeds,
         **_observation_fields(args),
     }
+
+
+def _record_root(args: argparse.Namespace, cwd: Path) -> str | None:
+    """The physical repository root this record's paths are relative to.
+
+    The tracker passes the root it already resolved; without it (a direct
+    call), git is asked once and the answer is cached on ``args``.
+    """
+    cached = getattr(args, "_record_root", False)
+    if cached is not False:
+        return cached
+    raw = getattr(args, "repo_root", None)
+    root = Path(raw) if raw else _repository_root(cwd)
+    resolved = os.path.realpath(root) if root is not None else None
+    args._record_root = resolved
+    return resolved
+
+
+def _stamp_file_frame(record: dict, root: str | None) -> None:
+    """Add `rel_path`, the record's path relative to its own root, with the
+    observer's rules: no `..`, no symlinked component below the root. A
+    path that cannot be framed keeps `rel_path: null` and says why, so the
+    index never joins it to a repository path by guesswork."""
+    raw = record.get("path")
+    if not isinstance(raw, str):
+        return
+    if root is None:
+        record["rel_path"] = None
+        record["rel_path_reason"] = "no-repository-root"
+        return
+    import io_observer
+
+    rel, reason = io_observer.repo_relative_unfollowed(raw, root)
+    record["rel_path"] = rel
+    if reason is not None:
+        record["rel_path_reason"] = reason
+
+
+def _stamp_v2(record: dict, args: argparse.Namespace, cwd: Path) -> dict:
+    """Identity and frame every v2 lineage record carries.
+
+    `event_id` is minted here unless the builder already set one (data
+    commands do). `host_session_id` falls back to the observation's, which
+    the observer took from the same payload. `ts_ns` orders records within
+    a second; the observation's journal sequence orders writes without any
+    clock.
+    """
+    record.setdefault("event_id", uuid.uuid4().hex)
+    observation = getattr(args, "observation", None) or {}
+    record["host"] = getattr(args, "host", None) or record.get("host")
+    record["host_session_id"] = (
+        getattr(args, "host_session_id", None)
+        or observation.get("host_session_id")
+        or record.get("host_session_id")
+    )
+    record["ts_ns"] = time.time_ns()
+    root = _record_root(args, cwd)
+    record["repo_root"] = root
+    for key in ("inputs", "outputs"):
+        for file_rec in record.get(key) or []:
+            if isinstance(file_rec, dict):
+                _stamp_file_frame(file_rec, root)
+                _stamp_hash_origin(file_rec, is_input=key == "inputs")
+    step = record.get("step") if isinstance(record.get("step"), dict) else None
+    for config in (step or {}).get("config_files") or []:
+        if isinstance(config, dict) and isinstance(config.get("path"), str):
+            _stamp_file_frame(config, root)
+            if config.get("sha256") is not None:
+                _stamp_hash_origin(config, is_input=True)
+                if config.get("pre_run_proven") is False:
+                    # Changed (or unprovable) across the call: the digest is
+                    # of the file afterwards, not what the step read.
+                    config["effective"] = "unknown"
+    _redact_record(record)
+    return record
+
+
+@functools.lru_cache(maxsize=4)
+def _redact_command_cached(text: str) -> str:
+    """One redaction per command text, however many records repeat it."""
+    import lineage_redact
+
+    return lineage_redact.redact_command(text)
+
+
+def _redact_record(record: dict) -> None:
+    """Apply the one redaction policy to every command text the record
+    keeps. A changed embedded source gets the hash of the sanitized text,
+    labelled, so no digest of a secret-bearing body is stored."""
+    import lineage_redact
+
+    if isinstance(record.get("bash_cmd"), str):
+        record["bash_cmd"] = _redact_command_cached(record["bash_cmd"])
+    source = record.get("script_source")
+    if isinstance(source, str):
+        sanitized = lineage_redact.redact_source(source)
+        if sanitized != source:
+            record["script_source"] = sanitized
+            record["script_sha256"] = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
+            record["script_sha256_of"] = "sanitized"
+
+
+def _stamp_hash_origin(record: dict, *, is_input: bool) -> None:
+    """Say how a recorded hash was taken, so no reader overstates it.
+
+    - `pre-run-proven`: the bytes at the path matched the Pre snapshot (an
+      input the observer proved unchanged across the call).
+    - `hashed-at-post`: the observer's stable protocol hash, taken at Post,
+      without a pre-run proof.
+    - `hook-post`: the hook's plain digest at Post, with no stability or
+      timing guarantee (outputs, and inputs no proof was attempted for,
+      which 0.9.7 labelled `hash_status: hashed-at-post`).
+    """
+    if record.get("sha256") is None:
+        return
+    if is_input and record.get("pre_run_proven") is True:
+        record["hash_origin"] = "pre-run-proven"
+    elif is_input and record.get("hash_status") not in (None, "hashed-at-post"):
+        record["hash_origin"] = "hashed-at-post"
+    else:
+        record["hash_origin"] = "hook-post"
 
 
 def write_events(lines: list[str], append_to: Path | None) -> None:
@@ -5944,6 +6561,14 @@ def _record_unowned_data_command(
     if event is None:
         return
     event.update(keys)
+    if event.get("kind") == "data_command":
+        step = data_command_step(args.bash_cmd, event.get("named_paths"))
+        if step is not None:
+            event["step"] = step
+        _stamp_v2(event, args, cwd)
+    else:
+        event["ts_ns"] = time.time_ns()
+        _redact_record(event)
     # A failed append propagates: the guarded main exits 70, which the
     # tracker records as a `detector-failed` gap rather than silence.
     _append_with_stable_lock(args.data_command_to, json.dumps(event) + "\n")
@@ -6033,10 +6658,22 @@ def _apply_input_proofs(events: list[dict], args: argparse.Namespace, cwd: Path)
     observation = getattr(args, "observation", None) or {}
     snapshot = observation.get("pre_snapshot")
     state_dir = observation.get("state_dir")
-    root = _repository_root(cwd)
-    if not snapshot or not state_dir or root is None:
+    if not snapshot or not state_dir:
         return
-    paths = [r["path"] for e in events for r in e.get("inputs", []) if r.get("path")]
+    root_text = _record_root(args, cwd)
+    if root_text is None:
+        return
+    root = Path(root_text)
+
+    def proved_records(event: dict) -> list[dict]:
+        # Inputs, and the config files a step named: a config replaced
+        # during the call must not pass as the settings the step read.
+        step = event.get("step") if isinstance(event.get("step"), dict) else {}
+        configs = [c for c in step.get("config_files") or []
+                   if isinstance(c, dict) and c.get("sha256") is not None]
+        return [*event.get("inputs", []), *configs]
+
+    paths = [r["path"] for e in events for r in proved_records(e) if r.get("path")]
     if not paths:
         try:
             os.unlink(snapshot)
@@ -6048,7 +6685,7 @@ def _apply_input_proofs(events: list[dict], args: argparse.Namespace, cwd: Path)
 
     proofs = io_observer.prove_inputs(Path(state_dir), Path(snapshot), root, paths)
     for event in events:
-        for record in event.get("inputs", []):
+        for record in proved_records(event):
             proof = proofs.get(record.get("path"))
             if not proof:
                 continue
@@ -6113,6 +6750,15 @@ def main() -> int:
     ap.add_argument("--host", default=None)
     ap.add_argument("--host-session-id", default=None)
     ap.add_argument(
+        "--repo-root",
+        default=None,
+        help=(
+            "The repository root the hook resolved. Every record stores it "
+            "and frames its file paths relative to it (`rel_path`); without "
+            "it, git is asked."
+        ),
+    )
+    ap.add_argument(
         "--observation-json",
         default=None,
         help=(
@@ -6131,6 +6777,7 @@ def main() -> int:
 
     cwd = Path(args.cwd)
     detections = []
+    invocations: list[dict[str, Any]] = []
     analysis_named = is_analysis(args.bash_cmd)
     if analysis_named:
         detections = _detect_scripts_with_cwd(
@@ -6139,6 +6786,7 @@ def main() -> int:
             bash_exit=args.bash_exit,
             require_execution_evidence=True,
             include_inline=not args.check_post_action,
+            invocations=invocations,
         )
     if args.check_execution or args.check_post_action:
         if detections:
@@ -6154,7 +6802,11 @@ def main() -> int:
         # minimal record of its own kind, never an analysis event.
         event = build_data_command_event(args, cwd, analysis_named)
         if event is not None:
+            step = data_command_step(args.bash_cmd, event.get("named_paths"))
+            if step is not None:
+                event["step"] = step
             _apply_input_proofs([event], args, cwd)
+            _stamp_v2(event, args, cwd)
             write_events([json.dumps(event) + "\n"], args.append_to)
         else:
             _apply_input_proofs([], args, cwd)
@@ -6165,16 +6817,48 @@ def main() -> int:
 
     events: list[dict] = []
     unreadable: list[str] = []
-    for script_path, inline_source, effective_cwd in detections:
+    budget = ConfigBudget()
+    # Several runner stages in one call: the n-th runner detection is the
+    # n-th runner word, but only when the counts agree (a runner name in an
+    # echo would otherwise shift every stage).
+    runner_matches = list(_RUNNER_WORD_RX.finditer(args.bash_cmd))
+    runner_words = [m.start(1) for m in runner_matches]
+    runner_names = {os.path.basename(m.group(1)) for m in runner_matches}
+    runner_slots = [i for i, inv in enumerate(invocations) if inv.get("kind") == "runner"]
+    # Detection lists one runner type's stages in command order, but not
+    # different types relative to each other: assign only for one type.
+    if (len(runner_slots) > 1 and len(runner_words) == len(runner_slots)
+            and len(runner_names) == 1):
+        for slot, offset in zip(runner_slots, runner_words):
+            invocations[slot] = {**invocations[slot], "offset": offset}
+    dropped = max(0, len(detections) - MAX_EVENTS_PER_CALL)
+    detections = detections[:MAX_EVENTS_PER_CALL]
+    for index, (script_path, inline_source, effective_cwd) in enumerate(detections):
         event = build_event_for_detection(
             (script_path, inline_source), args, effective_cwd, git_sha
         )
         if event is not None:
+            invocation = invocations[index] if index < len(invocations) else None
+            step = build_step(args.bash_cmd, invocation, inline_source, effective_cwd, budget)
+            source_seeds = [{"value": v, "origin": "source"}
+                            for v in event.get("seeds_detected") or []]
+            if source_seeds:
+                step["seeds"] = [*step.get("seeds", []), *source_seeds]
+            event["step"] = step
             events.append(event)
         elif isinstance(script_path, Path):
             unreadable.append(str(script_path))
 
+    if dropped and events:
+        # A loop or generated chain of distinct runs: recording each with the
+        # whole command text would grow quadratically, so the rest is named.
+        events[-1]["lineage_warnings"].append(
+            f"This call ran {dropped} more analysis stage(s) than the "
+            f"{MAX_EVENTS_PER_CALL} recorded; their runs are not separately listed.")
+        events[-1]["stages_not_recorded"] = dropped
     _apply_input_proofs(events, args, cwd)
+    for event in events:
+        _stamp_v2(event, args, cwd)
     write_events([json.dumps(event) + "\n" for event in events], args.append_to)
     if args.append_to is not None:
         # A detected script that is gone or unreadable at hook time (often a

@@ -102,6 +102,72 @@ register_value(
 
 The provenance string lives in the manifest entry and is what Phase 6 of report-generator uses to re-verify the value against the on-disk artifact.
 
+### Hash-linked source (preferred for numbers read from a file)
+
+When the number is read from a file the analysis wrote, link it to that file's hash with `source=`. Write and close the file **first**: the source is hashed at registration.
+
+```python
+table.to_csv("outputs/tables/cell_qc.csv")        # written and closed
+register_value(
+    "n_passing",
+    n_passing,
+    source={"path": "outputs/tables/cell_qc.csv",
+            "locator": {"row": "passing", "column": "count"}},
+)
+```
+
+- `path`: relative paths resolve against the current working directory, as `open()` does. The path is stored relative to the project root (the nearest ancestor with `.living/`).
+- `locator`: required. It says where in the file the number comes from, either a non-empty string or a dict with any of `row`, `column`, `key`, `sheet`, `cell`, `query`. It is recorded as declared and is not evaluated.
+- `provenance`: when you don't give one, it becomes `"<path>:<locator>"`.
+
+The entry gains a `source` object:
+
+```json
+"source": {"path": "analysis/qc/outputs/tables/cell_qc.csv", "root": "repo",
+           "sha256": "…", "size_bytes": 1234,
+           "locator": {"row": "passing", "column": "count"}, "hashed_at": "…Z"}
+```
+
+`check_report_values.py` (`skills/core/scripts/`) recomputes each source's hash. It flags these as errors:
+
+- `stale-value`: the file changed;
+- `source-missing`: the file is gone;
+- `source-invalid`: a bad path, hash or locator;
+- `source-unreadable`: the file cannot be hashed.
+
+A number with no source is an `unchecked-value` warning. The HTML report gate and `sync_html_report.py` run the same check, and the TeX gate runs it as an explicit step.
+
+**A number that depends on more than one file** lists them all. The usual case is a table plus the config that set its threshold. A threshold change can leave the table byte-identical while changing the number, so linking only the table would never flag it.
+
+```python
+register_value(
+    "n_genes_up",
+    n_up,
+    source=[
+        {"path": "outputs/gene_means.csv", "locator": {"column": "ratio"}},
+        {"path": "params.yaml", "locator": {"key": "ratio_threshold"}},
+    ],
+)
+```
+
+The entry then carries `sources` (a list) instead of `source`, and the number is `stale-value` when any of the files changes.
+
+A config is usually read at the start of a run and the number registered at the end. If the config could change in between, hash it when you read it with `snapshot_source`. Registration then refuses a file that changed since:
+
+```python
+from register_value import register_value, snapshot_source
+
+cfg_source = snapshot_source("params.yaml", {"key": "ratio_threshold"})
+threshold = yaml.safe_load(open("params.yaml"))["ratio_threshold"]
+...
+register_value("n_genes_up", n_up, source=[
+    {"path": "outputs/gene_means.csv", "locator": {"column": "ratio"}}, cfg_source])
+```
+
+**A stale number is fixed by rerunning the analysis that registers it, then redoing the Phase 1 merge.** Never edit or refresh `source.sha256` by hand. That would certify a number computed from bytes that no longer exist.
+
+If you vendor `register_value.py` into a project (`analysis/_lib/`), copy the new version to get `source=`. Older vendored copies keep working, without hash links.
+
 ### What gets written
 
 After your analysis runs, `analysis/<name>/outputs/numbers.json` looks like:
@@ -133,6 +199,43 @@ After your analysis runs, `analysis/<name>/outputs/numbers.json` looks like:
 ```
 
 Entries are sorted by `key` for deterministic diffs.
+
+## Recording which rows and features a step used (`record_ids`)
+
+Hooks see which files a step read and wrote, not which cells, samples or genes inside them it used. The same vendored file provides `record_ids`, so an analysis can record that at the points that matter: after QC, after a filter, for a train/test split, and for the genes a test ran on.
+
+```python
+from register_value import record_ids
+
+record_ids("cells_after_qc", adata.obs_names, axis="row", role="used")
+record_ids("cells_dropped_qc", dropped.obs_names, axis="row", role="excluded")
+record_ids("genes_tested", res.index, axis="feature", role="used")
+record_ids("test_cells", test.obs_names, axis="row", role="used", ordered=False)
+```
+
+- `axis` is `row` (cells, samples, observations) or `feature` (genes, variables).
+- `role` is `read`, `used`, `written` or `excluded`.
+- `source=` (optional) hashes the file the ids came from. Only the path and digest are kept, never a locator, since free text could carry an id.
+- Ids must be non-empty strings. Convert numbers deliberately (`str(x)`, or in R `format(x, scientific = FALSE)`), because R and Python print numbers differently and the fingerprints would not match.
+
+Only a count, a distinct count, and a fingerprint of the id set are stored, never the ids. The fingerprint is the sha256 of the sorted distinct ids, so order does not matter; with `ordered=True`, an order fingerprint is kept too. Records go to `analysis/<name>/outputs/access.json`, one per name, and re-recording a name replaces it.
+
+With these records, a reader such as Warrant can catch:
+
+- two numbers that claim the same population but used different cells;
+- a test set that overlaps a training set;
+- a QC drop that differs from what the report says.
+
+Record at filter, subset and split steps. Mycelium recommends it but does not require it.
+
+**R:** vendor `skills/core/scripts/record_access.R` next to `register_value.py`, then:
+
+```r
+source("analysis/_lib/record_access.R")
+record_ids("cells_after_qc", colnames(sce), axis = "row", role = "used")
+```
+
+It calls the Python helper's command line, so R and Python write identical records. It looks for the helper through `MYCELIUM_REGISTER_VALUE`, then `analysis/_lib/register_value.py`, then the plugin root. It uses Python from `MYCELIUM_PYTHON`, default `python3`.
 
 ## Collisions
 

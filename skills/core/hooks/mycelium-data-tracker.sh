@@ -175,6 +175,7 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
       --ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       --bash-cmd "$COMMAND" \
       --check-execution \
+      --repo-root "$REPO_ROOT" \
       ${DATA_COMMAND_FLAGS[@]+"${DATA_COMMAND_FLAGS[@]}"} \
       ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} \
       ${OBSERVATION_FLAGS[@]+"${OBSERVATION_FLAGS[@]}"} >/dev/null 2>&1 || CHECK_STATUS=$?
@@ -228,11 +229,18 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
   if [[ "$STRICT_CAPTURE" == "1" ]]; then
     EXTRACTOR_ERR=$(mktemp "${TMPDIR:-/tmp}/mycelium-extractor-err.XXXXXX")
   fi
+  # Identity for the v2 record: host, host session, and the root its paths
+  # are framed against. The host is kept even without a session id.
+  IDENTITY_FLAGS=(--host "$(mycelium_hook_host)" --repo-root "$REPO_ROOT")
+  if [[ -n "$OBS_SID" ]] && mycelium_valid_session_id "$OBS_SID"; then
+    IDENTITY_FLAGS+=(--host-session-id "$OBS_SID")
+  fi
   EXTRACTOR_OUT=$(python3 "$HELPER" \
     --cwd "$SESSION_CWD" \
     --ts "$TS" \
     --bash-cmd "$COMMAND" \
     --append-to "$EVENTS_FILE" \
+    "${IDENTITY_FLAGS[@]}" \
     ${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"} \
     ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} \
     ${OBSERVATION_FLAGS[@]+"${OBSERVATION_FLAGS[@]}"} 2>"$EXTRACTOR_ERR") || EXTRACTOR_STATUS=$?

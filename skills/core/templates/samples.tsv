@@ -1,0 +1,9 @@
+sample_id	condition	line	derivation	prep	dish	library	prep_date	sequencing_run
+S01	control	L1	L1-D1	L1-D1-P1	L1-D1-P1-d1	lib01	2026-03-02	run1
+S02	control	L1	L1-D1	L1-D1-P1	L1-D1-P1-d2	lib02	2026-03-02	run1
+S03	control	L2	L2-D1	L2-D1-P1	L2-D1-P1-d1	lib03	2026-03-09	run2
+S04	control	L2	L2-D1	L2-D1-P1	L2-D1-P1-d2	lib04	2026-03-09	run2
+S05	treated	L1	L1-D2	L1-D2-P1	L1-D2-P1-d1	lib05	2026-03-02	run1
+S06	treated	L1	L1-D2	L1-D2-P1	L1-D2-P1-d2	lib06	2026-03-02	run2
+S07	treated	L2	L2-D2	L2-D2-P1	L2-D2-P1-d1	lib07	2026-03-09	run1
+S08	treated	L2	L2-D2	L2-D2-P1	L2-D2-P1-d2	lib08	2026-03-09	run2

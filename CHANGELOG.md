@@ -7,7 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A project-level lineage index** (`skills/core/scripts/lineage_index.py`).
+  It answers three questions across sessions: which events read a content
+  hash, which call produced it, and whether that write is still current.
+  `query --hash`, `--path` and `--event` return:
+  - a record verdict: `current-in-record`, `superseded` (naming the
+    superseding call), `superseded-unverified`, or `unknown` with reasons;
+  - a separate disk check.
+
+  The headline is `current` only when both agree. How it decides:
+  - Writes come from observations, one set per call.
+  - Order comes only from the observer's call journal, never clocks.
+  - A gap the record cannot rule out makes the verdict `unknown`.
+  - Readers carry their `hash_origin`, so proven reads are told apart from
+    weaker digests.
+
+  The index is a derived, per-checkout cache rebuilt incrementally on query.
+  It never runs on the hook path.
+- **v2 lineage records.**
+  - Every analysis event and data command gets an identity: `event_id`,
+    `host`, `host_session_id`, `ts_ns` and `repo_root`.
+  - File records get a framed `rel_path` and a `hash_origin`.
+  - Manifests carry `schema: mycelium.data_lineage.manifest.v2` and are
+    written atomically.
+  - Observations (version 2) record their journal position and checkout.
+  - A Post against another checkout's Pre snapshot claims nothing.
+  - Edit tools (Write, Edit, MultiEdit, NotebookEdit, and Codex apply_patch)
+    are now observed by path, with post-edit hashes taken before the call's
+    interval closes.
+
+  0.9.7 manifests and observations still load, as v1.
+- **Step settings.** Each event has a `step`: the matched stage's own argv,
+  interpreter, script arguments, environment assignments, config files and
+  literal seeds.
+  - Two runs of one script with different arguments are two events.
+  - Config files follow per-interpreter operand rules, are hashed under one
+    budget per call, and are proven against the Pre snapshot like inputs.
+  - A call with more than 64 analysis stages records the first 64 and says
+    so.
+- **One redaction policy** (`lineage_redact.py`) for every stored command
+  text: events, data commands, observations, skips, `step` fields, and
+  embedded script source. It covers secret-named assignments and options,
+  URL passwords, auth headers, and quoted secret literals in code. Values
+  are redacted, never hashed.
+- **Hash-linked report values.**
+  - `register_value(..., source={"path", "locator"})` records the source
+    file's repository-relative path, SHA-256 and locator.
+  - New `check_report_values.py` flags a number whose source changed
+    (`stale-value`), is gone, or is malformed. Unlinked numbers are
+    `unchecked-value` warnings.
+  - `sync_html_report.py` blocks on stale numbers, and `check_html_report.py
+    --manifest` and the TeX gate run the same check.
+  - Fragment writes take a sidecar lock, so parallel scripts no longer drop
+    entries.
+  - The fix for a stale number is to rerun its analysis, never to refresh
+    the hash.
+- **A standard sample ledger.** `samples.tsv` with a `samples.ledger.json`
+  spec (templates in `skills/core/templates/`) names the sample id, group,
+  replication nesting and crossed batch variables. The ingest skill writes it.
+  `data_contract_check.py --ledger` checks unique ids, nesting, units per
+  group (`rows: samples`), each batch against the group (the existing
+  `batch_confounding`), and pairing. `--emit-contract` gives analyses a
+  starting contract, with its table path relative to `--root`.
+  - New check kinds: `unique`, `nesting`, and `batch_estimability`.
+    `batch_estimability` blocks when batch columns adjusted for together
+    make a contrast level inestimable, even if each passes alone.
+  - `unit_of_replication` gains `rows: samples` and `unit_scope` (local
+    labels), and `batch_confounding` gains `batch_scope`.
+  - `pairing` blocks with fewer than two levels.
+  - A ledger pairing may declare its expected levels. When the pairing
+    licenses units across groups, it must cover every group present.
+- **`skills/core/references/provenance-schema.json`**, one JSON Schema file
+  for manifests (v1 and v2), events, data commands, skips, observations, index
+  results, report fragments, numbers, findings and the ledger. Tests validate
+  real outputs against it, and CI requires the validator.
+- **Row and feature access records (item 7).** `record_ids(name, ids,
+  axis=row|feature, role=read|used|written|excluded)` in `register_value.py`
+  records which cells, samples or genes a step used or dropped. It stores a
+  count, a distinct count and a fingerprint of the id set (never the ids) in
+  `analysis/<name>/outputs/access.json`. `record_access.R` is the R version;
+  it shares the Python implementation through `register_value.py record-ids`.
+  The analyze skill recommends it at filter, subset and split steps. Design and
+  decisions: `docs/plans/row-feature-access.md`.
+- **Multi-file report sources.** `register_value(..., source=[...])` links a
+  number to several files, for example the table and the config that set its
+  threshold. The number is stale when any of them changes. Live runs showed
+  why: a threshold change left the table byte-identical while changing the
+  number.
+
 ### Changed
+
+- `filters_detected` is no longer recorded. It held unevaluated regex text
+  with false positives, and nothing read it. Historical records keep it.
+  Seeds now skip string literals and recognize R `set.seed`.
 
 - The README's Codex install section now says where to approve hooks in the
   desktop app (Settings → Hooks, under From Plugins, or the composer's

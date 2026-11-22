@@ -475,6 +475,29 @@ def check_file(path: str | Path, **kwargs) -> list[Finding]:
     return check_source(p.read_text(encoding="utf-8"), str(p), **kwargs)
 
 
+def _value_findings(manifest_path: Path, repo_root: str | None,
+                    report: Path) -> tuple[list[Finding], str | None]:
+    """Freshness of the manifest's hash-linked numbers, as report findings
+    (`stale-value`, `source-missing`, `source-invalid`, `source-unreadable`
+    errors; `unchecked-value` warnings). Shares check_report_values."""
+    import json
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import check_report_values
+
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+        entries = check_report_values.number_entries(document)
+    except FileNotFoundError:
+        return [], f"not found: {manifest_path}"
+    except (OSError, ValueError) as exc:
+        return [], f"{manifest_path}: {exc}"
+    root = check_report_values.resolve_repo_root(
+        manifest_path.parent, Path(repo_root) if repo_root else None)
+    return [Finding(f["code"], f["severity"], 0, 0, f"number {f.get('id')!r}: {f['message']}")
+            for f in check_report_values.check_numbers(entries, root)], None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="check_html_report", description="Check an HTML report's structure and slides")
     parser.add_argument("paths", nargs="+", help="report .html files")
@@ -484,7 +507,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report-only", action="store_true",
                         help="skip the deck rules (Phase 7 before Phase 9 has written the slides)")
     parser.add_argument("--template", default=None, help="template to compare the runtime block against")
+    parser.add_argument("--manifest", default=None,
+                        help="the report's .manifest.json: also check that every hash-linked "
+                             "number still matches its source file (one report path only)")
+    parser.add_argument("--repo-root", default=None,
+                        help="project root number sources are relative to "
+                             "(default: nearest ancestor with .living/)")
     args = parser.parse_args(argv)
+    if args.manifest and len(args.paths) != 1:
+        print("--manifest checks one report: pass exactly one report path", file=sys.stderr)
+        return 2
+    value_findings: list[Finding] = []
+    if args.manifest:
+        value_findings, problem = _value_findings(Path(args.manifest), args.repo_root,
+                                                  Path(args.paths[0]))
+        if problem:
+            print(problem, file=sys.stderr)
+            return 2
     failed = False
     for raw in args.paths:
         path = Path(raw)
@@ -493,7 +532,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         extra = {"template": Path(args.template)} if args.template else {}
         findings = check_file(path, min_slides=args.min_slides, max_slides=args.max_slides,
-                              report_only=args.report_only, **extra)
+                              report_only=args.report_only, **extra) + value_findings
         for f in findings:
             print(f"{path}:{f.line}:{f.col}: [{f.code}] {f.severity}: {f.message}")
         errors = [f for f in findings if f.severity == "error" or args.strict]

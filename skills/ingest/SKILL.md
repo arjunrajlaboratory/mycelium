@@ -44,6 +44,9 @@ Pull a new dataset into the analytical framework, ensuring it is properly docume
    - `summary_stats.md` — row counts, column distributions, missing data summary
    - Use the templates at `skills/core/templates/schema.yaml`, `skills/core/templates/provenance.md`, and `skills/core/templates/summary_stats.md` as starting points.
    - Required fields: source, date acquired, schema/column descriptions, known issues, access restrictions.
+   - **When the data has samples, write a sample ledger.** Write `samples.tsv` with one row per sample: its id, its group, every replication level from coarse to fine (for example line, derivation, preparation, dish, library), and the crossed batch variables (preparation date, sequencing run). Write `samples.ledger.json` to name those columns, starting from `skills/core/templates/samples.ledger.json` and `samples.tsv`. Point `schema.yaml`'s `sample_ledger:` at the spec. Then run:
+     `python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/data_contract_check.py" --ledger data/metadata/[dataset-name]/samples.ledger.json`
+     The run checks unique sample ids, that each level nests in the one above it, at least two replication units per group, each batch variable against the group, and any declared pairing. Fix a block in the ledger or the data, or record it as a known issue. Never loosen the spec to make it pass. A batch variable listed as a replication level at or below the unit is a spec error: nested preparation instances belong in `nesting`, and calendar batches belong in `batch`.
 
 7. **Update `data/DATA_MANIFEST.md`** with a new entry using `skills/core/templates/dataset-manifest-entry.yaml`.
 

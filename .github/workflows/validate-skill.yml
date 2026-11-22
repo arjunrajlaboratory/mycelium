@@ -16,6 +16,10 @@ on:
   push:
     branches: [main]
 
+env:
+  # The provenance schema test must run, never skip, in CI.
+  MYCELIUM_REQUIRE_JSONSCHEMA: "1"
+
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -35,7 +39,8 @@ jobs:
       - name: Install dependencies
         run: |
           # The Antigravity lineage tests execute pandas scripts in subprocesses.
-          pip install pytest pytest-xdist pyyaml pandas
+          # jsonschema validates real lineage outputs against provenance-schema.json.
+          pip install pytest pytest-xdist pyyaml pandas jsonschema
           # data_contract_check reads .h5ad obs through h5py; its tests skip without it.
           pip install h5py
 
@@ -189,7 +194,8 @@ jobs:
       - name: Install dependencies
         run: |
           # The Antigravity lineage tests execute pandas scripts in subprocesses.
-          pip install pytest pytest-xdist pyyaml pandas
+          # jsonschema validates real lineage outputs against provenance-schema.json.
+          pip install pytest pytest-xdist pyyaml pandas jsonschema
 
       - name: Test init and validate scripts (macOS)
         run: |

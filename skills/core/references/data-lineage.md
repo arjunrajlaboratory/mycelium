@@ -263,9 +263,20 @@ not enter `summary.unique_inputs`/`unique_outputs`.
 
 ## Event schema (NDJSON, one line per detected script)
 
+The authoritative field definitions for every record below, for v1 (0.9.7
+and earlier) and v2 (0.9.8 onward), are in
+[`provenance-schema.json`](provenance-schema.json) (JSON Schema 2020-12).
+That file is what Warrant and other readers validate against. This section
+describes the fields; where the two differ, the schema file wins.
+
 ```json
 {
   "ts": "2026-05-26T15:32:11Z",
+  "event_id": "9f2c…",          # v2
+  "host": "claude",              # v2
+  "host_session_id": "…",        # v2
+  "ts_ns": 1764000000000000000,  # v2
+  "repo_root": "/path/to/repo",  # v2: the frame for every rel_path
   "agent_id": null,
   "agent_type": null,
   "bash_cmd": "python analysis/foo.py",
@@ -276,14 +287,74 @@ not enter `summary.unique_inputs`/`unique_outputs`.
   "script_source": "...",
   "script_candidate": null,
   "git_sha": "c3d4...",
-  "inputs":  [{"path", "sha256", "size_bytes", "n_rows"?}],
-  "outputs": [{"path", "sha256", "size_bytes"}],
+  "inputs":  [{"path", "rel_path", "sha256", "size_bytes", "hash_origin", "pre_run_proven"?}],
+  "outputs": [{"path", "rel_path", "sha256", "size_bytes", "hash_origin",
+               "observed_change"?, "observed_sha256"?}],
   "io_detection": "static",
   "lineage_warnings": [],
-  "filters_detected": ["df.query(...)", ...],
-  "seeds_detected": [42, ...]
+  "seeds_detected": [42, ...],
+  "step": {"argv", "interpreter", "script_args", "env", "config_files", "seeds"}  # v2
 }
 ```
+
+### v2 identity and frame (0.9.8)
+
+- **`event_id`, `host`, `host_session_id`, `ts_ns`.** Every analysis event
+  and data command now has an identity. `ts_ns` orders records within a
+  second. Write order between calls comes only from the observation's
+  `journal` (`id`, `pre_seq`, `post_seq`, `expired`), never from clocks.
+- **`repo_root` and `rel_path`.** `repo_root` is the physical checkout the
+  hook resolved. Each file record's `rel_path` is relative to it, framed with
+  the observer's rules: no `..`, no symlinked component below the root. A path
+  that cannot be framed has `rel_path: null` and a `rel_path_reason`.
+- **`hash_origin`.** Says how each hash was taken:
+  - `pre-run-proven`: the bytes matched the Pre snapshot;
+  - `hashed-at-post`: the observer's stable hash at Post;
+  - `hook-post`: the hook's plain digest after the call;
+  - `unknown`: a 0.9.7 record.
+
+  Outputs also carry `observed_sha256` (the observation's protocol hash) where
+  the call's observation saw them change. The hook digest is never promoted
+  to an observed hash.
+
+### Step settings (`step`, v2)
+
+Read from the detected stage's own text, never guessed:
+
+- `argv`, `executable`, `interpreter` and `script_args`. Inline `-c`/`-e`
+  bodies become `{"inline_sha256", "length"}`.
+- `env`: assignment and `env VAR=x` prefixes of that stage. Unexpanded
+  `$VAR` values are marked `expanded: false`.
+- `config_files`: named by interpreter-specific operand rules, then hashed
+  within one budget per call (8 files, 5 MB each, 250 ms) and proven
+  against the Pre snapshot like inputs. A config that changed during the call
+  is `effective: unknown`.
+- `seeds`: literal seeds from argv (`--seed N`) and source (`np.random.seed`,
+  `set.seed`), with their origin.
+
+Two runs of one script with different arguments are two events. Identical
+stages (a loop body) are one. A call with more than 64 analysis stages records
+the first 64, with `stages_not_recorded`.
+
+`filters_detected` is no longer written. It held unevaluated regex text with
+false positives, and nothing read it. Historical records keep it. Evaluated
+row and feature access is a separate, in-process record (see
+`docs/plans/row-feature-access.md`).
+
+### Redaction
+
+Every stored command text goes through one policy (`lineage_redact.py`):
+`bash_cmd`, `argv`, `script_args`, `env`, embedded `script_source`, and the
+`bash_cmd` of observations and skips. These values become `<redacted>`:
+
+- secret-named assignments and options (token, secret, password, api key,
+  credential, auth, cookie);
+- URL passwords;
+- `Authorization:` header values;
+- quoted secret literals in code.
+
+Nothing is hashed, because a short secret's digest can be guessed. A
+redacted embedded source has `script_sha256_of: "sanitized"`.
 
 `bash_exit` is populated when the host exposes a Bash exit code. Conditional
 analysis commands are recorded only when the status or a statically known
@@ -339,6 +410,7 @@ captured.
 
 ```json
 {
+  "schema": "mycelium.data_lineage.manifest.v2",   # absent in v1 (0.9.7 and earlier)
   "session_id": "2026-05-26-099",
   "repo_root": "/path/to/repo",
   "git_sha": "c3d4...",
@@ -365,6 +437,10 @@ captured.
 }
 ```
 
+Manifests are written atomically: a reader sees the old file or the new
+one, never a torn file. Re-consolidating a v1 record into a v2 manifest
+keeps it v1-shaped (no identity, `hash_origin` unknown).
+
 `skipped` and `summary.skipped_count` were added after 0.9.5. A manifest written
 earlier has neither key: read its coverage as unknown, not as zero skips. The
 same holds for `data_commands` and `summary.data_command_count`.
@@ -381,6 +457,46 @@ codes: an unknown exit is neither a success nor a failure.
 list, and to `(unresolved <candidate>)` for an R run whose script is
 uncertain. Repeated invocations of the same inline source collapse to one
 entry.
+
+## The project index: `lineage_index.py`
+
+`skills/core/scripts/lineage_index.py` answers provenance questions across
+sessions for one checkout:
+
+```bash
+python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/lineage_index.py" query --hash <sha256>
+python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/lineage_index.py" query --path data/processed/x.csv
+python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/lineage_index.py" query --event <event_id>
+```
+
+**Sources.** It reads every manifest and every local observation store.
+Observation stores include edit-tool observations (Write, Edit, apply_patch
+by path) and Bash calls no event referenced.
+
+**Writes.** These come from observations, one set per call. A manifest
+committed from another checkout contributes readers but never writes.
+
+**Statuses.** For each write, the index reports:
+
+- a **record** status: `current-in-record`, `superseded` (naming the
+  superseding call), `superseded-unverified`, or `unknown` with reasons
+  (`order-unproven`, `gap`, `unwatched-path`, `write-hash-unknown`,
+  `inferred-write`, …);
+- a separate **disk** result: `match`, `differs`, `missing`, `unverified`.
+
+The headline is `current` only when both agree. Supersession needs journal
+order and two known, different hashes. A gap the record cannot rule out makes
+the status `unknown`, never `current`. Examples of such gaps: an unavailable,
+missing or unresolved observation, a capped diff, an unwatched scope.
+
+**Readers.** Readers are listed with their `hash_origin`, proven first. A
+hook cannot see reads, so every read stays inferred.
+
+**Cache.** The index is cached per checkout under
+`.mycelium/lineage/index-<root hash>.json`. It is rebuilt incrementally from
+changed sources on every query, is never committed, and never runs on the
+hook path. `--record-only` skips the disk, and `--no-write` never writes the
+cache. Exit codes: 0 answered, 1 nothing recorded, 2 bad input.
 
 ## Detection coverage
 
@@ -418,8 +534,8 @@ entry.
 **Data I/O patterns scanned in the script body** (case-sensitive Python idioms):
 - Reads: `pd.read_{parquet,csv,tsv,feather,hdf,h5,json,excel,stata,sas,orc,pickle,table}`, `ad.read_h5ad`, `ad.read_csv`, `np.load`, `xr.open_{dataset,dataarray,zarr,mfdataset}`, `sc.read{,_h5ad,_csv,_mtx,_10x_h5,_10x_mtx}`
 - Writes: `.to_{parquet,csv,tsv,feather,hdf,h5,json,excel,stata,sas,orc,pickle,table}`, `.write_{csv,parquet,json,h5ad}`, `np.save{,_compressed,z}`, `(plt|fig|ax).savefig`, `.to_netcdf`
-- Filters: `.query(…)`, `.sample(…)`, `.filter(…)`, boolean masks (`df[df.col > x]` / `df[df['col'] != '']`), `.loc[…]` / `.iloc[…]`, `.merge(…)`, `.join(…)`, `pd.concat(…)`
-- Seeds: `np.random.seed(N)`, `random.seed(N)`, `torch.manual_seed(N)`, `np.random.default_rng(N)`
+- Seeds: `np.random.seed(N)`, `random.seed(N)`, `torch.manual_seed(N)`, `np.random.default_rng(N)`, and R `set.seed(N)`; a call inside a string literal or comment is not a seed
+- Filters are no longer scanned (see *Step settings*)
 
 **Not statically resolved (recorded as warnings)**:
 - R-side I/O (only R *invocation* is detected, not its inputs/outputs)
@@ -448,7 +564,7 @@ Both hooks deliberately use plain regex (not AST) so they can scan inline
 `-c` snippets without parsing. Adding a new I/O pattern:
 
 1. Add a `re.compile(...)` to the relevant list in `extract_data_lineage_event.py`
-   (`INPUT_REGEXES`, `OUTPUT_REGEXES`, `FILTER_REGEXES`, or `SEED_REGEXES`).
+   (`INPUT_REGEXES`, `OUTPUT_REGEXES`, `SEED_REGEXES`, or the R lists `R_INPUT_REGEXES`, `R_OUTPUT_REGEXES`, `R_SEED_REGEXES`).
 2. Add a test case to `test_extract_data_lineage_event.py`.
 3. Run `python3 -m pytest skills/core/scripts/test_extract_data_lineage_event.py -v`.
 
