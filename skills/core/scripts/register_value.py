@@ -229,10 +229,8 @@ def _register_locked(
             return  # same value, same key, no new source: a no-op
         # Same value, newly linked (or relinked) source: record it.
 
-    outputs_dir = analysis_root / "outputs"
-    outputs_dir.mkdir(parents=True, exist_ok=True)
     _upsert_fragment(
-        outputs_dir / "numbers.json",
+        _outputs_file(analysis_root, "numbers.json"),
         namespace=ns,
         key=key,
         value=value,
@@ -254,6 +252,34 @@ def _repo_root(start: Path, analysis_root: Path) -> Path:
             if (candidate / marker).exists():
                 return candidate
     return analysis_root.parent.parent
+
+
+def _outputs_file(analysis_root: Path, name: str, *,
+                  error: type[ValueRegistrationError] = ValueRegistrationError) -> Path:
+    """``analysis_root/outputs/<name>``, refusing a destination that a link
+    would redirect: the analysis root must lie inside the project, and
+    neither ``outputs`` nor the file (nor its lock) may be a symlink. The
+    lock, the temporary file and the replace all go through this path, so
+    one symlinked ``outputs`` could otherwise write outside the project."""
+    root = _repo_root(analysis_root, analysis_root)
+    real_root = os.path.realpath(root)
+    real_analysis = os.path.realpath(analysis_root)
+    if os.path.commonpath([real_root, real_analysis]) != real_root:
+        raise error(f"register_value: {analysis_root} resolves outside the project {root}")
+    outputs = analysis_root / "outputs"
+    if outputs.is_symlink():
+        raise error(f"register_value: {outputs} is a symlink; refusing to write through it")
+    if not outputs.exists():
+        outputs.mkdir()
+    elif not outputs.is_dir():
+        raise error(f"register_value: {outputs} is not a directory")
+    target = outputs / name
+    for candidate in (target, Path(f"{target}.lock")):
+        if candidate.is_symlink():
+            raise error(f"register_value: {candidate} is a symlink; refusing to write through it")
+    if os.path.realpath(outputs) != os.path.join(real_analysis, "outputs"):
+        raise error(f"register_value: {outputs} does not resolve inside {analysis_root}")
+    return target
 
 
 def _locator_text(locator: Any) -> str:
@@ -350,11 +376,30 @@ def snapshot_source(path: Any, locator: Any = None) -> dict[str, Any]:
         ...
         register_value("n_up", n_up, source=[table_source, cfg_source])
     """
-    digest, _ = _hash_source(Path(os.path.abspath(os.fspath(path))))
-    entry: dict[str, Any] = {"path": os.fspath(path), "sha256": digest}
+    absolute = _absolute_source_path(path)
+    digest, _ = _hash_source(Path(absolute))
+    # The absolute path, fixed now: registration validates this same file
+    # even if the working directory changes in between.
+    entry: dict[str, Any] = {"path": absolute, "sha256": digest}
     if locator is not None:
         entry["locator"] = locator
     return entry
+
+
+def _absolute_source_path(path: Any) -> str:
+    """The absolute path of a source read now, against the current working
+    directory (which ``os.getcwd`` reports without symlinks). Components are
+    kept as given, not collapsed, so registration still refuses a ``..`` or a
+    symlinked component exactly as it would for the original path."""
+    if not isinstance(path, (str, os.PathLike)) or not os.fspath(path):
+        raise ValueRegistrationError("register_value: source needs a path")
+    text = os.fspath(path)
+    if isinstance(text, bytes):
+        raise ValueRegistrationError("register_value: a source path must be text")
+    if ".." in Path(text).parts:
+        raise ValueRegistrationError(
+            f"register_value: source path {text!r} must not contain `..`")
+    return text if os.path.isabs(text) else os.path.join(os.getcwd(), text)
 
 
 def read_source(path: Any, locator: Any = None, *, mode: str = "rb") -> tuple[Any, dict[str, Any]]:
@@ -369,9 +414,12 @@ def read_source(path: Any, locator: Any = None, *, mode: str = "rb") -> tuple[An
 
     Registration refuses the file if it no longer has those bytes.
     """
-    with open(os.fspath(path), "rb") as handle:
+    absolute = _absolute_source_path(path)
+    with open(absolute, "rb") as handle:
         data = handle.read()
-    entry: dict[str, Any] = {"path": os.fspath(path),
+    # The absolute path of the file actually read, so a later change of the
+    # working directory cannot link an identical file elsewhere instead.
+    entry: dict[str, Any] = {"path": absolute,
                              "sha256": hashlib.sha256(data).hexdigest()}
     if locator is not None:
         entry["locator"] = locator
@@ -508,7 +556,9 @@ def _fragment_lock(path: Path):
     if fcntl is None:
         yield
         return
-    fd = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT, 0o644)
+    # O_NOFOLLOW: a lock replaced by a symlink after the destination check
+    # is refused rather than followed.
+    fd = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -621,6 +671,12 @@ def id_set_fingerprint(ids: Any) -> tuple[str, int, int, str]:
     """
     import unicodedata
 
+    if isinstance(ids, (str, bytes, bytearray)):
+        # A string is iterable, but per character: "cell_1" would be
+        # recorded as six one-letter ids.
+        raise AccessRecordError(
+            "record_ids: ids must be a collection of ids, not a single "
+            f"{type(ids).__name__}; to record one id, wrap it in a list ([id])")
     texts = []
     for item in ids:
         if not isinstance(item, str):
@@ -721,8 +777,7 @@ def _record_ids_at(name: str, ids: Any, *, axis: str, role: str, source: Any, ns
         hashed = _source_entry({"path": path_only, "locator": "file"}, analysis_root)
         entry["source"] = {k: hashed[k] for k in ("path", "root", "sha256", "size_bytes",
                                                    "hashed_at")}
-    path = analysis_root / "outputs" / "access.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = _outputs_file(analysis_root, "access.json", error=AccessRecordError)
     with _REGISTER_LOCK, _fragment_lock(path):
         document: dict[str, Any] = {"namespace": ns, "records": []}
         if path.exists():
@@ -766,7 +821,8 @@ def _main(argv: list[str] | None = None) -> int:
     """Command line, so other languages (the R helper) share this one
     implementation: ``register_value.py record-ids --analysis-root DIR
     --name N --axis row --role used --ids-file F [--source P] [--ordered]
-    [--computed-at SCRIPT:LINE]``. Ids are read one per line."""
+    [--computed-at SCRIPT:LINE] [--run-pid PID --run-started-at TIME]``
+    (the two run options go together). Ids are read one per line."""
     import argparse
 
     parser = argparse.ArgumentParser(prog="register_value.py")
@@ -784,6 +840,15 @@ def _main(argv: list[str] | None = None) -> int:
                      help="The calling analysis process (the R session), not this helper.")
     rec.add_argument("--run-started-at", default=None)
     args = parser.parse_args(argv)
+    if (args.run_pid is None) != (args.run_started_at is None):
+        # The run is one process: a pid without its start time (or the
+        # reverse) cannot identify it, and a null field breaks the schema.
+        print("register_value: --run-pid and --run-started-at must be given together",
+              file=sys.stderr)
+        return 2
+    if args.run_started_at is not None and not args.run_started_at.strip():
+        print("register_value: --run-started-at must not be empty", file=sys.stderr)
+        return 2
     root = Path(os.path.abspath(args.analysis_root))
     if root.parent.name != "analysis" or not root.is_dir():
         print("register_value: --analysis-root must be an existing analysis/<name> directory",

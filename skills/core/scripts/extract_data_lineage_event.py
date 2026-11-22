@@ -3969,9 +3969,15 @@ def _detect_scripts_with_cwd(
     seen_unresolved: set[tuple[UnresolvedScript, Path, str]] = set()
     seen_inline: set[tuple[str, Path | None, Any]] = set()
 
-    def record(offset: int | None, kind: str, word: str | None = None) -> None:
+    def record(offset: int | None, kind: str, word: str | None = None,
+               form: str | None = None) -> None:
         if invocations is not None:
-            invocations.append({"offset": offset, "kind": kind, "script_word": word})
+            entry: dict[str, Any] = {"offset": offset, "kind": kind, "script_word": word}
+            if form is not None:
+                # `r-file`: an `R -f`/`R --file=` run, whose script arguments
+                # follow `--args` rather than the script word.
+                entry["form"] = form
+            invocations.append(entry)
     inline_patterns = (RX_PYTHON_C, RX_R_E, RX_RSCRIPT_E) if include_inline else ()
     for pattern in inline_patterns:
         inline_language = "python" if pattern is RX_PYTHON_C else "r"
@@ -4069,7 +4075,8 @@ def _detect_scripts_with_cwd(
                     )
                     if unresolved_key not in seen_unresolved:
                         out.append((unresolved_key[0], None, effective_cwd))
-                        record(m.start(), "unresolved", r_script.text)
+                        record(m.start(), "unresolved", r_script.text,
+                               "r-file" if pattern is RX_R_FILE_PATH else None)
                         seen_unresolved.add(unresolved_key)
                     continue
                 path_word = shlex.quote(r_script.text)
@@ -4121,7 +4128,8 @@ def _detect_scripts_with_cwd(
             stage_key = (path, _stage_key(bash_cmd, m.start()))
             if stage_key not in seen_paths:
                 out.append((path, None, effective_cwd))
-                record(m.start(), "script", raw_path)
+                record(m.start(), "script", raw_path,
+                       "r-file" if pattern is RX_R_FILE_PATH else None)
                 seen_paths.add(stage_key)
     runner_offsets: list[int] = []
     runners = _detect_runners(
@@ -6079,9 +6087,105 @@ def _inline_placeholder(body: str) -> dict[str, Any]:
     return placeholder
 
 
-def _resolve(token: str, base: Path | None) -> Path | None:
-    if not token or "\0" in token or "$" in token or "`" in token:
+def _stage_raw_words(fragment: str) -> list[str] | None:
+    """The words of one simple command as written (quotes kept), with
+    redirections dropped: the same words `_simple_command_argv` decodes, so
+    a caller can tell `~/c.yaml` from `'~/c.yaml'`. None where the scan
+    cannot follow the syntax."""
+    command = _join_line_continuations(fragment)
+    words: list[str] = []
+    index = 0
+    try:
+        while True:
+            while command[index: index + 1] in {" ", "\t"}:
+                index += 1
+            if index >= len(command) or command[index] in ";\n|)#&":
+                return words
+            operator = None
+            if not command.startswith(("<(", ">("), index):
+                operator = _REDIRECTION_OPERATOR_RX.match(command, index)
+            if operator is not None:
+                index = operator.end()
+                while command[index: index + 1] in {" ", "\t"}:
+                    index += 1
+                if operator.group("op") in {"<<", "<<-"} and command[
+                        index: index + 1] in {"'", '"'}:
+                    end = _quoted_delimiter_end(command, index)
+                else:
+                    end = _shell_word_end(command, index)
+                if end is None:
+                    return None
+                index = end
+                continue
+            end = _shell_word_end(command, index)
+            if end is None:
+                return None
+            words.append(command[index:end])
+            index = end
+    except RecursionError:
         return None
+
+
+def _unquoted_chars(raw: str) -> Iterator[tuple[int, str]]:
+    """(index, char) for every character of a shell word outside quotes
+    and not escaped."""
+    quote: str | None = None
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if char in "'\"" and quote in (None, char):
+            quote = None if quote else char
+        elif quote is None:
+            yield index, char
+        index += 1
+
+
+def _has_unquoted_pattern(raw: str) -> bool:
+    """A glob (`*`, `?`, `[`) or brace expansion the shell would apply."""
+    chars = [c for _, c in _unquoted_chars(raw)]
+    if any(c in "*?[" for c in chars):
+        return True
+    return "{" in chars and "}" in chars[chars.index("{"):]
+
+
+def _resolve(token: str, base: Path | None, raw: str | None = None, *,
+             tilde: bool = True) -> Path | None:
+    """The path a shell operand names, by bash's expansion rules, or None
+    where it depends on an expansion this hook cannot reproduce.
+
+    ``raw`` is the word as written. An unquoted leading `~` or `~/` is the
+    home directory (and `~user` that user's, when known), a quoted one is a
+    literal; a parameter, command or arithmetic expansion, a glob or a
+    brace expansion is unresolved. Without ``raw`` the quoting is unknown,
+    so anything the shell might have expanded is unresolved. ``tilde``
+    False (the value after `--flag=`, which bash does not tilde-expand but
+    other shells may) leaves a leading `~` unresolved rather than guessed.
+    """
+    if not token or "\0" in token:
+        return None
+    if raw is None:
+        if token.startswith("~") or "$" in token or "`" in token or _has_unquoted_pattern(token):
+            return None
+    else:
+        if _expansion(raw)[0] or _has_unquoted_pattern(raw):
+            return None
+        if raw.startswith("~"):
+            slash = raw.find("/")
+            prefix = raw if slash < 0 else raw[:slash]
+            if not any(c in prefix for c in "'\"\\"):
+                # An unquoted tilde prefix: expanded by the shell.
+                if not tilde:
+                    return None
+                user = prefix[1:]
+                if user and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9._-]*", user):
+                    return None  # `~+`, `~-`, `~1`: the shell's directory stack
+                home = os.path.expanduser(prefix)
+                if home.startswith("~") or not os.path.isabs(home):
+                    return None
+                token = home + token[len(prefix):]
     path = Path(token)
     if not path.is_absolute():
         if base is None:
@@ -6090,18 +6194,29 @@ def _resolve(token: str, base: Path | None) -> Path | None:
     return path
 
 
-def _config_candidates(interpreter: str, args: list[str]) -> list[tuple[str, str]]:
-    """(token, via) pairs naming config files, by interpreter-specific
-    operand rules. `.json` counts only after a config flag (a JSON operand
-    is as often data); python's `-c` is code and snakemake's `-c` is cores,
-    so neither is a config flag."""
+class _ConfigOperand(NamedTuple):
+    token: str  # decoded value
+    via: str  # the flag, "suffix", or "--profile" (a profile directory)
+    index: int  # position in the scanned args of the word holding it
+    eq: str | None  # the `--flag` before `=` when the value shares its word
+
+
+_SNAKEMAKE_PARAM_FLAGS = frozenset({"--config", "-C"})
+
+
+def _config_operands(interpreter: str, args: list[Any]) -> list[_ConfigOperand]:
+    """Operands naming config files, by interpreter-specific rules. `.json`
+    counts only after a config flag (a JSON operand is as often data);
+    python's `-c` is code and snakemake's `-c` is cores, so neither is a
+    config flag. Snakemake's `--config`/`-C` values are KEY=VALUE params,
+    never files."""
     flags = {
         "snakemake": _SNAKEMAKE_CONFIG_FLAGS,
         "nextflow": _NEXTFLOW_CONFIG_FLAGS,
     }.get(interpreter, _SCRIPT_CONFIG_FLAGS)
-    found: list[tuple[str, str]] = []
+    found: list[_ConfigOperand] = []
     expect: str | None = None
-    for token in args:
+    for index, token in enumerate(args):
         if not isinstance(token, str):
             expect = None
             continue
@@ -6109,28 +6224,96 @@ def _config_candidates(interpreter: str, args: list[str]) -> list[tuple[str, str
             if token.startswith("-"):
                 expect = None
             else:
-                found.append((token, expect))
-                if expect != "--configfiles":
+                if expect != "params":
+                    found.append(_ConfigOperand(token, expect, index, None))
+                if expect not in ("--configfiles", "params"):
                     expect = None
                 continue
         name, eq, value = token.partition("=")
+        if interpreter == "snakemake" and (
+                name in _SNAKEMAKE_PARAM_FLAGS or token.startswith("-C")):
+            expect = "params"
+            continue
         if name in flags:
             if eq:
-                found.append((value, name))
+                found.append(_ConfigOperand(value, name, index, name))
             else:
                 expect = name
             continue
         if interpreter == "snakemake" and name == "--profile":
-            target = value if eq else None
-            if target:
-                found.append((str(Path(target) / "config.yaml"), "--profile"))
+            if eq:
+                if value:
+                    found.append(_ConfigOperand(value, "--profile", index, name))
             else:
-                expect = "--profile-dir"
+                expect = "--profile"
             continue
         if not token.startswith("-") and Path(token).suffix.lower() in _CONFIG_SUFFIXES:
-            found.append((token, "suffix"))
-    return [(str(Path(t) / "config.yaml"), "--profile") if via == "--profile-dir" else (t, via)
-            for t, via in found]
+            found.append(_ConfigOperand(token, "suffix", index, None))
+    return found
+
+
+def _config_candidates(interpreter: str, args: list[str]) -> list[tuple[str, str]]:
+    """(token, via) pairs naming config files; a profile is shown by its
+    `config.yaml` (build_step lists the profile's actual config files)."""
+    return [(str(Path(o.token) / "config.yaml"), o.via) if o.via == "--profile"
+            else (o.token, o.via) for o in _config_operands(interpreter, args)]
+
+
+def _snakemake_params(args: list[str]) -> list[str]:
+    """Snakemake's `--config`/`-C` KEY=VALUE overrides, verbatim, with a
+    secret-named key's value redacted."""
+    import lineage_redact
+
+    values: list[str] = []
+    collecting = False
+    for token in args:
+        if not isinstance(token, str):
+            collecting = False
+            continue
+        if token in _SNAKEMAKE_PARAM_FLAGS:
+            collecting = True
+            continue
+        if token.startswith("--config="):
+            collecting = True
+            token = token[len("--config="):]
+        elif token.startswith("-C") and len(token) > 2:
+            collecting = True
+            token = token[2:]
+        elif token.startswith("-"):
+            collecting = False
+            continue
+        elif not collecting:
+            continue
+        key, eq, _ = token.partition("=")
+        if eq and lineage_redact.is_secret_name(key):
+            values.append(f"{key}={lineage_redact.REDACTED}")
+        else:
+            (redacted,) = lineage_redact.redact_argv([token])
+            if len(redacted) > STEP_TOKEN_MAX:
+                redacted = redacted[:STEP_TOKEN_MAX] + "…[truncated]"
+            values.append(redacted)
+    return values
+
+
+def _snakemake_profile_configs(directory: Path, token: str) -> list[Path]:
+    """The config files of a `--profile` directory: every
+    `config.yaml`/`config.vN+.yaml` in it (which one Snakemake reads depends
+    on its version), searched like Snakemake does for a bare profile name.
+    A profile with none is named by its `config.yaml`, listed as missing."""
+    location = directory
+    if not location.is_dir() and "/" not in token:
+        for root in _snakemake_user_profile_roots():
+            if (root / token).is_dir():
+                location = root / token
+                break
+    try:
+        files = sorted(
+            child for child in location.iterdir()
+            if _SNAKEMAKE_PROFILE_FILE_RX.fullmatch(child.name)
+            and child.name.startswith("config") and child.is_file())
+    except OSError:
+        files = []
+    return files or [location / "config.yaml"]
 
 
 class ConfigBudget:
@@ -6146,6 +6329,13 @@ class ConfigBudget:
             return False
         self.files_left -= 1
         return True
+
+
+# Every config digest this process took, by path: (dev, ino, size, mtime_ns,
+# ctime_ns) when read, and the digest. The proof pass reuses a digest whose
+# file still has that identity instead of reading it again, so the whole
+# config budget is the one ConfigBudget spends.
+_HASHED_CONFIGS: dict[str, tuple[tuple[int, int, int, int, int], str]] = {}
 
 
 def _hash_config(path: Path, deadline: float) -> dict[str, Any]:
@@ -6200,6 +6390,7 @@ def _hash_config(path: Path, deadline: float) -> dict[str, Any]:
             return record
         record.update(sha256=digest.hexdigest(), hash_status="hashed-at-post",
                       hash_origin="hook-post")
+        _HASHED_CONFIGS[str(path)] = (ident, record["sha256"])
         return record
     finally:
         os.close(fd)
@@ -6263,6 +6454,14 @@ def build_step(
             if token == "-m" and argv[index + 1] == invocation.get("script_word"):
                 operand_index = index + 2
                 break
+    elif kind in ("script", "unresolved") and invocation.get("form") == "r-file":
+        # `R -f X` / `R --file=X`: R reads its own options anywhere before
+        # `--args`; the script's arguments are only the words after it.
+        operand_index = len(argv)
+        for index, token in enumerate(argv[1:], start=1):
+            if token == "--args":
+                operand_index = index + 1
+                break
     elif kind in ("script", "unresolved"):
         word = invocation.get("script_word")
         for index, token in enumerate(argv[1:], start=1):
@@ -6288,16 +6487,39 @@ def build_step(
         step["env"] = env
     if wrappers:
         step["wrappers"] = lineage_redact.redact_argv(wrappers)
+    if interpreter == "snakemake":
+        params = _snakemake_params(argv[1:])
+        if params:
+            step["params"] = params
     # Config files: the operands after the script for script runners, the
-    # whole argv for runners driven by flags.
-    candidates = [(token, via) for token, via in _config_candidates(
-        interpreter, lineage_redact.redact_argv(script_args if operand_index else argv[1:]))
-        if lineage_redact.REDACTED not in token]
+    # whole argv for runners driven by flags. Each is resolved by the shell's
+    # expansion of the word as written, so the raw words ride along.
+    scan_from = operand_index if operand_index else 1
+    raws = _stage_raw_words(suffix)
+    if raws is not None and len(raws) != len(argv):
+        raws = None  # the two scans disagree: treat the quoting as unknown
+    resolved: list[tuple[str, str, Path | None]] = []
+    for operand in _config_operands(
+            interpreter, lineage_redact.redact_argv(argv[scan_from:])):
+        if lineage_redact.REDACTED in operand.token:
+            continue
+        raw = raws[scan_from + operand.index] if raws is not None else None
+        if raw is not None and operand.eq is not None:
+            prefix = operand.eq + "="
+            raw = raw[len(prefix):] if raw.startswith(prefix) else None
+        path = _resolve(operand.token, io_cwd, raw, tilde=operand.eq is None)
+        if operand.via == "--profile":
+            if path is None:
+                resolved.append((str(Path(operand.token) / "config.yaml"), operand.via, None))
+            else:
+                resolved.extend((str(p), operand.via, p)
+                                for p in _snakemake_profile_configs(path, operand.token))
+            continue
+        resolved.append((operand.token, operand.via, path))
     budget = budget or ConfigBudget()
     configs: list[dict[str, Any]] = []
     skipped = 0
-    for token, via in candidates:
-        path = _resolve(token, io_cwd)
+    for token, via, path in resolved:
         if path is None:
             configs.append({"path": token, "via": via, "sha256": None,
                             "hash_status": "unresolved"})
@@ -6731,6 +6953,31 @@ def _apply_input_proofs(events: list[dict], args: argparse.Namespace, cwd: Path)
                    if isinstance(c, dict) and c.get("sha256") is not None]
         return [*event.get("inputs", []), *configs]
 
+    # The config budget was spent in build_step: reuse each config digest
+    # whose file still has the identity it was read with, so the proof pass
+    # reads no config bytes again. A config that changed since is unstable
+    # and is not proved (proving it would mean reading it a second time).
+    reused: dict[tuple[int, int, int, int, int], str] = {}
+    for event in events:
+        step = event.get("step") if isinstance(event.get("step"), dict) else {}
+        for config in step.get("config_files") or []:
+            if not isinstance(config, dict) or config.get("sha256") is None:
+                continue
+            known = _HASHED_CONFIGS.get(config.get("path"))
+            if known is None or known[1] != config["sha256"]:
+                continue  # not a digest this process took: proved as before
+            try:
+                st = os.stat(config["path"], follow_symlinks=False)
+                ident = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+            except (OSError, ValueError):
+                ident = None
+            if ident != known[0]:
+                config.update(sha256=None, hash_status="unstable", pre_run_proven=False,
+                              proof_reason="changed-after-hash")
+                config.pop("hash_origin", None)
+                continue
+            reused[ident] = known[1]
+
     paths = [r["path"] for e in events for r in proved_records(e) if r.get("path")]
     if not paths:
         try:
@@ -6741,7 +6988,12 @@ def _apply_input_proofs(events: list[dict], args: argparse.Namespace, cwd: Path)
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import io_observer
 
-    proofs = io_observer.prove_inputs(Path(state_dir), Path(snapshot), root, paths)
+    # Configs hashed this call are offered by identity, so the proof pass
+    # reads none of them again (one config budget, not two).
+    seeded = {":".join(str(part) for part in ident): digest
+              for ident, digest in (reused or {}).items()}
+    proofs = io_observer.prove_inputs(Path(state_dir), Path(snapshot), root, paths,
+                                      known_digests=seeded)
     for event in events:
         for record in proved_records(event):
             proof = proofs.get(record.get("path"))
@@ -6762,6 +7014,21 @@ def _apply_input_proofs(events: list[dict], args: argparse.Namespace, cwd: Path)
                 # No protocol hash was attempted (outside the watched scope,
                 # a symlinked path): the digest is of the content at Post.
                 record["hash_status"] = "hashed-at-post"
+
+
+def _in_command_order(
+    detections: list[Any], invocations: list[dict[str, Any]]
+) -> tuple[list[Any], list[dict[str, Any] | None]]:
+    """Detections, each with its invocation, sorted by shell offset. A
+    detection without a known offset keeps its place relative to the others
+    without one, after every positioned stage."""
+    paired = [(d, invocations[i] if i < len(invocations) else None)
+              for i, d in enumerate(detections)]
+    order = sorted(range(len(paired)), key=lambda i: (
+        (paired[i][1] or {}).get("offset") is None,
+        (paired[i][1] or {}).get("offset") or 0,
+        i))
+    return [paired[i][0] for i in order], [paired[i][1] for i in order]
 
 
 def main() -> int:
@@ -6889,6 +7156,9 @@ def main() -> int:
             and len(runner_names) == 1):
         for slot, offset in zip(runner_slots, runner_words):
             invocations[slot] = {**invocations[slot], "offset": offset}
+    # Detection groups runs by interpreter and form; the cap and the shared
+    # config budget go to the stages that ran first, so order by position.
+    detections, invocations = _in_command_order(detections, invocations)
     dropped = max(0, len(detections) - MAX_EVENTS_PER_CALL)
     detections = detections[:MAX_EVENTS_PER_CALL]
     for index, (script_path, inline_source, effective_cwd) in enumerate(detections):

@@ -94,6 +94,12 @@ these conflict with the text below, the amendments win.
 - **Open calls are reported, not counted.** A Bash call with a journaled Pre and no Post yet is listed under `open_calls` with each later verdict. It does not make the verdict `unknown`, because the command running a query is always such a call.
 - **Skips are reconciled.** Skips carry their call's `observation_id`. A skip whose call has an observation with a change list is covered, and any other skip is a gap.
 - **Background jobs.** A background job stays a gap even after the journal expires its interval: the timeout is not evidence the job stopped.
+- **Owed observations.** A Post that will publish an observation (every Bash call, and an edit with named targets) says so in the journal (`observe`). If a closed call has no observation in any store, the gap is bounded by its interval. That covers an append that failed. Journal compaction can drop such an interval; the store keeps the other kinds of gap.
+- **Expiry versus turn end.** A turn end proves a foreground call is over, so its `call-unresolved` observation carries the journal bound, and later writes are placed after it. An age expiry proves nothing. The expiring hook publishes a `call-expired` observation whose end is open, so every later write stays `unknown`.
+- **Unconfirmed edits.** An edit whose success was not established credits no write. Its targets become `edit-unconfirmed` path gaps, with their post-call hashes kept as evidence.
+- **Checkout framing of summaries.** A foreign manifest's `observations_missing` and `unresolved_calls` are ignored, like its skips. A skip that names a session is reconciled only against that session's observation.
+- **Scope at both walks.** An observation's `unwatched` list merges both walks (Pre-only entries are tagged `"at": "pre"`). That way, a directory excluded at Pre and deleted during the call is a coverage gap rather than silence.
+- **Redaction on decoded words.** Secret options, assignments and `Authorization` headers are found on shell-decoded words. A header is redacted whole, including Digest fields. Literals hidden by shell quoting are redacted in the decoded text. Quoted keys (`{"api_key": "…"}`) count as names. A 0.9.7 event finalized after an upgrade gets the same source redaction and a sanitized, labelled digest.
 
 Item 7 (row and feature access) is a separate note,
 `docs/plans/row-feature-access.md`, for agreement before building.

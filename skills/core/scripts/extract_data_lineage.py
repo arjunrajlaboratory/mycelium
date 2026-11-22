@@ -331,8 +331,40 @@ def normalize_event(
         script_path = Path(event["script"])
         if script_path.exists():
             event["script_sha256"] = sha256_file(script_path)
+            _sanitize_file_digest(event, script_path)
+    _sanitize_embedded_source(event)
 
     return event
+
+
+def _sanitize_embedded_source(event: dict) -> None:
+    """A pre-v2 event (recorded by 0.9.7, finalized after an upgrade) still
+    carries its raw source and digest: redact it here, and hash and label
+    the sanitized text, so no secret or digest of one is published."""
+    import lineage_redact
+
+    source = event.get("script_source")
+    if not isinstance(source, str):
+        return
+    sanitized = lineage_redact.redact_source(source)
+    if sanitized != source:
+        event["script_source"] = sanitized
+        event["script_sha256"] = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
+        event["script_sha256_of"] = "sanitized"
+
+
+def _sanitize_file_digest(event: dict, script_path: Path) -> None:
+    """A digest recomputed from the file follows the same rule."""
+    import lineage_redact
+
+    try:
+        text = script_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    sanitized = lineage_redact.redact_source(text)
+    if sanitized != text:
+        event["script_sha256"] = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
+        event["script_sha256_of"] = "sanitized"
 
 
 def normalize_skip(raw: dict[str, Any]) -> dict[str, Any]:

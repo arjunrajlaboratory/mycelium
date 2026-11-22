@@ -23,6 +23,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 from collections import Counter, defaultdict
 
 SCHEMA = "mycelium.data_contract.v1"
@@ -423,6 +424,16 @@ def check_unit(check, columns, rows):
     return alerts
 
 
+def distinct_levels(values):
+    """Listed levels as the text a table compares them as, first spelling
+    kept, duplicates dropped."""
+    out = []
+    for value in as_list(values):
+        if str(value) not in out:
+            out.append(str(value))
+    return out
+
+
 def check_pairing(check, columns, rows):
     unit = need(check, "unit")
     within = need(check, "within")
@@ -432,7 +443,15 @@ def check_pairing(check, columns, rows):
     # does not list them) from every row with a level: a unit seen at no level
     # is incomplete, and a level seen with no unit is still a level.
     observed_levels = sorted({r[within] for r in having(rows, within)})
-    levels = [str(l) for l in as_list(check.get("levels"))] or observed_levels
+    # Listed levels compare as text, like table values: "28" and 28 are one
+    # level, and a level listed twice is still one side of the pairing.
+    listed = distinct_levels(check.get("levels"))
+    levels = listed or observed_levels
+    # How many distinct sides the pairing must have. Listing levels states
+    # the sides, so at least two; `min_levels` opts a contract without a
+    # list into the same rule (ledger contracts set it). A contract with
+    # neither keeps the 0.9.7 behavior: the levels present are the sides.
+    minimum = max(2 if listed else 0, check.get("min_levels") or 0)
     if check.get("exact_levels") and check.get("levels"):
         extra = [lvl for lvl in observed_levels if lvl not in levels]
         absent = [lvl for lvl in levels if lvl not in observed_levels]
@@ -447,12 +466,14 @@ def check_pairing(check, columns, rows):
                                                  "absent: " + ", ".join(absent) if absent else ""]))))
             return alerts
     seen = {r[unit]: set() for r in having(rows, unit)}
-    if seen and len(levels) < 2:
+    if seen and len(levels) < minimum:
         # A pairing with one level pairs nothing: the other level's rows are
         # missing (an export left out), so the design cannot be checked.
         alerts.append(alert(
-            "pairing", "fewer than two levels of '{}'; a pairing needs both sides".format(within),
-            True, expected=">= 2 levels", observed=", ".join(levels) or "none"))
+            "pairing", "fewer than {} distinct levels of '{}'; a pairing needs both sides".format(
+                minimum, within),
+            True, expected=">= {} distinct levels".format(minimum),
+            observed=", ".join(levels) or "none"))
         return alerts
     if not seen or not levels:
         return alerts
@@ -798,7 +819,7 @@ KIND_KEYS = {
     "cohort": {"column", "levels", "min_rows", "rows", "no_missing"},
     "unit_of_replication": {"unit", "group", "within", "min_units_per_group", "units_may_span_groups",
                             "rows", "unit_scope"},
-    "pairing": {"unit", "within", "levels", "unit_scope", "exact_levels"},
+    "pairing": {"unit", "within", "levels", "unit_scope", "exact_levels", "min_levels"},
     "batch_confounding": {"batch", "contrast", "max_share", "batch_scope"},
     "batch_estimability": {"batch", "contrast", "batch_scopes"},
     "unique": {"columns"},
@@ -887,6 +908,7 @@ def validate_contract(contract):
                 fail(where, "'exact_levels' must be true or false")
             if check.get("exact_levels") and "levels" not in check:
                 fail(where, "'exact_levels' needs 'levels'")
+            validate_count(where, check, "min_levels", 2)
         elif kind == "unique":
             validate_columns(where, check, "columns", required=True)
         elif kind == "batch_estimability":
@@ -1094,9 +1116,11 @@ def ledger_contract(spec, spec_dir):
             raise ContractError("ledger 'pairing' must be {\"unit\": ..., \"within\": ..., "
                                 "\"levels\": [...]} or null")
         if "levels" in pairing and (not isinstance(pairing["levels"], list) or
-                                    len(pairing["levels"]) < 2 or
-                                    not all(is_scalar(v) for v in pairing["levels"])):
-            raise ContractError("ledger pairing 'levels' must list at least two expected levels")
+                                    not all(is_scalar(v) for v in pairing["levels"]) or
+                                    len(distinct_levels(pairing["levels"])) < 2):
+            # Distinct as the table compares them: ["A", "A"] is one level.
+            raise ContractError("ledger pairing 'levels' must list at least two distinct "
+                                "expected levels")
     table = spec["file"] if os.path.isabs(spec["file"]) else os.path.join(spec_dir, spec["file"])
     named = [spec["sample_id"], group] + nesting + batch
     if unit not in named:
@@ -1137,10 +1161,12 @@ def ledger_contract(spec, spec_dir):
             joint["batch_scopes"] = scopes
         checks.append(joint)
     if pairing:
-        pair_check = {"kind": "pairing", "unit": pairing["unit"], "within": pairing["within"]}
+        # A declared pairing needs both sides on whatever table it runs on.
+        pair_check = {"kind": "pairing", "unit": pairing["unit"], "within": pairing["within"],
+                      "min_levels": 2}
         spans = pairing["unit"] == unit and pairing["within"] == group
         if pairing.get("levels"):
-            pair_check["levels"] = [str(v) for v in pairing["levels"]]
+            pair_check["levels"] = distinct_levels(pairing["levels"])
             if spans:
                 # The pairing licenses units in several groups, so it must
                 # hold for exactly the declared groups, on whatever table the
@@ -1178,6 +1204,46 @@ def render(summaries, alerts):
     return "\n".join(lines)
 
 
+def refuse_input_alias(destination, inputs):
+    """Refuse an --emit-contract destination that names an input: the ledger
+    spec or its sample table, directly or through a symlink or hard link.
+    Writing there would destroy the input the contract describes."""
+    dest_real = os.path.realpath(destination)
+    for source in inputs:
+        same = os.path.realpath(source) == dest_real
+        if not same and os.path.exists(destination) and os.path.exists(source):
+            try:
+                same = os.path.samefile(destination, source)
+            except OSError:
+                same = False
+        if same:
+            raise ContractError("--emit-contract {} is the same file as the input {}; choose a "
+                                "new path such as analysis/<name>/data_contract.json".format(
+                                    destination, source))
+
+
+def write_atomic_json(path, document):
+    """Write through a temporary file in the destination's directory and
+    replace: a failure leaves the old file (or none), never a truncated one."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(prefix=".{}.".format(os.path.basename(path)), suffix=".tmp",
+                               dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, indent=2)
+            handle.write("\n")
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, 0o666 & ~umask)  # as open() would create it, not mkstemp's 0600
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     source = parser.add_mutually_exclusive_group(required=True)
@@ -1204,9 +1270,9 @@ def main(argv=None):
                     # Relative to --root, so the contract replays against the
                     # checkout it is run in, not the one it was emitted from.
                     emitted["table"] = os.path.relpath(table, root)
-                with open(args.emit_contract, "w", encoding="utf-8") as handle:
-                    json.dump(emitted, handle, indent=2)
-                    handle.write("\n")
+                refuse_input_alias(args.emit_contract, [args.ledger, table])
+                validate_contract(emitted)
+                write_atomic_json(args.emit_contract, emitted)
         else:
             with open(args.contract, encoding="utf-8") as handle:
                 contract = json.load(handle, object_pairs_hook=reject_duplicate_keys)

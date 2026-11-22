@@ -135,7 +135,9 @@ The entry gains a `source` object:
 - `source-invalid`: a bad path, hash or locator;
 - `source-unreadable`: the file cannot be hashed.
 
-A number with no source is an `unchecked-value` warning. The HTML report gate and `sync_html_report.py` run the same check, and the TeX gate runs it as an explicit step.
+A number with neither a `source` nor a `sources` field is an `unchecked-value` warning. A field that is present but `null`, a `null` member of `sources`, or a `numbers` entry that is not an object is a `source-invalid` error: a broken link is never read as an unlinked number. The HTML report gate and `sync_html_report.py` run the same check (`sync_html_report.py` runs it once, for both its warnings and its errors), and the TeX gate runs it as an explicit step. Each source file is hashed once per check, however many numbers name it.
+
+`--explain` adds, for a stale or missing source, the recorded call that left the file as it is now. It names a call only when the lineage index says that call's write (or deletion) is still current. When the bytes on disk match a write that a later recorded write superseded (restored outside the record), it reports `current-bytes-match-superseded-write` and credits no one; a deletion followed by a recorded recreation reports `missing-after-superseded-deletion`.
 
 **A number that depends on more than one file** lists them all. The usual case is a table plus the config that set its threshold. A threshold change can leave the table byte-identical while changing the number, so linking only the table would never flag it.
 
@@ -164,7 +166,9 @@ register_value("n_genes_up", n_up, source=[
     {"path": "outputs/gene_means.csv", "locator": {"column": "ratio"}}, cfg_source])
 ```
 
-(`snapshot_source(path)` hashes without reading. Prefer `read_source`: it leaves no window between hashing a file and parsing it.)
+(`snapshot_source(path)` hashes without reading. Prefer `read_source`: it leaves no window between hashing a file and parsing it.) Both record the file's absolute path when they read it, so a later change of working directory cannot link a different file with the same bytes.
+
+The fragment is written only to `analysis/<name>/outputs/` inside the project: if `outputs`, `numbers.json` or its lock is a symlink, registration refuses rather than writing through it. `access.json` follows the same rule.
 
 **A stale number is fixed by rerunning the analysis that registers it, then redoing the Phase 1 merge.** Never edit or refresh `source.sha256` by hand. That would certify a number computed from bytes that no longer exist.
 
@@ -218,6 +222,7 @@ record_ids("test_cells", test.obs_names, axis="row", role="used", ordered=False)
 - `axis` is `row` (cells, samples, observations) or `feature` (genes, variables).
 - `role` is `read`, `used`, `written` or `excluded`.
 - `source=` (optional) hashes the file the ids came from. Only the path and digest are kept, never a locator, since free text could carry an id.
+- `ids` is a collection. A bare string (or bytes) is refused, since it would be read one character at a time; to record one id, pass `["cell_1"]`.
 - Ids must be non-empty strings. Convert numbers deliberately (`str(x)`, or in R `format(x, scientific = FALSE)`), because R and Python print numbers differently and the fingerprints would not match.
 
 Only a count, a distinct count, and a fingerprint of the id set are stored, never the ids. The fingerprint is the sha256 of the sorted distinct ids, so order does not matter; with `ordered=True`, an order fingerprint is kept too. Records go to `analysis/<name>/outputs/access.json`, one per name, and re-recording a name replaces it.
@@ -238,7 +243,7 @@ source("analysis/_lib/record_access.R")
 record_ids("cells_after_qc", colnames(sce), axis = "row", role = "used")
 ```
 
-It calls the Python helper's command line, so R and Python write identical records. It looks for the helper through `MYCELIUM_REGISTER_VALUE`, then `analysis/_lib/register_value.py`, then the plugin root. It uses Python from `MYCELIUM_PYTHON`, default `python3`.
+It calls the Python helper's command line, so R and Python write identical records. The command line takes `--run-pid` and `--run-started-at` together, or neither; one without the other exits 2. It looks for the helper through `MYCELIUM_REGISTER_VALUE`, then `analysis/_lib/register_value.py`, then the plugin root. It uses Python from `MYCELIUM_PYTHON`, default `python3`.
 
 ## Collisions
 

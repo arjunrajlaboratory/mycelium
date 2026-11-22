@@ -322,19 +322,35 @@ describes the fields; where the two differ, the schema file wins.
 Read from the detected stage's own text, never guessed:
 
 - `argv`, `executable`, `interpreter` and `script_args`. Inline `-c`/`-e`
-  bodies become `{"inline_sha256", "length"}`.
+  bodies become `{"inline_sha256", "length"}`. For `R -f X` and
+  `R --file=X`, `script_args` are the words after `--args` (R reads its own
+  options anywhere before it), so `R --file=a.R --args --seed 1` keeps the seed.
 - `env`: assignment and `env VAR=x` prefixes of that stage. Unexpanded
   `$VAR` values are marked `expanded: false`.
 - `config_files`: named by interpreter-specific operand rules, then hashed
   within one budget per call (8 files, 5 MB each, 250 ms) and proven
-  against the Pre snapshot like inputs. A config that changed during the call
-  is `effective: unknown`.
+  against the Pre snapshot like inputs. The proof reuses each digest whose
+  file still has the identity it was read with (device, inode, size, mtime,
+  ctime), so the 250 ms is the whole config cost. A config that changed after
+  it was hashed is `hash_status: unstable`. A config that changed during the
+  call is `effective: unknown`.
+  - Operands resolve as bash expands them. An unquoted leading `~/` (or
+    `~user/`) is the home directory, while a quoted or escaped `~` is a literal
+    name under the stage's directory. A parameter or command expansion, a glob,
+    a brace expansion, `~+`/`~-`, and a `~` after `--flag=` (bash leaves it,
+    other shells may not) are `hash_status: unresolved`, never guessed.
+  - Snakemake `--profile P`: every `config.yaml`/`config.vN+.yaml` in the
+    profile directory (a bare name is also searched in the user config
+    directories). A profile with none is listed as a missing `config.yaml`.
+- `params` (snakemake): the `--config`/`-C` `KEY=VALUE` overrides, verbatim,
+  with the value of a secret-named key redacted.
 - `seeds`: literal seeds from argv (`--seed N`) and source (`np.random.seed`,
   `set.seed`), with their origin.
 
 Two runs of one script with different arguments are two events. Identical
 stages (a loop body) are one. A call with more than 64 analysis stages records
-the first 64, with `stages_not_recorded`.
+the first 64 in command order, with `stages_not_recorded`. The shared config
+budget also goes to stages in command order.
 
 `filters_detected` is no longer written. It held unevaluated regex text with
 false positives, and nothing read it. Historical records keep it. Evaluated
@@ -344,7 +360,7 @@ row and feature access is a separate, in-process record (see
 ### Redaction
 
 Every stored command text goes through one policy (`lineage_redact.py`):
-`bash_cmd`, `argv`, `script_args`, `env`, embedded `script_source`, and the
+`bash_cmd`, `argv`, `script_args`, `env`, `params`, embedded `script_source`, and the
 `bash_cmd` of observations and skips. These values become `<redacted>`:
 
 - secret-named assignments and options (token, secret, password, api key,

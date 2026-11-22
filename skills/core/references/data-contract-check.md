@@ -115,8 +115,14 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   be estimated once all of them are in the model. Per-column checks can all
   pass while the batches jointly determine the group: controls at (date 1,
   run 1), treated at (date 2, run 1) and (date 1, run 2).
-- `pairing` blocks when fewer than two levels are present (listed or
-  observed): a pairing whose other side is missing pairs nothing. With
+- `pairing` levels compare as text, as table values do, so a level listed
+  twice (`["A", "A"]`, or `["28", 28]`) counts once. A pairing that lists
+  `levels` blocks when fewer than two distinct levels are listed. Without a
+  list, it takes `"min_levels": N` (a whole number, at least 2) and blocks
+  when fewer than N distinct levels are present: a pairing whose other side
+  is missing pairs nothing. A contract with neither keeps the older
+  behavior, where the levels present are the sides, so one observed level
+  passes. Ledger contracts set `"min_levels": 2`. With
   `"exact_levels": true` (which needs `levels`), it also blocks when the table
   has a level not listed, or lacks a listed one. Ledger contracts set this when
   the pairing licenses units across groups.
@@ -189,7 +195,10 @@ model table that lost one side. The table path is written relative to
 `--root`, so the contract replays against the checkout it runs in. With two
 or more batch columns, the emitted contract also has a `batch_estimability`
 check for an analysis that adjusts for all of them. A ledger `pairing` may
-list its expected `levels`, so a missing side blocks. A batch column that is a replication level at or below the unit of
+list its expected `levels` (at least two distinct ones), so a missing side
+blocks. `--emit-contract` refuses a destination that is the ledger spec or
+its sample table (by path, symlink or hard link), and checks the generated
+contract before writing it in one replace. A batch column that is a replication level at or below the unit of
 replication is a spec error (exit 1), because it is nested in the group by
 construction. Calendar batches belong in `batch`, and nested preparation
 instances belong in `nesting`.

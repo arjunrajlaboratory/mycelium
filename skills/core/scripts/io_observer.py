@@ -252,7 +252,14 @@ def walk(
     return Snapshot(entries, unwatched, truncated, timed_out, walk_ms, coarse)
 
 
-def watch_status(rel: str, unwatched: list[dict[str, Any]]) -> str:
+def unwatched_prefixes(unwatched: list[dict[str, Any]]) -> frozenset[str]:
+    """The walk's unwatched directories as a set, so a path is checked by
+    its ancestors (O(depth)) instead of against every entry."""
+    return frozenset(item["path"] for item in unwatched
+                     if isinstance(item, dict) and isinstance(item.get("path"), str))
+
+
+def watch_status(rel: str, unwatched: list[dict[str, Any]] | frozenset[str]) -> str:
     """Whether a repository-relative path lies in the watched scope.
 
     `outside-scope` (escapes the repository), `unwatched` (under a fixed
@@ -268,9 +275,9 @@ def watch_status(rel: str, unwatched: list[dict[str, Any]]) -> str:
         return "unwatched"
     if parts[-1] in EXCLUDED_FILE_NAMES or parts[-1].startswith("._"):
         return "unwatched"
-    for item in unwatched:
-        prefix = item.get("path") if isinstance(item, dict) else None
-        if isinstance(prefix, str) and (rel == prefix or rel.startswith(prefix + "/")):
+    prefixes = unwatched if isinstance(unwatched, frozenset) else unwatched_prefixes(unwatched)
+    for i in range(1, len(parts) + 1):
+        if "/".join(parts[:i]) in prefixes:
             return "unwatched"
     return "watched"
 
@@ -510,6 +517,12 @@ class Interval(NamedTuple):
     expired: bool
     pre_wall_ns: int
     agent: str | None = None  # a subagent's id; None for the main agent
+    # The Post said an observation follows (a Bash call, an edit with named
+    # targets): a closed interval with none on record is a gap.
+    observe: bool = False
+    # Why an expired interval closed: "turn-ended" (the host's turn is over,
+    # so no foreground call is still running) or "age" (only a bound).
+    end_reason: str | None = None
 
 
 def _journal_records(path: Path) -> list[dict[str, Any]]:
@@ -566,6 +579,9 @@ def _intervals(records: list[dict[str, Any]]) -> dict[str, Interval]:
                 post_seq=record["seq"],
                 expired=event == "expire",
                 background=current.background or bool(record.get("background")),
+                observe=current.observe or record.get("observe") is True,
+                end_reason=(("turn-ended" if record.get("reason") == "turn-ended" else "age")
+                            if event == "expire" else None),
             )
     return calls
 
@@ -595,6 +611,7 @@ def journal_event(
     background: bool = False,
     now_ns: int | None = None,
     meta: dict[str, Any] | None = None,
+    observe: bool = False,
 ) -> tuple[int, dict[str, Interval], list[Interval]]:
     """Append one event under the journal lock.
 
@@ -656,6 +673,7 @@ def journal_event(
                 "background": background,
                 "wall_ns": now_ns,
                 "jid": jid,
+                **({"observe": True} if observe else {}),
             }
         )
         intervals = _intervals(records)
@@ -687,7 +705,39 @@ def journal_event(
                 os.write(fd, line.encode("utf-8"))
             finally:
                 os.close(fd)
+    _publish_expired(state_dir, jid, expired)
     return seq, intervals, expired
+
+
+def _publish_expired(state_dir: Path, jid: str, expired: list[Interval]) -> None:
+    """A foreground call the journal closed by age, with no Post: what it
+    changed is unknown, and the age bound is no evidence that it stopped.
+    The gap is published to the call's store, since compaction drops the
+    interval from the journal right away. Best effort, like every append."""
+    for interval in expired:
+        if interval.background:
+            continue  # its launch observation already carries the gap
+        snap = snapshot_path(state_dir, interval.host, interval.session, interval.call)
+        record = {
+            "kind": "observation",
+            "version": OBSERVATION_VERSION,
+            "observation_id": f"{interval.host}:{interval.call}",
+            "host": interval.host,
+            "host_session_id": interval.session,
+            "tool": interval.tool,
+            "status": "unavailable",
+            "reason": "call-expired",
+            "detail": "the call had no Post within the journal's age bound",
+            "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "changes": None,
+            "journal": {"id": jid, "pre_seq": interval.pre_seq, "post_seq": None,
+                        "expired": True, "end_reason": "age"},
+            "repo_root": _snapshot_root(snap) if snap.exists() and not snap.is_symlink()
+            else None,
+        }
+        with contextlib.suppress(OSError):
+            append_line(observations_path(state_dir, interval.host, interval.session),
+                        record, io_root=state_dir / "io")
 
 
 def turn_end(state_dir: Path, *, host: str, session: str) -> int:
@@ -703,11 +753,16 @@ def turn_end(state_dir: Path, *, host: str, session: str) -> int:
     path = journal_path(state_dir)
     io_root = state_dir / "io"
     closed: list[str] = []
+    # The journal bound of each call closed here: a confirmed turn end, so
+    # a later call's writes are provably after whatever this one hid.
+    bounds: dict[str, dict[str, Any]] = {}
     if path.exists():
         _check_dir(io_root, path.parent)
         with _locked(path):
             records = _journal_records(path)
             seq = max((r["seq"] for r in records), default=0)
+            jid = next((r["jid"] for r in reversed(records) if isinstance(r.get("jid"), str)),
+                       None)
             now_ns = time.time_ns()
             lines = []
             for interval in _intervals(records).values():
@@ -719,9 +774,14 @@ def turn_end(state_dir: Path, *, host: str, session: str) -> int:
                     seq += 1
                     record = {"seq": seq, "ev": "expire", "call": interval.call,
                               "host": interval.host, "session": interval.session,
-                              "wall_ns": now_ns, "reason": "turn-ended"}
+                              "wall_ns": now_ns, "reason": "turn-ended",
+                              **({"jid": jid} if jid else {})}
                     lines.append(json.dumps(record, sort_keys=True) + "\n")
                     closed.append(interval.call)
+                    if jid:
+                        bounds[interval.call] = {"id": jid, "pre_seq": interval.pre_seq,
+                                                 "post_seq": seq, "expired": True,
+                                                 "end_reason": "turn-ended"}
             if lines:
                 fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
                 try:
@@ -766,6 +826,7 @@ def turn_end(state_dir: Path, *, host: str, session: str) -> int:
                           "(denied, interrupted, or the hook did not run)",
                 "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "changes": None,
+                "journal": bounds.get(call),
                 # The checkout this gap belongs to, from the call's own Pre
                 # snapshot, so it never clouds another worktree's verdicts.
                 "repo_root": _snapshot_root(snap),
@@ -1379,6 +1440,9 @@ def post(
             state_dir, "launch" if background else "post", call_id, host=host,
             session=session, agent=agent, tool=tool, background=background,
             meta=journal_meta,
+            # An observation is owed for this call; if its append later fails,
+            # the index sees a closed call with none on record: a gap.
+            observe=repo_root is not None,
         )
     except LockTimeout:
         journal_error = "lock-timeout"
@@ -1470,9 +1534,17 @@ def post(
         observation["reason"] = "own-interval-unjournaled"
         _publish(state_dir, host, session, observation, snap_file)
         return observation
+    # A directory unwatched at either walk hides changes: one excluded at
+    # Pre and removed (with its exclusion) during the call appears in
+    # neither snapshot, so its deletion is visible only as this gap.
+    merged_unwatched = list(post_snap.unwatched)
+    post_prefixes = unwatched_prefixes(post_snap.unwatched)
+    for item in pre_snap.unwatched:
+        if isinstance(item, dict) and item.get("path") not in post_prefixes:
+            merged_unwatched.append({**item, "at": "pre"})
     observation["scope"] = {
         "entries": len(post_snap.entries),
-        "unwatched": post_snap.unwatched,
+        "unwatched": merged_unwatched,
         "walk_ms": [pre_snap.walk_ms, post_snap.walk_ms],
     }
     for label, snap in (("pre", pre_snap), ("post", post_snap)):
@@ -1492,9 +1564,10 @@ def post(
     # because the scope file changed, vanished from one walk without being
     # deleted (or appeared without being created). It is recorded as a
     # coverage change, never as a deletion or creation.
+    pre_prefixes = unwatched_prefixes(pre_snap.unwatched)
     coverage_changed = sorted(
-        [p for p in result.deleted if watch_status(p, post_snap.unwatched) != "watched"]
-        + [p for p in result.created if watch_status(p, pre_snap.unwatched) != "watched"])
+        [p for p in result.deleted if watch_status(p, post_prefixes) != "watched"]
+        + [p for p in result.created if watch_status(p, pre_prefixes) != "watched"])
     if coverage_changed:
         moved = set(coverage_changed)
         result = Diff([p for p in result.created if p not in moved], result.modified,
@@ -1591,8 +1664,13 @@ def prove_inputs(
     inputs: list[str],
     *,
     hash_seconds: float = DEFAULT_HASH_SECONDS,
+    known_digests: dict[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Input proofs against a retired Pre snapshot, keyed by input path.
+
+    ``known_digests`` are digests the caller already took this call, keyed
+    like the hash cache (``dev:ino:size:mtime_ns:ctime_ns``): a file whose
+    identity still matches is not read again. They are not persisted.
 
     An input whose identity is the same now as in the Pre snapshot (ctime
     only moves forward, so equal identities mean no write in between), and
@@ -1619,7 +1697,7 @@ def prove_inputs(
             if rel is not None:
                 current[rel] = identity_of(os.lstat(os.path.join(root, rel)))
     post_like = Snapshot(current, pre_snap.unwatched, False, False, 0, pre_snap.coarse_devices)
-    cache = load_cache(state_dir)
+    cache = {**load_cache(state_dir), **(known_digests or {})}
     new_cache: dict[str, str] = {}
     proofs = _input_proofs(
         inputs, Path(root), pre_snap, post_like, int(meta.get("taken_ns") or 0),

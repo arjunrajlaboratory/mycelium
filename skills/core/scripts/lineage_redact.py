@@ -25,6 +25,7 @@ stay cheap.
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any
 
 REDACTED = "<redacted>"
@@ -34,9 +35,11 @@ _SECRET_WORD = (r"(?:token|secret|passw(?:or)?d?|pwd|api[_-]?key|private[_-]?key
 SECRET_NAME_RX = re.compile(rf"(?i){_SECRET_WORD}")
 _NAME_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _URL_USERINFO_RX = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s/:@'\"]+):([^\s/@'\"]+)@")
-_AUTH_HEADER_RX = re.compile(
-    r"(?i)(authorization\s*:\s*(?:bearer|basic|token|digest)?\s*)([^\s'\"\\]+)"
-)
+# The whole header value goes, not its first token: a Digest header carries
+# its response in later fields. Unquoted text stops at a quote or line end;
+# a header inside a shell word is handled on the decoded word first.
+_AUTH_HEADER_RX = re.compile(r"(?i)(authorization\s*:\s*)([^\n'\"]+)")
+_AUTH_WORD_RX = re.compile(r"(?i)\s*authorization\s*:")
 _OPERATORS = set(";&|<>()\n")
 
 
@@ -90,8 +93,47 @@ def _unquoted_head(word: str) -> str:
     return word
 
 
+def _decode(word: str) -> str:
+    """A shell word with its quoting removed, as the program receives it.
+    Expansions are left as written; this only decides what is secret."""
+    out: list[str] = []
+    quote = None
+    i = 0
+    n = len(word)
+    while i < n:
+        c = word[i]
+        if quote is None:
+            if c == "\\" and i + 1 < n:
+                out.append(word[i + 1])
+                i += 2
+                continue
+            if c in "'\"":
+                quote = c
+            else:
+                out.append(c)
+        elif quote == "'":
+            if c == "'":
+                quote = None
+            else:
+                out.append(c)
+        else:
+            if c == "\\" and i + 1 < n and word[i + 1] in '$`"\\\n':
+                out.append(word[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                quote = None
+            else:
+                out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def redact_text(text: str) -> str:
-    """The text with every secret value replaced; unchanged when none."""
+    """The text with every secret value replaced; unchanged when none.
+
+    Words are judged on their decoded form, so a quoted option name
+    (``"--token" X``, ``'--api-key=X'``) is caught like a bare one."""
     if not text:
         return text
     replacements: list[tuple[int, int, str]] = []
@@ -99,7 +141,11 @@ def redact_text(text: str) -> str:
     redact_next = False
     for start, end in spans:
         word = text[start:end]
-        head = _unquoted_head(word)
+        head = _decode(word)
+        if _AUTH_WORD_RX.match(head):
+            replacements.append((start, end, shlex.quote(f"Authorization: {REDACTED}")))
+            redact_next = False
+            continue
         if redact_next:
             redact_next = False
             if not head.startswith("-"):
@@ -110,8 +156,7 @@ def redact_text(text: str) -> str:
             replacements.append((start, end, f"{name}={REDACTED}"))
         elif eq and name.startswith("-") and SECRET_NAME_RX.search(name):
             replacements.append((start, end, f"{name}={REDACTED}"))
-        elif (not eq and head == word and head.startswith("-")
-              and SECRET_NAME_RX.search(head)):
+        elif not eq and head.startswith("-") and SECRET_NAME_RX.search(head):
             redact_next = True
     out = text
     for start, end, new in reversed(replacements):
@@ -121,11 +166,34 @@ def redact_text(text: str) -> str:
     return out
 
 
+def _redact_decoded_words(text: str) -> str:
+    """Secret literals hidden by shell quoting: ``python -c "pw = \\"x\\""``
+    holds ``pw = "x"`` only once the shell has decoded it. A word whose
+    decoded body changes is replaced by the quoted, redacted body."""
+    replacements: list[tuple[int, int, str]] = []
+    for start, end in _words(text):
+        word = text[start:end]
+        if not any(c in word for c in "'\"\\"):
+            continue
+        decoded = _decode(word)
+        redacted = redact_source(decoded)
+        if redacted != decoded:
+            replacements.append((start, end, shlex.quote(redacted)))
+    out = text
+    for start, end, new in reversed(replacements):
+        out = out[:start] + new + out[end:]
+    return out
+
+
 _LITERAL = (r"(?:[rRbBuUfF]{1,2})?(?:'''[\s\S]*?'''|\"\"\"[\s\S]*?\"\"\""
             r"|'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\")")
+# A secret-named key followed by a literal: `token = "x"`, `token <- 'x'`,
+# and the quoted-key forms `{"api_key": "x"}` and `headers["Authorization"]
+# = "x"` (the closing quote and bracket of the key are optional).
 _SOURCE_LITERAL_RX = re.compile(
-    rf"""(?i)\b([A-Za-z_][A-Za-z0-9_]*{_SECRET_WORD}[A-Za-z0-9_]*|{_SECRET_WORD}[A-Za-z0-9_]*)"""
-    rf"""(\s*(?:=|:|<-)\s*)({_LITERAL})"""
+    rf"""(?i)\b([A-Za-z_][A-Za-z0-9_]*{_SECRET_WORD}[A-Za-z0-9_]*|{_SECRET_WORD}[A-Za-z0-9_]*"""
+    rf"""|authorization)"""
+    rf"""(["']?\]?\s*(?:=|:|<-|,)\s*)({_LITERAL})"""
 )
 
 
@@ -161,7 +229,7 @@ def redact_command(text: str) -> str:
     (``python -c "password = '…'"``) both redacted."""
     if not text:
         return text
-    return redact_source(redact_text(text))
+    return redact_source(_redact_decoded_words(redact_text(text)))
 
 
 def redact_argv(argv: list[Any]) -> list[Any]:
@@ -182,6 +250,9 @@ def redact_argv(argv: list[Any]) -> list[Any]:
             redact_next = False
             continue
         redact_next = False
+        if _AUTH_WORD_RX.match(token):
+            out.append(f"Authorization: {REDACTED}")
+            continue
         name, eq, _ = token.partition("=")
         if eq and name.startswith("-") and SECRET_NAME_RX.search(name):
             out.append(f"{name}={REDACTED}")

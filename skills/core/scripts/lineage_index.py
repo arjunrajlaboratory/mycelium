@@ -361,9 +361,11 @@ def _manifest_contribution(path: Path, name: str, root_real: str) -> dict[str, A
                 "host_session_id": skip.get("host_session_id")})
     summary = manifest.get("summary") if isinstance(manifest.get("summary"), dict) else {}
     # Reconciled after every source is loaded: a store may hold the record.
+    # A collaborator's committed manifest frames its gaps in its own
+    # checkout, like its skips: they never cloud this checkout's verdicts.
     for kind, field in (("observation-missing", "observations_missing"),
                         ("call-unresolved", "unresolved_calls")):
-        items = summary.get(field)
+        items = summary.get(field) if local_manifest else None
         for item in items if isinstance(items, list) else []:
             if isinstance(item, str):
                 out["pending_gaps"].append({"kind": kind, "scope": "repo", "source": name,
@@ -560,7 +562,9 @@ class Index:
                                          "background": interval.background,
                                          "host": interval.host,
                                          "session": interval.session,
-                                         "call": interval.call}
+                                         "call": interval.call,
+                                         "observe": interval.observe,
+                                         "end_reason": interval.end_reason}
         except Exception:  # noqa: BLE001 - no journal: background bounds stay open
             pass
         self._aggregate()
@@ -570,6 +574,7 @@ class Index:
     def _aggregate(self) -> None:
         candidates: list[dict[str, Any]] = []
         pending_gaps: list[dict[str, Any]] = []
+        all_observed: set[str] = set()
         reads: dict[tuple, dict[str, Any]] = {}
         for name in sorted(self.sources):
             part = self.sources[name].get("contribution") or {}
@@ -585,6 +590,9 @@ class Index:
                 key = _obs_key(record.get("host_session_id"), record.get("observation_id"))
                 if key is None:
                     continue
+                # Every call some checkout observed, ours or not: a journaled
+                # call with an observation elsewhere is not missing one.
+                all_observed.add(key)
                 root = record.get("repo_root")
                 if not isinstance(root, str):
                     root = item.get("manifest_root")
@@ -609,19 +617,31 @@ class Index:
                         for item in self.observations.values()
                         if isinstance(item["record"].get("changes"), dict)}
         known_ids = {item["record"].get("observation_id") for item in self.observations.values()}
+        # Calls whose own observation is a gap the journal bounds (a turn
+        # that ended without a Post): a manifest summary naming the same
+        # call is that gap, already placed, not a second unbounded one.
+        bounded_ids = {item["record"].get("observation_id")
+                       for item in self.observations.values()
+                       if isinstance(item["record"].get("journal"), dict)}
         for gap in pending_gaps:
             if gap["kind"] == "skip-unreconciled":
                 key = _obs_key(gap.get("host_session_id"), gap.get("observation_id"))
                 observed = self.observations.get(key) if key else None
-                if observed is None and gap.get("observation_id") in resolved_ids:
-                    continue  # a call id known with a change list in some session
+                if (observed is None and not gap.get("host_session_id")
+                        and gap.get("observation_id") in resolved_ids):
+                    # A legacy skip naming no session: the bare call id is
+                    # all there is to match on.
+                    continue
                 if observed is not None and isinstance(observed["record"].get("changes"), dict):
                     continue
                 self.gaps.append(gap)
                 continue
             target = resolved_ids if gap["kind"] == "call-unresolved" else known_ids
-            if gap.get("observation_id") not in target:
-                self.gaps.append(gap)
+            if gap.get("observation_id") in target:
+                continue
+            if gap["kind"] == "call-unresolved" and gap.get("observation_id") in bounded_ids:
+                continue
+            self.gaps.append(gap)
         for ref in self.events.values():
             call = ref.get("call")
             if ref.get("checkout") == "foreign":
@@ -637,15 +657,31 @@ class Index:
         # verdict that follows it (`open_calls`), not counted as a gap: the
         # command running this very query is always such a call.
         for interval in self.journal_now.values():
-            if interval.get("tool") != "Bash" or interval.get("post_seq") is not None:
-                continue
             call_key = _obs_key(interval.get("session"),
                                 f"{interval.get('host')}:{interval.get('call')}")
-            if call_key in self.observations:
+            if call_key in all_observed:
                 continue
-            self.gaps.append({"kind": "call-open", "scope": "info", "call": call_key,
-                              "journal": {"id": interval["id"], "pre_seq": interval["pre_seq"],
-                                          "post_seq": None, "expired": False}})
+            if interval.get("post_seq") is None:
+                if interval.get("tool") == "Bash":
+                    self.gaps.append({"kind": "call-open", "scope": "info", "call": call_key,
+                                      "journal": {"id": interval["id"],
+                                                  "pre_seq": interval["pre_seq"],
+                                                  "post_seq": None, "expired": False}})
+                continue
+            # A closed call that owed an observation and has none on record:
+            # its Post never ran (the interval aged out), or its store append
+            # failed. What it changed is unknown. A turn end bounds it; an
+            # age expiry does not (the call may still be running).
+            owed = interval.get("tool") == "Bash" or interval.get("observe")
+            if not owed or interval.get("background"):
+                continue
+            bounded = not interval.get("expired") or interval.get("end_reason") == "turn-ended"
+            self.gaps.append({"kind": "observation-missing", "scope": "repo", "call": call_key,
+                              "source": "journal",
+                              "journal": {"id": interval["id"],
+                                          "pre_seq": interval["pre_seq"],
+                                          "post_seq": interval["post_seq"] if bounded else None,
+                                          "expired": bool(interval.get("expired"))}})
         seen_candidates = set()
         for cand in candidates:
             if cand.get("call") in observed_calls:
@@ -678,8 +714,25 @@ class Index:
             return
         attribution = {"no-known-overlap": "sole", "overlap": "shared",
                        "background": "uncertain", "edit": "sole"}.get(status, "uncertain")
-        if status == "edit" and record.get("outcome") != "success":
-            attribution = "uncertain"  # an edit whose success was not established
+        unconfirmed_edit = status == "edit" and record.get("outcome") != "success"
+        if unconfirmed_edit:
+            # An edit not shown to have succeeded: its targets were hashed
+            # after the call, but nothing says the call changed them (an
+            # edit records no before-state). The hashes stay as evidence on
+            # a gap; no write is credited to the call.
+            for kind in ("edited", "created", "modified", "deleted"):
+                for entry in changes.get(kind) or []:
+                    if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                        self.gaps.append({"kind": "edit-unconfirmed", "scope": "path",
+                                          "path": entry["path"],
+                                          "after": entry.get("after"), **base})
+            for refused in changes.get("refused") or []:
+                if (isinstance(refused, dict) and isinstance(refused.get("path"), str)
+                        and not os.path.isabs(refused["path"])):
+                    self.gaps.append({"kind": "edit-uncertain", "scope": "path",
+                                      "path": refused["path"],
+                                      "reason": refused.get("reason"), **base})
+            return
         overlapping = [o.get("call") for o in record.get("overlapping") or []
                        if isinstance(o, dict)]
         if overlapping and attribution == "sole":
