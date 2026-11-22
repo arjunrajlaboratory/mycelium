@@ -281,7 +281,13 @@ def _manifest_contribution(path: Path, name: str, root_real: str) -> dict[str, A
             ref = _event_ref(record, kind=kind, manifest=name, session_id=session_id,
                              ident=ident, synthetic=synthetic)
             out["events"].append(ref)
-            if ref["call"] is None and record.get("observation_status") == "unavailable":
+            own_root = record.get("repo_root") if isinstance(record.get("repo_root"),
+                                                             str) else manifest_root
+            foreign = isinstance(own_root, str) and os.path.realpath(own_root) != root_real
+            if foreign:
+                ref["checkout"] = "foreign"
+            if not foreign and ref["call"] is None and \
+                    record.get("observation_status") == "unavailable":
                 # The observer failed outright for this call (no id): its
                 # file changes are unknown, anywhere in the repository.
                 out["gaps"].append({"kind": "observation-unavailable", "scope": "repo",
@@ -294,8 +300,10 @@ def _manifest_contribution(path: Path, name: str, root_real: str) -> dict[str, A
             # worktree or a collaborator's clone) still says which content
             # its steps read, but its writes went to that checkout's files:
             # they never enter this checkout's write history.
-            foreign = isinstance(record.get("repo_root"), str) and \
-                os.path.realpath(record["repo_root"]) != root_real
+            effective_root = record.get("repo_root") if isinstance(record.get("repo_root"),
+                                                                   str) else manifest_root
+            foreign = isinstance(effective_root, str) and \
+                os.path.realpath(effective_root) != root_real
             if foreign:
                 ref["checkout"] = "foreign"
             for direction in ("inputs", "outputs"):
@@ -339,11 +347,18 @@ def _manifest_contribution(path: Path, name: str, root_real: str) -> dict[str, A
             out["observations"].append({"record": observation, "source": name,
                                         "manifest_root": manifest_root})
     skipped = manifest.get("skipped")
+    local_manifest = not isinstance(manifest_root, str) or \
+        os.path.realpath(manifest_root) == root_real
     for skip in skipped if isinstance(skipped, list) else []:
-        if isinstance(skip, dict):
-            out["gaps"].append({"kind": "skip", "scope": "info", "source": name,
-                                "reason": skip.get("skip_reason"), "ts": skip.get("ts"),
-                                "ts_ns": skip.get("ts_ns")})
+        if isinstance(skip, dict) and local_manifest:
+            # Reconciled after loading: a skip whose call has an observation
+            # with a change list is covered; any other skip is a gap.
+            out["pending_gaps"].append({
+                "kind": "skip-unreconciled", "scope": "repo", "source": name,
+                "reason": skip.get("skip_reason"), "ts": skip.get("ts"),
+                "ts_ns": skip.get("ts_ns"),
+                "observation_id": skip.get("observation_id"),
+                "host_session_id": skip.get("host_session_id")})
     summary = manifest.get("summary") if isinstance(manifest.get("summary"), dict) else {}
     # Reconciled after every source is loaded: a store may hold the record.
     for kind, field in (("observation-missing", "observations_missing"),
@@ -359,7 +374,7 @@ def _manifest_contribution(path: Path, name: str, root_real: str) -> dict[str, A
 def _store_contribution(path: Path, name: str) -> dict[str, Any]:
     out = _empty()
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_bytes().split(b"\n")
     except OSError as exc:
         out["gaps"].append({"kind": "store-unreadable", "scope": "repo", "source": name,
                             "detail": type(exc).__name__})
@@ -368,8 +383,8 @@ def _store_contribution(path: Path, name: str) -> dict[str, Any]:
         if not line.strip():
             continue
         try:
-            record = json.loads(line)
-        except ValueError:
+            record = json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
             # A torn or corrupt record may have been an edit or a change
             # list: its evidence is lost, so the gap is recorded.
             out["gaps"].append({"kind": "store-record-unreadable", "scope": "repo",
@@ -414,7 +429,12 @@ def _write_cache(path: Path, data: dict[str, Any], root: Path) -> bool:
     try:
         import mycelium_locks
 
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if not _cache_dir_safe(path.parent, root):
+            return False
+        if not path.parent.exists():
+            os.mkdir(path.parent, 0o755)
+        if not _cache_dir_safe(path.parent, root):
+            return False
         with mycelium_locks.durable_lock(root, "lineage-index", timeout=LOCK_TIMEOUT_SECONDS):
             fd, temp = tempfile.mkstemp(prefix=".index.", suffix=".tmp", dir=path.parent)
             try:
@@ -428,6 +448,25 @@ def _write_cache(path: Path, data: dict[str, Any], root: Path) -> bool:
         return True
     except Exception:  # noqa: BLE001 - a cache that cannot be written is only slower
         return False
+
+
+def _cache_dir_safe(directory: Path, root: Path) -> bool:
+    """The cache directory and every ancestor up to the root are real
+    directories inside the checkout (no symlink, nothing outside), or the
+    cache directory does not exist yet under such a parent."""
+    root_real = os.path.realpath(root)
+    current = Path(os.path.abspath(directory))
+    while True:
+        if current.is_symlink():
+            return False
+        if current.exists() and not current.is_dir():
+            return False
+        if os.path.realpath(current) == root_real:
+            return True
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
 
 
 def load(root: Path, state_dir: Path | None = None, *, write: bool = True) -> "Index":
@@ -508,6 +547,7 @@ class Index:
         self.gaps: list[dict[str, Any]] = []
         self.observations: dict[str, dict[str, Any]] = {}
         self.journal_now: dict[str, Any] = {}
+        self._disk_memo: dict[str, tuple[Any, str | None, str | None]] = {}
         try:
             records = io_observer._journal_records(io_observer.journal_path(state_dir))
             jid = next((r["jid"] for r in reversed(records) if isinstance(r.get("jid"), str)),
@@ -515,7 +555,12 @@ class Index:
             for key, interval in io_observer._intervals(records).items():
                 self.journal_now[key] = {"id": jid, "pre_seq": interval.pre_seq,
                                          "post_seq": interval.post_seq,
-                                         "expired": interval.expired}
+                                         "expired": interval.expired,
+                                         "tool": interval.tool,
+                                         "background": interval.background,
+                                         "host": interval.host,
+                                         "session": interval.session,
+                                         "call": interval.call}
         except Exception:  # noqa: BLE001 - no journal: background bounds stay open
             pass
         self._aggregate()
@@ -565,17 +610,42 @@ class Index:
                         if isinstance(item["record"].get("changes"), dict)}
         known_ids = {item["record"].get("observation_id") for item in self.observations.values()}
         for gap in pending_gaps:
+            if gap["kind"] == "skip-unreconciled":
+                key = _obs_key(gap.get("host_session_id"), gap.get("observation_id"))
+                observed = self.observations.get(key) if key else None
+                if observed is None and gap.get("observation_id") in resolved_ids:
+                    continue  # a call id known with a change list in some session
+                if observed is not None and isinstance(observed["record"].get("changes"), dict):
+                    continue
+                self.gaps.append(gap)
+                continue
             target = resolved_ids if gap["kind"] == "call-unresolved" else known_ids
             if gap.get("observation_id") not in target:
                 self.gaps.append(gap)
         for ref in self.events.values():
             call = ref.get("call")
+            if ref.get("checkout") == "foreign":
+                continue  # another checkout's missing observation clouds nothing here
             if call and call not in self.observations and ref.get("observation_status"):
                 self.gaps.append({"kind": "observation-missing", "scope": "repo",
                                   "source": ref.get("manifest"), "event_id": ref["event_id"],
                                   "observation_id": ref.get("observation_id")})
         observed_calls = {key for key, item in self.observations.items()
                           if isinstance(item["record"].get("changes"), dict)}
+        # A Bash call whose Pre is journaled but whose Post has not been
+        # observed may still be changing files. It is reported with every
+        # verdict that follows it (`open_calls`), not counted as a gap: the
+        # command running this very query is always such a call.
+        for interval in self.journal_now.values():
+            if interval.get("tool") != "Bash" or interval.get("post_seq") is not None:
+                continue
+            call_key = _obs_key(interval.get("session"),
+                                f"{interval.get('host')}:{interval.get('call')}")
+            if call_key in self.observations:
+                continue
+            self.gaps.append({"kind": "call-open", "scope": "info", "call": call_key,
+                              "journal": {"id": interval["id"], "pre_seq": interval["pre_seq"],
+                                          "post_seq": None, "expired": False}})
         seen_candidates = set()
         for cand in candidates:
             if cand.get("call") in observed_calls:
@@ -608,6 +678,8 @@ class Index:
             return
         attribution = {"no-known-overlap": "sole", "overlap": "shared",
                        "background": "uncertain", "edit": "sole"}.get(status, "uncertain")
+        if status == "edit" and record.get("outcome") != "success":
+            attribution = "uncertain"  # an edit whose success was not established
         overlapping = [o.get("call") for o in record.get("overlapping") or []
                        if isinstance(o, dict)]
         if overlapping and attribution == "sole":
@@ -633,8 +705,12 @@ class Index:
             host, _, call = str(record.get("observation_id") or "").partition(":")
             now = self.journal_now.get(io_observer.interval_key(
                 host, str(record.get("host_session_id") or ""), call))
+            bound = dict(now or journal or {})
+            if bound.get("expired"):
+                # The journal's timeout is not evidence the job stopped.
+                bound["post_seq"] = None
             self.gaps.append({"kind": "background-job", "scope": "repo",
-                              **{**base, "journal": now or journal}})
+                              **{**base, "journal": bound or None}})
         incomplete = bool(changes.get("capped"))
         if incomplete:
             # A capped diff lists only some changes; its top-level counts
@@ -652,7 +728,8 @@ class Index:
                 self.gaps.append({"kind": "unwatched", "scope": "path",
                                   "path": unwatched["path"], "prefix": True, **base})
         racy = [r for r in changes.get("racy_unknown") or [] if isinstance(r, str)]
-        racy_count = (changes.get("counts") or {}).get("racy_unknown")
+        counts = changes.get("counts") if isinstance(changes.get("counts"), dict) else {}
+        racy_count = counts.get("racy_unknown")
         if isinstance(racy_count, int) and racy_count > len(racy):
             self.gaps.append({"kind": "racy-truncated", "scope": "repo", **base})
         for path in racy:
@@ -727,9 +804,19 @@ class Index:
                 later_diff.append(other)
             elif theirs is None or mine is None:
                 later_maybe.append(other)  # a difference cannot be proven
+        gaps = [g for g in self.gaps if self._gap_applies(g, path)
+                and (g.get("call") != write["call"] or g.get("kind") == "background-job")
+                and not _ended_before(g.get("journal"), write.get("journal"))]
         if later_diff:
+            # A journal-ordered later write with different known bytes (or a
+            # deletion) replaced these bytes, whatever else a gap may hide;
+            # the gaps are reported with the verdict, not instead of it.
             first = min(later_diff, key=lambda w: (w["journal"] or {}).get("pre_seq") or 0)
-            return {"status": "superseded", "superseded_by": _write_summary(first, self)}
+            result = {"status": "superseded", "superseded_by": _write_summary(first, self)}
+            if gaps:
+                result["gaps"] = [_gap_summary(g) for g in gaps[:10]]
+                result["gap_count"] = len(gaps)
+            return result
         if later_maybe:
             first = min(later_maybe, key=lambda w: (w["journal"] or {}).get("pre_seq") or 0)
             reason = "earlier-hash-unknown" if mine is None else "later-write-hash-unknown"
@@ -742,15 +829,14 @@ class Index:
             # A Bash observation never sees this path (an excluded
             # directory or name): a later Bash call could have changed it.
             reasons.append("unwatched-path")
-        gaps = [g for g in self.gaps if self._gap_applies(g, path)
-                and (g.get("call") != write["call"] or g.get("kind") == "background-job")
-                and not _ended_before(g.get("journal"), write.get("journal"))]
         if gaps:
             reasons.append("gap")
         if mine is None and not deleted:
             reasons.append("write-hash-unknown")
         if write.get("incomplete"):
             reasons.append("incomplete-observation")
+        open_calls = [g["call"] for g in self.gaps if g.get("kind") == "call-open"
+                      and not _ended_before(g.get("journal"), write.get("journal"))]
         if reasons:
             result: dict[str, Any] = {"status": "unknown", "reasons": reasons}
             if unordered:
@@ -758,8 +844,11 @@ class Index:
             if gaps:
                 result["gaps"] = [_gap_summary(g) for g in gaps[:10]]
                 result["gap_count"] = len(gaps)
-            return result
-        return {"status": "current-in-record"}
+        else:
+            result = {"status": "current-in-record"}
+        if open_calls:
+            result["open_calls"] = open_calls[:10]
+        return result
 
     def disk_status(self, path: str, expected: str | None, *,
                     identity: dict[str, Any] | None = None,
@@ -786,7 +875,10 @@ class Index:
             return {"disk": "unverified", "reason": "not-a-regular-file"}
         ident = io_observer.identity_of(st)
         cached = cache.get(io_observer._cache_key(ident))
-        if cached:
+        memo = self._disk_memo.get(path)
+        if memo is not None and memo[0] == ident:
+            digest, origin = memo[1], memo[2]
+        elif cached:
             digest, origin = cached, "hash-cache"
         elif st.st_size > max_bytes:
             return {"disk": "unverified", "reason": "too-large", "size_bytes": st.st_size}
@@ -801,6 +893,7 @@ class Index:
                 return {"disk": "unverified", "reason": "changed-during-check"}
         except OSError:
             return {"disk": "unverified", "reason": "changed-during-check"}
+        self._disk_memo[path] = (ident, digest, origin)
         out: dict[str, Any] = {"disk_sha256": digest, "disk_hash_origin": origin}
         if expected is None:
             out["disk"] = "unverified"
@@ -876,6 +969,16 @@ def _resolve_pending(index: Index, sha256: str, max_bytes: int) -> list[dict[str
     resolved = []
     for write in index.writes:
         if write.get("sha256") is None and write.get("identity") and write.get("frame") == "repo":
+            # A cheap identity check first: only a file that still has the
+            # observed identity is worth hashing.
+            try:
+                st = os.lstat(os.path.join(index.root_real, write["path"]))
+            except (OSError, ValueError):
+                continue
+            ident = write["identity"]
+            if any(ident.get(k) != getattr(st, f"st_{k}") for k in
+                   ("dev", "ino", "size", "mtime_ns", "ctime_ns")):
+                continue
             disk = index.disk_status(write["path"], None, identity=write["identity"],
                                      max_bytes=max_bytes)
             if disk.get("resolved_sha256") == sha256:

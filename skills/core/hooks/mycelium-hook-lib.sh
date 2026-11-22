@@ -660,6 +660,15 @@ while len(rest) >= 2:
         once = value == "true"
     elif flag == "--stable-lock":
         stable_lock = value == "true"
+# The call this skip belongs to, when the tracker knows it: the index then
+# matches the skip to that call observation rather than counting a gap.
+call = os.environ.get("MYCELIUM__SKIP_CALL", "")
+skip_host = record.get("host") or os.environ.get("MYCELIUM__SKIP_HOST", "")
+if call and skip_host:
+    record["observation_id"] = skip_host + ":" + call
+    record.setdefault("host", skip_host)
+    if os.environ.get("MYCELIUM__SKIP_SESSION"):
+        record.setdefault("host_session_id", os.environ["MYCELIUM__SKIP_SESSION"])
 line = (json.dumps(record) + "\n").encode("ascii")
 lock_path = path + ".lock" if stable_lock else path
 lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)

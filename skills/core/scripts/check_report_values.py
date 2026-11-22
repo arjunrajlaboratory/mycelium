@@ -154,6 +154,12 @@ def check_numbers(entries: Iterable[Any], repo_root: Path, *,
             continue
         number_id = entry.get("id", entry.get("key"))
         sources = entry.get("sources")
+        if sources is not None and "source" in entry:
+            # Which one is the dependency? A stale `source` must not hide
+            # behind a fresh `sources` (or the reverse).
+            findings.append(_finding("source-invalid", "error", number_id,
+                                     "the entry has both source and sources"))
+            continue
         if sources is not None:
             # A number linked to several files: each is checked on its own,
             # and any one stale, missing or invalid fails the number.
@@ -204,7 +210,7 @@ def check_numbers(entries: Iterable[Any], repo_root: Path, *,
                 f"{number_id!r}, then redo the Phase 1 merge", path=rel, expected=expected)
             if explain:
                 index = index or _lineage(repo_root)
-                finding["lineage"] = _explain(index, rel)
+                finding["lineage"] = _explain(index, rel, None)
             findings.append(finding)
             continue
         if actual is None:
@@ -221,7 +227,7 @@ def check_numbers(entries: Iterable[Any], repo_root: Path, *,
                 path=rel, expected=expected, actual=actual)
             if explain:
                 index = index or _lineage(repo_root)
-                finding["lineage"] = _explain(index, rel)
+                finding["lineage"] = _explain(index, rel, actual)
             findings.append(finding)
     return findings
 
@@ -235,7 +241,10 @@ def _lineage(repo_root: Path):
         return None
 
 
-def _explain(index, rel: str) -> dict[str, Any] | None:
+def _explain(index, rel: str, actual: str | None) -> dict[str, Any] | None:
+    """The recorded call that wrote the bytes now on disk, when the record
+    can establish it: an observed write whose hash is exactly ``actual``.
+    Otherwise says so, rather than naming the last write it happens to see."""
     if index is None:
         return None
     try:
@@ -247,10 +256,24 @@ def _explain(index, rel: str) -> dict[str, Any] | None:
     writes = result.get("writes") or []
     if not writes:
         return {"status": "no-recorded-write"}
-    last = writes[-1]
-    return {"latest_write_call": last.get("call"), "sha256": last.get("sha256"),
-            "events": [e.get("event_id") for e in last.get("events") or []],
-            "action": last.get("action")}
+    if actual is None:
+        deletions = [w for w in writes if w.get("action") == "deleted"]
+        if deletions:
+            last = deletions[-1]
+            return {"status": "deleted-in-record", "write_call": last.get("call"),
+                    "events": [e.get("event_id") for e in last.get("events") or []]}
+        return {"status": "no-recorded-deletion"}
+    matching = [w for w in writes if w.get("sha256") == actual and w.get("evidence") == "observed"]
+    if not matching:
+        return {"status": "current-bytes-not-in-record",
+                "detail": "no recorded write produced the bytes now on disk; they changed "
+                          "outside the record"}
+    if len(matching) > 1:
+        return {"status": "producer-ambiguous", "calls": [w.get("call") for w in matching]}
+    write = matching[0]
+    return {"status": "written-by", "write_call": write.get("call"), "sha256": actual,
+            "events": [e.get("event_id") for e in write.get("events") or []],
+            "verdict": write.get("record", {}).get("status")}
 
 
 def number_entries(document: Any) -> list[Any]:
@@ -311,6 +334,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         for finding in findings:
             print(format_finding(finding, f"{doc_path}:{finding.get('id')}"))
+            lineage = finding.get("lineage")
+            if lineage:
+                calls = lineage.get("write_call") or ", ".join(lineage.get("calls") or [])
+                print(f"    lineage: {lineage.get('status')}"
+                      + (f" ({calls})" if calls else ""))
         errors = sum(f["severity"] == "error" for f in findings)
         warnings = sum(f["severity"] == "warning" for f in findings)
         print(f"{doc_path}: {len(entries)} number(s), {errors} error(s), {warnings} warning(s)",

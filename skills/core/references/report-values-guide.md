@@ -152,17 +152,19 @@ register_value(
 
 The entry then carries `sources` (a list) instead of `source`, and the number is `stale-value` when any of the files changes.
 
-A config is usually read at the start of a run and the number registered at the end. If the config could change in between, hash it when you read it with `snapshot_source`. Registration then refuses a file that changed since:
+A config is usually read at the start of a run and the number registered at the end. Read it with `read_source`, which returns the content together with a source entry for exactly those bytes. Registration then refuses a file that no longer has them:
 
 ```python
-from register_value import register_value, snapshot_source
+from register_value import register_value, read_source
 
-cfg_source = snapshot_source("params.yaml", {"key": "ratio_threshold"})
-threshold = yaml.safe_load(open("params.yaml"))["ratio_threshold"]
+text, cfg_source = read_source("params.yaml", {"key": "ratio_threshold"}, mode="r")
+threshold = yaml.safe_load(text)["ratio_threshold"]
 ...
 register_value("n_genes_up", n_up, source=[
     {"path": "outputs/gene_means.csv", "locator": {"column": "ratio"}}, cfg_source])
 ```
+
+(`snapshot_source(path)` hashes without reading. Prefer `read_source`: it leaves no window between hashing a file and parsing it.)
 
 **A stale number is fixed by rerunning the analysis that registers it, then redoing the Phase 1 merge.** Never edit or refresh `source.sha256` by hand. That would certify a number computed from bytes that no longer exist.
 
@@ -222,9 +224,10 @@ Only a count, a distinct count, and a fingerprint of the id set are stored, neve
 
 With these records, a reader such as Warrant can catch:
 
-- two numbers that claim the same population but used different cells;
-- a test set that overlaps a training set;
-- a QC drop that differs from what the report says.
+- two numbers that claim the same population but used different cells (their fingerprints differ);
+- a QC drop that differs from what the report says (the counts disagree).
+
+Fingerprints show only whether two sets are *equal*. A train set `{a, b}` and test set `{b, c}` give different fingerprints, exactly as two disjoint sets do. Overlap detection needs a separate check that sees the ids, inside the analysis.
 
 Record at filter, subset and split steps. Mycelium recommends it but does not require it.
 

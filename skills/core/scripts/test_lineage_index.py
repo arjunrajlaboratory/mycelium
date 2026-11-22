@@ -80,6 +80,7 @@ def observation(repo: Path, call: str, *, created=(), modified=(), deleted=(), e
     }
     if edited:
         record["status"] = "edit"
+        record["outcome"] = "success"
         record["changes"] = {"edited": entries(edited), "deleted": [], "refused": []}
     record.update(extra)
     return record

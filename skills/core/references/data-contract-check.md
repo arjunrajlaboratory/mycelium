@@ -116,7 +116,12 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   pass while the batches jointly determine the group: controls at (date 1,
   run 1), treated at (date 2, run 1) and (date 1, run 2).
 - `pairing` blocks when fewer than two levels are present (listed or
-  observed): a pairing whose other side is missing pairs nothing.
+  observed): a pairing whose other side is missing pairs nothing. With
+  `"exact_levels": true` (which needs `levels`), it also blocks when the table
+  has a level not listed, or lacks a listed one. Ledger contracts set this when
+  the pairing licenses units across groups.
+- `batch_estimability` takes `batch_scopes`, a map from batch column to the
+  parent columns that qualify its local labels.
 - `cohort`: the required `levels` of `column` are present; `min_rows` or exact
   `rows` holds; and the `no_missing` columns have no missing values. Rows with
   no `column` value are left out of the levels and counts, with a warning.

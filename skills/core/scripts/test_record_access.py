@@ -101,7 +101,7 @@ def test_the_r_helper_writes_the_identical_record(project: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     (record,) = access(project)["records"]
     assert record["id_set_sha256"] == rv.id_set_fingerprint(["AAAC-1", "AAAG-1", "AACT-1"])[0]
-    assert record["count"] == 3 and record["computed_at"] == "probe.R"
+    assert record["count"] == 3 and record["computed_at"] == "scripts/probe.R"
 
 
 # -- multi-file report sources ---------------------------------------------------

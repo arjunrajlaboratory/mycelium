@@ -1201,6 +1201,8 @@ def _state(ident: Identity | None, result: HashResult | None) -> dict[str, Any] 
         "size_bytes": ident.size,
         "hash_status": result.status if result else "not-captured",
     }
+    if state["sha256"] is not None:
+        state["hash_origin"] = "observed"
     if result is not None and result.status == "pending":
         # Enough to resolve the hash later, only if the file still has
         # exactly this identity (never a hash of later content).
@@ -1391,7 +1393,8 @@ def post(
                              tool=tool, agent=agent, repo_root=repo_root,
                              edit_changes=edit_changes, intervals=intervals,
                              journal_meta=journal_meta, journal_error=journal_error,
-                             outcome=outcome)
+                             outcome=outcome,
+                             unjournaled=filter_unjournaled(markers, intervals))
     if repo_root is None:
         return None
     with contextlib.suppress(OSError):
@@ -1708,9 +1711,14 @@ def hook(state_dir: Path, repo_root: Path, host: str, raw: str) -> int:
                 # Claude sends PostToolUse only for edits that succeeded. Elsewhere
                 # the response says; a failed patch may have applied partly, so
                 # its targets become uncertain rather than writes or deletions.
-                if edit_outcome(payload.get("tool_response")) == "failure":
+                verdict = edit_outcome(payload.get("tool_response"))
+                if verdict == "failure":
                     edited = [(path, "uncertain") for path, _ in edited]
                     edit_result = "failure"
+                elif verdict == "unknown":
+                    # Not shown to have succeeded: the targets' hashes are
+                    # recorded, but never credited to this call as its own.
+                    edit_result = "unknown"
         post(state_dir, host=host, session=session, call_id=call_id, tool=tool, agent=agent,
              repo_root=repo_root if edited is not None else None, edited=edited,
              outcome=edit_result)
@@ -1748,8 +1756,39 @@ def edit_outcome(response: Any) -> str:
 
     found = code(response)
     if found is None:
+        found = _textual_edit_code(response)
+    if found is None:
         return "unknown"
     return "success" if found == 0 else "failure"
+
+
+_EDIT_FAILURE_TEXT_RX = re.compile(
+    r"^\s*(?:error|failed|patch failed|invalid (?:context|patch))\b", re.IGNORECASE)
+_EDIT_SUCCESS_TEXT_RX = re.compile(r"^\s*success\b", re.IGNORECASE)
+
+
+def _textual_edit_code(value: Any) -> int | None:
+    """Plain-text edit responses, decoded as the activity tracker does
+    (`Error: invalid patch context` is a failure; `Success. Updated ...` a
+    success). Printed `stdout`/`stderr` fields are never read as status."""
+    if isinstance(value, dict):
+        for key, candidate in value.items():
+            if key in ("stdout", "stderr"):
+                continue
+            found = _textual_edit_code(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = _textual_edit_code(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, str):
+        if _EDIT_FAILURE_TEXT_RX.match(value):
+            return 1
+        if _EDIT_SUCCESS_TEXT_RX.match(value):
+            return 0
+    return None
 
 
 _PATCH_FILE_RX = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+?)\s*$", re.M)
@@ -1846,6 +1885,8 @@ def _edit_changes(
             result, _ = stable_hash(path, ident, deadline=deadline, cache={}, new_cache={})
         after: dict[str, Any] = {"sha256": result.sha256, "size_bytes": ident.size,
                                  "hash_status": result.status}
+        if result.sha256 is not None:
+            after["hash_origin"] = "observed"
         if result.status == "pending":
             # As for Bash outputs: enough to resolve the hash later only if
             # the file still has exactly this identity.
@@ -1994,6 +2035,7 @@ def _publish_edit(
     journal_meta: dict[str, Any],
     journal_error: str | None,
     outcome: str = "success",
+    unjournaled: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Record the files an edit tool wrote, by path, with their hashes after
     the edit. No snapshot is involved: the tool names its own targets, so
@@ -2012,7 +2054,10 @@ def _publish_edit(
         "bash_cmd": None,
         "outcome": outcome,
         "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "overlapping": overlapping(intervals, own_key) if own is not None else [],
+        # A concurrent call whose Pre missed the journal still left a
+        # marker: either call could have written these bytes.
+        "overlapping": (overlapping(intervals, own_key) if own is not None else [])
+        + list(unjournaled or []),
         "status": "edit",
         "reason": journal_error,
         "scope": None,

@@ -357,6 +357,27 @@ def snapshot_source(path: Any, locator: Any = None) -> dict[str, Any]:
     return entry
 
 
+def read_source(path: Any, locator: Any = None, *, mode: str = "rb") -> tuple[Any, dict[str, Any]]:
+    """Read a file once and return (its content, a source entry for those
+    exact bytes). The number is then linked to the bytes the analysis
+    parsed, with no window between hashing and reading::
+
+        text, cfg_source = read_source("params.yaml", {"key": "threshold"}, mode="r")
+        threshold = yaml.safe_load(text)["threshold"]
+        ...
+        register_value("n_up", n_up, source=[table_source, cfg_source])
+
+    Registration refuses the file if it no longer has those bytes.
+    """
+    with open(os.fspath(path), "rb") as handle:
+        data = handle.read()
+    entry: dict[str, Any] = {"path": os.fspath(path),
+                             "sha256": hashlib.sha256(data).hexdigest()}
+    if locator is not None:
+        entry["locator"] = locator
+    return (data.decode("utf-8") if mode == "r" else data), entry
+
+
 def _hash_source(path: Path) -> tuple[str, int]:
     """SHA-256 of the file, only if it provably did not change while read:
     the opened descriptor and the path must have the same identity before
@@ -677,7 +698,8 @@ def _validate_access(name: Any, axis: Any, role: Any) -> None:
 
 
 def _record_ids_at(name: str, ids: Any, *, axis: str, role: str, source: Any, ns: str,
-                   analysis_root: Path, ordered: bool, computed_at: str) -> dict[str, Any]:
+                   analysis_root: Path, ordered: bool, computed_at: str,
+                   run: dict[str, Any] | None = None) -> dict[str, Any]:
     # Validated here too, so the command line can never replace a good
     # record with a malformed one.
     _validate_access(name, axis, role)
@@ -685,7 +707,10 @@ def _record_ids_at(name: str, ids: Any, *, axis: str, role: str, source: Any, ns
     entry: dict[str, Any] = {
         "name": name, "axis": axis, "role": role, "count": count, "distinct": distinct,
         "id_set_sha256": set_hash, "computed_at": computed_at,
-        "run": {"pid": os.getpid(), "process_started_at": _PROCESS_STARTED},
+        # The analysis process: this one, or the caller the CLI names (an R
+        # session). `process_started_at` is when the helper was first loaded
+        # in that process, close to but not exactly its start.
+        "run": run or {"pid": os.getpid(), "process_started_at": _PROCESS_STARTED},
     }
     if ordered:
         entry["order_sha256"] = order_hash
@@ -755,6 +780,9 @@ def _main(argv: list[str] | None = None) -> int:
     rec.add_argument("--source", default=None)
     rec.add_argument("--ordered", action="store_true")
     rec.add_argument("--computed-at", default="unknown")
+    rec.add_argument("--run-pid", type=int, default=None,
+                     help="The calling analysis process (the R session), not this helper.")
+    rec.add_argument("--run-started-at", default=None)
     args = parser.parse_args(argv)
     root = Path(os.path.abspath(args.analysis_root))
     if root.parent.name != "analysis" or not root.is_dir():
@@ -768,7 +796,9 @@ def _main(argv: list[str] | None = None) -> int:
             ids.pop()  # the final newline ends the last id; every other line is an id
         entry = _record_ids_at(args.name, ids, axis=args.axis, role=args.role,
                                source=args.source, ns=root.name, analysis_root=root,
-                               ordered=args.ordered, computed_at=args.computed_at)
+                               ordered=args.ordered, computed_at=args.computed_at,
+                               run={"pid": args.run_pid, "process_started_at": args.run_started_at}
+                               if args.run_pid is not None else None)
     except (ValueRegistrationError, OSError) as exc:
         print(f"register_value: {exc}", file=sys.stderr)
         return 1
@@ -776,7 +806,7 @@ def _main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["register_value", "record_ids", "snapshot_source", "id_set_fingerprint",
+__all__ = ["register_value", "record_ids", "snapshot_source", "read_source", "id_set_fingerprint",
            "ValueRegistrationError", "AccessRecordError"]
 
 

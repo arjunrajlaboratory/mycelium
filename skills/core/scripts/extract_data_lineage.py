@@ -341,6 +341,10 @@ def normalize_skip(raw: dict[str, Any]) -> dict[str, Any]:
         "ts": raw.get("ts"),
         "skip_id": raw.get("skip_id"),
         "skip_reason": raw.get("skip_reason") or "unknown",
+        # The call the skip belongs to, when known: the index reconciles a
+        # skip with that call's observation instead of counting a gap.
+        **({"observation_id": raw["observation_id"]}
+           if isinstance(raw.get("observation_id"), str) else {}),
         "detail": raw.get("detail"),
         "bash_cmd": _redact(raw.get("bash_cmd")),
         "bash_exit": raw.get("bash_exit"),
@@ -518,7 +522,7 @@ def join_observations(
             continue
         host = observation_id.split(":", 1)[0]
         wanted.setdefault((host, session), set()).add(observation_id)
-    found: dict[str, dict[str, Any]] = {}
+    found: dict[tuple[str, str], dict[str, Any]] = {}
     for (host, session), ids in wanted.items():
         path = obs_dir / _safe_component(host) / f"{_safe_component(session)}.ndjson"
         if not _store_path_safe(obs_dir, path):
@@ -527,11 +531,12 @@ def join_observations(
             observation_id = observation.get("observation_id")
             if observation_id not in ids:
                 continue
-            previous = found.get(observation_id)
+            key = (session, observation_id)
+            previous = found.get(key)
             if previous is None or previous.get("reason") == "call-unresolved":
-                found[observation_id] = observation
-    referenced = sorted({i for ids in wanted.values() for i in ids})
-    missing = [i for i in referenced if i not in found]
+                found[key] = observation
+    referenced = sorted({(session, i) for (_, session), ids in wanted.items() for i in ids})
+    missing = [i for key in referenced for i in [key[1]] if key not in found]
     # Calls of these host sessions whose Pre snapshot no Post has claimed
     # yet: still running (a Codex terminal not yet polled to completion), or
     # never completed. Their file changes are unknown so far.
@@ -571,11 +576,11 @@ def join_observations(
     _mark_observed_changes(records, found, repo_root)
     if consume is not None:
         consume.extend(consumable)
-    return [found[i] for i in referenced if i in found], missing, unresolved
+    return [found[k] for k in referenced if k in found], missing, unresolved
 
 
 def _mark_observed_changes(
-    records: list[dict[str, Any]], found: dict[str, dict[str, Any]], repo_root: str
+    records: list[dict[str, Any]], found: dict[Any, dict[str, Any]], repo_root: str
 ) -> None:
     """Say, per inferred output, whether the call's observation saw it change.
 
@@ -591,7 +596,9 @@ def _mark_observed_changes(
 
     root = os.path.realpath(repo_root)
     for record in records:
-        observation = found.get(record.get("observation_id"))
+        observation = found.get((record.get("observation_session"), record.get("observation_id")))
+        if observation is None:
+            observation = found.get(record.get("observation_id"))  # a caller keyed by id
         changes = observation.get("changes") if observation else None
         if not isinstance(changes, dict):
             continue
@@ -648,6 +655,12 @@ def _mark_one(
             # was not. Never the hook digest.
             output["observed_sha256"] = side.get("sha256")
             output["observed_hash_status"] = side.get("hash_status")
+        return
+    # A path whose coverage changed during the call (the scope file moved)
+    # could have been rewritten unseen.
+    moved = changes.get("coverage_changed") or []
+    if rel in moved or changes.get("coverage_changed_truncated"):
+        output["observed_change"] = "unknown-coverage"
         return
     # Absent from the change list means "unchanged" only where the
     # observation could have seen a change.

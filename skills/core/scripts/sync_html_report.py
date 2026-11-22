@@ -832,9 +832,13 @@ def number_findings(manifest: dict, repo_root: Path) -> list[dict]:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import check_report_values
 
-    entries = manifest.get("numbers")
-    return check_report_values.check_numbers(entries if isinstance(entries, list) else [],
-                                             repo_root)
+    try:
+        entries = check_report_values.number_entries(manifest)
+    except ValueError as exc:
+        # A malformed `numbers` is never read as "no numbers".
+        return [{"code": "source-invalid", "severity": "error", "id": None,
+                 "message": f"manifest numbers are malformed: {exc}"}]
+    return check_report_values.check_numbers(entries, repo_root)
 
 
 def plan(source: str, manifest: dict, base: Path, repo_root: Path | None = None) -> list[Edit]:

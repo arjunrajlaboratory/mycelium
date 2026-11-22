@@ -302,7 +302,8 @@ def test_a_rerun_flags_a_number_registered_against_the_old_output(project: Path)
     (finding,) = json.loads(findings.stdout)["findings"]
     assert finding["code"] == "stale-value"
     assert finding["expected"] == old_sha
-    assert finding["lineage"]["latest_write_call"].endswith("claude:t2")
+    assert finding["lineage"]["status"] == "written-by"
+    assert finding["lineage"]["write_call"].endswith("claude:t2")
     _ = io
 
 

@@ -538,18 +538,27 @@ def _variable_script_path(command: str, offset: int, raw_path: str,
     if match is None:
         return None
     name, rest = match.groups()
-    value = None
-    for assignment in _ROOT_ASSIGNMENT_RX.finditer(command[:offset]):
-        if assignment.group(1) != name:
-            continue
-        literal = assignment.group(2)
-        if literal is not None:
-            value = literal
-        elif cwd is not None:
-            try:
-                value = (cwd / ".mycelium" / "plugin-root").read_text(encoding="utf-8").strip()
-            except OSError:
-                value = None
+    prefix = command[:offset]
+    # The value the interpreter receives is the *last* assignment before it:
+    # any later one this resolver cannot model (`P=.`, `P=$OTHER`) voids it.
+    any_assignment = re.compile(
+        rf"(?:^|[;&|\n(]|&&|\|\|)\s*{re.escape(name)}=")
+    last_any = None
+    for found in any_assignment.finditer(prefix):
+        last_any = found.start()
+    if last_any is None:
+        return None
+    modeled = [a for a in _ROOT_ASSIGNMENT_RX.finditer(prefix) if a.group(1) == name]
+    if not modeled or modeled[-1].start() != last_any:
+        return None
+    literal = modeled[-1].group(2)
+    if literal is not None:
+        value = literal
+    elif cwd is not None:
+        # The bounded, link-refusing pointer reader the accessor path uses.
+        value = _pointer_expansion_value(cwd, "cat")
+    else:
+        value = None
     if not value or "\0" in value:
         return None
     return Path(os.path.realpath(value + rest))
@@ -3870,11 +3879,14 @@ def _detect_runners(
     *,
     bash_exit: int | None,
     require_execution_evidence: bool,
+    offsets: list[int] | None = None,
 ) -> list[tuple[Path | None, str | None, Path | None]]:
     """Detect proven pipeline-runner and shell-script executions.
 
     The third element is the directory the run's I/O resolves against, or
-    ``None`` when a runner option moves the run somewhere unknowable.
+    ``None`` when a runner option moves the run somewhere unknowable. With
+    ``offsets``, the position of each detection's runner word is appended
+    in the same order, so its stage settings come from its own argv.
     """
     out: list[tuple[Path | None, str | None, Path | None]] = []
     for pattern in RUNNER_PATTERNS:
@@ -3909,6 +3921,8 @@ def _detect_runners(
                 io_cwd = _resolve_runner_directory(run.run_dir, effective_cwd)
             if run.entry is None:
                 out.append((None, run.source, io_cwd))
+                if offsets is not None:
+                    offsets.append(m.start())
                 continue
             unresolved = Path(run.entry)
             if not unresolved.is_absolute():
@@ -3923,6 +3937,8 @@ def _detect_runners(
             ):
                 continue
             out.append((path, None, io_cwd))
+            if offsets is not None:
+                offsets.append(m.start())
     return out
 
 
@@ -4107,23 +4123,27 @@ def _detect_scripts_with_cwd(
                 out.append((path, None, effective_cwd))
                 record(m.start(), "script", raw_path)
                 seen_paths.add(stage_key)
-    for path, source, io_cwd in _detect_runners(
+    runner_offsets: list[int] = []
+    runners = _detect_runners(
         bash_cmd,
         cwd,
         bash_exit=bash_exit,
         require_execution_evidence=require_execution_evidence,
-    ):
-        # A runner's own argv is not captured (its detection carries no
-        # stage); its step is recorded as partial.
+        offsets=runner_offsets,
+    )
+    for (path, source, io_cwd), offset in zip(runners, runner_offsets):
+        # Each runner stage is its own run: the same Snakefile with two
+        # different config files is two events, each with its own settings.
+        stage = _stage_key(bash_cmd, offset)
         if path is not None:
-            if not any(seen == path for seen, _ in seen_paths):
+            if (path, stage) not in seen_paths:
                 out.append((path, None, io_cwd))
-                record(None, "runner", None)
-                seen_paths.add((path, -1))
-        elif not any(seen[:2] == (source, io_cwd) for seen in seen_inline):
+                record(offset, "runner", None)
+                seen_paths.add((path, stage))
+        elif (source, io_cwd, stage) not in seen_inline:
             out.append((None, source, io_cwd))
-            record(None, "runner", None)
-            seen_inline.add((source, io_cwd, -1))
+            record(offset, "runner", None)
+            seen_inline.add((source, io_cwd, stage))
     return out
 
 
@@ -5791,7 +5811,8 @@ def build_data_command_event(
     """One minimal `data_command` record for a Bash call that touches data
     and has no analysis event, or None when the call names no data and no
     analysis run."""
-    named, truncated = _data_path_mentions(args.bash_cmd, _project_root(str(cwd)))
+    named, truncated = _data_path_mentions(_redact_command_cached(args.bash_cmd),
+                                           _project_root(str(cwd)))
     candidates = _unproven_analysis_candidates(args.bash_cmd, cwd, analysis_named)
     io = _certain_shell_io(args.bash_cmd, cwd, getattr(args, "bash_exit", None))
     observation = getattr(args, "observation", None) or {}
@@ -5879,6 +5900,8 @@ def build_event_for_detection(
     source = ""
     script_sha: str | None = None
     script_source_embed: str | None = None
+    sanitized_digest = False
+    args._sanitized_digest = False
 
     if script_path:
         # A script that does not exist is no evidence of an execution: the
@@ -5894,6 +5917,14 @@ def build_event_for_detection(
         script_sha = sha256_file(script_path)
         if len(source.encode("utf-8")) < EMBED_LIMIT_BYTES:
             script_source_embed = source
+        else:
+            import lineage_redact
+
+            sanitized = lineage_redact.redact_source(source)
+            if sanitized != source:
+                script_sha = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
+                sanitized_digest = True
+                args._sanitized_digest = True
     elif inline_source:
         source = inline_source
         script_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
@@ -6211,11 +6242,22 @@ def build_step(
     operand_index: int | None = None
     shown: list[Any] = list(argv)
     if kind == "inline":
-        body_flags = {"-c"} if interpreter == "python" else {"-e", "--eval"}
-        for index, token in enumerate(argv[:-1]):
-            if token in body_flags:
-                shown[index + 1] = _inline_placeholder(argv[index + 1])
-                operand_index = index + 2
+        if interpreter == "python":
+            # Python takes one `-c` body; everything after it is sys.argv.
+            for index, token in enumerate(argv[:-1]):
+                if token == "-c":
+                    shown[index + 1] = _inline_placeholder(argv[index + 1])
+                    operand_index = index + 2
+                    break
+        else:
+            # R evaluates every `-e` up to `--args`; after it, arguments.
+            for index, token in enumerate(argv[:-1]):
+                if token == "--args":
+                    operand_index = index + 1
+                    break
+                if token in ("-e", "--eval"):
+                    shown[index + 1] = _inline_placeholder(argv[index + 1])
+                    operand_index = index + 2
     elif kind == "module":
         for index, token in enumerate(argv[:-1]):
             if token == "-m" and argv[index + 1] == invocation.get("script_word"):
@@ -6248,7 +6290,9 @@ def build_step(
         step["wrappers"] = lineage_redact.redact_argv(wrappers)
     # Config files: the operands after the script for script runners, the
     # whole argv for runners driven by flags.
-    candidates = _config_candidates(interpreter, script_args if operand_index else argv[1:])
+    candidates = [(token, via) for token, via in _config_candidates(
+        interpreter, lineage_redact.redact_argv(script_args if operand_index else argv[1:]))
+        if lineage_redact.REDACTED not in token]
     budget = budget or ConfigBudget()
     configs: list[dict[str, Any]] = []
     skipped = 0
@@ -6267,6 +6311,12 @@ def build_step(
             continue
         record = _hash_config(path, budget.deadline)
         record["via"] = via
+        if record.get("sha256") is not None:
+            # Unproven until the Pre snapshot says otherwise: with no
+            # snapshot (no observer, a failed Pre) the digest describes the
+            # file after the call, so the settings the step read are unknown.
+            record["pre_run_proven"] = False
+            record["proof_reason"] = "no-pre-snapshot"
         configs.append(record)
     if skipped:
         step["config_files_over_budget"] = skipped
@@ -6277,12 +6327,12 @@ def build_step(
     for token in script_args:
         if expect_seed:
             expect_seed = False
-            if re.fullmatch(r"-?\d+", token):
+            if re.fullmatch(r"-?\d{1,19}", token):
                 seeds.append({"value": int(token), "origin": "argv"})
             continue
         name, eq, value = token.partition("=")
         if name in _SEED_FLAGS:
-            if eq and re.fullmatch(r"-?\d+", value):
+            if eq and re.fullmatch(r"-?\d{1,19}", value):
                 seeds.append({"value": int(value), "origin": "argv"})
             elif not eq:
                 expect_seed = True
@@ -6326,7 +6376,11 @@ def data_command_step(bash_cmd: str, named_paths: list[str] | None = None) -> di
                     fallback = {**record, "stage": "first-run-stage"}
                 if not named:
                     return fallback
-        offset += len(suffix) + 1
+        offset += len(suffix)
+        if offset < len(bash_cmd) and bash_cmd[offset] == "#":
+            newline = bash_cmd.find("\n", offset)
+            offset = len(bash_cmd) if newline < 0 else newline
+        offset += 1
         while offset < len(bash_cmd) and bash_cmd[offset] in " \t;&|\n":
             offset += 1
     return fallback
@@ -6368,6 +6422,10 @@ def _event_dict(
         # record (docs/plans/row-feature-access.md).
         "seeds_detected": seeds,
         **_observation_fields(args),
+        # A large script whose source held a secret literal: its digest is
+        # of the sanitized text, never of the secret-bearing body.
+        **({"script_sha256_of": "sanitized"} if getattr(args, "_sanitized_digest", False)
+           else {}),
     }
 
 

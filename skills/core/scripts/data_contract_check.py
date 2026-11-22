@@ -431,8 +431,21 @@ def check_pairing(check, columns, rows):
     # The units come from every row with a unit, the levels (when the contract
     # does not list them) from every row with a level: a unit seen at no level
     # is incomplete, and a level seen with no unit is still a level.
-    levels = [str(l) for l in as_list(check.get("levels"))] or \
-        sorted({r[within] for r in having(rows, within)})
+    observed_levels = sorted({r[within] for r in having(rows, within)})
+    levels = [str(l) for l in as_list(check.get("levels"))] or observed_levels
+    if check.get("exact_levels") and check.get("levels"):
+        extra = [lvl for lvl in observed_levels if lvl not in levels]
+        absent = [lvl for lvl in levels if lvl not in observed_levels]
+        if extra or absent:
+            # The pairing licenses reuse across exactly these levels: any
+            # other level would reuse units nothing verified, and a missing
+            # one leaves the pairing unchecked.
+            alerts.append(alert(
+                "pairing", "levels of '{}' differ from the declared pairing levels".format(within),
+                True, expected="exactly " + ", ".join(levels),
+                observed="; ".join(filter(None, ["extra: " + ", ".join(extra) if extra else "",
+                                                 "absent: " + ", ".join(absent) if absent else ""]))))
+            return alerts
     seen = {r[unit]: set() for r in having(rows, unit)}
     if seen and len(levels) < 2:
         # A pairing with one level pairs nothing: the other level's rows are
@@ -487,9 +500,24 @@ def check_estimability(check, columns, rows):
     """
     batches = need(check, "batch")
     contrast = need(check, "contrast")
+    scopes = check.get("batch_scopes") or {}
+    for column in batches:
+        rows = scoped(rows, column, as_list(scopes.get(column)))
     kept, alerts = drop_missing(rows, [contrast] + batches, "batch_estimability")
+    present = sorted({r[contrast] for r in having(rows, contrast)})
     cells = sorted({(r[contrast],) + tuple(r[b] for b in batches) for r in kept})
     levels = sorted({c[0] for c in cells})
+    lost = [lvl for lvl in present if lvl not in levels]
+    if lost:
+        # A model adjusting for every batch drops rows missing any of them;
+        # a level with no complete row cannot be estimated at all.
+        alerts.append(alert(
+            "batch_estimability",
+            "{} has no row with every batch column ({}), so a model adjusting for "
+            "all of them cannot estimate it".format(", ".join(lost), ", ".join(batches)),
+            True, expected="each level of {} with complete batch values".format(contrast),
+            observed="lost: " + ", ".join(lost)))
+        return alerts
     if len(levels) < 2:
         return alerts
     batch_levels = [sorted({c[i + 1] for c in cells}) for i in range(len(batches))]
@@ -770,9 +798,9 @@ KIND_KEYS = {
     "cohort": {"column", "levels", "min_rows", "rows", "no_missing"},
     "unit_of_replication": {"unit", "group", "within", "min_units_per_group", "units_may_span_groups",
                             "rows", "unit_scope"},
-    "pairing": {"unit", "within", "levels", "unit_scope"},
+    "pairing": {"unit", "within", "levels", "unit_scope", "exact_levels"},
     "batch_confounding": {"batch", "contrast", "max_share", "batch_scope"},
-    "batch_estimability": {"batch", "contrast"},
+    "batch_estimability": {"batch", "contrast", "batch_scopes"},
     "unique": {"columns"},
     "nesting": {"levels", "local_labels"},
 }
@@ -855,10 +883,19 @@ def validate_contract(contract):
             validate_column(where, check, "within", required=True)
             validate_levels(where, check)
             validate_columns(where, check, "unit_scope", allow_single=True)
+            if "exact_levels" in check and not isinstance(check["exact_levels"], bool):
+                fail(where, "'exact_levels' must be true or false")
+            if check.get("exact_levels") and "levels" not in check:
+                fail(where, "'exact_levels' needs 'levels'")
         elif kind == "unique":
             validate_columns(where, check, "columns", required=True)
         elif kind == "batch_estimability":
             validate_columns(where, check, "batch", required=True)
+            scopes = check.get("batch_scopes", {})
+            if not isinstance(scopes, dict) or not all(
+                    isinstance(k, str) and isinstance(v, list) and all(isinstance(c, str) for c in v)
+                    for k, v in scopes.items()):
+                fail(where, "'batch_scopes' must map batch columns to lists of columns")
             if len(as_list(check.get("batch"))) < 2:
                 fail(where, "'batch' needs at least two columns (one column is batch_confounding)")
             validate_column(where, check, "contrast", required=True)
@@ -899,6 +936,8 @@ def referenced_columns(check):
     cols += as_list(check.get("unit_scope")) + as_list(check.get("batch_scope"))
     if check.get("kind") == "batch_estimability":
         cols += as_list(check.get("batch"))
+        for scope in (check.get("batch_scopes") or {}).values():
+            cols += as_list(scope)
     if check.get("kind") in ("unique", "nesting"):
         cols += as_list(check.get("columns")) + as_list(check.get("levels"))
     return cols
@@ -1091,20 +1130,22 @@ def ledger_contract(spec, spec_dir):
             batch_check["batch_scope"] = ancestors(column)
         checks.append(batch_check)
     if len(batch) >= 2:
-        checks.append({"kind": "batch_estimability", "batch": batch, "contrast": group,
-                       "note": "for an analysis that adjusts for all of these batch terms"})
+        joint = {"kind": "batch_estimability", "batch": batch, "contrast": group,
+                 "note": "for an analysis that adjusts for all of these batch terms"}
+        scopes = {column: ancestors(column) for column in batch if ancestors(column)}
+        if scopes:
+            joint["batch_scopes"] = scopes
+        checks.append(joint)
     if pairing:
         pair_check = {"kind": "pairing", "unit": pairing["unit"], "within": pairing["within"]}
         spans = pairing["unit"] == unit and pairing["within"] == group
-        if pairing.get("levels") and spans:
-            # The pairing licenses units in several groups, so it must hold
-            # for every group present, not only the declared ones: an extra
-            # group would reuse units nothing verified. The declared levels
-            # must also be present.
-            checks.append({"kind": "cohort", "column": group,
-                           "levels": [str(v) for v in pairing["levels"]]})
-        elif pairing.get("levels"):
+        if pairing.get("levels"):
             pair_check["levels"] = [str(v) for v in pairing["levels"]]
+            if spans:
+                # The pairing licenses units in several groups, so it must
+                # hold for exactly the declared groups, on whatever table the
+                # pairing check is pointed at (the modeled one included).
+                pair_check["exact_levels"] = True
         if ancestors(pairing["unit"]):
             pair_check["unit_scope"] = ancestors(pairing["unit"])
         checks.append(pair_check)

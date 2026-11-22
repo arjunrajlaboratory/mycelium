@@ -88,6 +88,13 @@ these conflict with the text below, the amendments win.
     when the declared pairing verifies that same unit across the group
     column.
 
+**Post-PR review amendments** (Codex review rounds on PR #154):
+
+- **Supersession and gaps.** A journal-ordered later observed write with different known bytes, or a deletion, makes a write `superseded` even when a gap is open. Whatever the gap hides, those bytes were replaced. The applicable gaps are reported with the verdict.
+- **Open calls are reported, not counted.** A Bash call with a journaled Pre and no Post yet is listed under `open_calls` with each later verdict. It does not make the verdict `unknown`, because the command running a query is always such a call.
+- **Skips are reconciled.** Skips carry their call's `observation_id`. A skip whose call has an observation with a change list is covered, and any other skip is a gap.
+- **Background jobs.** A background job stays a gap even after the journal expires its interval: the timeout is not evidence the job stopped.
+
 Item 7 (row and feature access) is a separate note,
 `docs/plans/row-feature-access.md`, for agreement before building.
 

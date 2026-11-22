@@ -32,7 +32,8 @@
     raw <- gsub("~+~", " ", sub("^--file=", "", file_arg[1]), fixed = TRUE)
     script <- normalizePath(raw, mustWork = FALSE)
   }
-  list(wrapper = wrapper, script = script, launch_dir = normalizePath(getwd()))
+  list(wrapper = wrapper, script = script, launch_dir = normalizePath(getwd()),
+       started_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"))
 })
 
 record_ids <- function(name, ids, axis, role, source = NULL, namespace = NULL,
@@ -57,7 +58,8 @@ record_ids <- function(name, ids, axis, role, source = NULL, namespace = NULL,
   args <- c(shQuote(helper), "record-ids", "--analysis-root", shQuote(root),
             "--name", shQuote(name), "--axis", shQuote(axis), "--role", shQuote(role),
             "--ids-file", shQuote(ids_file),
-            "--computed-at", shQuote(if (is.null(state$script)) "R" else basename(state$script)))
+            "--computed-at", shQuote(.mycelium_computed_at(state, project)),
+            "--run-pid", Sys.getpid(), "--run-started-at", shQuote(state$started_at))
   if (!is.null(source)) {
     args <- c(args, "--source", shQuote(normalizePath(source, mustWork = TRUE)))
   }
@@ -76,6 +78,18 @@ record_ids <- function(name, ids, axis, role, source = NULL, namespace = NULL,
          call. = FALSE)
   }
   invisible(out)
+}
+
+.mycelium_computed_at <- function(state, project) {
+  # The script relative to its analysis directory, as register_value writes
+  # it for Python callers; no line number is available from R.
+  if (is.null(state$script)) return("R")
+  parts <- strsplit(state$script, "/", fixed = TRUE)[[1]]
+  at <- rev(which(parts == "analysis"))
+  if (length(at) && at[1] + 1 < length(parts)) {
+    return(paste(parts[(at[1] + 2):length(parts)], collapse = "/"))
+  }
+  basename(state$script)
 }
 
 .mycelium_project_root <- function(state) {

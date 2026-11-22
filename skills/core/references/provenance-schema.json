@@ -89,7 +89,8 @@
             "unwatched",
             "outside-scope",
             "unknown-capped",
-            "unknown-racy"
+            "unknown-racy",
+            "unknown-coverage"
           ]
         },
         "observed_sha256": {
@@ -604,6 +605,9 @@
             "string",
             "null"
           ]
+        },
+        "observation_id": {
+          "type": "string"
         }
       }
     },
@@ -625,6 +629,9 @@
         },
         "identity": {
           "type": "object"
+        },
+        "hash_origin": {
+          "const": "observed"
         }
       }
     },
@@ -994,6 +1001,13 @@
         },
         "unordered_writes": {
           "type": "array"
+        },
+        "open_calls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Bash calls still running (journaled Pre, no Post) after this write; informational, since the querying command is always one."
         }
       }
     },
@@ -1472,6 +1486,16 @@
                 },
                 "within": {
                   "type": "string"
+                },
+                "levels": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": {
+                    "type": [
+                      "string",
+                      "number"
+                    ]
+                  }
                 }
               }
             }

@@ -98,6 +98,12 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
   OBSERVATION_FLAGS=()
   OBS_SID=$(mycelium_json_get_optional_string 'session_id' INPUT) || OBS_SID=""
   OBS_CALL=$(mycelium_json_get_optional_string 'tool_use_id' INPUT) || OBS_CALL=""
+  # Every skip this call records names the call, so the lineage index can
+  # match it to the call's observation instead of treating it as a gap.
+  export MYCELIUM__SKIP_HOST MYCELIUM__SKIP_SESSION MYCELIUM__SKIP_CALL
+  MYCELIUM__SKIP_HOST="$(mycelium_hook_host)"
+  MYCELIUM__SKIP_SESSION="$OBS_SID"
+  MYCELIUM__SKIP_CALL="$OBS_CALL"
   OBSERVER="${MYCELIUM_IO_OBSERVER:-$HERE/../scripts/io_observer.py}"
   if [[ -n "$OBS_SID" && -n "$OBS_CALL" && -f "$OBSERVER" ]] \
     && mycelium_valid_session_id "$OBS_SID" \
