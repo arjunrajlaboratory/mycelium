@@ -210,7 +210,10 @@ jobs:
 
       - name: Test Antigravity package lifecycle (macOS)
         run: |
-          pytest -q tools/test_antigravity_package.py tools/test_antigravity_app_package.py
+          # All of tools/, as on Linux and in the release gate: the integrity
+          # tests walk real directory trees, whose limits (such as PATH_MAX)
+          # differ between macOS and Linux.
+          pytest -q tools
 
       - name: Run hook compatibility tests (macOS)
         run: |
