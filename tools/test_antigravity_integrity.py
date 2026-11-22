@@ -279,7 +279,17 @@ def test_workspace_readiness_survives_a_very_deep_state_tree(tmp_path, monkeypat
     os.symlink('/', 'link')
     monkeypatch.chdir(tmp_path)
     report = package.workspace_readiness(repo)
-    assert not report['ok'] and report['reason'].startswith('symlink found at .mycelium/d/d/')
+    # The tree is refused at any depth. Naming the link needs its full path,
+    # which fits Linux's PATH_MAX (4096) but not macOS's (1024): there the
+    # walk cannot open the deepest directories and says so instead.
+    link = os.path.join(str(deep), *(['d'] * 1100), 'link')
+    path_max = os.pathconf(str(tmp_path), 'PC_PATH_MAX')
+    assert not report['ok']
+    if len(os.fsencode(link)) < path_max:
+        assert report['reason'].startswith('symlink found at .mycelium/d/d/')
+    else:
+        assert report['reason'].startswith(
+            '.mycelium contains a symlink Mycelium could not name')
 
 
 def test_workspace_readiness_creates_no_state(tmp_path):
