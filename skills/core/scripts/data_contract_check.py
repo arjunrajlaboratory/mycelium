@@ -447,11 +447,16 @@ def check_pairing(check, columns, rows):
     # level, and a level listed twice is still one side of the pairing.
     listed = distinct_levels(check.get("levels"))
     levels = listed or observed_levels
-    # How many distinct sides the pairing must have. Listing levels states
-    # the sides, so at least two; `min_levels` opts a contract without a
-    # list into the same rule (ledger contracts set it). A contract with
-    # neither keeps the 0.9.7 behavior: the levels present are the sides.
-    minimum = max(2 if listed else 0, check.get("min_levels") or 0)
+    # How many distinct sides the pairing must have. Only `min_levels` sets a
+    # minimum (ledger contracts set it to 2): a 0.9.7 contract listing one
+    # level (`levels: ["baseline"]`) keeps its 0.9.7 behavior, where every
+    # unit seen at the listed levels passes. The one exception is a list of
+    # two or more entries that collapse to fewer distinct levels
+    # (`["A", "A"]`, `["28", 28]`): it names two sides that are one, which
+    # pairs nothing, so it needs two distinct levels.
+    minimum = check.get("min_levels") or 0
+    if len(as_list(check.get("levels"))) >= 2:
+        minimum = max(minimum, 2)
     if check.get("exact_levels") and check.get("levels"):
         extra = [lvl for lvl in observed_levels if lvl not in levels]
         absent = [lvl for lvl in levels if lvl not in observed_levels]
@@ -1222,9 +1227,12 @@ def refuse_input_alias(destination, inputs):
                                     destination, source))
 
 
-def write_atomic_json(path, document):
+def write_atomic_json(path, document, replace=True):
     """Write through a temporary file in the destination's directory and
-    replace: a failure leaves the old file (or none), never a truncated one."""
+    replace: a failure leaves the old file (or none), never a truncated one.
+    With replace=False the file is published only if `path` still does not
+    exist (a hard link fails on an existing name), so a file created since
+    the caller looked is never clobbered."""
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(prefix=".{}.".format(os.path.basename(path)), suffix=".tmp",
                                dir=directory)
@@ -1235,7 +1243,22 @@ def write_atomic_json(path, document):
         umask = os.umask(0)
         os.umask(umask)
         os.chmod(tmp, 0o666 & ~umask)  # as open() would create it, not mkstemp's 0600
-        os.replace(tmp, path)
+        if replace:
+            os.replace(tmp, path)
+        else:
+            exists = ContractError("--emit-contract {} already exists; nothing was written. Pass "
+                                   "--overwrite to replace it, or choose a new path".format(path))
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                raise exists
+            except OSError:
+                # A filesystem without hard links: check, then replace.
+                if os.path.lexists(path):
+                    raise exists
+                os.replace(tmp, path)
+            else:
+                os.unlink(tmp)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -1251,12 +1274,19 @@ def main(argv=None):
     source.add_argument("--ledger", help="path to a sample ledger spec (samples.ledger.json)")
     parser.add_argument("--root", default=".", help="directory relative table paths resolve from")
     parser.add_argument("--emit-contract", default=None,
-                        help="with --ledger: also write the generated contract here")
+                        help="with --ledger: also write the generated contract here (a new "
+                             "file, unless --overwrite)")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="with --emit-contract: replace an existing destination contract")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     if args.emit_contract and not args.ledger:
         print("contract error: --emit-contract needs --ledger", file=sys.stderr)
         return 1
+    if args.overwrite and not args.emit_contract:
+        print("contract error: --overwrite needs --emit-contract", file=sys.stderr)
+        return 1
+    emitted = None
     try:
         if args.ledger:
             with open(args.ledger, encoding="utf-8") as handle:
@@ -1271,12 +1301,27 @@ def main(argv=None):
                     # checkout it is run in, not the one it was emitted from.
                     emitted["table"] = os.path.relpath(table, root)
                 refuse_input_alias(args.emit_contract, [args.ledger, table])
+                if os.path.lexists(args.emit_contract) and not args.overwrite:
+                    # The destination may be the analysis's extended contract
+                    # (filters, the modeled table); regenerating it from the
+                    # ledger would drop that work.
+                    raise ContractError(
+                        "--emit-contract {} already exists; nothing was written. Pass "
+                        "--overwrite to replace it, or choose a new path".format(args.emit_contract))
                 validate_contract(emitted)
-                write_atomic_json(args.emit_contract, emitted)
         else:
             with open(args.contract, encoding="utf-8") as handle:
                 contract = json.load(handle, object_pairs_hook=reject_duplicate_keys)
+        # The checks run before anything is published.
         summaries, alerts = run_contract(contract, args.root)
+        if emitted is not None:
+            if os.path.isfile(table):
+                # Written even when the checks block or gap: the analysis
+                # extends this contract, and the alerts are reported below.
+                write_atomic_json(args.emit_contract, emitted, replace=args.overwrite)
+            else:
+                print("contract not written: the sample table {} does not exist".format(
+                    contract["table"]), file=sys.stderr)
     except (ContractError, ValueError, OSError) as error:
         print("contract error: {}".format(error), file=sys.stderr)
         return 1

@@ -4911,6 +4911,54 @@ def _merge_recovered_paths(
     return merged, added
 
 
+# A URL scheme (`https://`, `s3://`, `gs://`, `file://`). Two or more
+# characters before the colon, so a Windows drive (`C:/`) is not one; the
+# single-slash form is what `Path` leaves of `scheme://` once normalized.
+_URL_RX = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:/")
+
+
+def _is_url(value: object) -> bool:
+    """Whether a literal names a URL rather than a filesystem path. A URL is
+    never resolved against a working directory, hashed, or recorded as a
+    local path."""
+    return isinstance(value, str) and bool(_URL_RX.match(value.strip()))
+
+
+def _redact_url(value: str) -> str:
+    """A URL as it may be kept: the shared redaction policy first (userinfo
+    passwords, `https://user:pass@host`), then any userinfo left (a bare
+    token, `https://ghp_x@host`) and any query or fragment (`?api_key=`),
+    which can carry credentials the policy does not name."""
+    import lineage_redact
+
+    text = lineage_redact.redact_text(value)
+    match = re.match(r"([A-Za-z][A-Za-z0-9+.-]*://)([^/?#]*)(.*)\Z", text, re.S)
+    if not match:
+        return text
+    scheme, authority, rest = match.groups()
+    if "@" in authority:
+        authority = lineage_redact.REDACTED + "@" + authority.rpartition("@")[2]
+    for mark in ("?", "#"):
+        if mark in rest:
+            rest = rest.split(mark, 1)[0] + mark + lineage_redact.REDACTED
+            break
+    return scheme + authority + rest
+
+
+def _split_urls(paths: list[str]) -> tuple[list[str], list[str]]:
+    """(local paths, redacted URLs) from scanned literals."""
+    local: list[str] = []
+    remote: list[str] = []
+    for value in paths:
+        if _is_url(value):
+            redacted = _redact_url(value.strip())
+            if redacted not in remote:
+                remote.append(redacted)
+        else:
+            local.append(value)
+    return local, remote
+
+
 def file_record(path_str: str, cwd: Path) -> dict:
     path = Path(path_str)
     if not path.is_absolute():
@@ -5401,6 +5449,10 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
             # that its redirections opened). Earlier commands' claims stand.
             return io
         for operator, target in redirections:
+            if _is_url(target):
+                # A URL-shaped word (`> s3://user:pass@b/o.csv`) is never
+                # recorded as a local path: it would carry its userinfo.
+                continue
             if not _is_data_like_path(target, root) and not _is_data_like_path(
                 str(_resolve_shell_path(target, current) or ""), root
             ):
@@ -5417,7 +5469,8 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
         if argv[0] in ("cp", "mv"):
             # The destination's kind is read from the final filesystem, so
             # only when nothing later in the list could have changed it.
-            pairs = _copy_move_pairs(argv, current) if inert_after[position] else None
+            pairs = _copy_move_pairs(argv, current) if inert_after[position] and not any(
+                _is_url(word) for word in argv[1:]) else None
             for source, target in pairs or []:
                 if _is_data_like_path(str(source), root) or _is_data_like_path(
                     str(target), root
@@ -5455,7 +5508,9 @@ def _io_records(paths: list[tuple[str, str]], cwd: Path) -> list[dict]:
     records: list[dict] = []
     seen: set[str] = set()
     for path, evidence in paths:
-        if path in seen:
+        if path in seen or _is_url(path):
+            # A URL-shaped word (`> s3://user:pass@b/o.csv`) is never
+            # recorded as a local path: it would carry its userinfo along.
             continue
         seen.add(path)
         record = file_record(path, cwd)
@@ -5945,6 +6000,18 @@ def build_event_for_detection(
         source_language(script_path if isinstance(script_path, Path) else None)
         or getattr(inline_source, "language", None),
     )
+    # A URL literal (`pd.read_csv("https://...")`) is remote I/O, not a
+    # file under the cwd: it is never resolved, hashed, or recorded as a
+    # path, and is named only in a warning with its credentials redacted.
+    inputs, remote_inputs = _split_urls(inputs)
+    outputs, remote_outputs = _split_urls(outputs)
+    remote_warnings = []
+    if remote_inputs or remote_outputs:
+        remote_warnings.append(
+            "Remote URLs were not recorded as local files: "
+            + ", ".join(remote_inputs + [u for u in remote_outputs if u not in remote_inputs])
+            + "."
+        )
     if cwd is None:
         return _event_dict(
             args,
@@ -5959,7 +6026,7 @@ def build_event_for_detection(
                 "The runner's working directory could not be resolved "
                 "statically, so the script's literal I/O paths were not "
                 "recorded."
-            ],
+            ] + remote_warnings,
             filters=filters,
             seeds=seeds,
         )
@@ -5978,6 +6045,7 @@ def build_event_for_detection(
             "No literal input/output paths were detected; the script may "
             "resolve paths dynamically or delegate I/O through imports."
         )
+    lineage_warnings.extend(remote_warnings)
 
     recovered = set(added_inputs) | set(added_outputs)
 
@@ -6151,8 +6219,49 @@ def _has_unquoted_pattern(raw: str) -> bool:
     return "{" in chars and "}" in chars[chars.index("{"):]
 
 
+# Builtins that can set a variable whose name is computed at run time
+# (`declare "$v=..."`, `read "$name"`, `printf -v "$x"`), so a line that
+# runs one with any expansion may have set HOME without naming it.
+_DYNAMIC_ASSIGN_BUILTINS = frozenset({
+    "declare", "typeset", "export", "readonly", "local", "read", "printf",
+    "mapfile", "readarray", "unset", "let", "getopts",
+})
+
+
+def _home_may_change(before: str, stage: str = "") -> bool:
+    """Whether the command text may have changed HOME before the stage's
+    words are expanded, so the hook's own HOME may not be the one bash used
+    for a bare `~`.
+
+    ``before`` is the command up to the stage's command word (earlier
+    stages and the stage's own prefix assignments); ``stage`` is the stage
+    itself. Any mention of the HOME variable other than a plain `$HOME` or
+    `${HOME}` read counts (`HOME=`, `export HOME`, `env HOME=`, `unset
+    HOME`, `declare/typeset/readonly HOME`, `read HOME`, `${HOME:=x}`), as
+    does running code this hook cannot see (`source`, `.`, `eval`) or a
+    variable-setting builtin with a computed name. Errs toward True.
+    """
+    for text in (before, stage):
+        for match in re.finditer(r"(?<![A-Za-z0-9_])HOME(?![A-Za-z0-9_])", text):
+            start, end = match.start(), match.end()
+            if text[max(0, start - 1):start] == "$":
+                continue  # `$HOME`: a read
+            if text[max(0, start - 2):start] == "${" and text[end:end + 1] == "}":
+                continue  # `${HOME}`: a read
+            return True
+    if re.search(r"(?<![A-Za-z0-9_.-])(source|eval|fc|enable|trap)(?![A-Za-z0-9_.-])", before):
+        return True
+    if re.search(r"(?:^|[\s;&|(){}!`])\.(?:\s|$)", before):
+        return True  # `. file`: the POSIX spelling of source
+    for segment in re.split(r"[;&|\n()]+", before):
+        words = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", segment))
+        if words & _DYNAMIC_ASSIGN_BUILTINS and re.search(r"[$`]", segment):
+            return True
+    return False
+
+
 def _resolve(token: str, base: Path | None, raw: str | None = None, *,
-             tilde: bool = True) -> Path | None:
+             tilde: bool = True, home: bool = True) -> Path | None:
     """The path a shell operand names, by bash's expansion rules, or None
     where it depends on an expansion this hook cannot reproduce.
 
@@ -6163,7 +6272,13 @@ def _resolve(token: str, base: Path | None, raw: str | None = None, *,
     so anything the shell might have expanded is unresolved. ``tilde``
     False (the value after `--flag=`, which bash does not tilde-expand but
     other shells may) leaves a leading `~` unresolved rather than guessed.
+    ``home`` False (the command may have changed HOME first, see
+    `_home_may_change`) leaves a bare `~` or `~/` unresolved, since bash
+    expands it with the command's HOME, not the hook's. A URL
+    (`scheme://...`) is never a local path, so it is unresolved too.
     """
+    if _is_url(token):
+        return None
     if not token or "\0" in token:
         return None
     if raw is None:
@@ -6180,6 +6295,8 @@ def _resolve(token: str, base: Path | None, raw: str | None = None, *,
                 if not tilde:
                     return None
                 user = prefix[1:]
+                if not user and not home:
+                    return None  # HOME may differ from the hook's
                 if user and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9._-]*", user):
                     return None  # `~+`, `~-`, `~1`: the shell's directory stack
                 home = os.path.expanduser(prefix)
@@ -6499,15 +6616,28 @@ def build_step(
     if raws is not None and len(raws) != len(argv):
         raws = None  # the two scans disagree: treat the quoting as unknown
     resolved: list[tuple[str, str, Path | None]] = []
+    remote: list[dict[str, Any]] = []
+    # bash expands a bare `~` with the command's HOME: when anything before
+    # this stage may have set it, the hook's own HOME proves nothing.
+    home_stable = not _home_may_change(bash_cmd[:offset], suffix or "")
     for operand in _config_operands(
             interpreter, lineage_redact.redact_argv(argv[scan_from:])):
-        if lineage_redact.REDACTED in operand.token:
+        if _is_url(operand.token):
+            # A remote config is not a local file: never resolved against
+            # the cwd or hashed. One a flag names is kept as a reference with
+            # its userinfo redacted; a bare `.yaml` URL may be anything.
+            if operand.via != "suffix":
+                remote.append({"path": _redact_url(operand.token), "via": operand.via,
+                               "sha256": None, "hash_status": "remote"})
             continue
+        if lineage_redact.REDACTED in operand.token:
+            continue  # a redacted local value is never a config path
         raw = raws[scan_from + operand.index] if raws is not None else None
         if raw is not None and operand.eq is not None:
             prefix = operand.eq + "="
             raw = raw[len(prefix):] if raw.startswith(prefix) else None
-        path = _resolve(operand.token, io_cwd, raw, tilde=operand.eq is None)
+        path = _resolve(operand.token, io_cwd, raw, tilde=operand.eq is None,
+                        home=home_stable)
         if operand.via == "--profile":
             if path is None:
                 resolved.append((str(Path(operand.token) / "config.yaml"), operand.via, None))
@@ -6517,7 +6647,7 @@ def build_step(
             continue
         resolved.append((operand.token, operand.via, path))
     budget = budget or ConfigBudget()
-    configs: list[dict[str, Any]] = []
+    configs: list[dict[str, Any]] = list(remote)
     skipped = 0
     for token, via, path in resolved:
         if path is None:
@@ -6674,6 +6804,12 @@ def _stamp_file_frame(record: dict, root: str | None) -> None:
     index never joins it to a repository path by guesswork."""
     raw = record.get("path")
     if not isinstance(raw, str):
+        return
+    if _is_url(raw):
+        # A remote reference (a config URL): nothing under any root. The
+        # schema's reason for a path outside the repository fits it.
+        record["rel_path"] = None
+        record["rel_path_reason"] = "outside-scope"
         return
     if root is None:
         record["rel_path"] = None

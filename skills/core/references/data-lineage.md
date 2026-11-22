@@ -339,6 +339,17 @@ Read from the detected stage's own text, never guessed:
     name under the stage's directory. A parameter or command expansion, a glob,
     a brace expansion, `~+`/`~-`, and a `~` after `--flag=` (bash leaves it,
     other shells may not) are `hash_status: unresolved`, never guessed.
+  - Bash expands a bare `~` with the command's own HOME, so the hook's HOME
+    is used only when nothing before the stage may have changed it. Any
+    mention of HOME other than a `$HOME`/`${HOME}` read (`HOME=`, `export
+    HOME`, `env HOME=`, `unset HOME`, `declare`/`typeset`/`readonly HOME`,
+    `read HOME`, `${HOME:=x}`), a `source` or `.` of any file, `eval`, or a
+    variable-setting builtin with a computed name (`declare "$v=x"`) makes a
+    `~/` operand `hash_status: unresolved`. `~user/` is unaffected.
+  - A URL operand (`--config https://host/c.yaml`) is never resolved against
+    the directory or hashed. A flag's URL value is kept as `hash_status:
+    remote` with `rel_path: null`, its userinfo, query and fragment
+    replaced by `<redacted>`. A URL that only has a config suffix is left out.
   - Snakemake `--profile P`: every `config.yaml`/`config.vN+.yaml` in the
     profile directory (a bare name is also searched in the user config
     directories). A profile with none is listed as a missing `config.yaml`.
@@ -371,6 +382,12 @@ Every stored command text goes through one policy (`lineage_redact.py`):
 
 Nothing is hashed, because a short secret's digest can be guessed. A
 redacted embedded source has `script_sha256_of: "sanitized"`.
+
+A URL is never a local path. A script's URL literal (`pd.read_csv("https://...")`,
+`to_csv("s3://...")`) is left out of `inputs` and `outputs`. It is named in
+`lineage_warnings` with its userinfo, query and fragment redacted. A
+URL-shaped word in a data command's redirection or `cp`/`mv` operands is
+not an input or output either.
 
 `bash_exit` is populated when the host exposes a Bash exit code. Conditional
 analysis commands are recorded only when the status or a statically known

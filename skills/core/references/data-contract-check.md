@@ -116,13 +116,16 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   pass while the batches jointly determine the group: controls at (date 1,
   run 1), treated at (date 2, run 1) and (date 1, run 2).
 - `pairing` levels compare as text, as table values do, so a level listed
-  twice (`["A", "A"]`, or `["28", 28]`) counts once. A pairing that lists
-  `levels` blocks when fewer than two distinct levels are listed. Without a
-  list, it takes `"min_levels": N` (a whole number, at least 2) and blocks
-  when fewer than N distinct levels are present: a pairing whose other side
-  is missing pairs nothing. A contract with neither keeps the older
-  behavior, where the levels present are the sides, so one observed level
-  passes. Ledger contracts set `"min_levels": 2`. With
+  twice (`["A", "A"]`, or `["28", 28]`) counts once. The minimum number of
+  distinct sides is set only by `"min_levels": N` (a whole number, at least
+  2): the check blocks when fewer than N distinct levels are listed or, with
+  no list, present, since a pairing whose other side is missing pairs
+  nothing. Ledger contracts set `"min_levels": 2`. Without `min_levels`, a
+  pairing keeps the 0.9.7 behavior: the listed levels (or, with no list, the
+  levels present) are the sides, so `"levels": ["baseline"]` with every unit
+  seen at baseline passes. The one exception is a list of two or more
+  entries that collapse to one distinct level (`["A", "A"]`), which names
+  two sides that are one and blocks. With
   `"exact_levels": true` (which needs `levels`), it also blocks when the table
   has a level not listed, or lacks a listed one. Ledger contracts set this when
   the pairing licenses units across groups.
@@ -197,8 +200,13 @@ or more batch columns, the emitted contract also has a `batch_estimability`
 check for an analysis that adjusts for all of them. A ledger `pairing` may
 list its expected `levels` (at least two distinct ones), so a missing side
 blocks. `--emit-contract` refuses a destination that is the ledger spec or
-its sample table (by path, symlink or hard link), and checks the generated
-contract before writing it in one replace. A batch column that is a replication level at or below the unit of
+its sample table (by path, symlink or hard link). It also refuses (exit 1,
+nothing written) a destination that already exists, since that is usually
+the analysis's extended contract; pass `--overwrite` to replace it. The
+checks run first, then the validated contract is published in one step. It
+is written even when the checks block or gap, because the analysis extends
+it and the alerts are reported alongside, but never when the sample table
+does not exist (the run exits 2 with nothing written). A batch column that is a replication level at or below the unit of
 replication is a spec error (exit 1), because it is nested in the group by
 construction. Calendar batches belong in `batch`, and nested preparation
 instances belong in `nesting`.

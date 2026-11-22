@@ -176,6 +176,8 @@ def walk(
         try:
             dir_st = os.lstat(directory)
         except OSError:
+            # Not silently skipped: its contents would read as deleted.
+            unwatched.append({"path": directory[prefix_len:] or ".", "why": "unreadable"})
             continue
         key = (dir_st.st_dev, dir_st.st_ino)
         if key in seen_dirs:
@@ -572,7 +574,8 @@ def _intervals(records: list[dict[str, Any]]) -> dict[str, Interval]:
         elif event == "launch" and key in calls:
             # A background call's own Post: the job may still be running,
             # so the interval stays open.
-            calls[key] = calls[key]._replace(background=True)
+            calls[key] = calls[key]._replace(
+                background=True, observe=calls[key].observe or record.get("observe") is True)
         elif event in ("post", "expire") and key in calls and calls[key].post_seq is None:
             current = calls[key]
             calls[key] = current._replace(
@@ -715,8 +718,10 @@ def _publish_expired(state_dir: Path, jid: str, expired: list[Interval]) -> None
     The gap is published to the call's store, since compaction drops the
     interval from the journal right away. Best effort, like every append."""
     for interval in expired:
-        if interval.background:
-            continue  # its launch observation already carries the gap
+        # A background job too: if its launch observation was lost, this is
+        # the only durable trace once compaction drops the interval. Where
+        # the launch observation exists, the index prefers it (it has a
+        # change list), and either way the job's gap stays open-ended.
         snap = snapshot_path(state_dir, interval.host, interval.session, interval.call)
         record = {
             "kind": "observation",
@@ -1548,6 +1553,14 @@ def post(
         "walk_ms": [pre_snap.walk_ms, post_snap.walk_ms],
     }
     for label, snap in (("pre", pre_snap), ("post", post_snap)):
+        if "." in unwatched_prefixes(snap.unwatched):
+            # The checkout itself could not be listed (`chmod 711 .`): every
+            # path would vanish from that walk and read as a deletion, so
+            # no change list is claimed at all.
+            observation["status"] = "unavailable"
+            observation["reason"] = f"{label}-root-unreadable"
+            _publish(state_dir, host, session, observation, snap_file)
+            return observation
         if snap.truncated or snap.timed_out:
             observation["status"] = "unavailable"
             observation["reason"] = (

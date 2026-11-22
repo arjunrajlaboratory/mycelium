@@ -329,9 +329,7 @@ def normalize_event(
 
     if event["script"] and event["script_sha256"] is None:
         script_path = Path(event["script"])
-        if script_path.exists():
-            event["script_sha256"] = sha256_file(script_path)
-            _sanitize_file_digest(event, script_path)
+        _digest_script_file(event, script_path)
     _sanitize_embedded_source(event)
 
     return event
@@ -353,18 +351,33 @@ def _sanitize_embedded_source(event: dict) -> None:
         event["script_sha256_of"] = "sanitized"
 
 
-def _sanitize_file_digest(event: dict, script_path: Path) -> None:
-    """A digest recomputed from the file follows the same rule."""
+def _digest_script_file(event: dict, script_path: Path) -> None:
+    """A digest recomputed from the file, under the same rule as embedded
+    source: one bounded read from a descriptor proven to be a regular file
+    (a FIFO or device never blocks Stop), and a sanitized, labelled digest
+    when the text holds a secret."""
     import lineage_redact
 
     try:
-        text = script_path.read_text(encoding="utf-8", errors="replace")
+        fd = _open_regular_fd(script_path)
     except OSError:
         return
+    if fd is None:
+        return
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(SIZE_LIMIT_BYTES + 1)
+    except OSError:
+        return
+    if len(data) > SIZE_LIMIT_BYTES:
+        return
+    text = data.decode("utf-8", errors="replace")
     sanitized = lineage_redact.redact_source(text)
     if sanitized != text:
         event["script_sha256"] = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
         event["script_sha256_of"] = "sanitized"
+    else:
+        event["script_sha256"] = hashlib.sha256(data).hexdigest()
 
 
 def normalize_skip(raw: dict[str, Any]) -> dict[str, Any]:

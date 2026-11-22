@@ -99,6 +99,8 @@ these conflict with the text below, the amendments win.
 - **Unconfirmed edits.** An edit whose success was not established credits no write. Its targets become `edit-unconfirmed` path gaps, with their post-call hashes kept as evidence.
 - **Checkout framing of summaries.** A foreign manifest's `observations_missing` and `unresolved_calls` are ignored, like its skips. A skip that names a session is reconciled only against that session's observation.
 - **Scope at both walks.** An observation's `unwatched` list merges both walks (Pre-only entries are tagged `"at": "pre"`). That way, a directory excluded at Pre and deleted during the call is a coverage gap rather than silence.
+- **Unreadable checkouts and lost launches.** A walk that cannot list the checkout root makes the observation `unavailable` (`pre-root-unreadable`/`post-root-unreadable`) instead of claiming every file deleted. A launched background job with no launch observation is an open-ended gap, and its age expiry is published to the store like any other.
+- **The index cache keeps only what the index reads.** It never holds command text: observations are stored slim, and builder version 3 rebuilds older caches.
 - **Redaction on decoded words.** Secret options, assignments and `Authorization` headers are found on shell-decoded words. A header is redacted whole, including Digest fields. Literals hidden by shell quoting are redacted in the decoded text. Quoted keys (`{"api_key": "…"}`) count as names. A 0.9.7 event finalized after an upgrade gets the same source redaction and a sanitized, labelled digest.
 
 Item 7 (row and feature access) is a separate note,

@@ -66,7 +66,7 @@ if str(HERE) not in sys.path:
 
 import io_observer  # noqa: E402
 
-BUILDER_VERSION = 2
+BUILDER_VERSION = 3  # 3: observations stored slim (no command text)
 INDEX_SCHEMA = "mycelium.lineage_index.v1"
 QUERY_SCHEMA = "mycelium.lineage_query.v1"
 DEFAULT_MAX_BYTES = 4 * 1024**3
@@ -344,7 +344,7 @@ def _manifest_contribution(path: Path, name: str, root_real: str) -> dict[str, A
         if isinstance(observation, dict):
             # A 0.9.7 observation names no checkout; the manifest holding it
             # does, so a collaborator's committed record stays theirs.
-            out["observations"].append({"record": observation, "source": name,
+            out["observations"].append({"record": _slim_observation(observation), "source": name,
                                         "manifest_root": manifest_root})
     skipped = manifest.get("skipped")
     local_manifest = not isinstance(manifest_root, str) or \
@@ -393,8 +393,25 @@ def _store_contribution(path: Path, name: str) -> dict[str, Any]:
                                 "source": name, "detail": f"line {number}"})
             continue
         if isinstance(record, dict) and record.get("kind") == "observation":
-            out["observations"].append({"record": record, "source": name})
+            out["observations"].append({"record": _slim_observation(record), "source": name})
     return out
+
+
+# The observation fields the index reads. Only these are kept in the cache:
+# a 0.9.7 record may carry an unredacted `bash_cmd` (or other text), and the
+# index must never copy it into a new file.
+_OBSERVATION_FIELDS = ("kind", "version", "observation_id", "host", "host_session_id",
+                       "agent_id", "tool", "status", "reason", "outcome", "observed_at",
+                       "repo_root", "journal", "overlapping", "scope", "changes")
+
+
+def _slim_observation(record: dict[str, Any]) -> dict[str, Any]:
+    slim = {key: record[key] for key in _OBSERVATION_FIELDS if key in record}
+    overlapping = slim.get("overlapping")
+    if isinstance(overlapping, list):
+        slim["overlapping"] = [{"call": o.get("call")} for o in overlapping
+                               if isinstance(o, dict)]
+    return slim
 
 
 def contribution(root: Path, state_dir: Path, name: str) -> dict[str, Any]:
@@ -660,6 +677,16 @@ class Index:
             call_key = _obs_key(interval.get("session"),
                                 f"{interval.get('host')}:{interval.get('call')}")
             if call_key in all_observed:
+                continue
+            if interval.get("background") and interval.get("observe"):
+                # A launched background job whose launch observation never
+                # reached a store: it may still be writing, so the gap has
+                # no end, whatever the journal later says.
+                self.gaps.append({"kind": "background-job", "scope": "repo", "call": call_key,
+                                  "source": "journal",
+                                  "journal": {"id": interval["id"],
+                                              "pre_seq": interval["pre_seq"],
+                                              "post_seq": None, "expired": False}})
                 continue
             if interval.get("post_seq") is None:
                 if interval.get("tool") == "Bash":

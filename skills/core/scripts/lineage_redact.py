@@ -35,12 +35,29 @@ _SECRET_WORD = (r"(?:token|secret|passw(?:or)?d?|pwd|api[_-]?key|private[_-]?key
 SECRET_NAME_RX = re.compile(rf"(?i){_SECRET_WORD}")
 _NAME_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _URL_USERINFO_RX = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s/:@'\"]+):([^\s/@'\"]+)@")
+# A bare userinfo is often a token (`https://ghp_x@github.com/...`): the
+# whole userinfo goes. And query parameters whose name looks secret.
+_URL_BARE_USERINFO_RX = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^\s/:@'\"<>]+)@")
+_URL_QUERY_SECRET_RX = re.compile(
+    rf"(?i)([?&][^=&\s'\"#]*(?:{_SECRET_WORD[3:-1]}|key|sig(?:nature)?|credential)"
+    rf"[^=&\s'\"#]*=)([^&\s'\"#]+)")
 # The whole header value goes, not its first token: a Digest header carries
 # its response in later fields. Unquoted text stops at a quote or line end;
 # a header inside a shell word is handled on the decoded word first.
 _AUTH_HEADER_RX = re.compile(r"(?i)(authorization\s*:\s*)([^\n'\"]+)")
 _AUTH_WORD_RX = re.compile(r"(?i)\s*authorization\s*:")
 _OPERATORS = set(";&|<>()\n")
+
+
+def _redact_urls(text: str) -> str:
+    """URL credentials: a `user:password` pair, a bare userinfo token, and
+    query parameters named like secrets (`?key=…`, `&X-Amz-Signature=…`)."""
+    out = _URL_USERINFO_RX.sub(lambda m: f"{m.group(1)}:{REDACTED}@", text)
+    out = _URL_BARE_USERINFO_RX.sub(
+        lambda m: m.group(0) if m.group(2).endswith(f":{REDACTED}") or m.group(2) == REDACTED
+        else f"{m.group(1)}{REDACTED}@", out)
+    return _URL_QUERY_SECRET_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", out)
+_LONG_OPTION_RX = re.compile(r"--[A-Za-z][A-Za-z0-9_-]*(?:=|\Z)")
 
 
 def _words(text: str) -> list[tuple[int, int]]:
@@ -54,6 +71,11 @@ def _words(text: str) -> list[tuple[int, int]]:
     while i < n:
         c = text[i]
         if quote is None:
+            if c == "\\" and i + 1 < n and text[i + 1] == "\n":
+                # A line continuation: the shell deletes it, joining the
+                # lines; between words it separates nothing.
+                i += 2
+                continue
             if c == "\\" and i + 1 < n:
                 if start is None:
                     start = i
@@ -104,7 +126,8 @@ def _decode(word: str) -> str:
         c = word[i]
         if quote is None:
             if c == "\\" and i + 1 < n:
-                out.append(word[i + 1])
+                if word[i + 1] != "\n":  # a continuation is deleted
+                    out.append(word[i + 1])
                 i += 2
                 continue
             if c in "'\"":
@@ -148,7 +171,9 @@ def redact_text(text: str) -> str:
             continue
         if redact_next:
             redact_next = False
-            if not head.startswith("-"):
+            if not _LONG_OPTION_RX.match(head):
+                # A value may begin with "-" (`--password -123456`); only a
+                # word shaped like the next long option is left alone.
                 replacements.append((start, end, REDACTED))
                 continue
         name, eq, _ = head.partition("=")
@@ -161,7 +186,7 @@ def redact_text(text: str) -> str:
     out = text
     for start, end, new in reversed(replacements):
         out = out[:start] + new + out[end:]
-    out = _URL_USERINFO_RX.sub(lambda m: f"{m.group(1)}:{REDACTED}@", out)
+    out = _redact_urls(out)
     out = _AUTH_HEADER_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", out)
     return out
 
@@ -216,7 +241,7 @@ def redact_source(text: str) -> str:
     """
     if not text:
         return text
-    out = _URL_USERINFO_RX.sub(lambda m: f"{m.group(1)}:{REDACTED}@", text)
+    out = _redact_urls(text)
     out = _AUTH_HEADER_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", out)
     return _SOURCE_LITERAL_RX.sub(
         lambda m: _keep_quotes(m.group(1) + m.group(2), m.group(3)), out
@@ -245,7 +270,7 @@ def redact_argv(argv: list[Any]) -> list[Any]:
             out.append(token)
             redact_next = False
             continue
-        if redact_next and not token.startswith("-"):
+        if redact_next and not _LONG_OPTION_RX.match(token):
             out.append(REDACTED)
             redact_next = False
             continue
