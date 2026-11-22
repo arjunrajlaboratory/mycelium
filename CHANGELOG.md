@@ -14,12 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chip). It also says to approve only after the first app start following a
   GitHub-marketplace install or upgrade (observed on Codex 0.169.0): that start
   added `.codex-marketplace-install.json` and voided earlier approval. The
-  first-install and project-initialization steps now point at that four-step
-  flow. It recommends keeping the marketplace on GitHub rather than a local
+  first-install, project-initialization and update steps now point at that
+  four-step flow. It recommends keeping the marketplace on GitHub rather than a local
   checkout, and shows how to switch back. `mycelium:develop` documents the
   candidate-audit recipe that restores the GitHub source, and what a
   GitHub-source install contains beyond the packaged files. `mycelium:core`
-  now gives the hook count as eight, not five.
+  now gives the Codex hook count as eight, not five, in both places.
 
 ## [0.9.7] - 2026-11-21
 

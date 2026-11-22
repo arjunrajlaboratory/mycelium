@@ -391,8 +391,8 @@ The session log the post-action hook names (`.living/log/<date>-<nnn>-<project>.
 ### Automated Enforcement (Claude Code and Codex Hooks)
 
 Mycelium ships shared hook scripts in `skills/core/hooks/`. `init_repo.py`
-registers Claude hooks in `.claude/settings.local.json`. Codex discovers five
-plugin-bundled registrations from `hooks/hooks.json`; their dispatcher uses
+registers Claude hooks in `.claude/settings.local.json`. Codex discovers eight
+plugin-bundled command hooks from `hooks/hooks.json`; their dispatcher uses
 Codex's dynamic `PLUGIN_ROOT` and no-ops outside repositories with `.living/`.
 
 | Hook | Event | Purpose |

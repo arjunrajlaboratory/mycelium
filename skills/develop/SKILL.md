@@ -169,25 +169,33 @@ Operational gotchas, all of which have cost a full cycle:
   Codex skipped them all. The complete entries were written while the Codex
   desktop app was running, so approve from the desktop app (Settings → Hooks →
   Trust all). With a local marketplace source, launching the desktop app
-  re-copies the plugin from that marketplace source, replacing the installed
-  candidate and needing approval again—verify the installed hash after
-  launching it.
+  re-copies the plugin from that marketplace source, so any change in that
+  folder since the approval replaces the installed candidate and needs
+  approval again—verify the installed hash after launching it.
 - Keep the maintainer's `[marketplaces.mycelium]` on the GitHub source
   (`codex plugin marketplace add arjunrajlaboratory/mycelium`), never the
   working checkout: a local source copies uncommitted files into the install
-  on every desktop-app launch. To audit a candidate, back up
-  `~/.codex/config.toml` and point `source` (with `source_type = "local"`, and
-  `ref` removed) at a clean clone or `git archive` export of the candidate.
-  Install it, open the
-  desktop app once, trust all, quit, then verify the hashes and `hooks/list`
-  before the audit. Afterwards, restore the backed-up GitHub source, not the
-  checkout.
+  on every desktop-app launch. To audit a candidate:
+  1. Back up `~/.codex/config.toml`.
+  2. Make a clean clone or `git archive` export of the candidate, then run
+     `codex plugin marketplace remove mycelium` and
+     `codex plugin marketplace add <export-path>`.
+  3. Run `codex plugin add mycelium@mycelium`, open the desktop app once,
+     trust all, quit, then verify the hashes and `hooks/list` before the audit.
+  4. Afterwards, switch back with `codex plugin marketplace remove mycelium`
+     and `codex plugin marketplace add arjunrajlaboratory/mycelium`, run
+     `codex plugin add mycelium@mycelium` again, and follow the README's four
+     approval steps. Confirm with `codex plugin list --json` and `hooks/list`.
+     Don't restore the whole config backup, which would drop trust entries
+     and other changes the desktop app made during the audit. Use it only to
+     compare.
 - A GitHub-source install is not a pure export. It carries the snapshot's
   `.git/`, and on 0.169.0 (2026-11-22) the first app-server or desktop-app
   start added `.codex-marketplace-install.json` (source, ref, revision). That
   first start voided any approval given before it, so trust only after it.
   When hashing such an install against a `git archive` of the tag, ignore
-  both. Codex also omits the repository-root `SKILL.md`.
+  both on the install side, and drop the root `SKILL.md` from the archive
+  side, since Codex does not copy it.
 - So check trust before an audit with the app-server, not `/hooks`: run
   `codex app-server`, send `initialize`, the `initialized` notification, then
   `hooks/list` with `{"cwds": [<project>]}`. Every `mycelium@mycelium` hook's
