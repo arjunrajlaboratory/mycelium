@@ -726,6 +726,28 @@ class Index:
                 "observed_change": cand.get("observed_change"),
             })
 
+    def _refusal_gaps(self, changes: dict[str, Any], base: dict[str, Any], *,
+                      any_reason: bool) -> None:
+        """Gaps for edit targets the observer could not confirm: a failed
+        or partly applied patch, a deletion that did not happen, or an edit
+        through a link (at its in-checkout referent, or anywhere when that
+        is unknown). With ``any_reason`` (an unconfirmed edit) every
+        in-checkout refusal is uncertain."""
+        uncertain = {"edit-failed", "deletion-not-applied", "edit-via-link"}
+        for refused in changes.get("refused") or []:
+            if not isinstance(refused, dict):
+                continue
+            reason = refused.get("reason")
+            if reason == "edit-target-unknown":
+                self.gaps.append({"kind": "edit-uncertain", "scope": "repo",
+                                  "reason": reason, **base})
+                continue
+            path = refused.get("path")
+            if (isinstance(path, str) and not os.path.isabs(path)
+                    and (any_reason or reason in uncertain)):
+                self.gaps.append({"kind": "edit-uncertain", "scope": "path", "path": path,
+                                  "reason": reason, **base})
+
     def _add_observation(self, key: str, item: dict[str, Any], events: list[str]) -> None:
         record = item["record"]
         status = record.get("status")
@@ -753,12 +775,7 @@ class Index:
                         self.gaps.append({"kind": "edit-unconfirmed", "scope": "path",
                                           "path": entry["path"],
                                           "after": entry.get("after"), **base})
-            for refused in changes.get("refused") or []:
-                if (isinstance(refused, dict) and isinstance(refused.get("path"), str)
-                        and not os.path.isabs(refused["path"])):
-                    self.gaps.append({"kind": "edit-uncertain", "scope": "path",
-                                      "path": refused["path"],
-                                      "reason": refused.get("reason"), **base})
+            self._refusal_gaps(changes, base, any_reason=True)
             return
         overlapping = [o.get("call") for o in record.get("overlapping") or []
                        if isinstance(o, dict)]
@@ -766,12 +783,7 @@ class Index:
             attribution = "shared"
         # Targets an edit could not confirm (a failed or partly applied
         # patch, a deletion that did not happen): their content is unknown.
-        for refused in changes.get("refused") or []:
-            if (isinstance(refused, dict) and isinstance(refused.get("path"), str)
-                    and not os.path.isabs(refused["path"])
-                    and refused.get("reason") in ("edit-failed", "deletion-not-applied")):
-                self.gaps.append({"kind": "edit-uncertain", "scope": "path",
-                                  "path": refused["path"], "reason": refused["reason"], **base})
+        self._refusal_gaps(changes, base, any_reason=False)
         # Paths that left or entered the watched scope during the call.
         for moved in changes.get("coverage_changed") or []:
             if isinstance(moved, str):

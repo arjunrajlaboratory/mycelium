@@ -128,6 +128,12 @@ def _scope_overrides(repo_root: Path) -> tuple[list[str], list[str]]:
         value = value.strip().strip("/")
         if not value or value.startswith("..") or "/../" in f"/{value}/" or "\0" in value:
             continue
+        # One repository-relative spelling per directory: `./data`,
+        # `data/.`, and `data//x` would otherwise walk the same files under
+        # a second name, inventing a creation and a deletion for each.
+        value = os.path.normpath(value)
+        if value in (".", "") or value.startswith(".."):
+            continue
         if word == "exclude":
             excludes.append(value)
         elif word == "root":
@@ -1937,6 +1943,22 @@ EDIT_HASH_SECONDS = 0.5
 EDIT_HASH_MAX_BYTES = 50 * 1024 * 1024
 
 
+def _edit_referent(raw: str, root_real: str) -> dict[str, Any]:
+    """Where an edit through a link landed, as a refusal the index turns
+    into a gap: `edit-via-link` at the in-checkout file, `edit-target-
+    outside` when it resolved outside, `edit-target-unknown` otherwise."""
+    try:
+        real = os.path.realpath(raw)
+    except (OSError, ValueError):
+        return {"path": None, "reason": "edit-target-unknown"}
+    prefix = root_real.rstrip(os.sep) + os.sep
+    if real.startswith(prefix):
+        return {"path": os.path.relpath(real, root_real), "reason": "edit-via-link"}
+    if real == root_real:
+        return {"path": None, "reason": "edit-target-unknown"}
+    return {"path": None, "reason": "edit-target-outside"}
+
+
 def _edit_changes(
     repo_root: Path, edited: list[tuple[str, str]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1952,6 +1974,13 @@ def _edit_changes(
         rel, reason = repo_relative_unfollowed(raw, root_real)
         if rel is None:
             refused.append({"path": raw, "reason": reason})
+            if reason in ("symlinked-path", "parent-traversal"):
+                # The edit wrote through a link (or a climbing path): the
+                # file it changed is wherever that resolved, which may be in
+                # this checkout. Never credited as a write, but never silent:
+                # the referent becomes uncertain, or the whole checkout when
+                # the referent cannot be established.
+                refused.append(_edit_referent(raw, root_real))
             continue
         if action == "uncertain":
             refused.append({"path": rel, "reason": "edit-failed"})

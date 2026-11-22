@@ -200,7 +200,11 @@ or more batch columns, the emitted contract also has a `batch_estimability`
 check for an analysis that adjusts for all of them. A ledger `pairing` may
 list its expected `levels` (at least two distinct ones), so a missing side
 blocks. `--emit-contract` refuses a destination that is the ledger spec or
-its sample table (by path, symlink or hard link). It also refuses (exit 1,
+its sample table (by path, symlink or hard link). The ledger, its table and
+the destination are each resolved once, symlinks first, the way the OS
+opens them (a table `latest/../samples.tsv` with `latest` a symlink names
+the file beside the link's target, not beside the ledger), and that one
+path is the one read, checked, guarded and written. It also refuses (exit 1,
 nothing written) a destination that already exists, since that is usually
 the analysis's extended contract; pass `--overwrite` to replace it. The
 checks run first, then the validated contract is published in one step. It

@@ -34,10 +34,10 @@ _SECRET_WORD = (r"(?:token|secret|passw(?:or)?d?|pwd|api[_-]?key|private[_-]?key
                 r"|auth(?!or)|cookie|session)")
 SECRET_NAME_RX = re.compile(rf"(?i){_SECRET_WORD}")
 _NAME_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-_URL_USERINFO_RX = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s/:@'\"]+):([^\s/@'\"]+)@")
-# A bare userinfo is often a token (`https://ghp_x@github.com/...`): the
-# whole userinfo goes. And query parameters whose name looks secret.
-_URL_BARE_USERINFO_RX = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^\s/:@'\"<>]+)@")
+# The whole userinfo goes: a token may sit in the username
+# (`https://ghp_x@host`, `https://TOKEN:x-oauth-basic@host`) as easily as
+# in the password. And query parameters whose name looks secret.
+_URL_USERINFO_RX = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^\s/@'\"<>]+)@")
 _URL_QUERY_SECRET_RX = re.compile(
     rf"(?i)([?&][^=&\s'\"#]*(?:{_SECRET_WORD[3:-1]}|key|sig(?:nature)?|credential)"
     rf"[^=&\s'\"#]*=)([^&\s'\"#]+)")
@@ -50,13 +50,12 @@ _OPERATORS = set(";&|<>()\n")
 
 
 def _redact_urls(text: str) -> str:
-    """URL credentials: a `user:password` pair, a bare userinfo token, and
-    query parameters named like secrets (`?key=…`, `&X-Amz-Signature=…`)."""
-    out = _URL_USERINFO_RX.sub(lambda m: f"{m.group(1)}:{REDACTED}@", text)
-    out = _URL_BARE_USERINFO_RX.sub(
-        lambda m: m.group(0) if m.group(2).endswith(f":{REDACTED}") or m.group(2) == REDACTED
-        else f"{m.group(1)}{REDACTED}@", out)
+    """URL credentials: the whole userinfo, and query parameters named like
+    secrets (`?key=…`, `&X-Amz-Signature=…`)."""
+    out = _URL_USERINFO_RX.sub(lambda m: f"{m.group(1)}{REDACTED}@", text)
     return _URL_QUERY_SECRET_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", out)
+
+
 _LONG_OPTION_RX = re.compile(r"--[A-Za-z][A-Za-z0-9_-]*(?:=|\Z)")
 
 
@@ -218,7 +217,11 @@ _LITERAL = (r"(?:[rRbBuUfF]{1,2})?(?:'''[\s\S]*?'''|\"\"\"[\s\S]*?\"\"\""
 _SOURCE_LITERAL_RX = re.compile(
     rf"""(?i)\b([A-Za-z_][A-Za-z0-9_]*{_SECRET_WORD}[A-Za-z0-9_]*|{_SECRET_WORD}[A-Za-z0-9_]*"""
     rf"""|authorization)"""
-    rf"""(["']?\]?\s*(?:=|:|<-|,)\s*)({_LITERAL})"""
+    # An annotation may sit between the name and `=` (`API_TOKEN: str = …`,
+    # `key: Final[str] = …`).
+    rf"""(["']?\]?(?:\s*:\s*(?:[A-Za-z_][\w.\[\], |]*?|"[^"\n]*"|'[^'\n]*')(?=\s*=))?"""
+    rf"""\s*(?:=|:|<-|,)\s*)"""
+    rf"""({_LITERAL})"""
 )
 
 

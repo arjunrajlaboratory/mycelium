@@ -1114,7 +1114,70 @@ def _strip_assignments(segment: list[str]) -> list[str]:
     return segment
 
 
-def _simple_cd_status(segment: list[str], cwd: Path) -> tuple[bool | None, Path]:
+def _cdpath_may_be_set(text: str) -> bool:
+    """Whether shell text may set CDPATH for a later ``cd`` in the same shell.
+
+    Any mention of the variable counts (an assignment, ``export``,
+    ``unset``, ``declare``, ``${CDPATH:=...}``), as does running code this
+    hook cannot see (``source``, ``.``, ``eval``) or a variable-setting
+    builtin with a computed name. Errs toward True, like `_home_may_change`.
+    """
+    if re.search(r"(?<![A-Za-z0-9_])CDPATH(?![A-Za-z0-9_])", text):
+        return True
+    if re.search(r"(?<![A-Za-z0-9_.-])(source|eval|fc|enable|trap)(?![A-Za-z0-9_.-])", text):
+        return True
+    if re.search(r"(?:^|[\s;&|(){}!`])\.(?:\s|$)", text):
+        return True  # `. file`: the POSIX spelling of source
+    for segment in re.split(r"[;&|\n()]+", text):
+        words = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", segment))
+        if words & _DYNAMIC_ASSIGN_BUILTINS and re.search(r"[$`]", segment):
+            return True
+    return False
+
+
+def _cdpath_env_set() -> bool:
+    """The hook's own CDPATH: the agent's shell may well share it."""
+    return bool(os.environ.get("CDPATH"))
+
+
+def _cd_operand_searches_cdpath(operand: str) -> bool:
+    """bash searches $CDPATH for a relative operand that does not begin
+    with ``/``, ``./`` or ``../`` (and is not ``.`` or ``..``)."""
+    if operand in (".", "..") or operand.startswith(("/", "./", "../")):
+        return False
+    expanded = _expanded_static_path(operand)
+    return expanded is None or not expanded.is_absolute()
+
+
+def _cd_is_cdpath_uncertain(segment: list[str], cdpath: bool = False) -> bool:
+    """A ``cd`` whose target depends on a CDPATH this hook cannot know.
+
+    ``cdpath`` says the command may have set CDPATH before this segment;
+    the hook's own environment and the segment's prefix assignments
+    (``CDPATH=x cd run``) are checked here.
+    """
+    stripped = _strip_assignments(segment)
+    if not stripped or stripped[0] != "cd":
+        return False
+    prefix_sets = any(w.startswith("CDPATH=") for w in segment[: len(segment) - len(stripped)])
+    if not (cdpath or prefix_sets or _cdpath_env_set()):
+        return False
+    operands: list[str] = []
+    options_done = False
+    for value in stripped[1:]:
+        if not options_done and value == "--":
+            options_done = True
+            continue
+        if not options_done and value.startswith("-") and value != "-":
+            continue
+        operands.append(value)
+        options_done = True
+    return len(operands) == 1 and _cd_operand_searches_cdpath(operands[0])
+
+
+def _simple_cd_status(
+    segment: list[str], cwd: Path, cdpath: bool = False
+) -> tuple[bool | None, Path]:
     """Return a simple cd's known status and resulting cwd without executing it.
 
     Documented flags are modeled (`cd [-L|[-P [-e]]] [--] dir`): ``-P``
@@ -1122,7 +1185,14 @@ def _simple_cd_status(segment: list[str], cwd: Path) -> tuple[bool | None, Path]
     resolves lexically, later flags override earlier ones, and ``-e`` only
     affects exit status in cases a known-good directory cannot hit. Any
     other option (``-@``, ``cd -``) stays unknown.
+
+    An unqualified relative operand (``cd run``) is searched for in
+    $CDPATH first: when CDPATH may be set (``cdpath``, the hook's own
+    environment, or a prefix assignment) the target is unknown, so the cd
+    is unmodeled like any other unknown form.
     """
+    if _cd_is_cdpath_uncertain(segment, cdpath):
+        return None, cwd
     segment = _strip_assignments(segment)
     if not segment or segment[0] != "cd":
         return None, cwd
@@ -1210,9 +1280,9 @@ def _expanded_static_path(value: str) -> Path | None:
         return None
 
 
-def _apply_cd(segment: list[str], cwd: Path) -> Path:
+def _apply_cd(segment: list[str], cwd: Path, cdpath: bool = False) -> Path:
     """Apply a simple shell ``cd`` segment without executing user input."""
-    status, target = _simple_cd_status(segment, cwd)
+    status, target = _simple_cd_status(segment, cwd, cdpath)
     return target if status is True else cwd
 
 
@@ -2055,7 +2125,7 @@ def _strip_command_prefix_words(
     return tokens, stripped_any
 
 
-def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
+def _segment_cwd_is_modeled(segment: list[str], cwd: Path, cdpath: bool = False) -> bool:
     """True when a completed segment cannot change the cwd in unmodeled ways.
 
     ``cd`` with a statically known status is modeled; other cwd-affecting
@@ -2117,7 +2187,7 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
             {"cd"} | _CWD_AFFECTING_BUILTINS | _BUILTIN_LAUNCHER_PREFIXES
         )
     if name == "cd":
-        status, _ = _simple_cd_status(segment, cwd)
+        status, _ = _simple_cd_status(segment, cwd, cdpath)
         return status is not None
     return True
 
@@ -2342,11 +2412,17 @@ def _cons_items(cons: object) -> list:
 class _CwdFoldState(NamedTuple):
     cwd: Path
     fully_modeled: bool
-    # Cons list of (cwd, segment_is_conditional, chain_has_or) per open "(".
+    # Cons list of (cwd, segment_is_conditional, chain_has_or, cwd_unknown)
+    # per open "(".
     subshell_states: object
     segment: tuple[str, ...]
     segment_is_conditional: bool
     chain_has_or: bool
+    # An earlier segment may have set CDPATH (never cleared: conservative).
+    cdpath: bool = False
+    # A `cd` that may have searched CDPATH ran in this shell: the remembered
+    # cwd is a guess, so nothing relative may be proven against it.
+    cwd_unknown: bool = False
 
 
 def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
@@ -2357,25 +2433,35 @@ def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
     segment = list(state.segment)
     segment_is_conditional = state.segment_is_conditional
     chain_has_or = state.chain_has_or
+    cdpath = state.cdpath
+    cwd_unknown = state.cwd_unknown
 
     def complete_segment() -> None:
-        nonlocal fully_modeled
-        if not _segment_cwd_is_modeled(segment, cwd):
+        nonlocal fully_modeled, cwd_unknown
+        if not _segment_cwd_is_modeled(segment, cwd, cdpath):
             fully_modeled = False
+        if _cd_is_cdpath_uncertain(segment, cdpath):
+            cwd_unknown = True
+
+    def after_segment() -> None:
+        nonlocal cdpath
+        if not cdpath and _cdpath_may_be_set(" ".join(segment)):
+            cdpath = True
 
     for token in tokens:
         if token in {"&&", "||"}:
             complete_segment()
             if not segment_is_conditional:
                 # The first segment in an AND-OR list always executes.
-                cwd = _apply_cd(segment, cwd)
+                cwd = _apply_cd(segment, cwd, cdpath)
             elif token == "&&" and not chain_has_or:
                 # Reaching the matched command at the end of an uninterrupted
                 # AND chain proves that each earlier segment in that chain ran
                 # successfully. A mixed OR chain is ambiguous: for
                 # ``true || cd sub && python a.py``, Python runs while cd does
                 # not, so retain the prior cwd in that case.
-                cwd = _apply_cd(segment, cwd)
+                cwd = _apply_cd(segment, cwd, cdpath)
+            after_segment()
             segment = []
             segment_is_conditional = True
             if token == "||":
@@ -2383,26 +2469,30 @@ def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
         elif token in {";", "\n"}:
             complete_segment()
             if not segment_is_conditional:
-                cwd = _apply_cd(segment, cwd)
+                cwd = _apply_cd(segment, cwd, cdpath)
+            after_segment()
             segment = []
             segment_is_conditional = False
             chain_has_or = False
         elif token in {"|", "&"}:
             # A cd in a pipeline/subshell does not reliably affect the parent.
             complete_segment()
+            after_segment()
             segment = []
         elif token == "(":
             complete_segment()
+            after_segment()
             segment = []
             subshell_states = (
-                (cwd, segment_is_conditional, chain_has_or),
+                (cwd, segment_is_conditional, chain_has_or, cwd_unknown),
                 subshell_states,
             )
         elif token == ")":
             complete_segment()
+            after_segment()
             segment = []
             if subshell_states is not None:
-                (cwd, segment_is_conditional, chain_has_or), subshell_states = (
+                (cwd, segment_is_conditional, chain_has_or, cwd_unknown), subshell_states = (
                     subshell_states
                 )
         else:
@@ -2414,6 +2504,8 @@ def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
         tuple(segment),
         segment_is_conditional,
         chain_has_or,
+        cdpath,
+        cwd_unknown,
     )
 
 
@@ -2429,15 +2521,36 @@ def _effective_cwd_state(
     accessor trust decision, where a false negative merely costs a
     redundant reminder.
     """
-    state = _prefix_folds(bash_cmd).fold(
-        offset,
-        ("cwd", initial_cwd),
-        lambda: _CwdFoldState(initial_cwd, True, None, (), False, False),
-        _fold_cwd_state,
-    )
+    state = _cwd_fold(bash_cmd, offset, initial_cwd)
     if state is None:
         return initial_cwd, False
     return state.cwd, state.fully_modeled
+
+
+def _cwd_fold(bash_cmd: str, offset: int, initial_cwd: Path) -> _CwdFoldState | None:
+    # The hook's CDPATH is part of the key: a cached walk must not outlive it.
+    return _prefix_folds(bash_cmd).fold(
+        offset,
+        ("cwd", initial_cwd, _cdpath_env_set()),
+        lambda: _CwdFoldState(initial_cwd, True, None, (), False, False),
+        _fold_cwd_state,
+    )
+
+
+def _effective_cwd_unknown(bash_cmd: str, offset: int, initial_cwd: Path) -> bool:
+    """True when a ``cd`` before ``offset`` may have searched CDPATH, so the
+    inferred cwd is a guess: relative paths resolved against it prove
+    nothing (an unlexable prefix counts as unknown too)."""
+    state = _cwd_fold(bash_cmd, offset, initial_cwd)
+    return state is None or state.cwd_unknown
+
+
+def _known_io_cwd(
+    bash_cmd: str, offset: int, initial_cwd: Path, effective_cwd: Path
+) -> Path | None:
+    """The directory a detection's relative I/O resolves against, or
+    ``None`` when a CDPATH-searched ``cd`` made it a guess."""
+    return None if _effective_cwd_unknown(bash_cmd, offset, initial_cwd) else effective_cwd
 
 
 def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
@@ -2909,8 +3022,12 @@ def _command_effective_cwd(
     return _prefix_execution_cwd(prefix, base_cwd)
 
 
-def _simple_command_status(segment: list[str], cwd: Path) -> bool | None:
+def _simple_command_status(
+    segment: list[str], cwd: Path, cdpath: bool = False
+) -> bool | None:
     """Return a statically knowable simple-command status, if available."""
+    if _cd_is_cdpath_uncertain(segment, cdpath):
+        return None  # `CDPATH=x cd run`: the prefix assignment counts too
     segment = _strip_assignments(segment)
     if segment[:1] == ["command"]:
         segment = segment[1:]
@@ -2921,7 +3038,7 @@ def _simple_command_status(segment: list[str], cwd: Path) -> bool | None:
         return False
     if len(segment) == 1 and name in {"true", ":"}:
         return True
-    status, _ = _simple_cd_status(segment, cwd)
+    status, _ = _simple_cd_status(segment, cwd, cdpath)
     return status
 
 
@@ -2943,6 +3060,7 @@ class _OrFoldState(NamedTuple):
     alternatives_failed: bool
     alternatives_touch_cwd: bool
     operators_are_or: bool
+    cdpath: bool = False  # an earlier segment may have set CDPATH
 
 
 def _fold_or_prefix(state: _OrFoldState, tokens: list[str]) -> _OrFoldState:
@@ -2955,12 +3073,16 @@ def _fold_or_prefix(state: _OrFoldState, tokens: list[str]) -> _OrFoldState:
     alternatives_failed = state.alternatives_failed
     alternatives_touch_cwd = state.alternatives_touch_cwd
     operators_are_or = state.operators_are_or
+    cdpath = state.cdpath
     for token in tokens:
         if token in {"(", ")"}:
             return state._replace(failed=True)
+        if token in {";", "\n", "&&", "||", "|", "&"}:
+            this_cdpath = cdpath
+            cdpath = cdpath or _cdpath_may_be_set(" ".join(segment))
         if token in {";", "\n"}:
             if not alternatives:
-                status, target = _simple_cd_status(segment, cwd)
+                status, target = _simple_cd_status(segment, cwd, this_cdpath)
                 if status is True:
                     cwd = target
             elif alternatives_touch_cwd or _touches_cwd(segment):
@@ -2977,7 +3099,8 @@ def _fold_or_prefix(state: _OrFoldState, tokens: list[str]) -> _OrFoldState:
         elif token in {"&&", "||", "|", "&"}:
             alternatives += 1
             alternatives_failed = (
-                alternatives_failed and _simple_command_status(segment, cwd) is False
+                alternatives_failed
+                and _simple_command_status(segment, cwd, this_cdpath) is False
             )
             alternatives_touch_cwd = alternatives_touch_cwd or _touches_cwd(segment)
             operators_are_or = operators_are_or and token == "||"
@@ -2992,6 +3115,7 @@ def _fold_or_prefix(state: _OrFoldState, tokens: list[str]) -> _OrFoldState:
         alternatives_failed,
         alternatives_touch_cwd,
         operators_are_or,
+        cdpath,
     )
 
 
@@ -3007,7 +3131,7 @@ def _or_prefix_is_proven_failed(
     return _or_fold_proves(
         _prefix_folds(bash_cmd).fold(
             offset,
-            ("or", initial_cwd),
+            ("or", initial_cwd, _cdpath_env_set()),
             lambda: _OrFoldState(False, initial_cwd, (), 0, True, False, True),
             _fold_or_prefix,
         )
@@ -3059,7 +3183,7 @@ def _and_prefix_is_proven_successful(
     return _and_fold_proves(
         _prefix_folds(bash_cmd).fold(
             offset,
-            ("and", initial_cwd),
+            ("and", initial_cwd, _cdpath_env_set()),
             lambda: _AndFoldState(False, False, (), initial_cwd),
             _fold_and_prefix,
         )
@@ -3913,7 +4037,10 @@ def _detect_runners(
             )
             if run is None:
                 continue
-            if run.run_dir_unknown:
+            # A `cd` that may have searched CDPATH: the run's directory is a
+            # guess, so its relative I/O and entry file prove nothing.
+            cwd_unknown = _effective_cwd_unknown(bash_cmd, m.start(), cwd)
+            if run.run_dir_unknown or cwd_unknown:
                 io_cwd = None
             elif run.run_dir is None:
                 io_cwd = effective_cwd
@@ -3926,6 +4053,8 @@ def _detect_runners(
                 continue
             unresolved = Path(run.entry)
             if not unresolved.is_absolute():
+                if cwd_unknown:
+                    continue
                 unresolved = effective_cwd / unresolved
             try:
                 path = Path(os.path.abspath(unresolved))
@@ -4012,7 +4141,7 @@ def _detect_scripts_with_cwd(
             src = InlineSource(src, inline_language)
             identity = (src, effective_cwd, _stage_key(bash_cmd, m.start()))
             if identity not in seen_inline:
-                out.append((None, src, effective_cwd))
+                out.append((None, src, _known_io_cwd(bash_cmd, m.start(), cwd, effective_cwd)))
                 record(m.start(), "inline")
                 seen_inline.add(identity)
     for m in _scan_word_pattern(RX_PYTHON_M, bash_cmd):
@@ -4031,7 +4160,7 @@ def _detect_scripts_with_cwd(
         source = f"# Python module execution: {module}"
         identity = (source, effective_cwd, _stage_key(bash_cmd, m.start()))
         if identity not in seen_inline:
-            out.append((None, source, effective_cwd))
+            out.append((None, source, _known_io_cwd(bash_cmd, m.start(), cwd, effective_cwd)))
             record(m.start(), "module", module)
             seen_inline.add(identity)
     for pattern in (
@@ -4074,7 +4203,8 @@ def _detect_scripts_with_cwd(
                         _stage_key(bash_cmd, m.start()),
                     )
                     if unresolved_key not in seen_unresolved:
-                        out.append((unresolved_key[0], None, effective_cwd))
+                        out.append((unresolved_key[0], None,
+                                    _known_io_cwd(bash_cmd, m.start(), cwd, effective_cwd)))
                         record(m.start(), "unresolved", r_script.text,
                                "r-file" if pattern is RX_R_FILE_PATH else None)
                         seen_unresolved.add(unresolved_key)
@@ -4105,11 +4235,16 @@ def _detect_scripts_with_cwd(
                 expanded = _accessor_expanded_script_path(
                     m.group("path"), raw_path, effective_cwd
                 )
+            cwd_unknown = _effective_cwd_unknown(bash_cmd, m.start(), cwd)
             if expanded is not None:
                 unresolved = expanded
             else:
                 unresolved = Path(raw_path)
                 if not unresolved.is_absolute():
+                    if cwd_unknown:
+                        # `cd run` may have gone to $CDPATH/run: which
+                        # script ran is unknown, so none is claimed.
+                        continue
                     unresolved = effective_cwd / unresolved
             # Judge trust on the canonical filesystem path of the UNCOLLAPSED
             # word: lexical abspath folds "symlink/.." differently than the
@@ -4127,7 +4262,7 @@ def _detect_scripts_with_cwd(
                 continue
             stage_key = (path, _stage_key(bash_cmd, m.start()))
             if stage_key not in seen_paths:
-                out.append((path, None, effective_cwd))
+                out.append((path, None, None if cwd_unknown else effective_cwd))
                 record(m.start(), "script", raw_path,
                        "r-file" if pattern is RX_R_FILE_PATH else None)
                 seen_paths.add(stage_key)
@@ -5434,7 +5569,7 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
             words_next[0] in _INERT_AFTER_COPY
             and not any(op in _OUTPUT_REDIRECTIONS or op == "<>" for op, _ in redirections_next)
         )
-    cdpath_possible = "CDPATH" in command or bool(os.environ.get("CDPATH"))
+    cdpath_possible = _cdpath_may_be_set(command) or _cdpath_env_set()
     current: Path | None = cwd
     for position, (argv, redirections) in enumerate(parsed):
         first = 0
@@ -6091,6 +6226,57 @@ MAX_EVENTS_PER_CALL = 64
 CONFIG_MAX_BYTES = 5 * 1024 * 1024
 CONFIG_BUDGET_SECONDS = 0.25
 STEP_TOKEN_MAX = 4096
+_TRUNCATED_MARK = "…[truncated]"
+# A secret-like key followed by a value separator (`"api_key": `, `token=`).
+_SECRET_KEY_VALUE_RX = re.compile(
+    r"(?i)(?:token|secret|passw(?:or)?d?|pwd|api[_-]?key|private[_-]?key|credential"
+    r"|auth(?!or)|cookie|session)[A-Za-z0-9_-]*[\"']?\]?\s*(?:=|:)")
+
+
+def _clip_redacted_token(original: Any, redacted: Any) -> tuple[Any, bool]:
+    """Clip one already-redacted token to STEP_TOKEN_MAX; (token, clipped).
+
+    Redaction ran on the whole token first, so a secret whose closing quote
+    lies past the cap was still recognized. When the token looked secret
+    at all (a secret-like name anywhere in the unclipped text, or redaction
+    changed it), the kept prefix also stops before the first secret-like
+    name or redaction marker in it: no partial literal can survive a cut
+    that redaction did not foresee (an unterminated quote, say).
+    """
+    import lineage_redact
+
+    if not isinstance(redacted, str) or len(redacted) <= STEP_TOKEN_MAX:
+        return redacted, False
+    kept = redacted[:STEP_TOKEN_MAX]
+    if isinstance(original, str) and (
+        lineage_redact.is_secret_name(original) or redacted != original
+    ):
+        cuts = [m.start() for m in [lineage_redact.SECRET_NAME_RX.search(kept)] if m]
+        marker = kept.find(lineage_redact.REDACTED)
+        if marker >= 0:
+            cuts.append(marker)
+        if cuts:
+            kept = kept[: min(cuts)] + lineage_redact.REDACTED
+    return kept + _TRUNCATED_MARK, True
+
+
+def _redacted_clipped_argv(argv: list[Any]) -> tuple[list[Any], bool]:
+    """Redact the complete argv, then clip each long token; (argv, any clipped).
+
+    Clipping first would cut a secret's closing quote off before redaction
+    could see it, leaving the secret's prefix in the record."""
+    import lineage_redact
+
+    redacted = lineage_redact.redact_argv(list(argv))
+    out: list[Any] = []
+    truncated = False
+    for original, token in zip(argv, redacted):
+        token, clipped = _clip_redacted_token(original, token)
+        truncated = truncated or clipped
+        out.append(token)
+    return out, truncated
+
+
 _NAME_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _NON_RUN_WORDS = frozenset({"cd", "pushd", "popd", "export", "set", "source", ".", "unset"})
 
@@ -6406,9 +6592,7 @@ def _snakemake_params(args: list[str]) -> list[str]:
             values.append(f"{key}={lineage_redact.REDACTED}")
         else:
             (redacted,) = lineage_redact.redact_argv([token])
-            if len(redacted) > STEP_TOKEN_MAX:
-                redacted = redacted[:STEP_TOKEN_MAX] + "…[truncated]"
-            values.append(redacted)
+            values.append(_clip_redacted_token(token, redacted)[0])
     return values
 
 
@@ -6586,20 +6770,10 @@ def build_step(
                 operand_index = index + 1
                 break
     script_args = argv[operand_index:] if operand_index is not None else []
-    truncated = False
-    clipped: list[Any] = []
-    for token in shown:
-        if isinstance(token, str) and len(token) > STEP_TOKEN_MAX:
-            clipped.append(token[:STEP_TOKEN_MAX] + "…[truncated]")
-            truncated = True
-        else:
-            clipped.append(token)
-    step["argv"] = lineage_redact.redact_argv(clipped)
+    step["argv"], truncated = _redacted_clipped_argv(shown)
     step["executable"] = argv[0]
     step["interpreter"] = interpreter
-    step["script_args"] = lineage_redact.redact_argv(
-        [t if len(t) <= STEP_TOKEN_MAX else t[:STEP_TOKEN_MAX] + "…[truncated]"
-         for t in script_args])
+    step["script_args"], _ = _redacted_clipped_argv(script_args)
     if env:
         step["env"] = env
     if wrappers:
@@ -6632,6 +6806,11 @@ def build_step(
             continue
         if lineage_redact.REDACTED in operand.token:
             continue  # a redacted local value is never a config path
+        if _SECRET_KEY_VALUE_RX.search(operand.token):
+            # `--params '{"api_key": "…'` with no closing quote: redaction
+            # cannot delimit the literal, and no config path looks like
+            # this, so it is never recorded as one.
+            continue
         raw = raws[scan_from + operand.index] if raws is not None else None
         if raw is not None and operand.eq is not None:
             prefix = operand.eq + "="
@@ -6702,9 +6881,7 @@ def data_command_step(bash_cmd: str, named_paths: list[str] | None = None) -> di
     """The argv of the data command's working stage: the first stage that
     names one of the data paths the record lists, else the first stage that
     does something other than change directory or set variables."""
-    import lineage_redact
-
-    named = [p for p in named_paths or [] if isinstance(p, str) and p]
+    named =[p for p in named_paths or [] if isinstance(p, str) and p]
     fallback: dict[str, Any] | None = None
     offset = 0
     stages = 0
@@ -6718,9 +6895,8 @@ def data_command_step(bash_cmd: str, named_paths: list[str] | None = None) -> di
             words = [w for w in argv if not (_NAME_RX.fullmatch(w.partition("=")[0])
                                               and "=" in w)]
             if words and words[0] not in _NON_RUN_WORDS:
-                record = {"argv": lineage_redact.redact_argv(
-                    [w if len(w) <= STEP_TOKEN_MAX else w[:STEP_TOKEN_MAX] + "…[truncated]"
-                     for w in argv]), "executable": words[0]}
+                record = {"argv": _redacted_clipped_argv(argv)[0],
+                          "executable": words[0]}
                 if named and any(any(p in w or w in p for p in named) for w in argv[1:]
                                  if len(w) > 1):
                     return {**record, "stage": "names-data"}

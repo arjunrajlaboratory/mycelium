@@ -237,7 +237,7 @@ def test_consolidation_redacts_historical_records(tmp_path: Path) -> None:
     [
         ("export AWS_SECRET_ACCESS_KEY=abc && run", "export AWS_SECRET_ACCESS_KEY=<redacted> && run"),
         ("tool --author Jane --token=t0k", "tool --author Jane --token=<redacted>"),
-        ("git clone https://user:pa55@host/x.git", "git clone https://user:<redacted>@host/x.git"),
+        ("git clone https://user:pa55@host/x.git", "git clone https://<redacted>@host/x.git"),
         ("python fit.py --seed 3", "python fit.py --seed 3"),
         ("AUTHOR=me make", "AUTHOR=me make"),
     ],

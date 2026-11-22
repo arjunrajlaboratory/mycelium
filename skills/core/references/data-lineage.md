@@ -212,8 +212,8 @@ of literal simple commands, so every command in it ran and succeeded:
   present after `mv`, a move into a directory, and a copy onto itself claim
   nothing;
 - `cd DIR` is followed logically (as bash does through symlinks) to an
-  existing directory; a bare name is unresolved when `CDPATH` is mentioned
-  or set. After any command that could move or remove a directory
+  existing directory; a bare name is unresolved when `CDPATH` may be set
+  (see below). After any command that could move or remove a directory
   (everything outside a short list of read-only and file-creating commands,
   including `cp` and `mv`), later relative paths are unresolved.
 - `exit`, `return`, `exec`, `set`, `!`, `eval`, `source`, and wrappers
@@ -346,6 +346,16 @@ Read from the detected stage's own text, never guessed:
     `read HOME`, `${HOME:=x}`), a `source` or `.` of any file, `eval`, or a
     variable-setting builtin with a computed name (`declare "$v=x"`) makes a
     `~/` operand `hash_status: unresolved`. `~user/` is unaffected.
+  - Bash searches `$CDPATH` for an unqualified relative `cd` operand (`cd
+    run`, not `/x`, `./run` or `../run`), so that `cd` may land somewhere
+    the hook cannot know when CDPATH may be set: in the hook's own
+    environment, by a prefix (`CDPATH=x cd run`), or by anything earlier in
+    the command that mentions CDPATH, runs `source`/`.`/`eval`, or sets a
+    variable with a computed name. Such a `cd` is unmodeled. A script named
+    relative to it is not claimed (which file ran is unknown), and the
+    stage's relative config operands and I/O are `hash_status: unresolved`
+    and unresolved; absolute paths still resolve. Without any of those
+    signals `cd run` is followed as usual.
   - A URL operand (`--config https://host/c.yaml`) is never resolved against
     the directory or hashed. A flag's URL value is kept as `hash_status:
     remote` with `rel_path: null`, its userinfo, query and fragment
@@ -382,6 +392,13 @@ Every stored command text goes through one policy (`lineage_redact.py`):
 
 Nothing is hashed, because a short secret's digest can be guessed. A
 redacted embedded source has `script_sha256_of: "sanitized"`.
+
+`argv`, `script_args`, `params`, and a data command's `argv` keep at most
+4 KiB per word (`…[truncated]`). Each whole argv is redacted before any word
+is clipped, so a secret whose closing quote lies past the cap is still
+found. A clipped word that looked secret (a secret-like name anywhere in it,
+or redaction changed it) is also cut before the first secret-like name or
+`<redacted>` marker in what is kept, so no partial literal survives.
 
 A URL is never a local path. A script's URL literal (`pd.read_csv("https://...")`,
 `to_csv("s3://...")`) is left out of `inputs` and `outputs`. It is named in

@@ -1233,7 +1233,10 @@ def write_atomic_json(path, document, replace=True):
     With replace=False the file is published only if `path` still does not
     exist (a hard link fails on an existing name), so a file created since
     the caller looked is never clobbered."""
-    directory = os.path.dirname(os.path.abspath(path))
+    # The directory the OS will publish into: resolved without collapsing
+    # `..` lexically first (`out/latest/../c.json` under a symlinked
+    # `latest` is not out/c.json), so the replace stays in one directory.
+    directory = os.path.realpath(os.path.dirname(path) or os.curdir)
     fd, tmp = tempfile.mkstemp(prefix=".{}.".format(os.path.basename(path)), suffix=".tmp",
                                dir=directory)
     try:
@@ -1289,18 +1292,30 @@ def main(argv=None):
     emitted = None
     try:
         if args.ledger:
-            with open(args.ledger, encoding="utf-8") as handle:
+            # Paths are resolved with realpath on the joined, un-normalized
+            # text, never normpath/abspath first: the OS resolves a symlink
+            # before a following `..` (`latest/../x` under `latest ->
+            # snapshot/staging` is snapshot/x), and lexical collapsing would
+            # name another file than the one read or written.
+            ledger_path = os.path.realpath(args.ledger)
+            with open(ledger_path, encoding="utf-8") as handle:
                 spec = json.load(handle, object_pairs_hook=reject_duplicate_keys)
-            contract = ledger_contract(spec, os.path.dirname(os.path.abspath(args.ledger)))
+            # The table is relative to the directory the ledger was named
+            # from (a symlinked ledger keeps its link's directory).
+            contract = ledger_contract(
+                spec, os.path.realpath(os.path.dirname(args.ledger) or os.curdir))
+            # One resolved table path for reading, the checks, the alias
+            # guard, and the emitted contract.
+            table = os.path.realpath(contract["table"])
+            contract["table"] = table
             if args.emit_contract:
                 emitted = dict(contract)
-                root = os.path.abspath(args.root)
-                table = os.path.abspath(contract["table"])
+                root = os.path.realpath(args.root)
                 if table.startswith(root.rstrip(os.sep) + os.sep):
                     # Relative to --root, so the contract replays against the
                     # checkout it is run in, not the one it was emitted from.
                     emitted["table"] = os.path.relpath(table, root)
-                refuse_input_alias(args.emit_contract, [args.ledger, table])
+                refuse_input_alias(args.emit_contract, [ledger_path, table])
                 if os.path.lexists(args.emit_contract) and not args.overwrite:
                     # The destination may be the analysis's extended contract
                     # (filters, the modeled table); regenerating it from the
