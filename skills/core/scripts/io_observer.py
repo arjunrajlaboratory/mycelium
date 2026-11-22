@@ -222,6 +222,10 @@ def walk(
                 try:
                     st = entry.stat(follow_symlinks=False)
                 except OSError:
+                    # Listed but not inspectable (a directory without search
+                    # permission): never silently absent, or it would read as
+                    # a deletion.
+                    unwatched.append({"path": rel, "why": "unreadable"})
                     continue
                 mode = st.st_mode
                 if stat.S_ISDIR(mode):
@@ -1972,12 +1976,20 @@ def _case_insensitive(root_real: str) -> bool:
     """Whether the checkout's volume folds case, probed once per root by
     looking up the root's own name with its case swapped."""
     if root_real not in _CASE_PROBES:
-        parent, name = os.path.split(root_real)
-        swapped = name.swapcase()
+        # The nearest ancestor (the root itself first) whose name has a
+        # letter: a checkout named `12345` is probed through its parent.
         folds = False
-        if swapped != name:
-            with contextlib.suppress(OSError):
-                folds = os.path.samefile(root_real, os.path.join(parent, swapped))
+        current = root_real
+        while True:
+            parent, name = os.path.split(current)
+            if not name:
+                break
+            swapped = name.swapcase()
+            if swapped != name:
+                with contextlib.suppress(OSError):
+                    folds = os.path.samefile(current, os.path.join(parent, swapped))
+                break
+            current = parent
         _CASE_PROBES[root_real] = folds
     return _CASE_PROBES[root_real]
 

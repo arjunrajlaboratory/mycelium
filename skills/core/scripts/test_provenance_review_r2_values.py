@@ -226,7 +226,7 @@ def test_explain_credits_a_current_deletion(monkeypatch) -> None:
         {"call": "w1", "action": "created", "sha256": "ab" * 32, "evidence": "observed",
          "record": {"status": "superseded"}},
         {"call": "d2", "action": "deleted", "evidence": "observed",
-         "record": {"status": "current-in-record"}},
+         "attribution": "sole", "record": {"status": "current-in-record"}},
     ])
     lineage = crv._explain(object(), "out/res.csv", None)
     assert (lineage["status"], lineage["write_call"]) == ("deleted-in-record", "d2")

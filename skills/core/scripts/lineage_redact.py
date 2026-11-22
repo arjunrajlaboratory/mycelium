@@ -50,6 +50,9 @@ _URL_QUERY_SECRET_RX = re.compile(
 # escape and the word pass still sees one word, which it redacts whole.
 _AUTH_HEADER_RX = re.compile(r"(?i)(authorization\s*:\s*)([^\n'\"\\]+)")
 _AUTH_WORD_RX = re.compile(r"(?i)\s*authorization\s*:")
+# A header inside one word, possibly behind an attached option.
+_AUTH_IN_WORD_RX = re.compile(r"(?i)((?:-{1,2}[A-Za-z][\w-]*=?)?)\s*authorization\s*:")
+_AUTH_LINE_RX = re.compile(r"(?im)^(\s*authorization\s*:\s*)(\S.*)$")
 _OPERATORS = set(";&|<>()\n")
 
 
@@ -247,6 +250,9 @@ def redact_text(text: str) -> str:
         return text
     # Header lines first, on the raw text: a header in a heredoc body is
     # not one shell word, so its value would survive the word pass.
+    # A line that is itself a header (a heredoc or here-string body) goes
+    # to its end, quotes and all.
+    text = _AUTH_LINE_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", text)
     text = _AUTH_HEADER_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", text)
     replacements: list[tuple[int, int, str]] = []
     spans = _words(text)
@@ -254,8 +260,12 @@ def redact_text(text: str) -> str:
     for start, end in spans:
         word = text[start:end]
         head = _decode(word)
-        if _AUTH_WORD_RX.match(head):
-            replacements.append((start, end, shlex.quote(f"Authorization: {REDACTED}")))
+        header = _AUTH_IN_WORD_RX.match(head)
+        if header:
+            # `Authorization: …`, `--header=Authorization: …`,
+            # `-HAuthorization: …`: the whole decoded value goes.
+            replacements.append((start, end, shlex.quote(
+                f"{header.group(1)}Authorization: {REDACTED}")))
             redact_next = False
             continue
         if redact_next:
@@ -329,7 +339,10 @@ def _redact_decoded_words(text: str) -> str:
         if not any(c in word for c in "'\"\\"):
             continue
         decoded = _decode(word)
-        redacted = redact_source(decoded)
+        # The decoded body may itself be a command (`bash -c '…'`,
+        # `ssh h '…'`): shell-level rules apply to it too. redact_text does
+        # not come back here, so this recursion is one level deep.
+        redacted = redact_source(redact_text(decoded))
         if redacted != decoded:
             replacements.append((start, end, shlex.quote(redacted)))
     out = text
@@ -426,8 +439,9 @@ def redact_argv(argv: list[Any]) -> list[Any]:
             redact_next = False
             continue
         redact_next = False
-        if _AUTH_WORD_RX.match(token):
-            out.append(f"Authorization: {REDACTED}")
+        header = _AUTH_IN_WORD_RX.match(token)
+        if header:
+            out.append(f"{header.group(1)}Authorization: {REDACTED}")
             continue
         name, eq, _ = token.partition("=")
         if eq and name.startswith("-") and SECRET_NAME_RX.search(name):

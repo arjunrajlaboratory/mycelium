@@ -1056,7 +1056,11 @@ def _headline(record: str, disk: str | None, action: str | None) -> str:
         if disk is None:
             return "current-in-record"
         if action == "deleted":
-            return "current" if disk == "missing" else "changed-outside-record"
+            # Only a path shown to exist again is a change outside the
+            # record; one that could not be checked stays unverified.
+            if disk == "missing":
+                return "current"
+            return "changed-outside-record" if disk in ("match", "differs") else "unverified"
         return {"match": "current", "differs": "changed-outside-record",
                 "missing": "missing-on-disk"}.get(disk, "unverified")
     return "unknown"

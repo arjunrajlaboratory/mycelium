@@ -431,6 +431,8 @@ def _explain(index, rel: str, actual: str | None) -> dict[str, Any] | None:
         current = [w for w in deletions if _verdict(w) in _CURRENT_VERDICTS]
         if len(current) == 1:
             last = current[0]
+            if last.get("attribution") != "sole":
+                return _shared(last)
             return {"status": "deleted-in-record", "write_call": last.get("call"),
                     "events": [e.get("event_id") for e in last.get("events") or []],
                     "verdict": _verdict(last)}
@@ -474,12 +476,25 @@ def _explain(index, rel: str, actual: str | None) -> dict[str, Any] | None:
                            "a recorded write produced these bytes, but the record cannot "
                            "show it is the latest change to the path")
     write = current[0]
+    if write.get("attribution") != "sole":
+        return _shared(write)
     out = {"status": "written-by", "write_call": write.get("call"), "sha256": actual,
            "events": [e.get("event_id") for e in write.get("events") or []],
            "verdict": _verdict(write)}
     if write.get("hash_origin") == "query-identity-match":
         out["hash_origin"] = "query-identity-match"
     return out
+
+
+def _shared(write: dict[str, Any]) -> dict[str, Any]:
+    """An observation that saw the change while other calls overlapped it:
+    any of them may have made it, so none is named as the producer."""
+    candidates = [write.get("call")] + [c for c in write.get("overlapping") or []
+                                        if isinstance(c, str)]
+    return {"status": "producer-shared", "candidates": candidates,
+            "verdict": _verdict(write), "attribution": write.get("attribution"),
+            "detail": "the change was observed while other calls overlapped; any of the "
+                      "candidates may have made it"}
 
 
 def number_entries(document: Any) -> list[Any]:
