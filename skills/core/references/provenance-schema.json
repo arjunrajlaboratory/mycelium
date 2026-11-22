@@ -1577,10 +1577,15 @@
       "description": "analysis/<ns>/outputs/access.json, written by record_ids (Python) and record_access.R.",
       "type": "object",
       "required": [
+        "schema",
         "namespace",
         "records"
       ],
       "properties": {
+        "schema": {
+          "const": "mycelium.access.v1",
+          "description": "Format marker. record_ids refuses to update an existing access.json without it (or with other top-level keys): that file is not Mycelium's."
+        },
         "namespace": {
           "type": "string"
         },

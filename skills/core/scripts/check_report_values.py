@@ -333,13 +333,82 @@ def _uncredited(status: str, writes: list[dict[str, Any]], detail: str) -> dict[
                                 for w in writes]}
 
 
+def _resolve_pending_writes(index, rel: str, writes: list[dict[str, Any]],
+                            actual: str) -> list[dict[str, Any]]:
+    """``writes`` with each observed write whose hash was pending (or
+    unavailable) at Post resolved by the index's identity match: when the
+    file still has exactly the identity the observer recorded and hashes to
+    ``actual``, that write produced the current bytes, and its verdict is
+    re-derived with the resolved hash. A write that cannot be resolved keeps
+    its unknown hash."""
+    try:
+        raw = index.writes_at(rel)
+    except Exception:  # noqa: BLE001 - no raw writes, nothing to resolve
+        return writes
+    if len(raw) != len(writes):
+        return writes
+    out = []
+    for summary, write in zip(writes, raw):
+        if (summary.get("sha256") is None and summary.get("action") != "deleted"
+                and summary.get("evidence") == "observed" and write.get("identity")
+                and write.get("frame") == "repo" and write.get("path") == rel):
+            try:
+                disk = index.disk_status(rel, None, identity=write["identity"])
+                if disk.get("resolved_sha256") == actual:
+                    record = index.record_status({**write, "sha256": actual})
+                    summary = {**summary, "sha256": actual, "record": record,
+                               "hash_origin": "query-identity-match"}
+            except Exception:  # noqa: BLE001 - unresolved stays unknown
+                pass
+        out.append(summary)
+    return out
+
+
+def _incomplete_reasons(index, rel: str, writes: list[dict[str, Any]]) -> list[str]:
+    """Why the record cannot show it holds every change to ``rel``: a write
+    whose resulting bytes are unknown and not provably replaced, a gap that
+    applies to the path, or a path Bash observation never watches. Only with
+    none of these may a change be called outside the record."""
+    reasons = []
+    if any(w.get("sha256") is None and w.get("action") != "deleted"
+           and _verdict(w) != "superseded" for w in writes):
+        reasons.append("write-hash-unknown")
+    try:
+        import lineage_index
+
+        if any(lineage_index.Index._gap_applies(g, rel) for g in getattr(index, "gaps", [])):
+            reasons.append("gap")
+    except Exception:  # noqa: BLE001 - cannot rule a gap out
+        reasons.append("gap")
+    try:
+        import io_observer
+
+        if io_observer.watch_status(rel, []) != "watched":
+            reasons.append("unwatched-path")
+    except Exception:  # noqa: BLE001
+        reasons.append("unwatched-path")
+    return reasons
+
+
+def _producer_unknown(reasons: list[str], writes: list[dict[str, Any]],
+                      detail: str) -> dict[str, Any]:
+    return {"status": "producer-unknown", "reasons": reasons, "detail": detail,
+            "writes": [{"call": w.get("call"), "sha256": w.get("sha256"),
+                        "hash_status": w.get("hash_status"), "verdict": _verdict(w)}
+                       for w in writes]}
+
+
 def _explain(index, rel: str, actual: str | None) -> dict[str, Any] | None:
     """The recorded call that left the path as it is now, when the record
     can establish it: an observed write (or deletion) whose result is
     exactly what is on disk *and* whose index verdict says no later recorded
     write replaced it. A matching but superseded write is reported as such
     and is not credited: the same bytes may have been restored outside the
-    record after a later write replaced them."""
+    record after a later write replaced them.
+
+    A write whose hash was pending at Post is first resolved by file
+    identity. "Outside the record" is said only when the record is complete
+    for the path; otherwise the status is ``producer-unknown``."""
     if index is None:
         return None
     try:
@@ -351,6 +420,9 @@ def _explain(index, rel: str, actual: str | None) -> dict[str, Any] | None:
     writes = result.get("writes") or []
     if not writes:
         return {"status": "no-recorded-write"}
+    if actual is not None:
+        writes = _resolve_pending_writes(index, rel, writes, actual)
+    incomplete = _incomplete_reasons(index, rel, writes)
     if actual is None:
         deletions = [w for w in writes if w.get("action") == "deleted"
                      and w.get("evidence") == "observed"]
@@ -365,6 +437,10 @@ def _explain(index, rel: str, actual: str | None) -> dict[str, Any] | None:
         if len(current) > 1:
             return {"status": "producer-ambiguous", "calls": [w.get("call") for w in current]}
         if any(str(_verdict(w)).startswith("superseded") for w in deletions):
+            if incomplete:
+                return _producer_unknown(incomplete, writes,
+                                         "a recorded deletion was followed by a later write, "
+                                         "and the record cannot show what removed the file")
             return _uncredited("missing-after-superseded-deletion", deletions,
                                "a recorded deletion was followed by a later recorded write; "
                                "the file was removed again outside the record")
@@ -373,6 +449,11 @@ def _explain(index, rel: str, actual: str | None) -> dict[str, Any] | None:
                            "the latest change to the path")
     matching = [w for w in writes if w.get("sha256") == actual and w.get("evidence") == "observed"]
     if not matching:
+        if incomplete:
+            return _producer_unknown(incomplete, writes,
+                                     "no recorded write is known to have produced the bytes now "
+                                     "on disk, but the record is incomplete for this path, so "
+                                     "the change may be in it")
         return {"status": "current-bytes-not-in-record",
                 "detail": "no recorded write produced the bytes now on disk; they changed "
                           "outside the record"}
@@ -381,6 +462,11 @@ def _explain(index, rel: str, actual: str | None) -> dict[str, Any] | None:
         return {"status": "producer-ambiguous", "calls": [w.get("call") for w in current]}
     if not current:
         if any(str(_verdict(w)).startswith("superseded") for w in matching):
+            if incomplete:
+                return _producer_unknown(incomplete, writes,
+                                         "a recorded write produced these bytes and a later "
+                                         "write replaced them; the record is incomplete for "
+                                         "this path, so what restored them is unknown")
             return _uncredited("current-bytes-match-superseded-write", matching,
                                "a recorded write produced these bytes, but a later recorded "
                                "write replaced them; they were restored outside the record")
@@ -388,9 +474,12 @@ def _explain(index, rel: str, actual: str | None) -> dict[str, Any] | None:
                            "a recorded write produced these bytes, but the record cannot "
                            "show it is the latest change to the path")
     write = current[0]
-    return {"status": "written-by", "write_call": write.get("call"), "sha256": actual,
-            "events": [e.get("event_id") for e in write.get("events") or []],
-            "verdict": _verdict(write)}
+    out = {"status": "written-by", "write_call": write.get("call"), "sha256": actual,
+           "events": [e.get("event_id") for e in write.get("events") or []],
+           "verdict": _verdict(write)}
+    if write.get("hash_origin") == "query-identity-match":
+        out["hash_origin"] = "query-identity-match"
+    return out
 
 
 def number_entries(document: Any) -> list[Any]:

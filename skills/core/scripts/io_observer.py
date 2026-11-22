@@ -171,7 +171,23 @@ def walk(
     timed_out = False
     sub_second: dict[int, bool] = {}
     stack: list[str] = [root]
-    stack.extend(os.path.join(root, r) for r in extra_roots)
+    for extra in extra_roots:
+        # Walked in the listing's spelling, never through a link: a root
+        # named `SKILLS/core` on a case-insensitive volume would otherwise
+        # claim those inodes under a second spelling, and the real one
+        # would vanish from the walk as if deleted.
+        spelled = canonical_spelling(root, extra)
+        if spelled is None or not os.path.isdir(os.path.join(root, spelled)):
+            continue
+        linked = False
+        current = root
+        for part in spelled.split("/"):
+            current = os.path.join(current, part)
+            if os.path.islink(current):
+                linked = True
+                break
+        if not linked:
+            stack.append(os.path.join(root, spelled))
     seen_dirs: set[tuple[int, int]] = set()
     prefix_len = len(root) + 1
     while stack:
@@ -1943,6 +1959,23 @@ EDIT_HASH_SECONDS = 0.5
 EDIT_HASH_MAX_BYTES = 50 * 1024 * 1024
 
 
+_CASE_PROBES: dict[str, bool] = {}
+
+
+def _case_insensitive(root_real: str) -> bool:
+    """Whether the checkout's volume folds case, probed once per root by
+    looking up the root's own name with its case swapped."""
+    if root_real not in _CASE_PROBES:
+        parent, name = os.path.split(root_real)
+        swapped = name.swapcase()
+        folds = False
+        if swapped != name:
+            with contextlib.suppress(OSError):
+                folds = os.path.samefile(root_real, os.path.join(parent, swapped))
+        _CASE_PROBES[root_real] = folds
+    return _CASE_PROBES[root_real]
+
+
 def canonical_spelling(root_real: str, rel: str) -> str | None:
     """``rel`` spelled as the directory listings spell it (the walk's
     spelling). On a case- or normalization-insensitive volume a tool may
@@ -2038,6 +2071,12 @@ def _edit_changes(
                 refused.append({"path": rel, "reason": "deletion-not-applied"})
             else:
                 deleted.append({"path": rel, "after": None})
+                if _case_insensitive(root_real):
+                    # The deleted entry can no longer be listed, so the
+                    # spelling its writes were recorded under is unknown:
+                    # every spelling of the name becomes uncertain.
+                    refused.append({"path": rel, "reason": "deleted-spelling-unknown",
+                                    "casefold": True})
             continue
         path = Path(root_real) / rel
         try:

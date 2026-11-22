@@ -125,8 +125,13 @@ def _words(text: str) -> list[tuple[int, int]]:
 
 def _substitution_end(text: str, i: int) -> int:
     """The index just past a `$( … )` or backtick substitution starting at
-    ``i`` (the end of the text when it is unclosed). Quotes inside are
-    skipped so a `)` in a string does not close it."""
+    ``i`` (the end of the text when it is unclosed)."""
+    return _substitution_span(text, i)[0]
+
+
+def _substitution_span(text: str, i: int) -> tuple[int, bool]:
+    """(end, closed) for the substitution starting at ``i``. Quotes inside
+    are skipped so a `)` in a string does not close it."""
     n = len(text)
     if text[i] == "`":
         j = i + 1
@@ -135,9 +140,9 @@ def _substitution_end(text: str, i: int) -> int:
                 j += 2
                 continue
             if text[j] == "`":
-                return j + 1
+                return j + 1, True
             j += 1
-        return n
+        return n, False
     depth = 0
     j = i + 1
     quote = None
@@ -159,9 +164,9 @@ def _substitution_end(text: str, i: int) -> int:
         elif c == ")":
             depth -= 1
             if depth == 0:
-                return j + 1
+                return j + 1, True
         j += 1
-    return n
+    return n, False
 
 
 # A secret-named key nested inside a value: `--config=api_token=X`,
@@ -231,6 +236,9 @@ def redact_text(text: str) -> str:
     (``"--token" X``, ``'--api-key=X'``) is caught like a bare one."""
     if not text:
         return text
+    # Header lines first, on the raw text: a header in a heredoc body is
+    # not one shell word, so its value would survive the word pass.
+    text = _AUTH_HEADER_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", text)
     replacements: list[tuple[int, int, str]] = []
     spans = _words(text)
     redact_next = False
@@ -243,26 +251,63 @@ def redact_text(text: str) -> str:
             continue
         if redact_next:
             redact_next = False
-            if not _LONG_OPTION_RX.match(head):
-                # A value may begin with "-" (`--password -123456`); only a
-                # word shaped like the next long option is left alone.
-                replacements.append((start, end, REDACTED))
-                continue
+            # The value may look like an option (`--password --ab9_Xm3q`
+            # is a password to getopt): the next word always goes, except
+            # after a flag that plainly takes none.
+            replacements.append((start, end, REDACTED))
+            continue
         name, eq, _ = head.partition("=")
         if eq and _NAME_RX.match(name) and SECRET_NAME_RX.search(name):
             replacements.append((start, end, f"{name}={REDACTED}"))
         elif eq and name.startswith("-") and SECRET_NAME_RX.search(name):
             replacements.append((start, end, f"{name}={REDACTED}"))
         elif not eq and head.startswith("-") and SECRET_NAME_RX.search(head):
-            redact_next = True
+            redact_next = not _NO_VALUE_FLAG_RX.search(head)
         elif eq and (cut := _nested_secret_cut(head)) is not None:
             replacements.append((start, end, shlex.quote(cut)))
+        elif "$(" in word or "`" in word:
+            # Options inside a substitution are options too:
+            # `x=$(fetch --token T)`.
+            inner = _redact_substitutions(word)
+            if inner != word:
+                replacements.append((start, end, inner))
     out = text
     for start, end, new in reversed(replacements):
         out = out[:start] + new + out[end:]
     out = _redact_urls(out)
     out = _AUTH_HEADER_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", out)
     return out
+
+
+# Secret-named flags that take no value (`--no-password`, `--ask-pass`,
+# `--password-stdin`): the word after them is kept.
+_NO_VALUE_FLAG_RX = re.compile(r"(?i)^--?(?:no-|ask-|prompt-)|-stdin$")
+
+
+def _redact_substitutions(word: str, depth: int = 0) -> str:
+    """The word with the text inside each `$( … )` or backtick redacted as
+    a command of its own. An unclosed substitution (whose end cannot be
+    found) has everything after its opening redacted."""
+    out: list[str] = []
+    i = 0
+    n = len(word)
+    while i < n:
+        c = word[i]
+        opens = 2 if word.startswith("$(", i) else 1 if c == "`" else 0
+        if not opens:
+            out.append(c)
+            i += 1
+            continue
+        end, closed = _substitution_span(word, i)
+        if not closed:
+            out.append(word[i:i + opens] + REDACTED)
+            break
+        inner = word[i + opens:end - 1]
+        out.append(word[i:i + opens]
+                   + (redact_command(inner) if depth < 8 else REDACTED)
+                   + word[end - 1])
+        i = end
+    return "".join(out)
 
 
 def _redact_decoded_words(text: str) -> str:
@@ -367,7 +412,7 @@ def redact_argv(argv: list[Any]) -> list[Any]:
             depth = value_part.count("(") - value_part.count(")")
             ticks = value_part.count("`") % 2
             open_depth = max(depth, 1 if ticks else 0)
-        if redact_next and not _LONG_OPTION_RX.match(token):
+        if redact_next:
             out.append(REDACTED)
             redact_next = False
             continue
@@ -382,7 +427,7 @@ def redact_argv(argv: list[Any]) -> list[Any]:
             out.append(f"{name}={REDACTED}")
         elif token.startswith("-") and not eq and SECRET_NAME_RX.search(token):
             out.append(token)
-            redact_next = True
+            redact_next = not _NO_VALUE_FLAG_RX.search(token)
         elif eq and (cut := _nested_secret_cut(token)) is not None:
             out.append(cut)
         else:

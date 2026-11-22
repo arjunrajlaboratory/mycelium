@@ -766,9 +766,11 @@ class Index:
                 continue
             path = refused.get("path")
             if (isinstance(path, str) and not os.path.isabs(path)
-                    and (any_reason or reason in uncertain)):
+                    and (any_reason or reason in uncertain or refused.get("casefold"))):
                 self.gaps.append({"kind": "edit-uncertain", "scope": "path", "path": path,
-                                  "reason": reason, **base})
+                                  "reason": reason,
+                                  **({"casefold": True} if refused.get("casefold") else {}),
+                                  **base})
 
     def _add_observation(self, key: str, item: dict[str, Any], events: list[str]) -> None:
         record = item["record"]
@@ -879,6 +881,16 @@ class Index:
         if gap.get("scope") != "path":
             return False
         gpath = gap.get("path") or ""
+        if gap.get("casefold"):
+            # A path named in a spelling that could not be checked against
+            # the volume (a deleted file on a case-insensitive disk): it
+            # covers every spelling of that name.
+            import unicodedata
+
+            def fold(text: str) -> str:
+                return unicodedata.normalize("NFC", text).casefold()
+
+            path, gpath = fold(path), fold(gpath)
         if gap.get("prefix"):
             return path == gpath or path.startswith(gpath.rstrip("/") + "/")
         return path == gpath

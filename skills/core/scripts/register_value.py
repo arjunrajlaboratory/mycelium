@@ -653,6 +653,12 @@ def _upsert_locked(
 # and a QC step's drop is a recorded number, without any barcode leaving the
 # analysis. Written to analysis/<ns>/outputs/access.json, beside numbers.json.
 
+# The format marker every access.json Mycelium writes carries. An existing
+# file without it (or with keys this format does not define) belongs to
+# someone else, a QC audit file with its own metadata for example, and is
+# never rewritten.
+ACCESS_SCHEMA = "mycelium.access.v1"
+_ACCESS_DOC_KEYS = frozenset({"schema", "namespace", "records"})
 _ACCESS_AXES = frozenset({"row", "feature"})
 _ACCESS_ROLES = frozenset({"read", "used", "written", "excluded"})
 _PROCESS_STARTED = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -723,12 +729,16 @@ def record_ids(
         filter dropped).
     source:
         Optional file the ids came from: a path or ``{"path", "locator"}``;
-        hashed now, like a report value's source (the locator is optional).
+        hashed now, like a report value's source (the locator is optional
+        and never stored). An entry from ``read_source``/``snapshot_source``
+        keeps its read-time digest: the call fails if the file changed since.
     ordered:
         Also keep a fingerprint of the given order, for steps where order
         matters (a split, a ranking).
 
-    Returns the stored entry. Re-recording the same name replaces it.
+    Returns the stored entry. Re-recording the same name replaces it. An
+    existing access.json without the ``mycelium.access.v1`` schema marker
+    (a file Mycelium did not write) is refused and left untouched.
     """
     _validate_access(name, axis, role)
     caller = _caller_frame()
@@ -771,31 +781,71 @@ def _record_ids_at(name: str, ids: Any, *, axis: str, role: str, source: Any, ns
     if ordered:
         entry["order_sha256"] = order_hash
     if source is not None:
-        # The file reference and digest only: a locator is free text and
-        # could carry an id, which an access record must never hold.
-        path_only = source.get("path") if isinstance(source, dict) else source
-        hashed = _source_entry({"path": path_only, "locator": "file"}, analysis_root)
-        entry["source"] = {k: hashed[k] for k in ("path", "root", "sha256", "size_bytes",
-                                                   "hashed_at")}
+        entry["source"] = _access_source(source, analysis_root)
     path = _outputs_file(analysis_root, "access.json", error=AccessRecordError)
     with _REGISTER_LOCK, _fragment_lock(path):
-        document: dict[str, Any] = {"namespace": ns, "records": []}
+        document: dict[str, Any] = {"schema": ACCESS_SCHEMA, "namespace": ns, "records": []}
         if path.exists():
             try:
                 document = json.loads(path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
                 raise AccessRecordError(f"record_ids: {path} is not valid JSON: {exc}") from exc
-            if not isinstance(document, dict) or not isinstance(document.get("records"), list):
-                raise AccessRecordError(f"record_ids: {path} must hold a 'records' list")
-            if document.get("namespace") not in (None, ns):
-                raise AccessRecordError(f"record_ids: {path} belongs to another namespace")
-        records = [r for r in document["records"]
-                   if not (isinstance(r, dict) and r.get("name") == name)]
+            _check_access_document(path, document, ns)
+        records = [r for r in document["records"] if r.get("name") != name]
         records.append(entry)
-        records.sort(key=lambda r: r.get("name", "") if isinstance(r, dict) else "")
-        document = {"namespace": ns, "records": records}
+        records.sort(key=lambda r: r.get("name", ""))
+        document = {"schema": ACCESS_SCHEMA, "namespace": ns, "records": records}
         _atomic_json(path, document)
     return entry
+
+
+def _access_source(source: Any, analysis_root: Path) -> dict[str, Any]:
+    """The file reference and digest only: a locator is free text and could
+    carry an id, which an access record must never hold. A source from
+    ``read_source``/``snapshot_source`` keeps the digest taken when it was
+    read, and is refused if the file at that absolute path has changed since,
+    exactly as ``register_value`` refuses it."""
+    if isinstance(source, dict):
+        unknown = set(source) - {"path", "locator", "sha256"}
+        if unknown:
+            raise AccessRecordError(f"record_ids: unknown source keys {sorted(unknown)}")
+        spec: dict[str, Any] = {"path": source.get("path"), "locator": "file"}
+        if "sha256" in source:
+            if not isinstance(source["sha256"], str) or not source["sha256"]:
+                raise AccessRecordError("record_ids: a source's sha256 must be a digest string")
+            spec["sha256"] = source["sha256"]
+    else:
+        spec = {"path": source, "locator": "file"}
+    try:
+        hashed = _source_entry(spec, analysis_root)
+    except AccessRecordError:
+        raise
+    except ValueRegistrationError as exc:
+        raise AccessRecordError(str(exc).replace("register_value:", "record_ids:", 1)) from exc
+    return {k: hashed[k] for k in ("path", "root", "sha256", "size_bytes", "hashed_at")}
+
+
+def _check_access_document(path: Path, document: Any, ns: str) -> None:
+    """Refuse to update an access.json Mycelium did not write: no format
+    marker, keys the format does not define, or records it cannot hold."""
+    if not isinstance(document, dict):
+        raise AccessRecordError(f"record_ids: {path} root must be a JSON object")
+    if document.get("schema") != ACCESS_SCHEMA:
+        raise AccessRecordError(
+            f"record_ids: {path} has no {ACCESS_SCHEMA!r} schema marker, so Mycelium did "
+            "not write it; refusing to overwrite it. Move it aside or record under "
+            "another analysis.")
+    unknown = set(document) - _ACCESS_DOC_KEYS
+    if unknown:
+        raise AccessRecordError(
+            f"record_ids: {path} has keys this format does not define {sorted(unknown)}; "
+            "refusing to overwrite it")
+    records = document.get("records")
+    if not isinstance(records, list) or not all(
+            isinstance(r, dict) and isinstance(r.get("name"), str) for r in records):
+        raise AccessRecordError(f"record_ids: {path} must hold a 'records' list of named records")
+    if document.get("namespace") != ns:
+        raise AccessRecordError(f"record_ids: {path} belongs to another namespace")
 
 
 def _atomic_json(path: Path, document: dict[str, Any]) -> None:

@@ -339,4 +339,6 @@ def test_edit_observation_refuses_paths_outside_the_checkout(tmp_path: Path) -> 
                (str(repo / "gone.txt"), "deleted")])
     assert written[0]["path"] == "a.txt" and written[0]["after"]["hash_status"] == "hashed"
     assert deleted == [{"path": "gone.txt", "after": None}]
-    assert refused == [{"path": str(tmp_path / "x.txt"), "reason": "outside-scope"}]
+    # On a case-insensitive volume the deletion also covers every spelling.
+    assert [r for r in refused if not r.get("casefold")] == \
+        [{"path": str(tmp_path / "x.txt"), "reason": "outside-scope"}]
