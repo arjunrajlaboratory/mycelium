@@ -167,10 +167,27 @@ Operational gotchas, all of which have cost a full cycle:
   wrote only `trusted_hash` to `~/.codex/config.toml`, with no
   `trusted_content_hash`; `/hooks` then showed every hook as active while
   Codex skipped them all. The complete entries were written while the Codex
-  desktop app was running, so approve from the desktop app. Launching the
-  desktop app re-copies the plugin from its marketplace source (for local
-  development, the working checkout), replacing the installed candidate and
-  needing approval again—verify the installed hash after launching it.
+  desktop app was running, so approve from the desktop app (Settings → Hooks →
+  Trust all). With a local marketplace source, launching the desktop app
+  re-copies the plugin from that marketplace source, replacing the installed
+  candidate and needing approval again—verify the installed hash after
+  launching it.
+- Keep the maintainer's `[marketplaces.mycelium]` on the GitHub source
+  (`codex plugin marketplace add arjunrajlaboratory/mycelium`), never the
+  working checkout: a local source copies uncommitted files into the install
+  on every desktop-app launch. To audit a candidate, back up
+  `~/.codex/config.toml` and point `source` (with `source_type = "local"`, and
+  `ref` removed) at a clean clone or `git archive` export of the candidate.
+  Install it, open the
+  desktop app once, trust all, quit, then verify the hashes and `hooks/list`
+  before the audit. Afterwards, restore the backed-up GitHub source, not the
+  checkout.
+- A GitHub-source install is not a pure export. It carries the snapshot's
+  `.git/`, and on 0.169.0 (2026-11-22) the first app-server or desktop-app
+  start added `.codex-marketplace-install.json` (source, ref, revision). That
+  first start voided any approval given before it, so trust only after it.
+  When hashing such an install against a `git archive` of the tag, ignore
+  both. Codex also omits the repository-root `SKILL.md`.
 - So check trust before an audit with the app-server, not `/hooks`: run
   `codex app-server`, send `initialize`, the `initialized` notification, then
   `hooks/list` with `{"cwds": [<project>]}`. Every `mycelium@mycelium` hook's

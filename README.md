@@ -59,11 +59,11 @@ codex plugin add mycelium@mycelium
 Start a new task after installation. Codex can invoke the bundled skills
 implicitly, through the plugin picker, or explicitly by skill name.
 
-Before the first Mycelium task, review and trust all eight Mycelium plugin
-hooks, then fully exit Codex and restart it so the approved `SessionStart` hook
-is present from process startup. The hooks are bundled with the plugin and
-resolve through Codex's dynamic `PLUGIN_ROOT`; they do not embed a versioned
-cache path into your repositories.
+Before the first Mycelium task, approve all eight Mycelium plugin hooks with
+the four steps under "Approve after the first start" below, so the approved
+`SessionStart` hook is present from process startup. The hooks are bundled
+with the plugin and resolve through Codex's dynamic `PLUGIN_ROOT`; they do not
+embed a versioned cache path into your repositories.
 
 Current Codex binds each hook approval to the installed plugin's contents, a
 hash of every file in the installed plugin. Repeat the review after every
@@ -76,15 +76,45 @@ Trusting the hooks in the terminal CLI's `/hooks` saved an incomplete approval
 (no plugin-content hash). Afterwards `/hooks` may show the hooks as trusted or
 active with nothing to review while Codex still skips every one of them. The
 only complete approvals were saved while the Codex desktop app was running, so
-for now approve the Mycelium hooks from the desktop app. Launching the desktop
-app also re-copies the plugin from its marketplace source—for a local
-development marketplace, that is your working checkout—which replaces the
-installed copy and needs approval again. Do not take `/hooks` alone as proof.
-The reliable check is the `hooks/list` request to `codex app-server`: every
-`mycelium@mycelium` hook must report `trustStatus` `trusted`. Initialized
-projects also tell the agent to check, at the start of each task, for the
-`SESSION HANDOFF PATH` line that SessionStart adds to its context and to warn
-you when the line is missing.
+for now approve the Mycelium hooks from the desktop app. In the desktop app
+(ChatGPT.app, November 2026), approval is in **Settings → Hooks → Trust all**,
+or in a project chat's composer through the **Review hooks · N need approval**
+chip → **Allow all**. It is not on the plugin's own page, and the Settings list
+may be scoped to the selected project, so open a project first. Do not take
+`/hooks` alone as proof. The reliable check is the `hooks/list` request to
+`codex app-server`: every `mycelium@mycelium` hook must report `trustStatus`
+`trusted`. Initialized projects also tell the agent to check, at the start of
+each task, for the `SESSION HANDOFF PATH` line that SessionStart adds to its
+context and to warn you when the line is missing.
+
+**Approve after the first start, not right after installing (observed on
+Codex 0.169.0, November 2026).** With the GitHub marketplace, the first time
+the desktop app (or `codex app-server`) started after an install or upgrade,
+Codex added a `.codex-marketplace-install.json` record to the installed plugin.
+That changed the installed contents and voided any approval given before it.
+So, after `codex plugin add`:
+
+1. Fully quit the desktop app if it is running, then open it.
+2. Trust all the Mycelium hooks.
+3. Fully quit and reopen the app, and restart any open Codex CLI sessions.
+4. Confirm that the hooks are still trusted.
+
+In that observation, the installed copy then stayed the same across restarts
+and the approval held.
+
+**Keep the marketplace on GitHub.** If the marketplace source is a local
+folder, such as a Mycelium working checkout, every desktop-app launch re-copies
+the plugin from that marketplace source, uncommitted files included. That
+changes the installed copy and voids the approval again. If you once added a
+local folder as the `mycelium` marketplace, switch it back:
+
+```bash
+codex plugin marketplace remove mycelium
+codex plugin marketplace add arjunrajlaboratory/mycelium
+codex plugin add mycelium@mycelium
+```
+
+Then follow the four approval steps above.
 
 **Local Claude development install:**
 
@@ -142,10 +172,11 @@ memory layer, canonical `MYCELIUM.md` guidance, and thin `CLAUDE.md` and
 `report-generator`, and `idea-generator`) are installed automatically.
 
 **Codex hook approval:** if you did not approve the plugin hooks during
-installation, trust all eight Mycelium command hooks now—from the Codex desktop
-app on Codex 0.169.0 (see "Where to approve" above), or open `/hooks` in a
-current CLI (run `codex update` if it is absent) and confirm with `hooks/list`.
-Fully exit Codex and restart it before opening the initialized project. Codex
+installation, trust all eight Mycelium command hooks now with the four steps
+under "Approve after the first start" above, and confirm with `hooks/list`.
+You can open `/hooks` in a current CLI (run `codex update` if it is absent) to
+look at them, but on Codex 0.169.0 approving there saved incomplete approvals
+(see "Where to approve" above). Codex
 deliberately skips untrusted command hooks. Approve again after every plugin
 upgrade or reinstall: Codex invalidates the approval whenever the installed
 plugin's files change, even though repositories no longer retain a cache path.
@@ -204,11 +235,11 @@ codex plugin add mycelium@mycelium
 ```
 
 The first command refreshes the configured Git marketplace; the second updates
-the installed plugin cache. Then trust the `mycelium@mycelium` hooks again (see
-"Where to approve" above): Codex skips the updated plugin's hooks until you
-approve them, even if `/hooks` shows them as active. Fully exit Codex and start
-a new task afterward so the updated skills and hooks are discovered. You can
-confirm the installed version with:
+the installed plugin cache. Then approve the `mycelium@mycelium` hooks again,
+using the four steps under "Approve after the first start" above. Until you do,
+Codex skips the updated plugin's hooks, even if `/hooks` shows them as active.
+Start a new task afterward so Codex picks up the updated skills and hooks.
+You can confirm the installed version with:
 
 ```bash
 codex plugin list --json

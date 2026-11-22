@@ -71,7 +71,7 @@ knowledge and optional domain steps below after the base scaffold succeeds.
     Codex's dynamic `PLUGIN_ROOT`; initialization must not write versioned
     plugin-cache paths into `.codex/hooks.json`. Codex binds hook approval to
     the installed plugin's contents, so after every plugin install, upgrade, or
-    reinstall tell the user to review and trust the five plugin hooks, fully
+    reinstall tell the user to review and trust the eight plugin hooks, fully
     exit Codex, and restart it so the approved hook set is loaded at
     SessionStart. On Codex 0.169.0, terminal `/hooks` was observed to save an
     incomplete approval (the hooks show as trusted but are still skipped);
