@@ -5112,3 +5112,103 @@ def test_main_stdlib_argparse_needs_exactly_decoded_words(
     events = [json.loads(line) for line in target.read_text().splitlines()]
     assert len(events) == 1
     assert [Path(o["path"]).name for o in events[0]["outputs"]] == expected
+
+
+
+# Round-2 review probes (PR #155).
+_STDLIB_REVIEW_CASES_2 = {
+    "builtins_exec": ('import builtins\nOUT="a.csv"\nbuiltins.exec("OUT=\'b.csv\'")\nopen(OUT,"w")\n', [], ([], [])),
+    "main_dict_sub": ('import sys\nOUT="a.csv"\nsys.modules[__name__].__dict__["OUT"]="b.csv"\nopen(OUT,"w")\n', [], ([], [])),
+    "getframe_globals": ('import sys\nOUT="a.csv"\nsys._getframe().f_globals["OUT"]="b.csv"\nopen(OUT,"w")\n', [], ([], [])),
+    "getattr_chdir": ('import os\ngetattr(os, "ch"+"dir")("sub")\nopen("x.csv","w")\n', [], ([], [])),
+    "getattr_chdir_literal": ('import os\ngetattr(os, "chdir")("sub")\nopen("x.csv","w")\n', [], ([], [])),
+    "chdir_alias": ('from os import chdir as cd\ncd("sub")\nopen("x.csv","w")\n', [], ([], [])),
+    "contextlib_chdir": ('import contextlib\nwith contextlib.chdir("sub"):\n    open("x.csv","w")\n', [], ([], [])),
+    "builtins_dict_open": ('import builtins, io\nbuiltins.__dict__["open"]=lambda p,m="r": io.open("z"+p,m)\nopen("x.csv","w")\n', [], ([], [])),
+    "argparse_patch": ('import argparse\nargparse.ArgumentParser.parse_args=lambda self, a=None: argparse.Namespace(out="b.csv")\np=argparse.ArgumentParser()\np.add_argument("--out", default="a.csv")\nns=p.parse_args()\nopen(ns.out,"w")\n', [], ([], [])),
+    "ns_dict_sub": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="a.csv")\nns=p.parse_args()\nns.__dict__["out"]="b.csv"\nopen(ns.out,"w")\n', [], ([], [])),
+    "action_dest_patch": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="a.csv")\np.add_argument("--x", dest="out", action="store_const", const="b.csv")\nns=p.parse_args()\nopen(ns.out,"w")\n', ["--x"], ([], [])),
+    "prefix_chars_plus": ('import argparse\np=argparse.ArgumentParser(prefix_chars="+")\np.add_argument("+o", default="a.csv")\nns=p.parse_args()\nopen(ns.o,"w")\n', ["+o", "b.csv"], ([], ["b.csv"])),
+    "required_missing": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", required=True)\nns=p.parse_args()\nopen(ns.out,"w")\n', [], ([], [])),
+    "path_dotdot_join": ('import os\nopen(os.path.join("a","..","b.csv"))\n', [], ([], [])),
+    "dest_from_flag_dash": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out-file", default="a.csv")\nns=p.parse_args()\nopen(ns.out_file,"w")\n', ["--out-file", "g.csv"], ([], ["g.csv"])),
+    "ann_default_type": ('import argparse\nfrom pathlib import Path\np=argparse.ArgumentParser()\np.add_argument("--o", type=Path, default=Path("d"))\nns=p.parse_args()\n(ns.o / "x.csv").write_text("")\n', [], ([], ["d/x.csv"])),
+    "str_div": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--o", default="d")\nns=p.parse_args()\nopen(ns.o / "x.csv","w")\n', [], ([], [])),
+    "int_type_given": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--n", type=int)\np.add_argument("--o", default="d.csv")\nns=p.parse_args()\nopen(ns.o,"w")\n', ["--n", "x"], ([], [])),
+    "sys_alias_argv": ('import argparse, sys\ns = sys\ns.argv[:] = ["x", "--out", "b.csv"]\np=argparse.ArgumentParser()\np.add_argument("--out", default="a.csv")\nns=p.parse_args()\nopen(ns.out,"w")\n', [], ([], [])),
+    "module_attr_patch": ('import io\nio.DEFAULT = 1\nopen("a.csv")\n', [], ([], [])),
+    "chdir_in_comment": ('# no need for chdir here\nx = "chdir"\nopen("a.csv")\n', [], (["a.csv"], [])),
+    "environ_store_is_fine": ('import os\nos.environ["OMP_NUM_THREADS"] = "1"\nopen("a.csv")\n', [], (["a.csv"], [])),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_STDLIB_REVIEW_CASES_2))
+def test_stdlib_review_probe_round_2(case: str) -> None:
+    source, script_args, expected = _STDLIB_REVIEW_CASES_2[case]
+    assert lineage_event._stdlib_static_io(source, script_args) == expected
+
+
+def _argparse_options_source(count: int) -> str:
+    return (
+        "import argparse\np=argparse.ArgumentParser()\n"
+        + "".join(f'p.add_argument("--opt{i}", default="d{i}")\n' for i in range(count))
+        + 'ns=p.parse_args()\nopen(ns.opt1,"w")\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "source,script_args",
+    [
+        ("x = " + "open(p)+" * 3000 + "+".join(["0"] * 8000) + "\n", []),
+        ("x = " + "q.read_text()+" * 3000 + "+".join(["0"] * 8000) + "\n", []),
+        ("".join(f"def f{i}():\n    pass\n" for i in range(2000))
+         + "x = " + "+".join(f"f{i}()" for i in range(2000)) + "+"
+         + "+".join(["0"] * 10000) + "\n", []),
+        ("x=1\n" * 1_000_000, []),
+        ("open(p)\n" * 30_000, []),
+        (_argparse_options_source(5000), ["--opt"] * 5000),
+        (_argparse_options_source(20000), [x for i in range(2000) for x in (f"--opt{i}", "v")]),
+        (_argparse_options_source(250), ["--opt"] * 5000),
+    ],
+    ids=["deep-open", "deep-read-text", "deep-reach", "huge-flat", "many-sinks",
+         "argparse-5k-by-5k", "argparse-20k", "argparse-many-args"],
+)
+def test_stdlib_scan_work_is_bounded_globally(source: str, script_args) -> None:
+    import time
+
+    start = time.perf_counter()
+    lineage_event._stdlib_static_io(source, script_args)
+    assert time.perf_counter() - start < 0.5
+
+
+def test_argparse_replay_still_resolves_a_realistic_parser() -> None:
+    assert lineage_event._stdlib_static_io(
+        _argparse_options_source(200), ["--opt1", "given.csv"]
+    ) == ([], ["given.csv"])
+
+
+def test_chdir_mentioned_only_in_text_keeps_relative_reader_paths(tmp_path: Path) -> None:
+    _, inputs, _ = _stdlib_event(
+        tmp_path,
+        "import pandas as pd\n# the shell wrapper does the chdir\n"
+        "pd.read_csv('a.csv')\nprint('no chdir needed')\n",
+    )
+    assert inputs == [str(tmp_path / "a.csv")]
+
+
+def test_unstattable_inferred_path_does_not_drop_the_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_exists = Path.exists
+
+    def exists(self, *args, **kwargs):
+        if self.name.startswith("toolong"):
+            raise OSError(63, "File name too long")
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    _, inputs, outputs = _stdlib_event(
+        tmp_path, "open('toolong.csv')\nopen('ok.csv', 'w')\n"
+    )
+    assert inputs == [str(tmp_path / "toolong.csv")]
+    assert outputs == [str(tmp_path / "ok.csv")]

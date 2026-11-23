@@ -5314,8 +5314,22 @@ _STDLIB_GUARDED_ATTRS = frozenset({
 _STDLIB_OPAQUE_BUILTINS = frozenset({
     "__import__", "delattr", "eval", "exec", "globals", "locals", "setattr", "vars",
 })
-_STDLIB_WORK_LIMIT = 20_000  # value evaluations per script
+# The whole scan is bounded: a source over the size cap is not parsed, every
+# AST node visited and every value evaluated costs a tick, and a wall-clock
+# deadline is checked as it ticks. Over any bound, nothing is resolved.
+_STDLIB_SOURCE_LIMIT = 256 * 1024
+_STDLIB_WORK_LIMIT = 400_000
+_STDLIB_DEADLINE_SECONDS = 0.3
 _STDLIB_PATH_LIMIT = 4096
+# argparse replay is quadratic in options x arguments (prefix matching).
+_ARGPARSE_REPLAY_LIMIT = 256
+# Attributes that reach a module's or frame's namespace directly.
+_STDLIB_NAMESPACE_ATTRS = frozenset({
+    "__builtins__", "__dict__", "__globals__", "_getframe", "f_back",
+    "f_globals", "f_locals",
+})
+# A subscript store through these (`sys.argv[:] = ...`) rewrites state.
+_STDLIB_STATE_ATTRS = frozenset({"argv", "modules"}) | _STDLIB_NAMESPACE_ATTRS
 _ARGPARSE_PARSER_KEYWORDS = frozenset({
     "add_help", "allow_abbrev", "color", "description", "epilog",
     "formatter_class", "prefix_chars", "prog", "suggest_on_error", "usage",
@@ -5388,10 +5402,19 @@ _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.
 class _StdlibIO:
     """The certain standard-library I/O of one Python source."""
 
-    def __init__(self, tree: ast.Module, script_args: list[str] | None) -> None:
+    def __init__(self, tree: ast.Module, script_args: list[str] | None,
+                 deadline: float) -> None:
         self.tree = tree
         self.script_args = script_args
+        self.deadline = deadline
         self.parents: dict[ast.AST, ast.AST] = {}
+        # Each node's enclosing scope and each statement's (block, index),
+        # computed once top-down so later lookups are O(1).
+        self.scopes: dict[ast.AST, ast.AST] = {}
+        self.blocks: dict[ast.AST, tuple[list, int]] = {}
+        self.calls_by_scope: dict[ast.AST, list[ast.Call]] = {}
+        self.chdir_names: list[ast.AST] = []
+        self.root_stores: list[ast.AST] = []
         self.counts: dict[str, int] = {}
         self.binders: dict[str, ast.AST] = {}
         self.imports: dict[str, str] = {}
@@ -5403,11 +5426,21 @@ class _StdlibIO:
         self.work = 0
         self.memo: dict[str, _StdPath | None] = {}
         self.namespaces: dict[str, dict[str, Any] | None] = {}
+        # ast.walk is breadth-first, so a node's parent and scope are known
+        # before the node itself is indexed.
         for node in ast.walk(tree):
+            self._tick()
+            inner = node if isinstance(node, _SCOPES) else self.scopes.get(node, tree)
+            for field in ("body", "orelse", "finalbody"):
+                block = getattr(node, field, None)
+                if isinstance(block, list):
+                    for index, statement in enumerate(block):
+                        self.blocks[statement] = (block, index)
             for child in ast.iter_child_nodes(node):
                 self.parents[child] = node
-        for node in ast.walk(tree):
+                self.scopes[child] = inner
             self._index(node)
+        self._finish_index()
         self.functions = {
             node.name: node for node in tree.body
             if isinstance(node, ast.FunctionDef) and not node.decorator_list
@@ -5417,7 +5450,9 @@ class _StdlibIO:
 
     def _tick(self) -> None:
         self.work += 1
-        if self.work > _STDLIB_WORK_LIMIT:
+        if self.work > _STDLIB_WORK_LIMIT or (
+            not self.work & 1023 and time.monotonic() > self.deadline
+        ):
             raise _OverBudget
 
     def _bind(self, name: str, binder: ast.AST, weight: int = 1) -> None:
@@ -5426,8 +5461,6 @@ class _StdlibIO:
 
     def _index(self, node: ast.AST) -> None:
         if isinstance(node, ast.Name):
-            if node.id in ("chdir", "fchdir"):
-                self.chdir = True
             if isinstance(node.ctx, ast.Load):
                 self.loads.setdefault(node.id, []).append(node)
                 if node.id in _STDLIB_OPAQUE_BUILTINS:
@@ -5436,13 +5469,30 @@ class _StdlibIO:
                 self._bind(node.id, self.parents.get(node, node))
         elif isinstance(node, ast.Attribute):
             if node.attr in ("chdir", "fchdir"):
-                self.chdir = True
+                self.chdir_names.append(node)
+            if node.attr in _STDLIB_NAMESPACE_ATTRS or node.attr in _STDLIB_OPAQUE_BUILTINS:
+                self.opaque = True  # `x.__dict__[...]`, `builtins.exec(...)`
             if not isinstance(node.ctx, ast.Load):
                 self.stored_attrs.add(node.attr)
+                self.root_stores.append(node)
                 if node.attr in _STDLIB_GUARDED_ATTRS:
                     self.opaque = True
                 if isinstance(node.value, ast.Name):
                     self.mutated_names.add(node.value.id)
+        elif isinstance(node, ast.Subscript):
+            if not isinstance(node.ctx, ast.Load):
+                self.root_stores.append(node)
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                self.calls_by_scope.setdefault(self.scopes.get(node, self.tree), []).append(node)
+                if node.func.id == "getattr" and len(node.args) >= 2:
+                    name = node.args[1]
+                    if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                        self.opaque = True  # any attribute, chdir included
+                    elif name.value in ("chdir", "fchdir"):
+                        self.chdir = True
+                    elif name.value in _STDLIB_NAMESPACE_ATTRS:
+                        self.opaque = True
         elif isinstance(node, ast.arg):
             self._bind(node.arg, node)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -5475,13 +5525,42 @@ class _StdlibIO:
         elif isinstance(node, ast.MatchMapping) and node.rest:
             self._bind(node.rest, node)
 
+    def _finish_index(self) -> None:
+        """Checks that need every binding known."""
+        for node in self.chdir_names:
+            name = self.canonical(node)
+            if name is not None and name.rsplit(".", 1)[-1] in ("chdir", "fchdir") \
+                    and "." in name:
+                self.chdir = True
+        for node in self.root_stores:
+            self._tick()
+            # An assignment into an imported module (`argparse.X.parse_args
+            # = ...`, `s.argv[:] = ...`) can change any call into it.
+            attrs = set()
+            root = node
+            while isinstance(root, (ast.Attribute, ast.Subscript, ast.Call)):
+                self._tick()
+                if isinstance(root, ast.Attribute):
+                    attrs.add(root.attr)
+                root = root.func if isinstance(root, ast.Call) else root.value
+            if not isinstance(root, ast.Name) or not isinstance(
+                    self.binders.get(root.id), (ast.Import, ast.ImportFrom)):
+                continue
+            if isinstance(node, ast.Attribute) or attrs & _STDLIB_STATE_ATTRS:
+                self.opaque = True
+        for name, binder in self.binders.items():
+            if not isinstance(binder, ast.Import):
+                continue
+            for load in self.loads.get(name, []):
+                self._tick()
+                parent = self.parents.get(load)
+                if not (isinstance(parent, ast.Attribute) and parent.value is load):
+                    self.opaque = True  # a module aliased or passed on
+
     # -- structure --
 
     def _scope(self, node: ast.AST) -> ast.AST:
-        parent = self.parents.get(node)
-        while parent is not None and not isinstance(parent, _SCOPES):
-            parent = self.parents.get(parent)
-        return parent if parent is not None else self.tree
+        return self.scopes.get(node, self.tree)
 
     def _call_sites(self, name: str) -> list[ast.Call] | None:
         """Every call of a module function, or None if it is used otherwise."""
@@ -5503,12 +5582,10 @@ class _StdlibIO:
         pending: list[ast.AST] = [self.tree]
         while pending:
             scope = pending.pop()
-            for node in ast.walk(scope):
-                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
-                    continue
+            for node in self.calls_by_scope.get(scope, []):
+                self._tick()
                 name = node.func.id
-                if name in self.functions and name not in reachable \
-                        and self._scope(node) is scope:
+                if name in self.functions and name not in reachable:
                     reachable.add(name)
                     pending.append(self.functions[name])
         return reachable
@@ -5704,7 +5781,8 @@ class _StdlibIO:
         return self.namespaces[name]
 
     def _replay_parser(self, name: str) -> dict[str, Any] | None:
-        if self.script_args is None or self.opaque or self.counts.get(name) != 1:
+        if self.script_args is None or self.opaque or self.counts.get(name) != 1 \
+                or len(self.script_args) > _ARGPARSE_REPLAY_LIMIT:
             return None
         args_stmt = self.binders.get(name)
         if not (isinstance(args_stmt, ast.Assign) and len(args_stmt.targets) == 1
@@ -5740,17 +5818,17 @@ class _StdlibIO:
         block = self._block_of(parser_stmt)
         if block is None:
             return None
-        start = block.index(parser_stmt)
+        start = self._position(parser_stmt)
         # `args = parser.parse_args()` follows in the same block, or in an
         # `if __name__ == "__main__":` that does.
         if self._block_of(args_stmt) is block:
-            end = block.index(args_stmt)
+            end = self._position(args_stmt)
         else:
             guard = self.parents.get(args_stmt)
-            if not (_is_main_guard(guard) and args_stmt in guard.body
+            if not (_is_main_guard(guard) and self._block_of(args_stmt) is guard.body
                     and self._block_of(guard) is block):
                 return None
-            end = block.index(guard)
+            end = self._position(guard)
         if start >= end:
             return None
         add_calls = []
@@ -5765,15 +5843,18 @@ class _StdlibIO:
             statement = self.parents.get(call)
             if attribute.attr != "add_argument" or not isinstance(statement, ast.Expr) \
                     or self._block_of(statement) is not block \
-                    or not start < block.index(statement) < end:
+                    or not start < self._position(statement) < end:
                 return None
             add_calls.append(call)
+            if len(add_calls) > _ARGPARSE_REPLAY_LIMIT:
+                return None
         parser = _ReplayParser(prog="script", **settings)
         # dest -> (marker, default expression, type is Path) for the options
         # whose value can be a path: a plain `store` with no nargs or const.
         eligible: dict[str, tuple[object, ast.AST | None, bool]] = {}
         dests: set[str] = set()
         for call in add_calls:
+            self._tick()
             if call.keywords and any(k.arg is None for k in call.keywords):
                 return None
             if any(isinstance(a, ast.Starred) for a in call.args):
@@ -5818,6 +5899,8 @@ class _StdlibIO:
             dests.add(action.dest)
             if path_like:
                 eligible[action.dest] = (marker, default_node, type_kind == "path")
+        for _ in self.script_args:
+            self._tick()
         namespace = parser.parse_args(list(self.script_args))
         result: dict[str, Any] = {}
         for dest, (marker, default_node, type_is_path) in eligible.items():
@@ -5829,12 +5912,11 @@ class _StdlibIO:
         return result
 
     def _block_of(self, statement: ast.AST) -> list[ast.stmt] | None:
-        parent = self.parents.get(statement)
-        for field in ("body", "orelse", "finalbody"):
-            block = getattr(parent, field, None)
-            if isinstance(block, list) and statement in block:
-                return block
-        return None
+        entry = self.blocks.get(statement)
+        return entry[0] if entry is not None else None
+
+    def _position(self, statement: ast.AST) -> int:
+        return self.blocks[statement][1]
 
     def _namespace_value(self, name: str, attr: str) -> _StdPath | None:
         namespace = self._namespace(name)
@@ -5859,6 +5941,7 @@ class _StdlibIO:
         if self.opaque:
             return [], []
         for node in ast.walk(self.tree):
+            self._tick()
             if not isinstance(node, ast.Call) or any(
                 isinstance(a, ast.Starred) for a in node.args
             ) or any(k.arg is None or k.arg == "opener" for k in node.keywords):
@@ -5911,27 +5994,45 @@ class _StdlibIO:
         return None
 
 
-def _stdlib_static_io(
-    source: str, script_args: list[str] | None
-) -> tuple[list[str], list[str]]:
-    """Paths a Python source certainly opens through the standard library."""
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError, MemoryError):
-        return [], []
-    try:
-        return _StdlibIO(tree, script_args).collect()
-    except (_OverBudget, RecursionError, MemoryError):
-        return [], []
+class _StdlibAnalysis(NamedTuple):
+    inputs: list[str]
+    outputs: list[str]
+    changes_directory: bool  # the source may chdir: relative paths are ambiguous
 
 
 _CHDIR_RX = re.compile(r"\b(?:f?chdir)\b")
 
 
-def _python_changes_directory(source: str) -> bool:
-    """Whether a Python source may change its working directory, which
-    makes every relative path it names ambiguous."""
-    return bool(_CHDIR_RX.search(source))
+def _stdlib_analysis(source: str, script_args: list[str] | None) -> _StdlibAnalysis:
+    """Paths a Python source certainly opens through the standard library,
+    and whether it may change its working directory.
+
+    The chdir answer comes from the AST (a call or reference that resolves
+    to a `chdir`). Where the source cannot be analysed (too large, not
+    parsable, over budget) it falls back to the conservative text check."""
+    fallback = _StdlibAnalysis([], [], bool(_CHDIR_RX.search(source)))
+    if len(source) > _STDLIB_SOURCE_LIMIT \
+            or len(source.encode("utf-8", "surrogatepass")) > _STDLIB_SOURCE_LIMIT:
+        return fallback
+    deadline = time.monotonic() + _STDLIB_DEADLINE_SECONDS
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return fallback
+    try:
+        resolver = _StdlibIO(tree, script_args, deadline)
+        inputs, outputs = resolver.collect()
+    except (_OverBudget, RecursionError, MemoryError):
+        return fallback
+    return _StdlibAnalysis(inputs, outputs, resolver.chdir)
+
+
+def _stdlib_static_io(
+    source: str, script_args: list[str] | None
+) -> tuple[list[str], list[str]]:
+    """Paths a Python source certainly opens through the standard library."""
+    analysis = _stdlib_analysis(source, script_args)
+    return analysis.inputs, analysis.outputs
 
 
 def _repository_literal_io(
@@ -6063,7 +6164,13 @@ def file_record(path_str: str, cwd: Path) -> dict:
     if not path.is_absolute():
         path = cwd / path
     rec: dict = {"path": str(path)}
-    if not path.exists():
+    try:
+        exists = path.exists()
+    except (OSError, ValueError):
+        # A name the OS cannot stat (ENAMETOOLONG before Python 3.12) is
+        # unhashable, not fatal: the event's other records still stand.
+        exists = False
+    if not exists:
         rec["_missing"] = True
         return rec
     try:
@@ -7103,16 +7210,18 @@ def build_event_for_detection(
         or getattr(inline_source, "language", None)
     )
     inputs, outputs, filters, seeds = scan_source(source, language)
-    changes_directory = language == "python" and _python_changes_directory(source)
+    stdlib_inputs: list[str] = []
+    stdlib_outputs: list[str] = []
+    changes_directory = False
+    if language == "python":
+        # `open`, pathlib and argparse I/O the reader/writer scan cannot see,
+        # and one chdir check shared by both scans.
+        stdlib_inputs, stdlib_outputs, changes_directory = _stdlib_analysis(
+            source, script_args)
     if changes_directory:
         # After `os.chdir`, a relative path may name a file anywhere.
         inputs = [p for p in inputs if os.path.isabs(p) or _is_url(p)]
         outputs = [p for p in outputs if os.path.isabs(p) or _is_url(p)]
-    if language == "python":
-        # `open`, pathlib and argparse I/O the reader/writer scan cannot see.
-        stdlib_inputs, stdlib_outputs = _stdlib_static_io(source, script_args)
-    else:
-        stdlib_inputs, stdlib_outputs = [], []
     # A URL literal (`pd.read_csv("https://...")`) is remote I/O, not a
     # file under the cwd: it is never resolved, hashed, or recorded as a
     # path, and is named only in a warning.
