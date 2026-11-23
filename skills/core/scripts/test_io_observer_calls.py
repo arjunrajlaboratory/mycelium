@@ -86,8 +86,10 @@ def test_modified_file_before_hash_is_cached_content_or_not_captured(tmp_path: P
     io.flush_cache(state, cache)
     obs = _call(state, root, "c1", lambda: target.write_text("v2 longer\n"))
     (entry,) = obs["changes"]["modified"]
-    assert entry["before"] == {"sha256": first.sha256, "size_bytes": 4, "hash_status": "cached",
-                               "hash_origin": "observed"}
+    before = dict(entry["before"])
+    assert set(before.pop("identity")) == {"dev", "ino", "size", "mtime_ns", "ctime_ns"}
+    assert before == {"sha256": first.sha256, "size_bytes": 4, "hash_status": "cached",
+                      "hash_origin": "observed"}
     assert entry["after"]["sha256"] != first.sha256
 
 

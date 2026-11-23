@@ -589,10 +589,19 @@ class Index:
         self.observations: dict[str, dict[str, Any]] = {}
         self.journal_now: dict[str, Any] = {}
         self._disk_memo: dict[str, tuple[Any, str | None, str | None]] = {}
+        # The journal that proves coverage: its id, and where compaction cut
+        # (nothing that started before the floor can be proven complete).
+        self.journal_id: str | None = None
+        self.journal_floor = 0
+        self._foreign_calls: set[str] = set()
         try:
             records = io_observer._journal_records(io_observer.journal_path(state_dir))
             jid = next((r["jid"] for r in reversed(records) if isinstance(r.get("jid"), str)),
                        None)
+            self.journal_id = jid
+            self.journal_floor = max([0] + [r["floor"] for r in records
+                                            if r.get("ev") == "floor"
+                                            and isinstance(r.get("floor"), int)])
             for key, interval in io_observer._intervals(records).items():
                 self.journal_now[key] = {"id": jid, "pre_seq": interval.pre_seq,
                                          "post_seq": interval.post_seq,
@@ -636,6 +645,7 @@ class Index:
                 if not isinstance(root, str):
                     root = item.get("manifest_root")
                 if isinstance(root, str) and os.path.realpath(root) != self.root_real:
+                    self._foreign_calls.add(key)
                     continue  # another checkout (a shared state dir, a committed record)
                 prior = self.observations.get(key)
                 # A manifest's copy and the store's are the same record;
@@ -961,6 +971,9 @@ class Index:
             reasons.append("write-hash-unknown")
         if write.get("incomplete"):
             reasons.append("incomplete-observation")
+        unaccounted = self._unaccounted_since(write)
+        if unaccounted:
+            reasons.append("coverage-unproven")
         open_calls = [g["call"] for g in self.gaps if g.get("kind") == "call-open"
                       and not _ended_before(g.get("journal"), write.get("journal"))]
         if reasons:
@@ -970,11 +983,84 @@ class Index:
             if gaps:
                 result["gaps"] = [_gap_summary(g) for g in gaps[:10]]
                 result["gap_count"] = len(gaps)
+            if unaccounted:
+                result["unaccounted"] = unaccounted[:10]
+                result["unaccounted_count"] = len(unaccounted)
         else:
             result = {"status": "current-in-record"}
         if open_calls:
             result["open_calls"] = open_calls[:10]
         return result
+
+    def _unaccounted_since(self, write: dict[str, Any]) -> list[dict[str, Any]]:
+        """Positive proof of coverage for one write: every journaled call
+        that ran during or after it must be accounted for at its path, by a
+        complete observation of this checkout that watched the path. What
+        is not (including anything the journal can no longer show) is
+        returned; an empty list is the proof."""
+        path = write["path"]
+        journal = write.get("journal") or {}
+        if not self.journal_id or journal.get("id") != self.journal_id:
+            return [{"kind": "journal-discontinuous"}]
+        start = journal.get("pre_seq")
+        if not isinstance(start, int) or start < self.journal_floor:
+            return [{"kind": "journal-compacted", "floor": self.journal_floor}]
+        out: list[dict[str, Any]] = []
+        for interval in self.journal_now.values():
+            call = _obs_key(interval.get("session"),
+                            f"{interval.get('host')}:{interval.get('call')}")
+            if call is None or call == write.get("call"):
+                continue
+            post = interval.get("post_seq")
+            if isinstance(post, int) and post < start:
+                continue  # ended before this write began
+            if post is None and not interval.get("background"):
+                continue  # still running: reported as an open call
+            observed = self.observations.get(call)
+            if observed is None:
+                if call in self._foreign_calls:
+                    continue  # another checkout's call
+                out.append({"kind": "no-observation", "call": call})
+                continue
+            problem = self._observation_gap_at(observed["record"], path, interval)
+            if problem:
+                out.append({"kind": problem, "call": call})
+        return out
+
+    def _observation_gap_at(self, record: dict[str, Any], path: str,
+                            interval: dict[str, Any]) -> str | None:
+        """Why an observation does not account for ``path``, or None."""
+        changes = record.get("changes")
+        status = record.get("status")
+        if status in _GAP_STATUSES or not isinstance(changes, dict):
+            return f"observation-{status or 'unknown'}"
+        if status == "background" or interval.get("background"):
+            bound = interval.get("post_seq")
+            if bound is None or (interval.get("expired")
+                                 and interval.get("end_reason") != "turn-ended"):
+                return "background-running"
+            # Ended, but what it did between launch and end was not seen.
+            return "background-unobserved"
+        if status == "edit" and record.get("outcome") != "success":
+            return "edit-unconfirmed"
+        if changes.get("capped"):
+            tops = changes.get("top_level")
+            if not (isinstance(tops, dict) and changes.get("top_level_complete") is True
+                    and path.split("/")[0] not in tops):
+                return "observation-capped"
+        if status != "edit":
+            scope = record.get("scope") if isinstance(record.get("scope"), dict) else {}
+            if io_observer.watch_status(path, scope.get("unwatched") or []) != "watched":
+                return "path-unwatched"
+        for name in ("racy_unknown", "coverage_changed"):
+            if path in (changes.get(name) or []):
+                return f"path-{name.replace('_', '-')}"
+        for refused in changes.get("refused") or []:
+            if isinstance(refused, dict) and (refused.get("path") == path
+                                              or refused.get("reason")
+                                              == "edit-target-unknown"):
+                return "path-uncertain"
+        return None
 
     def disk_status(self, path: str, expected: str | None, *,
                     identity: dict[str, Any] | None = None,
@@ -1046,7 +1132,37 @@ class Index:
                                            max_bytes=max_bytes))
         result["status"] = _headline(record["status"], result.get("disk") if disk else None,
                                      write.get("action"))
+        if (disk and result["status"] == "unknown" and result.get("disk") == "match"
+                and self._identity_unchanged(write)):
+            # The record cannot account for everything since this write,
+            # but the file itself can: it still has exactly the identity it
+            # had right after the write, and its ctime moves on any change
+            # and cannot be set back. Nothing has touched it since.
+            result["status"] = "current"
+            result["basis"] = "identity-unchanged-since-write"
         return result
+
+    def _identity_unchanged(self, write: dict[str, Any]) -> bool:
+        ident = write.get("identity")
+        if not isinstance(ident, dict) or write.get("action") == "deleted":
+            return False
+        if write.get("evidence") != "observed" or not isinstance(write.get("sha256"), str):
+            return False
+        keys = ("dev", "ino", "size", "mtime_ns", "ctime_ns")
+        if not all(isinstance(ident.get(k), int) for k in keys):
+            return False
+        if ident["ctime_ns"] % 1_000_000_000 == 0 and ident["mtime_ns"] % 1_000_000_000 == 0:
+            return False  # whole-second timestamps: a change in the same second hides
+        rel, _ = io_observer.repo_relative_unfollowed(
+            os.path.join(self.root_real, write["path"]), self.root_real)
+        if rel is None:
+            return False
+        try:
+            st = os.lstat(os.path.join(self.root_real, rel))
+        except OSError:
+            return False
+        now = io_observer.identity_of(st)
+        return all(getattr(now, k) == ident[k] for k in keys)
 
 
 def _headline(record: str, disk: str | None, action: str | None) -> str:

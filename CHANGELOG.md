@@ -99,6 +99,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Committed lineage manifests keep only allowlisted words**
+  (`text_policy: "allowlist-v1"`). Six review rounds kept finding secrets
+  that survived the denylist redaction, which can never cover every shell,
+  CLI and language. Manifests under `.living/log/data-lineage/` are
+  committed, so at Stop every free-text field of every record they hold now
+  keeps only the command word, option and assignment names, short numbers
+  (not after a secret-named option), operators, and the record's own paths.
+  Everything else becomes `<v>`, and a heredoc body becomes
+  `<heredoc: N lines>`. The fields covered are `bash_cmd`, `step.argv`,
+  `script_args`, `params`, `env` values, `wrappers`, `script_candidate`,
+  lineage warnings, skip details, and the `bash_cmd` of observations.
+  `script_source` is no longer committed; `script_sha256`,
+  `script_source_bytes` and `script_source_lines` are. A historical event's
+  `filters_detected` is dropped from new manifests. The full
+  (denylist-redacted) text stays in the gitignored stores under
+  `.mycelium/`. Manifests without `text_policy` (0.9.7 and earlier) still
+  load. Events recorded before an upgrade get the allowlist when they are
+  consolidated into a new manifest.
+
 - `filters_detected` is no longer recorded. It held unevaluated regex text
   with false positives, and nothing read it. Historical records keep it.
   Seeds now skip string literals and recognize R `set.seed`.

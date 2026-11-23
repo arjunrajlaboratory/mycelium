@@ -135,6 +135,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -280,6 +281,209 @@ def _redact_observation(observation: dict[str, Any]) -> dict[str, Any]:
     if isinstance(observation, dict) and isinstance(observation.get("bash_cmd"), str):
         return {**observation, "bash_cmd": _redact(observation["bash_cmd"])}
     return observation
+
+
+# --- the commit allowlist ---------------------------------------------------
+#
+# A manifest is committed; the stores under .mycelium/ are machine-local.
+# Every free-text field of every record a manifest holds keeps only words
+# the allowlist in lineage_redact knows to be safe (TEXT_POLICY): the
+# command word, option and assignment names, short numbers, operators, and
+# the record's own paths. Anything else becomes `<v>`. Embedded script
+# source is never committed (its digest is). File records' paths are
+# structured data and stay as they are.
+
+TEXT_POLICY = "allowlist-v1"
+_PATHISH_RX = re.compile(r"[A-Za-z0-9_./~+-]+\Z")
+_SCRIPT_WORD_RX = re.compile(r"[A-Za-z0-9_./+-]*[A-Za-z0-9_+-]\.[A-Za-z0-9]{1,8}\Z")
+
+
+def _lr() -> Any:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lineage_redact
+
+    return lineage_redact
+
+
+def _pathish(value: Any) -> bool:
+    """A plain path word, shaped like one the recorder lists (a data path
+    under a directory, or a file with a suffix): path characters only, no
+    option, no URL, no expansion."""
+    return (isinstance(value, str) and bool(_PATHISH_RX.match(value))
+            and not value.startswith("-") and "://" not in value
+            and ("/" in value or _script_word(value)))
+
+
+def _script_word(value: Any) -> bool:
+    """A script-shaped word (`a.R`, `analysis/fit.py`): a plain path that
+    ends in a file suffix."""
+    return isinstance(value, str) and bool(_SCRIPT_WORD_RX.match(value))
+
+
+def _file_paths(records: Any) -> list[str]:
+    out: list[str] = []
+    for rec in records if isinstance(records, list) else []:
+        if isinstance(rec, dict):
+            out.extend(rec[k] for k in ("path", "rel_path") if isinstance(rec.get(k), str))
+    return out
+
+
+def _commit_config_files(configs: Any) -> Any:
+    """Config records under the allowlist: a resolved file keeps its path; a
+    remote URL, or an operand that could not be resolved and is not a plain
+    path word, is `<v>`."""
+    lr = _lr()
+    if not isinstance(configs, list):
+        return configs
+    out = []
+    for config in configs:
+        if not isinstance(config, dict):
+            out.append(config)
+            continue
+        config = dict(config)
+        path = config.get("path")
+        status = config.get("hash_status")
+        if status == "remote":
+            config["path"] = lr.COMMIT_VALUE
+        elif status == "unresolved" and not (
+                _pathish(path) and ("/" in path or _script_word(path))):
+            config["path"] = lr.COMMIT_VALUE
+        out.append(config)
+    return out
+
+
+def _commit_env(env: Any, keep: set[str]) -> Any:
+    lr = _lr()
+    if not isinstance(env, dict):
+        return env
+    out: dict[str, Any] = {}
+    for name, value in env.items():
+        secret = lr._commit_secret_name(str(name))
+        if isinstance(value, str):
+            out[name] = lr.commit_safe_value(value, keep, secret)
+        elif isinstance(value, dict) and isinstance(value.get("text"), str):
+            out[name] = {**value, "text": lr.commit_safe_value(value["text"], keep, secret)}
+        else:
+            out[name] = value
+    return out
+
+
+def _commit_step(step: Any, keep: set[str]) -> Any:
+    lr = _lr()
+    if not isinstance(step, dict):
+        return step
+    step = dict(step)
+    if "argv" in step:
+        step["argv"] = lr.commit_safe_argv(step["argv"], keep, command_word=True)
+    for key in ("script_args", "params"):
+        if key in step:
+            step[key] = lr.commit_safe_argv(step[key], keep, command_word=False)
+    if "wrappers" in step:
+        step["wrappers"] = lr.commit_safe_argv(step["wrappers"], keep, command_word=True)
+    for key in ("executable", "interpreter"):
+        if isinstance(step.get(key), str):
+            step[key] = lr.commit_safe_argv([step[key]], keep, command_word=True)[0]
+    if "env" in step:
+        step["env"] = _commit_env(step["env"], keep)
+    return step
+
+
+def commit_event(event: dict[str, Any]) -> dict[str, Any]:
+    """An analysis event as a committed manifest holds it."""
+    lr = _lr()
+    event = dict(event)
+    step = dict(event["step"]) if isinstance(event.get("step"), dict) else None
+    if step is not None and "config_files" in step:
+        step["config_files"] = _commit_config_files(step["config_files"])
+    candidate = event.get("script_candidate")
+    safe_candidate = candidate if _script_word(candidate) else (
+        lr.COMMIT_VALUE if isinstance(candidate, str) else candidate)
+    paths = [*_file_paths(event.get("inputs")), *_file_paths(event.get("outputs"))]
+    if isinstance(event.get("script"), str):
+        paths.append(event["script"])
+    if step is not None:
+        paths.extend(p for p in _file_paths(step.get("config_files")) if p != lr.COMMIT_VALUE)
+    if isinstance(safe_candidate, str) and safe_candidate != lr.COMMIT_VALUE:
+        paths.append(safe_candidate)
+    keep = lr.commit_keep_paths(paths)
+    event["bash_cmd"] = lr.commit_safe_command(event.get("bash_cmd"), keep)
+    if "script_candidate" in event:
+        event["script_candidate"] = safe_candidate
+    source = event.pop("script_source", None)
+    if isinstance(source, str):
+        # The source itself stays in the machine-local event queue; its
+        # digest (script_sha256) identifies it here.
+        event["script_source_bytes"] = len(source.encode("utf-8"))
+        event["script_source_lines"] = source.count("\n") + (
+            0 if source.endswith("\n") else 1)
+    replace = ((candidate, safe_candidate),) if isinstance(candidate, str) else ()
+    event["lineage_warnings"] = [
+        lr.commit_safe_prose(w, keep, replace) for w in event.get("lineage_warnings") or []
+    ]
+    # Unevaluated regex text from 0.9.7 recorders: free source text.
+    event.pop("filters_detected", None)
+    if step is not None:
+        event["step"] = _commit_step(step, keep)
+    return event
+
+
+def commit_skip(skip: dict[str, Any]) -> dict[str, Any]:
+    lr = _lr()
+    skip = dict(skip)
+    detail = skip.get("detail")
+    paths = [detail] if (skip.get("skip_reason") == "script-unreadable"
+                         and isinstance(detail, str)) else []
+    keep = lr.commit_keep_paths(paths)
+    skip["bash_cmd"] = lr.commit_safe_command(skip.get("bash_cmd"), keep)
+    skip["detail"] = lr.commit_safe_prose(detail, keep)
+    return skip
+
+
+def commit_data_command(record: dict[str, Any]) -> dict[str, Any]:
+    lr = _lr()
+    record = dict(record)
+    # A path shape is not proof: `data/<token>` is shaped like one. A named
+    # word is kept only if it names a file or directory that exists.
+    bases = [b for b in (record.get("cwd"), record.get("repo_root")) if isinstance(b, str)]
+
+    def real(word: Any) -> bool:
+        return _pathish(word) and any(
+            os.path.lexists(os.path.join(base, word)) for base in bases or ["."])
+
+    record["named_paths"] = [p if real(p) else lr.COMMIT_VALUE
+                             for p in record.get("named_paths") or []]
+    record["analysis_candidates"] = [
+        c if c == "(inline)" or real(c) else lr.COMMIT_VALUE
+        for c in record.get("analysis_candidates") or []]
+    paths = [*_file_paths(record.get("inputs")), *_file_paths(record.get("outputs")),
+             *(p for p in record["named_paths"] if p != lr.COMMIT_VALUE),
+             *(c for c in record["analysis_candidates"] if _pathish(c))]
+    for key in ("cwd", "repo_root"):
+        if isinstance(record.get(key), str):
+            paths.append(record[key])
+    keep = lr.commit_keep_paths(paths)
+    record["bash_cmd"] = lr.commit_safe_command(record.get("bash_cmd"), keep)
+    if isinstance(record.get("step"), dict):
+        record["step"] = _commit_step(record["step"], keep)
+    return record
+
+
+def commit_observation(observation: Any) -> Any:
+    lr = _lr()
+    if not isinstance(observation, dict) or not isinstance(observation.get("bash_cmd"), str):
+        return observation
+    paths: list[str] = []
+    root = observation.get("repo_root")
+    changes = observation.get("changes")
+    if isinstance(changes, dict):
+        for kind in ("created", "modified", "deleted"):
+            for entry in changes.get(kind) or []:
+                if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                    paths.append(entry["path"])
+                    if isinstance(root, str):
+                        paths.append(os.path.join(root, entry["path"]))
+    keep = lr.commit_keep_paths(paths)
+    return {**observation, "bash_cmd": lr.commit_safe_command(observation["bash_cmd"], keep)}
 
 
 def normalize_event(
@@ -952,11 +1156,18 @@ def extract(
         [*events, *data_commands], observations_dir, repo_root, warnings, consume, session_id,
         claim_aliases,
     )
+    # The manifest is committed: every record's text goes through the
+    # allowlist (after the joins above, which read only paths and ids).
+    events = [commit_event(e) for e in events]
+    skipped = [commit_skip(s) for s in skipped]
+    data_commands = [commit_data_command(d) for d in data_commands]
     manifest = {
         "schema": MANIFEST_SCHEMA,
+        "text_policy": TEXT_POLICY,
         **build_manifest(events, session_id, repo_root, warnings, skipped, data_commands),
     }
-    manifest["observations"] = [_redact_observation(o) for o in observations]
+    manifest["observations"] = [commit_observation(_redact_observation(o))
+                                for o in observations]
     counts: dict[str, int] = {}
     for observation in observations:
         status = str(observation.get("status") or "unknown")

@@ -705,7 +705,16 @@ def test_a_line_separator_in_a_command_keeps_one_skip_record(tmp_path, host):
     manifest = json.loads(next(
         (repo / ".living" / "log" / "data-lineage").glob("*.json")
     ).read_text())
-    assert [s["bash_cmd"] for s in manifest["skipped"]] == [command]
+    # One record, its command whole (not split at the separators), in the
+    # committed manifest's allowlisted form.
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lineage_redact
+
+    assert [s["bash_cmd"] for s in manifest["skipped"]] == [
+        lineage_redact.commit_safe_command(command, set())]
+    assert manifest["skipped"][0]["bash_cmd"].startswith("python3 <v>  <v>")
     assert manifest["extraction_warnings"] == []
 
 

@@ -134,11 +134,15 @@ def test_an_edit_that_owed_an_observation_is_a_gap(project: Path) -> None:
     assert verdict(project, "A") == "unknown"
 
 
-def test_a_failed_edit_with_nothing_to_observe_is_not_a_gap(project: Path) -> None:
+def test_a_closed_edit_with_no_observation_is_unaccounted(project: Path) -> None:
+    # Positive proof: an edit whose targets are unknown (nothing to observe)
+    # still ran after the write, so it is not accounted for.
     first = journal(project, "c1")
     journal(project, "e1", tool="Edit", observe=False)
     tli.write_store(project, [observed(project, "c1", first, created=[("out/x", sha("A"))])])
-    assert verdict(project, "A") == "current"
+    write = li.query_hash(li.load(project), sha("A"), disk=False)["paths"][0]["writes"][0]
+    assert write["record"]["status"] == "unknown"
+    assert "coverage-unproven" in write["record"]["reasons"]
 
 
 def test_an_age_expired_call_stays_unbounded(project: Path) -> None:

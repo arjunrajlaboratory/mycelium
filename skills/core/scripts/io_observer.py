@@ -549,8 +549,11 @@ class Interval(NamedTuple):
     # targets): a closed interval with none on record is a gap.
     observe: bool = False
     # Why an expired interval closed: "turn-ended" (the host's turn is over,
-    # so no foreground call is still running) or "age" (only a bound).
+    # so no foreground call is still running) or "age" (only a bound); for
+    # a background job, "task-finished" when the host showed it ended.
     end_reason: str | None = None
+    # The host's id for a background job (Claude's backgroundTaskId).
+    task: str | None = None
 
 
 def _journal_records(path: Path) -> list[dict[str, Any]]:
@@ -601,7 +604,14 @@ def _intervals(records: list[dict[str, Any]]) -> dict[str, Interval]:
             # A background call's own Post: the job may still be running,
             # so the interval stays open.
             calls[key] = calls[key]._replace(
-                background=True, observe=calls[key].observe or record.get("observe") is True)
+                background=True, observe=calls[key].observe or record.get("observe") is True,
+                task=record.get("task") if isinstance(record.get("task"), str)
+                else calls[key].task)
+        elif event == "end" and key in calls and calls[key].post_seq is None:
+            # The host showed the background job ended: a real bound.
+            calls[key] = calls[key]._replace(
+                post_seq=record["seq"], expired=False, background=True,
+                end_reason=str(record.get("reason") or "task-finished"))
         elif event in ("post", "expire") and key in calls and calls[key].post_seq is None:
             current = calls[key]
             calls[key] = current._replace(
@@ -641,6 +651,7 @@ def journal_event(
     now_ns: int | None = None,
     meta: dict[str, Any] | None = None,
     observe: bool = False,
+    task: str | None = None,
 ) -> tuple[int, dict[str, Interval], list[Interval]]:
     """Append one event under the journal lock.
 
@@ -703,6 +714,7 @@ def journal_event(
                 "wall_ns": now_ns,
                 "jid": jid,
                 **({"observe": True} if observe else {}),
+                **({"task": task} if task else {}),
             }
         )
         intervals = _intervals(records)
@@ -718,6 +730,11 @@ def journal_event(
                 if i.post_seq is None or i.post_seq >= horizon
             }
             kept = [r for r in records if str(r.get("call")) in keep]
+            # Where compaction cut: an interval that started before this may
+            # be gone, so the index proves nothing it cannot see past it.
+            floor = max([horizon] + [r.get("floor", 0) for r in records
+                                     if r.get("ev") == "floor"])
+            kept.insert(0, {"seq": 0, "ev": "floor", "call": "", "floor": floor, "jid": jid})
             if not kept or kept[-1]["seq"] != seq:
                 # The counter lives in the file: keep the newest line so
                 # sequence numbers never restart after compaction.
@@ -769,6 +786,64 @@ def _publish_expired(state_dir: Path, jid: str, expired: list[Interval]) -> None
         with contextlib.suppress(OSError):
             append_line(observations_path(state_dir, interval.host, interval.session),
                         record, io_root=state_dir / "io")
+
+
+_TASK_ID_RX = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+# Statuses that mean a background task is over. Anything else (including a
+# status this list does not know) leaves the job open.
+_TASK_DONE = frozenset({"completed", "complete", "done", "failed", "error", "errored",
+                        "killed", "stopped", "cancelled", "canceled", "exited",
+                        "terminated", "finished"})
+
+
+def end_finished_background(state_dir: Path, *, host: str, session: str,
+                            tasks: list[Any]) -> int:
+    """End background jobs the host's own task list shows are over.
+
+    ``tasks`` is the host's snapshot of this session's background tasks
+    (Claude's Stop `background_tasks`). A job of this session whose task id
+    is absent from the snapshot, or present with a finished status, gets an
+    `end` record: a real bound, unlike an age expiry. A job with no task id,
+    or one listed with any other status, stays open. Returns how many ended.
+    """
+    listed: dict[str, str] = {}
+    for task in tasks:
+        if isinstance(task, dict) and isinstance(task.get("id"), str):
+            listed[task["id"]] = str(task.get("status") or "").lower()
+    path = journal_path(state_dir)
+    if not path.exists():
+        return 0
+    _check_dir(state_dir / "io", path.parent)
+    ended = 0
+    with _locked(path):
+        records = _journal_records(path)
+        seq = max((r["seq"] for r in records), default=0)
+        jid = next((r["jid"] for r in reversed(records) if isinstance(r.get("jid"), str)), None)
+        lines = []
+        for interval in _intervals(records).values():
+            if (interval.post_seq is not None or not interval.background or not interval.task
+                    or interval.host != host or interval.session != session):
+                continue
+            status = listed.get(interval.task)
+            if status is not None and status not in _TASK_DONE:
+                continue  # still running, or a status we cannot read
+            seq += 1
+            lines.append(json.dumps({"seq": seq, "ev": "end", "call": interval.call,
+                                     "host": host, "session": session,
+                                     "reason": "task-finished", "task": interval.task,
+                                     "wall_ns": time.time_ns(),
+                                     **({"jid": jid} if jid else {})},
+                                    sort_keys=True) + "\n")
+            ended += 1
+        if lines:
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise OSError("journal is not a regular file")
+                os.write(fd, "".join(lines).encode("utf-8"))
+            finally:
+                os.close(fd)
+    return ended
 
 
 def turn_end(state_dir: Path, *, host: str, session: str) -> int:
@@ -1295,11 +1370,11 @@ def _state(ident: Identity | None, result: HashResult | None) -> dict[str, Any] 
     }
     if state["sha256"] is not None:
         state["hash_origin"] = "observed"
-    if result is not None and result.status == "pending":
-        # Enough to resolve the hash later, only if the file still has
-        # exactly this identity (never a hash of later content).
-        state["identity"] = {"dev": ident.dev, "ino": ident.ino, "size": ident.size,
-                             "mtime_ns": ident.mtime_ns, "ctime_ns": ident.ctime_ns}
+    # Always kept: a pending hash is resolved later only if the file still
+    # has exactly this identity, and an unchanged identity (ctime moves on
+    # any change and cannot be set back) proves the file untouched since.
+    state["identity"] = {"dev": ident.dev, "ino": ident.ino, "size": ident.size,
+                         "mtime_ns": ident.mtime_ns, "ctime_ns": ident.ctime_ns}
     return state
 
 
@@ -1439,6 +1514,7 @@ def post(
     hash_seconds: float = DEFAULT_HASH_SECONDS,
     change_cap: int = DEFAULT_CHANGE_CAP,
     edited: list[tuple[str, str]] | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Close the call's interval and, for Bash, build its observation.
 
@@ -1474,6 +1550,7 @@ def post(
             # An observation is owed for this call; if its append later fails,
             # the index sees a closed call with none on record: a gap.
             observe=repo_root is not None,
+            task=task_id if background else None,
         )
     except LockTimeout:
         journal_error = "lock-timeout"
@@ -2334,6 +2411,8 @@ def _build_parser() -> argparse.ArgumentParser:
     t.add_argument("--state-dir", type=Path, required=True)
     t.add_argument("--host", required=True)
     t.add_argument("--session", required=True)
+    t.add_argument("--stop-payload-stdin", action="store_true",
+                   help="Read the Stop payload on stdin; its background_tasks end jobs.")
     for name in ("pre", "post"):
         p = sub.add_parser(name)
         p.add_argument("--state-dir", type=Path, required=True)
@@ -2351,6 +2430,7 @@ def _build_parser() -> argparse.ArgumentParser:
                            choices=("success", "failure", "unknown"))
             p.add_argument("--bash-exit", type=int)
             p.add_argument("--bash-cmd")
+            p.add_argument("--task-id", help="The host's id for a background job.")
             p.add_argument("--inputs-json", type=Path,
                            help="File holding a JSON list of inferred input paths.")
     return parser
@@ -2364,6 +2444,16 @@ def main(argv: list[str] | None = None) -> int:
         if not _SESSION_ID_RX.fullmatch(args.session) or args.session in (".", ".."):
             return 64
         turn_end(args.state_dir, host=args.host, session=args.session)
+        if args.stop_payload_stdin:
+            try:
+                payload = json.loads(sys.stdin.read())
+            except ValueError:
+                payload = None
+            tasks = payload.get("background_tasks") if isinstance(payload, dict) else None
+            if isinstance(tasks, list):
+                with contextlib.suppress(OSError, LockTimeout):
+                    end_finished_background(args.state_dir, host=args.host,
+                                            session=args.session, tasks=tasks)
         return 0
     for value in (args.host, args.session, args.call_id):
         if "\0" in value or not value:
@@ -2386,6 +2476,7 @@ def main(argv: list[str] | None = None) -> int:
         tool=args.tool, agent=args.agent_id, repo_root=args.repo_root,
         outcome=args.outcome, bash_exit=args.bash_exit, bash_cmd=args.bash_cmd,
         background=args.background, inputs=inputs,
+        task_id=args.task_id if args.task_id and _TASK_ID_RX.fullmatch(args.task_id) else None,
     )
     if observation is not None:
         # The calling hook reads this one line to link its lineage record.

@@ -88,6 +88,30 @@ these conflict with the text below, the amendments win.
     when the declared pairing verifies that same unit across the group
     column.
 
+**Structural fixes** (after six P1-only review passes kept finding 6–8 new cases each).
+Sorting the 43 findings showed two design choices behind most of them:
+
+- **Committed records keep only known-safe words.** Before, credentials were scrubbed with a blocklist of patterns, which can never be complete over shell, every program's options and every language. Committed manifests now keep only:
+  - command and option names;
+  - the record's own paths;
+  - small numbers;
+  - shell operators.
+
+  Everything else becomes `<v>`, and script source is not committed (`text_policy: allowlist-v1`). Full text stays in the machine-local `.mycelium` stores, at the same trust level as shell history.
+- **`current` needs positive proof.** Before, a verdict was `current` unless some code path had recorded a gap, so each failure mode needed its own gap. Now `current-in-record` also requires that everything since the write is accounted for:
+  - the write is in the current journal;
+  - it started after the compaction `floor` that compaction now records;
+  - every journaled call that ran during or after it has a complete observation of this checkout that watched the path (not capped there, not racy, not refused, no coverage change). Open calls still don't count.
+
+  Anything else, including failure modes nobody listed, is `unknown` with `coverage-unproven` and the unaccounted calls.
+- **Identity continuity.** Every observed state now keeps the file's identity: device, inode, size, mtime_ns and ctime_ns. ctime moves on any change and cannot be set back. A disk query whose record verdict is `unknown` reports `current` with `basis: identity-unchanged-since-write` when three things hold:
+  - the bytes match;
+  - the file still has exactly the identity recorded right after the write;
+  - its timestamps are not whole seconds.
+
+  A→B→A rewrites are never rescued this way, because ctime moved.
+- **Background jobs end on host evidence.** A live run showed one host-backgrounded command clouding every earlier write for good. A job launched with Claude's `backgroundTaskId` now ends when a later Stop's `background_tasks` snapshot omits it or lists it as finished. An unknown status, a missing id, or a Codex job stays open. Writes after the end are provable from the record. What the job did between launch and end was never observed, so earlier writes rely on identity continuity.
+
 **Post-PR review amendments** (Codex review rounds on PR #154):
 
 - **Supersession and gaps.** A journal-ordered later observed write with different known bytes, or a deletion, makes a write `superseded` even when a gap is open. Whatever the gap hides, those bytes were replaced. The applicable gaps are reported with the verdict.

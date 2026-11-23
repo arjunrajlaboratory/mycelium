@@ -46,9 +46,11 @@ if [[ "$(mycelium_hook_host)" == "claude" && -n "$HOST_SESSION_ID" \
   && mycelium_valid_session_id "$HOST_SESSION_ID" \
   && IO_SHARED=$(mycelium__checked_shared_state_dir "$REPO_ROOT" 2>/dev/null) \
   && [[ -d "$IO_SHARED/io" && ! -L "$IO_SHARED/io" ]]; then
-  python3 "${MYCELIUM_IO_OBSERVER:-$HERE/../scripts/io_observer.py}" turn-end \
-    --state-dir "$IO_SHARED" --host claude --session "$HOST_SESSION_ID" \
-    >/dev/null 2>&1 || true
+  # The Stop payload's background_tasks snapshot ends background jobs the
+  # host shows are over (a job absent from it, or listed as finished).
+  printf '%s' "$INPUT" | python3 "${MYCELIUM_IO_OBSERVER:-$HERE/../scripts/io_observer.py}" \
+    turn-end --state-dir "$IO_SHARED" --host claude --session "$HOST_SESSION_ID" \
+    --stop-payload-stdin >/dev/null 2>&1 || true
 fi
 # Report, and clear, the skips this host session's hooks recorded while it had
 # no transaction it owned. Used on the paths that end Stop without one. With

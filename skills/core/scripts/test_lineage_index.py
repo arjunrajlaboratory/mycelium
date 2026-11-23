@@ -56,6 +56,41 @@ def write_store(repo: Path, records: list[dict], session: str = "s1") -> None:
     with path.open("a") as handle:
         for record in records:
             handle.write(json.dumps(record) + "\n")
+    synthesize_journal(repo, records)
+
+
+def synthesize_journal(repo: Path, records: list[dict]) -> None:
+    """The journal entries these observations' bounds imply, as the real
+    hooks would have written them (the index proves coverage from the
+    journal). Only for fixture journals (id JID): a test that drives the
+    real journal keeps it as it is."""
+    journal = io.journal_path(repo / ".mycelium")
+    existing = io._journal_records(journal) if journal.exists() else []
+    if any(r.get("jid") not in (None, JID) for r in existing):
+        return
+    known = {(r.get("call"), r.get("ev")) for r in existing}
+    lines = []
+    for record in records:
+        bound = record.get("journal")
+        if not isinstance(bound, dict) or bound.get("id") != JID:
+            continue
+        call = str(record.get("observation_id") or "").partition(":")[2]
+        session = record.get("host_session_id") or "s1"
+        tool = record.get("tool") or ("Edit" if record.get("status") == "edit" else "Bash")
+        background = record.get("status") == "background"
+        base = {"call": call, "host": "claude", "session": session, "tool": tool,
+                "jid": JID, "background": background, "wall_ns": 0}
+        if isinstance(bound.get("pre_seq"), int) and (call, "pre") not in known:
+            lines.append({**base, "seq": bound["pre_seq"], "ev": "pre"})
+        post = bound.get("post_seq")
+        if isinstance(post, int) and (call, "post") not in known:
+            event = "expire" if bound.get("expired") else ("launch" if background else "post")
+            lines.append({**base, "seq": post, "ev": event, "observe": True})
+    if lines:
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        with journal.open("a") as handle:
+            for line in lines:
+                handle.write(json.dumps(line) + "\n")
 
 
 def observation(repo: Path, call: str, *, created=(), modified=(), deleted=(), edited=(),

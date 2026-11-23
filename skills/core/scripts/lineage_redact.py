@@ -460,3 +460,365 @@ def redact_argv(argv: list[Any]) -> list[Any]:
 
 def is_secret_name(name: str) -> bool:
     return bool(SECRET_NAME_RX.search(name))
+
+
+# ---------------------------------------------------------------------------
+# Commit allowlist (text_policy "allowlist-v1")
+#
+# The functions above are a denylist: they find secrets they know the shape
+# of. Command text is unbounded (every shell, CLI and language), so a
+# denylist is never complete. Records that are COMMITTED (the per-session
+# manifests under .living/log/data-lineage/) therefore keep only words known
+# to be safe; everything else becomes `<v>`. Full (denylist-redacted) text
+# stays in the machine-local stores under .mycelium/.
+#
+# Kept verbatim:
+# - the command word of each simple command (path characters only), shell
+#   keywords, and the command after a known wrapper (`env`, `nohup`, ...);
+# - option names (`-x`, `-abc`, `--long-name`; `--opt=` of `--opt=value`);
+# - assignment names (`NAME=` of `NAME=value`);
+# - values that, decoded, are one of the record's own paths (`keep_paths`);
+# - short plain numbers (at most 6 characters), except as the value of a
+#   secret-named option or assignment;
+# - operators, redirections and whitespace layout.
+# A heredoc body becomes `<heredoc: N lines>`.
+# ---------------------------------------------------------------------------
+
+COMMIT_VALUE = "<v>"
+COMMIT_POLICY = "allowlist-v1"
+
+# A command name: path characters, not led by a dash (that is an option).
+_CMD_WORD_RX = re.compile(r"[A-Za-z0-9_./+][A-Za-z0-9_./+-]*\Z")
+_LONG_OPT_RX = re.compile(r"--[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
+_LONG_OPT_EQ_RX = re.compile(r"(--[A-Za-z][A-Za-z0-9_-]{0,63})=")
+# Single-dash option names: a short cluster (`-x`, `-abc`, `-pdf`), a digit
+# level (`-O2`, `-j8`), or an all-lowercase word (`-resume`, `-params-file`).
+# Anything else glued to a single dash may be a value (`-pS3cr3t`).
+_SHORT_OPT_RX = re.compile(r"-(?:[A-Za-z]{1,4}|[A-Za-z][0-9]{1,3}|[a-z]+(?:-[a-z]+)*)\Z")
+_ASSIGN_RX = re.compile(r"([A-Za-z_][A-Za-z0-9_.-]{0,63})=")
+_NUMBER_RX = re.compile(r"-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?\Z")
+# Numeric one-time codes are secrets too, though no denylist name covers them.
+_EXTRA_SECRET_RX = re.compile(r"(?i)(?:^|[-_])(?:pin|otp|totp|mfa|passcode|2fa)(?:$|[-_])")
+_SHELL_KEYWORDS = frozenset({
+    "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for",
+    "case", "esac", "function", "{", "}", "!", "[[", "]]", "select", "coproc",
+})
+_WRAPPERS = frozenset({"env", "nohup", "time", "exec", "command", "builtin", "nice"})
+_HEREDOC_RX = re.compile(r"<<(?!<)(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([^\s;&|<>()'\"]+))")
+_DELIM_RX = re.compile(r"-?[A-Za-z_][A-Za-z0-9_]{0,15}\Z")
+# Placeholders already in the text (`<redacted>` from the denylist, `<v>`)
+# are values; they are hidden from the word scanner, which splits on `<>`.
+_HIDDEN = "\x01"
+
+
+def _commit_secret_name(name: str) -> bool:
+    return is_secret_name(name) or bool(_EXTRA_SECRET_RX.search(name))
+
+
+def _norm_path(value: str) -> str:
+    import posixpath
+
+    while value.startswith("./") and len(value) > 2:
+        value = value[2:]
+    value = posixpath.normpath(value) if value else value
+    return value
+
+
+def commit_keep_paths(paths: Any) -> set[str]:
+    """Every spelling of the record's own paths a command may use: the
+    path, and each run of its components (`/r/analysis/de/run.py` gives
+    `analysis/de/run.py`, `de/run.py`, `run.py`, `analysis/de`, ...). All of
+    these are already in the record, so keeping them discloses nothing."""
+    out: set[str] = set()
+    for path in paths or ():
+        if not isinstance(path, str) or not path or "\n" in path:
+            continue
+        norm = _norm_path(path)
+        out.add(norm)
+        absolute = norm.startswith("/")
+        parts = [p for p in norm.split("/") if p]
+        if len(parts) > 64:
+            continue
+        for i in range(len(parts)):
+            for j in range(i + 1, len(parts) + 1):
+                joined = "/".join(parts[i:j])
+                out.add(joined)
+                if i == 0 and absolute:
+                    out.add("/" + joined)
+    out.discard("")
+    out.discard(".")
+    out.discard("..")
+    return out
+
+
+def _is_number(value: str) -> bool:
+    return bool(_NUMBER_RX.match(value)) and len(value.lstrip("-")) <= 6
+
+
+def commit_safe_value(value: str, keep_paths: set[str], secret: bool = False) -> str:
+    """One decoded value under the allowlist: a record path or a short
+    number is kept, anything else (and any secret-named value) is `<v>`."""
+    if secret or not isinstance(value, str) or _HIDDEN in value or REDACTED in value \
+            or COMMIT_VALUE in value:
+        return COMMIT_VALUE
+    if value and _norm_path(value) in keep_paths:
+        return shlex.quote(value)
+    if _is_number(value):
+        return value
+    return COMMIT_VALUE
+
+
+class _CommitState:
+    __slots__ = ("cmd", "wrapper", "secret_next", "loop_name")
+
+    def __init__(self, cmd: bool) -> None:
+        self.cmd = cmd
+        self.wrapper = False
+        self.secret_next = False
+        self.loop_name = False
+
+
+def _commit_word(raw: str, dec: str, keep_paths: set[str], state: _CommitState) -> str:
+    """One word (as written, and decoded) under the allowlist."""
+    if state.secret_next:
+        state.secret_next = False
+        state.cmd = state.wrapper = False
+        return COMMIT_VALUE
+    if _HIDDEN in dec:
+        if state.cmd and not state.wrapper:
+            state.cmd = False
+        match = _ASSIGN_RX.match(dec)
+        if match:
+            return match.group(0) + COMMIT_VALUE
+        long_eq = _LONG_OPT_EQ_RX.match(dec)
+        if long_eq:
+            return long_eq.group(0) + COMMIT_VALUE
+        return COMMIT_VALUE
+    assign = _ASSIGN_RX.match(dec)
+    if state.cmd:
+        if assign:
+            name = assign.group(1)
+            return assign.group(0) + commit_safe_value(
+                dec[assign.end():], keep_paths, _commit_secret_name(name))
+        if raw == dec and dec in _SHELL_KEYWORDS:
+            return dec
+        if raw == dec and dec in ("for", "select", "case"):
+            # `for NAME in WORDS`: a variable name, then values, not a command.
+            state.cmd = state.wrapper = False
+            state.loop_name = dec != "case"
+            return dec
+        if state.wrapper and (_LONG_OPT_RX.match(dec) or _SHORT_OPT_RX.match(dec)
+                              or _is_number(dec)):
+            return dec
+        state.cmd = False
+        state.wrapper = False
+        if _CMD_WORD_RX.match(raw):
+            if raw in _WRAPPERS:
+                state.cmd = state.wrapper = True
+            return raw
+        return COMMIT_VALUE
+    if state.loop_name:
+        state.loop_name = False
+        if raw == dec and _NAME_RX.match(dec) and "." not in dec and "-" not in dec:
+            return dec
+        return COMMIT_VALUE
+    if dec in ("-", "--") or (raw == dec == "in"):
+        return dec
+    if _LONG_OPT_RX.match(dec):
+        if _commit_secret_name(dec) and not _NO_VALUE_FLAG_RX.search(dec):
+            state.secret_next = True
+        return dec
+    long_eq = _LONG_OPT_EQ_RX.match(dec)
+    if long_eq:
+        return long_eq.group(0) + commit_safe_value(
+            dec[long_eq.end():], keep_paths, _commit_secret_name(long_eq.group(1)))
+    if _is_number(dec):
+        return dec
+    if _SHORT_OPT_RX.match(dec):
+        if _commit_secret_name(dec) and not _NO_VALUE_FLAG_RX.search(dec):
+            state.secret_next = True
+        return dec
+    if assign:
+        return assign.group(0) + commit_safe_value(
+            dec[assign.end():], keep_paths, _commit_secret_name(assign.group(1)))
+    return commit_safe_value(dec, keep_paths)
+
+
+def _gap_kind(gap: str) -> tuple[bool, bool, bool]:
+    """(separator, redirection, heredoc) for the text between two words."""
+    sep = redir = False
+    gap = gap.replace("\\\n", " ")  # a line continuation separates nothing
+    for i, c in enumerate(gap):
+        if c in "<>":
+            redir = True
+        elif c == "&":
+            if (i > 0 and gap[i - 1] in "<>") or (i + 1 < len(gap) and gap[i + 1] == ">"):
+                redir = True
+            else:
+                sep, redir = True, False
+        elif c in ";|()\n":
+            sep, redir = True, False
+    tail = gap.rstrip(" \t")
+    heredoc = redir and tail.endswith("<<") and not tail.endswith("<<<")
+    return sep, redir, heredoc
+
+
+def _commit_shell(text: str, keep_paths: set[str]) -> str:
+    out: list[str] = []
+    state = _CommitState(cmd=True)
+    pos = 0
+    for start, end in _words(text):
+        gap = text[pos:start]
+        out.append(gap)
+        sep, redir, heredoc = _gap_kind(gap)
+        if sep:
+            state = _CommitState(cmd=True)
+        raw = text[start:end]
+        dec = _decode(raw)
+        if heredoc:
+            plain = _DELIM_RX.match(dec) and raw in (dec, f"'{dec}'", f'"{dec}"', "\\" + dec)
+            out.append(raw if plain else COMMIT_VALUE)
+        elif redir:
+            out.append(commit_safe_value(dec, keep_paths))
+        else:
+            out.append(_commit_word(raw, dec, keep_paths, state))
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _hide_placeholders(text: str) -> str:
+    return text.replace(REDACTED, _HIDDEN).replace(COMMIT_VALUE, _HIDDEN)
+
+
+def _show_placeholders(text: str) -> str:
+    return text.replace(_HIDDEN, COMMIT_VALUE)
+
+
+def commit_safe_command(text: Any, keep_paths: set[str] | None = None) -> Any:
+    """Command text for a committed record: only allowlisted words survive
+    (see the block comment above); separators and layout are kept, and
+    each heredoc body collapses to `<heredoc: N lines>`."""
+    if not isinstance(text, str) or not text:
+        return text
+    keep = keep_paths or set()
+    text = _hide_placeholders(text)
+    out: list[str] = []
+    shell: list[str] = []
+    pending: list[tuple[str, bool]] = []  # (delimiter, strip leading tabs)
+    body = 0
+
+    def flush() -> None:
+        if shell:
+            out.append(_commit_shell("".join(shell), keep))
+            shell.clear()
+
+    def delim_text(word: str) -> str:
+        return word if _DELIM_RX.match(word) else COMMIT_VALUE
+
+    for line in text.splitlines(keepends=True):
+        if pending:
+            delimiter, strip = pending[0]
+            content = line.rstrip("\n")
+            if (content.lstrip("\t") if strip else content) == delimiter:
+                out.append(f"<heredoc: {body} lines>\n")
+                out.append(delim_text(delimiter) + ("\n" if line.endswith("\n") else ""))
+                pending.pop(0)
+                body = 0
+            else:
+                body += 1
+            continue
+        shell.append(line)
+        for match in _HEREDOC_RX.finditer(line):
+            word = next(g for g in match.groups()[1:] if g is not None)
+            pending.append((word, bool(match.group(1))))
+        if pending:
+            flush()
+            if not line.endswith("\n"):
+                out.append("\n")
+    flush()
+    if pending:
+        out.append(f"<heredoc: {body} lines>")
+    return _show_placeholders("".join(out))
+
+
+def commit_safe_argv(argv: Any, keep_paths: set[str] | None = None,
+                     command_word: bool = True) -> Any:
+    """An argv list for a committed record, word by word under the same
+    allowlist. ``command_word`` says whether the list starts with a command
+    (a full argv, wrappers) or is only operands (`script_args`, `params`).
+    Non-string tokens (an inline-body placeholder) pass through."""
+    if not isinstance(argv, list):
+        return argv
+    keep = keep_paths or set()
+    state = _CommitState(cmd=command_word)
+    out: list[Any] = []
+    for token in argv:
+        if not isinstance(token, str):
+            out.append(token)
+            state.secret_next = False
+            state.cmd = state.wrapper = False
+            continue
+        token = _hide_placeholders(token)
+        out.append(_show_placeholders(_commit_word(token, token, keep, state)))
+    return out
+
+
+_PROSE_CORE_RX = re.compile(r"([(\[\"'`]*)(.*?)([)\]\"'`,.;:!?]*)\Z", re.S)
+# The words of the messages the recorders write (lineage warnings, skip
+# details), compared case-insensitively. A word outside it, even one of
+# plain letters (`MY_SECRET`), is `<v>`: a new message degrades to
+# placeholders until its words are added here, never the other way.
+COMMIT_PROSE_WORDS = frozenset("""
+a an the and or but so of to in on at by for from with without into than then
+is are was were be been has have had not no nor may might could can cannot
+will would its it this that these those their there which what when where who
+one more each every any some all other only also still yet as if
+script scripts ran run runs runner runner's script's call calls command commands
+names named name file files path paths directory working change changed
+earlier unknown left search shell syntax r_batch_options r cd pushd popd cdpath
+remote urls url recorded record local resolved statically literal i/o
+input/output detected resolve dynamically delegate through imports
+analysis stage stage(s recorded separately listed exit checked reopen refused
+failed missing extractor helper unreadable lock unavailable redaction omitted
+observation observations session sessions completed reported treat changes -
+""".split())
+
+
+def commit_safe_prose(text: Any, keep_paths: set[str] | None = None,
+                      replace: tuple[tuple[str, str], ...] = ()) -> Any:
+    """A message (a lineage warning, a skip detail) for a committed record.
+    Words of the recorders' messages (COMMIT_PROSE_WORDS) stay; numbers,
+    record paths and `...` stay; any other token (a URL, a command word, an
+    unexpanded `$X`, a name) becomes `<v>`. ``replace`` substitutes known
+    variable parts first."""
+    if not isinstance(text, str) or not text:
+        return text
+    keep = keep_paths or set()
+    for old, new in replace:
+        if old and old != new:
+            # Whole tokens only, so a short variable part never cuts a word.
+            text = re.sub(rf"(?<!\S){re.escape(old)}(?=[\s)\]\"'`,.;:!?]|\Z)",
+                          lambda _m: _hide_placeholders(new), text)
+    text = _hide_placeholders(text)
+    out: list[str] = []
+    # A count is kept only at the start or after a message word (`exit 3`,
+    # `ran 3 more`), never after a dropped token (`--pin 4829`).
+    prev_word = True
+    for piece in re.split(r"(\s+)", text):
+        if not piece or piece.isspace():
+            out.append(piece)
+            continue
+        lead, core, trail = _PROSE_CORE_RX.match(piece).groups()
+        word = core.lower() in COMMIT_PROSE_WORDS
+        if (not core or word or core == "..."
+                or (prev_word and _is_number(core))
+                or (_HIDDEN not in core and _norm_path(core) in keep)):
+            out.append(piece)
+        elif _HIDDEN in core and core.strip(_HIDDEN) == "":
+            out.append(piece)
+            word = False
+        else:
+            out.append(f"{lead}{COMMIT_VALUE}{trail}")
+        prev_word = word
+    return _show_placeholders("".join(out))

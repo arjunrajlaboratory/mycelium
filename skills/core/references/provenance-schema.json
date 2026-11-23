@@ -405,7 +405,18 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "The embedded (redacted) source. Never present in a manifest with text_policy allowlist-v1: it stays in the machine-local event queue, and script_sha256 identifies it."
+        },
+        "script_source_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "allowlist-v1: UTF-8 size of the embedded (redacted) source that the manifest does not carry."
+        },
+        "script_source_lines": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "allowlist-v1: line count of that source."
         },
         "script_candidate": {
           "type": [
@@ -849,6 +860,10 @@
       "properties": {
         "session_id": {
           "type": "string"
+        },
+        "text_policy": {
+          "const": "allowlist-v1",
+          "description": "How the free text of the manifest's records was reduced before commit. allowlist-v1: command text, argv, script_args, params, env values, wrappers, lineage warnings and skip details keep only allowlisted words (command words, option and assignment names, short numbers, operators, the record's own paths); every other word is `<v>`, a heredoc body is `<heredoc: N lines>`, and script_source is dropped. Absent: written by 0.9.7 or earlier (denylist redaction only, or none)."
         },
         "repo_root": {
           "type": "string"

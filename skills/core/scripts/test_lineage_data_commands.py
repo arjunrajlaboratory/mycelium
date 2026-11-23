@@ -415,7 +415,10 @@ def test_parking_needs_check_execution_and_keys(project):
 def test_the_manifest_keeps_data_commands_apart_from_actions(tmp_path):
     action = {"ts": "2026-11-20T00:00:02Z", "bash_cmd": "python a.py",
               "script": "a.py", "inputs": [], "outputs": []}
-    data = {"ts": "2026-11-20T00:00:01Z", "kind": "data_command",
+    # A named path survives into the committed record only if it exists.
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "x.csv").write_text("a\n")
+    data = {"ts": "2026-11-20T00:00:01Z", "kind": "data_command", "cwd": str(tmp_path),
             "event_id": "e1", "bash_cmd": "head data/x.csv",
             "named_paths": ["data/x.csv"], "signals": ["data-path"],
             "inputs": [], "outputs": [], "io_detection": "unresolved"}

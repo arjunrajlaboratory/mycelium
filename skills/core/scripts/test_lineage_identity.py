@@ -161,7 +161,9 @@ def test_manifest_is_versioned_and_keeps_identity(tmp_path: Path) -> None:
     assert action["host"] == "claude"
     assert action["host_session_id"] == "s-1"
     assert action["ts_ns"] == 5
-    assert action["step"] == {"argv": ["python", "fit.py"]}
+    # The step travels into the manifest under the commit allowlist:
+    # `fit.py` is not one of the record's own paths, so it is a placeholder.
+    assert action["step"] == {"argv": ["python", "<v>"]}
     assert "filters_detected" not in action
     (command,) = manifest["data_commands"]
     assert command["host_session_id"] == "s-1" and command["repo_root"] == "/r"
@@ -176,7 +178,8 @@ def test_v1_event_reconsolidated_stays_v1_shaped(tmp_path: Path) -> None:
     ])
     (action,) = stop.extract(events, "sess", str(tmp_path))["actions"]
     assert "event_id" not in action and "host" not in action
-    assert action["filters_detected"] == [".query("]
+    # Free regex text from a 0.9.7 recorder is not committed (allowlist-v1).
+    assert "filters_detected" not in action
 
 
 def test_analysis_events_are_deduped_by_event_id(tmp_path: Path) -> None:

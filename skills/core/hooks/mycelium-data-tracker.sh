@@ -117,9 +117,14 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
     # host moved a long foreground command to the background at its
     # timeout (Claude Code then returns a backgroundTaskId). Either way the
     # job may still be writing, so its interval stays open.
+    OBS_TASK_ID=$(mycelium_json_get 'tool_response.backgroundTaskId' INPUT)
     if [[ "$(mycelium_json_get 'tool_input.run_in_background' INPUT)" == "True" \
-      || -n "$(mycelium_json_get 'tool_response.backgroundTaskId' INPUT)" ]]; then
+      || -n "$OBS_TASK_ID" ]]; then
       OBS_ARGS+=(--background)
+      # The host's task id lets a later Stop snapshot end the job.
+      if [[ "$OBS_TASK_ID" =~ ^[A-Za-z0-9_.:-]{1,128}$ ]]; then
+        OBS_ARGS+=(--task-id "$OBS_TASK_ID")
+      fi
     fi
     OBS_SUMMARY=$(python3 "$OBSERVER" "${OBS_ARGS[@]}" 2>/dev/null) \
       || OBS_SUMMARY='{"status": "unavailable", "reason": "observer-failed"}'

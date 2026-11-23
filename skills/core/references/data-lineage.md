@@ -400,7 +400,70 @@ row and feature access is a separate, in-process record (see
 
 ### Redaction
 
-Every stored command text goes through one policy (`lineage_redact.py`):
+Two levels apply, by where a record is stored.
+
+**Committed manifests: an allowlist (`text_policy: "allowlist-v1"`).** The
+per-session manifests under `.living/log/data-lineage/` are committed and
+shared, so their records keep only words known to be safe. A denylist of
+secret shapes (below) can never cover every shell, CLI and language, so a
+manifest does not rely on it. At Stop, `extract_data_lineage.py` passes
+every free-text field of every record through the allowlist in
+`lineage_redact.py` (`commit_safe_command`, `commit_safe_argv`,
+`commit_safe_prose`). That covers each action's `bash_cmd`, `step.argv`,
+`step.script_args`, `step.params`, `step.wrappers`, `step.executable`,
+`step.interpreter`, `step.env` values, `script_candidate` and
+`lineage_warnings`. It also covers a data command's `bash_cmd`, `step.argv`,
+`named_paths` and `analysis_candidates`, a skip's `bash_cmd` and `detail`,
+and an embedded observation's `bash_cmd`. Only these words are kept:
+
+- the command word of each simple command (path characters only, not led by
+  `-`), after any leading `NAME=value` assignments; shell keywords; and the
+  command after a wrapper (`env`, `nohup`, `time`, `exec`, `command`,
+  `builtin`, `nice`);
+- option names: `--long-name`, and single-dash names that are a short
+  cluster (`-x`, `-abc`), a letter and digits (`-O2`), or all-lowercase words
+  (`-resume`, `-params-file`). For `--opt=value`, `--opt=` is kept and the
+  value takes the value rule;
+- assignment names (`NAME=`), with the value rule for the value;
+- values that, decoded, are one of the record's own paths: its inputs,
+  outputs, script and config files, in absolute, repo-relative or any shorter
+  component spelling (`analysis/de/run.py`, `de/run.py`, `run.py`). All of
+  these are already in the record. A data command also counts its `cwd` and
+  its path-shaped `named_paths`;
+- plain numbers of at most 6 characters (`3`, `0.05`, `1e-3`), except the
+  value of a secret-named option or assignment (the denylist's names, plus
+  `pin`, `otp`, `totp`, `mfa`, `passcode`, `2fa`);
+- operators, redirections, and the whitespace layout.
+
+Every other word becomes `<v>`: quoted strings, inline code bodies, URLs,
+`$(...)` and `$X`, and unknown words. A heredoc body becomes one
+`<heredoc: N lines>` line. So
+`python3 analysis/de/run.py --config analysis/de/params.yaml --seed 3` is
+kept whole when those are the record's paths, while `tool -k
+9f8a7b6c5d4e3f2a1b0c` becomes `tool -k <v>`. Warning and skip-detail text
+keeps only the words of the recorders' own messages
+(`COMMIT_PROSE_WORDS`), counts that follow one of those words, and record
+paths. A script candidate is kept only when it is a script-shaped word
+(`a.R`). A config operand that is remote, or unresolved and not path-shaped,
+has `path: "<v>"`.
+
+`script_source` is never committed. The manifest keeps `script_sha256` (with
+`script_sha256_of` as before) and adds `script_source_bytes` and
+`script_source_lines`. `filters_detected` (0.9.7 regex text) is dropped.
+File records' `path` and `rel_path`, `cwd` and `repo_root` are structured
+data and stay. Events recorded before an upgrade get the same treatment
+when a new manifest consolidates them. A manifest without `text_policy` was
+written by 0.9.7 or earlier and still loads.
+
+Known limits of the allowlist: a secret written as a command name, as an
+all-lowercase word glued to a single dash (`-psecret`), or as an option name
+is kept, since it cannot be told apart from a program or a flag.
+
+**Machine-local stores: the denylist.** The stores under `.mycelium/` (the
+per-call event queue, observation stores, the journal) are gitignored and
+local, at the trust level of shell history. They keep the full
+denylist-redacted text, including `script_source`. Every stored command text
+goes through one policy (`lineage_redact.py`):
 `bash_cmd`, `argv`, `script_args`, `env`, `params`, embedded `script_source`, and the
 `bash_cmd` of observations and skips. These values become `<redacted>`:
 
@@ -456,7 +519,8 @@ including adjacent quoted, bare, and backslash-escaped components such as
 A `python a.py && python b.py` chain emits **two** events (one per detected
 script). Inline `-c` scripts emit one event each; their `script` field is
 `null`, with the source embedded under `script_source` and identified by
-`script_sha256`.
+`script_sha256`. The embedded source stays in the machine-local event queue;
+a committed manifest keeps only the digest and the size (see Redaction).
 
 `script_candidate` is `null` except for an R script run (`R -f`,
 `R --file=`, `R CMD BATCH`) whose script cannot be named with certainty:
@@ -491,6 +555,7 @@ captured.
 ```json
 {
   "schema": "mycelium.data_lineage.manifest.v2",   # absent in v1 (0.9.7 and earlier)
+  "text_policy": "allowlist-v1",   # record text reduced to allowlisted words (see Redaction)
   "session_id": "2026-05-26-099",
   "repo_root": "/path/to/repo",
   "git_sha": "c3d4...",
@@ -568,6 +633,37 @@ The headline is `current` only when both agree. Supersession needs journal
 order and two known, different hashes. A gap the record cannot rule out makes
 the status `unknown`, never `current`. Examples of such gaps: an unavailable,
 missing or unresolved observation, a capped diff, an unwatched scope.
+
+**Positive proof.** `current-in-record` is never assumed from the absence of a
+recorded gap. It needs everything since the write to be accounted for:
+
+- the write sits in the current journal;
+- it started after the journal's compaction `floor`;
+- every journaled call that ran during or after it is covered at the path by a
+  complete observation of this checkout. That observation watched the path,
+  was not capped there, and did not leave the path racy, refused, or moved in
+  or out of scope.
+
+Anything else is `unknown` with the reason `coverage-unproven`, and the
+unaccounted calls are listed under `unaccounted`. Calls still running are
+listed under `open_calls` instead.
+
+**Identity continuity.** A disk query can still answer `current`, with
+`basis: identity-unchanged-since-write`, when three things hold:
+
+- the bytes match;
+- the file has exactly the identity (device, inode, size, mtime, ctime)
+  recorded right after the write. ctime moves on any change and cannot be set
+  back, so nothing has touched the file since;
+- the timestamps are not whole seconds.
+
+A file rewritten to the same bytes has a new ctime and is not certified this
+way.
+
+**Background jobs.** A background job is accounted for only up to the moment
+the host shows it ended. For Claude, that is when a later Stop's
+`background_tasks` snapshot omits the job's `backgroundTaskId` or lists it as
+finished. An unknown status, a job with no task id, or a Codex job stays open.
 
 **Readers.** Readers are listed with their `hash_origin`, proven first. A
 hook cannot see reads, so every read stays inferred.
