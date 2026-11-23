@@ -184,9 +184,13 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   randomized runs spread both sides out and pass. Ledger contracts set
   `"max_share": 0.5`. It takes `unit_scope` and `batch_scopes` for local
   labels, and checks 1000 units with three visits and two batch columns in
-  well under a second. Its elimination has a fixed work budget (about a
-  second); a design past it, such as hundreds of runs crossed with hundreds
-  of dates, is reported as too large to check, and nothing is concluded.
+  well under a second. All advisory checks in one run share one budget of
+  work and about a second of wall-clock, row preparation included. A check
+  that runs out (hundreds of runs crossed with hundreds of dates) reports
+  that it was too large to check and concludes nothing. Checks reached after
+  the budget is used up (a ledger with dozens of batch columns gets one per
+  column) are skipped with a warning. Running out never raises and never
+  changes the exit status.
 
   Known gaps, open while it is advisory:
   - a matched-pair design whose two sides are different groups (a case
@@ -262,7 +266,9 @@ Ledger mode runs these checks:
 - with a pairing, one `paired_batch` per batch column, and one for all of
   them together when there are two or more, against the within-unit
   contrast (per group when `within` is not the group). These are advisory:
-  they warn and never change the exit status.
+  they warn and never change the exit status. They run in ledger mode only:
+  `--emit-contract` leaves them out of the emitted contract (its note says
+  so), so readers that predate the kind can still replay it.
 
 `--emit-contract` writes that contract so the analysis can extend it. Add
 filters, and point the replication, pairing and batch checks at the

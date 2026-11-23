@@ -581,7 +581,7 @@ class _Echelon:
     def __init__(self, prefer=None, budget=None):
         self.prefer = prefer or (lambda column: 0)
         self.pivots, self.order = {}, {}
-        self.budget = budget  # entry operations allowed before TooLarge
+        self.budget = budget  # an _AdvisoryBudget, or None for no limit
 
     class TooLarge(Exception):
         pass
@@ -600,9 +600,7 @@ class _Echelon:
                 continue
             pivot = self.pivots[column]
             if self.budget is not None:
-                self.budget -= len(pivot) + len(row)
-                if self.budget < 0:
-                    raise _Echelon.TooLarge()
+                self.budget.spend(len(pivot) + len(row))
             b = pivot[column]
             out = {k: v * b for k, v in row.items()}
             for k, v in pivot.items():
@@ -637,11 +635,50 @@ class _Echelon:
 # Entry operations one paired_batch check may spend on elimination (about a
 # second); past it the check reports that it did not run.
 PAIRED_BATCH_BUDGET = 5000000
+# Seconds all advisory checks in one run may take together, row preparation
+# included; checks reached after it runs out are skipped with a warning.
+ADVISORY_SECONDS = 1.0
+
+
+class _AdvisoryBudget:
+    """Work and wall-clock shared by the advisory checks of one run."""
+
+    def __init__(self, ops=None, seconds=None):
+        import time
+
+        self.clock = time.monotonic
+        self.ops = PAIRED_BATCH_BUDGET if ops is None else ops
+        self.deadline = self.clock() + (ADVISORY_SECONDS if seconds is None else seconds)
+        self.calls = 0
+
+    def spend(self, n=1):
+        self.ops -= n
+        self.calls += 1
+        if self.ops < 0 or (self.calls % 256 == 0 and self.clock() > self.deadline):
+            raise _Echelon.TooLarge()
+
+    def exhausted(self):
+        return self.ops < 0 or self.clock() > self.deadline
 
 UNKNOWN_GROUP = object()  # a row whose group is unknown: its own nuisance cells
 
 
 def check_paired_batch(check, columns, rows):
+    """See _paired_batch. Advisory: running out of budget anywhere (row
+    preparation, elimination, contrast tests) discards partial results and
+    reports that the check did not run; it never raises."""
+    budget = check.get("_budget") or _AdvisoryBudget()
+    try:
+        return _paired_batch(check, rows, budget)
+    except _Echelon.TooLarge:
+        return [alert(
+            "paired_batch", "the design is too large to check within the time advisory checks "
+            "allow, so batch against the {} contrast was not checked".format(check.get("within")),
+            False, observed="{} rows, batch columns: {}".format(
+                len(rows), ", ".join(as_list(check.get("batch")))))]
+
+
+def _paired_batch(check, rows, budget):
     """Whether the within-unit contrasts of a paired design survive batch.
 
     One design for the whole check: rows with a known unit and `within`
@@ -674,6 +711,7 @@ def check_paired_batch(check, columns, rows):
     batch_ids = [[r[b] for r in scoped(rows, b, as_list(scopes.get(b)))] for b in batches]
     # One record per row: (unit, group, within, batch identities), with the
     # raw within value whatever the batch scoping did to its column.
+    budget.spend(len(rows) * (2 + len(batches)))
     records = [(unit_ids[i], r[group] if group else None, r[within],
                 tuple(ids[i] for ids in batch_ids)) for i, r in enumerate(rows)]
     alerts = []
@@ -720,7 +758,7 @@ def check_paired_batch(check, columns, rows):
 
     def echelon(records, with_batch):
         ech = _Echelon(prefer=lambda column: (0 if column[0] == "b" else 1, str(column)),
-                       budget=PAIRED_BATCH_BUDGET)
+                       budget=budget)
         first, seen = {}, set()
         # Repeated samples of one cell (aliquots, images) add nothing.
         for u, g, w, b in sorted({(u, key(g), w, b if with_batch else ()) for u, g, w, b in records},
@@ -743,15 +781,8 @@ def check_paired_batch(check, columns, rows):
         g, lvl, ref = contrast
         return {("c", key(g), lvl): 1, ("c", key(g), ref): -1}
 
-    try:
-        before, after = echelon(paired_rows, False), echelon(batched, False)
-        adjusted = echelon(batched, True)
-    except _Echelon.TooLarge:
-        alerts.append(alert(
-            "paired_batch", "the design is too large to check exactly within the time this check "
-            "allows, so batch against the {} contrast was not checked".format(within), False,
-            observed="{} rows, {} batch columns".format(len(batched), len(batches))))
-        return alerts
+    before, after = echelon(paired_rows, False), echelon(batched, False)
+    adjusted = echelon(batched, True)
     erased, confounded = [], []
     for contrast in contrasts:
         if not before.spans(vector(contrast)):
@@ -1283,9 +1314,21 @@ def run_contract(contract, base_dir):
     wanted = defaultdict(set)  # an .h5ad's obs is read only for the columns the contract names
     for _, _, _, _, _, path, named in plan:
         wanted[path].update(named)
+    budget = None  # shared by the advisory checks, started at the first one
     for index, check, kind, table, filters, path, named in plan:
         label = "checks[{}] {}".format(index, check.get("label", kind))
         found = []
+        if kind in ADVISORY_KINDS:
+            budget = budget or _AdvisoryBudget()
+            if budget.exhausted():
+                skipped = alert(kind, "skipped: the time this run allows advisory checks is used "
+                                      "up", False)
+                skipped.update(check=label, table=table, rows_checked=0)
+                summaries.append({"check": label, "kind": kind, "table": table, "rows_checked": 0,
+                                  "status": "warn", "relaxations": []})
+                alerts.append(skipped)
+                continue
+            check = dict(check, _budget=budget)
         if not os.path.isfile(path):
             found.append(alert("schema", "the table the plan names does not exist", True,
                                observed="not found: " + table))
@@ -1665,6 +1708,13 @@ def main(argv=None):
             contract["table"] = table
             if args.emit_contract:
                 emitted = dict(contract)
+                # Advisory kinds run in ledger mode but stay out of the v1
+                # export, so readers that predate them can replay it.
+                emitted["checks"] = [c for c in contract["checks"]
+                                     if c["kind"] not in ADVISORY_KINDS]
+                if len(emitted["checks"]) < len(contract["checks"]):
+                    emitted["note"] = contract["note"] + "; advisory paired_batch checks ran " \
+                        "in ledger mode and are left out of this contract"
                 root = os.path.realpath(args.root)
                 if table.startswith(root.rstrip(os.sep) + os.sep):
                     # Relative to --root, so the contract replays against the

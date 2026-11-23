@@ -857,3 +857,82 @@ def test_a_design_past_the_budget_warns_that_it_was_not_checked(monkeypatch) -> 
     alerts = dcc.check_paired_batch({"unit": "donor", "within": "visit", "batch": ["run"]}, [], rows)
     assert [a["blocking"] for a in alerts] == [False]
     assert "too large" in alerts[0]["message"]
+
+
+def _write_ledger(tmp_path: Path, header: list, rows: list, **spec) -> Path:
+    (tmp_path / "samples.tsv").write_text("\t".join(header) + "\n" + "".join(
+        "\t".join(r) + "\n" for r in rows))
+    path = tmp_path / "samples.ledger.json"
+    path.write_text(json.dumps({"schema": dcc.LEDGER_SCHEMA, "file": "samples.tsv", **spec}))
+    return path
+
+
+def test_budget_exhaustion_while_testing_contrasts_never_crashes(tmp_path: Path) -> None:
+    # Codex's 8,808-row ledger: the budget runs out in the contrast tests,
+    # after the designs are built. An advisory check must never raise.
+    rows = []
+    for v in range(12):
+        for j, start in enumerate(range(0, 349, 11)):
+            pair = f"{v:02}-{j:03}"
+            for g in range(start, min(start + 12, 350)):
+                rows.append((pair, f"g{g:04}", f"d{g:04}-{v % 2}", f"v{v:02}", "R"))
+            for w in range(12):
+                if w != v:
+                    rows.append((pair, "", "", f"v{w:02}", ""))
+        rows.append(("zz", "g0349", f"d0349-{v % 2}", f"v{v:02}", "R"))
+    rows = [[f"s{i}", *r] for i, r in enumerate(rows)]
+    spec = _write_ledger(tmp_path, ["sample", "pair", "group", "donor", "visit", "run"], rows,
+                         sample_id="sample", group="group", unit_of_replication="donor",
+                         batch=["run"], pairing={"unit": "pair", "within": "visit"})
+    result = subprocess.run([sys.executable, str(CHECKER), "--ledger", str(spec), "--json"],
+                            capture_output=True, text=True)
+    assert "Traceback" not in result.stderr, result.stderr[-2000:]
+    paired = [a for a in json.loads(result.stdout)["alerts"] if a["kind"] == "paired_batch"]
+    assert not any(a["blocking"] for a in paired)
+
+
+def test_advisory_checks_share_one_time_budget(tmp_path: Path) -> None:
+    # 32 batch columns: 33 generated paired_batch checks. Together they may
+    # add about a second to the ledger run, not one budget each.
+    import time
+
+    batch = [f"run{j:02}" for j in range(32)]
+    rows = [[f"s{u}-{v}-{k}", f"d{u}", str((u // 2) % 2), f"v{v:02}"] +
+            [f"R{(u + v + j) % 2}" for j in range(32)]
+            for u in range(1000) for v in range(12) for k in range(2)]
+    header = ["sample_id", "donor", "group", "visit"] + batch
+    spec = {"schema": dcc.LEDGER_SCHEMA, "file": "samples.tsv", "sample_id": "sample_id",
+            "group": "group", "unit_of_replication": "donor", "batch": batch}
+    _write_ledger(tmp_path, header, rows)
+
+    def seconds(extra: dict) -> tuple:
+        contract = dcc.ledger_contract({**spec, **extra}, str(tmp_path))
+        start = time.perf_counter()
+        summaries, _ = dcc.run_contract(contract, str(tmp_path))
+        return time.perf_counter() - start, summaries
+
+    base, _ = seconds({})
+    paired, summaries = seconds({"pairing": {"unit": "donor", "within": "visit"}})
+    assert paired - base < dcc.ADVISORY_SECONDS + 1.0, (base, paired)
+    assert all(s["status"] != "block" for s in summaries if s["kind"] == "paired_batch")
+
+
+MAIN_KINDS = {"schema", "cohort", "unit_of_replication", "pairing", "batch_confounding",
+              "unique", "nesting", "batch_estimability"}
+
+
+def test_the_emitted_contract_replays_on_the_released_kinds(tmp_path: Path) -> None:
+    rows = [["s1", "d1", "A", "r"], ["s2", "d1", "B", "r"], ["s3", "d2", "A", "r"],
+            ["s4", "d2", "B", "r"]]
+    spec = _write_ledger(tmp_path, ["sample", "donor", "group", "run"], rows,
+                         sample_id="sample", group="group", unit_of_replication="donor",
+                         batch=["run"], pairing={"unit": "donor", "within": "group"})
+    out = tmp_path / "contract.json"
+    result = subprocess.run([sys.executable, str(CHECKER), "--ledger", str(spec), "--json",
+                             "--emit-contract", str(out)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    ran = {c["kind"] for c in json.loads(result.stdout)["checks"]}
+    assert "paired_batch" in ran  # the advisory check still runs in ledger mode
+    emitted = json.loads(out.read_text())
+    assert emitted["schema"] == dcc.SCHEMA
+    assert {c["kind"] for c in emitted["checks"]} <= MAIN_KINDS

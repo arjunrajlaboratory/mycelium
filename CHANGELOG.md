@@ -80,8 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     never blocks** until proven on real ledgers. A ledger with a pairing and
     batch columns gets one per batch column, plus one for all of them
     together. It tests, exactly, one design: unit (absorbed) + every observed
-    group-by-within cell + batch, within a fixed work budget (a design past
-    it is reported as too large to check). It warns when a within-unit
+    group-by-within cell + batch. All advisory checks in a run share one
+    budget (about a second); a check that runs out reports it was too large
+    to check, and later ones are skipped with a warning. They run in ledger
+    mode only: `--emit-contract` leaves them out, so the emitted v1 contract
+    replays on readers that predate the kind. It warns when a within-unit
     contrast the pairs estimate is lost to batch: the pairs are split across batches in step with the
     within factor (donor 1 treated in run 1 and control in run 2, donor 2
     treated in run 2 and control in run 3, where `batch_confounding` only
