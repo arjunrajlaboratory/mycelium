@@ -248,12 +248,13 @@ Pipes, `;`, `||`, backgrounding, subshells, substitutions, `$` expansions,
 globs, braces, tilde, heredocs, and an unknown exit status claim nothing. A
 Claude Code background launch (`run_in_background`, or a result carrying a
 `backgroundTaskId`) fires PostToolUse when the job starts, so the tracker
-passes no exit status and `--background-launch` for it. A launch, or any call
-the observer saw leave a job running, records no `outputs` at all, from any
-source: a path it is expected to write is listed, unhashed, in
-`unconfirmed_outputs`. After `printf -v`, `read`, `readarray`, `mapfile`,
-`getopts`, or `let` (any of which can set `PATH`), nothing later in the list
-is claimed, as after `export` or a `PATH=` assignment. A
+passes no exit status and `--background-launch` for it. A launch records no
+`outputs` at all, from any source; the observer's `background` status alone
+does not withhold them, since a foreground stage before a `nohup` finished.
+After `printf -v NAME`, `read`, `readarray`, `mapfile`, `getopts`, or `let`
+(any of which can set `PATH`), nothing later in the list is claimed, as after
+`export` or a `PATH=` assignment; the setter's own redirections still are.
+The attached form `printf -vPATH` is not recognized. A
 command's own operands (`head data/x.csv`) are never inputs: that would need
 each tool's grammar. Files are hashed at hook time; a FIFO, device, or
 directory is recorded without being opened, and every open is non-blocking

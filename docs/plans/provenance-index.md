@@ -916,7 +916,21 @@ touched these paths", not "its inputs and outputs are known".
   secondary, unverified figure for this reason among others.
 - Claude transcript directories are found by their encoded name. Only calls
   whose recorded cwd is the project or one of its `git worktree list`
-  worktrees (compared by path components) are counted.
+  worktrees (compared by path components) are counted. A linked worktree
+  outside the project directory has a transcript directory of its own name,
+  which is not searched: a coverage gap (its calls are left out), not a
+  wrong count.
+
+**Known limits of the hook path** (documented, not fixed):
+
+- `printf -vPATH ...` (the option attached to its name) is not recognized
+  as setting a variable, so a later `cp` in the same `&&` list can still be
+  claimed; `printf -v PATH ...` is.
+- Commands up to the 16 KB cap are never sliced, but one pathological shape
+  is still slow: a 246 KB command of thousands of short words plus 64 data
+  paths of about 900 characters each took 1.6 s of CPU in the step's path
+  matching. It is within the per-path limit and far from anything in the
+  transcripts.
 
 **What "no silent misses" means.** It holds under the classification rule
 above, not for every data access. The rule shares the detector's blind

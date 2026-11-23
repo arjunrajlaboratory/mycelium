@@ -6066,11 +6066,12 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
                 return io  # the command name may now resolve elsewhere
             first += 1
         argv = argv[first:]
-        if argv and (argv[0] in _VARIABLE_SETTING_WORDS
-                     or (argv[0] == "printf" and "-v" in argv[1:2])):
-            # `printf -v PATH ...`, `read PATH`: any variable, PATH included,
-            # may now differ, so a later `cp` may not be cp.
-            return io
+        # `printf -v PATH ...`, `read PATH`: any variable, PATH included, may
+        # now differ, so a later `cp` may not be cp. The setter's own
+        # redirections (`read v < data/in.csv`) still opened: they are
+        # claimed below, and only what comes after it is not.
+        sets_variable = bool(argv) and (argv[0] in _VARIABLE_SETTING_WORDS
+                                        or (argv[0] == "printf" and "-v" in argv[1:2]))
         if argv and argv[0] in _STATUS_UNPROVEN_WORDS:
             # `exit 0 && ...`, `set -n && ...`, `! cmd < missing`: the final
             # status no longer proves this or any later command ran (or
@@ -6092,6 +6093,8 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
                 io.inputs.append((str(path), "redirection"))
             elif operator in _OUTPUT_REDIRECTIONS:
                 io.outputs.append((str(path), "redirection"))
+        if sets_variable:
+            return io
         if not argv:
             continue
         if argv[0] in ("cp", "mv"):
@@ -7678,26 +7681,24 @@ _OBSERVATION_STATUSES = frozenset({"no-known-overlap", "overlap", "background", 
 
 
 def _is_background_launch(args: argparse.Namespace) -> bool:
-    """The hook ran when a background job started, not when it ended: the
-    tracker says so (`--background-launch`), or the observer saw the call
-    leave a job running."""
-    observation = getattr(args, "observation", None) or {}
-    return bool(getattr(args, "background_launch", False)
-                or observation.get("status") == "background")
+    """The host says the hook ran when a background job started
+    (`--background-launch`: `run_in_background`, or a `backgroundTaskId`).
+    The observer's `background` status is not enough on its own: in
+    `python3 fit.py && nohup true` the script ran to completion first."""
+    return bool(getattr(args, "background_launch", False))
 
 
 def _withhold_launch_outputs(record: dict, args: argparse.Namespace) -> None:
-    """At a background launch nothing has been written yet: a predicted
-    output keeps only its path, in `unconfirmed_outputs`, never a hash or a
-    place in `outputs` (which every reader takes as a completed write)."""
+    """At a background launch nothing has been written yet: no output is
+    recorded at all, not even as a bare path (a predicted name would reach
+    the Stop archive outside the commit allowlist). The command text keeps
+    its mentions, which the allowlist does govern."""
     if not _is_background_launch(args) or not record.get("outputs"):
         return
-    paths = [o.get("path") for o in record["outputs"] if isinstance(o, dict) and o.get("path")]
     record["outputs"] = []
-    record["unconfirmed_outputs"] = paths
     record.setdefault("lineage_warnings", []).append(
         "Background launch: the job had not finished when this was recorded, "
-        "so its outputs are listed unhashed in unconfirmed_outputs.")
+        "so no output is listed.")
 
 
 def _parse_observation(raw: str | None) -> dict | None:

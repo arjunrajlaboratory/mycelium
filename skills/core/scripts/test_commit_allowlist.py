@@ -743,6 +743,25 @@ def test_an_archived_event_stream_holds_only_allowlisted_text(tmp_path: Path) ->
         [None, "data_command", "skip"]
 
 
+def test_a_background_launch_never_archives_a_predicted_output(tmp_path: Path) -> None:
+    # Review of #159: a launch's predicted outputs once sat in a field the
+    # Stop archive copied verbatim. The name lives only in the script source.
+    (tmp_path / "fit.py").write_text(
+        "import pandas as pd\npd.DataFrame().to_csv('REVIEW_MARKER.csv')\n")
+    stream = tmp_path / "events.ndjson"
+    old = sys.argv
+    sys.argv = ["x", "--cwd", str(tmp_path), "--ts", "T", "--bash-cmd", "python3 fit.py",
+                "--append-to", str(stream), "--background-launch"]
+    try:
+        assert ev.main() == 0
+    finally:
+        sys.argv = old
+    assert stream.read_text()
+    archive = tmp_path / "archive.tmp"
+    stop.commit_stream(stream, archive)
+    assert "REVIEW_MARKER" not in archive.read_text()
+
+
 def test_the_observation_store_holds_only_allowlisted_text() -> None:
     observation = {"kind": "observation", "repo_root": "/r",
                    "bash_cmd": f"python3 fit.py -k {RANDOM_TOKEN} > out/x.csv",

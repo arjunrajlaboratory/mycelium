@@ -388,32 +388,58 @@ def test_a_path_change_ends_what_a_copy_proves(project, setter, pair):
         (project / name).write_text("1\n")
     event = _event(f"{setter} && cp {pair}", project)
     assert event is not None
-    assert event["inputs"] == [] and event["outputs"] == []
+    # Nothing from the copy; a setter's own `< data/x.csv` still opened.
+    assert all(i["evidence"] == "redirection" for i in event["inputs"])
+    assert event["outputs"] == []
 
 
-@pytest.mark.parametrize("flags", [
-    ["--background-launch"],
-    ["--observation-json", '{"status": "background", "host_session_id": "s"}'],
-])
-def test_a_launch_records_outputs_only_as_unhashed_paths(project, flags):
+def _run_extractor(project: Path, command: str, *flags: str) -> list[dict]:
+    out = project / "events.ndjson"
+    out.unlink(missing_ok=True)
+    old = sys.argv
+    sys.argv = ["x", "--cwd", str(project), "--ts", "T", "--bash-cmd", command,
+                "--append-to", str(out), *flags]
+    try:
+        assert lineage_event.main() == 0
+    finally:
+        sys.argv = old
+    return [json.loads(line) for line in out.read_text().splitlines()] if out.exists() else []
+
+
+def test_a_launch_records_no_output_at_all(project):
     (project / "out.csv").write_text("old")
-    script = project / "fit.py"
-    script.write_text("import pandas as pd\npd.DataFrame().to_csv('out.csv')\n")
-    for command in ("python3 fit.py", "sleep 9 && printf x > data/x.csv"):
-        out = project / "events.ndjson"
-        out.unlink(missing_ok=True)
-        old = sys.argv
-        sys.argv = ["x", "--cwd", str(project), "--ts", "T", "--bash-cmd", command,
-                    "--append-to", str(out), *flags]
-        try:
-            assert lineage_event.main() == 0
-        finally:
-            sys.argv = old
-        (record,) = [json.loads(line) for line in out.read_text().splitlines()]
-        assert record["outputs"] == []
-        if command.startswith("python3"):
-            # The static scan's prediction, as a bare path.
-            assert record["unconfirmed_outputs"] == [str(project / "out.csv")]
+    (project / "fit.py").write_text("import pandas as pd\npd.DataFrame().to_csv('out.csv')\n")
+    (record,) = _run_extractor(project, "python3 fit.py", "--background-launch")
+    assert record["outputs"] == []
+    assert "unconfirmed_outputs" not in record
+    assert "out.csv" not in json.dumps(record.get("lineage_warnings"))
+
+
+def test_a_foreground_stage_beside_nohup_keeps_its_output(project):
+    # Review of #159: the observer reports `background` for the whole call,
+    # but `python3 fit.py` ran to completion before `nohup true` (0.9.7
+    # records out.csv). Only the host's launch evidence withholds outputs.
+    (project / "fit.py").write_text("import pandas as pd\npd.DataFrame().to_csv('out.csv')\n")
+    (project / "out.csv").write_text("new")
+    (record,) = _run_extractor(
+        project, "python3 fit.py && nohup true", "--bash-exit", "0",
+        "--observation-json", '{"status": "background", "host_session_id": "s"}')
+    assert [o["path"] for o in record["outputs"]] == [str(project / "out.csv")]
+
+
+def test_a_variable_setter_keeps_its_own_redirections(project):
+    # Review of #159: 0.9.7 records both; the setter guard must only end
+    # what comes after the setter.
+    (project / "data" / "in.csv").write_text("1\n")
+    event = _event("read value < data/in.csv", project)
+    assert [i["path"] for i in event["inputs"]] == [str(project / "data" / "in.csv")]
+    (project / "data" / "empty.csv").write_text("")
+    event = _event("printf -v result %s hi > data/empty.csv", project)
+    assert [o["path"] for o in event["outputs"]] == [str(project / "data" / "empty.csv")]
+    # ...while a copy after it still claims nothing.
+    event = _event("read value < data/in.csv && cp data/in.csv data/y.csv", project)
+    assert [i["path"] for i in event["inputs"]] == [str(project / "data" / "in.csv")]
+    assert event["outputs"] == []
 
 
 def test_relative_resolution_stats_a_bounded_number_of_words(project):

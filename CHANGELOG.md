@@ -221,15 +221,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or `cp`/`mv` target that already existed was then recorded as the job's
   output, with its old content, while the job was still waiting to run. This
   affected 0.9.7 for data-extension paths too. The tracker now passes no exit
-  status for a launch, plus `--background-launch`. A launch, or a call the
-  observer saw leave a job running, records no `outputs` at all. Its
-  predicted outputs are listed unhashed in a new `unconfirmed_outputs`
-  field. This includes a script's statically inferred outputs, which 0.9.7
-  also hashed at launch.
-- After `printf -v`, `read`, `readarray`, `mapfile`, `getopts`, or `let`,
-  any of which can set `PATH`, a later `cp`/`mv` in the same `&&` list no
-  longer counts as proven. 0.9.7 recorded a copy that a `PATH`-shadowed `cp`
-  never made.
+  status for a launch, plus `--background-launch`. A launch records no
+  `outputs` at all, including a script's statically inferred outputs, which
+  0.9.7 also hashed at launch. Only the host's launch evidence counts; the
+  observer's `background` status alone does not (`python3 fit.py && nohup
+  true` keeps fit.py's output).
+- After `printf -v NAME`, `read`, `readarray`, `mapfile`, `getopts`, or
+  `let`, any of which can set `PATH`, a later `cp`/`mv` in the same `&&` list
+  no longer counts as proven; the setter's own redirections still do. 0.9.7
+  recorded a copy that a `PATH`-shadowed `cp` never made. The attached form
+  `printf -vPATH` is not recognized.
 - A data command's `step` no longer tokenizes a stage longer than 16 KB.
   `shlex` built a 250 KB quoted argument one character at a time, taking
   seconds on the hook path. Such a stage is recorded as `partial` with
