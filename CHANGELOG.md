@@ -173,7 +173,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handoff is missing or stale, Stop publishes the generic fallback as
   before. If the check itself errors, Stop also falls back without
   blocking. Complete handoffs, including the older `## Current State` /
-  `## What Was Done` schema, are accepted without a block.
+  `## What Was Done` schema, are accepted without a block. A leading
+  byte-order mark or trailing whitespace on a heading line no longer makes
+  a heading count as missing. The check runs before the registry row is
+  written, so a blocked attempt never reads as complete. On the Antigravity
+  adapter's last allowed Stop, where a block could not reach the agent,
+  Stop publishes the fallback at once. The one-time marker is cleared when
+  Stop accepts or SessionStart replaces the transaction, and it moves with
+  a session adopted into a worktree, so the move does not grant a second
+  explanation.
   `finalize_handoff.py --diagnose` reports the problems: exit 0 for a
   complete handoff, 3 with a one-line diagnosis, 1 on error. Existing projects pick up the new rule 10 the next time
   `init_repo.py` or migration refreshes their `MYCELIUM.md`.

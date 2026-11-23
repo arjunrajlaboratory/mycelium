@@ -608,6 +608,10 @@ mycelium_accept_lineage_session() {
 }
 
 mycelium_cleanup_accepted_scoped_state() {
+  # The one-time handoff explanation belongs to the accepted transaction, in a
+  # flat (legacy) state directory as much as a scoped one. Never fatal: a
+  # directory at this path must not fail an accepted Stop.
+  rm -f "$STATE_DIR/handoff-check-blocked.tmp" 2>/dev/null || true
   if [[ "${MYCELIUM_SESSION_SCOPED:-false}" != true \
     || "$STATE_DIR" == "$MYCELIUM_SHARED_STATE_DIR" ]]; then
     return 0
@@ -616,7 +620,6 @@ mycelium_cleanup_accepted_scoped_state() {
   # on every earlier failure/block path. Never recurse into an identity-derived
   # directory.
   rm -f "$STATE_DIR/last-session.md"
-  rm -f "$STATE_DIR/handoff-check-blocked.tmp"
   rm -f "$STATE_DIR/mycelium-read-access.log"
   # This IDE can lose the hook response after finalization. Publish an
   # identity-bound receipt only after all acceptance effects have completed;
@@ -634,7 +637,8 @@ mycelium_cleanup_accepted_scoped_state() {
 # Explain a handoff the agent wrote this transaction but that the finalizer
 # would reject, once per transaction, instead of replacing it silently. The
 # marker holds the transaction's session ID, so a retry that still fails falls
-# back and a later transaction is not suppressed by a stale marker. Fails open:
+# back and a later transaction is not suppressed by a stale marker. Accepted
+# Stop and SessionStart's replacement of a transaction remove it. Fails open:
 # returns 1 (caller publishes the fallback) unless the validator gave a definite
 # diagnosis and the marker was recorded; returns 0 only after emitting a block.
 mycelium_block_once_for_incomplete_handoff() {
@@ -647,11 +651,20 @@ mycelium_block_once_for_incomplete_handoff() {
   local headings='`## What was worked on`, `## Key decisions made`, `## Blockers & surprises`, `## Current state`, `## Next steps`'
 
   [[ -n "$transaction" && -f "$FINALIZE_HANDOFF_SCRIPT" ]] || return 1
+  # The host has no continuation left (the Antigravity adapter's last allowed
+  # Stop): a block would never reach the agent, so publish the fallback now.
+  if [[ "${MYCELIUM_STOP_NO_CONTINUATION:-}" == 1 ]]; then
+    return 1
+  fi
   if [[ -L "$marker" || ( -e "$marker" && ! -f "$marker" ) ]]; then
     return 1
   fi
-  if [[ -f "$marker" && "$(head -n 1 "$marker" 2>/dev/null || true)" == "$transaction" ]]; then
-    return 1
+  # "carried": a session adopted from another checkout already had its one
+  # explanation there (see mycelium__take_moved_from).
+  if [[ -f "$marker" ]]; then
+    case "$(head -n 1 "$marker" 2>/dev/null || true)" in
+      "$transaction" | carried) return 1 ;;
+    esac
   fi
   diagnosis=$(python3 "$FINALIZE_HANDOFF_SCRIPT" \
     --handoff "$handoff" --diagnose 2>/dev/null) || status=$?
@@ -861,6 +874,44 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
           "STOP BLOCKED — session registry finalization failed because the session ID is invalid. Active state was preserved for repair and retry."
         exit 0
       fi
+      # Judge the handoff before any registry write: a blocked attempt must
+      # leave the row untouched, or it reads as complete and --preserve-authored
+      # later keeps this attempt's generated summary as if the agent wrote it.
+      _SESSION_FILE="$STATE_DIR/last-session.md"
+      _SESSION_COMPLETE=true
+      _SESSION_FRESH=false
+      _SESSION_MTIME=0
+      if [ -f "$_SESSION_FILE" ] && [ ! -L "$_SESSION_FILE" ]; then
+        _SESSION_MTIME=$(mycelium_file_mtime "$_SESSION_FILE" 2>/dev/null || echo "0")
+        # Ask the finalizer to validate the exact body it would publish after
+        # removing obsolete lifecycle prose. A pre-cleanup check can accept a
+        # section whose only content is then deleted during finalization.
+        if [ -f "$FINALIZE_HANDOFF_SCRIPT" ] \
+          && python3 "$FINALIZE_HANDOFF_SCRIPT" \
+            --handoff "$_SESSION_FILE" \
+            --check-complete \
+            >/dev/null 2>/dev/null; then
+          _SESSION_COMPLETE=true
+        else
+          _SESSION_COMPLETE=false
+        fi
+        if [[ "$START_TS" =~ ^[0-9]+$ \
+          && "$_SESSION_MTIME" =~ ^[0-9]+$ \
+          && "$_SESSION_MTIME" -ge "$START_TS" ]]; then
+          _SESSION_FRESH=true
+        fi
+      else
+        _SESSION_COMPLETE=false
+      fi
+
+      # A handoff the agent wrote this transaction but that fails the check
+      # gets one specific explanation before the fallback replaces it.
+      if [[ "$_SESSION_COMPLETE" != true && "$_SESSION_FRESH" == true ]] \
+        && mycelium_block_once_for_incomplete_handoff \
+          "$_SESSION_FILE" "$SESSION_ID"; then
+        exit 0
+      fi
+
       # Summary from the first 3 paths in the same unique session file set.
       SUMMARY=""
       if [ -n "$SESSION_CHANGED_FILES" ]; then
@@ -911,42 +962,6 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
       if [[ "$REGISTRY_OK" != true ]]; then
         mycelium_emit_stop_block \
           "STOP BLOCKED — session registry finalization failed. The active log and session baselines were preserved; inspect .living/log/.upsert_registry_row.err or the helper installation, then retry Stop."
-        exit 0
-      fi
-
-      # Auto-write last-session.md for next session context
-      _SESSION_FILE="$STATE_DIR/last-session.md"
-      _SESSION_COMPLETE=true
-      _SESSION_FRESH=false
-      _SESSION_MTIME=0
-      if [ -f "$_SESSION_FILE" ] && [ ! -L "$_SESSION_FILE" ]; then
-        _SESSION_MTIME=$(mycelium_file_mtime "$_SESSION_FILE" 2>/dev/null || echo "0")
-        # Ask the finalizer to validate the exact body it would publish after
-        # removing obsolete lifecycle prose. A pre-cleanup check can accept a
-        # section whose only content is then deleted during finalization.
-        if [ -f "$FINALIZE_HANDOFF_SCRIPT" ] \
-          && python3 "$FINALIZE_HANDOFF_SCRIPT" \
-            --handoff "$_SESSION_FILE" \
-            --check-complete \
-            >/dev/null 2>/dev/null; then
-          _SESSION_COMPLETE=true
-        else
-          _SESSION_COMPLETE=false
-        fi
-        if [[ "$START_TS" =~ ^[0-9]+$ \
-          && "$_SESSION_MTIME" =~ ^[0-9]+$ \
-          && "$_SESSION_MTIME" -ge "$START_TS" ]]; then
-          _SESSION_FRESH=true
-        fi
-      else
-        _SESSION_COMPLETE=false
-      fi
-
-      # A handoff the agent wrote this transaction but that fails the check
-      # gets one specific explanation before the fallback replaces it.
-      if [[ "$_SESSION_COMPLETE" != true && "$_SESSION_FRESH" == true ]] \
-        && mycelium_block_once_for_incomplete_handoff \
-          "$_SESSION_FILE" "$SESSION_ID"; then
         exit 0
       fi
 

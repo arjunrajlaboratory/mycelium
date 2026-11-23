@@ -44,8 +44,14 @@ _STALE_STOP_LINE = re.compile(
 _MARKDOWN_HEADING = re.compile(r"^ {0,3}#{1,6}(?:\s|$)")
 
 
+def _is_heading(line: str, heading: str) -> bool:
+    """Trailing whitespace on a heading line is invisible; it still counts."""
+    return line.rstrip() == heading
+
+
 def clean_handoff_body(content: str) -> str:
-    content = _STATUS_BLOCK.sub("", content)
+    # Editors may save a byte-order mark; it is not part of the first heading.
+    content = _STATUS_BLOCK.sub("", content.removeprefix("\ufeff"))
     kept = [line for line in content.splitlines() if not _STALE_STOP_LINE.match(line)]
     return "\n".join(kept).strip("\n")
 
@@ -55,7 +61,9 @@ def handoff_has_complete_sections(content: str) -> bool:
     for headings in HANDOFF_SCHEMAS:
         positions: list[int] = []
         for heading in headings:
-            matches = [index for index, line in enumerate(lines) if line == heading]
+            matches = [
+                index for index, line in enumerate(lines) if _is_heading(line, heading)
+            ]
             if len(matches) != 1:
                 break
             positions.append(matches[0])
@@ -99,7 +107,9 @@ def describe_handoff_problems(content: str) -> list[str]:
     ]
     lines = clean_handoff_body(content).splitlines()
     positions = {
-        heading: [index for index, line in enumerate(lines) if line == heading]
+        heading: [
+            index for index, line in enumerate(lines) if _is_heading(line, heading)
+        ]
         for heading in headings
     }
     problems: list[str] = []
@@ -113,7 +123,9 @@ def describe_handoff_problems(content: str) -> list[str]:
     found_order = sorted(single, key=lambda heading: positions[heading][0])
     if found_order != single:
         problems.append(f"headings out of order ({_quoted(found_order)})")
-    starts = sorted(positions[heading][0] for heading in single)
+    # Every occurrence ends the section before it, so a duplicate heading's
+    # body is never credited to the empty section above it.
+    starts = sorted(position for found in positions.values() for position in found)
     for heading in single:
         start = positions[heading][0]
         later = [position for position in starts if position > start]

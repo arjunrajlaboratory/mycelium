@@ -389,3 +389,33 @@ def test_a_malformed_owner_token_is_not_taken(tmp_path):
 
     assert stub.is_file()
     assert owner.is_file()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_handoff_explanation_given_before_a_move_is_not_given_again(
+    tmp_path, host
+):
+    """The one-time handoff block moves with the session: the adopting
+    checkout's Stop falls back instead of explaining a second time."""
+    main, worktree = _checkouts(tmp_path)
+    _start(host, main)
+    # A shell edit records no activity, so the reservation stays adoptable.
+    (main / "report.py").write_text("y = 3\n")
+    with (main / ".living" / "learnings.md").open("a") as handle:
+        handle.write("\n### Main learning\n- noted\n")
+    handoff = _run_dir(main, host) / "last-session.md"
+    handoff.write_text("## 1. Accomplished\n- Numbered headings.\n")
+    future = time.time() + 2
+    os.utime(handoff, (future, future))
+    first = _stop(host, main, active=False)
+    assert _blocked(first), first.stdout
+    assert "would be replaced by a generic fallback" in json.loads(first.stdout)["reason"]
+    assert (_run_dir(main, host) / "handoff-check-blocked.tmp").is_file()
+
+    _edit(host, worktree, worktree / "analysis.py", "x = 3\n")
+    assert (_run_dir(worktree, host) / "handoff-check-blocked.tmp").read_text() == "carried\n"
+    with (worktree / ".living" / "learnings.md").open("a") as handle:
+        handle.write("\n### Worktree learning\n- noted\n")
+    stop = _stop(host, worktree, active=True)
+    reason = json.loads(stop.stdout)["reason"] if _blocked(stop) else ""
+    assert "would be replaced by a generic fallback" not in reason

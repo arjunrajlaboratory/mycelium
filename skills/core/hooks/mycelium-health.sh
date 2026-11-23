@@ -276,6 +276,7 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
     rm -f "$ACTIVE_OWNER_FILE"
     rm -f "$STATE_DIR/session-start-ts.tmp"
     rm -f "$STATE_DIR/handoff-finalization-pending.tmp"
+    rm -f "$STATE_DIR/handoff-check-blocked.tmp" 2>/dev/null || true
     rm -f "$STATE_DIR/data-lineage-session-id.tmp"
     rm -f "$STATE_DIR/mycelium-reminded.tmp"
     rm -f "$STATE_DIR/mycelium-session-activity.tmp"
@@ -301,6 +302,13 @@ if [[ "$SOURCE" != "startup" && "${MYCELIUM_SESSION_SCOPED:-false}" == true ]] \
     || (( CARRIED_START_TS > NOW_TS )); then
     CARRIED_START_TS=""
   fi
+fi
+
+# With no transaction here, a one-time handoff-explanation marker is left over
+# from one that ended without an accepted Stop. Clear it before a move below
+# can carry the moved transaction's marker in.
+if [ ! -f "$ACTIVE_LOG_FILE" ]; then
+  rm -f "$STATE_DIR/handoff-check-blocked.tmp" 2>/dev/null || true
 fi
 
 # A session that moved here from a sibling checkout of this repository (a

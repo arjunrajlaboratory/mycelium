@@ -1183,8 +1183,10 @@ canonical headings in order, and a test checks them against
 reject blocks Stop once per transaction, with a reason that names the missing,
 duplicated, misordered and empty sections and any stripped Stop-status line.
 The marker that spends that block holds the transaction's session ID. A retry
-that still fails, an absent or stale handoff, and any validator error fall
-back without blocking.
+that still fails, an absent or stale handoff, any validator error, and a host
+with no continuation left fall back without blocking. The check and the
+diagnosis share one normalisation (byte-order mark, trailing heading
+whitespace), and the block comes before any registry write.
 
 **Regression evidence:** Run Stop on a real numbered-heading handoff, a
 subheading-only section and a section emptied by Stop-status cleanup: each

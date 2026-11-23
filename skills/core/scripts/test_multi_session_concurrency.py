@@ -574,6 +574,8 @@ def test_fresh_numbered_handoff_blocks_once_then_falls_back(tmp_path):
         tmp_path, session_id, authored
     )
     shared = repo / ".mycelium" / "last-session.md"
+    registry = repo / ".living" / "log" / "LOG_REGISTRY.md"
+    registry_before = registry.read_bytes()
 
     first = _stop(repo, session_id, False)
 
@@ -588,6 +590,8 @@ def test_fresh_numbered_handoff_blocks_once_then_falls_back(tmp_path):
     assert "`- None.`" in reason
     assert "second" in reason
     assert private.read_text(encoding="utf-8") == authored
+    # A blocked attempt writes no registry row, so it cannot read as complete.
+    assert registry.read_bytes() == registry_before
     assert not shared.exists() or "1. Accomplished" not in shared.read_text()
 
     second = _stop(repo, session_id, True)
@@ -659,6 +663,24 @@ def test_handoff_block_is_not_inherited_by_a_later_transaction(tmp_path):
 
     assert third.returncode == 0, third.stderr
     assert "would be replaced by a generic fallback" in json.loads(third.stdout)["reason"]
+
+
+def test_a_directory_at_the_handoff_marker_path_never_fails_stop(tmp_path):
+    session_id = "marker-directory-root"
+    repo, scoped_state, private = _scoped_work_with_handoff(
+        tmp_path, session_id, NUMBERED_HANDOFF.read_text(encoding="utf-8")
+    )
+    (scoped_state / "handoff-check-blocked.tmp").mkdir()
+
+    stopped = _stop(repo, session_id, False)
+
+    # Fails open: no block it cannot record, and the accepted cleanup's
+    # removal of the marker path is not fatal.
+    assert stopped.returncode == 0, stopped.stderr
+    assert '"decision": "block"' not in stopped.stdout
+    assert "Completed the session work recorded" in (
+        repo / ".mycelium" / "last-session.md"
+    ).read_text()
 
 
 def test_matching_preupgrade_flat_transaction_completes_without_migration(tmp_path):

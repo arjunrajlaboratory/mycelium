@@ -3698,6 +3698,46 @@ def test_stop_handoff_check_fails_open_when_the_validator_errors(tmp_path):
     assert "Completed the session work recorded in the finalized session log." in published
 
 
+def test_stop_without_a_continuation_publishes_the_fallback_at_once(tmp_path):
+    result, handoff = _stop_with_fresh_numbered_handoff(
+        tmp_path, {"MYCELIUM_STOP_NO_CONTINUATION": "1"}
+    )
+
+    assert '"decision": "block"' not in result.stdout
+    assert "Completed the session work recorded" in handoff.read_text()
+
+
+def test_flat_handoff_marker_is_cleared_when_stop_accepts(tmp_path):
+    result, handoff = _stop_with_fresh_numbered_handoff(tmp_path)
+    marker = handoff.parent / "handoff-check-blocked.tmp"
+    assert json.loads(result.stdout)["decision"] == "block" and marker.is_file()
+
+    retried = _run_hook(
+        "mycelium-stop-check.sh",
+        handoff.parent.parent,
+        {"cwd": str(handoff.parent.parent), "stop_hook_active": True, "turn_id": "retry"},
+    )
+
+    assert '"decision": "block"' not in retried.stdout
+    assert not marker.exists()
+
+
+def test_fresh_flat_transaction_clears_a_leftover_handoff_marker(tmp_path):
+    repo = _repo(tmp_path)
+    marker = repo / ".mycelium" / "handoff-check-blocked.tmp"
+    marker.parent.mkdir(exist_ok=True)
+    marker.write_text("2026-11-22-007\n")
+
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "fresh-start"},
+    )
+
+    assert start.returncode == 0, start.stderr
+    assert not marker.exists()
+
+
 def test_stop_handoff_block_ignores_a_marker_from_another_transaction(tmp_path):
     result, handoff = _stop_with_fresh_numbered_handoff(
         tmp_path, marker="2020-01-01-001\n"

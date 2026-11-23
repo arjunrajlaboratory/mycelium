@@ -364,3 +364,38 @@ def test_diagnose_fails_closed_to_an_error_status_on_unreadable_input(
 
     assert result.returncode == 1
     assert result.stdout == ""
+
+
+def test_byte_order_mark_and_trailing_heading_space_are_complete(
+    tmp_path: Path,
+) -> None:
+    # Both are invisible in an editor; the check and the diagnosis share one
+    # normalisation, so neither costs the agent its authored handoff.
+    for raw in (
+        b"\xef\xbb\xbf" + _complete_handoff().encode(),
+        _complete_handoff().replace("## Current state", "## Current state  \t").encode(),
+    ):
+        handoff = tmp_path / "last-session.md"
+        handoff.write_bytes(raw)
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--handoff", str(handoff), "--diagnose"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert (result.returncode, result.stdout) == (0, "")
+        assert finalize(raw.decode("utf-8"), "2026-11-23T12:00:00-0500").count(
+            "﻿"
+        ) == 0
+
+
+def test_diagnose_names_an_empty_section_before_a_duplicate(tmp_path: Path) -> None:
+    handoff = _complete_handoff().replace(
+        "## Current state\n- Analysis complete.\n\n", "## Current state\n\n"
+    ) + "\n## Next steps\n- A second list.\n"
+
+    result = _diagnose(tmp_path, handoff)
+
+    assert result.returncode == 3
+    assert "`## Next steps` appears 2 times" in result.stdout
+    assert "`## Current state` has no prose or bullet" in result.stdout
