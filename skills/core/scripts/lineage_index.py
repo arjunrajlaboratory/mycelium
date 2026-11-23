@@ -1209,6 +1209,11 @@ class Index:
                         and (g.get("journal") or {}).get("post_seq") is None
                         and not (g.get("journal") or {}).get("expired")
                         for g in self.gaps)
+            # A call flagged background at Pre whose launch never reached
+            # the journal (its Post failed) is just as open.
+            open_ = open_ or any(i.get("background") and i.get("post_seq") is None
+                                 and not i.get("expired")
+                                 for i in self.journal_now.values())
             self._bg_open = open_
         return self._bg_open
 

@@ -287,6 +287,25 @@ def test_another_checkouts_call_cannot_vouch(project: Path, tmp_path: Path) -> N
     assert {"kind": "foreign-call", "call": "s1|claude:F"} in record["unaccounted"]
 
 
+def test_a_background_call_whose_launch_was_lost_blocks_identity_rescue(
+        project: Path) -> None:
+    bash(project, "c1", write_x(project, "A"))
+    # Flagged background at Pre; its Post (the launch) never reached the
+    # journal, so only the open interval says a job may be running.
+    io.pre(project / ".mycelium", host="claude", session="s1", call_id="bg", tool="Bash",
+           repo_root=project, snapshot=True, background=True)
+    index = li.load(project, write=False)
+    assert index._background_open()
+
+
+def test_an_unusual_env_name_is_not_committed() -> None:
+    import extract_data_lineage as stop
+
+    name = "gH7pQx2LmZ9vRt4K_wN8sYb"
+    committed = stop._commit_env({name: "1", "OMP_NUM_THREADS": "4"}, set())
+    assert name not in committed and committed["OMP_NUM_THREADS"] == "4"
+
+
 def test_every_new_observation_records_identity(project: Path) -> None:
     observation = bash(project, "c1", write_x(project, "A"))
     (created,) = observation["changes"]["created"]

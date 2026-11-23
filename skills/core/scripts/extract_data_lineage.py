@@ -387,7 +387,14 @@ def _commit_env(env: Any, keep: set[str]) -> Any:
     if not isinstance(env, dict):
         return env
     out: dict[str, Any] = {}
+    hidden = 0
     for name, value in env.items():
+        if not lr._name_ok(str(name)):
+            # The same name rule as the command text: a name that is not
+            # plainly a variable name may itself be a credential.
+            hidden += 1
+            out[f"{lr.COMMIT_VALUE}#{hidden}"] = lr.COMMIT_VALUE
+            continue
         secret = lr._commit_secret_name(str(name))
         if isinstance(value, str):
             out[name] = lr.commit_safe_value(value, keep, secret)
