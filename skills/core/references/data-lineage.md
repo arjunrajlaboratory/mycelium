@@ -461,9 +461,10 @@ and an embedded observation's `bash_cmd`. A word is kept only on
     command's options are not lent to another (`cat --oneline` is `<v>`);
   - the words go to an interpreter (`python3`, `Rscript`, `bash`, ...), or
     they are the step's `script_args` or `params`, and the run's own source
-    spells `--name` as a whole token. The source is the event's
-    `script_source`: the inline body, or the embedded copy of a script under
-    100 KB. A larger script lends no names. Consolidation reads nothing
+    spells `--name` as a whole token. The source is the embedded copy of a
+    script file under 100 KB whose digest was recorded. An inline `-c`/`-e`
+    body never lends names, because it is part of the command it would vouch
+    for. A larger script lends no names either. Consolidation reads nothing
     from disk.
 
   For `--opt=value`, `--opt=` follows the same rule and the value takes the

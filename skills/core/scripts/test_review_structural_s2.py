@@ -84,13 +84,17 @@ def test_the_reviewed_option_shaped_credential_is_not_published(repo: Path) -> N
     assert action["step"]["argv"][-2:] == [V, V]
 
 
-def test_an_option_the_inline_body_names_is_kept(repo: Path) -> None:
+def test_an_inline_body_never_vouches_for_its_own_options(repo: Path) -> None:
+    # The inline body is part of the command it would vouch for: a body
+    # that spells `--tok` would let `--tok` (a credential) through.
     body = ("import argparse; p = argparse.ArgumentParser(); "
             "p.add_argument('--min-count', type=int); p.parse_args()")
     manifest, _ = _manifest(repo, f'python3 -c "{body}" --min-count 3 --cinder-x 4')
     (action,) = manifest["actions"]
-    assert action["step"]["script_args"] == ["--min-count", "3", V, "4"]
-    assert action["bash_cmd"].endswith(f"--min-count 3 {V} 4")
+    assert action["step"]["script_args"] == [V, "3", V, "4"]
+    token = "zq-vortex-amber-lattice"
+    _, text = _manifest(repo, f"python3 -c 'print(\"--{token}\")' --{token}")
+    assert token not in text
 
 
 def test_an_option_the_script_file_names_is_kept(repo: Path) -> None:

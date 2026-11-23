@@ -501,10 +501,12 @@ def commit_event(event: dict[str, Any]) -> dict[str, Any]:
     safe_candidate = candidate if not isinstance(candidate, str) or lr._keep_match(
         candidate, keep) else lr.COMMIT_VALUE
     source = event.pop("script_source", None)
-    # The run's own source (an inline body, or a script small enough to be
-    # embedded) is the evidence that a long option word is one of its
-    # options; nothing is read from disk here.
-    known = lr.commit_source_options(source)
+    # A script file's embedded source, when that file is evidence-backed
+    # (hashed), is evidence that a long option word is one of its options.
+    # An inline body is not: it is part of the very command it would vouch
+    # for (`python -c '"--tok"' --tok`). Nothing is read from disk here.
+    file_backed = isinstance(event.get("script"), str) and _digest(event.get("script_sha256"))
+    known = lr.commit_source_options(source) if file_backed else set()
     event["bash_cmd"] = lr.commit_safe_command(event.get("bash_cmd"), keep, known)
     if "script_candidate" in event:
         event["script_candidate"] = safe_candidate
