@@ -147,8 +147,22 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   when the visit effect alone is estimable from the other genotype. A
   contrast no unit observes on both sides is left to `pairing`, and a within
   level with no row carrying every batch column blocks, since it cannot be
-  checked. It takes `unit_scope` and `batch_scopes` for local labels. A batch
-  that coincides with the group itself is `batch_confounding`'s block.
+  checked. It takes `unit_scope` and `batch_scopes` for local labels. When
+  `group` is a between-unit factor, a batch that coincides with it is
+  `batch_confounding`'s block (the unit absorbs the group, so this check
+  does not see it); when the group is the `within` factor, both checks
+  block. Blocking is exact; with `max_share` (above 0, at most 1) it also
+  warns when, for a contrast it can still estimate, more than that share of
+  the units with both sides are split across batches in step with it, not
+  offset by a unit split the other way (counterbalanced). Eight donors with
+  base in run 1 and week 4 in run 2, plus two with both visits in run 3,
+  warn: the visit effect rests on two donors. Ledger contracts set
+  `"max_share": 0.5`.
+- For a crossover, make the group the treatment, not the sequence. With
+  `group` set to the sequence (AB, BA), each sequence's treatment effect is
+  aliased with period by design, so a period batch blocks; with the
+  treatment as both group and `within`, AB/BA counterbalancing separates
+  treatment from period and the check passes.
 - `cohort`: the required `levels` of `column` are present; `min_rows` or exact
   `rows` holds; and the `no_missing` columns have no missing values. Rows with
   no `column` value are left out of the levels and counts, with a warning.

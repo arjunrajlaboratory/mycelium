@@ -612,7 +612,6 @@ def check_paired_batch(check, columns, rows):
             observed=", ".join(_side_label(group, s) for s in lost)))
         return alerts
     cells = sorted({(r[unit],) + side(r) + tuple(r[b] for b in batches) for r in kept})
-    units = sorted({c[0] for c in cells})
     batch_levels = [sorted({c[3 + i] for c in cells}) for i in range(len(batches))]
     # Per group level, every within level but the first is one tested effect.
     effects = []
@@ -623,16 +622,22 @@ def check_paired_batch(check, columns, rows):
         return alerts
 
     def design(with_batch, drop=None):
-        matrix = []
+        # The intercept and unit indicators are absorbed: each unit's first
+        # cell is subtracted from its other cells, since rank([1, U, X]) is
+        # the number of units plus the rank of those within-unit differences.
+        # The elimination then grows with the cells, not with units squared.
+        reference, matrix = {}, []
         for cell in cells:
-            row = [1] + [1 if cell[0] == u else 0 for u in units[1:]]
-            row += [1 if (cell[1], cell[2]) == (g, lvl) else 0
-                    for g, lvl, _ in effects if (g, lvl) != drop]
+            row = [1 if (cell[1], cell[2]) == (g, lvl) else 0
+                   for g, lvl, _ in effects if (g, lvl) != drop]
             if with_batch:
                 for i, values in enumerate(batch_levels):
                     row += [1 if cell[3 + i] == v else 0 for v in values[1:]]
-            matrix.append(row)
-        return matrix
+            if cell[0] not in reference:
+                reference[cell[0]] = row
+            else:
+                matrix.append([a - b for a, b in zip(row, reference[cell[0]])])
+        return matrix or [[0]]
 
     unbatched, batched = _rank(design(False)), _rank(design(True))
     confounded = [e for e in effects
@@ -654,6 +659,32 @@ def check_paired_batch(check, columns, rows):
                 "{} vs {}".format(_side_label(group, (g, lvl)), ref) for g, lvl, ref in confounded),
             evidence=["{}={}: {}".format(unit, u, ", ".join(sorted(v)))
                       for u, v in sorted(by_unit.items())][:5]))
+    share = check.get("max_share")
+    if share is None:
+        return alerts
+    # Estimable is not the same as well supported: eight donors split in step
+    # (base in run 1, week 4 in run 2) and two unsplit leave the effect
+    # resting on two donors. A unit's split is offset by one in the opposite
+    # direction (counterbalancing); the rest are in step with the contrast.
+    for g, lvl, ref in effects:
+        if (g, lvl, ref) in confounded:
+            continue
+        sides = defaultdict(lambda: (set(), set()))
+        for cell in cells:
+            if cell[1] == g and cell[2] in (ref, lvl):
+                sides[cell[0]][cell[2] == lvl].add(cell[3:])
+        paired = {u: (a, b) for u, (a, b) in sides.items() if a and b}
+        splits = Counter((frozenset(a), frozenset(b)) for a, b in paired.values() if not a & b)
+        in_step = sum(n - min(n, splits.get((b, a), 0)) for (a, b), n in splits.items())
+        if paired and in_step / len(paired) > share:
+            alerts.append(alert(
+                "paired_batch",
+                "within {}, the {} contrast {} vs {} rests mostly on pairs split across {} in "
+                "step with it".format(unit, within, _side_label(group, (g, lvl)), ref,
+                                      ", ".join(batches)), False,
+                expected="at most {} of {} split in step".format(percent(share), unit),
+                observed="{} of {} units split in step, not offset by a reverse split".format(
+                    in_step, len(paired))))
     return alerts
 
 
@@ -915,7 +946,7 @@ KIND_KEYS = {
     "pairing": {"unit", "within", "levels", "unit_scope", "exact_levels", "min_levels"},
     "batch_confounding": {"batch", "contrast", "max_share", "batch_scope"},
     "batch_estimability": {"batch", "contrast", "batch_scopes"},
-    "paired_batch": {"unit", "within", "batch", "group", "unit_scope", "batch_scopes"},
+    "paired_batch": {"unit", "within", "batch", "group", "unit_scope", "batch_scopes", "max_share"},
     "unique": {"columns"},
     "nesting": {"levels", "local_labels"},
 }
@@ -1014,6 +1045,7 @@ def validate_contract(contract):
                     for k, v in scopes.items()):
                 fail(where, "'batch_scopes' must map batch columns to lists of columns")
             if kind == "paired_batch":
+                validate_share(where, check)
                 validate_column(where, check, "unit", required=True)
                 validate_column(where, check, "within", required=True)
                 validate_column(where, check, "group")
@@ -1033,11 +1065,15 @@ def validate_contract(contract):
             validate_column(where, check, "batch", required=True)
             validate_column(where, check, "contrast", required=True)
             validate_columns(where, check, "batch_scope", allow_single=True)
-            if "max_share" in check:
-                share = check["max_share"]
-                if isinstance(share, bool) or not isinstance(share, (int, float)) or not 0 < share <= 1:
-                    fail(where, "max_share must be a number above 0 and at most 1, as a "
-                                         "share (0.7 for 70%): {}".format(json.dumps(share)))
+            validate_share(where, check)
+
+
+def validate_share(where, check):
+    if "max_share" in check:
+        share = check["max_share"]
+        if isinstance(share, bool) or not isinstance(share, (int, float)) or not 0 < share <= 1:
+            fail(where, "max_share must be a number above 0 and at most 1, as a "
+                        "share (0.7 for 70%): {}".format(json.dumps(share)))
 
 
 CHECKS = {
@@ -1280,8 +1316,10 @@ def ledger_contract(spec, spec_dir):
         # Batch against the within-unit contrast: one check per batch column,
         # and all of them together, as for batch against the group above.
         for columns in [[c] for c in batch] + ([batch] if len(batch) >= 2 else []):
+            # Blocking stays exact; max_share warns when most pairs are
+            # split in step with the contrast, so it rests on a few units.
             paired = {"kind": "paired_batch", "unit": pairing["unit"],
-                      "within": pairing["within"], "batch": columns}
+                      "within": pairing["within"], "batch": columns, "max_share": 0.5}
             if pairing["within"] != group:
                 paired["group"] = group
             if ancestors(pairing["unit"]):

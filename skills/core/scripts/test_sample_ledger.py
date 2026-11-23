@@ -547,3 +547,69 @@ def test_local_labels_qualify_paired_batch_units_and_batches(ledger: Path) -> No
     assert all(c["unit_scope"] == ["site", "line", "derivation"] for c in paired)
     assert paired[0]["batch_scopes"] == {"line": ["site"]}
     assert "batch_scopes" not in paired[1]
+
+
+def test_a_few_hundred_paired_units_check_quickly() -> None:
+    # Unit indicators are absorbed by differencing within units, so the rank
+    # work grows with the cells, not with units squared.
+    import random
+    import time
+
+    rng = random.Random(1)
+    rows = [{"donor": f"d{i}", "g": "WK"[i % 2], "visit": v, "run": f"r{rng.randrange(12)}",
+             "date": f"x{rng.randrange(10)}"} for i in range(300) for v in ("v0", "v1", "v2")]
+    check = {"unit": "donor", "within": "visit", "group": "g", "batch": ["run", "date"]}
+    start = time.perf_counter()
+    assert dcc.check_paired_batch(check, [], rows) == []
+    assert time.perf_counter() - start < 5
+
+
+def test_pairs_mostly_split_in_step_warn(tmp_path: Path) -> None:
+    # Eight donors with base in r1 and week 4 in r2, two with both visits in
+    # r3: estimable (blocking stays exact), but the visit effect rests on two
+    # donors, so the ledger's max_share warns.
+    design = [(f"d{i}", "WK"[i % 2], v, "r1" if v == "base" else "r2")
+              for i in range(8) for v in ("base", "wk4")]
+    design += [(d, g, v, "r3") for d, g in (("d8", "W"), ("d9", "K")) for v in ("base", "wk4")]
+    summaries, alerts = _paired(tmp_path, design, within="visit")
+    assert _paired_status(summaries) == ["warn"]
+    alert = next(a for a in alerts if a["kind"] == "paired_batch")
+    assert not alert["blocking"] and "4 of 5" in alert["observed"]
+
+
+def test_counterbalanced_splits_do_not_warn(tmp_path: Path) -> None:
+    design = []
+    for i in range(6):
+        first, second = ("r1", "r2") if i % 2 else ("r2", "r1")
+        design += [(f"d{i}", "treated", "v", first), (f"d{i}", "control", "v", second)]
+    assert _paired_status(_paired(tmp_path, design)[0]) == ["pass"]
+    lopsided = design[:]
+    for i in range(6, 14):
+        lopsided += [(f"d{i}", "treated", "v", "r1"), (f"d{i}", "control", "v", "r2")]
+    assert _paired_status(_paired(tmp_path, lopsided)[0]) == ["warn"]
+
+
+def test_ledger_paired_batch_sets_a_share_and_validates_it(ledger: Path) -> None:
+    base = {**spec(ledger), "pairing": {"unit": "derivation", "within": "condition"}}
+    paired = [c for c in dcc.ledger_contract(base, str(ledger))["checks"]
+              if c["kind"] == "paired_batch"]
+    assert all(c["max_share"] == 0.5 for c in paired)
+    for bad in (0, 1.5, True, "0.5"):
+        with pytest.raises(dcc.ContractError, match="max_share"):
+            dcc.validate_contract({"schema": dcc.SCHEMA, "table": "t.tsv", "checks": [
+                {"kind": "paired_batch", "unit": "u", "within": "w", "batch": ["b"],
+                 "max_share": bad}]})
+
+
+def test_a_crossover_groups_by_treatment_not_sequence() -> None:
+    # AB/BA: period is the batch. Grouped by treatment, counterbalancing
+    # separates treatment from period; grouped by sequence, each sequence's
+    # treatment effect is period by design, which the docs warn about.
+    rows = [{"subject": f"s{i}", "seq": "AB" if i % 2 else "BA", "treatment": t, "period": p}
+            for i in range(6) for t, p in ((("A", "p1"), ("B", "p2")) if i % 2
+                                            else (("B", "p1"), ("A", "p2")))]
+    by_treatment = {"unit": "subject", "within": "treatment", "batch": ["period"],
+                    "max_share": 0.5}
+    assert dcc.check_paired_batch(by_treatment, [], rows) == []
+    by_sequence = {**by_treatment, "group": "seq"}
+    assert any(a["blocking"] for a in dcc.check_paired_batch(by_sequence, [], rows))
