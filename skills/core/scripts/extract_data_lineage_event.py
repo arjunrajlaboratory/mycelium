@@ -5319,6 +5319,8 @@ _STDLIB_OPAQUE_BUILTINS = frozenset({
 # deadline is checked as it ticks. Over any bound, nothing is resolved.
 _STDLIB_SOURCE_LIMIT = 256 * 1024
 _STDLIB_WORK_LIMIT = 400_000
+# `open` keywords that cannot change which file is opened, when literal.
+_STDLIB_OPEN_LITERAL_KEYWORDS = frozenset({"buffering", "encoding", "errors", "newline"})
 _STDLIB_DEADLINE_SECONDS = 0.3
 _STDLIB_PATH_LIMIT = 4096
 # argparse replay is quadratic in options x arguments (prefix matching).
@@ -5384,6 +5386,14 @@ def _open_mode_directions(mode: Any) -> tuple[str, ...]:
     return ("output",)
 
 
+def _is_literal(node: ast.AST) -> bool:
+    try:
+        ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
+    return True
+
+
 def _is_main_guard(node: ast.AST) -> bool:
     """`if __name__ == "__main__":`"""
     test = node.test if isinstance(node, ast.If) else None
@@ -5413,7 +5423,7 @@ class _StdlibIO:
         self.scopes: dict[ast.AST, ast.AST] = {}
         self.blocks: dict[ast.AST, tuple[list, int]] = {}
         self.calls_by_scope: dict[ast.AST, list[ast.Call]] = {}
-        self.chdir_names: list[ast.AST] = []
+        self.argv_touched = False  # any `x.argv`: argparse may not see the command line
         self.root_stores: list[ast.AST] = []
         self.counts: dict[str, int] = {}
         self.binders: dict[str, ast.AST] = {}
@@ -5461,6 +5471,8 @@ class _StdlibIO:
 
     def _index(self, node: ast.AST) -> None:
         if isinstance(node, ast.Name):
+            if node.id in ("chdir", "fchdir"):
+                self.chdir = True  # any binding: imports may repeat in scopes
             if isinstance(node.ctx, ast.Load):
                 self.loads.setdefault(node.id, []).append(node)
                 if node.id in _STDLIB_OPAQUE_BUILTINS:
@@ -5468,8 +5480,12 @@ class _StdlibIO:
             else:
                 self._bind(node.id, self.parents.get(node, node))
         elif isinstance(node, ast.Attribute):
+            # Hazards are matched by name on any receiver, not through
+            # `canonical`: a repeated import in another scope hides the binding.
             if node.attr in ("chdir", "fchdir"):
-                self.chdir_names.append(node)
+                self.chdir = True
+            if node.attr == "argv":
+                self.argv_touched = True
             if node.attr in _STDLIB_NAMESPACE_ATTRS or node.attr in _STDLIB_OPAQUE_BUILTINS:
                 self.opaque = True  # `x.__dict__[...]`, `builtins.exec(...)`
             if not isinstance(node.ctx, ast.Load):
@@ -5491,6 +5507,8 @@ class _StdlibIO:
                         self.opaque = True  # any attribute, chdir included
                     elif name.value in ("chdir", "fchdir"):
                         self.chdir = True
+                    elif name.value == "argv":
+                        self.argv_touched = True
                     elif name.value in _STDLIB_NAMESPACE_ATTRS:
                         self.opaque = True
         elif isinstance(node, ast.arg):
@@ -5515,6 +5533,8 @@ class _StdlibIO:
                     self.imports[local] = target
                     if target.rsplit(".", 1)[-1] in ("chdir", "fchdir"):
                         self.chdir = True
+                    if target.rsplit(".", 1)[-1] == "argv":
+                        self.argv_touched = True
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             for name in node.names:
                 self._bind(name, node, weight=2)
@@ -5527,11 +5547,6 @@ class _StdlibIO:
 
     def _finish_index(self) -> None:
         """Checks that need every binding known."""
-        for node in self.chdir_names:
-            name = self.canonical(node)
-            if name is not None and name.rsplit(".", 1)[-1] in ("chdir", "fchdir") \
-                    and "." in name:
-                self.chdir = True
         for node in self.root_stores:
             self._tick()
             # An assignment into an imported module (`argparse.X.parse_args
@@ -5744,17 +5759,6 @@ class _StdlibIO:
             return certain and self._is_process_argv(expression, guard | {node.id})
         return False
 
-    def _sys_argv_touched(self) -> bool:
-        """Any mention of `sys.argv` may change what argparse reads."""
-        for target in self.imports.values():
-            if target == "sys.argv":
-                return True
-        for node in ast.walk(self.tree):
-            if isinstance(node, ast.Attribute) and node.attr == "argv" \
-                    and self.canonical(node) == "sys.argv":
-                return True
-        return False
-
     def _namespace_escapes(self, name: str) -> bool:
         """Whether a namespace is used other than by reading `ns.option`."""
         for load in self.loads.get(name, []):
@@ -5796,7 +5800,7 @@ class _StdlibIO:
         if parse_call.keywords or len(parse_call.args) > 1 or not self._is_process_argv(
                 parse_call.args[0] if parse_call.args else None):
             return None
-        if self._namespace_escapes(name) or self._sys_argv_touched():
+        if self._namespace_escapes(name) or self.argv_touched:
             return None
         if not self._runs(args_stmt):
             return None
@@ -5853,6 +5857,7 @@ class _StdlibIO:
         # whose value can be a path: a plain `store` with no nargs or const.
         eligible: dict[str, tuple[object, ast.AST | None, bool]] = {}
         dests: set[str] = set()
+        variable_positionals = 0
         for call in add_calls:
             self._tick()
             if call.keywords and any(k.arg is None for k in call.keywords):
@@ -5886,6 +5891,13 @@ class _StdlibIO:
             action_name = options.get("action", "store")
             if action_name not in _ARGPARSE_ACTIONS:
                 return None
+            prefix = settings.get("prefix_chars", "-")
+            if "nargs" in options and flags and not flags[0][:1] in prefix:
+                # Several positionals with nargs make argparse backtrack,
+                # with no bound on its cost: allow one, decline more.
+                variable_positionals += 1
+                if variable_positionals > 1:
+                    return None
             path_like = action_name == "store" and type_kind != "number" \
                 and "nargs" not in options and "const" not in options
             marker = object()
@@ -5944,7 +5956,7 @@ class _StdlibIO:
             self._tick()
             if not isinstance(node, ast.Call) or any(
                 isinstance(a, ast.Starred) for a in node.args
-            ) or any(k.arg is None or k.arg == "opener" for k in node.keywords):
+            ) or any(k.arg is None for k in node.keywords):
                 continue
             found = self._sink(node)
             if found is None or not self._runs(node):
@@ -5974,10 +5986,26 @@ class _StdlibIO:
                 return keyword.value
         return None
 
+    def _plain_open_arguments(self, node: ast.Call, positional: int,
+                              names: frozenset[str]) -> bool:
+        """At most `positional` positionals (the path and mode slots), and
+        only keywords in `names` or literal ones that cannot redirect the
+        open (an `opener`, positional or not, can)."""
+        if len(node.args) > positional:
+            return False
+        return all(
+            keyword.arg in names
+            or (keyword.arg in _STDLIB_OPEN_LITERAL_KEYWORDS
+                and _is_literal(keyword.value))
+            for keyword in node.keywords
+        )
+
     def _sink(self, node: ast.Call):
         """(path expression, mode, receiver must be a Path) for an I/O call."""
         name = self.canonical(node.func)
         if name in ("open", "io.open"):
+            if not self._plain_open_arguments(node, 2, frozenset({"file", "mode"})):
+                return None
             path = node.args[0] if node.args else self._keyword(node, "file")
             mode = node.args[1] if len(node.args) > 1 else self._keyword(node, "mode")
             return path, mode if mode is not None else "r", False
@@ -5989,6 +6017,8 @@ class _StdlibIO:
             if method in _STDLIB_PATH_METHODS:
                 return node.func.value, _STDLIB_PATH_METHODS[method], True
             if method == "open":
+                if not self._plain_open_arguments(node, 1, frozenset({"mode"})):
+                    return None
                 mode = node.args[0] if node.args else self._keyword(node, "mode")
                 return node.func.value, mode if mode is not None else "r", True
         return None
@@ -6001,6 +6031,29 @@ class _StdlibAnalysis(NamedTuple):
 
 
 _CHDIR_RX = re.compile(r"\b(?:f?chdir)\b")
+_CODING_COOKIE_RX = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)", re.MULTILINE)
+
+
+def _text_may_chdir(source: str) -> bool:
+    """The fallback check, outside comments and strings (all of the source
+    when it cannot be tokenized)."""
+    if not _CHDIR_RX.search(source):
+        return False
+    spans = _python_spans(source)
+    if spans is not None:
+        source = _blank(source, spans.comments + spans.strings)
+    return bool(_CHDIR_RX.search(source))
+
+
+def _decoded_as_python_would(source: str) -> bool:
+    """Whether the text is what Python itself decoded: UTF-8 with no
+    replacement characters and no other encoding cookie."""
+    if "\ufffd" in source:
+        return False
+    head = "\n".join(source.splitlines()[:2])
+    cookie = _CODING_COOKIE_RX.search(head)
+    return cookie is None or cookie.group(1).lower().replace("_", "-") in (
+        "utf-8", "utf8", "utf-8-sig")
 
 
 def _stdlib_analysis(source: str, script_args: list[str] | None) -> _StdlibAnalysis:
@@ -6010,9 +6063,12 @@ def _stdlib_analysis(source: str, script_args: list[str] | None) -> _StdlibAnaly
     The chdir answer comes from the AST (a call or reference that resolves
     to a `chdir`). Where the source cannot be analysed (too large, not
     parsable, over budget) it falls back to the conservative text check."""
-    fallback = _StdlibAnalysis([], [], bool(_CHDIR_RX.search(source)))
     if len(source) > _STDLIB_SOURCE_LIMIT \
             or len(source.encode("utf-8", "surrogatepass")) > _STDLIB_SOURCE_LIMIT:
+        return _StdlibAnalysis([], [], _text_may_chdir(source))
+    fallback = _StdlibAnalysis([], [], _text_may_chdir(source))
+    if not _decoded_as_python_would(source):
+        # A literal may decode to another name than the file Python opened.
         return fallback
     deadline = time.monotonic() + _STDLIB_DEADLINE_SECONDS
     try:
@@ -7910,6 +7966,8 @@ def build_step(
                 # A backslash needs the shell's quote-dependent decoding:
                 # decline rather than risk a different word.
                 "\\" not in raw
+                # shlex splits on these; the shell keeps them in the word.
+                and not any(char in raw for char in "\r\x0b\x0c")
                 and not _expansion(raw)[0] and not _has_unquoted_pattern(raw)
                 and all(char != "~" for _, char in _unquoted_chars(raw))
                 for raw in raws[operand_index:]):

@@ -5212,3 +5212,119 @@ def test_unstattable_inferred_path_does_not_drop_the_event(
     )
     assert inputs == [str(tmp_path / "toolong.csv")]
     assert outputs == [str(tmp_path / "ok.csv")]
+
+
+
+# Round-3 (Codex P1) reproductions (PR #155).
+_STDLIB_REVIEW_CASES_3 = {
+    "repeated_import_hides_hazards": (
+        "import argparse, os, sys\n"
+        "def prepare():\n"
+        "    import os, sys\n"
+        "    os.chdir('work')\n"
+        "    sys.argv.extend(['--input', os.path.abspath('actual.csv')])\n"
+        "prepare()\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--input', default='/dev/null')\n"
+        "args = parser.parse_args()\n"
+        "with open(args.input) as src:\n"
+        "    open('report.csv', 'w').write(src.read())\n",
+        [], ([], []),
+    ),
+    "argv_method_any_receiver": (
+        "import argparse\nimport sys as s2\ndef f():\n    import sys as s2\n"
+        "    s2.argv.append('--out=b.csv')\nf()\n"
+        "p = argparse.ArgumentParser()\np.add_argument('--out', default='/abs/a.csv')\n"
+        "a = p.parse_args()\nopen(a.out, 'w')\n",
+        [], ([], []),
+    ),
+    "chdir_any_receiver": ("helper.chdir('x')\nopen('a.csv')\nopen('/abs/b.csv')\n", [],
+                           (["/abs/b.csv"], [])),
+    "positional_opener": (
+        "import os\n"
+        "directory = os.open('data', os.O_RDONLY)\n"
+        "def in_data(path, flags):\n"
+        "    return os.open(path, flags, dir_fd=directory)\n"
+        "with open('sample.csv', 'r', -1, None, None, None, True, in_data) as src:\n"
+        "    print(src.read())\n",
+        [], ([], []),
+    ),
+    "open_third_positional": ("open('a.csv', 'r', -1)\n", [], ([], [])),
+    "open_literal_keywords": (
+        "open('a.csv', 'r', encoding='utf-8', newline='', errors='strict', buffering=-1)\n",
+        [], (["a.csv"], []),
+    ),
+    "open_dynamic_encoding": ("open('a.csv', encoding=enc)\n", [], ([], [])),
+    "path_open_extra_positional": (
+        "from pathlib import Path\nPath('a.csv').open('r', -1, None, None, None)\n",
+        [], ([], []),
+    ),
+    "encoding_cookie": ("# coding: latin-1\nopen('café.csv', 'w')\n", [], ([], [])),
+    "replacement_char": ("open('caf�.csv', 'w')\n", [], ([], [])),
+    "variable_positionals": (
+        "import argparse\np = argparse.ArgumentParser()\np.add_argument('--output')\n"
+        "p.add_argument('samples', nargs='*')\np.add_argument('columns', nargs=3)\n"
+        "a = p.parse_args()\nopen(a.output, 'w')\n",
+        ["s", "--output", "r.txt", "c", "c", "c"], ([], []),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_STDLIB_REVIEW_CASES_3))
+def test_stdlib_review_probe_round_3(case: str) -> None:
+    source, script_args, expected = _STDLIB_REVIEW_CASES_3[case]
+    assert lineage_event._stdlib_static_io(source, script_args) == expected
+
+
+def test_argparse_backtracking_layout_is_declined_quickly() -> None:
+    import time
+
+    source = (
+        "import argparse\np = argparse.ArgumentParser()\np.add_argument('--output')\n"
+        + "".join(f"p.add_argument('{n}', nargs='*')\n"
+                  for n in ("samples", "controls", "weights", "labels"))
+        + "p.add_argument('columns', nargs=101)\na = p.parse_args()\nopen(a.output, 'w')\n"
+    )
+    args = ["sample"] * 100 + ["--output", "report.txt"] + ["col"] * 101
+    start = time.perf_counter()
+    assert lineage_event._stdlib_static_io(source, args) == ([], [])
+    assert time.perf_counter() - start < 0.5
+
+
+def test_main_argparse_declines_carriage_return_in_shell_word(tmp_path: Path) -> None:
+    (tmp_path / "run.py").write_text(
+        "import argparse\np = argparse.ArgumentParser()\np.add_argument('--out')\n"
+        "p.add_argument('--label')\na = p.parse_args()\nopen(a.out, 'w').write('x')\n"
+    )
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+    result = subprocess.run(
+        [sys.executable, str(extractor), "--cwd", str(tmp_path),
+         "--ts", "2026-11-23T12:00:00Z",
+         "--bash-cmd", "python3 run.py --out=out.csv\r --label report",
+         "--bash-exit", "0", "--append-to", str(target)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    [event] = [json.loads(line) for line in target.read_text().splitlines()]
+    assert event["outputs"] == []
+
+
+def test_oversized_script_chdir_in_comment_keeps_reader_paths(tmp_path: Path) -> None:
+    source = (
+        "# Previous versions used os.chdir elsewhere.\n"
+        "import pandas as pd\npd.read_csv('samples.csv')\n"
+        "CALIBRATION = (\n" + "    0.123456789,\n" * 17_000 + ")\n"
+    )
+    assert len(source) > lineage_event._STDLIB_SOURCE_LIMIT
+    _, inputs, _ = _stdlib_event(tmp_path, source)
+    assert inputs == [str(tmp_path / "samples.csv")]
+
+
+def test_oversized_script_real_chdir_still_drops_relative_paths(tmp_path: Path) -> None:
+    source = (
+        "import os\nimport pandas as pd\nos.chdir('work')\npd.read_csv('samples.csv')\n"
+        "CALIBRATION = (\n" + "    0.123456789,\n" * 17_000 + ")\n"
+    )
+    _, inputs, _ = _stdlib_event(tmp_path, source)
+    assert inputs == []
