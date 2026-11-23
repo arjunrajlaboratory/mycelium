@@ -251,12 +251,15 @@ BODY_RULE = (
     "Each section needs at least one line of prose or a bullet besides its "
     "subheadings; write `- None.` when there is nothing to report."
 )
+STATE_RULE = "`## Current state` describes the project, not Stop status."
 
 
 def _named_headings(instruction):
     import re
 
-    return re.findall(r"`(## [^`]+)`", instruction)
+    # The heading list comes before the body rule, which may mention a heading.
+    listed = instruction.split(BODY_RULE)[0]
+    return re.findall(r"`(## [^`]+)`", listed)
 
 
 def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
@@ -286,6 +289,7 @@ def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
     assert _named_headings(handoff_line) == list(headings)
     assert FALLBACK_RULE in handoff_line
     assert BODY_RULE in handoff_line
+    assert STATE_RULE in handoff_line
 
     template = (
         Path(__file__).resolve().parent.parent / "templates" / "MYCELIUM.md.template"
@@ -297,6 +301,7 @@ def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
     assert _named_headings(summary_rule) == list(headings)
     assert FALLBACK_RULE in summary_rule
     assert BODY_RULE in summary_rule
+    assert STATE_RULE in summary_rule
 
     acted = _run_hook(
         "mycelium-post-action.sh",
@@ -315,6 +320,7 @@ def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
     assert _named_headings(summary_step) == list(headings)
     assert FALLBACK_RULE in summary_step
     assert BODY_RULE in summary_step
+    assert STATE_RULE in summary_step
     assert "### Locked decisions" in summary_step
     assert "### Dead ends — do not redo" in summary_step
 
@@ -526,6 +532,133 @@ def test_accepted_scoped_handoff_is_published_to_shared_resume_pointer(tmp_path)
     assert _only_carried_baseline(scoped_state)
     assert shared.is_file()
     assert "Lifecycle status: accepted by Stop" in shared.read_text()
+
+
+NUMBERED_HANDOFF = Path(__file__).with_name("testdata") / "antigravity-app-numbered-handoff.md"
+
+
+def _scoped_work_with_handoff(tmp_path, session_id, handoff_text):
+    repo = _repo(tmp_path)
+    assert _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "session_id": session_id},
+    ).returncode == 0
+    (repo / "work.txt").write_text("completed work\n")
+    learnings = repo / ".living" / "learnings.md"
+    learnings.write_text(learnings.read_text() + "\nScoped handoff recorded.\n")
+    scoped_state = _run_state(repo, "codex", session_id)
+    private = scoped_state / "last-session.md"
+    private.write_text(handoff_text)
+    future = time.time() + 2
+    os.utime(private, (future, future))
+    return repo, scoped_state, private
+
+
+def _stop(repo, session_id, active):
+    return _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": active, "session_id": session_id},
+    )
+
+
+def test_fresh_numbered_handoff_blocks_once_then_falls_back(tmp_path):
+    # The real Antigravity App handoff from the ag-154-live-2 run: five
+    # numbered sections under headings no schema accepts. Stop used to
+    # replace it silently; it now says why once, and falls back on a retry
+    # that still fails.
+    session_id = "numbered-handoff-root"
+    authored = NUMBERED_HANDOFF.read_text(encoding="utf-8")
+    repo, scoped_state, private = _scoped_work_with_handoff(
+        tmp_path, session_id, authored
+    )
+    shared = repo / ".mycelium" / "last-session.md"
+
+    first = _stop(repo, session_id, False)
+
+    assert first.returncode == 0, first.stderr
+    reason = json.loads(first.stdout)["reason"]
+    assert "\n" not in reason
+    assert str(private) in reason
+    assert (
+        "missing `## What was worked on`, `## Key decisions made`, "
+        "`## Blockers & surprises`, `## Current state`, `## Next steps`"
+    ) in reason
+    assert "`- None.`" in reason
+    assert "second" in reason
+    assert private.read_text(encoding="utf-8") == authored
+    assert not shared.exists() or "1. Accomplished" not in shared.read_text()
+
+    second = _stop(repo, session_id, True)
+
+    assert second.returncode == 0, second.stderr
+    assert '"decision": "block"' not in second.stdout
+    published = shared.read_text()
+    assert "Lifecycle status: accepted by Stop" in published
+    assert "Completed the session work recorded in the finalized session log." in published
+    assert _only_carried_baseline(scoped_state)
+
+
+def test_handoff_repaired_after_the_block_is_preserved(tmp_path):
+    session_id = "repaired-handoff-root"
+    repo, scoped_state, private = _scoped_work_with_handoff(
+        tmp_path, session_id, NUMBERED_HANDOFF.read_text(encoding="utf-8")
+    )
+    assert json.loads(_stop(repo, session_id, False).stdout)["decision"] == "block"
+
+    private.write_text(
+        "## What was worked on\n- Mean-ratio analysis.\n\n"
+        "## Key decisions made\n- None.\n\n### Locked decisions\n\n"
+        "## Blockers & surprises\n- None.\n\n"
+        "## Current state\n- Threshold 1.3; outputs current.\n\n"
+        "## Next steps\n- Review the lineage gaps.\n"
+    )
+    future = time.time() + 2
+    os.utime(private, (future, future))
+    second = _stop(repo, session_id, True)
+
+    assert second.returncode == 0, second.stderr
+    assert '"decision": "block"' not in second.stdout
+    published = (repo / ".mycelium" / "last-session.md").read_text()
+    assert "- Threshold 1.3; outputs current." in published
+    assert "Completed the session work recorded" not in published
+    assert _only_carried_baseline(scoped_state)
+
+
+def test_handoff_block_is_not_inherited_by_a_later_transaction(tmp_path):
+    session_id = "later-transaction-root"
+    repo, scoped_state, private = _scoped_work_with_handoff(
+        tmp_path, session_id, NUMBERED_HANDOFF.read_text(encoding="utf-8")
+    )
+    assert json.loads(_stop(repo, session_id, False).stdout)["decision"] == "block"
+    assert '"decision": "block"' not in _stop(repo, session_id, True).stdout
+
+    # The next turn of the same host session is a new transaction: its own
+    # bad handoff gets its own one-time explanation.
+    (repo / "more-work.txt").write_text("more\n")
+    # The tracker records the edit as the next turn's work.
+    assert _run_hook(
+        "mycelium-activity-tracker.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "session_id": session_id,
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(repo / "more-work.txt")},
+        },
+    ).returncode == 0
+    time.sleep(1.1)
+    learnings = repo / ".living" / "learnings.md"
+    learnings.write_text(learnings.read_text() + "\nSecond turn recorded.\n")
+    private.write_text(NUMBERED_HANDOFF.read_text(encoding="utf-8"))
+    future = time.time() + 4
+    os.utime(private, (future, future))
+
+    third = _stop(repo, session_id, False)
+
+    assert third.returncode == 0, third.stderr
+    assert "would be replaced by a generic fallback" in json.loads(third.stdout)["reason"]
 
 
 def test_matching_preupgrade_flat_transaction_completes_without_migration(tmp_path):

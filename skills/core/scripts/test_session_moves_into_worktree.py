@@ -144,6 +144,17 @@ def _owned_log(root: Path, host: str, sid: str = SID) -> Path:
     return Path(marker.read_text().splitlines()[0])
 
 
+# Complete, so the accepted Stop keeps it; an incomplete handoff written this
+# transaction would get the one-time handoff explanation instead.
+MOVED_HANDOFF = (
+    "## What was worked on\n- Handoff written before the move.\n\n"
+    "## Key decisions made\n- None.\n\n"
+    "## Blockers & surprises\n- None.\n\n"
+    "## Current state\n- Analysis edited in the worktree.\n\n"
+    "## Next steps\n- Continue in the worktree.\n"
+)
+
+
 @pytest.mark.parametrize("host", HOSTS)
 def test_moving_into_a_worktree_keeps_one_transaction(tmp_path, host):
     main, worktree = _checkouts(tmp_path)
@@ -157,7 +168,7 @@ def test_moving_into_a_worktree_keeps_one_transaction(tmp_path, host):
     start_ts = int((_run_dir(main, host) / "session-start-ts.tmp").read_text())
     started = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(start_ts))
     handoff = _run_dir(main, host) / "last-session.md"
-    handoff.write_text("# Handoff written before the move\n")
+    handoff.write_text(MOVED_HANDOFF)
 
     # The session moves into the worktree and works there.
     _edit(host, worktree, worktree / "analysis.py", "x = 2\n")
@@ -166,7 +177,7 @@ def test_moving_into_a_worktree_keeps_one_transaction(tmp_path, host):
     # and the handoff written at the path SessionStart announced.
     assert not _run_dir(main, host).exists()
     assert (_run_dir(worktree, host) / "last-session.md").read_text() \
-        == "# Handoff written before the move\n"
+        == MOVED_HANDOFF
     log = _owned_log(worktree, host)
     assert re.search(r"^started: (.+)$", log.read_text(), re.M).group(1) \
         == started

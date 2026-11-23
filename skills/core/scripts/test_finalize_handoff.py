@@ -267,3 +267,100 @@ def test_section_holding_only_subheadings_is_incomplete() -> None:
     )
 
     assert not handoff_is_complete_after_cleanup(handoff)
+
+
+NUMBERED_HANDOFF = Path(__file__).with_name("testdata") / "antigravity-app-numbered-handoff.md"
+
+
+def _diagnose(tmp_path: Path, content: str) -> subprocess.CompletedProcess:
+    handoff = tmp_path / "last-session.md"
+    handoff.write_text(content)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--handoff", str(handoff), "--diagnose"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_diagnose_accepts_canonical_and_legacy_handoffs(tmp_path: Path) -> None:
+    legacy = (
+        "## Current State\n- Tests passed.\n\n"
+        "## What Was Done\n- Lifecycle smoke audit.\n\n"
+        "## Key Decisions\n- Preserve the authored handoff.\n\n"
+        "## Next Steps\n- Continue review.\n\n"
+        "## Relevant Files\n- `.living/learnings.md`.\n"
+    )
+    for content in (_complete_handoff(), legacy):
+        result = _diagnose(tmp_path, content)
+        assert (result.returncode, result.stdout) == (0, "")
+
+
+def test_diagnose_names_the_numbered_headings_of_a_real_app_handoff(
+    tmp_path: Path,
+) -> None:
+    result = _diagnose(tmp_path, NUMBERED_HANDOFF.read_text(encoding="utf-8"))
+
+    assert result.returncode == 3
+    assert result.stdout.count("\n") == 1
+    assert result.stdout.strip() == (
+        "missing `## What was worked on`, `## Key decisions made`, "
+        "`## Blockers & surprises`, `## Current state`, `## Next steps`"
+    )
+
+
+def test_diagnose_names_a_section_holding_only_a_subheading(tmp_path: Path) -> None:
+    handoff = _complete_handoff().replace(
+        "## Key decisions made\n- Preserve complete authored handoffs.\n",
+        "## Key decisions made\n\n### Locked decisions\n",
+    )
+
+    result = _diagnose(tmp_path, handoff)
+
+    assert result.returncode == 3
+    assert result.stdout.strip() == "`## Key decisions made` has no prose or bullet"
+
+
+def test_diagnose_explains_a_stripped_stop_status_bullet(tmp_path: Path) -> None:
+    handoff = _complete_handoff(
+        current_state="- Natural Stop finalization remains pending."
+    )
+
+    result = _diagnose(tmp_path, handoff)
+
+    assert result.returncode == 3
+    assert "`## Current state` has no prose or bullet" in result.stdout
+    assert "1 Stop-status line(s) are removed before the check" in result.stdout
+    assert "Natural Stop finalization remains pending." in result.stdout
+
+
+def test_diagnose_names_duplicated_and_misordered_headings(tmp_path: Path) -> None:
+    duplicated = _complete_handoff() + "\n## Next steps\n- Again.\n"
+    misordered = _complete_handoff().replace(
+        "## What was worked on\n- Lifecycle finalization.\n\n", ""
+    ) + "\n## What was worked on\n- Lifecycle finalization.\n"
+
+    assert "`## Next steps` appears 2 times" in _diagnose(tmp_path, duplicated).stdout
+    assert "headings out of order (`## Key decisions made`" in _diagnose(
+        tmp_path, misordered
+    ).stdout
+
+
+def test_diagnose_fails_closed_to_an_error_status_on_unreadable_input(
+    tmp_path: Path,
+) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--handoff",
+            str(tmp_path / "absent.md"),
+            "--diagnose",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""

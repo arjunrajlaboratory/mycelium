@@ -3460,10 +3460,23 @@ def test_stop_falls_back_when_cleanup_empties_required_handoff_sections(tmp_path
     future = time.time() + 2
     os.utime(handoff, (future, future))
 
-    result = _run_hook(
+    first = _run_hook(
         "mycelium-stop-check.sh",
         repo,
         {"cwd": str(repo), "stop_hook_active": False, "turn_id": "cleanup-stop"},
+    )
+
+    assert first.returncode == 0, first.stderr
+    reason = json.loads(first.stdout)["reason"]
+    assert "`## Current state` has no prose or bullet" in reason
+    assert "Stop-status line(s) are removed before the check" in reason
+    assert "Natural Stop finalization remains pending." in reason
+    assert "describes the project, not Stop status" in reason
+
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": True, "turn_id": "cleanup-retry"},
     )
 
     assert result.returncode == 0, result.stderr
@@ -3514,8 +3527,15 @@ def test_stop_falls_back_when_cleanup_empties_required_handoff_sections(tmp_path
             "## Next steps\n- Attempt natural Stop.\n\n"
             "## Blockers & surprises\n- Duplicate heading.\n"
         ),
+        (
+            "## What was worked on\n- Lifecycle smoke audit.\n\n"
+            "## Key decisions made\n\n### Locked decisions\n\n"
+            "## Blockers & surprises\n- None.\n\n"
+            "## Current state\n- Tests passed.\n\n"
+            "## Next steps\n- Continue review.\n"
+        ),
     ),
-    ids=("empty-section", "misordered-sections", "duplicate-heading"),
+    ids=("empty-section", "misordered-sections", "duplicate-heading", "subheading-only"),
 )
 def test_stop_replaces_fresh_incomplete_handoff(tmp_path, handoff_body):
     repo = _repo(tmp_path)
@@ -3535,13 +3555,28 @@ def test_stop_replaces_fresh_incomplete_handoff(tmp_path, handoff_body):
     future = time.time() + 2
     os.utime(handoff, (future, future))
 
-    result = _run_hook(
+    first = _run_hook(
         "mycelium-stop-check.sh",
         repo,
         {
             "cwd": str(repo),
             "stop_hook_active": False,
             "turn_id": "empty-handoff-stop",
+        },
+    )
+
+    assert first.returncode == 0, first.stderr
+    reason = json.loads(first.stdout)["reason"]
+    assert reason.startswith(f"STOP BLOCKED — the session handoff {handoff} would be replaced")
+    assert handoff.read_text() == handoff_body
+    # The explanation is given once; a retry that still fails falls back.
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "stop_hook_active": True,
+            "turn_id": "empty-handoff-retry",
         },
     )
 
@@ -3606,6 +3641,70 @@ def test_stop_preserves_fresh_complete_alternate_five_section_handoff(
     finalized = handoff.read_text()
     assert "Lifecycle status: accepted by Stop" in finalized
     assert complete in finalized
+
+
+def _stop_with_fresh_numbered_handoff(tmp_path, extra_env=None, marker=None):
+    repo = _repo(tmp_path)
+    start = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "turn_id": "numbered-start"},
+    )
+    assert start.returncode == 0, start.stderr
+    state = repo / ".mycelium"
+    (repo / "work.py").write_text("print('work')\n")
+    (repo / ".living" / "learnings.md").write_text(
+        "# Learnings\n\nThe handoff check fails open.\n"
+    )
+    if marker is not None:
+        (state / "handoff-check-blocked.tmp").write_text(marker)
+    handoff = state / "last-session.md"
+    handoff.write_text(
+        (Path(__file__).with_name("testdata") / "antigravity-app-numbered-handoff.md")
+        .read_text(encoding="utf-8")
+    )
+    future = time.time() + 2
+    os.utime(handoff, (future, future))
+    result = _run_hook(
+        "mycelium-stop-check.sh",
+        repo,
+        {"cwd": str(repo), "stop_hook_active": False, "turn_id": "numbered-stop"},
+        extra_env,
+    )
+    assert result.returncode == 0, result.stderr
+    return result, handoff
+
+
+def test_stop_handoff_check_fails_open_when_the_validator_errors(tmp_path):
+    # A diagnosis the hook cannot trust never holds Stop: it publishes the
+    # fallback exactly as before the one-time explanation existed.
+    real = Path(__file__).with_name("finalize_handoff.py")
+    flaky = tmp_path / "flaky-finalizer.py"
+    flaky.write_text(
+        "import runpy, sys\n"
+        "if '--diagnose' in sys.argv:\n"
+        "    raise SystemExit(1)\n"
+        f"sys.argv[0] = {str(real)!r}\n"
+        f"runpy.run_path({str(real)!r}, run_name='__main__')\n"
+    )
+
+    result, handoff = _stop_with_fresh_numbered_handoff(
+        tmp_path, {"MYCELIUM_HANDOFF_FINALIZER_HELPER": str(flaky)}
+    )
+
+    assert '"decision": "block"' not in result.stdout
+    published = handoff.read_text()
+    assert "Lifecycle status: accepted by Stop" in published
+    assert "Completed the session work recorded in the finalized session log." in published
+
+
+def test_stop_handoff_block_ignores_a_marker_from_another_transaction(tmp_path):
+    result, handoff = _stop_with_fresh_numbered_handoff(
+        tmp_path, marker="2020-01-01-001\n"
+    )
+
+    assert "would be replaced by a generic fallback" in json.loads(result.stdout)["reason"]
+    assert "1. Accomplished" in handoff.read_text()
 
 
 def test_stop_fallback_handoff_contains_all_five_sections(tmp_path):

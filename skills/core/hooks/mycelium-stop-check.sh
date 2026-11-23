@@ -616,6 +616,7 @@ mycelium_cleanup_accepted_scoped_state() {
   # on every earlier failure/block path. Never recurse into an identity-derived
   # directory.
   rm -f "$STATE_DIR/last-session.md"
+  rm -f "$STATE_DIR/handoff-check-blocked.tmp"
   rm -f "$STATE_DIR/mycelium-read-access.log"
   # This IDE can lose the hook response after finalization. Publish an
   # identity-bound receipt only after all acceptance effects have completed;
@@ -628,6 +629,45 @@ mycelium_cleanup_accepted_scoped_state() {
   fi
   mycelium_release_session_lock
   rmdir "$STATE_DIR" 2>/dev/null || true
+}
+
+# Explain a handoff the agent wrote this transaction but that the finalizer
+# would reject, once per transaction, instead of replacing it silently. The
+# marker holds the transaction's session ID, so a retry that still fails falls
+# back and a later transaction is not suppressed by a stale marker. Fails open:
+# returns 1 (caller publishes the fallback) unless the validator gave a definite
+# diagnosis and the marker was recorded; returns 0 only after emitting a block.
+mycelium_block_once_for_incomplete_handoff() {
+  local handoff="$1"
+  local transaction="$2"
+  local marker="$STATE_DIR/handoff-check-blocked.tmp"
+  local diagnosis=""
+  local status=0
+  local marker_tmp=""
+  local headings='`## What was worked on`, `## Key decisions made`, `## Blockers & surprises`, `## Current state`, `## Next steps`'
+
+  [[ -n "$transaction" && -f "$FINALIZE_HANDOFF_SCRIPT" ]] || return 1
+  if [[ -L "$marker" || ( -e "$marker" && ! -f "$marker" ) ]]; then
+    return 1
+  fi
+  if [[ -f "$marker" && "$(head -n 1 "$marker" 2>/dev/null || true)" == "$transaction" ]]; then
+    return 1
+  fi
+  diagnosis=$(python3 "$FINALIZE_HANDOFF_SCRIPT" \
+    --handoff "$handoff" --diagnose 2>/dev/null) || status=$?
+  if [[ "$status" -ne 3 || -z "$diagnosis" || "$diagnosis" == *$'\n'* ]]; then
+    return 1
+  fi
+  marker_tmp=$(mktemp "$STATE_DIR/.handoff-check-blocked.tmp.XXXXXX" 2>/dev/null) || return 1
+  if ! printf '%s\n' "$transaction" > "$marker_tmp" \
+    || ! mv -f "$marker_tmp" "$marker"; then
+    rm -f "$marker_tmp"
+    return 1
+  fi
+  mycelium_emit_stop_block \
+    "STOP BLOCKED — the session handoff ${handoff} would be replaced by a generic fallback: ${diagnosis}. Rewrite it with exactly these headings, once each, in this order: ${headings}. Give each section at least one line of prose or a bullet besides its subheadings (\`- None.\` when there is nothing to report). \`## Current state\` describes the project, not Stop status; Stop-status lines are removed before the check. Then end your turn again. This is asked once: if a second Stop still finds the handoff incomplete, it publishes the generic fallback." \
+    || return 1
+  return 0
 }
 
 # Resolve this hook's mycelium-core dir once, in absolute form. Used to locate
@@ -900,6 +940,14 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
         fi
       else
         _SESSION_COMPLETE=false
+      fi
+
+      # A handoff the agent wrote this transaction but that fails the check
+      # gets one specific explanation before the fallback replaces it.
+      if [[ "$_SESSION_COMPLETE" != true && "$_SESSION_FRESH" == true ]] \
+        && mycelium_block_once_for_incomplete_handoff \
+          "$_SESSION_FILE" "$SESSION_ID"; then
+        exit 0
       fi
 
       # Preserve a complete handoff authored during this session. If it is

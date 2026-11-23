@@ -162,7 +162,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the fallback (the older `## Current State` / `## What Was Done` schema is
   still accepted). They also say each section needs a line of prose or a
   bullet besides its `###` subheadings (`- None.` when there is nothing to
-  report), since a section holding only a subheading counts as empty. Existing projects pick up the new rule 10 the next time
+  report), since a section holding only a subheading counts as empty, and
+  that `## Current state` describes the project, not Stop status.
+- **Stop now explains a handoff it would replace, once, instead of replacing
+  it silently.** When the agent wrote a handoff during the session that
+  fails the completeness check, Stop blocks with the handoff's path and its
+  problems: missing, duplicated or out-of-order headings, sections with no
+  prose or bullet, and Stop-status lines that cleanup removes. The block
+  happens once per session transaction. If the retry still fails, or the
+  handoff is missing or stale, Stop publishes the generic fallback as
+  before. If the check itself errors, Stop also falls back without
+  blocking. Complete handoffs, including the older `## Current State` /
+  `## What Was Done` schema, are accepted without a block.
+  `finalize_handoff.py --diagnose` reports the problems: exit 0 for a
+  complete handoff, 3 with a one-line diagnosis, 1 on error. Existing projects pick up the new rule 10 the next time
   `init_repo.py` or migration refreshes their `MYCELIUM.md`.
 
 ## [0.9.7] - 2026-11-21
