@@ -22,7 +22,9 @@ import csv
 import io
 import json
 import os
+import stat
 import sys
+import tempfile
 from collections import Counter, defaultdict
 
 SCHEMA = "mycelium.data_contract.v1"
@@ -358,16 +360,41 @@ def check_cohort(check, columns, rows):
     return alerts
 
 
+def scoped(rows, unit, scope):
+    """Rows whose unit value is qualified by its parents' values.
+
+    With local labels (`derivation` 1 under line A and under line B are two
+    derivations), a unit's identity is the full ancestor path. A row missing
+    any scope value keeps no unit value, so it is left out like any row
+    missing its unit.
+    """
+    if not scope:
+        return rows
+    out = []
+    for r in rows:
+        r = dict(r)
+        parts = [r[c] for c in scope] + [r[unit]]
+        # A JSON list, not a joined string: ("A/B", "C") and ("A", "B/C")
+        # stay two identities.
+        r[unit] = "" if any(is_missing(v) for v in parts) else json.dumps(parts)
+        out.append(r)
+    return out
+
+
 def check_unit(check, columns, rows):
     unit = need(check, "unit")
     group = need(check, "group")
     within = as_list(check.get("within"))
+    rows = scoped(rows, unit, as_list(check.get("unit_scope")))
     _, alerts = drop_missing(rows, [unit, group] + within, "unit_of_replication")
     # Repeats need every key; membership needs only unit and group; the groups
     # held to the minimum need only group (a group with no unit has 0 units).
+    # On a sample ledger (`rows: samples`) several rows per unit are the
+    # point (samples nested in a unit), so only membership and counts apply.
     cells = Counter((r[group],) + tuple(r[w] for w in within) + (r[unit],)
                     for r in having(rows, unit, group, *within))
-    repeats = sorted(key for key, n in cells.items() if n > 1)
+    repeats = [] if check.get("rows") == "samples" else \
+        sorted(key for key, n in cells.items() if n > 1)
     if repeats:
         labels = [group] + within + [unit]
         alerts.append(alert(
@@ -398,16 +425,58 @@ def check_unit(check, columns, rows):
     return alerts
 
 
+def distinct_levels(values):
+    """Listed levels as the text a table compares them as, first spelling
+    kept, duplicates dropped."""
+    out = []
+    for value in as_list(values):
+        if str(value) not in out:
+            out.append(str(value))
+    return out
+
+
 def check_pairing(check, columns, rows):
     unit = need(check, "unit")
     within = need(check, "within")
+    rows = scoped(rows, unit, as_list(check.get("unit_scope")))
     _, alerts = drop_missing(rows, [unit, within], "pairing")
     # The units come from every row with a unit, the levels (when the contract
     # does not list them) from every row with a level: a unit seen at no level
     # is incomplete, and a level seen with no unit is still a level.
-    levels = [str(l) for l in as_list(check.get("levels"))] or \
-        sorted({r[within] for r in having(rows, within)})
+    observed_levels = sorted({r[within] for r in having(rows, within)})
+    # Listed levels compare as text, like table values: "28" and 28 are one
+    # level, and a level listed twice is still one side of the pairing.
+    listed = distinct_levels(check.get("levels"))
+    levels = listed or observed_levels
+    # How many distinct sides the pairing must have. Only an explicit
+    # `min_levels` sets a minimum (ledger contracts set it to 2). Without it,
+    # any `levels` list keeps its 0.9.7 behavior, where every unit seen at
+    # the listed levels passes: `levels: ["baseline"]` and a list that
+    # collapses to one level (`["control", "control"]`) alike.
+    minimum = check.get("min_levels") or 0
+    if check.get("exact_levels") and check.get("levels"):
+        extra = [lvl for lvl in observed_levels if lvl not in levels]
+        absent = [lvl for lvl in levels if lvl not in observed_levels]
+        if extra or absent:
+            # The pairing licenses reuse across exactly these levels: any
+            # other level would reuse units nothing verified, and a missing
+            # one leaves the pairing unchecked.
+            alerts.append(alert(
+                "pairing", "levels of '{}' differ from the declared pairing levels".format(within),
+                True, expected="exactly " + ", ".join(levels),
+                observed="; ".join(filter(None, ["extra: " + ", ".join(extra) if extra else "",
+                                                 "absent: " + ", ".join(absent) if absent else ""]))))
+            return alerts
     seen = {r[unit]: set() for r in having(rows, unit)}
+    if seen and len(levels) < minimum:
+        # A pairing with one level pairs nothing: the other level's rows are
+        # missing (an export left out), so the design cannot be checked.
+        alerts.append(alert(
+            "pairing", "fewer than {} distinct levels of '{}'; a pairing needs both sides".format(
+                minimum, within),
+            True, expected=">= {} distinct levels".format(minimum),
+            observed=", ".join(levels) or "none"))
+        return alerts
     if not seen or not levels:
         return alerts
     for r in having(rows, unit, within):
@@ -422,9 +491,138 @@ def check_pairing(check, columns, rows):
     return alerts
 
 
+def _rank(matrix):
+    """Rank of a small matrix, exactly, by elimination over fractions."""
+    from fractions import Fraction
+
+    rows = [[Fraction(v) for v in row] for row in matrix]
+    rank, cols = 0, len(rows[0]) if rows else 0
+    for col in range(cols):
+        pivot = next((r for r in range(rank, len(rows)) if rows[r][col] != 0), None)
+        if pivot is None:
+            continue
+        rows[rank], rows[pivot] = rows[pivot], rows[rank]
+        for r in range(len(rows)):
+            if r != rank and rows[r][col] != 0:
+                factor = rows[r][col] / rows[rank][col]
+                rows[r] = [a - factor * b for a, b in zip(rows[r], rows[rank])]
+        rank += 1
+    return rank
+
+
+def check_estimability(check, columns, rows):
+    """Whether each contrast level stays estimable when every declared batch
+    column is adjusted for at once.
+
+    Per-column checks can all pass while the batches jointly determine the
+    group: controls at (date 1, run 1) and treated at (date 2, run 1) or
+    (date 1, run 2) make treatment the sum of the date-2 and run-2
+    indicators. The design is the distinct (contrast, batches...) cells; a
+    contrast level is estimable when its indicator adds rank beyond the
+    intercept, the other levels, and all batch indicators.
+    """
+    batches = need(check, "batch")
+    contrast = need(check, "contrast")
+    scopes = check.get("batch_scopes") or {}
+    for column in batches:
+        rows = scoped(rows, column, as_list(scopes.get(column)))
+    kept, alerts = drop_missing(rows, [contrast] + batches, "batch_estimability")
+    present = sorted({r[contrast] for r in having(rows, contrast)})
+    cells = sorted({(r[contrast],) + tuple(r[b] for b in batches) for r in kept})
+    levels = sorted({c[0] for c in cells})
+    lost = [lvl for lvl in present if lvl not in levels]
+    if lost:
+        # A model adjusting for every batch drops rows missing any of them;
+        # a level with no complete row cannot be estimated at all.
+        alerts.append(alert(
+            "batch_estimability",
+            "{} has no row with every batch column ({}), so a model adjusting for "
+            "all of them cannot estimate it".format(", ".join(lost), ", ".join(batches)),
+            True, expected="each level of {} with complete batch values".format(contrast),
+            observed="lost: " + ", ".join(lost)))
+        return alerts
+    if len(levels) < 2:
+        return alerts
+    batch_levels = [sorted({c[i + 1] for c in cells}) for i in range(len(batches))]
+
+    def design(drop_level=None):
+        matrix = []
+        for cell in cells:
+            row = [1]
+            row += [1 if cell[0] == lvl else 0 for lvl in levels[1:] if lvl != drop_level]
+            for i, values in enumerate(batch_levels):
+                row += [1 if cell[i + 1] == v else 0 for v in values[1:]]
+            matrix.append(row)
+        return matrix
+
+    full = _rank(design())
+    lost = [lvl for lvl in levels[1:] if _rank(design(drop_level=lvl)) == full]
+    if lost:
+        alerts.append(alert(
+            "batch_estimability",
+            "adjusting for {} together, the contrast of {} against {} cannot be "
+            "estimated: the batches jointly determine it".format(
+                ", ".join(batches), ", ".join(lost), levels[0]), True,
+            expected="each level of {} estimable given all batch columns".format(contrast),
+            observed="not estimable: " + ", ".join(lost),
+            evidence=["{}={}: {}".format(contrast, c[0], ", ".join(
+                "{}={}".format(b, v) for b, v in zip(batches, c[1:]))) for c in cells][:5]))
+    return alerts
+
+
+def check_unique(check, columns, rows):
+    cols = need(check, "columns")
+    alerts = []
+    missing = [r for r in rows if any(is_missing(r[c]) for c in cols)]
+    if missing:
+        alerts.append(alert(
+            "unique", "rows have no value in {}".format(", ".join(cols)), True,
+            expected="a value in every row", observed="{} of {} rows".format(len(missing), len(rows))))
+    counts = Counter(tuple(r[c] for c in cols) for r in having(rows, *cols))
+    repeated = sorted(key for key, n in counts.items() if n > 1)
+    if repeated:
+        alerts.append(alert(
+            "unique", "values of {} repeat; each row must be one distinct sample".format(
+                ", ".join(cols)), True,
+            expected="each value once", observed="{} repeated values".format(len(repeated)),
+            evidence=[", ".join(key) + " ({} rows)".format(counts[key]) for key in repeated]))
+    return alerts
+
+
+def check_nesting(check, columns, rows):
+    """Every finer level sits under exactly one value of the level above.
+
+    With global labels a dish called "3" under two preparations is two dishes
+    sharing a name, which every later unit count would merge; it blocks. With
+    `local_labels`, labels are qualified by their parents, so the nesting
+    holds by construction and only missing values are reported.
+    """
+    levels = need(check, "levels")
+    local = bool(check.get("local_labels", False))
+    alerts = []
+    for coarse, fine in zip(levels, levels[1:]):
+        kept, warnings = drop_missing(rows, [coarse, fine], "nesting")
+        alerts.extend(warnings)
+        if local:
+            continue
+        parents = defaultdict(set)
+        for r in kept:
+            parents[r[fine]].add(r[coarse])
+        crossed = sorted((f, sorted(p)) for f, p in parents.items() if len(p) > 1)
+        if crossed:
+            alerts.append(alert(
+                "nesting", "'{}' values sit under more than one '{}'".format(fine, coarse), True,
+                expected="each {} under one {} (or declare local_labels)".format(fine, coarse),
+                observed="{} {} values crossed".format(len(crossed), fine),
+                evidence=["{}={} under {}={}".format(fine, f, coarse, ", ".join(p))
+                          for f, p in crossed]))
+    return alerts
+
+
 def check_batch(check, columns, rows):
     batch = need(check, "batch")
     contrast = need(check, "contrast")
+    rows = scoped(rows, batch, as_list(check.get("batch_scope")))
     batched, alerts = drop_missing(rows, [batch, contrast], "batch_confounding")
     observed = sorted({r[contrast] for r in having(rows, contrast)})
     if len(observed) < 2:
@@ -621,9 +819,13 @@ CHECK_KEYS = {"kind", "table", "filters", "label"} | set(NOTES)
 KIND_KEYS = {
     "schema": {"columns"},
     "cohort": {"column", "levels", "min_rows", "rows", "no_missing"},
-    "unit_of_replication": {"unit", "group", "within", "min_units_per_group", "units_may_span_groups"},
-    "pairing": {"unit", "within", "levels"},
-    "batch_confounding": {"batch", "contrast", "max_share"},
+    "unit_of_replication": {"unit", "group", "within", "min_units_per_group", "units_may_span_groups",
+                            "rows", "unit_scope"},
+    "pairing": {"unit", "within", "levels", "unit_scope", "exact_levels", "min_levels"},
+    "batch_confounding": {"batch", "contrast", "max_share", "batch_scope"},
+    "batch_estimability": {"batch", "contrast", "batch_scopes"},
+    "unique": {"columns"},
+    "nesting": {"levels", "local_labels"},
 }
 FILTER_KEYS = {"column", "equals", "in", "not_in"}
 
@@ -695,13 +897,43 @@ def validate_contract(contract):
             if "units_may_span_groups" in check and not isinstance(check["units_may_span_groups"], bool):
                 fail(where, "'units_may_span_groups' must be true or false: {}".format(
                     json.dumps(check["units_may_span_groups"])))
+            if "rows" in check and check["rows"] != "samples":
+                fail(where, "'rows' may only be \"samples\" (a sample ledger): {}".format(
+                    json.dumps(check["rows"])))
+            validate_columns(where, check, "unit_scope", allow_single=True)
         elif kind == "pairing":
             validate_column(where, check, "unit", required=True)
             validate_column(where, check, "within", required=True)
             validate_levels(where, check)
+            validate_columns(where, check, "unit_scope", allow_single=True)
+            if "exact_levels" in check and not isinstance(check["exact_levels"], bool):
+                fail(where, "'exact_levels' must be true or false")
+            if check.get("exact_levels") and "levels" not in check:
+                fail(where, "'exact_levels' needs 'levels'")
+            validate_count(where, check, "min_levels", 2)
+        elif kind == "unique":
+            validate_columns(where, check, "columns", required=True)
+        elif kind == "batch_estimability":
+            validate_columns(where, check, "batch", required=True)
+            scopes = check.get("batch_scopes", {})
+            if not isinstance(scopes, dict) or not all(
+                    isinstance(k, str) and isinstance(v, list) and all(isinstance(c, str) for c in v)
+                    for k, v in scopes.items()):
+                fail(where, "'batch_scopes' must map batch columns to lists of columns")
+            if len(as_list(check.get("batch"))) < 2:
+                fail(where, "'batch' needs at least two columns (one column is batch_confounding)")
+            validate_column(where, check, "contrast", required=True)
+        elif kind == "nesting":
+            validate_columns(where, check, "levels", required=True)
+            if len(as_list(check.get("levels"))) < 2:
+                fail(where, "'levels' needs at least two columns, coarse to fine")
+            if "local_labels" in check and not isinstance(check["local_labels"], bool):
+                fail(where, "'local_labels' must be true or false: {}".format(
+                    json.dumps(check["local_labels"])))
         elif kind == "batch_confounding":
             validate_column(where, check, "batch", required=True)
             validate_column(where, check, "contrast", required=True)
+            validate_columns(where, check, "batch_scope", allow_single=True)
             if "max_share" in check:
                 share = check["max_share"]
                 if isinstance(share, bool) or not isinstance(share, (int, float)) or not 0 < share <= 1:
@@ -715,13 +947,23 @@ CHECKS = {
     "unit_of_replication": check_unit,
     "pairing": check_pairing,
     "batch_confounding": check_batch,
+    "unique": check_unique,
+    "nesting": check_nesting,
+    "batch_estimability": check_estimability,
 }
 
 
 def referenced_columns(check):
     keys = ["column", "unit", "group", "batch", "contrast"]
-    cols = [check[k] for k in keys if k in check]
+    cols = [check[k] for k in keys if k in check and isinstance(check[k], str)]
     cols += as_list(check.get("within")) + as_list(check.get("no_missing"))
+    cols += as_list(check.get("unit_scope")) + as_list(check.get("batch_scope"))
+    if check.get("kind") == "batch_estimability":
+        cols += as_list(check.get("batch"))
+        for scope in (check.get("batch_scopes") or {}).values():
+            cols += as_list(scope)
+    if check.get("kind") in ("unique", "nesting"):
+        cols += as_list(check.get("columns")) + as_list(check.get("levels"))
     return cols
 
 
@@ -792,8 +1034,13 @@ def run_contract(contract, base_dir):
             rows, filter_warnings = apply_filters(rows, filters, columns, kind)
             found.extend(filter_warnings)
             rows_checked = len(rows)
-            identity = [check[k] for k in ("column", "unit", "group", "batch", "contrast") if k in check]
-            identity += as_list(check.get("within"))
+            identity = [check[k] for k in ("column", "unit", "group", "batch", "contrast")
+                        if k in check and isinstance(check[k], str)]
+            if kind == "batch_estimability":
+                identity += as_list(check.get("batch"))
+            identity += as_list(check.get("within")) + as_list(check.get("unit_scope"))
+            if kind in ("unique", "nesting"):
+                identity += as_list(check.get("columns")) + as_list(check.get("levels"))
             found.extend(spelling_variants(rows, sorted(set(identity)), kind))
             if not rows:
                 found.append(alert(kind, "no rows left after filters; the check would pass vacuously", True,
@@ -811,10 +1058,128 @@ def run_contract(contract, base_dir):
         summary = {"check": label, "kind": kind, "table": table, "rows_checked": rows_checked,
                    "status": status, "relaxations": [k for k in RELAXATIONS if check.get(k)]}
         if kind == "batch_confounding" and rows_checked:
-            summary["cross_table"] = cross_table(check, rows)
+            summary["cross_table"] = cross_table(
+                check, scoped(rows, check["batch"], as_list(check.get("batch_scope"))))
         summaries.append(summary)
         alerts.extend(found)
     return summaries, alerts
+
+
+LEDGER_SCHEMA = "mycelium.sample_ledger.v1"
+LEDGER_KEYS = {"schema", "file", "sample_id", "group", "unit_of_replication", "nesting",
+               "local_labels", "batch", "pairing"} | set(NOTES)
+
+
+def ledger_contract(spec, spec_dir):
+    """The contract a sample ledger implies.
+
+    The ledger (one row per sample) is checked for what holds at ingest:
+    unique sample ids, the declared nesting of replication levels, at least
+    two distinct replication units per group (`rows: samples`, since several
+    samples per unit are expected), each crossed batch variable against the
+    group, and the declared pairing. Whether rows are independent units is a
+    question about the modeled table, so the emitted contract tells the
+    analysis to point its replication check there.
+    """
+    if not isinstance(spec, dict):
+        raise ContractError("the ledger spec must be a JSON object")
+    if spec.get("schema") != LEDGER_SCHEMA:
+        raise ContractError("ledger schema must be " + LEDGER_SCHEMA)
+    reject_unknown("ledger", spec, LEDGER_KEYS)
+    for key in ("file", "sample_id", "group", "unit_of_replication"):
+        if not isinstance(spec.get(key), str) or not spec[key]:
+            raise ContractError("ledger '{}' must be a non-empty string".format(key))
+    nesting = spec.get("nesting") or []
+    batch = spec.get("batch") or []
+    for key, value in (("nesting", nesting), ("batch", batch)):
+        if not isinstance(value, list) or not all(isinstance(c, str) and c for c in value):
+            raise ContractError("ledger '{}' must be a list of column names".format(key))
+    unit = spec["unit_of_replication"]
+    if nesting and unit not in nesting:
+        raise ContractError("ledger unit_of_replication '{}' must be one of the nesting levels".format(unit))
+    local = spec.get("local_labels", False)
+    if not isinstance(local, bool):
+        raise ContractError("ledger 'local_labels' must be true or false")
+    if nesting:
+        at_or_below = nesting[nesting.index(unit):]
+        clash = [c for c in batch if c in at_or_below]
+        if clash:
+            raise ContractError(
+                "ledger batch column '{}' is a replication level at or below the unit of "
+                "replication, so it is nested in the group by construction; list a crossed "
+                "batch variable (a calendar date, a sequencing run) in 'batch' and keep "
+                "nested preparation instances in 'nesting'".format(clash[0]))
+    group = spec["group"]
+    scope = nesting[:nesting.index(unit)] if (local and nesting) else []
+    pairing = spec.get("pairing")
+    if pairing is not None:
+        if not isinstance(pairing, dict) or set(pairing) - {"unit", "within", "levels"} or \
+                not all(isinstance(pairing.get(k), str) and pairing[k] for k in ("unit", "within")):
+            raise ContractError("ledger 'pairing' must be {\"unit\": ..., \"within\": ..., "
+                                "\"levels\": [...]} or null")
+        if "levels" in pairing and (not isinstance(pairing["levels"], list) or
+                                    not all(is_scalar(v) for v in pairing["levels"]) or
+                                    len(distinct_levels(pairing["levels"])) < 2):
+            # Distinct as the table compares them: ["A", "A"] is one level.
+            raise ContractError("ledger pairing 'levels' must list at least two distinct "
+                                "expected levels")
+    table = spec["file"] if os.path.isabs(spec["file"]) else os.path.join(spec_dir, spec["file"])
+    named = [spec["sample_id"], group] + nesting + batch
+    if unit not in named:
+        named.append(unit)
+    checks = [
+        {"kind": "schema", "columns": sorted(set(named), key=named.index)},
+        {"kind": "unique", "columns": [spec["sample_id"]]},
+    ]
+    if len(nesting) >= 2:
+        checks.append({"kind": "nesting", "levels": nesting, "local_labels": local})
+    unit_check = {"kind": "unit_of_replication", "unit": unit, "group": group, "rows": "samples",
+                  "note": "on the ledger: distinct units per group. In the analysis contract, "
+                          "point this check (dropping rows), the pairing check and the batch "
+                          "checks at the modeled table, so rows the model drops are counted"}
+    if scope:
+        unit_check["unit_scope"] = scope
+    # Cross-group reuse only when the declared pairing verifies that same unit
+    # across the group column itself.
+    if pairing and pairing["unit"] == unit and pairing["within"] == group:
+        unit_check["units_may_span_groups"] = True
+    checks.append(unit_check)
+    def ancestors(column):
+        # Local labels are qualified by the levels above them.
+        if local and column in nesting:
+            return nesting[:nesting.index(column)]
+        return []
+
+    for column in batch:
+        batch_check = {"kind": "batch_confounding", "batch": column, "contrast": group}
+        if ancestors(column):
+            batch_check["batch_scope"] = ancestors(column)
+        checks.append(batch_check)
+    if len(batch) >= 2:
+        joint = {"kind": "batch_estimability", "batch": batch, "contrast": group,
+                 "note": "for an analysis that adjusts for all of these batch terms"}
+        scopes = {column: ancestors(column) for column in batch if ancestors(column)}
+        if scopes:
+            joint["batch_scopes"] = scopes
+        checks.append(joint)
+    if pairing:
+        # A declared pairing needs both sides on whatever table it runs on.
+        pair_check = {"kind": "pairing", "unit": pairing["unit"], "within": pairing["within"],
+                      "min_levels": 2}
+        spans = pairing["unit"] == unit and pairing["within"] == group
+        if pairing.get("levels"):
+            pair_check["levels"] = distinct_levels(pairing["levels"])
+            if spans:
+                # The pairing licenses units in several groups, so it must
+                # hold for exactly the declared groups, on whatever table the
+                # pairing check is pointed at (the modeled one included).
+                pair_check["exact_levels"] = True
+        if ancestors(pairing["unit"]):
+            pair_check["unit_scope"] = ancestors(pairing["unit"])
+        checks.append(pair_check)
+    return {"schema": SCHEMA, "table": table, "checks": checks,
+            "note": "generated from the sample ledger spec; extend it in the analysis "
+                    "contract (filters, the modeled table), never loosen it"}
 
 
 def render(summaries, alerts):
@@ -841,16 +1206,170 @@ def render(summaries, alerts):
     return "\n".join(lines)
 
 
+def refuse_input_alias(destination, inputs):
+    """Refuse an --emit-contract destination that names an input: the ledger
+    spec or its sample table, directly or through a symlink or hard link.
+    Writing there would destroy the input the contract describes."""
+    dest_real = os.path.realpath(destination)
+    for source in inputs:
+        same = os.path.realpath(source) == dest_real
+        if not same and os.path.exists(destination) and os.path.exists(source):
+            try:
+                same = os.path.samefile(destination, source)
+            except OSError:
+                same = False
+        if same:
+            raise ContractError("--emit-contract {} is the same file as the input {}; choose a "
+                                "new path such as analysis/<name>/data_contract.json".format(
+                                    destination, source))
+
+
+def _write_exclusive(path, text, exists):
+    """Create `path` only if no file (or link) has that name, then write
+    `text` into it and fsync. A partial file left by a failed write is
+    removed: it is this call's own file, since the exclusive create proved
+    nothing else had the name."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    except FileExistsError:
+        raise exists
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+
+
+def write_atomic_json(path, document, replace=True):
+    """Write through a temporary file in the destination's directory and
+    replace: a failure leaves the old file (or none), never a truncated one.
+    With replace=False the file is published only if `path` still does not
+    exist (a hard link fails on an existing name), so a file created since
+    the caller looked is never clobbered. Without hard links the file is
+    created exclusively (O_CREAT|O_EXCL) and written in place: never a
+    check-then-replace, which could clobber a file published in between."""
+    text = json.dumps(document, indent=2) + "\n"
+    # The directory the OS will publish into: resolved without collapsing
+    # `..` lexically first (`out/latest/../c.json` under a symlinked
+    # `latest` is not out/c.json), so the replace stays in one directory.
+    directory = os.path.realpath(os.path.dirname(path) or os.curdir)
+    fd, tmp = tempfile.mkstemp(prefix=".{}.".format(os.path.basename(path)), suffix=".tmp",
+                               dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        # A replaced file keeps its own mode (a 0600 contract stays 0600);
+        # a new one gets what open() would create under the umask, not
+        # mkstemp's 0600.
+        mode = None
+        if replace:
+            try:
+                existing = os.stat(path)
+            except OSError:
+                existing = None
+            if existing is not None and stat.S_ISREG(existing.st_mode):
+                mode = stat.S_IMODE(existing.st_mode)
+        if mode is None:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(tmp, mode)
+        if replace:
+            os.replace(tmp, path)
+        else:
+            exists = ContractError("--emit-contract {} already exists; nothing was written. Pass "
+                                   "--overwrite to replace it, or choose a new path".format(path))
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                raise exists
+            except OSError:
+                # A filesystem without hard links: os.replace would clobber a
+                # file another process published after any existence check,
+                # so create the destination exclusively and write into it.
+                _write_exclusive(path, text, exists)
+            os.unlink(tmp)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--contract", required=True, help="path to the contract JSON")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--contract", help="path to the contract JSON")
+    source.add_argument("--ledger", help="path to a sample ledger spec (samples.ledger.json)")
     parser.add_argument("--root", default=".", help="directory relative table paths resolve from")
+    parser.add_argument("--emit-contract", default=None,
+                        help="with --ledger: also write the generated contract here (a new "
+                             "file, unless --overwrite)")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="with --emit-contract: replace an existing destination contract")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    if args.emit_contract and not args.ledger:
+        print("contract error: --emit-contract needs --ledger", file=sys.stderr)
+        return 1
+    if args.overwrite and not args.emit_contract:
+        print("contract error: --overwrite needs --emit-contract", file=sys.stderr)
+        return 1
+    emitted = None
     try:
-        with open(args.contract, encoding="utf-8") as handle:
-            contract = json.load(handle, object_pairs_hook=reject_duplicate_keys)
+        if args.ledger:
+            # Paths are resolved with realpath on the joined, un-normalized
+            # text, never normpath/abspath first: the OS resolves a symlink
+            # before a following `..` (`latest/../x` under `latest ->
+            # snapshot/staging` is snapshot/x), and lexical collapsing would
+            # name another file than the one read or written.
+            ledger_path = os.path.realpath(args.ledger)
+            with open(ledger_path, encoding="utf-8") as handle:
+                spec = json.load(handle, object_pairs_hook=reject_duplicate_keys)
+            # The table is relative to the directory the ledger was named
+            # from (a symlinked ledger keeps its link's directory).
+            contract = ledger_contract(
+                spec, os.path.realpath(os.path.dirname(args.ledger) or os.curdir))
+            # One resolved table path for reading, the checks, the alias
+            # guard, and the emitted contract.
+            table = os.path.realpath(contract["table"])
+            contract["table"] = table
+            if args.emit_contract:
+                emitted = dict(contract)
+                root = os.path.realpath(args.root)
+                if table.startswith(root.rstrip(os.sep) + os.sep):
+                    # Relative to --root, so the contract replays against the
+                    # checkout it is run in, not the one it was emitted from.
+                    emitted["table"] = os.path.relpath(table, root)
+                refuse_input_alias(args.emit_contract, [ledger_path, table])
+                if os.path.lexists(args.emit_contract) and not args.overwrite:
+                    # The destination may be the analysis's extended contract
+                    # (filters, the modeled table); regenerating it from the
+                    # ledger would drop that work.
+                    raise ContractError(
+                        "--emit-contract {} already exists; nothing was written. Pass "
+                        "--overwrite to replace it, or choose a new path".format(args.emit_contract))
+                validate_contract(emitted)
+        else:
+            with open(args.contract, encoding="utf-8") as handle:
+                contract = json.load(handle, object_pairs_hook=reject_duplicate_keys)
+        # The checks run before anything is published.
         summaries, alerts = run_contract(contract, args.root)
+        if emitted is not None:
+            if os.path.isfile(table):
+                # Written even when the checks block or gap: the analysis
+                # extends this contract, and the alerts are reported below.
+                write_atomic_json(args.emit_contract, emitted, replace=args.overwrite)
+            else:
+                print("contract not written: the sample table {} does not exist".format(
+                    contract["table"]), file=sys.stderr)
     except (ContractError, ValueError, OSError) as error:
         print("contract error: {}".format(error), file=sys.stderr)
         return 1

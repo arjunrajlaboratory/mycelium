@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any, Iterator, NamedTuple
 
 SNAPSHOT_VERSION = 2
-OBSERVATION_VERSION = 1
+OBSERVATION_VERSION = 2  # 2: adds `journal` (id, pre_seq, post_seq) for write ordering
 
 DEFAULT_ENTRY_CAP = 250_000
 DEFAULT_WALK_SECONDS = 3.0
@@ -128,6 +128,12 @@ def _scope_overrides(repo_root: Path) -> tuple[list[str], list[str]]:
         value = value.strip().strip("/")
         if not value or value.startswith("..") or "/../" in f"/{value}/" or "\0" in value:
             continue
+        # One repository-relative spelling per directory: `./data`,
+        # `data/.`, and `data//x` would otherwise walk the same files under
+        # a second name, inventing a creation and a deletion for each.
+        value = os.path.normpath(value)
+        if value in (".", "") or value.startswith(".."):
+            continue
         if word == "exclude":
             excludes.append(value)
         elif word == "root":
@@ -165,7 +171,23 @@ def walk(
     timed_out = False
     sub_second: dict[int, bool] = {}
     stack: list[str] = [root]
-    stack.extend(os.path.join(root, r) for r in extra_roots)
+    for extra in extra_roots:
+        # Walked in the listing's spelling, never through a link: a root
+        # named `SKILLS/core` on a case-insensitive volume would otherwise
+        # claim those inodes under a second spelling, and the real one
+        # would vanish from the walk as if deleted.
+        spelled = canonical_spelling(root, extra)
+        if spelled is None or not os.path.isdir(os.path.join(root, spelled)):
+            continue
+        linked = False
+        current = root
+        for part in spelled.split("/"):
+            current = os.path.join(current, part)
+            if os.path.islink(current):
+                linked = True
+                break
+        if not linked:
+            stack.append(os.path.join(root, spelled))
     seen_dirs: set[tuple[int, int]] = set()
     prefix_len = len(root) + 1
     while stack:
@@ -176,6 +198,8 @@ def walk(
         try:
             dir_st = os.lstat(directory)
         except OSError:
+            # Not silently skipped: its contents would read as deleted.
+            unwatched.append({"path": directory[prefix_len:] or ".", "why": "unreadable"})
             continue
         key = (dir_st.st_dev, dir_st.st_ino)
         if key in seen_dirs:
@@ -198,6 +222,10 @@ def walk(
                 try:
                     st = entry.stat(follow_symlinks=False)
                 except OSError:
+                    # Listed but not inspectable (a directory without search
+                    # permission): never silently absent, or it would read as
+                    # a deletion.
+                    unwatched.append({"path": rel, "why": "unreadable"})
                     continue
                 mode = st.st_mode
                 if stat.S_ISDIR(mode):
@@ -252,7 +280,14 @@ def walk(
     return Snapshot(entries, unwatched, truncated, timed_out, walk_ms, coarse)
 
 
-def watch_status(rel: str, unwatched: list[dict[str, Any]]) -> str:
+def unwatched_prefixes(unwatched: list[dict[str, Any]]) -> frozenset[str]:
+    """The walk's unwatched directories as a set, so a path is checked by
+    its ancestors (O(depth)) instead of against every entry."""
+    return frozenset(item["path"] for item in unwatched
+                     if isinstance(item, dict) and isinstance(item.get("path"), str))
+
+
+def watch_status(rel: str, unwatched: list[dict[str, Any]] | frozenset[str]) -> str:
     """Whether a repository-relative path lies in the watched scope.
 
     `outside-scope` (escapes the repository), `unwatched` (under a fixed
@@ -268,9 +303,9 @@ def watch_status(rel: str, unwatched: list[dict[str, Any]]) -> str:
         return "unwatched"
     if parts[-1] in EXCLUDED_FILE_NAMES or parts[-1].startswith("._"):
         return "unwatched"
-    for item in unwatched:
-        prefix = item.get("path") if isinstance(item, dict) else None
-        if isinstance(prefix, str) and (rel == prefix or rel.startswith(prefix + "/")):
+    prefixes = unwatched if isinstance(unwatched, frozenset) else unwatched_prefixes(unwatched)
+    for i in range(1, len(parts) + 1):
+        if "/".join(parts[:i]) in prefixes:
             return "unwatched"
     return "watched"
 
@@ -352,6 +387,15 @@ def write_snapshot(
         raise
 
 
+def _snapshot_root(path: Path) -> str | None:
+    """The physical checkout a Pre snapshot walked, or None if unreadable."""
+    loaded = read_snapshot(path)
+    if loaded is None:
+        return None
+    root = loaded[1].get("repo_root")
+    return os.path.realpath(root) if isinstance(root, str) else None
+
+
 def read_snapshot(path: Path) -> tuple[Snapshot, dict[str, Any]] | None:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -417,8 +461,12 @@ def _locked(path: Path) -> Iterator[None]:
 
 
 def append_line(path: Path, record: dict[str, Any], *, io_root: Path) -> None:
-    """Append one JSON line under the file's stable lock."""
+    """Append one JSON line under the file's stable lock. The observation
+    store is kept long-term, so an observation's command text is stored
+    under the commit allowlist (its change entries are the evidence)."""
     _check_dir(io_root, path.parent)
+    if record.get("kind") == "observation" and isinstance(record.get("bash_cmd"), str):
+        record = _allowlisted(record)
     line = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
     with _locked(path):
         fd = os.open(
@@ -430,6 +478,48 @@ def append_line(path: Path, record: dict[str, Any], *, io_root: Path) -> None:
             os.write(fd, line)
         finally:
             os.close(fd)
+
+
+def journal_intact(path: Path) -> bool:
+    """Whether every line of the journal parses as a record. A torn line (a
+    hook that failed mid-append) may have been a Post or an expiry, so the
+    index proves nothing from a journal that is not intact."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            raw = handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    for line in raw.split(b"\n"):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            return False
+        if not isinstance(value, dict) or not isinstance(value.get("seq"), int):
+            return False
+    return True
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """os.write until every byte is written: a short write would tear a
+    journal line."""
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write")
+        view = view[written:]
 
 
 def _read_lines(path: Path) -> list[dict[str, Any]]:
@@ -501,20 +591,54 @@ class Interval(NamedTuple):
     expired: bool
     pre_wall_ns: int
     agent: str | None = None  # a subagent's id; None for the main agent
+    # The Post said an observation follows (a Bash call, an edit with named
+    # targets): a closed interval with none on record is a gap.
+    observe: bool = False
+    # Why an expired interval closed: "turn-ended" (the host's turn is over,
+    # so no foreground call is still running) or "age" (only a bound); for
+    # a background job, "task-finished" when the host showed it ended.
+    end_reason: str | None = None
+    # The host's id for a background job (Claude's backgroundTaskId).
+    task: str | None = None
+    # The command may leave a process running after its shell: the host's
+    # task ending is then no evidence that the work ended.
+    detached: bool = False
 
 
 def _journal_records(path: Path) -> list[dict[str, Any]]:
     return [r for r in _read_lines(path) if isinstance(r.get("seq"), int)]
 
 
+def interval_key(host: str, session: str, call: str) -> str:
+    """A call's journal identity: its id within its host session. The same
+    tool id in two sessions is two calls, and one session's Post never
+    closes the other's interval."""
+    return f"{host}\x00{session}\x00{call}"
+
+
 def _intervals(records: list[dict[str, Any]]) -> dict[str, Interval]:
     calls: dict[str, Interval] = {}
+    by_call: dict[str, list[str]] = {}
     for record in sorted(records, key=lambda r: r["seq"]):
-        key = str(record.get("call"))
+        call = str(record.get("call"))
         event = record.get("ev")
+        host, session = record.get("host"), record.get("session")
+        if event == "pre":
+            key = interval_key(str(host or ""), str(session or ""), call)
+            by_call.setdefault(call, []).append(key)
+        elif isinstance(host, str) and isinstance(session, str):
+            key = interval_key(host, session, call)
+        else:
+            # A record without its session (written before keys were scoped):
+            # it applies only where the bare id names exactly one open call.
+            open_keys = [k for k in by_call.get(call, []) if k in calls
+                         and calls[k].post_seq is None]
+            if len(open_keys) != 1:
+                continue
+            key = open_keys[0]
         if event == "pre":
             calls[key] = Interval(
-                key,
+                call,
                 str(record.get("host") or ""),
                 str(record.get("session") or ""),
                 str(record.get("tool") or ""),
@@ -524,17 +648,29 @@ def _intervals(records: list[dict[str, Any]]) -> dict[str, Interval]:
                 False,
                 int(record.get("wall_ns") or 0),
                 record.get("agent") if isinstance(record.get("agent"), str) else None,
+                detached=record.get("detached") is True,
             )
         elif event == "launch" and key in calls:
             # A background call's own Post: the job may still be running,
             # so the interval stays open.
-            calls[key] = calls[key]._replace(background=True)
+            calls[key] = calls[key]._replace(
+                background=True, observe=calls[key].observe or record.get("observe") is True,
+                task=record.get("task") if isinstance(record.get("task"), str)
+                else calls[key].task)
+        elif event == "end" and key in calls and calls[key].post_seq is None:
+            # The host showed the background job ended: a real bound.
+            calls[key] = calls[key]._replace(
+                post_seq=record["seq"], expired=False, background=True,
+                end_reason=str(record.get("reason") or "task-finished"))
         elif event in ("post", "expire") and key in calls and calls[key].post_seq is None:
             current = calls[key]
             calls[key] = current._replace(
                 post_seq=record["seq"],
                 expired=event == "expire",
                 background=current.background or bool(record.get("background")),
+                observe=current.observe or record.get("observe") is True,
+                end_reason=(("turn-ended" if record.get("reason") == "turn-ended" else "age")
+                            if event == "expire" else None),
             )
     return calls
 
@@ -563,6 +699,10 @@ def journal_event(
     tool: str = "",
     background: bool = False,
     now_ns: int | None = None,
+    meta: dict[str, Any] | None = None,
+    observe: bool = False,
+    task: str | None = None,
+    detached: bool = False,
 ) -> tuple[int, dict[str, Interval], list[Interval]]:
     """Append one event under the journal lock.
 
@@ -570,6 +710,11 @@ def journal_event(
     intervals this call expired (open past their age bound). Expiry and
     compaction run here, in whichever hook holds the lock, so no Stop branch
     has to run for the journal to stay bounded.
+
+    Every record carries the journal's id (`jid`), minted when the journal
+    starts empty. Sequence numbers are comparable only within one id: a
+    deleted journal restarts at 1 under a new id. With ``meta``, the id is
+    stored there as ``journal_id``.
     """
     path = journal_path(state_dir)
     _check_dir(state_dir / "io", path.parent)
@@ -578,17 +723,26 @@ def journal_event(
         records = _journal_records(path)
         existing = len(records)
         seq = max((r["seq"] for r in records), default=0) + 1
+        jid = next((r["jid"] for r in reversed(records) if isinstance(r.get("jid"), str)), None)
+        if jid is None:
+            # A fresh journal, or one written before ids existed: a new id,
+            # so its sequence numbers are never compared with an older run's.
+            jid = uuid.uuid4().hex
+        if meta is not None:
+            meta["journal_id"] = jid
         intervals = _intervals(records)
         expired: list[Interval] = []
-        for interval in intervals.values():
-            if interval.post_seq is not None or interval.call == call:
+        own_key = interval_key(host, session, call)
+        for key, interval in intervals.items():
+            if interval.post_seq is not None or key == own_key:
                 continue
             if now_ns - interval.pre_wall_ns > OPEN_INTERVAL_MAX_SECONDS * 1_000_000_000:
                 records.append({"seq": seq, "ev": "expire", "call": interval.call,
-                                "wall_ns": now_ns})
+                                "host": interval.host, "session": interval.session,
+                                "wall_ns": now_ns, "jid": jid})
                 expired.append(interval)
                 seq += 1
-        if event in ("post", "launch") and call not in intervals:
+        if event in ("post", "launch") and own_key not in intervals:
             # This call's Pre never reached the journal (its append timed
             # out). Record it as having started before everything still in
             # the journal: every call it may have run beside then lists it,
@@ -596,7 +750,7 @@ def journal_event(
             records.append({"seq": seq, "ev": "pre", "call": call, "host": host,
                             "session": session, "agent": agent, "tool": tool,
                             "background": background, "wall_ns": now_ns,
-                            "start_unknown": True})
+                            "start_unknown": True, "jid": jid})
             seq += 1
         records.append(
             {
@@ -609,6 +763,10 @@ def journal_event(
                 "tool": tool,
                 "background": background,
                 "wall_ns": now_ns,
+                "jid": jid,
+                **({"observe": True} if observe else {}),
+                **({"task": task} if task else {}),
+                **({"detached": True} if detached else {}),
             }
         )
         intervals = _intervals(records)
@@ -624,6 +782,11 @@ def journal_event(
                 if i.post_seq is None or i.post_seq >= horizon
             }
             kept = [r for r in records if str(r.get("call")) in keep]
+            # Where compaction cut: an interval that started before this may
+            # be gone, so the index proves nothing it cannot see past it.
+            floor = max([horizon] + [r.get("floor", 0) for r in records
+                                     if r.get("ev") == "floor"])
+            kept.insert(0, {"seq": 0, "ev": "floor", "call": "", "floor": floor, "jid": jid})
             if not kept or kept[-1]["seq"] != seq:
                 # The counter lives in the file: keep the newest line so
                 # sequence numbers never restart after compaction.
@@ -637,10 +800,120 @@ def journal_event(
             try:
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
                     raise OSError("journal is not a regular file")
-                os.write(fd, line.encode("utf-8"))
+                _write_all(fd, line.encode("utf-8"))
             finally:
                 os.close(fd)
+    _publish_expired(state_dir, jid, expired)
     return seq, intervals, expired
+
+
+def _publish_expired(state_dir: Path, jid: str, expired: list[Interval]) -> None:
+    """A foreground call the journal closed by age, with no Post: what it
+    changed is unknown, and the age bound is no evidence that it stopped.
+    The gap is published to the call's store, since compaction drops the
+    interval from the journal right away. Best effort, like every append."""
+    for interval in expired:
+        # A background job too: if its launch observation was lost, this is
+        # the only durable trace once compaction drops the interval. Where
+        # the launch observation exists, the index prefers it (it has a
+        # change list), and either way the job's gap stays open-ended.
+        snap = snapshot_path(state_dir, interval.host, interval.session, interval.call)
+        record = {
+            "kind": "observation",
+            "version": OBSERVATION_VERSION,
+            "observation_id": f"{interval.host}:{interval.call}",
+            "host": interval.host,
+            "host_session_id": interval.session,
+            "tool": interval.tool,
+            "status": "unavailable",
+            "reason": "call-expired",
+            "detail": "the call had no Post within the journal's age bound",
+            "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "changes": None,
+            "journal": {"id": jid, "pre_seq": interval.pre_seq, "post_seq": None,
+                        "expired": True, "end_reason": "age"},
+            "repo_root": _snapshot_root(snap) if snap.exists() and not snap.is_symlink()
+            else None,
+        }
+        with contextlib.suppress(OSError):
+            append_line(observations_path(state_dir, interval.host, interval.session),
+                        record, io_root=state_dir / "io")
+
+
+_TASK_ID_RX = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+# Statuses that mean a background task is over. Anything else (including a
+# status this list does not know) leaves the job open.
+_TASK_DONE = frozenset({"completed", "complete", "done", "failed", "error", "errored",
+                        "killed", "stopped", "cancelled", "canceled", "exited",
+                        "terminated", "finished"})
+
+
+def end_finished_background(state_dir: Path, *, host: str, session: str,
+                            tasks: list[Any]) -> int:
+    """End background jobs the host's own task list shows are over.
+
+    ``tasks`` is the host's snapshot of this session's background tasks
+    (Claude's Stop `background_tasks`). A job of this session whose task id
+    is absent from the snapshot, or present with a finished status, gets an
+    `end` record: a real bound, unlike an age expiry. A job with no task id,
+    or one listed with any other status, stays open. Returns how many ended.
+    """
+    listed: dict[str, str] = {}
+    for task in tasks:
+        if isinstance(task, dict) and isinstance(task.get("id"), str):
+            listed[task["id"]] = str(task.get("status") or "").lower()
+    path = journal_path(state_dir)
+    if not path.exists():
+        return 0
+    _check_dir(state_dir / "io", path.parent)
+    ended = 0
+    ends: list[tuple[str, int]] = []
+    jid = None
+    with _locked(path):
+        records = _journal_records(path)
+        seq = max((r["seq"] for r in records), default=0)
+        jid = next((r["jid"] for r in reversed(records) if isinstance(r.get("jid"), str)), None)
+        lines = []
+        for interval in _intervals(records).values():
+            if (interval.post_seq is not None or not interval.background or not interval.task
+                    or interval.detached
+                    or interval.host != host or interval.session != session):
+                continue  # a detached process may outlive the host's task
+            status = listed.get(interval.task)
+            if status is not None and status not in _TASK_DONE:
+                continue  # still running, or a status we cannot read
+            if status is None and interval.agent is not None:
+                # Absence proves an end only for the main agent's own jobs:
+                # it is stopped while its Stop snapshot is taken, but a
+                # background subagent may launch a job after the snapshot.
+                continue
+            seq += 1
+            lines.append(json.dumps({"seq": seq, "ev": "end", "call": interval.call,
+                                     "host": host, "session": session,
+                                     "reason": "task-finished", "task": interval.task,
+                                     "wall_ns": time.time_ns(),
+                                     **({"jid": jid} if jid else {})},
+                                    sort_keys=True) + "\n")
+            ends.append((interval.call, seq))
+            ended += 1
+        if lines:
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise OSError("journal is not a regular file")
+                _write_all(fd, "".join(lines).encode("utf-8"))
+            finally:
+                os.close(fd)
+    # The end also goes to the session's store: compaction drops the ended
+    # interval from the journal, and the bound must outlive it.
+    for call, end_seq in ends:
+        with contextlib.suppress(OSError):
+            append_line(observations_path(state_dir, host, session),
+                        {"kind": "background-end", "observation_id": f"{host}:{call}",
+                         "host_session_id": session, "reason": "task-finished",
+                         "journal": {"id": jid, "post_seq": end_seq}},
+                        io_root=state_dir / "io")
+    return ended
 
 
 def turn_end(state_dir: Path, *, host: str, session: str) -> int:
@@ -656,11 +929,16 @@ def turn_end(state_dir: Path, *, host: str, session: str) -> int:
     path = journal_path(state_dir)
     io_root = state_dir / "io"
     closed: list[str] = []
+    # The journal bound of each call closed here: a confirmed turn end, so
+    # a later call's writes are provably after whatever this one hid.
+    bounds: dict[str, dict[str, Any]] = {}
     if path.exists():
         _check_dir(io_root, path.parent)
         with _locked(path):
             records = _journal_records(path)
             seq = max((r["seq"] for r in records), default=0)
+            jid = next((r["jid"] for r in reversed(records) if isinstance(r.get("jid"), str)),
+                       None)
             now_ns = time.time_ns()
             lines = []
             for interval in _intervals(records).values():
@@ -671,15 +949,21 @@ def turn_end(state_dir: Path, *, host: str, session: str) -> int:
                         and interval.host == host and interval.session == session):
                     seq += 1
                     record = {"seq": seq, "ev": "expire", "call": interval.call,
-                              "wall_ns": now_ns, "reason": "turn-ended"}
+                              "host": interval.host, "session": interval.session,
+                              "wall_ns": now_ns, "reason": "turn-ended",
+                              **({"jid": jid} if jid else {})}
                     lines.append(json.dumps(record, sort_keys=True) + "\n")
                     closed.append(interval.call)
+                    if jid:
+                        bounds[interval.call] = {"id": jid, "pre_seq": interval.pre_seq,
+                                                 "post_seq": seq, "expired": True,
+                                                 "end_reason": "turn-ended"}
             if lines:
                 fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
                 try:
                     if not stat.S_ISREG(os.fstat(fd).st_mode):
                         raise OSError("journal is not a regular file")
-                    os.write(fd, "".join(lines).encode("utf-8"))
+                    _write_all(fd, "".join(lines).encode("utf-8"))
                 finally:
                     os.close(fd)
     # Unjournaled foreground calls of this session (their Pre lost the
@@ -718,6 +1002,10 @@ def turn_end(state_dir: Path, *, host: str, session: str) -> int:
                           "(denied, interrupted, or the hook did not run)",
                 "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "changes": None,
+                "journal": bounds.get(call),
+                # The checkout this gap belongs to, from the call's own Pre
+                # snapshot, so it never clouds another worktree's verdicts.
+                "repo_root": _snapshot_root(snap),
             }
             with contextlib.suppress(OSError):
                 append_line(observations_path(state_dir, host, session), record,
@@ -736,15 +1024,22 @@ def turn_end(state_dir: Path, *, host: str, session: str) -> int:
     return len(closed)
 
 
-def overlapping(intervals: dict[str, Interval], call: str) -> list[dict[str, Any]]:
-    """Every other interval that intersects this call's [pre, post]."""
-    own = intervals.get(call)
+def overlapping(intervals: dict[str, Interval], key: str) -> list[dict[str, Any]]:
+    """Every other interval that intersects this call's [pre, post].
+    ``key`` is the call's `interval_key`."""
+    own = intervals.get(key)
+    if own is None and "\x00" not in key:
+        # A bare call id: accepted when it names exactly one interval.
+        matches = [k for k, i in intervals.items() if i.call == key]
+        if len(matches) == 1:
+            key = matches[0]
+            own = intervals[key]
     if own is None:
         return []
     own_end = own.post_seq if own.post_seq is not None else float("inf")
     found = []
-    for other in intervals.values():
-        if other.call == call:
+    for other_key, other in intervals.items():
+        if other_key == key:
             continue
         other_end = other.post_seq if other.post_seq is not None else float("inf")
         if other.pre_seq < own_end and own.pre_seq < other_end:
@@ -952,6 +1247,7 @@ def pre(
     repo_root: Path | None = None,
     snapshot: bool = False,
     background: bool = False,
+    detached: bool = False,
 ) -> None:
     """Open the call's interval; for Bash, snapshot the watched scope.
 
@@ -971,7 +1267,7 @@ def pre(
     try:
         seq, _, _ = journal_event(
             state_dir, "pre", call_id, host=host, session=session, agent=agent,
-            tool=tool, background=background,
+            tool=tool, background=background, detached=detached,
         )
     except LockTimeout:
         journal_error = "lock-timeout"
@@ -1101,7 +1397,10 @@ def unjournaled_open_calls(
                 if data is None:
                     continue
                 call = data.get("call") if isinstance(data.get("call"), str) else marker.name
-                if call == own_call or call in intervals:
+                marker_host = str(data.get("host") or host_entry.name)
+                marker_session = str(data.get("session") or session_entry.name)
+                if call == own_call or interval_key(marker_host, marker_session,
+                                                    call) in intervals:
                     continue
                 found.append({
                     "call": call,
@@ -1122,7 +1421,10 @@ def filter_unjournaled(
     """Markers scanned *before* the journal was read, minus the calls the
     journal now knows. A call leaves the marker set only after entering the
     journal, so scanning first means no call can fall between the two."""
-    return [marker for marker in markers if marker["call"] not in intervals]
+    bare = {interval.call for interval in intervals.values()}
+    return [marker for marker in markers
+            if (interval_key(marker["host"], marker["session"], marker["call"]) not in intervals
+                if "host" in marker and "session" in marker else marker["call"] not in bare)]
 
 
 def _entry(path: str, before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict:
@@ -1137,11 +1439,13 @@ def _state(ident: Identity | None, result: HashResult | None) -> dict[str, Any] 
         "size_bytes": ident.size,
         "hash_status": result.status if result else "not-captured",
     }
-    if result is not None and result.status == "pending":
-        # Enough to resolve the hash later, only if the file still has
-        # exactly this identity (never a hash of later content).
-        state["identity"] = {"dev": ident.dev, "ino": ident.ino, "size": ident.size,
-                             "mtime_ns": ident.mtime_ns, "ctime_ns": ident.ctime_ns}
+    if state["sha256"] is not None:
+        state["hash_origin"] = "observed"
+    # Always kept: a pending hash is resolved later only if the file still
+    # has exactly this identity, and an unchanged identity (ctime moves on
+    # any change and cannot be set back) proves the file untouched since.
+    state["identity"] = {"dev": ident.dev, "ino": ident.ino, "size": ident.size,
+                         "mtime_ns": ident.mtime_ns, "ctime_ns": ident.ctime_ns}
     return state
 
 
@@ -1166,16 +1470,30 @@ def repo_relative_unfollowed(raw: str, root_real: str) -> tuple[str | None, str 
         # files, so a path that climbs is never proven.
         return None, "parent-traversal"
     lexical = os.path.normpath(os.path.abspath(raw))
-    ancestor = lexical
     rel = None
-    while True:
-        if os.path.realpath(ancestor) == root_real:
-            rel = os.path.relpath(lexical, ancestor)
-            break
-        parent = os.path.dirname(ancestor)
-        if parent == ancestor:
+    if lexical == root_real or lexical.startswith(root_real.rstrip(os.sep) + os.sep):
+        # Under the root as written: no alias search, so a symlink below the
+        # root (`self -> .`) is checked as a component, never taken as one.
+        rel = os.path.relpath(lexical, root_real)
+    else:
+        # An alias above the root (macOS /var for /private/var): the
+        # outermost ancestor that resolves to the root. Taking the
+        # outermost one keeps any symlink below it inside `rel`, where the
+        # component check refuses it.
+        ancestors = []
+        ancestor = lexical
+        while True:
+            ancestors.append(ancestor)
+            parent = os.path.dirname(ancestor)
+            if parent == ancestor:
+                break
+            ancestor = parent
+        for ancestor in reversed(ancestors):
+            if os.path.realpath(ancestor) == root_real:
+                rel = os.path.relpath(lexical, ancestor)
+                break
+        if rel is None:
             return None, "outside-scope"
-        ancestor = parent
     if rel == ".":
         return None, "outside-scope"
     current = root_real
@@ -1239,6 +1557,16 @@ def _input_proofs(
     return proofs
 
 
+def _allowlisted(observation: dict[str, Any]) -> dict[str, Any]:
+    """The observation with its command text under the commit allowlist."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import lineage_redact
+
+    return {**observation, "bash_cmd": lineage_redact.commit_observation_command(observation)}
+
+
 def post(
     state_dir: Path,
     *,
@@ -1255,6 +1583,8 @@ def post(
     inputs: list[str] | None = None,
     hash_seconds: float = DEFAULT_HASH_SECONDS,
     change_cap: int = DEFAULT_CHANGE_CAP,
+    edited: list[tuple[str, str]] | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Close the call's interval and, for Bash, build its observation.
 
@@ -1266,7 +1596,14 @@ def post(
     if bash_cmd and starts_background_job(bash_cmd):
         background = True
     snap_file = snapshot_path(state_dir, host, session, call_id)
-    loaded = read_snapshot(snap_file) if repo_root is not None else None
+    # An edit's targets are hashed while its interval is still open: once it
+    # closes, a later call may rewrite them, and those bytes must not be
+    # claimed as this edit's. A later call that overlaps the hashing shows
+    # up as overlap, not as a false ordering.
+    edit_changes = (_edit_changes(repo_root, edited)
+                    if edited is not None and repo_root is not None else None)
+    loaded = (read_snapshot(snap_file)
+              if repo_root is not None and edited is None else None)
     post_snap = walk(repo_root) if loaded is not None else None
     # Open markers are scanned before the journal is read (see
     # `filter_unjournaled`), after the walk so a call starting during the
@@ -1274,10 +1611,16 @@ def post(
     markers = unjournaled_open_calls(state_dir, {}, call_id) if repo_root is not None else []
     journal_error: str | None = None
     intervals: dict[str, Interval] = {}
+    journal_meta: dict[str, Any] = {}
     try:
         _, intervals, _ = journal_event(
             state_dir, "launch" if background else "post", call_id, host=host,
             session=session, agent=agent, tool=tool, background=background,
+            meta=journal_meta,
+            # An observation is owed for this call; if its append later fails,
+            # the index sees a closed call with none on record: a gap.
+            observe=repo_root is not None,
+            task=task_id if background else None,
         )
     except LockTimeout:
         journal_error = "lock-timeout"
@@ -1287,6 +1630,13 @@ def post(
         # A background job may still be running: its marker stays until
         # the journal expires the interval or a late completion arrives.
         clear_open_marker(state_dir, host, session, call_id)
+    if edit_changes is not None and repo_root is not None:
+        return _publish_edit(state_dir, host=host, session=session, call_id=call_id,
+                             tool=tool, agent=agent, repo_root=repo_root,
+                             edit_changes=edit_changes, intervals=intervals,
+                             journal_meta=journal_meta, journal_error=journal_error,
+                             outcome=outcome,
+                             unjournaled=filter_unjournaled(markers, intervals))
     if repo_root is None:
         return None
     with contextlib.suppress(OSError):
@@ -1303,15 +1653,32 @@ def post(
         "outcome": outcome,
         "bash_exit": bash_exit,
         "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "overlapping": overlapping(intervals, call_id)
+        "overlapping": overlapping(intervals, interval_key(host, session, call_id))
         + filter_unjournaled(markers, intervals),
         "status": None,
         "reason": None,
         "scope": None,
         "changes": None,
         "input_proofs": [],
+        "journal": None,
+        # The checkout whose files `changes` paths are relative to. A shared
+        # state directory can serve several worktrees; the index keeps only
+        # observations of its own checkout.
+        "repo_root": os.path.realpath(repo_root),
     }
-    own = intervals.get(call_id)
+    own = intervals.get(interval_key(host, session, call_id))
+    if own is not None and journal_meta.get("journal_id"):
+        # Where this call sits in the journal's order: a write by a call
+        # whose post_seq precedes another call's pre_seq happened first,
+        # with no clock involved. Comparable only under the same id.
+        observation["journal"] = {
+            "id": journal_meta["journal_id"],
+            "pre_seq": own.pre_seq,
+            "post_seq": own.post_seq,
+            # An expiry is a bound the journal imposed, not the call's end:
+            # no order is asserted from it.
+            "expired": own.expired,
+        }
     if own is not None and own.background:
         background = True
     if loaded is None or journal_error is not None:
@@ -1324,6 +1691,20 @@ def post(
         return observation
     pre_snap, meta = loaded
     assert post_snap is not None
+    pre_root = meta.get("repo_root")
+    if isinstance(pre_root, str) and os.path.realpath(pre_root) != observation["repo_root"]:
+        # Pre walked another checkout (a session that moved, or a shared
+        # state directory): diffing two different trees would invent
+        # changes, so none are claimed.
+        observation["status"] = "unavailable"
+        observation["reason"] = "cross-root"
+        append_line(observations_path(state_dir, host, session), observation,
+                    io_root=state_dir / "io")
+        # The snapshot describes another tree: it is withheld from input and
+        # config proofs entirely, not retired for the extractor.
+        with contextlib.suppress(OSError):
+            os.unlink(snap_file)
+        return observation
     if own is None or meta.get("journal_error"):
         # This call's own Pre never reached the journal, so which calls
         # overlapped it is unknown: no change list is claimed as its own.
@@ -1331,12 +1712,28 @@ def post(
         observation["reason"] = "own-interval-unjournaled"
         _publish(state_dir, host, session, observation, snap_file)
         return observation
+    # A directory unwatched at either walk hides changes: one excluded at
+    # Pre and removed (with its exclusion) during the call appears in
+    # neither snapshot, so its deletion is visible only as this gap.
+    merged_unwatched = list(post_snap.unwatched)
+    post_prefixes = unwatched_prefixes(post_snap.unwatched)
+    for item in pre_snap.unwatched:
+        if isinstance(item, dict) and item.get("path") not in post_prefixes:
+            merged_unwatched.append({**item, "at": "pre"})
     observation["scope"] = {
         "entries": len(post_snap.entries),
-        "unwatched": post_snap.unwatched,
+        "unwatched": merged_unwatched,
         "walk_ms": [pre_snap.walk_ms, post_snap.walk_ms],
     }
     for label, snap in (("pre", pre_snap), ("post", post_snap)):
+        if "." in unwatched_prefixes(snap.unwatched):
+            # The checkout itself could not be listed (`chmod 711 .`): every
+            # path would vanish from that walk and read as a deletion, so
+            # no change list is claimed at all.
+            observation["status"] = "unavailable"
+            observation["reason"] = f"{label}-root-unreadable"
+            _publish(state_dir, host, session, observation, snap_file)
+            return observation
         if snap.truncated or snap.timed_out:
             observation["status"] = "unavailable"
             observation["reason"] = (
@@ -1349,6 +1746,19 @@ def post(
     cache = load_cache(state_dir)
     new_cache: dict[str, str] = {}
     result = diff(pre_snap.entries, post_snap.entries)
+    # A path that left (or entered) the watched scope during the call, say
+    # because the scope file changed, vanished from one walk without being
+    # deleted (or appeared without being created). It is recorded as a
+    # coverage change, never as a deletion or creation.
+    pre_prefixes = unwatched_prefixes(pre_snap.unwatched)
+    coverage_changed = sorted(
+        [p for p in result.deleted if watch_status(p, post_prefixes) != "watched"]
+        + [p for p in result.created if watch_status(p, pre_prefixes) != "watched"])
+    if coverage_changed:
+        moved = set(coverage_changed)
+        result = Diff([p for p in result.created if p not in moved], result.modified,
+                      [p for p in result.deleted if p not in moved],
+                      [r for r in result.rename_candidates if r[0] not in moved and r[1] not in moved])
     root = Path(os.path.realpath(repo_root))
     taken_ns = int(meta.get("taken_ns") or 0)
 
@@ -1364,11 +1774,16 @@ def post(
                for p in result.deleted[:change_cap]]
     modified: list[dict] = []
     metadata_only: list[str] = []
+    # Same bytes, new identity (a rerun that reproduced its output): kept
+    # with the new identity, so the latest identity of the file is on
+    # record and an unchanged one can still be proven later.
+    rewritten: list[dict] = []
     for path in result.modified[:change_cap]:
         before = _before_state(pre_snap.entries[path], cache)
         after = after_state(path)
         if (before and after and before["sha256"] and before["sha256"] == after["sha256"]):
             metadata_only.append(path)
+            rewritten.append(_entry(path, before, after))
         else:
             modified.append(_entry(path, before, after))
     capped = any(
@@ -1379,6 +1794,7 @@ def post(
         "modified": modified,
         "deleted": deleted,
         "metadata_only": metadata_only,
+        "rewritten": rewritten,
         "rename_candidates": [
             {"from": a, "to": b} for a, b in result.rename_candidates[:change_cap]
         ],
@@ -1389,8 +1805,16 @@ def post(
         },
         "capped": capped,
     }
+    if coverage_changed:
+        observation["changes"]["coverage_changed"] = coverage_changed[:change_cap]
+        if len(coverage_changed) > change_cap:
+            observation["changes"]["coverage_changed_truncated"] = True
     if capped:
         observation["changes"]["top_level"] = _top_level_counts(result)
+        # Readers may scope the capped diff's uncertainty to these
+        # directories only when the summary names all of them.
+        observation["changes"]["top_level_complete"] = (
+            _top_level_total(result) <= TOP_LEVEL_SUMMARY_MAX)
     if pre_snap.coarse_devices:
         # On a coarse-timestamp device a same-size rewrite within the tick
         # of the Pre stat leaves the stat identity unchanged, so these
@@ -1432,8 +1856,13 @@ def prove_inputs(
     inputs: list[str],
     *,
     hash_seconds: float = DEFAULT_HASH_SECONDS,
+    known_digests: dict[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Input proofs against a retired Pre snapshot, keyed by input path.
+
+    ``known_digests`` are digests the caller already took this call, keyed
+    like the hash cache (``dev:ino:size:mtime_ns:ctime_ns``): a file whose
+    identity still matches is not read again. They are not persisted.
 
     An input whose identity is the same now as in the Pre snapshot (ctime
     only moves forward, so equal identities mean no write in between), and
@@ -1446,6 +1875,13 @@ def prove_inputs(
     pre_snap, meta = loaded
     current: dict[str, Identity] = {}
     root = os.path.realpath(repo_root)
+    snap_root = meta.get("repo_root")
+    if isinstance(snap_root, str) and os.path.realpath(snap_root) != root:
+        # A snapshot of another checkout proves nothing about this one, even
+        # where both hold a file at the same relative path.
+        with contextlib.suppress(OSError):
+            os.unlink(done_snapshot)
+        return {path: {"pre_run_proven": False, "reason": "cross-root"} for path in inputs}
     for path in inputs:
         with contextlib.suppress(OSError, ValueError):
             # The same resolution as `_input_proofs`: no symlink followed.
@@ -1453,7 +1889,7 @@ def prove_inputs(
             if rel is not None:
                 current[rel] = identity_of(os.lstat(os.path.join(root, rel)))
     post_like = Snapshot(current, pre_snap.unwatched, False, False, 0, pre_snap.coarse_devices)
-    cache = load_cache(state_dir)
+    cache = {**load_cache(state_dir), **(known_digests or {})}
     new_cache: dict[str, str] = {}
     proofs = _input_proofs(
         inputs, Path(root), pre_snap, post_like, int(meta.get("taken_ns") or 0),
@@ -1524,18 +1960,328 @@ def hook(state_dir: Path, repo_root: Path, host: str, raw: str) -> int:
         return 0
     if event == "PreToolUse":
         background = False
+        detached = False
         if is_bash:
             tool_input = payload.get("tool_input")
             tool_input = tool_input if isinstance(tool_input, dict) else {}
             command = tool_input.get("command")
-            background = tool_input.get("run_in_background") is True or (
-                isinstance(command, str) and starts_background_job(command)
-            )
+            # The command itself may leave a process running after its shell
+            # (`&`, nohup, setsid, disown): the host's task ending does not
+            # end that process.
+            detached = isinstance(command, str) and starts_background_job(command)
+            background = tool_input.get("run_in_background") is True or detached
         pre(state_dir, host=host, session=session, call_id=call_id, tool=tool, agent=agent,
-            repo_root=repo_root, snapshot=is_bash, background=background)
+            repo_root=repo_root, snapshot=is_bash, background=background, detached=detached)
     elif event in ("PostToolUse", "PostToolUseFailure") and not is_bash:
-        post(state_dir, host=host, session=session, call_id=call_id, tool=tool, agent=agent)
+        edited = None
+        edit_result = "success"
+        cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+        if event == "PostToolUseFailure":
+            # A failed edit credits no write, but it may have left changed
+            # bytes (a partial write): its targets become uncertain.
+            edited = edit_targets(tool, payload.get("tool_input"), cwd)
+            if edited is not None:
+                edited = [(path, "uncertain") for path, _ in edited]
+                edit_result = "failure"
+        if event == "PostToolUse":
+            # A successful edit names the files it wrote.
+            edited = edit_targets(tool, payload.get("tool_input"), cwd)
+            if edited is not None and host != "claude":
+                # Claude sends PostToolUse only for edits that succeeded. Elsewhere
+                # the response says; a failed patch may have applied partly, so
+                # its targets become uncertain rather than writes or deletions.
+                verdict = edit_outcome(payload.get("tool_response"))
+                if verdict == "unknown" and host == "codex" and tool == "apply_patch":
+                    # Codex runs PostToolUse for apply_patch only on the Ok
+                    # path (a failed, rejected or denied patch returns an
+                    # error and fires no hook), and its response is plain
+                    # model-facing text: the Post itself is the evidence.
+                    verdict = "success"
+                if verdict == "failure":
+                    edited = [(path, "uncertain") for path, _ in edited]
+                    edit_result = "failure"
+                elif verdict == "unknown":
+                    # Not shown to have succeeded: the targets' hashes are
+                    # recorded, but never credited to this call as its own.
+                    edit_result = "unknown"
+        post(state_dir, host=host, session=session, call_id=call_id, tool=tool, agent=agent,
+             repo_root=repo_root if edited is not None else None, edited=edited,
+             outcome=edit_result)
     return 0
+
+
+def edit_outcome(response: Any) -> str:
+    """`failure`, `success`, or `unknown` from an edit tool's structured
+    response (an error flag, `success: false`, or a nonzero exit code)."""
+
+    def code(value: Any) -> int | None:
+        if isinstance(value, dict):
+            if value.get("isError") is True or value.get("success") is False:
+                return 1
+            for key in ("exit_code", "exitCode", "return_code", "returncode"):
+                candidate = value.get(key)
+                if isinstance(candidate, int) and not isinstance(candidate, bool):
+                    return candidate
+            for candidate in value.values():
+                found = code(candidate)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for candidate in value:
+                found = code(candidate)
+                if found is not None:
+                    return found
+        elif isinstance(value, str) and value[:1] in "{[":
+            try:
+                decoded = json.loads(value)
+            except ValueError:
+                return None
+            return code(decoded)
+        return None
+
+    found = code(response)
+    if found is None:
+        found = _textual_edit_code(response)
+    if found is None:
+        return "unknown"
+    return "success" if found == 0 else "failure"
+
+
+_EDIT_FAILURE_TEXT_RX = re.compile(
+    r"^\s*(?:error|failed|patch failed|invalid (?:context|patch))\b", re.IGNORECASE)
+_EDIT_SUCCESS_TEXT_RX = re.compile(r"^\s*success\b", re.IGNORECASE)
+
+
+def _textual_edit_code(value: Any) -> int | None:
+    """Plain-text edit responses, decoded as the activity tracker does
+    (`Error: invalid patch context` is a failure; `Success. Updated ...` a
+    success). Printed `stdout`/`stderr` fields are never read as status."""
+    if isinstance(value, dict):
+        for key, candidate in value.items():
+            if key in ("stdout", "stderr"):
+                continue
+            found = _textual_edit_code(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = _textual_edit_code(candidate)
+            if found is not None:
+                return found
+    elif isinstance(value, str):
+        if _EDIT_FAILURE_TEXT_RX.match(value):
+            return 1
+        if _EDIT_SUCCESS_TEXT_RX.match(value):
+            return 0
+    return None
+
+
+_PATCH_FILE_RX = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+?)\s*$", re.M)
+_PATCH_MOVE_RX = re.compile(r"^\*\*\* Move to: (.+?)\s*$", re.M)
+
+
+def edit_targets(
+    tool: str, tool_input: Any, cwd: str | None
+) -> list[tuple[str, str]] | None:
+    """The (path, action) pairs an edit tool call wrote, action being
+    `written` or `deleted`; None when the payload names none.
+
+    Claude's tools carry the path directly. Codex's apply_patch carries the
+    patch text, whose `*** Add/Update/Delete File:` (and `*** Move to:`)
+    lines name paths relative to the call's cwd.
+    """
+    if not isinstance(tool_input, dict):
+        return None
+    targets: list[tuple[str, str]] = []
+    if tool == "apply_patch":
+        patch = next(
+            (v for v in tool_input.values() if isinstance(v, str) and "*** Begin Patch" in v),
+            None,
+        )
+        if patch is None:
+            return None
+        # In order: an `Update File: a` followed by `Move to: b` leaves nothing
+        # at a (a tombstone) and the updated content at b.
+        for line in patch.splitlines():
+            file_match = _PATCH_FILE_RX.match(line)
+            if file_match:
+                action, raw = file_match.groups()
+                targets.append((raw, "deleted" if action == "Delete" else "written"))
+                continue
+            move_match = _PATCH_MOVE_RX.match(line)
+            if move_match and targets and targets[-1][1] == "written":
+                source, _ = targets.pop()
+                targets.append((source, "deleted"))
+                targets.append((move_match.group(1), "written"))
+    else:
+        key = "notebook_path" if tool == "NotebookEdit" else "file_path"
+        raw = tool_input.get(key)
+        if isinstance(raw, str) and raw:
+            targets.append((raw, "written"))
+    resolved = []
+    for raw, action in targets:
+        if "\0" in raw:
+            continue
+        path = raw if os.path.isabs(raw) or cwd is None else os.path.join(cwd, raw)
+        resolved.append((path, action))
+    return resolved or None
+
+
+EDIT_HASH_SECONDS = 0.5
+EDIT_HASH_MAX_BYTES = 50 * 1024 * 1024
+
+
+_CASE_PROBES: dict[str, bool] = {}
+
+
+def _case_insensitive(root_real: str) -> bool:
+    """Whether the checkout's volume folds case, probed once per root by
+    looking up the root's own name with its case swapped."""
+    if root_real not in _CASE_PROBES:
+        # The nearest ancestor (the root itself first) whose name has a
+        # letter: a checkout named `12345` is probed through its parent.
+        folds = False
+        current = root_real
+        while True:
+            parent, name = os.path.split(current)
+            if not name:
+                break
+            swapped = name.swapcase()
+            if swapped != name:
+                with contextlib.suppress(OSError):
+                    folds = os.path.samefile(current, os.path.join(parent, swapped))
+                break
+            current = parent
+        _CASE_PROBES[root_real] = folds
+    return _CASE_PROBES[root_real]
+
+
+def canonical_spelling(root_real: str, rel: str) -> str | None:
+    """``rel`` spelled as the directory listings spell it (the walk's
+    spelling). On a case- or normalization-insensitive volume a tool may
+    name `CHANGELOG.md` as `changelog.md`. A component that does not exist
+    keeps its spelling (nothing to disagree with); None when a component
+    matches no listed name, or several, or cannot be listed."""
+    import unicodedata
+
+    def fold(name: str) -> str:
+        return unicodedata.normalize("NFC", name).casefold()
+
+    parts = rel.split("/")
+    current = root_real
+    out: list[str] = []
+    for index, part in enumerate(parts):
+        candidate = os.path.join(current, part)
+        if not os.path.lexists(candidate):
+            out.extend(parts[index:])  # created later, or absent: as named
+            break
+        try:
+            names = os.listdir(current)
+        except OSError:
+            return None
+        if part in names:
+            chosen = part
+        else:
+            matches = [n for n in names if fold(n) == fold(part)]
+            if len(matches) != 1:
+                return None
+            chosen = matches[0]
+        out.append(chosen)
+        current = os.path.join(current, chosen)
+    return "/".join(out)
+
+
+def _edit_referent(raw: str, root_real: str) -> dict[str, Any]:
+    """Where an edit through a link landed, as a refusal the index turns
+    into a gap: `edit-via-link` at the in-checkout file, `edit-target-
+    outside` when it resolved outside, `edit-target-unknown` otherwise."""
+    try:
+        real = os.path.realpath(raw)
+    except (OSError, ValueError):
+        return {"path": None, "reason": "edit-target-unknown"}
+    prefix = root_real.rstrip(os.sep) + os.sep
+    if real.startswith(prefix):
+        return {"path": os.path.relpath(real, root_real), "reason": "edit-via-link"}
+    if real == root_real:
+        return {"path": None, "reason": "edit-target-unknown"}
+    return {"path": None, "reason": "edit-target-outside"}
+
+
+def _edit_changes(
+    repo_root: Path, edited: list[tuple[str, str]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """(written, deleted, refused) entries for an edit call's targets, each
+    written entry with the post-edit hash of the file when it is stable and
+    within the budget, else a null hash with its status."""
+    root_real = os.path.realpath(repo_root)
+    deadline = time.monotonic() + EDIT_HASH_SECONDS
+    written: list[dict[str, Any]] = []
+    deleted: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
+    for raw, action in edited:
+        rel, reason = repo_relative_unfollowed(raw, root_real)
+        if rel is None:
+            refused.append({"path": raw, "reason": reason})
+            if reason in ("symlinked-path", "parent-traversal"):
+                # The edit wrote through a link (or a climbing path): the
+                # file it changed is wherever that resolved, which may be in
+                # this checkout. Never credited as a write, but never silent:
+                # the referent becomes uncertain, or the whole checkout when
+                # the referent cannot be established.
+                refused.append(_edit_referent(raw, root_real))
+            continue
+        if action != "deleted":
+            # The spelling the filesystem lists, so `changelog.md` and
+            # `CHANGELOG.md` on a case-insensitive volume are one history.
+            canonical = canonical_spelling(root_real, rel)
+            if canonical is None:
+                # Which entry the edit wrote cannot be named: the whole
+                # checkout is uncertain for this call.
+                refused.append({"path": None, "reason": "edit-target-unknown",
+                                "detail": "spelling-unknown"})
+                continue
+            rel = canonical
+        if action == "uncertain":
+            refused.append({"path": rel, "reason": "edit-failed"})
+            continue
+        if action == "deleted":
+            # A tombstone only for a deletion that took effect: a path that
+            # is still there was not deleted by this call.
+            if os.path.lexists(os.path.join(root_real, rel)):
+                refused.append({"path": rel, "reason": "deletion-not-applied"})
+            else:
+                deleted.append({"path": rel, "after": None})
+                if _case_insensitive(root_real):
+                    # The deleted entry can no longer be listed, so the
+                    # spelling its writes were recorded under is unknown:
+                    # every spelling of the name becomes uncertain.
+                    refused.append({"path": rel, "reason": "deleted-spelling-unknown",
+                                    "casefold": True})
+            continue
+        path = Path(root_real) / rel
+        try:
+            ident = identity_of(os.lstat(path))
+        except OSError:
+            written.append({"path": rel, "after": {"sha256": None, "hash_status": "unavailable"}})
+            continue
+        if ident.size > EDIT_HASH_MAX_BYTES or time.monotonic() >= deadline:
+            result = HashResult(None, "pending")
+        else:
+            result, _ = stable_hash(path, ident, deadline=deadline, cache={}, new_cache={})
+        after: dict[str, Any] = {"sha256": result.sha256, "size_bytes": ident.size,
+                                 "hash_status": result.status}
+        if result.sha256 is not None:
+            after["hash_origin"] = "observed"
+        if result.status == "pending":
+            # As for Bash outputs: enough to resolve the hash later only if
+            # the file still has exactly this identity.
+            after["identity"] = {"dev": ident.dev, "ino": ident.ino, "size": ident.size,
+                                 "mtime_ns": ident.mtime_ns, "ctime_ns": ident.ctime_ns}
+        written.append({"path": rel, "after": after})
+    return written, deleted, refused
+
+
+TOP_LEVEL_SUMMARY_MAX = 50
 
 
 def _top_level_counts(result: Diff) -> dict[str, int]:
@@ -1543,7 +2289,12 @@ def _top_level_counts(result: Diff) -> dict[str, int]:
     for path in (*result.created, *result.modified, *result.deleted):
         top = path.split("/", 1)[0]
         counts[top] = counts.get(top, 0) + 1
-    return dict(sorted(counts.items(), key=lambda item: -item[1])[:50])
+    return dict(sorted(counts.items(), key=lambda item: -item[1])[:TOP_LEVEL_SUMMARY_MAX])
+
+
+def _top_level_total(result: Diff) -> int:
+    return len({path.split("/", 1)[0]
+                for path in (*result.created, *result.modified, *result.deleted)})
 
 
 SNAPSHOT_MAX_AGE_SECONDS = 24 * 3600
@@ -1620,6 +2371,7 @@ def sweep_stale_snapshots(
                               "(denied, interrupted, or never reported complete)",
                     "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "changes": None,
+                    "repo_root": _snapshot_root(path),
                 }
                 try:
                     append_line(
@@ -1654,6 +2406,67 @@ def done_snapshot_path(snap_file: Path) -> Path:
     return snap_file.with_name(snap_file.name[: -len(".snap")] + ".done")
 
 
+def _publish_edit(
+    state_dir: Path,
+    *,
+    host: str,
+    session: str,
+    call_id: str,
+    tool: str,
+    agent: str | None,
+    repo_root: Path,
+    edit_changes: tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]],
+    intervals: dict[str, Interval],
+    journal_meta: dict[str, Any],
+    journal_error: str | None,
+    outcome: str = "success",
+    unjournaled: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Record the files an edit tool wrote, by path, with their hashes after
+    the edit. No snapshot is involved: the tool names its own targets, so
+    an edit is a write of known paths, not a whole-repository gap."""
+    written, deleted, refused = edit_changes
+    own_key = interval_key(host, session, call_id)
+    own = intervals.get(own_key)
+    observation: dict[str, Any] = {
+        "kind": "observation",
+        "version": OBSERVATION_VERSION,
+        "observation_id": f"{host}:{call_id}",
+        "host": host,
+        "host_session_id": session,
+        "agent_id": agent,
+        "tool": tool,
+        "bash_cmd": None,
+        "outcome": outcome,
+        "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        # A concurrent call whose Pre missed the journal still left a
+        # marker: either call could have written these bytes.
+        "overlapping": (overlapping(intervals, own_key) if own is not None else [])
+        + list(unjournaled or []),
+        "status": "edit",
+        "reason": journal_error,
+        "scope": None,
+        "changes": {
+            # An edit tool reports what it wrote, not what it found: a
+            # written path may be new or modified, so it is not split.
+            "edited": written,
+            "deleted": deleted,
+            "refused": refused,
+        },
+        "input_proofs": [],
+        "journal": (
+            {"id": journal_meta["journal_id"], "pre_seq": own.pre_seq,
+             "post_seq": own.post_seq, "expired": own.expired}
+            if own is not None and journal_meta.get("journal_id") else None
+        ),
+        "repo_root": os.path.realpath(repo_root),
+    }
+    with contextlib.suppress(OSError):
+        append_line(observations_path(state_dir, host, session), observation,
+                    io_root=state_dir / "io")
+    return observation
+
+
 def _publish(
     state_dir: Path, host: str, session: str, observation: dict[str, Any], snap_file: Path
 ) -> None:
@@ -1683,6 +2496,8 @@ def _build_parser() -> argparse.ArgumentParser:
     t.add_argument("--state-dir", type=Path, required=True)
     t.add_argument("--host", required=True)
     t.add_argument("--session", required=True)
+    t.add_argument("--stop-payload-stdin", action="store_true",
+                   help="Read the Stop payload on stdin; its background_tasks end jobs.")
     for name in ("pre", "post"):
         p = sub.add_parser(name)
         p.add_argument("--state-dir", type=Path, required=True)
@@ -1700,6 +2515,7 @@ def _build_parser() -> argparse.ArgumentParser:
                            choices=("success", "failure", "unknown"))
             p.add_argument("--bash-exit", type=int)
             p.add_argument("--bash-cmd")
+            p.add_argument("--task-id", help="The host's id for a background job.")
             p.add_argument("--inputs-json", type=Path,
                            help="File holding a JSON list of inferred input paths.")
     return parser
@@ -1713,6 +2529,16 @@ def main(argv: list[str] | None = None) -> int:
         if not _SESSION_ID_RX.fullmatch(args.session) or args.session in (".", ".."):
             return 64
         turn_end(args.state_dir, host=args.host, session=args.session)
+        if args.stop_payload_stdin:
+            try:
+                payload = json.loads(sys.stdin.read())
+            except ValueError:
+                payload = None
+            tasks = payload.get("background_tasks") if isinstance(payload, dict) else None
+            if isinstance(tasks, list):
+                with contextlib.suppress(OSError, LockTimeout):
+                    end_finished_background(args.state_dir, host=args.host,
+                                            session=args.session, tasks=tasks)
         return 0
     for value in (args.host, args.session, args.call_id):
         if "\0" in value or not value:
@@ -1735,6 +2561,7 @@ def main(argv: list[str] | None = None) -> int:
         tool=args.tool, agent=args.agent_id, repo_root=args.repo_root,
         outcome=args.outcome, bash_exit=args.bash_exit, bash_cmd=args.bash_cmd,
         background=args.background, inputs=inputs,
+        task_id=args.task_id if args.task_id and _TASK_ID_RX.fullmatch(args.task_id) else None,
     )
     if observation is not None:
         # The calling hook reads this one line to link its lineage record.

@@ -135,6 +135,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -217,7 +218,7 @@ def n_rows_if_tabular(path: Path) -> int | None:
 # any of them was captured by an observing recorder: its hash (or its
 # explicit absence) describes the content at the time of the call, so Stop
 # never fills or replaces it from what the file holds now.
-_PROTOCOL_KEYS = ("hash_status", "source", "pre_run_proven")
+_PROTOCOL_KEYS = ("hash_status", "source", "pre_run_proven", "rel_path")
 _OBSERVATION_FIELDS = (
     "observation_id",
     "observation_status",
@@ -264,6 +265,305 @@ def enrich_file_record(rec: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# --- the commit allowlist ---------------------------------------------------
+#
+# A manifest is committed; the event queue it is built from is transient.
+# Every free-text field of every record a manifest holds keeps only words
+# the allowlist in lineage_redact knows to be safe (TEXT_POLICY): vocabulary
+# command words, option and assignment names of the fixed shape, short
+# numbers, operators, and exactly the record's own EVIDENCE-BACKED paths.
+# Anything else becomes `<v>`. Embedded script source is never committed
+# (its digest is).
+#
+# A path is evidence-backed when the record holds proof the file was there:
+# a digest actually taken (`sha256`, `observed_sha256`, or the script's
+# `script_sha256`) or an observed change entry. An operand as typed, a
+# config that was missing or unresolved, an unreadable script, a named path
+# nobody hashed: none of these proves anything, so none lends a word to the
+# command text. A config record without evidence also has its `path` and
+# `rel_path` replaced by `<v>`. Consolidating committed text reads no file
+# system (a named path is never checked on disk: an unresponsive mount would
+# hang Stop).
+
+TEXT_POLICY = "allowlist-v1"
+_HEX64_RX = re.compile(r"[0-9a-f]{64}\Z")
+_OBSERVED_CHANGES = frozenset({"created", "modified", "deleted"})
+_LR: Any = None
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _lr() -> Any:
+    global _LR
+    if _LR is None:
+        here = _HERE
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import lineage_redact
+
+        _LR = lineage_redact
+    return _LR
+
+
+def _digest(value: Any) -> bool:
+    return isinstance(value, str) and bool(_HEX64_RX.match(value))
+
+
+def _has_evidence(rec: Any) -> bool:
+    """A file record whose file was provably there: hashed, or in an
+    observation's change list."""
+    if not isinstance(rec, dict):
+        return False
+    return (_digest(rec.get("sha256")) or _digest(rec.get("observed_sha256"))
+            or rec.get("observed_change") in _OBSERVED_CHANGES)
+
+
+def _commit_file_records(records: Any) -> Any:
+    """Input and output records in a committed manifest. A record with no
+    evidence that its file was ever there (no hash, no observed change, no
+    size) names a file that does not exist: its path may be any word the
+    command held (`cp TOKEN out`), so it becomes `<v>`. A file that exists
+    with a pending or skipped hash keeps its path; the index matches on it."""
+    if not isinstance(records, list):
+        return records
+    out = []
+    for rec in records:
+        if isinstance(rec, dict) and not _has_evidence(rec) \
+                and not isinstance(rec.get("size_bytes"), int):
+            rec = {**rec, **{k: _lr().COMMIT_VALUE for k in ("path", "rel_path")
+                             if isinstance(rec.get(k), str)}}
+        out.append(rec)
+    return out
+
+
+def _evidence_paths(records: Any) -> list[str]:
+    out: list[str] = []
+    for rec in records if isinstance(records, list) else []:
+        if _has_evidence(rec):
+            out.extend(rec[k] for k in ("path", "rel_path") if isinstance(rec.get(k), str))
+    return out
+
+
+def _commit_config_files(configs: Any) -> Any:
+    """Config records under the allowlist: one with evidence keeps its path;
+    any other (missing, unresolved, remote, unhashed) has `path` and
+    `rel_path` as `<v>`, since they are only the operand as typed."""
+    lr = _lr()
+    if not isinstance(configs, list):
+        return configs
+    out = []
+    for config in configs:
+        if not isinstance(config, dict):
+            out.append(config)
+            continue
+        config = dict(config)
+        if not _has_evidence(config):
+            for key in ("path", "rel_path"):
+                if isinstance(config.get(key), str):
+                    config[key] = lr.COMMIT_VALUE
+        out.append(config)
+    return out
+
+
+def _commit_env(env: Any, keep: set[str]) -> Any:
+    lr = _lr()
+    if not isinstance(env, dict):
+        return env
+    out: dict[str, Any] = {}
+    hidden = 0
+    for name, value in env.items():
+        if not lr._name_ok(str(name)):
+            # The same name rule as the command text: a name that is not
+            # plainly a variable name may itself be a credential.
+            hidden += 1
+            out[f"{lr.COMMIT_VALUE}#{hidden}"] = lr.COMMIT_VALUE
+            continue
+        secret = lr.is_secret_name(str(name))
+        if isinstance(value, str):
+            out[name] = lr.commit_safe_value(value, keep, secret)
+        elif isinstance(value, dict) and isinstance(value.get("text"), str):
+            out[name] = {**value, "text": lr.commit_safe_value(value["text"], keep, secret)}
+        else:
+            out[name] = value
+    return out
+
+
+_COMMIT_SEED_FLAGS = frozenset({"--seed", "--random-state", "--random_state", "--random-seed"})
+
+
+def _short_seed(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and \
+        _lr()._is_number(str(value))
+
+
+def _argv_seed_survives(value: int, lists: list[list[Any]]) -> bool:
+    """A seed read from the arguments is published only where the committed
+    argv still shows it: a seed flag and its value both kept, adjacent
+    (`--seed 42`) or joined (`--seed=42`). A value the argv masked (too long,
+    after `--`, consumed by a secret flag) is never republished here."""
+    text = str(value)
+    for words in lists:
+        for index, word in enumerate(words):
+            if not isinstance(word, str):
+                continue
+            name, eq, rest = word.partition("=")
+            if name not in _COMMIT_SEED_FLAGS:
+                continue
+            if eq and rest == text:
+                return True
+            if not eq and index + 1 < len(words) and words[index + 1] == text:
+                return True
+    return False
+
+
+def _commit_seeds(step: dict[str, Any]) -> None:
+    """`step.seeds` under the committed policy (after the argv is committed):
+    an argv seed survives only as the committed argv shows it; a source seed
+    (the source is not committed) only under the short-number rule."""
+    seeds = step.get("seeds")
+    if not isinstance(seeds, list):
+        step.pop("seeds", None)
+        return
+    lists = [step[k] for k in ("script_args", "argv") if isinstance(step.get(k), list)]
+    kept = []
+    for seed in seeds:
+        if not isinstance(seed, dict) or not _short_seed(seed.get("value")):
+            continue
+        if seed.get("origin") == "argv" and not _argv_seed_survives(seed["value"], lists):
+            continue
+        kept.append(seed)
+    if kept:
+        step["seeds"] = kept
+    else:
+        step.pop("seeds", None)
+
+
+def _commit_step(step: Any, keep: set[str], known: set[str] | None = None) -> Any:
+    """``known``: the long option names the run's own source spells (the
+    evidence that such a word in its arguments is one of its options)."""
+    lr = _lr()
+    if not isinstance(step, dict):
+        return step
+    step = dict(step)
+    if "argv" in step:
+        step["argv"] = lr.commit_safe_argv(step["argv"], keep, True, known)
+    for key in ("script_args", "params"):
+        if key in step:
+            step[key] = lr.commit_safe_argv(step[key], keep, False, known)
+    if "wrappers" in step:
+        step["wrappers"] = lr.commit_safe_argv(step["wrappers"], keep, command_word=True)
+    for key in ("executable", "interpreter"):
+        if isinstance(step.get(key), str):
+            step[key] = lr.commit_safe_argv([step[key]], keep, command_word=True)[0]
+    if "env" in step:
+        step["env"] = _commit_env(step["env"], keep)
+    if "seeds" in step:
+        _commit_seeds(step)
+    return step
+
+
+def _commit_word_list(words: Any, keep: set[str], allowed: tuple[str, ...] = ()) -> list[Any]:
+    """Recorded words (named paths, candidates): each kept only if it is
+    exactly an evidence-backed path (or a fixed marker), never by shape."""
+    lr = _lr()
+    return [w if (w in allowed or (isinstance(w, str) and lr._keep_match(w, keep)))
+            else lr.COMMIT_VALUE for w in words or []]
+
+
+def commit_event(event: dict[str, Any]) -> dict[str, Any]:
+    """An analysis event as a committed manifest holds it."""
+    lr = _lr()
+    event = dict(event)
+    for direction in ("inputs", "outputs"):
+        event[direction] = _commit_file_records(event.get(direction))
+    step = dict(event["step"]) if isinstance(event.get("step"), dict) else None
+    if step is not None and "config_files" in step:
+        step["config_files"] = _commit_config_files(step["config_files"])
+    paths = [*_evidence_paths(event.get("inputs")), *_evidence_paths(event.get("outputs"))]
+    if isinstance(event.get("script"), str) and _digest(event.get("script_sha256")):
+        paths.append(event["script"])
+    if step is not None:
+        paths.extend(_evidence_paths(step.get("config_files")))
+    keep = lr.commit_keep_paths(paths)
+    candidate = event.get("script_candidate")
+    # A candidate is never read (R may have run another file), so it is
+    # kept only if it is exactly one of the record's evidence-backed paths.
+    safe_candidate = candidate if not isinstance(candidate, str) or lr._keep_match(
+        candidate, keep) else lr.COMMIT_VALUE
+    source = event.pop("script_source", None)
+    # A script file's embedded source, when that file is evidence-backed
+    # (hashed), is evidence that a long option word is one of its options.
+    # An inline body is not: it is part of the very command it would vouch
+    # for (`python -c '"--tok"' --tok`). Nothing is read from disk here.
+    file_backed = isinstance(event.get("script"), str) and _digest(event.get("script_sha256"))
+    known = lr.commit_source_options(source) if file_backed else set()
+    event["bash_cmd"] = lr.commit_safe_command(event.get("bash_cmd"), keep, known)
+    if "script_candidate" in event:
+        event["script_candidate"] = safe_candidate
+    if isinstance(source, str):
+        # The source itself stays in the machine-local event queue; its
+        # digest (script_sha256) identifies it here.
+        event["script_source_bytes"] = len(source.encode("utf-8"))
+        event["script_source_lines"] = source.count("\n") + (
+            0 if source.endswith("\n") else 1)
+    replace = ((candidate, safe_candidate),) if isinstance(candidate, str) else ()
+    event["lineage_warnings"] = [
+        lr.commit_safe_prose(w, keep, replace) for w in event.get("lineage_warnings") or []
+    ]
+    # Unevaluated regex text from 0.9.7 recorders: free source text.
+    event.pop("filters_detected", None)
+    if step is not None:
+        event["step"] = _commit_step(step, keep, known)
+    if "seeds_detected" in event:
+        # Source literals (the source is not committed): short numbers only.
+        event["seeds_detected"] = [v for v in event.get("seeds_detected") or []
+                                   if _short_seed(v)]
+    return event
+
+
+def commit_skip(skip: dict[str, Any]) -> dict[str, Any]:
+    """A skip has no file records: nothing in it is evidence (an unreadable
+    script's path is only the word the command used)."""
+    lr = _lr()
+    skip = dict(skip)
+    keep: set[str] = set()
+    skip["bash_cmd"] = lr.commit_safe_command(skip.get("bash_cmd"), keep)
+    skip["detail"] = lr.commit_safe_prose(skip.get("detail"), keep)
+    return skip
+
+
+def commit_data_command(record: dict[str, Any]) -> dict[str, Any]:
+    lr = _lr()
+    record = dict(record)
+    for direction in ("inputs", "outputs"):
+        if direction in record:
+            record[direction] = _commit_file_records(record.get(direction))
+    # A path shape is not proof (`data/<token>` is shaped like one), and
+    # neither is a check on disk at Stop (it can hang on a dead mount): a
+    # named word is kept only if it is exactly one of the record's own
+    # evidence-backed file records.
+    evidence = lr.commit_keep_paths(
+        [*_evidence_paths(record.get("inputs")), *_evidence_paths(record.get("outputs"))])
+    record["named_paths"] = _commit_word_list(record.get("named_paths"), evidence)
+    record["analysis_candidates"] = _commit_word_list(
+        record.get("analysis_candidates"), evidence, ("(inline)",))
+    # The cwd and repository root are host-supplied structured fields the
+    # record publishes anyway; their spellings may stay in the command.
+    roots = [record[k] for k in ("cwd", "repo_root") if isinstance(record.get(k), str)]
+    keep = evidence | lr.commit_keep_paths(roots)
+    record["bash_cmd"] = lr.commit_safe_command(record.get("bash_cmd"), keep)
+    if isinstance(record.get("step"), dict):
+        record["step"] = _commit_step(record["step"], keep)
+    return record
+
+
+def commit_observation(observation: Any) -> Any:
+    lr = _lr()
+    if not isinstance(observation, dict) or not isinstance(observation.get("bash_cmd"), str):
+        return observation
+    # The observer stores this form; an older store holds text it did not.
+    return {**observation, "bash_cmd": lr.commit_observation_command(observation)}
+
+
 def normalize_event(
     raw: dict[str, Any], warnings: list[str], idx: int
 ) -> dict[str, Any] | None:
@@ -295,14 +595,43 @@ def normalize_event(
         "filters_detected": list(raw.get("filters_detected") or []),
         "seeds_detected": list(raw.get("seeds_detected") or []),
         **_observation_link(raw),
+        **_identity(raw),
     }
+    if "filters_detected" not in raw:
+        # v2 recorders no longer collect it (unevaluated regex text); a
+        # historical record keeps whatever it had.
+        del event["filters_detected"]
+    if isinstance(raw.get("step"), dict):
+        event["step"] = raw["step"]
+    if raw.get("script_sha256_of") == "sanitized":
+        # An older recorder hashed a redacted source: the label travels
+        # with that digest.
+        event["script_sha256_of"] = "sanitized"
+    if isinstance(raw.get("stages_not_recorded"), int):
+        event["stages_not_recorded"] = raw["stages_not_recorded"]
 
     if event["script"] and event["script_sha256"] is None:
-        script_path = Path(event["script"])
-        if script_path.exists():
-            event["script_sha256"] = sha256_file(script_path)
+        _digest_script_file(event, Path(event["script"]))
 
     return event
+
+
+def _digest_script_file(event: dict, script_path: Path) -> None:
+    """The script file's digest, from one bounded read of a descriptor
+    proven to be a regular file (a FIFO or device never blocks Stop)."""
+    try:
+        fd = _open_regular_fd(script_path)
+    except OSError:
+        return
+    if fd is None:
+        return
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(SIZE_LIMIT_BYTES + 1)
+    except OSError:
+        return
+    if len(data) <= SIZE_LIMIT_BYTES:
+        event["script_sha256"] = hashlib.sha256(data).hexdigest()
 
 
 def normalize_skip(raw: dict[str, Any]) -> dict[str, Any]:
@@ -311,11 +640,16 @@ def normalize_skip(raw: dict[str, Any]) -> dict[str, Any]:
         "ts": raw.get("ts"),
         "skip_id": raw.get("skip_id"),
         "skip_reason": raw.get("skip_reason") or "unknown",
+        # The call the skip belongs to, when known: the index reconciles a
+        # skip with that call's observation instead of counting a gap.
+        **({"observation_id": raw["observation_id"]}
+           if isinstance(raw.get("observation_id"), str) else {}),
         "detail": raw.get("detail"),
         "bash_cmd": raw.get("bash_cmd"),
         "bash_exit": raw.get("bash_exit"),
         "agent_id": raw.get("agent_id"),
         "agent_type": raw.get("agent_type"),
+        **_identity(raw, minted=False),
     }
 
 
@@ -323,7 +657,7 @@ def normalize_data_command(raw: dict[str, Any]) -> dict[str, Any]:
     """Keep a data command's known fields. Its file records were taken at
     hook time; a hash is filled only where none was recorded, and a path
     recorded as missing stays missing."""
-    return {
+    record = {
         "ts": raw.get("ts"),
         "event_id": raw.get("event_id"),
         "agent_id": raw.get("agent_id"),
@@ -339,7 +673,24 @@ def normalize_data_command(raw: dict[str, Any]) -> dict[str, Any]:
         "outputs": [enrich_file_record(r) for r in (raw.get("outputs") or [])],
         "io_detection": "unresolved",
         **_observation_link(raw),
+        **_identity(raw, minted=False),
     }
+    if isinstance(raw.get("step"), dict):
+        record["step"] = raw["step"]
+    return record
+
+
+# v2 identity and frame fields. A field the record does not carry is left
+# out rather than written as null, so a v1 record re-consolidated into a v2
+# manifest still reads as v1 (no identity), never as "no host".
+_IDENTITY_FIELDS = ("host", "host_session_id", "ts_ns", "repo_root")
+
+
+def _identity(raw: dict[str, Any], *, minted: bool = True) -> dict[str, Any]:
+    out = {key: raw[key] for key in _IDENTITY_FIELDS if key in raw}
+    if minted and isinstance(raw.get("event_id"), str):
+        out["event_id"] = raw["event_id"]
+    return out
 
 
 def _observation_link(raw: dict[str, Any]) -> dict[str, Any]:
@@ -470,7 +821,7 @@ def join_observations(
             continue
         host = observation_id.split(":", 1)[0]
         wanted.setdefault((host, session), set()).add(observation_id)
-    found: dict[str, dict[str, Any]] = {}
+    found: dict[tuple[str, str], dict[str, Any]] = {}
     for (host, session), ids in wanted.items():
         path = obs_dir / _safe_component(host) / f"{_safe_component(session)}.ndjson"
         if not _store_path_safe(obs_dir, path):
@@ -479,11 +830,12 @@ def join_observations(
             observation_id = observation.get("observation_id")
             if observation_id not in ids:
                 continue
-            previous = found.get(observation_id)
+            key = (session, observation_id)
+            previous = found.get(key)
             if previous is None or previous.get("reason") == "call-unresolved":
-                found[observation_id] = observation
-    referenced = sorted({i for ids in wanted.values() for i in ids})
-    missing = [i for i in referenced if i not in found]
+                found[key] = observation
+    referenced = sorted({(session, i) for (_, session), ids in wanted.items() for i in ids})
+    missing = [i for key in referenced for i in [key[1]] if key not in found]
     # Calls of these host sessions whose Pre snapshot no Post has claimed
     # yet: still running (a Codex terminal not yet polled to completion), or
     # never completed. Their file changes are unknown so far.
@@ -523,11 +875,11 @@ def join_observations(
     _mark_observed_changes(records, found, repo_root)
     if consume is not None:
         consume.extend(consumable)
-    return [found[i] for i in referenced if i in found], missing, unresolved
+    return [found[k] for k in referenced if k in found], missing, unresolved
 
 
 def _mark_observed_changes(
-    records: list[dict[str, Any]], found: dict[str, dict[str, Any]], repo_root: str
+    records: list[dict[str, Any]], found: dict[Any, dict[str, Any]], repo_root: str
 ) -> None:
     """Say, per inferred output, whether the call's observation saw it change.
 
@@ -543,20 +895,34 @@ def _mark_observed_changes(
 
     root = os.path.realpath(repo_root)
     for record in records:
-        observation = found.get(record.get("observation_id"))
+        observation = found.get((record.get("observation_session"), record.get("observation_id")))
+        if observation is None:
+            observation = found.get(record.get("observation_id"))  # a caller keyed by id
         changes = observation.get("changes") if observation else None
         if not isinstance(changes, dict):
             continue
         scope = observation.get("scope") if isinstance(observation.get("scope"), dict) else {}
         unwatched = [u for u in scope.get("unwatched") or [] if isinstance(u, dict)]
         kinds: dict[str, str] = {}
+        after: dict[str, dict[str, Any]] = {}
         for kind in ("created", "modified", "deleted"):
             for entry in changes.get(kind) or []:
                 if isinstance(entry, dict) and isinstance(entry.get("path"), str):
                     kinds[entry["path"]] = kind
+                    if isinstance(entry.get("after"), dict):
+                        after[entry["path"]] = entry["after"]
         for output in record.get("outputs") or []:
             path = output.get("path")
             if not isinstance(path, str):
+                continue
+            if "rel_path" in output:
+                # A v2 record's own frame, set at hook time with the
+                # observer's rules; an explicit null means it could not be
+                # framed, so no observation entry is matched to it.
+                rel = output["rel_path"]
+                if not isinstance(rel, str):
+                    continue
+                _mark_one(output, rel, kinds, after, changes, unwatched, io_observer)
                 continue
             try:
                 # Lexically first: a symlinked directory inside the
@@ -567,24 +933,49 @@ def _mark_observed_changes(
                     rel = os.path.relpath(os.path.realpath(path), root)
             except ValueError:
                 continue
-            if rel in kinds:
-                output["observed_change"] = kinds[rel]
-                continue
-            # Absent from the change list means "unchanged" only where the
-            # observation could have seen a change.
-            status = io_observer.watch_status(rel, unwatched)
-            racy = changes.get("racy_unknown") or []
-            racy_count = (changes.get("counts") or {}).get("racy_unknown", 0)
-            if status != "watched":
-                output["observed_change"] = status
-            elif rel in racy:
-                # A coarse-timestamp identity the observer could not prove
-                # unchanged: a same-size rewrite in the same tick hides.
-                output["observed_change"] = "unknown-racy"
-            elif changes.get("capped") or (isinstance(racy_count, int) and racy_count > len(racy)):
-                output["observed_change"] = "unknown-capped"
-            else:
-                output["observed_change"] = "unchanged"
+            _mark_one(output, rel, kinds, after, changes, unwatched, io_observer)
+
+
+def _mark_one(
+    output: dict[str, Any],
+    rel: str,
+    kinds: dict[str, str],
+    after: dict[str, dict[str, Any]],
+    changes: dict[str, Any],
+    unwatched: list[dict[str, Any]],
+    io_observer: Any,
+) -> None:
+    if rel in kinds:
+        output["observed_change"] = kinds[rel]
+        side = after.get(rel)
+        if side is not None:
+            # The protocol hash of the bytes the call left, taken only when
+            # the file was provably stable; null (with its status) when it
+            # was not. Never the hook digest.
+            output["observed_sha256"] = side.get("sha256")
+            output["observed_hash_status"] = side.get("hash_status")
+        return
+    # A path whose coverage changed during the call (the scope file moved)
+    # could have been rewritten unseen.
+    moved = changes.get("coverage_changed") or []
+    if rel in moved or changes.get("coverage_changed_truncated"):
+        output["observed_change"] = "unknown-coverage"
+        return
+    # Absent from the change list means "unchanged" only where the
+    # observation could have seen a change.
+    status = io_observer.watch_status(rel, unwatched)
+    racy = changes.get("racy_unknown") or []
+    racy_count = (changes.get("counts") or {}).get("racy_unknown", 0)
+    if status != "watched":
+        output["observed_change"] = status
+    elif rel in racy:
+        # A coarse-timestamp identity the observer could not prove
+        # unchanged: a same-size rewrite in the same tick hides.
+        output["observed_change"] = "unknown-racy"
+    elif changes.get("capped") or (isinstance(racy_count, int) and racy_count > len(racy)):
+        output["observed_change"] = "unknown-capped"
+    else:
+        output["observed_change"] = "unchanged"
 
 
 def build_manifest(
@@ -686,6 +1077,42 @@ def build_manifest(
     }
 
 
+# The manifest's record shape. Absent means v1 (0.9.7 and earlier): no
+# event identity, no path frame, no step settings.
+MANIFEST_SCHEMA = "mycelium.data_lineage.manifest.v2"
+
+
+def write_manifest_atomic(path: Path, manifest: dict[str, Any]) -> None:
+    """Publish the manifest whole: a reader (the lineage index, another
+    session's query) sees the old file or the new one, never a torn one."""
+    import os
+    import stat
+    import tempfile
+
+    try:
+        # An existing manifest keeps its mode (a private 0600 stays private);
+        # a new one gets what a plain create would under the umask.
+        mode = stat.S_IMODE(os.stat(path, follow_symlinks=False).st_mode)
+    except OSError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    fd, temp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(manifest, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp, mode)
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
 def extract(
     events_file: Path,
     session_id: str,
@@ -738,6 +1165,13 @@ def extract(
                 continue
             normalized = normalize_event(raw, warnings, idx)
             if normalized is not None:
+                # v2 events carry an id: a record repeated by a retried
+                # transfer counts once. v1 events have none and are kept.
+                event_id = normalized.get("event_id")
+                if event_id and event_id in seen_event_ids:
+                    continue
+                if event_id:
+                    seen_event_ids.add(event_id)
                 events.append(normalized)
     else:
         warnings.append(f"events file not found: {events_file}")
@@ -747,10 +1181,18 @@ def extract(
         [*events, *data_commands], observations_dir, repo_root, warnings, consume, session_id,
         claim_aliases,
     )
-    manifest = build_manifest(
-        events, session_id, repo_root, warnings, skipped, data_commands
-    )
-    manifest["observations"] = observations
+    # The manifest is committed: every record's text goes through the
+    # allowlist (after the joins above, which read only paths and ids).
+    events = [commit_event(e) for e in events]
+    skipped = [commit_skip(s) for s in skipped]
+    data_commands = [commit_data_command(d) for d in data_commands]
+    manifest = {
+        "schema": MANIFEST_SCHEMA,
+        "text_policy": TEXT_POLICY,
+        **build_manifest(events, session_id, repo_root, warnings, skipped, data_commands),
+    }
+    manifest["observations"] = [commit_observation(o)
+                                for o in observations]
     counts: dict[str, int] = {}
     for observation in observations:
         status = str(observation.get("status") or "unknown")
@@ -759,6 +1201,24 @@ def extract(
     manifest["summary"]["observations_missing"] = missing
     manifest["summary"]["unresolved_calls"] = unresolved
     return manifest
+
+
+def commit_stream(source: Path, archive: Path) -> None:
+    """Archive a raw event stream (it outlives its session) with every
+    record under the commit allowlist; nothing but the stream is read."""
+    commit = {"skip": commit_skip, "data_command": commit_data_command}
+    lines = []
+    for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            record = commit.get(record.get("kind"), commit_event)(record)
+            lines.append(json.dumps(record) + "\n")
+    temp = archive.with_name(f".{archive.name}.tmp")
+    temp.write_text("".join(lines), encoding="utf-8")
+    os.replace(temp, archive)
 
 
 def main() -> int:
@@ -780,6 +1240,13 @@ def main() -> int:
         help="An earlier manifest id of this transaction that this manifest "
         "replaces; its claims on unresolved calls carry over.",
     )
+    ap.add_argument(
+        "--archive",
+        type=Path,
+        default=None,
+        help="Also write the event stream, allowlisted, here (commit_stream): "
+        "the copy an accepted Stop keeps.",
+    )
     args = ap.parse_args()
 
     consumed: list[Path] = []
@@ -788,7 +1255,9 @@ def main() -> int:
         tuple(args.replaces),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    write_manifest_atomic(args.output, manifest)
+    if args.archive is not None:
+        commit_stream(args.events_file, args.archive)
     # Listed in a written manifest: claimed by it, so a blocked Stop's retry
     # (which rewrites this manifest) still lists them and a later
     # transaction does not report them again.

@@ -386,3 +386,180 @@ def test_racy_identity_detection() -> None:
     assert not io.is_racy(settled, now, coarse=False)
     one_second_ago = io.Identity(1, 2, 3, now - 1_000_000_000, now - 1_000_000_000, 0o100644)
     assert io.is_racy(one_second_ago, now, coarse=True)
+
+
+def test_scope_checks_are_not_quadratic() -> None:
+    unwatched = [{"path": f"ex{i}/sub", "why": "scope-exclude"} for i in range(3000)]
+    prefixes = io.unwatched_prefixes(unwatched)
+    paths = [f"keep{i}/a/b/file.csv" for i in range(3000)]
+    started = time.perf_counter()
+    statuses = [io.watch_status(p, prefixes) for p in paths]
+    assert time.perf_counter() - started < 0.2
+    assert set(statuses) == {"watched"}
+    assert io.watch_status("ex7/sub/f.csv", prefixes) == "unwatched"
+    assert io.watch_status("ex7/subway.csv", unwatched) == "watched"
+
+
+@pytest.fixture()
+def project(tmp_path: Path) -> Path:
+    root = tmp_path / "proj"
+    (root / ".living" / "log" / "data-lineage").mkdir(parents=True)
+    (root / ".mycelium").mkdir()
+    (root / "out").mkdir()
+    return root
+
+
+def bash(project: Path, call: str, action=None, *, background: bool = False) -> dict:
+    """One real Bash call through the observer's Pre and Post."""
+    state = project / ".mycelium"
+    io.pre(state, host="claude", session="s1", call_id=call, tool="Bash",
+           repo_root=project, snapshot=True, background=background)
+    if action:
+        action()
+    return io.post(state, host="claude", session="s1", call_id=call, tool="Bash",
+                   repo_root=project, outcome="success", bash_exit=0, background=background)
+
+
+def write_x(project: Path, content: str):
+    return lambda: (project / "out" / "x").write_text(content)
+
+
+def test_every_new_observation_records_identity(project: Path) -> None:
+    observation = bash(project, "c1", write_x(project, "A"))
+    (created,) = observation["changes"]["created"]
+    assert set(created["after"]["identity"]) == {"dev", "ino", "size", "mtime_ns", "ctime_ns"}
+    assert created["after"]["identity"]["ino"] == os.lstat(project / "out" / "x").st_ino
+
+
+def test_an_unreadable_root_claims_no_deletions(project: Path, monkeypatch) -> None:
+    state = project / ".mycelium"
+    (project / "out" / "x").write_text("A")
+    io.pre(state, host="claude", session="s1", call_id="c1", tool="Bash",
+           repo_root=project, snapshot=True)
+    real_scandir = os.scandir
+    root = os.path.realpath(project)
+
+    def failing(path="."):
+        if os.path.realpath(path) == root:
+            raise PermissionError("listing denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(io.os, "scandir", failing)
+    observation = io.post(state, host="claude", session="s1", call_id="c1", tool="Bash",
+                          repo_root=project, outcome="success", bash_exit=0)
+    assert observation["status"] == "unavailable"
+    assert observation["reason"] == "post-root-unreadable"
+
+
+@pytest.fixture()
+def project_2(tmp_path: Path) -> Path:
+    root = tmp_path / "proj"
+    (root / ".living" / "log" / "data-lineage").mkdir(parents=True)
+    (root / ".mycelium" / "io").mkdir(parents=True)
+    (root / "data").mkdir()
+    (root / "out").mkdir()
+    return root
+
+
+@pytest.mark.parametrize("spelling", ["./data", "data/.", "data//", "./data/"])
+def test_a_scope_root_has_one_spelling(project_2: Path, spelling: str) -> None:
+    (project_2 / "data" / "result.csv").write_text("r")
+    (project_2 / ".mycelium" / "io" / "scope").write_text(f"root {spelling}\n")
+    _, roots = io._scope_overrides(project_2)
+    assert roots == ["data"]
+    snap = io.walk(project_2)
+    assert [p for p in snap.entries if p.endswith("result.csv")] == ["data/result.csv"]
+
+
+@pytest.fixture()
+def project_3(tmp_path: Path) -> Path:
+    root = tmp_path / "proj"
+    (root / ".living" / "log" / "data-lineage").mkdir(parents=True)
+    (root / ".mycelium" / "io").mkdir(parents=True)
+    (root / "skills" / "core").mkdir(parents=True)
+    return root
+
+
+def test_a_scope_root_in_another_case_walks_the_listed_spelling(project_3: Path) -> None:
+    (project_3 / "skills" / "core" / "a.txt").write_text("a")
+    if not io._case_insensitive(str(project_3.resolve())):
+        pytest.skip("case-sensitive volume")
+    (project_3 / ".mycelium" / "io" / "scope").write_text("root SKILLS/core\n")
+    entries = io.walk(project_3).entries
+    assert "skills/core/a.txt" in entries
+    assert not any(p.startswith("SKILLS/") for p in entries)
+
+
+def test_a_scope_root_through_a_link_is_not_walked(project_3: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "b.txt").write_text("b")
+    os.symlink(outside, project_3 / "linked")
+    (project_3 / ".mycelium" / "io" / "scope").write_text("root linked\n")
+    assert not any(p.startswith("linked/") for p in io.walk(project_3).entries)
+
+
+def test_an_uninspectable_entry_is_unwatched(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "repo"
+    (root / "data").mkdir(parents=True)
+    (root / "data" / "out.csv").write_text("x")
+    real = os.DirEntry.stat if hasattr(os.DirEntry, "stat") else None
+    assert real is not None
+    original_scandir = os.scandir
+
+    class Entry:
+        def __init__(self, entry):
+            self._e = entry
+            self.name = entry.name
+            self.path = entry.path
+
+        def stat(self, follow_symlinks=True):
+            if self.name == "out.csv":
+                raise PermissionError("search denied")
+            return self._e.stat(follow_symlinks=follow_symlinks)
+
+    class Wrapper:
+        def __init__(self, it):
+            self._it = it
+
+        def __iter__(self):
+            return (Entry(e) for e in self._it)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._it.close()
+
+    monkeypatch.setattr(io.os, "scandir", lambda p: Wrapper(original_scandir(p)))
+    snap = io.walk(root)
+    assert "data/out.csv" not in snap.entries
+    assert io.watch_status("data/out.csv", snap.unwatched) == "unwatched"
+
+
+def test_a_digit_named_checkout_is_probed_through_its_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "Projects"
+    (parent / "12345").mkdir(parents=True)
+    io._CASE_PROBES.clear()
+    expected = (tmp_path / "projects").exists()
+    assert io._case_insensitive(str((parent / "12345").resolve())) == expected
+
+
+def test_a_scope_change_is_not_a_deletion(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "data" / "processed").mkdir(parents=True)
+    (repo / "data" / "processed" / "x.csv").write_text("x")
+    state = repo / ".mycelium"
+    state.mkdir()
+    io.pre(state, host="claude", session="s", call_id="c", tool="Bash", repo_root=repo,
+           snapshot=True)
+    scope = state / "io" / "scope"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text("exclude data/processed\n")
+    observation = io.post(state, host="claude", session="s", call_id="c", tool="Bash",
+                          repo_root=repo, bash_cmd="true")
+    changes = observation["changes"]
+    if changes is None:  # the scope file itself made the walk unavailable: also no deletion
+        return
+    assert not any(e["path"] == "data/processed/x.csv" for e in changes["deleted"])
+    assert "data/processed/x.csv" in changes.get("coverage_changed", [])

@@ -32,6 +32,11 @@ These checks verify the prose matches the artifacts. Phase 6 (blind numerical re
 - [ ] **No swapped numbers between adjacent paragraphs.** *Failure mode: "lamanno Δ = -0.014" written when the actual value is -0.023, swapped with the adjacent paragraph.*
 - [ ] **Precision vs recall, accuracy vs F1, sensitivity vs specificity** — for any number where a sibling metric exists in the same table, the label matches the column it came from.
 
+### Number freshness
+
+- [ ] **`check_report_values.py --manifest` exits 0.** No hash-linked number is `stale-value`, `source-missing`, `source-invalid` or `source-unreadable`. *Failure mode: a table was regenerated after the number was registered, so the report quotes a count from bytes that no longer exist.* A stale number was fixed by rerunning its analysis, not by editing `source.sha256`.
+- [ ] **`unchecked-value` numbers are listed** in the compile log. These are numbers with no `source`: legacy, or never linked.
+
 ### Figure freshness
 
 - [ ] **Every figure's file hash** matches the manifest's `sha256`. If a figure was regenerated mid-draft, the prose may now reference the wrong version.

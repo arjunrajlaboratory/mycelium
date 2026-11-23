@@ -1,0 +1,1652 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/arjunrajlaboratory/mycelium/skills/core/references/provenance-schema.json",
+  "title": "Mycelium provenance records",
+  "description": "The record formats Mycelium writes for provenance: data-lineage manifests (v1 from 0.9.7 and earlier, v2 from 0.9.8), their events, data commands, skips and observations; the lineage index's query results; hash-linked report values and their checker findings; row and feature access records; and the sample ledger spec. Readers (Warrant) validate against the $defs entry points. Every field not listed as required is optional on read; a missing field means unknown, never a pass. Records carry hashes, sizes, paths and counts, never data content.",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nullable_sha256": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "hash_origin": {
+      "description": "How a hash was taken. pre-run-proven: the bytes at the path matched the call's Pre snapshot. hashed-at-post: the observer's stable hash at Post, without a pre-run proof. hook-post: the hook's plain digest at Post. observed: an observation's stable protocol hash of a call's output. query-identity-match: resolved later because the file still had the observed identity. unknown: an unlabelled (0.9.7) digest of unknown timing.",
+      "enum": [
+        "pre-run-proven",
+        "hashed-at-post",
+        "hook-post",
+        "observed",
+        "query-identity-match",
+        "unknown"
+      ]
+    },
+    "file_record": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Absolute path as the hook resolved it."
+        },
+        "rel_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "v2: path relative to the record's repo_root, framed without symlinks or `..`; null when it could not be framed (see rel_path_reason)."
+        },
+        "rel_path_reason": {
+          "enum": [
+            "outside-scope",
+            "parent-traversal",
+            "symlinked-path",
+            "no-repository-root"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/nullable_sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hash_status": {
+          "type": "string"
+        },
+        "hash_origin": {
+          "$ref": "#/$defs/hash_origin"
+        },
+        "pre_run_proven": {
+          "type": "boolean"
+        },
+        "proof_reason": {
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "inferred-static",
+            "inferred-repository",
+            "inferred-shell"
+          ]
+        },
+        "observed_change": {
+          "enum": [
+            "created",
+            "modified",
+            "deleted",
+            "unchanged",
+            "unwatched",
+            "outside-scope",
+            "unknown-capped",
+            "unknown-racy",
+            "unknown-coverage"
+          ]
+        },
+        "observed_sha256": {
+          "$ref": "#/$defs/nullable_sha256"
+        },
+        "observed_hash_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "_missing": {
+          "type": "boolean"
+        },
+        "_skipped_too_large": {
+          "type": "boolean"
+        }
+      }
+    },
+    "config_file": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/file_record"
+        }
+      ],
+      "type": "object",
+      "required": [
+        "path",
+        "via",
+        "sha256",
+        "hash_status"
+      ],
+      "properties": {
+        "via": {
+          "type": "string",
+          "description": "The flag that named it, or `suffix`."
+        },
+        "effective": {
+          "const": "unknown",
+          "description": "Set when the file changed across the call (or could not be proven unchanged): its digest is of the file afterwards, not the settings the step read."
+        }
+      }
+    },
+    "inline_placeholder": {
+      "type": "object",
+      "required": [
+        "inline_sha256",
+        "length"
+      ],
+      "properties": {
+        "inline_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256_of": {
+          "const": "sanitized"
+        }
+      }
+    },
+    "env_value": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "required": [
+            "redacted"
+          ],
+          "properties": {
+            "redacted": {
+              "const": true
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "expanded"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "expanded": {
+              "const": false
+            }
+          }
+        }
+      ]
+    },
+    "step": {
+      "description": "v2: the settings a step ran with, read from its own shell stage. Partial (with a reason) where the parser could not tell. In a committed manifest every string has passed the commit allowlist.",
+      "type": "object",
+      "properties": {
+        "argv": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/inline_placeholder"
+              }
+            ]
+          }
+        },
+        "executable": {
+          "type": "string"
+        },
+        "interpreter": {
+          "type": "string"
+        },
+        "script_args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/env_value"
+          }
+        },
+        "wrappers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "config_files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/config_file"
+          }
+        },
+        "config_files_over_budget": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "seeds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "value",
+              "origin"
+            ],
+            "properties": {
+              "value": {
+                "type": "integer"
+              },
+              "origin": {
+                "enum": [
+                  "argv",
+                  "source"
+                ]
+              }
+            }
+          }
+        },
+        "stage": {
+          "enum": [
+            "names-data",
+            "first-run-stage"
+          ]
+        },
+        "truncated": {
+          "const": true
+        },
+        "partial": {
+          "const": true
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "identity_v2": {
+      "type": "object",
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "host": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ts_ns": {
+          "type": "integer"
+        },
+        "repo_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "observation_link": {
+      "type": "object",
+      "properties": {
+        "observation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observation_status": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "no-known-overlap",
+            "overlap",
+            "background",
+            "unavailable",
+            null
+          ]
+        },
+        "observation_session": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observation_reason": {
+          "type": "string"
+        },
+        "tool_outcome": {
+          "enum": [
+            "success",
+            "failure",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "analysis_event": {
+      "description": "One proven analysis run (a script, inline body, module or runner) in a Bash call.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/identity_v2"
+        },
+        {
+          "$ref": "#/$defs/observation_link"
+        }
+      ],
+      "type": "object",
+      "required": [
+        "ts",
+        "inputs",
+        "outputs"
+      ],
+      "properties": {
+        "ts": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bash_cmd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bash_exit": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "script": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "script_sha256": {
+          "$ref": "#/$defs/nullable_sha256"
+        },
+        "script_sha256_of": {
+          "const": "sanitized"
+        },
+        "script_source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The embedded source. Never present in a manifest with text_policy allowlist-v1: it stays in the transient event queue, and script_sha256 identifies it."
+        },
+        "script_source_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "allowlist-v1: UTF-8 size of the embedded source that the manifest does not carry."
+        },
+        "script_source_lines": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "allowlist-v1: line count of that source."
+        },
+        "script_candidate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "git_sha": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/file_record"
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/file_record"
+          }
+        },
+        "io_detection": {
+          "enum": [
+            "static",
+            "static+repository",
+            "unresolved"
+          ]
+        },
+        "lineage_warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "seeds_detected": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "filters_detected": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "v1 only; no longer written."
+        },
+        "step": {
+          "$ref": "#/$defs/step"
+        },
+        "stages_not_recorded": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "data_command": {
+      "description": "A Bash call that touched data with no proven analysis run. Never claims an analysis ran.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/identity_v2"
+        },
+        {
+          "$ref": "#/$defs/observation_link"
+        }
+      ],
+      "type": "object",
+      "required": [
+        "ts",
+        "event_id",
+        "signals"
+      ],
+      "properties": {
+        "ts": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "bash_cmd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bash_exit": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signals": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "observed-change",
+              "observation-unavailable",
+              "data-path",
+              "shell-io",
+              "analysis-unproven"
+            ]
+          }
+        },
+        "named_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "named_paths_truncated": {
+          "type": "boolean"
+        },
+        "analysis_candidates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/file_record"
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/file_record"
+          }
+        },
+        "io_detection": {
+          "const": "unresolved"
+        },
+        "step": {
+          "$ref": "#/$defs/step"
+        }
+      }
+    },
+    "skip": {
+      "description": "A Bash call lineage could not record: a gap, never \"nothing happened\".",
+      "type": "object",
+      "required": [
+        "skip_reason"
+      ],
+      "properties": {
+        "ts": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ts_ns": {
+          "type": "integer"
+        },
+        "skip_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skip_reason": {
+          "type": "string"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bash_cmd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observation_id": {
+          "type": "string"
+        }
+      }
+    },
+    "change_side": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/nullable_sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hash_status": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "object"
+        },
+        "hash_origin": {
+          "const": "observed"
+        }
+      }
+    },
+    "change_entry": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Repository-relative."
+        },
+        "before": {
+          "$ref": "#/$defs/change_side"
+        },
+        "after": {
+          "$ref": "#/$defs/change_side"
+        }
+      }
+    },
+    "observation": {
+      "description": "What one tool call changed. Bash: a diff of stat snapshots taken before and after the call (changes observed while it ran, not proof it caused them; overlapping calls are listed). Edit tools (status `edit`): the paths the tool named, hashed after the edit. `journal` orders calls without clocks: within one journal id, a call whose post_seq precedes another's pre_seq finished first; an expired bound orders nothing.",
+      "type": "object",
+      "required": [
+        "kind",
+        "observation_id",
+        "status"
+      ],
+      "properties": {
+        "kind": {
+          "const": "observation"
+        },
+        "version": {
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "observation_id": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "host_session_id": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bash_cmd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bash_exit": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "no-known-overlap",
+            "overlap",
+            "background",
+            "unavailable",
+            "edit"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overlapping": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "journal": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pre_seq": {
+              "type": "integer"
+            },
+            "post_seq": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "expired": {
+              "type": "boolean"
+            }
+          }
+        },
+        "scope": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "changes": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "created": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/change_entry"
+              }
+            },
+            "modified": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/change_entry"
+              }
+            },
+            "deleted": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/change_entry"
+              }
+            },
+            "edited": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/change_entry"
+              }
+            },
+            "refused": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "metadata_only": {
+              "type": "array"
+            },
+            "rewritten": {
+              "description": "Paths rewritten with the same bytes (a rerun that reproduced its output), with their new identity; also listed in metadata_only.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/change_entry"
+              }
+            },
+            "rename_candidates": {
+              "type": "array"
+            },
+            "counts": {
+              "type": "object"
+            },
+            "capped": {
+              "type": "boolean"
+            },
+            "top_level": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "top_level_complete": {
+              "type": "boolean"
+            },
+            "racy_unknown": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "input_proofs": {
+          "type": "array"
+        }
+      }
+    },
+    "manifest_common": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "actions",
+        "summary"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "text_policy": {
+          "const": "allowlist-v1",
+          "description": "How the free text of the manifest's records was reduced before commit. allowlist-v1: command text, argv, script_args, params, env values, wrappers, lineage warnings and skip details keep only allowlisted words (command words, option and assignment names, short numbers, operators, the record's own paths); every other word is `<v>`, a heredoc body is `<heredoc: N lines>`, and script_source is dropped. Absent: written by 0.9.7 or earlier (denylist redaction only, or none)."
+        },
+        "repo_root": {
+          "type": "string"
+        },
+        "git_sha": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "n_actions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agents_seen": {
+          "type": "array"
+        },
+        "summary": {
+          "type": "object"
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/skip"
+          }
+        },
+        "data_commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/data_command"
+          }
+        },
+        "extraction_warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/observation"
+          }
+        }
+      }
+    },
+    "manifest_v1": {
+      "description": "A 0.9.7-or-earlier manifest: no `schema` field, no event identity, no path frame. A manifest without `skipped` or `data_commands` predates those records: read their absence as unknown.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/manifest_common"
+        }
+      ],
+      "not": {
+        "required": [
+          "schema"
+        ]
+      },
+      "properties": {
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/analysis_event"
+          }
+        }
+      }
+    },
+    "manifest_v2": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/manifest_common"
+        }
+      ],
+      "type": "object",
+      "required": [
+        "schema"
+      ],
+      "properties": {
+        "schema": {
+          "const": "mycelium.data_lineage.manifest.v2"
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/analysis_event"
+          }
+        }
+      }
+    },
+    "manifest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/manifest_v2"
+        },
+        {
+          "$ref": "#/$defs/manifest_v1"
+        }
+      ]
+    },
+    "record_status": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "current-in-record",
+            "superseded",
+            "superseded-unverified",
+            "unknown",
+            "no-recorded-write"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "inferred-write",
+              "order-unproven",
+              "unwatched-path",
+              "gap",
+              "write-hash-unknown",
+              "incomplete-observation",
+              "coverage-unproven",
+              "no-observations",
+              "earlier-hash-unknown",
+              "later-write-hash-unknown"
+            ]
+          }
+        },
+        "superseded_by": {
+          "type": "object"
+        },
+        "gaps": {
+          "type": "array"
+        },
+        "gap_count": {
+          "type": "integer"
+        },
+        "unordered_writes": {
+          "type": "array"
+        },
+        "open_calls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Bash calls still running (journaled Pre, no Post) after this write; informational, since the querying command is always one."
+        }
+      }
+    },
+    "index_write": {
+      "type": "object",
+      "required": [
+        "path",
+        "call",
+        "action",
+        "evidence",
+        "status",
+        "record"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "call": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "action": {
+          "enum": [
+            "written",
+            "deleted"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/nullable_sha256"
+        },
+        "hash_origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/hash_origin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "enum": [
+            "observed",
+            "inferred"
+          ]
+        },
+        "attribution": {
+          "enum": [
+            "sole",
+            "shared",
+            "uncertain",
+            "inferred"
+          ]
+        },
+        "order_basis": {
+          "enum": [
+            "journal",
+            "clock"
+          ]
+        },
+        "events": {
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "current",
+            "current-in-record",
+            "superseded",
+            "superseded-unverified",
+            "changed-outside-record",
+            "missing-on-disk",
+            "unverified",
+            "unknown"
+          ]
+        },
+        "record": {
+          "$ref": "#/$defs/record_status"
+        },
+        "disk": {
+          "enum": [
+            "match",
+            "differs",
+            "missing",
+            "unverified"
+          ]
+        },
+        "disk_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "disk_hash_origin": {
+          "enum": [
+            "hash-cache",
+            "hashed",
+            "query-identity-match"
+          ]
+        }
+      }
+    },
+    "index_read": {
+      "type": "object",
+      "required": [
+        "event_id",
+        "path",
+        "hash_origin"
+      ],
+      "properties": {
+        "event_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "frame": {
+          "enum": [
+            "repo",
+            "unresolved"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/nullable_sha256"
+        },
+        "hash_origin": {
+          "$ref": "#/$defs/hash_origin"
+        },
+        "checkout": {
+          "const": "foreign"
+        }
+      }
+    },
+    "index_query_result": {
+      "description": "Output of `lineage_index.py query --json`.",
+      "type": "object",
+      "required": [
+        "schema",
+        "selector",
+        "found",
+        "coverage"
+      ],
+      "properties": {
+        "schema": {
+          "const": "mycelium.lineage_query.v1"
+        },
+        "selector": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1
+        },
+        "found": {
+          "type": "boolean"
+        },
+        "readers": {
+          "type": [
+            "integer",
+            "array"
+          ]
+        },
+        "producers": {
+          "type": "integer"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "writes",
+              "readers"
+            ],
+            "properties": {
+              "writes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/index_write"
+                }
+              },
+              "readers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/index_read"
+                }
+              }
+            }
+          }
+        },
+        "writes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/index_write"
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "required": [
+            "manifests",
+            "stores",
+            "gaps"
+          ],
+          "properties": {
+            "gaps": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      }
+    },
+    "lineage_index": {
+      "description": "Output of `lineage_index.py build --json` (the cached index itself is internal and rebuildable).",
+      "type": "object",
+      "required": [
+        "schema",
+        "root",
+        "builder_version",
+        "coverage"
+      ],
+      "properties": {
+        "schema": {
+          "const": "mycelium.lineage_index.v1"
+        },
+        "root": {
+          "type": "string"
+        },
+        "builder_version": {
+          "type": "integer"
+        },
+        "coverage": {
+          "type": "object"
+        }
+      }
+    },
+    "value_source": {
+      "description": "The file a report number was read from, hashed when the number was registered.",
+      "type": "object",
+      "required": [
+        "path",
+        "sha256",
+        "locator"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Relative to the project root (nearest ancestor with .living/)."
+        },
+        "root": {
+          "const": "repo"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "locator": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {
+                "enum": [
+                  "row",
+                  "column",
+                  "key",
+                  "sheet",
+                  "cell",
+                  "query"
+                ]
+              }
+            }
+          ]
+        },
+        "hashed_at": {
+          "type": "string"
+        }
+      }
+    },
+    "report_number": {
+      "description": "A `numbers[*]` entry of a report `.manifest.json` (key `id`) or a `values[*]` entry of an analysis fragment (key `key`).",
+      "type": "object",
+      "required": [
+        "value"
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "id"
+          ]
+        },
+        {
+          "required": [
+            "key"
+          ]
+        }
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": [
+            "number",
+            "string",
+            "boolean"
+          ]
+        },
+        "provenance": {
+          "type": "string"
+        },
+        "computed_at": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/value_source"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/value_source"
+          },
+          "description": "Several files the number depends on (a table and the config that set its threshold); stale when any changes."
+        }
+      }
+    },
+    "report_fragment": {
+      "description": "analysis/<ns>/outputs/numbers.json, written by register_value.",
+      "type": "object",
+      "required": [
+        "namespace",
+        "values"
+      ],
+      "properties": {
+        "namespace": {
+          "type": "string"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/report_number"
+          }
+        }
+      }
+    },
+    "report_finding": {
+      "description": "One check_report_values finding.",
+      "type": "object",
+      "required": [
+        "schema",
+        "code",
+        "severity",
+        "message"
+      ],
+      "properties": {
+        "schema": {
+          "const": "mycelium.report_finding.v1"
+        },
+        "code": {
+          "enum": [
+            "stale-value",
+            "source-missing",
+            "source-invalid",
+            "source-unreadable",
+            "unchecked-value"
+          ]
+        },
+        "severity": {
+          "enum": [
+            "error",
+            "warning"
+          ]
+        },
+        "id": {},
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expected": {
+          "$ref": "#/$defs/sha256"
+        },
+        "actual": {
+          "$ref": "#/$defs/sha256"
+        },
+        "message": {
+          "type": "string"
+        },
+        "lineage": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "sample_ledger": {
+      "description": "samples.ledger.json: names the columns of a one-row-per-sample table. nesting lists replication levels coarse to fine; batch lists crossed nuisance variables, never a level at or below the unit.",
+      "type": "object",
+      "required": [
+        "schema",
+        "file",
+        "sample_id",
+        "group",
+        "unit_of_replication"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "mycelium.sample_ledger.v1"
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sample_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "group": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unit_of_replication": {
+          "type": "string",
+          "minLength": 1
+        },
+        "nesting": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "local_labels": {
+          "type": "boolean"
+        },
+        "batch": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "pairing": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "unit",
+                "within"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "unit": {
+                  "type": "string"
+                },
+                "within": {
+                  "type": "string"
+                },
+                "levels": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": {
+                    "type": [
+                      "string",
+                      "number"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "note": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "access_record": {
+      "description": "One record_ids declaration: which rows or features a step read, used, wrote or excluded, as a count and a fingerprint (never the ids).",
+      "type": "object",
+      "required": [
+        "name",
+        "axis",
+        "role",
+        "count",
+        "distinct",
+        "id_set_sha256"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "axis": {
+          "enum": [
+            "row",
+            "feature"
+          ]
+        },
+        "role": {
+          "enum": [
+            "read",
+            "used",
+            "written",
+            "excluded"
+          ]
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "distinct": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "id_set_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "sha256 of the sorted distinct NFC ids joined by newlines."
+        },
+        "order_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source": {
+          "$ref": "#/$defs/access_source"
+        },
+        "computed_at": {
+          "type": "string"
+        },
+        "run": {
+          "type": "object",
+          "properties": {
+            "pid": {
+              "type": "integer"
+            },
+            "process_started_at": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "access_fragment": {
+      "description": "analysis/<ns>/outputs/access.json, written by record_ids (Python) and record_access.R.",
+      "type": "object",
+      "required": [
+        "schema",
+        "namespace",
+        "records"
+      ],
+      "properties": {
+        "schema": {
+          "const": "mycelium.access.v1",
+          "description": "Format marker. record_ids refuses to update an existing access.json without it (or with other top-level keys): that file is not Mycelium's."
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/access_record"
+          }
+        }
+      }
+    },
+    "access_source": {
+      "description": "The file an access record's ids came from: reference and digest only, never a locator (free text that could carry an id).",
+      "type": "object",
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "root": {
+          "const": "repo"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hashed_at": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

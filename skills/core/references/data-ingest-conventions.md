@@ -25,8 +25,20 @@ Each dataset gets its own subdirectory. Include a documentation file (named in U
 data/metadata/[dataset-name]/
 ├── schema.yaml        # Column descriptions, types, units
 ├── provenance.md      # Full source details, acquisition method, contact
-└── summary_stats.md   # Row counts, column distributions, missing data summary
+├── summary_stats.md   # Row counts, column distributions, missing data summary
+├── samples.tsv        # Data with samples: one row per sample (the sample ledger)
+└── samples.ledger.json # Which ledger columns are the id, group, replication levels, batches
 ```
+
+A dataset with samples gets a **sample ledger**. `samples.tsv` has one row per sample: its id, its group, every replication level from coarse to fine (line, derivation, preparation, dish, library), and the crossed batch variables. `samples.ledger.json` names those columns, starting from `skills/core/templates/samples.ledger.json`. `data_contract_check.py --ledger` then checks, at ingest:
+
+- unique sample ids;
+- that each level nests in the one above it;
+- at least two replication units per group;
+- each batch variable against the group;
+- any declared pairing.
+
+Analyses start their data contracts from it (`--emit-contract`).
 
 Use the templates at `skills/core/templates/schema.yaml`, `skills/core/templates/provenance.md`, and `skills/core/templates/summary_stats.md` as starting points for each file.
 
@@ -94,6 +106,7 @@ Before considering ingestion complete:
 - [ ] Metadata created in `data/metadata/[dataset-name]/`
 - [ ] Schema documented with column descriptions and types
 - [ ] Metadata files created from templates (`schema.yaml`, `provenance.md`, `summary_stats.md`)
+- [ ] Data with samples: `samples.tsv` and `samples.ledger.json` written, and `data_contract_check.py --ledger` run with no block (or the block recorded as a known issue)
 - [ ] Provenance documented (source, date, method)
 - [ ] Known issues documented
 - [ ] `data/DATA_MANIFEST.md` updated with new entry

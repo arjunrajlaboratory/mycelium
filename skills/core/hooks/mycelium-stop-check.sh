@@ -46,9 +46,11 @@ if [[ "$(mycelium_hook_host)" == "claude" && -n "$HOST_SESSION_ID" \
   && mycelium_valid_session_id "$HOST_SESSION_ID" \
   && IO_SHARED=$(mycelium__checked_shared_state_dir "$REPO_ROOT" 2>/dev/null) \
   && [[ -d "$IO_SHARED/io" && ! -L "$IO_SHARED/io" ]]; then
-  python3 "${MYCELIUM_IO_OBSERVER:-$HERE/../scripts/io_observer.py}" turn-end \
-    --state-dir "$IO_SHARED" --host claude --session "$HOST_SESSION_ID" \
-    >/dev/null 2>&1 || true
+  # The Stop payload's background_tasks snapshot ends background jobs the
+  # host shows are over (a job absent from it, or listed as finished).
+  printf '%s' "$INPUT" | python3 "${MYCELIUM_IO_OBSERVER:-$HERE/../scripts/io_observer.py}" \
+    turn-end --state-dir "$IO_SHARED" --host claude --session "$HOST_SESSION_ID" \
+    --stop-payload-stdin >/dev/null 2>&1 || true
 fi
 # Report, and clear, the skips this host session's hooks recorded while it had
 # no transaction it owned. Used on the paths that end Stop without one. With
@@ -584,7 +586,9 @@ mycelium_accept_lineage_session() {
     local first_event_id=""
     # A stream of only data commands belongs to a turn that may release its
     # session number, which the next session can take again; name its raw
-    # archive by the stream's first event_id too, as its manifest is.
+    # archive by the stream's first event_id too, as its manifest is. The
+    # archive is the allowlisted copy consolidation wrote; the raw stream
+    # is removed either way.
     if ! grep -qv '"kind": "data_command"' "$events_file" 2>/dev/null; then
       first_event_id=$(grep -o '"event_id": "[0-9a-f]*"' "$events_file" 2>/dev/null \
         | head -1 | sed -E 's/.*: "([0-9a-f]*)"/\1/' | cut -c1-12 || true)
@@ -593,8 +597,11 @@ mycelium_accept_lineage_session() {
       fi
     fi
     mkdir -p "$prev_dir"
-    mv "$events_file" "$prev_dir/${session_id}.tmp"
-    # Keep only the 20 most recent raw-event archives.
+    if [[ -f "$events_file.archive" ]]; then
+      mv "$events_file.archive" "$prev_dir/${session_id}.tmp"
+    fi
+    rm -f "$events_file"
+    # Keep only the 20 most recent (allowlisted) event archives.
     ls -t "$prev_dir"/*.tmp 2>/dev/null | tail -n +21 | xargs rm -f 2>/dev/null || true
   fi
   rm -f "$session_marker"

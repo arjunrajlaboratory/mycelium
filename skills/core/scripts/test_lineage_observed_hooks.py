@@ -9,6 +9,7 @@ the Pre and Post hooks, as the host would run it there.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -278,9 +279,16 @@ def test_edit_tool_beside_bash_marks_overlap(tmp_path):
     assert _run(host, "mycelium-io-observer.sh", repo,
                 {**edit, "hook_event_name": "PostToolUse"}).returncode == 0
     _post(host, repo, sid, "call_8", command)
-    (obs,) = _store(repo, host, sid)
+    edit_obs, obs = _store(repo, host, sid)
     assert obs["status"] == "overlap"
     assert [o["call"] for o in obs["overlapping"]] == ["edit_1"]
+    # The edit itself is observed by path, with the hash it left.
+    assert edit_obs["status"] == "edit"
+    assert edit_obs["observation_id"] == "claude:edit_1"
+    (edited,) = edit_obs["changes"]["edited"]
+    assert edited["path"] == "notes.md"
+    assert edited["after"]["sha256"] == hashlib.sha256(b"n").hexdigest()
+    assert [o["call"] for o in edit_obs["overlapping"]] == ["call_8"]
 
 
 @pytest.mark.parametrize("host", HOSTS)

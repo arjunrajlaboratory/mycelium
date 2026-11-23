@@ -86,7 +86,10 @@ def test_modified_file_before_hash_is_cached_content_or_not_captured(tmp_path: P
     io.flush_cache(state, cache)
     obs = _call(state, root, "c1", lambda: target.write_text("v2 longer\n"))
     (entry,) = obs["changes"]["modified"]
-    assert entry["before"] == {"sha256": first.sha256, "size_bytes": 4, "hash_status": "cached"}
+    before = dict(entry["before"])
+    assert set(before.pop("identity")) == {"dev", "ino", "size", "mtime_ns", "ctime_ns"}
+    assert before == {"sha256": first.sha256, "size_bytes": 4, "hash_status": "cached",
+                      "hash_origin": "observed"}
     assert entry["after"]["sha256"] != first.sha256
 
 
@@ -423,3 +426,59 @@ def test_cli_prints_one_summary_line(tmp_path: Path) -> None:
         "pre_snapshot": str(retired),
         "state_dir": str(state),
     }
+
+
+def test_a_textual_patch_failure_is_a_failure() -> None:
+    assert io.edit_outcome("Error: invalid patch context") == "failure"
+    assert io.edit_outcome("Success. Updated the following files:\nM a.py") == "success"
+    assert io.edit_outcome("") == "unknown"
+
+
+@pytest.fixture()
+def project(tmp_path: Path) -> Path:
+    root = tmp_path / "proj"
+    (root / ".living" / "log" / "data-lineage").mkdir(parents=True)
+    (root / ".mycelium").mkdir()
+    (root / "out").mkdir()
+    return root
+
+
+def _case_insensitive(path: Path) -> bool:
+    probe = path / "CaseProbe"
+    probe.write_text("x")
+    try:
+        return (path / "caseprobe").exists()
+    finally:
+        probe.unlink()
+
+
+def test_an_edit_is_keyed_by_the_listed_spelling(project: Path) -> None:
+    if not _case_insensitive(project):
+        pytest.skip("case-sensitive volume")
+    (project / "CHANGELOG.md").write_text("B")
+    written, _, refused = io._edit_changes(project, [(str(project / "changelog.md"),
+                                                     "written")])
+    assert [w["path"] for w in written] == ["CHANGELOG.md"] and refused == []
+
+
+def test_canonical_spelling_keeps_new_paths_and_existing_names(project: Path) -> None:
+    (project / "out" / "x.csv").write_text("x")
+    assert io.canonical_spelling(str(project), "out/x.csv") == "out/x.csv"
+    assert io.canonical_spelling(str(project), "out/new/y.csv") == "out/new/y.csv"
+
+
+def test_a_failed_edit_observation_says_so(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "out.csv").write_text("v1")
+    state = repo / ".mycelium"
+    state.mkdir()
+    payload = {"session_id": "s", "tool_use_id": "e1", "tool_name": "apply_patch",
+               "cwd": str(repo), "tool_input": {"input": "*** Begin Patch\n*** Update File: out.csv\n"},
+               "tool_response": {"exit_code": 1}}
+    io.hook(state, repo, "codex", json.dumps({**payload, "hook_event_name": "PreToolUse"}))
+    io.hook(state, repo, "codex", json.dumps({**payload, "hook_event_name": "PostToolUse"}))
+    (record,) = io._read_lines(io.observations_path(state, "codex", "s"))
+    assert record["outcome"] == "failure"
+    assert record["changes"]["edited"] == []
+    assert record["changes"]["refused"] == [{"path": "out.csv", "reason": "edit-failed"}]

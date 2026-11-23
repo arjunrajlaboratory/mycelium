@@ -827,7 +827,31 @@ _MARKER_HINT = {"figure": "<!-- sci-media --><!-- /sci-media -->", "table": "<!-
                 "worked": "<!-- sci-rows --><!-- /sci-rows -->"}
 
 
-def plan(source: str, manifest: dict, base: Path) -> list[Edit]:
+def number_findings(manifest: dict, repo_root: Path) -> list[dict]:
+    """Freshness of the manifest's hash-linked numbers (check_report_values)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import check_report_values
+
+    try:
+        entries = check_report_values.number_entries(manifest)
+    except ValueError as exc:
+        # A malformed `numbers` is never read as "no numbers".
+        return [{"code": "source-invalid", "severity": "error", "id": None,
+                 "message": f"manifest numbers are malformed: {exc}"}]
+    return check_report_values.check_numbers(entries, repo_root)
+
+
+def plan(source: str, manifest: dict, base: Path, repo_root: Path | None = None, *,
+         numbers: list[dict] | None = None) -> list[Edit]:
+    """Edits that bring the report in line with the manifest.
+
+    ``base`` resolves figure and data paths (the report's asset base);
+    ``repo_root``, when given, resolves hash-linked number sources, and a
+    stale, missing or invalid number blocks the sync like a stale figure.
+    ``numbers``, when given, is the result of ``number_findings`` already
+    computed for this manifest, so its warnings and errors come from one
+    check rather than two runs that could see different files.
+    """
     figures = {f.get("id"): f for f in manifest.get("figures") or [] if isinstance(f, dict)}
     data = {d.get("id"): d for d in manifest.get("data") or [] if isinstance(d, dict)}
     worked = {w.get("id"): w for w in manifest.get("worked_examples") or [] if isinstance(w, dict)}
@@ -875,6 +899,13 @@ def plan(source: str, manifest: dict, base: Path) -> list[Edit]:
             edits.append(Edit(r.content_start, r.content_end, content))
         except SyncError as exc:
             errors.append(str(exc))
+    if numbers is None and repo_root is not None:
+        numbers = number_findings(manifest, repo_root)
+    if numbers is not None:
+        for finding in numbers:
+            if finding["severity"] == "error":
+                errors.append(f"number {finding.get('id')!r}: [{finding['code']}] "
+                              f"{finding['message']}")
     if errors:
         raise SyncError("\n".join(errors))
     return edits
@@ -923,6 +954,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("report", help="path to the report .html file")
     parser.add_argument("--manifest", required=True, help="path to .manifest.json")
     parser.add_argument("--root", default=None, help="base directory for manifest paths (default: the report's directory)")
+    parser.add_argument("--repo-root", default=None,
+                        help="project root that hash-linked number sources are relative to "
+                             "(default: nearest ancestor of the report with .living/)")
     parser.add_argument("--check", action="store_true", help="write nothing; exit 1 if the report is out of date")
     parser.add_argument("--reviewer-copy", default=None, metavar="PATH",
                         help="write a copy with inlined media/data/rows stubbed out (line numbers kept); the report is not modified")
@@ -957,8 +991,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote reviewer copy {out}")
         return 0
     base = Path(args.root) if args.root else report.parent
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import check_report_values
+
+    repo_root = check_report_values.resolve_repo_root(
+        manifest_path.parent, Path(args.repo_root) if args.repo_root else None)
+    # One check: the warnings below and the errors that block the sync come
+    # from the same hashes of the same files.
+    numbers = number_findings(manifest, repo_root)
+    unchecked = [f.get("id") for f in numbers if f["severity"] == "warning"]
+    if unchecked:
+        # One line, not one per number: legacy manifests have many.
+        shown = ", ".join(repr(i) for i in unchecked[:5]) + (" …" if len(unchecked) > 5 else "")
+        print(f"{report}: [unchecked-value] warning: {len(unchecked)} number(s) have no "
+              f"source and cannot be checked against their data: {shown}", file=sys.stderr)
     try:
-        edits = plan(source, manifest, base)
+        edits = plan(source, manifest, base, repo_root, numbers=numbers)
     except SyncError as exc:
         print(f"{report}: sync failed; nothing written\n{exc}", file=sys.stderr)
         return 1

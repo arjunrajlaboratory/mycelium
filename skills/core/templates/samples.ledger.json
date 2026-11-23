@@ -1,0 +1,12 @@
+{
+  "schema": "mycelium.sample_ledger.v1",
+  "note": "Copy to data/metadata/<dataset>/samples.ledger.json next to samples.tsv. One ledger row per sample. 'nesting' lists replication levels coarse to fine; 'unit_of_replication' is the independently assigned unit the model will treat as n; 'batch' lists crossed nuisance variables (calendar dates, runs), never a nested level at or below the unit. Check it with: data_contract_check.py --ledger <this file>.",
+  "file": "samples.tsv",
+  "sample_id": "sample_id",
+  "group": "condition",
+  "unit_of_replication": "derivation",
+  "nesting": ["line", "derivation", "prep", "dish", "library"],
+  "local_labels": false,
+  "batch": ["prep_date", "sequencing_run"],
+  "pairing": null
+}

@@ -169,7 +169,8 @@ mycelium_archive_abandoned_events() {
   if [ -e "$destination" ] || [ -L "$destination" ]; then
     destination="$archive_dir/${lineage_id}-$(date +%s)-$$.tmp"
   fi
-  mv "$events_file" "$destination" || return 1
+  rm -f "$events_file.archive"
+  mycelium_archive_lineage_stream "$events_file" "$destination"
 }
 if [ -f "$ACTIVE_LOG_FILE" ]; then
   _SHOULD_CLEAN=false

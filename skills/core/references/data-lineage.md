@@ -8,7 +8,17 @@ The subsystem is independent from the rest of mycelium's logging: it records an
 event when an analysis-script invocation is detected (`python`, `R`, `Rscript`, `jupyter`,
 `uv run python`, `poetry run python`, `conda run … python`, including inline
 `-c` / `-e`). Standard shell execution wrappers (`time`, `exec`, `nice`, and
-`timeout`) may precede or nest around those interpreters.
+`timeout`) may precede or nest around those interpreters. An interpreter held
+in a variable counts when the same command assigns it plainly first
+(`PY=/x/venv/bin/python; $PY run.py`). That means an unconditional,
+top-level `NAME=literal` statement, optionally `export`ed, whose value names
+python, Rscript or R. Assignments and uses are read only at command starts in
+shell text, never inside quotes, comments, heredoc bodies or (for uses)
+substitutions and subshells, so `printf '; PY=python3'` changes nothing. Any
+other unquoted mention of the name (`unset`, `read`, `declare`, `local`,
+`readonly`, `typeset`, `+=`, a loop variable, a conditional, piped, nested or
+control-structure assignment) voids it until the next plain assignment. One
+forward pass, linear in the command. The event keeps the command as written.
 
 Pipeline runners are detected too, recording their entry point as the event's
 script: a shell script run as `bash`/`sh`/`zsh run.sh` or `./run.sh`, the
@@ -67,7 +77,7 @@ UUID fallback if mycelium hasn't recorded an active session):
 ```
 .mycelium/
   mycelium-data-events.tmp                  # NDJSON, one event per detected script
-  mycelium-data-events-prev/<sid>.tmp       # rotated on accepted Stop (20-file cap)
+  mycelium-data-events-prev/<sid>.tmp       # archived on accepted Stop, allowlisted (20-file cap)
 .living/
   log/
     data-lineage/<sid>.json                 # consolidated manifest
@@ -212,8 +222,8 @@ of literal simple commands, so every command in it ran and succeeded:
   present after `mv`, a move into a directory, and a copy onto itself claim
   nothing;
 - `cd DIR` is followed logically (as bash does through symlinks) to an
-  existing directory; a bare name is unresolved when `CDPATH` is mentioned
-  or set. After any command that could move or remove a directory
+  existing directory; a bare name is unresolved when `CDPATH` may be set
+  (see below). After any command that could move or remove a directory
   (everything outside a short list of read-only and file-creating commands,
   including `cp` and `mv`), later relative paths are unresolved.
 - `exit`, `return`, `exec`, `set`, `!`, `eval`, `source`, and wrappers
@@ -263,9 +273,20 @@ not enter `summary.unique_inputs`/`unique_outputs`.
 
 ## Event schema (NDJSON, one line per detected script)
 
+The authoritative field definitions for every record below, for v1 (0.9.7
+and earlier) and v2 (0.9.8 onward), are in
+[`provenance-schema.json`](provenance-schema.json) (JSON Schema 2020-12).
+That file is what Warrant and other readers validate against. This section
+describes the fields; where the two differ, the schema file wins.
+
 ```json
 {
   "ts": "2026-05-26T15:32:11Z",
+  "event_id": "9f2c…",          # v2
+  "host": "claude",              # v2
+  "host_session_id": "…",        # v2
+  "ts_ns": 1764000000000000000,  # v2
+  "repo_root": "/path/to/repo",  # v2: the frame for every rel_path
   "agent_id": null,
   "agent_type": null,
   "bash_cmd": "python analysis/foo.py",
@@ -276,14 +297,288 @@ not enter `summary.unique_inputs`/`unique_outputs`.
   "script_source": "...",
   "script_candidate": null,
   "git_sha": "c3d4...",
-  "inputs":  [{"path", "sha256", "size_bytes", "n_rows"?}],
-  "outputs": [{"path", "sha256", "size_bytes"}],
+  "inputs":  [{"path", "rel_path", "sha256", "size_bytes", "hash_origin", "pre_run_proven"?}],
+  "outputs": [{"path", "rel_path", "sha256", "size_bytes", "hash_origin",
+               "observed_change"?, "observed_sha256"?}],
   "io_detection": "static",
   "lineage_warnings": [],
-  "filters_detected": ["df.query(...)", ...],
-  "seeds_detected": [42, ...]
+  "seeds_detected": [42, ...],
+  "step": {"argv", "interpreter", "script_args", "env", "config_files", "seeds"}  # v2
 }
 ```
+
+### v2 identity and frame (0.9.8)
+
+- **`event_id`, `host`, `host_session_id`, `ts_ns`.** Every analysis event
+  and data command now has an identity. `ts_ns` orders records within a
+  second. Write order between calls comes only from the observation's
+  `journal` (`id`, `pre_seq`, `post_seq`, `expired`), never from clocks.
+- **`repo_root` and `rel_path`.** `repo_root` is the physical checkout the
+  hook resolved. Each file record's `rel_path` is relative to it, framed with
+  the observer's rules: no `..`, no symlinked component below the root. A path
+  that cannot be framed has `rel_path: null` and a `rel_path_reason`.
+- **`hash_origin`.** Says how each hash was taken:
+  - `pre-run-proven`: the bytes matched the Pre snapshot;
+  - `hashed-at-post`: the observer's stable hash at Post;
+  - `hook-post`: the hook's plain digest after the call;
+  - `unknown`: a 0.9.7 record.
+
+  Outputs also carry `observed_sha256` (the observation's protocol hash) where
+  the call's observation saw them change. The hook digest is never promoted
+  to an observed hash.
+
+### Step settings (`step`, v2)
+
+Read from the detected stage's own text, never guessed:
+
+- `argv`, `executable`, `interpreter` and `script_args`. Inline `-c`/`-e`
+  bodies become `{"inline_sha256", "length"}`. The body, module or script
+  word is the one the detector matched, by position, so a startup option
+  value spelled like it (`python -X -c -c 'print(1)'`, `python -X fit.py
+  fit.py`) is not mistaken for it. For `R -f X` and
+  `R --file=X`, `script_args` are the words after `--args` (R reads its own
+  options anywhere before it), so `R --file=a.R --args --seed 1` keeps the seed.
+- `env`: assignment and `env VAR=x` prefixes of that stage. Unexpanded
+  `$VAR` values are marked `expanded: false`.
+- `config_files`: named by interpreter-specific operand rules, then hashed
+  within one budget per call (8 files, 5 MB each, 250 ms) and proven
+  against the Pre snapshot like inputs. The proof reuses each digest whose
+  file still has the identity it was read with (device, inode, size, mtime,
+  ctime), so the 250 ms is the whole config cost. A config that changed after
+  it was hashed is `hash_status: unstable`. A config that changed during the
+  call is `effective: unknown`.
+  - Operands resolve as bash expands them. An unquoted leading `~/` (or
+    `~user/`) is the home directory, while a quoted or escaped `~` is a literal
+    name under the stage's directory. A parameter or command expansion, a glob,
+    a brace expansion, `~+`/`~-`, and a `~` after `--flag=` (bash leaves it,
+    other shells may not) are `hash_status: unresolved`, never guessed.
+  - Bash expands a bare `~` with the command's own HOME, so the hook's HOME
+    is used only when nothing before the stage may have changed it. Any
+    mention of HOME other than a `$HOME`/`${HOME}` read (`HOME=`, `export
+    HOME`, `env HOME=`, `unset HOME`, `declare`/`typeset`/`readonly HOME`,
+    `read HOME`, `${HOME:=x}`), a `source` or `.` of any file, `eval`, or a
+    variable-setting builtin with a computed name (`declare "$v=x"`) makes a
+    `~/` operand `hash_status: unresolved`. `~user/` is unaffected.
+  - Bash searches `$CDPATH` for an unqualified relative `cd` operand (`cd
+    run`, not `/x`, `./run` or `../run`), so that `cd` may land somewhere
+    the hook cannot know when CDPATH may be set: in the hook's own
+    environment, by a prefix (`CDPATH=x cd run`), or by anything earlier in
+    the command that mentions CDPATH, runs `source`/`.`/`eval`, or sets a
+    variable with a computed name. Such a `cd` is unmodeled. Without any of
+    those signals `cd run` is followed as usual.
+  - Any directory change the cwd walk cannot follow leaves the stage's
+    working directory unknown: a CDPATH-searched `cd` (above), `pushd` and
+    `popd` (also through `builtin`/`command`/`time`), `cd -`, `cd "$DIR"`,
+    an undocumented `cd` flag, a redirection- or launcher-prefixed `cd`, a
+    `cd` after `|`, and a conditional `cd` the text cannot prove ran or was
+    skipped (`test -d x && cd x; ...`; `true && cd x; ...` and `false || cd
+    x; ...` are followed, `false && cd x; ...` is not). A script named by a
+    relative path is then recorded without proofs (`script: null`, the word
+    in `script_candidate`, nothing read or hashed), and the stage's relative
+    config operands and I/O are `hash_status: unresolved` and unresolved;
+    absolute paths still resolve. A change inside a closed subshell (`(pushd
+    x); python a.py`) does not leave the outer stage unknown, and a
+    subshell's first `cd` always runs when the subshell does. Code run by
+    `source`/`.`/`eval` is not treated as a directory change here
+    (`source venv/bin/activate && python fit.py` keeps `fit.py`), though it
+    makes a later unqualified `cd` CDPATH-uncertain.
+  - A URL operand (`--config https://host/c.yaml`) is never resolved against
+    the directory or hashed. A flag's URL value is kept as `hash_status:
+    remote` with `rel_path: null` (a committed manifest has no evidence
+    for it, so its `path` is `<v>`). A URL that only has a config suffix is
+    left out.
+  - Snakemake `--profile P`: every `config.yaml`/`config.vN+.yaml` in the
+    profile directory (a bare name is also searched in the user config
+    directories). A profile with none is listed as a missing `config.yaml`.
+  - Snakemake resolves `--profile` (while parsing arguments) and
+    `--configfile` (when it builds its config settings) from the invocation
+    directory, before it changes into `--directory`, so both are resolved
+    there; positional targets and the workflow's I/O use `--directory`.
+- `params` (snakemake): the `--config`/`-C` `KEY=VALUE` overrides, verbatim.
+- `seeds`: literal seeds from argv (`--seed N`) and source (`np.random.seed`,
+  `set.seed`), with their origin. A word a secret-named option or
+  assignment takes is never read as a seed or a config path: in
+  `fit.py --password --seed=482731` the parser takes `--seed=482731` as the
+  password, so it is not a seed. The scan stops at
+  a `--` word: after it, an option parser reads every word as a positional
+  value, so `-- --seed 4839…` names no seed. A committed manifest keeps a
+  seed only as the Redaction section allows.
+
+Two runs of one script with different arguments are two events. Identical
+stages (a loop body) are one. A call with more than 64 analysis stages records
+the first 64 in command order, with `stages_not_recorded`. The shared config
+budget also goes to stages in command order.
+
+`filters_detected` is no longer written. It held unevaluated regex text with
+false positives, and nothing read it. Historical records keep it. Evaluated
+row and feature access is a separate, in-process record (see
+`docs/plans/row-feature-access.md`).
+
+### Redaction
+
+One policy applies: an allowlist (`text_policy: "allowlist-v1"`). No list
+of secret shapes can cover every shell, CLI and language, so nothing looks
+for secrets; a word is kept only on evidence that it is safe. Where record
+text is stored decides when the allowlist applies:
+
+- **Committed manifests** (`.living/log/data-lineage/`): every free-text
+  field, at Stop (below).
+- **Stores that outlive a session**, under `.mycelium/`: the observation
+  store (`io/obs/`) keeps an observation's `bash_cmd` in its allowlisted
+  form, with the observation's own change entries as evidence, written so
+  by the observer. The event archives (`mycelium-data-events-prev/`, on an
+  accepted Stop, and `mycelium-data-events-abandoned/`, for a session that
+  never stopped) keep each record as a manifest would
+  (`extract_data_lineage.commit_stream`); the raw stream is removed either
+  way, even if the archive cannot be written.
+- **The transient event queue** (`mycelium-data-events.tmp`, including skip
+  records) and parked records in `lineage-skips-unowned.ndjson` hold the
+  raw command text and embedded `script_source`. Each Stop consumes them
+  (a blocked Stop keeps the queue for its retry), so they are machine-local
+  working state at the trust level of shell history. A host session that
+  ends without any further Stop can leave parked records behind.
+
+The extractor parses raw text. One rule protects parsing: a word a
+secret-named option or assignment takes (`--token X`, `--token=X`,
+`API_KEY=X`; the names are below) is never read as a config path or a
+seed. Everything else that could carry a secret into a manifest is stopped
+at consolidation: a config path without file evidence becomes `<v>`, a seed
+is kept only where the committed argv still shows it, and a named path only
+if it is exactly an evidence-backed record.
+
+**Committed manifests.** At Stop, `extract_data_lineage.py` passes
+every free-text field of every record through the allowlist in
+`lineage_redact.py` (`commit_safe_command`, `commit_safe_argv`,
+`commit_safe_prose`). That covers each action's `bash_cmd`, `step.argv`,
+`step.script_args`, `step.params`, `step.wrappers`, `step.executable`,
+`step.interpreter`, `step.env` values, `script_candidate` and
+`lineage_warnings`. It also covers a data command's `bash_cmd`, `step.argv`,
+`named_paths` and `analysis_candidates`, a skip's `bash_cmd` and `detail`,
+and an embedded observation's `bash_cmd`. A word is kept only on
+**evidence**, never because of its position or shape:
+
+- **Command words.** The command word of each simple command (after any
+  leading `NAME=value` assignments, or after a wrapper such as `env`,
+  `nohup`, `time`, `nice`, `sudo`, `timeout`, `xargs`) is kept only in two
+  cases. It may be in a fixed vocabulary of common commands and
+  interpreters (`python3`, `python3.11`, `Rscript`, `bash`, `cat`, `git`,
+  `snakemake`, `uv`, ...). A system-directory spelling such as
+  `/usr/bin/python3` is kept whole; any other directory becomes
+  `<v>/python3`. Or it may be exactly one of the record's evidence-backed
+  paths (`./tools/run.sh`). Nothing is looked up on `PATH` or on disk.
+- **Shell keywords** are kept only where a keyword can stand. A `case`
+  subject, a `case` pattern and a `for` list are values. A loop variable
+  name is kept only in the name shape below.
+- **Subcommands.** The first operand after a vocabulary command is kept if
+  it is a fixed subcommand (`git status`, `uv run python`, `R CMD BATCH`,
+  `python3 -m pytest`).
+- **Short options** are kept in a fixed shape, with at most 3 digits: `-x`,
+  `-xy`, three lower-case letters (`-xzf`), or a letter and one or two
+  digits (`-O2`).
+- **Long options** must have the shape `--[a-z][a-z0-9-]{0,40}` (at most 3
+  digits), but the shape alone is not evidence: `--cinder-lattice-sable-amber`
+  has it. A long option is kept only when one of these shows its role:
+  - it is one of about 55 common options (`--help`, `--verbose`, `--dry-run`,
+    `--output`, `--config`, `--seed`, `--threads`, ...);
+  - it is a known option of the vocabulary command that receives it
+    (`git log --oneline`, `grep --ignore-case`, `timeout --signal`). One
+    command's options are not lent to another (`cat --oneline` is `<v>`);
+  - the words go to an interpreter (`python3`, `Rscript`, `bash`, ...), or
+    they are the step's `script_args` or `params`, and the run's own source
+    spells `--name` as a whole token. The source is the embedded copy of a
+    script file under 100 KB whose digest was recorded. An inline `-c`/`-e`
+    body never lends names, because it is part of the command it would vouch
+    for. A larger script lends no names either. Consolidation reads nothing
+    from disk.
+
+  For `--opt=value`, `--opt=` follows the same rule and the value takes the
+  value rule. Anything else shaped like an option is a value (`--Q0t3SG…`,
+  `-pS3cr3t`, `-resume`, `--min_count`, an unknown `--proof`). After a `--`
+  word, every later word of that simple command is an operand.
+- **Names.** Assignment names (`NAME=`) and loop variable names are kept
+  only in one case (`OMP_NUM_THREADS`, `lr`, `trainer.max_epochs`), with at
+  most 3 digits. The value takes the value rule.
+- **Values.** A value is kept only if, after shell quote removal, it is
+  exactly one of the record's evidence-backed paths, or exactly that path
+  behind one leading `./`. The path may be absolute, as recorded, or any run
+  of its whole components (`analysis/de/run.py`, `de/run.py`, `run.py`),
+  never with a `.` or `..` component. Nothing is normalized, so
+  `x/../run.py` is not `run.py`: the string approved is the string
+  published. A value is also kept if it is a plain number of at most 6
+  characters (`3`, `0.05`, `1e-3`), or one of `/dev/null`, `/dev/stdin`,
+  `/dev/stdout` or `/dev/stderr`. A number given to a secret-named option or
+  assignment is never kept. Secret names hold `token`, `secret`, `password`
+  (`passwd`, `pwd`), `api key`, `private key`, `credential`, `auth`,
+  `cookie` or `session`, or are `pin`, `otp`, `totp`, `mfa`, `passcode` or
+  `2fa` as a whole name part.
+- **Layout.** Operators, redirections and the whitespace layout are kept. A
+  heredoc delimiter is kept if it is in a fixed list (`EOF`, `PY`, `END`,
+  ...).
+
+A path is **evidence-backed** when the record proves the file was there.
+That means a digest was actually taken (a file record's `sha256` or
+`observed_sha256`, or the event's `script_sha256` for its `script`), or the
+path is an observed change entry (`observed_change` created, modified or
+deleted, or an observation's change list). None of these lend a word: an
+operand as typed, a missing or unresolved config, an unhashed input, an
+unreadable script (a skip's detail), or a script candidate. A data
+command's `cwd` and `repo_root` are host-supplied structured fields, so
+their spellings may stay in its command text.
+
+Every other word becomes `<v>`: quoted strings, inline code bodies, URLs,
+`$(...)` and `$X`, and unknown words. An unquoted comment (a `#` that starts
+a word, through the end of the line) becomes `<comment>`. A heredoc body
+becomes one `<heredoc: N lines>` line. So
+`python3 analysis/de/run.py --config analysis/de/params.yaml --seed 3` is
+kept whole when the script and config were hashed, while `curl -k
+9f8a7b6c5d4e3f2a1b0c` becomes `curl -k <v>`. Warning and skip-detail text
+keeps only the words of the recorders' own messages
+(`COMMIT_PROSE_WORDS`), counts that follow one of those words, and exact
+evidence-backed paths. A script candidate, and each of a data command's
+`named_paths` and `analysis_candidates` (except `(inline)`), is kept only
+if it is exactly an evidence-backed path. A config record without evidence
+(missing, unresolved, remote, unhashed) has `path` and `rel_path` set to
+`"<v>"`. Consolidating committed text reads no file system, so an
+unresponsive mount cannot hang Stop.
+
+Seeds are derived from the argv and the source, so they follow the same
+policy. An argv seed in `step.seeds` is kept only where the committed argv
+still shows it: a seed flag and its value both kept, side by side (`--seed
+42`) or joined (`--seed=42`). A value the argv masks (more than 6
+characters, after `--`, or taken by a secret flag) is dropped. A source seed
+(`step.seeds` with `origin: source`, and `seeds_detected`) is kept only
+under the short-number rule, because the source is not committed. A step
+left with no seeds has no `seeds` field.
+
+`script_source` is never committed. The manifest keeps `script_sha256`, the
+plain digest of the script file or inline body, and adds
+`script_source_bytes` and `script_source_lines`. Records from older
+recorders may carry `script_sha256_of: "sanitized"` (a digest of
+denylist-redacted text) or an inline placeholder's `sha256_of`; both still
+load and pass through. `filters_detected` (0.9.7 regex text) is dropped.
+Input and output records' `path` and `rel_path`, the event's `script`, and
+`cwd` and `repo_root` are structured data and stay, whether or not they
+carry evidence. Events recorded before an upgrade get the same treatment
+when a new manifest consolidates them. A manifest without `text_policy` was
+written by 0.9.7 or earlier and still loads.
+
+Known limits of the allowlist. A secret is kept if it is exactly a
+vocabulary word, a fixed subcommand, a common or command-known option
+name, or a short number. It is also kept if the run's own source spells it
+as `--name` and it is passed to that run, or if it is shaped as a one-case
+assignment or loop name (`SECRETVALUE=1`), since it cannot be told apart
+from a variable. Structured input/output paths and `script` are
+published as recorded.
+
+`argv`, `script_args`, `params`, and a data command's `argv` keep at most
+4 KiB per word (`…[truncated]`); a clipped word is never kept in a
+committed record.
+
+A URL is never a local path. A script's URL literal (`pd.read_csv("https://...")`,
+`to_csv("s3://...")`) is left out of `inputs` and `outputs`. It is named in
+`lineage_warnings` (a committed warning keeps none of it). A
+URL-shaped word in a data command's redirection or `cp`/`mv` operands is
+not an input or output either.
 
 `bash_exit` is populated when the host exposes a Bash exit code. Conditional
 analysis commands are recorded only when the status or a statically known
@@ -305,7 +600,8 @@ including adjacent quoted, bare, and backslash-escaped components such as
 A `python a.py && python b.py` chain emits **two** events (one per detected
 script). Inline `-c` scripts emit one event each; their `script` field is
 `null`, with the source embedded under `script_source` and identified by
-`script_sha256`.
+`script_sha256`. The embedded source stays in the transient event queue;
+a committed manifest keeps only the digest and the size (see Redaction).
 
 `script_candidate` is `null` except for an R script run (`R -f`,
 `R --file=`, `R CMD BATCH`) whose script cannot be named with certainty:
@@ -339,6 +635,8 @@ captured.
 
 ```json
 {
+  "schema": "mycelium.data_lineage.manifest.v2",   # absent in v1 (0.9.7 and earlier)
+  "text_policy": "allowlist-v1",   # record text reduced to allowlisted words (see Redaction)
   "session_id": "2026-05-26-099",
   "repo_root": "/path/to/repo",
   "git_sha": "c3d4...",
@@ -365,6 +663,10 @@ captured.
 }
 ```
 
+Manifests are written atomically: a reader sees the old file or the new
+one, never a torn file. Re-consolidating a v1 record into a v2 manifest
+keeps it v1-shaped (no identity, `hash_origin` unknown).
+
 `skipped` and `summary.skipped_count` were added after 0.9.5. A manifest written
 earlier has neither key: read its coverage as unknown, not as zero skips. The
 same holds for `data_commands` and `summary.data_command_count`.
@@ -381,6 +683,112 @@ codes: an unknown exit is neither a success nor a failure.
 list, and to `(unresolved <candidate>)` for an R run whose script is
 uncertain. Repeated invocations of the same inline source collapse to one
 entry.
+
+## The project index: `lineage_index.py`
+
+`skills/core/scripts/lineage_index.py` answers provenance questions across
+sessions for one checkout:
+
+```bash
+python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/lineage_index.py" query --hash <sha256>
+python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/lineage_index.py" query --path data/processed/x.csv
+python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/lineage_index.py" query --event <event_id>
+```
+
+**Sources.** It reads every manifest and every local observation store.
+Observation stores include edit-tool observations (Write, Edit, apply_patch
+by path) and Bash calls no event referenced.
+
+**Writes.** These come from observations, one set per call. A manifest
+committed from another checkout contributes readers but never writes.
+
+**Statuses.** For each write, the index reports:
+
+- a **record** status: `current-in-record`, `superseded` (naming the
+  superseding call), `superseded-unverified`, or `unknown` with reasons
+  (`order-unproven`, `gap`, `unwatched-path`, `write-hash-unknown`,
+  `inferred-write`, …);
+- a separate **disk** result: `match`, `differs`, `missing`, `unverified`.
+
+The headline is `current` only when both agree. Supersession needs journal
+order and two known, different hashes. A gap the record cannot rule out makes
+the status `unknown` (reason `gap`), never `current`. Gaps are what the journal
+cannot place: an unreadable manifest, store or store record, a manifest-only
+call (an unreconciled skip, a summary's missing or unresolved observation), and
+a background job. A journaled call that leaves the path unaccounted for (an
+unavailable, missing or unresolved observation, a capped diff, an unwatched
+scope) is found by positive proof instead.
+
+**Positive proof.** `current-in-record` is never assumed from the absence of a
+recorded gap. It needs everything since the write to be accounted for:
+
+- the write sits in the current journal;
+- it started after the journal's compaction `floor`;
+- every journaled call that ran during or after it is covered at the path by a
+  complete observation of this checkout. That observation watched the path,
+  was not capped there, and did not leave the path racy, refused, or moved in
+  or out of scope.
+
+Anything else is `unknown` with the reason `coverage-unproven`, and the
+unaccounted calls are listed under `unaccounted`. Calls still running are
+listed under `open_calls` instead. Some calls never vouch for a write:
+
+- a call that started before the write ended and ran on past it, because
+  its two walks do not bracket the write;
+- another checkout's call recorded in a shared state directory, which could
+  still write here by absolute path;
+- any call when the journal has a line that does not parse. A torn line may
+  have been a Post. Appends write every byte.
+
+**Identity continuity.** A disk query can still answer `current`, with
+`basis: identity-unchanged-since-write`, when three things hold:
+
+- the bytes match;
+- the file has exactly the identity (device, inode, size, mtime, ctime)
+  recorded right after the write. ctime moves on any change and cannot be set
+  back, so nothing has touched the file since;
+- the timestamps are not whole seconds.
+
+A file rewritten to the same bytes has a new ctime and is not certified this
+way.
+
+**Background jobs.** A background job is accounted for only up to the moment
+the host shows it ended. For Claude, that is when a later Stop's
+`background_tasks` snapshot omits the job's `backgroundTaskId` or lists it as
+finished. An unknown status, a job with no task id, or a Codex job stays open.
+Absence from the snapshot ends only the main agent's own jobs; a background
+subagent's job needs a finished status. A command that may leave a process
+running after its shell (`&`, `nohup`, `setsid`, `disown`) is marked detached
+at Pre, and no host task status ends it. The end is also written to the
+session's store, so it outlives journal compaction. While any background job
+may still be running (one not ended and not yet past the journal's age bound),
+identity continuity is not used. A process that still holds a file open, for
+example through a shared memory mapping, can change it without moving its
+timestamps.
+
+**Out of reach.** The index sees what happens inside a tool call. Two cases are
+outside that:
+
+- Work a call hands to another process that outlives it: `sbatch`, `nohup …
+  &`, `docker run -d`, a daemon. Its later writes look like changes outside the
+  record. When the bytes still match, identity continuity reports the result,
+  not who wrote it.
+- Edits made outside the agent. A disk query finds them, but the record cannot
+  say who made them.
+- Hosts with no observer. The Antigravity adapters install no `PreToolUse`
+  hook, because a pre-hook there would sit on the approval path. Their runs
+  still reach the manifest, but no call is observed. With no observation
+  store at all, a query answers `no-recorded-write` with the reason
+  `no-observations`: the absence of a write proves nothing.
+
+**Readers.** Readers are listed with their `hash_origin`, proven first. A
+hook cannot see reads, so every read stays inferred.
+
+**Cache.** The index is cached per checkout under
+`.mycelium/lineage/index-<root hash>.json`. It is rebuilt incrementally from
+changed sources on every query, is never committed, and never runs on the
+hook path. `--record-only` skips the disk, and `--no-write` never writes the
+cache. Exit codes: 0 answered, 1 nothing recorded, 2 bad input.
 
 ## Detection coverage
 
@@ -418,8 +826,8 @@ entry.
 **Data I/O patterns scanned in the script body** (case-sensitive Python idioms):
 - Reads: `pd.read_{parquet,csv,tsv,feather,hdf,h5,json,excel,stata,sas,orc,pickle,table}`, `ad.read_h5ad`, `ad.read_csv`, `np.load`, `xr.open_{dataset,dataarray,zarr,mfdataset}`, `sc.read{,_h5ad,_csv,_mtx,_10x_h5,_10x_mtx}`
 - Writes: `.to_{parquet,csv,tsv,feather,hdf,h5,json,excel,stata,sas,orc,pickle,table}`, `.write_{csv,parquet,json,h5ad}`, `np.save{,_compressed,z}`, `(plt|fig|ax).savefig`, `.to_netcdf`
-- Filters: `.query(…)`, `.sample(…)`, `.filter(…)`, boolean masks (`df[df.col > x]` / `df[df['col'] != '']`), `.loc[…]` / `.iloc[…]`, `.merge(…)`, `.join(…)`, `pd.concat(…)`
-- Seeds: `np.random.seed(N)`, `random.seed(N)`, `torch.manual_seed(N)`, `np.random.default_rng(N)`
+- Seeds: `np.random.seed(N)`, `random.seed(N)`, `torch.manual_seed(N)`, `np.random.default_rng(N)`, and R `set.seed(N)`; a call inside a string literal or comment is not a seed
+- Filters are no longer scanned (see *Step settings*)
 
 **Not statically resolved (recorded as warnings)**:
 - R-side I/O (only R *invocation* is detected, not its inputs/outputs)
@@ -448,7 +856,7 @@ Both hooks deliberately use plain regex (not AST) so they can scan inline
 `-c` snippets without parsing. Adding a new I/O pattern:
 
 1. Add a `re.compile(...)` to the relevant list in `extract_data_lineage_event.py`
-   (`INPUT_REGEXES`, `OUTPUT_REGEXES`, `FILTER_REGEXES`, or `SEED_REGEXES`).
+   (`INPUT_REGEXES`, `OUTPUT_REGEXES`, `SEED_REGEXES`, or the R lists `R_INPUT_REGEXES`, `R_OUTPUT_REGEXES`, `R_SEED_REGEXES`).
 2. Add a test case to `test_extract_data_lineage_event.py`.
 3. Run `python3 -m pytest skills/core/scripts/test_extract_data_lineage_event.py -v`.
 

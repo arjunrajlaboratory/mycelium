@@ -7,6 +7,9 @@ description: >
   [1-3 sentences describing what the dataset contains, what it measures, and its
   intended use. Mention the unit of observation (e.g., "one row per patient visit").]
 format: [CSV|TSV|Parquet|HDF5|other]       # File format of the raw data
+sample_ledger: samples.ledger.json         # Datasets with samples: the per-sample ledger spec
+                                           # (template: skills/core/templates/samples.ledger.json).
+                                           # Delete this line if the data has no samples.
 
 columns:
     # Add one entry per column. Order should match column order in the file.

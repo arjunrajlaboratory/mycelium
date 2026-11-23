@@ -24,6 +24,9 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
 
 ## 1. Write the contract
 
+- If the dataset's `DATA_MANIFEST.md` entry names a `sample_ledger`, start
+  from it: `--ledger <spec> --emit-contract analysis/<name>/data_contract.json`
+  (see "From a sample ledger" below).
 - Find the sample-level table the analysis will use (one row per sample,
   acquisition, or pseudobulk unit) from `data/DATA_MANIFEST.md`, the analysis
   documentation, or the loading code. Name columns by header, spelled as the
@@ -45,10 +48,13 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   "filters": [{"column": "preferred_acquisition", "equals": "TRUE"}],
   "checks": [
     {"kind": "schema", "columns": ["participant", "cohort", "visit", "batch"]},
+    {"kind": "unique", "columns": ["sample"]},
+    {"kind": "nesting", "levels": ["site", "participant"]},
     {"kind": "cohort", "column": "cohort", "levels": ["A", "B"], "min_rows": 40, "no_missing": ["batch"]},
     {"kind": "unit_of_replication", "unit": "participant", "group": "cohort", "within": ["visit"], "min_units_per_group": 3},
     {"kind": "pairing", "unit": "participant", "within": "visit", "levels": ["0", "28"]},
-    {"kind": "batch_confounding", "batch": "batch", "contrast": "cohort", "max_share": 0.7}
+    {"kind": "batch_confounding", "batch": "batch", "contrast": "cohort", "max_share": 0.7},
+    {"kind": "batch_estimability", "batch": ["batch", "site"], "contrast": "cohort"}
   ]
 }
 ```
@@ -89,6 +95,42 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   filters keep; filter columns are scanned on every row, since a variant
   spelling silently escapes the filter.
 - `schema`: every column in `columns` exists.
+- `unique`: every row has a value in `columns`, and no combination repeats
+  (one row per sample).
+- `nesting`: `levels` lists replication levels from coarse to fine. Each
+  finer value sits under exactly one value of the level above it. A dish
+  labelled "3" under two preparations blocks, because every later unit count
+  would merge the two dishes. With `"local_labels": true`, labels are local
+  to their parent and are qualified by it, so the nesting holds by
+  construction.
+- `unit_of_replication` also takes `"rows": "samples"` for a sample ledger.
+  Several rows per unit are then expected, so only the units-per-group and
+  units-across-groups rules apply. It also takes `unit_scope`, the parent
+  columns that qualify a local unit label, so `derivation` 1 under line A
+  and under line B count as two units. `batch_confounding` takes
+  `batch_scope` the same way. Older checkers reject these keys, and the new
+  kinds, with exit 1.
+- `batch_estimability`: `batch` lists two or more batch columns that an
+  analysis adjusts for together. It blocks when some contrast level cannot
+  be estimated once all of them are in the model. Per-column checks can all
+  pass while the batches jointly determine the group: controls at (date 1,
+  run 1), treated at (date 2, run 1) and (date 1, run 2).
+- `pairing` levels compare as text, as table values do, so a level listed
+  twice (`["A", "A"]`, or `["28", 28]`) counts once. The minimum number of
+  distinct sides is set only by `"min_levels": N` (a whole number, at least
+  2): the check blocks when fewer than N distinct levels are listed or, with
+  no list, present, since a pairing whose other side is missing pairs
+  nothing. Ledger contracts set `"min_levels": 2`. Without `min_levels`, a
+  pairing keeps the 0.9.7 behavior: the listed levels (or, with no list, the
+  levels present) are the sides, so `"levels": ["baseline"]` with every unit
+  seen at baseline passes, and so does a list that repeats one level
+  (`["control", "control"]`): the distinct-level minimum applies only when
+  `min_levels` is given. With
+  `"exact_levels": true` (which needs `levels`), it also blocks when the table
+  has a level not listed, or lacks a listed one. Ledger contracts set this when
+  the pairing licenses units across groups.
+- `batch_estimability` takes `batch_scopes`, a map from batch column to the
+  parent columns that qualify its local labels.
 - `cohort`: the required `levels` of `column` are present; `min_rows` or exact
   `rows` holds; and the `no_missing` columns have no missing values. Rows with
   no `column` value are left out of the levels and counts, with a warning.
@@ -126,6 +168,59 @@ The script ships with Mycelium as a managed utility, so running it opens no
 post-action cycle and leaves no analysis lineage event. Because the command
 names a data-like file, it may leave a minimal `data_command` record (see
 `data-lineage.md`), which never claims an analysis ran.
+
+### From a sample ledger
+
+A dataset ingested with a sample ledger (`data/metadata/<dataset>/samples.tsv`
+plus `samples.ledger.json`; see the ingest skill) gets its structural checks
+from the ledger itself:
+
+```bash
+python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/data_contract_check.py" \
+  --ledger data/metadata/<dataset>/samples.ledger.json \
+  --emit-contract analysis/<name>/data_contract.json
+```
+
+Ledger mode runs these checks:
+
+- `schema`;
+- `unique` sample ids;
+- `nesting` of the replication levels;
+- `unit_of_replication` with `rows: samples`;
+- one `batch_confounding` per crossed batch column against the group;
+- the declared `pairing`.
+
+`--emit-contract` writes that contract so the analysis can extend it. Add
+filters, and point the replication, pairing and batch checks at the
+**modeled** table (dropping `rows` from the replication check), so rows the
+model drops are counted. A ledger with complete pairs proves nothing about a
+model table that lost one side. The table path is written relative to
+`--root`, so the contract replays against the checkout it runs in. With two
+or more batch columns, the emitted contract also has a `batch_estimability`
+check for an analysis that adjusts for all of them. A ledger `pairing` may
+list its expected `levels` (at least two distinct ones), so a missing side
+blocks. `--emit-contract` refuses a destination that is the ledger spec or
+its sample table (by path, symlink or hard link). The ledger, its table and
+the destination are each resolved once, symlinks first, the way the OS
+opens them (a table `latest/../samples.tsv` with `latest` a symlink names
+the file beside the link's target, not beside the ledger), and that one
+path is the one read, checked, guarded and written. It also refuses (exit 1,
+nothing written) a destination that already exists, since that is usually
+the analysis's extended contract; pass `--overwrite` to replace it (the
+replacement keeps the existing file's permissions, so a 0600 contract stays
+0600; a new file gets the usual umask-derived mode). Without
+`--overwrite` the contract is published only if the name is still free at
+that moment (a hard link, or on a filesystem without hard links an
+exclusive create written in place, which a concurrent reader may see
+partly written), so a file another process published in between is never
+replaced. The
+checks run first, then the validated contract is published in one step. It
+is written even when the checks block or gap, because the analysis extends
+it and the alerts are reported alongside, but never when the sample table
+does not exist (the run exits 2 with nothing written). A batch column that is a replication level at or below the unit of
+replication is a spec error (exit 1), because it is nested in the group by
+construction. Calendar batches belong in `batch`, and nested preparation
+instances belong in `nesting`.
 
 The output has one line per check (`PASS`, `WARN`, `GAP`, or `BLOCK`, with the
 rows it ran on). A `batch_confounding` check adds its batch-by-contrast table,

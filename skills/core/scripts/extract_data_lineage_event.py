@@ -42,6 +42,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Generator, Iterator, NamedTuple
@@ -520,6 +521,223 @@ def _is_managed_utility_path(resolved: Path) -> bool:
     return False
 
 
+# `P=$(cat .mycelium/plugin-root)`, optionally with a literal subdirectory
+# after it (`S="$(cat .mycelium/plugin-root)/skills/core/scripts"`), or a
+# literal absolute path.
+_ROOT_ASSIGNMENT_RX = re.compile(
+    r"""(?:^|[;&|\n(]|&&|\|\|)\s*([A-Za-z_][A-Za-z0-9_]*)="""
+    # The pointer may be read from a parent of the working directory
+    # (`$(cat ../../.mycelium/plugin-root)` from inside an analysis folder).
+    r"""(?:"\$\(cat (?P<up_q>(?:\.\./)*)\.mycelium/plugin-root\)(?P<suffix_q>/[A-Za-z0-9_./-]*)?\""""
+    r"""(?P<suffix_after>/[A-Za-z0-9_./-]*)?"""
+    r"""|\$\(cat (?P<up>(?:\.\./)*)\.mycelium/plugin-root\)(?P<suffix>/[A-Za-z0-9_./-]*)?"""
+    r"""|'?(?P<literal>/[^\s;&|$'"`]+)'?)(?=[\s;&|]|$)"""
+)
+
+
+# An interpreter held in a variable: `PY=/x/venv/bin/python; $PY run.py`.
+_INTERPRETER_BASENAME_RX = re.compile(r"python(?:\d+(?:\.\d+)*)?|Rscript|R")
+_LITERAL_VALUE_RX = re.compile(r"'([^']*)'|\"([^\"$`\\]*)\"|([^\s;&|<>()'\"$`\\*?\[\]{}~]+)")
+
+
+_VAR_ASSIGNMENT_AT_RX = re.compile(r"(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=")
+_VAR_USE_AT_RX = re.compile(
+    r"(?:\"\$(?:\{(?P<qb>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<qn>[A-Za-z_][A-Za-z0-9_]*))\""
+    r"|\$(?:\{(?P<b>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<n>[A-Za-z_][A-Za-z0-9_]*)))(?=[ \t])")
+# A bare mention of a name in unquoted shell text: `unset PY`, `read PY`,
+# `declare PY=x`, `PY+=x`, `for PY in`, `cond && PY=x`. `$PY`/`${PY}` are
+# uses, not mentions (the `$` or `{` before the name excludes them).
+_VAR_MENTION_RX = re.compile(
+    r"(?<![^\s;&|()`])([A-Za-z_][A-Za-z0-9_]*)(?=[\s;&|()=+\[<>]|$)")
+_COMMAND_WORD_AT_RX = re.compile(r"[^\s;&|()<>`]+")
+_CONTROL_OPEN_WORDS = frozenset(
+    {"if", "while", "until", "for", "case", "select", "{", "function", "coproc"})
+_CONTROL_CLOSE_WORDS = frozenset({"fi", "done", "esac", "}"})
+
+
+def _shell_command_starts(command: str, masked: str,
+                          visible: str) -> list[tuple[int, str, int, int]]:
+    """(offset, boundary, nesting depth, control depth) for each simple
+    command start in ``command``, found on ``masked`` (quotes, comments and
+    heredoc bodies blanked, offsets kept) so quoted text never starts one.
+    ``visible`` blanks only comments and heredoc bodies: a start whose raw
+    character is blanked there is data, not shell. Nesting depth counts
+    open parentheses (subshells, `$(`) and backticks; control depth counts
+    open `if`/`while`/`for`/`case`/`{` bodies. One linear pass."""
+    starts: list[tuple[int, str, int, int]] = []
+    length = len(command)
+    depth = 0
+    in_backtick = False
+    control = 0
+    boundary = "^"
+    at_start = True
+    index = 0
+    while index < length:
+        char = masked[index]
+        if at_start:
+            raw = command[index]
+            if raw in " \t":
+                index += 1
+                continue
+            if raw not in ";&|()`\n" and visible[index] != " ":
+                starts.append((index, boundary, depth + in_backtick, control))
+                word = _COMMAND_WORD_AT_RX.match(masked, index)
+                if word is not None:
+                    if word.group() in _CONTROL_OPEN_WORDS:
+                        control += 1
+                    elif word.group() in _CONTROL_CLOSE_WORDS:
+                        control = max(0, control - 1)
+            at_start = False
+        if char == "(":
+            depth += 1
+            boundary, at_start = "(", True
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "`":
+            in_backtick = not in_backtick
+            boundary, at_start = "`", True
+        elif char == "\n":
+            boundary, at_start = "\n", True
+        elif char == ";":
+            boundary, at_start = (";;" if masked[index + 1: index + 2] == ";" else ";"), True
+            if boundary == ";;":
+                index += 1
+        elif char in "&|":
+            previous = masked[index - 1] if index else ""
+            following = masked[index + 1] if index + 1 < length else ""
+            if char == "&" and (previous in "<>" or following == ">"):
+                pass  # a redirection (`2>&1`, `&>`), not a control operator
+            elif char == "|" and previous == ">":
+                pass  # `>|`
+            elif following == char:
+                boundary, at_start = char * 2, True
+                index += 1
+            else:
+                boundary, at_start = char, True
+        index += 1
+    return starts
+
+
+def _expand_interpreter_variables(command: str) -> str:
+    """The command with each `$VAR` used as an interpreter replaced by the
+    literal it was assigned earlier in the same command, so `PY=/x/python;
+    $PY run.py` is detected as the analysis run it is. Only a plain,
+    unconditional assignment statement counts: `NAME=literal` (optionally
+    `export`ed) at the top level, ended by `;` or a newline, the last one to
+    that name before the use, with no expansion in its value, and a value
+    whose basename is python, Rscript, or R. Anything else is left as
+    written (and stays undetected, as before).
+
+    Assignments and uses are only seen at command starts in shell text: not
+    in quotes, comments, heredoc bodies, or (for uses) substitutions and
+    subshells. Any other unquoted mention of the name (`unset`, `read`,
+    `declare`, `local`, `readonly`, `typeset`, `+=`, a conditional, piped
+    or nested assignment, a loop variable) voids it until the next plain
+    assignment. One forward pass over the command."""
+    if "$" not in command or "=" not in command:
+        return command
+    without_heredocs = _blank_heredoc_bodies(command)
+    masked = _unquoted_shell_text(without_heredocs)
+    visible = _strip_unquoted_shell_comments(without_heredocs)
+    if masked is None or visible is None:
+        return command
+    starts = _shell_command_starts(command, masked, visible)
+    mentions = [(m.start(1), m.group(1)) for m in _VAR_MENTION_RX.finditer(masked)]
+    values: dict[str, str | None] = {}
+    out: list[str] = []
+    last = 0
+    consumed = -1  # the offset of the name a modeled assignment just set
+    mention_index = 0
+    for offset, boundary, depth, control in starts:
+        # Mentions before this command start apply first, in order.
+        while mention_index < len(mentions) and mentions[mention_index][0] < offset:
+            position, name = mentions[mention_index]
+            mention_index += 1
+            if position != consumed:
+                values[name] = None
+        assignment = _VAR_ASSIGNMENT_AT_RX.match(command, offset)
+        if assignment is not None:
+            name = assignment.group(1)
+            value = None
+            if boundary in ("^", ";", "\n") and depth == 0 and control == 0:
+                value = _plain_interpreter_literal(command, assignment.end())
+            values[name] = value
+            consumed = assignment.start(1)
+            continue
+        if depth:
+            continue
+        use = _VAR_USE_AT_RX.match(command, offset)
+        if use is None:
+            continue
+        name = use.group("qb") or use.group("qn") or use.group("b") or use.group("n")
+        value = values.get(name)
+        if value is None:
+            continue
+        out.append(command[last:use.start()])
+        out.append(shlex.quote(value))
+        last = use.end()
+    if not out:
+        return command
+    out.append(command[last:])
+    return "".join(out)
+
+
+def _plain_interpreter_literal(command: str, start: int) -> str | None:
+    """The literal value at ``start`` (just after `NAME=`) when it is the
+    whole statement, ended by `;` or a newline, and names an interpreter."""
+    literal = _LITERAL_VALUE_RX.match(command, start)
+    if literal is None:
+        return None
+    if not re.compile(r"[ \t]*(?:;|\n)").match(command, literal.end()):
+        return None  # a prefix assignment (`PY=x cmd`) or more words follow
+    value = next(g for g in literal.groups() if g is not None)
+    if not value or _INTERPRETER_BASENAME_RX.fullmatch(os.path.basename(value)) is None:
+        return None
+    return value
+
+
+def _variable_script_path(command: str, offset: int, raw_path: str,
+                          cwd: Path | None) -> Path | None:
+    """`$P/skills/...` resolved through an assignment earlier in the same
+    command: `P=$(cat .mycelium/plugin-root)` (read from the working
+    directory) or `P=/literal/path`. None for anything else; this is used
+    only to recognize Mycelium's own helpers, never to infer analysis I/O."""
+    match = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(/.*)", raw_path)
+    if match is None:
+        return None
+    name, rest = match.groups()
+    prefix = command[:offset]
+    # The value the interpreter receives is the *last* assignment before it:
+    # any later one this resolver cannot model (`P=.`, `P=$OTHER`) voids it.
+    any_assignment = re.compile(
+        rf"(?:^|[;&|\n(]|&&|\|\|)\s*{re.escape(name)}=")
+    last_any = None
+    for found in any_assignment.finditer(prefix):
+        last_any = found.start()
+    if last_any is None:
+        return None
+    modeled = [a for a in _ROOT_ASSIGNMENT_RX.finditer(prefix) if a.group(1) == name]
+    if not modeled or modeled[-1].start() != last_any:
+        return None
+    assignment = modeled[-1]
+    literal = assignment.group("literal")
+    suffix = "".join(assignment.group(g) or "" for g in ("suffix_q", "suffix_after", "suffix"))
+    up = assignment.group("up_q") or assignment.group("up") or ""
+    if literal is not None:
+        value = literal
+    elif cwd is not None:
+        # The bounded, link-refusing pointer reader the accessor path uses,
+        # in the directory the `cat` names (the cwd or a parent of it).
+        base = Path(os.path.normpath(os.path.join(str(cwd), up))) if up else cwd
+        pointer = _pointer_expansion_value(base, "cat")
+        value = pointer + suffix if pointer else None
+    else:
+        value = None
+    if not value or "\0" in value or "/../" in f"{suffix}/":
+        return None
+    return Path(os.path.realpath(value + rest))
+
+
 IGNORED_SCRIPT_BASENAMES = {"setup.py"}
 ANALYSIS_PATTERNS = (
     RX_PYTHON_C,
@@ -806,6 +1024,9 @@ SEED_REGEXES = [
     ),
     re.compile(r"""np\.random\.default_rng\s*\(\s*(\d+)\s*\)"""),
 ]
+R_SEED_REGEXES = [
+    re.compile(r"""(?<![\w.])set\.seed\s*\(\s*(?:seed\s*=\s*)?(\d+)L?\s*[,)]"""),
+]
 
 # --- R readers and writers ---
 #
@@ -1067,7 +1288,70 @@ def _strip_assignments(segment: list[str]) -> list[str]:
     return segment
 
 
-def _simple_cd_status(segment: list[str], cwd: Path) -> tuple[bool | None, Path]:
+def _cdpath_may_be_set(text: str) -> bool:
+    """Whether shell text may set CDPATH for a later ``cd`` in the same shell.
+
+    Any mention of the variable counts (an assignment, ``export``,
+    ``unset``, ``declare``, ``${CDPATH:=...}``), as does running code this
+    hook cannot see (``source``, ``.``, ``eval``) or a variable-setting
+    builtin with a computed name. Errs toward True, like `_home_may_change`.
+    """
+    if re.search(r"(?<![A-Za-z0-9_])CDPATH(?![A-Za-z0-9_])", text):
+        return True
+    if re.search(r"(?<![A-Za-z0-9_.-])(source|eval|fc|enable|trap)(?![A-Za-z0-9_.-])", text):
+        return True
+    if re.search(r"(?:^|[\s;&|(){}!`])\.(?:\s|$)", text):
+        return True  # `. file`: the POSIX spelling of source
+    for segment in re.split(r"[;&|\n()]+", text):
+        words = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", segment))
+        if words & _DYNAMIC_ASSIGN_BUILTINS and re.search(r"[$`]", segment):
+            return True
+    return False
+
+
+def _cdpath_env_set() -> bool:
+    """The hook's own CDPATH: the agent's shell may well share it."""
+    return bool(os.environ.get("CDPATH"))
+
+
+def _cd_operand_searches_cdpath(operand: str) -> bool:
+    """bash searches $CDPATH for a relative operand that does not begin
+    with ``/``, ``./`` or ``../`` (and is not ``.`` or ``..``)."""
+    if operand in (".", "..") or operand.startswith(("/", "./", "../")):
+        return False
+    expanded = _expanded_static_path(operand)
+    return expanded is None or not expanded.is_absolute()
+
+
+def _cd_is_cdpath_uncertain(segment: list[str], cdpath: bool = False) -> bool:
+    """A ``cd`` whose target depends on a CDPATH this hook cannot know.
+
+    ``cdpath`` says the command may have set CDPATH before this segment;
+    the hook's own environment and the segment's prefix assignments
+    (``CDPATH=x cd run``) are checked here.
+    """
+    stripped = _strip_assignments(segment)
+    if not stripped or stripped[0] != "cd":
+        return False
+    prefix_sets = any(w.startswith("CDPATH=") for w in segment[: len(segment) - len(stripped)])
+    if not (cdpath or prefix_sets or _cdpath_env_set()):
+        return False
+    operands: list[str] = []
+    options_done = False
+    for value in stripped[1:]:
+        if not options_done and value == "--":
+            options_done = True
+            continue
+        if not options_done and value.startswith("-") and value != "-":
+            continue
+        operands.append(value)
+        options_done = True
+    return len(operands) == 1 and _cd_operand_searches_cdpath(operands[0])
+
+
+def _simple_cd_status(
+    segment: list[str], cwd: Path, cdpath: bool = False
+) -> tuple[bool | None, Path]:
     """Return a simple cd's known status and resulting cwd without executing it.
 
     Documented flags are modeled (`cd [-L|[-P [-e]]] [--] dir`): ``-P``
@@ -1075,7 +1359,14 @@ def _simple_cd_status(segment: list[str], cwd: Path) -> tuple[bool | None, Path]
     resolves lexically, later flags override earlier ones, and ``-e`` only
     affects exit status in cases a known-good directory cannot hit. Any
     other option (``-@``, ``cd -``) stays unknown.
+
+    An unqualified relative operand (``cd run``) is searched for in
+    $CDPATH first: when CDPATH may be set (``cdpath``, the hook's own
+    environment, or a prefix assignment) the target is unknown, so the cd
+    is unmodeled like any other unknown form.
     """
+    if _cd_is_cdpath_uncertain(segment, cdpath):
+        return None, cwd
     segment = _strip_assignments(segment)
     if not segment or segment[0] != "cd":
         return None, cwd
@@ -1163,9 +1454,9 @@ def _expanded_static_path(value: str) -> Path | None:
         return None
 
 
-def _apply_cd(segment: list[str], cwd: Path) -> Path:
+def _apply_cd(segment: list[str], cwd: Path, cdpath: bool = False) -> Path:
     """Apply a simple shell ``cd`` segment without executing user input."""
-    status, target = _simple_cd_status(segment, cwd)
+    status, target = _simple_cd_status(segment, cwd, cdpath)
     return target if status is True else cwd
 
 
@@ -1502,15 +1793,18 @@ class _RWord(NamedTuple):
 
 
 class UnresolvedScript(NamedTuple):
-    """An R script run whose script this scan cannot name with certainty.
+    """A script run whose script this scan cannot name with certainty.
 
     ``candidate`` is the file word as written on the command line; shell
     syntax (or, for ``R CMD BATCH``, ``R_BATCH_OPTIONS``) may make R read a
-    different file.
+    different file. With ``cwd_unknown`` the word is a relative path and
+    the directory it resolves against is not modeled (``pushd``, ``cd -``,
+    a CDPATH-searched ``cd``, ...), whatever the interpreter.
     """
 
     candidate: str
     batch: bool = False  # an `R CMD BATCH` run rather than `R -f`
+    cwd_unknown: bool = False
 
 
 def _decode_r_word(raw: str) -> str | None:
@@ -1960,6 +2254,8 @@ def _r_batch_script(command: str, match: re.Match[str]) -> _RWord | None:
 
 
 _CWD_AFFECTING_BUILTINS = {"pushd", "popd", "source", ".", "eval"}
+# The builtins whose whole job is to move the cwd (`cd` is modeled apart).
+_CWD_DIRECTORY_BUILTINS = {"pushd", "popd"}
 _BUILTIN_LAUNCHER_PREFIXES = {"command", "builtin", "time"}
 _REDIRECTION_TOKEN_RE = re.compile(r"^(?:\d+|&)?(?:>>|>\||<>|>|<)")
 
@@ -2008,13 +2304,24 @@ def _strip_command_prefix_words(
     return tokens, stripped_any
 
 
-def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
+def _segment_cwd_is_modeled(
+    segment: list[str], cwd: Path, cdpath: bool = False, *, directory_builtins_only: bool = False
+) -> bool:
     """True when a completed segment cannot change the cwd in unmodeled ways.
 
     ``cd`` with a statically known status is modeled; other cwd-affecting
     builtins (and ``command``-prefixed forms of them) are not — a following
     trust decision must not assume the working directory it computed.
+
+    ``directory_builtins_only`` asks the narrower question the cwd-unknown
+    flag needs: only the directory builtins (``cd`` forms the walk cannot
+    apply, ``pushd``, ``popd``) count, while code run through ``source`` /
+    ``.`` / ``eval`` is left to the CDPATH check (``source venv/bin/activate
+    && python a.py`` keeps its relative script).
     """
+    builtins = (
+        _CWD_DIRECTORY_BUILTINS if directory_builtins_only else _CWD_AFFECTING_BUILTINS
+    )
     stripped = _strip_assignments(segment)
     if not stripped:
         return True
@@ -2025,12 +2332,12 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
         return True
     name = stripped[0]
     if had_redirection and name in (
-        {"cd"} | _CWD_AFFECTING_BUILTINS | _BUILTIN_LAUNCHER_PREFIXES
+        {"cd"} | builtins | _BUILTIN_LAUNCHER_PREFIXES
     ):
         # `>log cd nested` still changes the cwd, but the cwd walker's
         # _apply_cd never tracks redirection-prefixed segments — unmodeled.
         return False
-    if name in _CWD_AFFECTING_BUILTINS:
+    if name in builtins:
         return False
     if name in _BUILTIN_LAUNCHER_PREFIXES:
         # `command cd`, `builtin cd`, `builtin source`, and the `time`
@@ -2067,10 +2374,10 @@ def _segment_cwd_is_modeled(segment: list[str], cwd: Path) -> bool:
                 return False
         follower = rest[0] if rest else ""
         return follower not in (
-            {"cd"} | _CWD_AFFECTING_BUILTINS | _BUILTIN_LAUNCHER_PREFIXES
+            {"cd"} | builtins | _BUILTIN_LAUNCHER_PREFIXES
         )
     if name == "cd":
-        status, _ = _simple_cd_status(segment, cwd)
+        status, _ = _simple_cd_status(segment, cwd, cdpath)
         return status is not None
     return True
 
@@ -2295,11 +2602,26 @@ def _cons_items(cons: object) -> list:
 class _CwdFoldState(NamedTuple):
     cwd: Path
     fully_modeled: bool
-    # Cons list of (cwd, segment_is_conditional, chain_has_or) per open "(".
+    # Cons list of (cwd, segment_is_conditional, chain_has_or, cwd_unknown)
+    # per open "(".
     subshell_states: object
     segment: tuple[str, ...]
     segment_is_conditional: bool
     chain_has_or: bool
+    # An earlier segment may have set CDPATH (never cleared: conservative).
+    cdpath: bool = False
+    # A directory change the walk cannot apply ran (or may have run) in this
+    # shell — a CDPATH-searched `cd`, `pushd`/`popd`, `cd -`, `cd $DIR`, a
+    # skipped conditional `cd` — so the remembered cwd is a guess and nothing
+    # relative may be proven against it.
+    cwd_unknown: bool = False
+    # The operator before the current segment in its AND-OR list (``None``
+    # for the list's first command), and the list's exit status so far when
+    # statically known: together they say whether a conditional `cd` ran.
+    pending_op: str | None = None
+    chain_status: bool | None = None
+    # The current segment follows a `|`: in bash it runs in a subshell.
+    in_pipeline: bool = False
 
 
 def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
@@ -2310,54 +2632,147 @@ def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
     segment = list(state.segment)
     segment_is_conditional = state.segment_is_conditional
     chain_has_or = state.chain_has_or
+    cdpath = state.cdpath
+    cwd_unknown = state.cwd_unknown
+    pending_op = state.pending_op
+    chain_status = state.chain_status
+    in_pipeline = state.in_pipeline
 
     def complete_segment() -> None:
-        nonlocal fully_modeled
-        if not _segment_cwd_is_modeled(segment, cwd):
+        nonlocal fully_modeled, cwd_unknown
+        if not _segment_cwd_is_modeled(segment, cwd, cdpath):
             fully_modeled = False
+        # The remembered cwd is a guess once this shell ran a directory change
+        # the walk cannot apply: a CDPATH-searched `cd`, `pushd`/`popd`,
+        # `cd -`, `cd $DIR`, a flagged or launcher-prefixed `cd`, ...
+        if _cd_is_cdpath_uncertain(segment, cdpath) or not _segment_cwd_is_modeled(
+            segment, cwd, cdpath, directory_builtins_only=True
+        ):
+            cwd_unknown = True
+
+    def segment_runs() -> bool | None:
+        """Whether the current segment ran, as far as the text proves."""
+        if pending_op is None:
+            return True
+        if chain_status is None:
+            return None
+        return chain_status == (pending_op == "&&")
+
+    def advance_chain(runs: bool | None) -> None:
+        nonlocal chain_status
+        status = _simple_command_status(segment, cwd, cdpath) if segment else None
+        if runs is True:
+            chain_status = status
+        elif runs is None and status != chain_status:
+            chain_status = None
+
+    def unapplied_cd(runs: bool | None) -> None:
+        # A `cd` the walk does not apply: when it ran (`true && cd sub;
+        # python a.py` runs Python in sub) and is not inside a pipeline, it
+        # moves the shell; when it may have run, the cwd is a guess.
+        nonlocal cwd, cwd_unknown, fully_modeled
+        if runs is False:
+            return
+        status, target = _simple_cd_status(segment, cwd, cdpath)
+        if status is not True or target == cwd:
+            return
+        if runs is True and not in_pipeline:
+            cwd = target
+        else:
+            cwd_unknown = True
+            fully_modeled = False
+
+    def after_segment() -> None:
+        nonlocal cdpath
+        if not cdpath and _cdpath_may_be_set(" ".join(segment)):
+            cdpath = True
 
     for token in tokens:
         if token in {"&&", "||"}:
             complete_segment()
-            if not segment_is_conditional:
+            runs = segment_runs()
+            advance_chain(runs)
+            if in_pipeline:
+                # `echo | cd sub && ...`: bash runs the cd in a subshell,
+                # zsh in this shell.
+                unapplied_cd(None)
+            elif not segment_is_conditional:
                 # The first segment in an AND-OR list always executes.
-                cwd = _apply_cd(segment, cwd)
+                cwd = _apply_cd(segment, cwd, cdpath)
             elif token == "&&" and not chain_has_or:
                 # Reaching the matched command at the end of an uninterrupted
                 # AND chain proves that each earlier segment in that chain ran
                 # successfully. A mixed OR chain is ambiguous: for
                 # ``true || cd sub && python a.py``, Python runs while cd does
-                # not, so retain the prior cwd in that case.
-                cwd = _apply_cd(segment, cwd)
+                # not, so it is applied only when the text proves it ran.
+                cwd = _apply_cd(segment, cwd, cdpath)
+            else:
+                unapplied_cd(runs)
+            after_segment()
             segment = []
             segment_is_conditional = True
+            pending_op = token
+            in_pipeline = False
             if token == "||":
                 chain_has_or = True
         elif token in {";", "\n"}:
             complete_segment()
-            if not segment_is_conditional:
-                cwd = _apply_cd(segment, cwd)
+            runs = segment_runs()
+            if in_pipeline:
+                unapplied_cd(None)
+            elif not segment_is_conditional:
+                cwd = _apply_cd(segment, cwd, cdpath)
+            else:
+                unapplied_cd(runs)
+            after_segment()
             segment = []
             segment_is_conditional = False
             chain_has_or = False
-        elif token in {"|", "&"}:
-            # A cd in a pipeline/subshell does not reliably affect the parent.
+            pending_op = None
+            chain_status = None
+            in_pipeline = False
+        elif token == "|":
+            # A cd in a pipeline does not reliably affect the parent. The
+            # pipeline runs exactly when its first command does, so the
+            # AND-OR state carries over to its last command.
             complete_segment()
+            after_segment()
             segment = []
+            in_pipeline = True
+        elif token == "&":
+            # A backgrounded command runs in a subshell and ends the list.
+            complete_segment()
+            after_segment()
+            segment = []
+            pending_op = None
+            chain_status = None
+            in_pipeline = False
         elif token == "(":
             complete_segment()
+            after_segment()
             segment = []
             subshell_states = (
-                (cwd, segment_is_conditional, chain_has_or),
+                (cwd, segment_is_conditional, chain_has_or, cwd_unknown,
+                 pending_op, chain_status, in_pipeline),
                 subshell_states,
             )
+            # A subshell's first command runs whenever the subshell does, so
+            # `a && (cd sub; python x.py)` runs Python in sub.
+            segment_is_conditional = False
+            chain_has_or = False
+            pending_op = None
+            chain_status = None
+            in_pipeline = False
         elif token == ")":
             complete_segment()
+            after_segment()
             segment = []
             if subshell_states is not None:
-                (cwd, segment_is_conditional, chain_has_or), subshell_states = (
-                    subshell_states
-                )
+                (
+                    (cwd, segment_is_conditional, chain_has_or, cwd_unknown,
+                     pending_op, chain_status, in_pipeline),
+                    subshell_states,
+                ) = subshell_states
         else:
             segment.append(token)
     return _CwdFoldState(
@@ -2367,6 +2782,11 @@ def _fold_cwd_state(state: _CwdFoldState, tokens: list[str]) -> _CwdFoldState:
         tuple(segment),
         segment_is_conditional,
         chain_has_or,
+        cdpath,
+        cwd_unknown,
+        pending_op,
+        chain_status,
+        in_pipeline,
     )
 
 
@@ -2382,15 +2802,38 @@ def _effective_cwd_state(
     accessor trust decision, where a false negative merely costs a
     redundant reminder.
     """
-    state = _prefix_folds(bash_cmd).fold(
-        offset,
-        ("cwd", initial_cwd),
-        lambda: _CwdFoldState(initial_cwd, True, None, (), False, False),
-        _fold_cwd_state,
-    )
+    state = _cwd_fold(bash_cmd, offset, initial_cwd)
     if state is None:
         return initial_cwd, False
     return state.cwd, state.fully_modeled
+
+
+def _cwd_fold(bash_cmd: str, offset: int, initial_cwd: Path) -> _CwdFoldState | None:
+    # The hook's CDPATH is part of the key: a cached walk must not outlive it.
+    return _prefix_folds(bash_cmd).fold(
+        offset,
+        ("cwd", initial_cwd, _cdpath_env_set()),
+        lambda: _CwdFoldState(initial_cwd, True, None, (), False, False),
+        _fold_cwd_state,
+    )
+
+
+def _effective_cwd_unknown(bash_cmd: str, offset: int, initial_cwd: Path) -> bool:
+    """True when a directory change before ``offset`` is not modeled (a
+    CDPATH-searched ``cd``, ``pushd``/``popd``, ``cd -``, ``cd $DIR``, a
+    flagged or skipped conditional ``cd``), so the inferred cwd is a guess:
+    relative paths resolved against it prove nothing (an unlexable prefix
+    counts as unknown too)."""
+    state = _cwd_fold(bash_cmd, offset, initial_cwd)
+    return state is None or state.cwd_unknown
+
+
+def _known_io_cwd(
+    bash_cmd: str, offset: int, initial_cwd: Path, effective_cwd: Path
+) -> Path | None:
+    """The directory a detection's relative I/O resolves against, or
+    ``None`` when an unmodeled directory change made it a guess."""
+    return None if _effective_cwd_unknown(bash_cmd, offset, initial_cwd) else effective_cwd
 
 
 def _effective_cwd(bash_cmd: str, offset: int, initial_cwd: Path) -> Path:
@@ -2862,8 +3305,12 @@ def _command_effective_cwd(
     return _prefix_execution_cwd(prefix, base_cwd)
 
 
-def _simple_command_status(segment: list[str], cwd: Path) -> bool | None:
+def _simple_command_status(
+    segment: list[str], cwd: Path, cdpath: bool = False
+) -> bool | None:
     """Return a statically knowable simple-command status, if available."""
+    if _cd_is_cdpath_uncertain(segment, cdpath):
+        return None  # `CDPATH=x cd run`: the prefix assignment counts too
     segment = _strip_assignments(segment)
     if segment[:1] == ["command"]:
         segment = segment[1:]
@@ -2874,7 +3321,7 @@ def _simple_command_status(segment: list[str], cwd: Path) -> bool | None:
         return False
     if len(segment) == 1 and name in {"true", ":"}:
         return True
-    status, _ = _simple_cd_status(segment, cwd)
+    status, _ = _simple_cd_status(segment, cwd, cdpath)
     return status
 
 
@@ -2896,6 +3343,7 @@ class _OrFoldState(NamedTuple):
     alternatives_failed: bool
     alternatives_touch_cwd: bool
     operators_are_or: bool
+    cdpath: bool = False  # an earlier segment may have set CDPATH
 
 
 def _fold_or_prefix(state: _OrFoldState, tokens: list[str]) -> _OrFoldState:
@@ -2908,12 +3356,16 @@ def _fold_or_prefix(state: _OrFoldState, tokens: list[str]) -> _OrFoldState:
     alternatives_failed = state.alternatives_failed
     alternatives_touch_cwd = state.alternatives_touch_cwd
     operators_are_or = state.operators_are_or
+    cdpath = state.cdpath
     for token in tokens:
         if token in {"(", ")"}:
             return state._replace(failed=True)
+        if token in {";", "\n", "&&", "||", "|", "&"}:
+            this_cdpath = cdpath
+            cdpath = cdpath or _cdpath_may_be_set(" ".join(segment))
         if token in {";", "\n"}:
             if not alternatives:
-                status, target = _simple_cd_status(segment, cwd)
+                status, target = _simple_cd_status(segment, cwd, this_cdpath)
                 if status is True:
                     cwd = target
             elif alternatives_touch_cwd or _touches_cwd(segment):
@@ -2930,7 +3382,8 @@ def _fold_or_prefix(state: _OrFoldState, tokens: list[str]) -> _OrFoldState:
         elif token in {"&&", "||", "|", "&"}:
             alternatives += 1
             alternatives_failed = (
-                alternatives_failed and _simple_command_status(segment, cwd) is False
+                alternatives_failed
+                and _simple_command_status(segment, cwd, this_cdpath) is False
             )
             alternatives_touch_cwd = alternatives_touch_cwd or _touches_cwd(segment)
             operators_are_or = operators_are_or and token == "||"
@@ -2945,6 +3398,7 @@ def _fold_or_prefix(state: _OrFoldState, tokens: list[str]) -> _OrFoldState:
         alternatives_failed,
         alternatives_touch_cwd,
         operators_are_or,
+        cdpath,
     )
 
 
@@ -2960,7 +3414,7 @@ def _or_prefix_is_proven_failed(
     return _or_fold_proves(
         _prefix_folds(bash_cmd).fold(
             offset,
-            ("or", initial_cwd),
+            ("or", initial_cwd, _cdpath_env_set()),
             lambda: _OrFoldState(False, initial_cwd, (), 0, True, False, True),
             _fold_or_prefix,
         )
@@ -3012,7 +3466,7 @@ def _and_prefix_is_proven_successful(
     return _and_fold_proves(
         _prefix_folds(bash_cmd).fold(
             offset,
-            ("and", initial_cwd),
+            ("and", initial_cwd, _cdpath_env_set()),
             lambda: _AndFoldState(False, False, (), initial_cwd),
             _fold_and_prefix,
         )
@@ -3832,11 +4286,17 @@ def _detect_runners(
     *,
     bash_exit: int | None,
     require_execution_evidence: bool,
+    offsets: list[int] | None = None,
+    launch_cwds: list[Path | None] | None = None,
 ) -> list[tuple[Path | None, str | None, Path | None]]:
     """Detect proven pipeline-runner and shell-script executions.
 
     The third element is the directory the run's I/O resolves against, or
-    ``None`` when a runner option moves the run somewhere unknowable.
+    ``None`` when a runner option moves the run somewhere unknowable. With
+    ``offsets``, the position of each detection's runner word is appended
+    in the same order, so its stage settings come from its own argv. With
+    ``launch_cwds``, the directory each runner was started in (before any
+    `--directory` change; None when unknown) is appended likewise.
     """
     out: list[tuple[Path | None, str | None, Path | None]] = []
     for pattern in RUNNER_PATTERNS:
@@ -3863,7 +4323,11 @@ def _detect_runners(
             )
             if run is None:
                 continue
-            if run.run_dir_unknown:
+            # An unmodeled directory change (a CDPATH-searched `cd`, `pushd`,
+            # `cd -`, ...): the run's directory is a
+            # guess, so its relative I/O and entry file prove nothing.
+            cwd_unknown = _effective_cwd_unknown(bash_cmd, m.start(), cwd)
+            if run.run_dir_unknown or cwd_unknown:
                 io_cwd = None
             elif run.run_dir is None:
                 io_cwd = effective_cwd
@@ -3871,9 +4335,15 @@ def _detect_runners(
                 io_cwd = _resolve_runner_directory(run.run_dir, effective_cwd)
             if run.entry is None:
                 out.append((None, run.source, io_cwd))
+                if offsets is not None:
+                    offsets.append(m.start())
+                if launch_cwds is not None:
+                    launch_cwds.append(None if cwd_unknown else effective_cwd)
                 continue
             unresolved = Path(run.entry)
             if not unresolved.is_absolute():
+                if cwd_unknown:
+                    continue
                 unresolved = effective_cwd / unresolved
             try:
                 path = Path(os.path.abspath(unresolved))
@@ -3885,6 +4355,10 @@ def _detect_runners(
             ):
                 continue
             out.append((path, None, io_cwd))
+            if offsets is not None:
+                offsets.append(m.start())
+            if launch_cwds is not None:
+                launch_cwds.append(None if cwd_unknown else effective_cwd)
     return out
 
 
@@ -3895,6 +4369,7 @@ def _detect_scripts_with_cwd(
     bash_exit: int | None = None,
     require_execution_evidence: bool = False,
     include_inline: bool = True,
+    invocations: list[dict[str, Any]] | None = None,
 ) -> list[tuple[Path | UnresolvedScript | None, str | None, Path | None]]:
     """Return (script_path, inline_source, effective_cwd) detections.
 
@@ -3902,11 +4377,39 @@ def _detect_scripts_with_cwd(
     script cannot be named with certainty. ``include_inline=False`` drops
     inline one-liners (``python -c``, ``R -e``, ``Rscript -e``) for the
     post-action check; lineage keeps them.
+
+    Detections are deduplicated per shell stage: ``python a.py --seed 1 &&
+    python a.py --seed 2`` is two runs. With ``invocations``, one dict per
+    detection (same order) records where it matched (``offset``), its kind,
+    and the script word, so the step's settings can be read from that
+    stage's own argv.
     """
     out: list[tuple[Path | UnresolvedScript | None, str | None, Path | None]] = []
-    seen_paths: set[Path] = set()
-    seen_unresolved: set[tuple[UnresolvedScript, Path]] = set()
-    seen_inline: set[tuple[str, Path | None]] = set()
+    seen_paths: set[tuple[Path, Any]] = set()
+    seen_unresolved: set[tuple[UnresolvedScript, Path, str]] = set()
+    seen_inline: set[tuple[str, Path | None, Any]] = set()
+
+    def record(offset: int | None, kind: str, word: str | None = None,
+               form: str | None = None, *, operand: int | None = None,
+               launch_cwd: Path | None = None) -> None:
+        if invocations is not None:
+            entry: dict[str, Any] = {"offset": offset, "kind": kind, "script_word": word}
+            if form is not None:
+                # `r-file`: an `R -f`/`R --file=` run, whose script arguments
+                # follow `--args` rather than the script word.
+                entry["form"] = form
+            if operand is not None:
+                # Where the matched operand (inline body, module, script
+                # word) begins: a startup option may consume a word spelled
+                # like it (`python -X -c -c 'print(1)'`), so build_step must
+                # not re-find it by spelling.
+                entry["operand_offset"] = operand
+            if launch_cwd is not None:
+                # The directory the runner was started in, before any
+                # `--directory` change (Snakemake reads its profile and
+                # config files there).
+                entry["launch_cwd"] = launch_cwd
+            invocations.append(entry)
     inline_patterns = (RX_PYTHON_C, RX_R_E, RX_RSCRIPT_E) if include_inline else ()
     for pattern in inline_patterns:
         inline_language = "python" if pattern is RX_PYTHON_C else "r"
@@ -3939,9 +4442,10 @@ def _detect_scripts_with_cwd(
             if r_argv is not None and r_argv.expressions:
                 src = "\n".join(r_argv.expressions)
             src = InlineSource(src, inline_language)
-            identity = (src, effective_cwd)
+            identity = (src, effective_cwd, _stage_key(bash_cmd, m.start()))
             if identity not in seen_inline:
-                out.append((None, src, effective_cwd))
+                out.append((None, src, _known_io_cwd(bash_cmd, m.start(), cwd, effective_cwd)))
+                record(m.start(), "inline", operand=m.start("source_word"))
                 seen_inline.add(identity)
     for m in _scan_word_pattern(RX_PYTHON_M, bash_cmd):
         if not _match_has_expected_executable(m, RX_PYTHON_M):
@@ -3957,9 +4461,10 @@ def _detect_scripts_with_cwd(
         if module in IGNORED_PYTHON_MODULES:
             continue
         source = f"# Python module execution: {module}"
-        identity = (source, effective_cwd)
+        identity = (source, effective_cwd, _stage_key(bash_cmd, m.start()))
         if identity not in seen_inline:
-            out.append((None, source, effective_cwd))
+            out.append((None, source, _known_io_cwd(bash_cmd, m.start(), cwd, effective_cwd)))
+            record(m.start(), "module", module, operand=m.start("module"))
             seen_inline.add(identity)
     for pattern in (
         RX_PYTHON_SCRIPT_PATH,
@@ -3991,6 +4496,9 @@ def _detect_scripts_with_cwd(
             ):
                 continue
             path_word = m.group("path")
+            # The script word's own position; an R `-f`/BATCH script is read
+            # from its argv instead (the matched word may not be the file).
+            path_operand = m.start("path") if r_script is None else None
             if r_script is not None:
                 if not r_script.known:
                     unresolved_key = (
@@ -3998,9 +4506,13 @@ def _detect_scripts_with_cwd(
                             r_script.text, pattern is RX_R_CMD_BATCH_PATH
                         ),
                         effective_cwd,
+                        _stage_key(bash_cmd, m.start()),
                     )
                     if unresolved_key not in seen_unresolved:
-                        out.append((unresolved_key[0], None, effective_cwd))
+                        out.append((unresolved_key[0], None,
+                                    _known_io_cwd(bash_cmd, m.start(), cwd, effective_cwd)))
+                        record(m.start(), "unresolved", r_script.text,
+                               "r-file" if pattern is RX_R_FILE_PATH else None)
                         seen_unresolved.add(unresolved_key)
                     continue
                 path_word = shlex.quote(r_script.text)
@@ -4013,13 +4525,20 @@ def _detect_scripts_with_cwd(
             raw_path = path_words[0]
             if Path(raw_path).name in IGNORED_SCRIPT_BASENAMES:
                 continue
+            if "$" in raw_path:
+                # `P=$(cat .mycelium/plugin-root); python3 $P/skills/core/...`
+                # runs a bundled helper: managed, not an unreadable script.
+                via_variable = _variable_script_path(bash_cmd, m.start(), raw_path, effective_cwd)
+                if via_variable is not None and _is_managed_utility_path(via_variable):
+                    continue
             # The accessor dereferences a pointer relative to the effective
             # cwd, so it may resolve only when every cwd change in the prefix
             # was fully modeled; an unmodeled `pushd`/`source`/flagged-cd
             # form means the pointer's directory is unknown (issue #71).
             expanded = None
             _, prefix_cwd_modeled = _effective_cwd_state(bash_cmd, m.start(), cwd)
-            if prefix_cwd_modeled:
+            cwd_unknown = _effective_cwd_unknown(bash_cmd, m.start(), cwd)
+            if prefix_cwd_modeled and not cwd_unknown:
                 expanded = _accessor_expanded_script_path(
                     m.group("path"), raw_path, effective_cwd
                 )
@@ -4028,6 +4547,23 @@ def _detect_scripts_with_cwd(
             else:
                 unresolved = Path(raw_path)
                 if not unresolved.is_absolute():
+                    if cwd_unknown:
+                        # `cd run` may have gone to $CDPATH/run, `pushd`
+                        # somewhere the walk does not follow: which file
+                        # ran is unknown, so the run is recorded under its
+                        # word alone, with nothing read, hashed or proven.
+                        unresolved_key = (
+                            UnresolvedScript(raw_path, cwd_unknown=True),
+                            effective_cwd,
+                            _stage_key(bash_cmd, m.start()),
+                        )
+                        if unresolved_key not in seen_unresolved:
+                            out.append((unresolved_key[0], None, None))
+                            record(m.start(), "unresolved", raw_path,
+                                   "r-file" if pattern is RX_R_FILE_PATH else None,
+                                   operand=path_operand)
+                            seen_unresolved.add(unresolved_key)
+                        continue
                     unresolved = effective_cwd / unresolved
             # Judge trust on the canonical filesystem path of the UNCOLLAPSED
             # word: lexical abspath folds "symlink/.." differently than the
@@ -4043,23 +4579,95 @@ def _detect_scripts_with_cwd(
                 continue
             if _is_managed_utility_path(canonical):
                 continue
-            if path not in seen_paths:
-                out.append((path, None, effective_cwd))
-                seen_paths.add(path)
-    for path, source, io_cwd in _detect_runners(
+            stage_key = (path, _stage_key(bash_cmd, m.start()))
+            if stage_key not in seen_paths:
+                out.append((path, None, None if cwd_unknown else effective_cwd))
+                record(m.start(), "script", raw_path,
+                       "r-file" if pattern is RX_R_FILE_PATH else None,
+                       operand=path_operand)
+                seen_paths.add(stage_key)
+    runner_offsets: list[int] = []
+    runner_launch_cwds: list[Path | None] = []
+    runners = _detect_runners(
         bash_cmd,
         cwd,
         bash_exit=bash_exit,
         require_execution_evidence=require_execution_evidence,
-    ):
+        offsets=runner_offsets,
+        launch_cwds=runner_launch_cwds,
+    )
+    for (path, source, io_cwd), offset, launch_cwd in zip(
+            runners, runner_offsets, runner_launch_cwds):
+        # Each runner stage is its own run: the same Snakefile with two
+        # different config files is two events, each with its own settings.
+        stage = _stage_key(bash_cmd, offset)
         if path is not None:
-            if path not in seen_paths:
+            if (path, stage) not in seen_paths:
                 out.append((path, None, io_cwd))
-                seen_paths.add(path)
-        elif (source, io_cwd) not in seen_inline:
+                record(offset, "runner", None, launch_cwd=launch_cwd)
+                seen_paths.add((path, stage))
+        elif (source, io_cwd, stage) not in seen_inline:
             out.append((None, source, io_cwd))
-            seen_inline.add((source, io_cwd))
+            record(offset, "runner", None, launch_cwd=launch_cwd)
+            seen_inline.add((source, io_cwd, stage))
     return out
+
+
+@functools.lru_cache(maxsize=8)
+def _stage_starts(command: str) -> tuple[int, ...]:
+    """Every index where a simple command can begin: 0, and just after each
+    unquoted control operator (``;``, newline, ``&&``, ``||``, ``|``,
+    ``&``, a parenthesis). One linear scan per command, cached, so many
+    matches in one long command cost a bisect each."""
+    starts = [0]
+    quote: str | None = None
+    index = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if quote is None:
+            if char == "\\":
+                index += 2
+                continue
+            if char in ("'", '"'):
+                quote = char
+            elif char in ";\n()":
+                starts.append(index + 1)
+            elif char == "&":
+                previous = command[index - 1] if index > 0 else ""
+                following = command[index + 1] if index + 1 < length else ""
+                if previous not in "<>" and following != ">":
+                    starts.append(index + 1)
+            elif char == "|":
+                if index == 0 or command[index - 1] != ">":
+                    starts.append(index + 1)
+        elif quote == "'":
+            if char == "'":
+                quote = None
+        elif char == "\\":
+            index += 2
+            continue
+        elif char == '"':
+            quote = None
+        index += 1
+    return tuple(starts)
+
+
+def _simple_command_start(command: str, offset: int) -> int:
+    """Where the simple command containing ``offset`` begins."""
+    starts = _stage_starts(command)
+    return starts[bisect.bisect_right(starts, offset) - 1]
+
+
+def _stage_key(command: str, offset: int) -> str:
+    """The full text of the stage a match sits in (assignments and wrappers
+    included). Identical stages are one run's settings repeated (a loop
+    body); stages that differ in any argument are separate runs."""
+    start = _simple_command_start(command, offset)
+    starts = _stage_starts(command)
+    following = bisect.bisect_right(starts, offset)
+    stop = starts[following] if following < len(starts) else len(command)
+    return command[start:stop].strip(" \t;&|\n()")
 
 
 def detect_scripts(
@@ -4146,17 +4754,22 @@ def scan_source(
         language, [*OUTPUT_REGEXES, *R_OUTPUT_REGEXES])
     inputs: list[str] = calls(input_rx)
     outputs: list[str] = calls(output_rx)
+    # Filters are no longer collected: the regex text was never evaluated
+    # and had false positives. The slot stays in the return value so callers
+    # keep their shape; it is always empty.
     filters: list[str] = []
     seeds: list[int] = []
-    for rx in FILTER_REGEXES:
-        filters.extend(m.group(1) for m in rx.finditer(source))
-    for rx in SEED_REGEXES:
+    seed_rx = {"python": SEED_REGEXES, "r": R_SEED_REGEXES}.get(
+        language, [*SEED_REGEXES, *R_SEED_REGEXES])
+    for rx in seed_rx:
         for m in rx.finditer(source):
+            if _inside(strings, m.start()):
+                continue  # a seed call quoted in a string is text
             try:
                 seeds.append(int(m.group(1)))
             except ValueError:
                 pass
-    return _dedupe(inputs), _dedupe(outputs), _dedupe(filters), sorted(set(seeds))
+    return _dedupe(inputs), _dedupe(outputs), filters, sorted(set(seeds))
 
 
 _DATA_FILE_SUFFIXES = {
@@ -4756,6 +5369,33 @@ def _merge_recovered_paths(
     return merged, added
 
 
+# A URL scheme (`https://`, `s3://`, `gs://`, `file://`). Two or more
+# characters before the colon, so a Windows drive (`C:/`) is not one; the
+# single-slash form is what `Path` leaves of `scheme://` once normalized.
+_URL_RX = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:/")
+
+
+def _is_url(value: object) -> bool:
+    """Whether a literal names a URL rather than a filesystem path. A URL is
+    never resolved against a working directory, hashed, or recorded as a
+    local path."""
+    return isinstance(value, str) and bool(_URL_RX.match(value.strip()))
+
+
+def _split_urls(paths: list[str]) -> tuple[list[str], list[str]]:
+    """(local paths, URLs) from scanned literals. A URL reaches the
+    transient queue only; the committed warning keeps none of it."""
+    local: list[str] = []
+    remote: list[str] = []
+    for value in paths:
+        if _is_url(value):
+            if value.strip() not in remote:
+                remote.append(value.strip())
+        else:
+            local.append(value)
+    return local, remote
+
+
 def file_record(path_str: str, cwd: Path) -> dict:
     path = Path(path_str)
     if not path.is_absolute():
@@ -5231,7 +5871,7 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
             words_next[0] in _INERT_AFTER_COPY
             and not any(op in _OUTPUT_REDIRECTIONS or op == "<>" for op, _ in redirections_next)
         )
-    cdpath_possible = "CDPATH" in command or bool(os.environ.get("CDPATH"))
+    cdpath_possible = _cdpath_may_be_set(command) or _cdpath_env_set()
     current: Path | None = cwd
     for position, (argv, redirections) in enumerate(parsed):
         first = 0
@@ -5246,6 +5886,10 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
             # that its redirections opened). Earlier commands' claims stand.
             return io
         for operator, target in redirections:
+            if _is_url(target):
+                # A URL-shaped word (`> s3://user:pass@b/o.csv`) is never
+                # recorded as a local path: it would carry its userinfo.
+                continue
             if not _is_data_like_path(target, root) and not _is_data_like_path(
                 str(_resolve_shell_path(target, current) or ""), root
             ):
@@ -5262,7 +5906,8 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
         if argv[0] in ("cp", "mv"):
             # The destination's kind is read from the final filesystem, so
             # only when nothing later in the list could have changed it.
-            pairs = _copy_move_pairs(argv, current) if inert_after[position] else None
+            pairs = _copy_move_pairs(argv, current) if inert_after[position] and not any(
+                _is_url(word) for word in argv[1:]) else None
             for source, target in pairs or []:
                 if _is_data_like_path(str(source), root) or _is_data_like_path(
                     str(target), root
@@ -5300,7 +5945,9 @@ def _io_records(paths: list[tuple[str, str]], cwd: Path) -> list[dict]:
     records: list[dict] = []
     seen: set[str] = set()
     for path, evidence in paths:
-        if path in seen:
+        if path in seen or _is_url(path):
+            # A URL-shaped word (`> s3://user:pass@b/o.csv`) is never
+            # recorded as a local path: it would carry its userinfo along.
             continue
         seen.add(path)
         record = file_record(path, cwd)
@@ -5698,7 +6345,7 @@ def build_data_command_event(
         "event_id": uuid.uuid4().hex,
         "agent_id": args.agent_id or None,
         "agent_type": args.agent_type or None,
-        "bash_cmd": args.bash_cmd,
+        "bash_cmd": getattr(args, "recorded_bash_cmd", args.bash_cmd),
         "bash_exit": getattr(args, "bash_exit", None),
         "cwd": str(cwd),
         "signals": signals,
@@ -5728,8 +6375,21 @@ def build_event_for_detection(
     """
     script_path, inline_source = detection
     if isinstance(script_path, UnresolvedScript):
-        # The run happened, but R may have read a file other than the one
-        # named, so nothing is read, hashed, or scanned.
+        # The run happened, but the interpreter may have read a file other
+        # than the one named, so nothing is read, hashed, or scanned.
+        if script_path.cwd_unknown:
+            warning = (
+                "A script ran, but an earlier directory change (pushd, cd -, "
+                "a CDPATH search, ...) left the working directory unknown, so "
+                f"which file {script_path.candidate} names is unknown."
+            )
+        else:
+            warning = (
+                "R ran a script, but shell syntax"
+                + (" or R_BATCH_OPTIONS" if script_path.batch else "")
+                + " may have changed which one; the command names "
+                + f"{script_path.candidate}."
+            )
         return _event_dict(
             args,
             None,
@@ -5739,12 +6399,7 @@ def build_event_for_detection(
             inputs=[],
             outputs=[],
             io_detection="unresolved",
-            lineage_warnings=[
-                "R ran a script, but shell syntax"
-                + (" or R_BATCH_OPTIONS" if script_path.batch else "")
-                + " may have changed which one; the command names "
-                + f"{script_path.candidate}."
-            ],
+            lineage_warnings=[warning],
             filters=[],
             seeds=[],
             script_candidate=script_path.candidate,
@@ -5766,6 +6421,7 @@ def build_event_for_detection(
             return None
         script_sha = sha256_file(script_path)
         if len(source.encode("utf-8")) < EMBED_LIMIT_BYTES:
+            # In the transient queue only: a manifest keeps its digest.
             script_source_embed = source
     elif inline_source:
         source = inline_source
@@ -5779,6 +6435,18 @@ def build_event_for_detection(
         source_language(script_path if isinstance(script_path, Path) else None)
         or getattr(inline_source, "language", None),
     )
+    # A URL literal (`pd.read_csv("https://...")`) is remote I/O, not a
+    # file under the cwd: it is never resolved, hashed, or recorded as a
+    # path, and is named only in a warning.
+    inputs, remote_inputs = _split_urls(inputs)
+    outputs, remote_outputs = _split_urls(outputs)
+    remote_warnings = []
+    if remote_inputs or remote_outputs:
+        remote_warnings.append(
+            "Remote URLs were not recorded as local files: "
+            + ", ".join(remote_inputs + [u for u in remote_outputs if u not in remote_inputs])
+            + "."
+        )
     if cwd is None:
         return _event_dict(
             args,
@@ -5793,7 +6461,7 @@ def build_event_for_detection(
                 "The runner's working directory could not be resolved "
                 "statically, so the script's literal I/O paths were not "
                 "recorded."
-            ],
+            ] + remote_warnings,
             filters=filters,
             seeds=seeds,
         )
@@ -5812,6 +6480,7 @@ def build_event_for_detection(
             "No literal input/output paths were detected; the script may "
             "resolve paths dynamically or delegate I/O through imports."
         )
+    lineage_warnings.extend(remote_warnings)
 
     recovered = set(added_inputs) | set(added_outputs)
 
@@ -5838,6 +6507,737 @@ def build_event_for_detection(
     )
 
 
+# --- Step settings (v2): what the matched stage actually ran with ---
+#
+# Read from the detected stage's own text: its argv, the assignments and
+# wrappers before the interpreter, config files it names, and literal seeds.
+# Nothing is expanded or guessed; what the parser cannot model is marked
+# `partial`. The text is raw (the queue is transient); a committed manifest
+# keeps only what the commit allowlist allows.
+
+_CONFIG_SUFFIXES = frozenset({".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"})
+_SCRIPT_CONFIG_FLAGS = frozenset({
+    "--config", "--config-file", "--configfile", "--params", "--params-file", "--settings",
+})
+_SNAKEMAKE_CONFIG_FLAGS = frozenset({"--configfile", "--configfiles"})
+# Operands Snakemake opens before it changes into `--directory`: profiles
+# are resolved while parsing arguments, and `--configfile`s are loaded when
+# its ConfigSettings are built (snakemake.settings.types), both relative to
+# the invocation directory. Positional targets and the workflow's own
+# I/O stay relative to `--directory`.
+_SNAKEMAKE_LAUNCH_RELATIVE = frozenset({"--profile", "--configfile", "--configfiles"})
+_NEXTFLOW_CONFIG_FLAGS = frozenset({"-params-file", "-c", "-config", "-C"})
+_SEED_FLAGS = frozenset({"--seed", "--random-state", "--random_state", "--random-seed"})
+CONFIG_MAX_FILES = 8
+MAX_EVENTS_PER_CALL = 64
+CONFIG_MAX_BYTES = 5 * 1024 * 1024
+CONFIG_BUDGET_SECONDS = 0.25
+STEP_TOKEN_MAX = 4096
+_TRUNCATED_MARK = "…[truncated]"
+
+
+def _clip(token: Any) -> Any:
+    """One token clipped to STEP_TOKEN_MAX (a clipped word is never kept
+    in a committed record: the allowlist makes it `<v>`)."""
+    if isinstance(token, str) and len(token) > STEP_TOKEN_MAX:
+        return token[:STEP_TOKEN_MAX] + _TRUNCATED_MARK
+    return token
+
+
+def _clipped_argv(argv: list[Any]) -> tuple[list[Any], bool]:
+    """(argv with each long token clipped, whether any was)."""
+    out = [_clip(token) for token in argv]
+    return out, out != list(argv)
+
+
+def _secret_values_masked(argv: list[Any]) -> list[Any]:
+    """The argv with each value a secret-named option or assignment takes
+    (`--token X`, `--token=X`, `API_KEY=X`) replaced by None, in place, so
+    it is never read as a config path or a seed."""
+    import lineage_redact
+
+    out: list[Any] = []
+    masked = False
+    for token in argv:
+        if masked or not isinstance(token, str):
+            out.append(None)
+            masked = False
+            continue
+        name, eq, _ = token.partition("=")
+        out.append(None if eq and lineage_redact.is_secret_name(name) else token)
+        masked = lineage_redact.takes_secret_value(token)
+    return out
+
+
+_NAME_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NON_RUN_WORDS = frozenset({"cd", "pushd", "popd", "export", "set", "source", ".", "unset"})
+
+
+_RUNNER_WORD_RX = re.compile(r"(?:^|[\s;&|(])((?:[\w./-]*/)?(?:snakemake|nextflow|sbatch))(?=\s|$)")
+
+
+def _interpreter_name(token: str) -> str:
+    name = os.path.basename(token)
+    for prefix in ("python", "Rscript", "R", "jupyter", "snakemake", "nextflow", "sbatch"):
+        if name == prefix or (prefix == "python" and re.fullmatch(r"python[0-9.]*", name)):
+            return "python" if prefix == "python" else prefix
+    return name
+
+
+def _prefix_settings(prefix: str) -> tuple[dict[str, Any], list[str], bool]:
+    """(env, wrappers, partial) from the words before the interpreter."""
+    env: dict[str, Any] = {}
+    wrappers: list[str] = []
+    try:
+        words = shlex.split(prefix, comments=False, posix=True)
+    except ValueError:
+        return env, wrappers, True
+    in_env = False
+    for word in words:
+        name, eq, value = word.partition("=")
+        if eq and _NAME_RX.fullmatch(name):
+            env[name] = _env_value(value)
+            continue
+        if word == "env":
+            in_env = True
+            wrappers.append(word)
+            continue
+        if in_env and word.startswith("-"):
+            wrappers.append(word)
+            continue
+        wrappers.append(word)
+    return env, wrappers, False
+
+
+def _env_value(value: str) -> Any:
+    if "$" in value or "`" in value:
+        return {"text": value, "expanded": False}
+    return value
+
+
+def _inline_placeholder(body: str) -> dict[str, Any]:
+    return {"inline_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "length": len(body)}
+
+
+def _stage_raw_words(fragment: str) -> list[str] | None:
+    """The words of one simple command as written (quotes kept), with
+    redirections dropped: the same words `_simple_command_argv` decodes, so
+    a caller can tell `~/c.yaml` from `'~/c.yaml'`. None where the scan
+    cannot follow the syntax."""
+    command = _join_line_continuations(fragment)
+    words: list[str] = []
+    index = 0
+    try:
+        while True:
+            while command[index: index + 1] in {" ", "\t"}:
+                index += 1
+            if index >= len(command) or command[index] in ";\n|)#&":
+                return words
+            operator = None
+            if not command.startswith(("<(", ">("), index):
+                operator = _REDIRECTION_OPERATOR_RX.match(command, index)
+            if operator is not None:
+                index = operator.end()
+                while command[index: index + 1] in {" ", "\t"}:
+                    index += 1
+                if operator.group("op") in {"<<", "<<-"} and command[
+                        index: index + 1] in {"'", '"'}:
+                    end = _quoted_delimiter_end(command, index)
+                else:
+                    end = _shell_word_end(command, index)
+                if end is None:
+                    return None
+                index = end
+                continue
+            end = _shell_word_end(command, index)
+            if end is None:
+                return None
+            words.append(command[index:end])
+            index = end
+    except RecursionError:
+        return None
+
+
+def _unquoted_chars(raw: str) -> Iterator[tuple[int, str]]:
+    """(index, char) for every character of a shell word outside quotes
+    and not escaped."""
+    quote: str | None = None
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if char in "'\"" and quote in (None, char):
+            quote = None if quote else char
+        elif quote is None:
+            yield index, char
+        index += 1
+
+
+def _has_unquoted_pattern(raw: str) -> bool:
+    """A glob (`*`, `?`, `[`) or brace expansion the shell would apply."""
+    chars = [c for _, c in _unquoted_chars(raw)]
+    if any(c in "*?[" for c in chars):
+        return True
+    return "{" in chars and "}" in chars[chars.index("{"):]
+
+
+# Builtins that can set a variable whose name is computed at run time
+# (`declare "$v=..."`, `read "$name"`, `printf -v "$x"`), so a line that
+# runs one with any expansion may have set HOME without naming it.
+_DYNAMIC_ASSIGN_BUILTINS = frozenset({
+    "declare", "typeset", "export", "readonly", "local", "read", "printf",
+    "mapfile", "readarray", "unset", "let", "getopts",
+})
+
+
+def _home_may_change(before: str, stage: str = "") -> bool:
+    """Whether the command text may have changed HOME before the stage's
+    words are expanded, so the hook's own HOME may not be the one bash used
+    for a bare `~`.
+
+    ``before`` is the command up to the stage's command word (earlier
+    stages and the stage's own prefix assignments); ``stage`` is the stage
+    itself. Any mention of the HOME variable other than a plain `$HOME` or
+    `${HOME}` read counts (`HOME=`, `export HOME`, `env HOME=`, `unset
+    HOME`, `declare/typeset/readonly HOME`, `read HOME`, `${HOME:=x}`), as
+    does running code this hook cannot see (`source`, `.`, `eval`) or a
+    variable-setting builtin with a computed name. Errs toward True.
+    """
+    for text in (before, stage):
+        for match in re.finditer(r"(?<![A-Za-z0-9_])HOME(?![A-Za-z0-9_])", text):
+            start, end = match.start(), match.end()
+            if text[max(0, start - 1):start] == "$":
+                continue  # `$HOME`: a read
+            if text[max(0, start - 2):start] == "${" and text[end:end + 1] == "}":
+                continue  # `${HOME}`: a read
+            return True
+    if re.search(r"(?<![A-Za-z0-9_.-])(source|eval|fc|enable|trap)(?![A-Za-z0-9_.-])", before):
+        return True
+    if re.search(r"(?:^|[\s;&|(){}!`])\.(?:\s|$)", before):
+        return True  # `. file`: the POSIX spelling of source
+    for segment in re.split(r"[;&|\n()]+", before):
+        words = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", segment))
+        if words & _DYNAMIC_ASSIGN_BUILTINS and re.search(r"[$`]", segment):
+            return True
+    return False
+
+
+def _resolve(token: str, base: Path | None, raw: str | None = None, *,
+             tilde: bool = True, home: bool = True) -> Path | None:
+    """The path a shell operand names, by bash's expansion rules, or None
+    where it depends on an expansion this hook cannot reproduce.
+
+    ``raw`` is the word as written. An unquoted leading `~` or `~/` is the
+    home directory (and `~user` that user's, when known), a quoted one is a
+    literal; a parameter, command or arithmetic expansion, a glob or a
+    brace expansion is unresolved. Without ``raw`` the quoting is unknown,
+    so anything the shell might have expanded is unresolved. ``tilde``
+    False (the value after `--flag=`, which bash does not tilde-expand but
+    other shells may) leaves a leading `~` unresolved rather than guessed.
+    ``home`` False (the command may have changed HOME first, see
+    `_home_may_change`) leaves a bare `~` or `~/` unresolved, since bash
+    expands it with the command's HOME, not the hook's. A URL
+    (`scheme://...`) is never a local path, so it is unresolved too.
+    """
+    if _is_url(token):
+        return None
+    if not token or "\0" in token:
+        return None
+    if raw is None:
+        if token.startswith("~") or "$" in token or "`" in token or _has_unquoted_pattern(token):
+            return None
+    else:
+        if _expansion(raw)[0] or _has_unquoted_pattern(raw):
+            return None
+        if raw.startswith("~"):
+            slash = raw.find("/")
+            prefix = raw if slash < 0 else raw[:slash]
+            if not any(c in prefix for c in "'\"\\"):
+                # An unquoted tilde prefix: expanded by the shell.
+                if not tilde:
+                    return None
+                user = prefix[1:]
+                if not user and not home:
+                    return None  # HOME may differ from the hook's
+                if user and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9._-]*", user):
+                    return None  # `~+`, `~-`, `~1`: the shell's directory stack
+                home = os.path.expanduser(prefix)
+                if home.startswith("~") or not os.path.isabs(home):
+                    return None
+                token = home + token[len(prefix):]
+    path = Path(token)
+    if not path.is_absolute():
+        if base is None:
+            return None
+        path = base / path
+    return path
+
+
+class _ConfigOperand(NamedTuple):
+    token: str  # decoded value
+    via: str  # the flag, "suffix", or "--profile" (a profile directory)
+    index: int  # position in the scanned args of the word holding it
+    eq: str | None  # the `--flag` before `=` when the value shares its word
+
+
+_SNAKEMAKE_PARAM_FLAGS = frozenset({"--config", "-C"})
+
+
+def _config_operands(interpreter: str, args: list[Any]) -> list[_ConfigOperand]:
+    """Operands naming config files, by interpreter-specific rules. `.json`
+    counts only after a config flag (a JSON operand is as often data);
+    python's `-c` is code and snakemake's `-c` is cores, so neither is a
+    config flag. Snakemake's `--config`/`-C` values are KEY=VALUE params,
+    never files."""
+    flags = {
+        "snakemake": _SNAKEMAKE_CONFIG_FLAGS,
+        "nextflow": _NEXTFLOW_CONFIG_FLAGS,
+    }.get(interpreter, _SCRIPT_CONFIG_FLAGS)
+    found: list[_ConfigOperand] = []
+    expect: str | None = None
+    for index, token in enumerate(args):
+        if not isinstance(token, str):
+            expect = None
+            continue
+        if expect is not None:
+            if token.startswith("-"):
+                expect = None
+            else:
+                if expect != "params":
+                    found.append(_ConfigOperand(token, expect, index, None))
+                if expect not in ("--configfiles", "params"):
+                    expect = None
+                continue
+        name, eq, value = token.partition("=")
+        if interpreter == "snakemake" and (
+                name in _SNAKEMAKE_PARAM_FLAGS or token.startswith("-C")):
+            expect = "params"
+            continue
+        if name in flags:
+            if eq:
+                found.append(_ConfigOperand(value, name, index, name))
+            else:
+                expect = name
+            continue
+        if interpreter == "snakemake" and name == "--profile":
+            if eq:
+                if value:
+                    found.append(_ConfigOperand(value, "--profile", index, name))
+            else:
+                expect = "--profile"
+            continue
+        if not token.startswith("-") and Path(token).suffix.lower() in _CONFIG_SUFFIXES:
+            found.append(_ConfigOperand(token, "suffix", index, None))
+    return found
+
+
+def _config_candidates(interpreter: str, args: list[str]) -> list[tuple[str, str]]:
+    """(token, via) pairs naming config files; a profile is shown by its
+    `config.yaml` (build_step lists the profile's actual config files)."""
+    return [(str(Path(o.token) / "config.yaml"), o.via) if o.via == "--profile"
+            else (o.token, o.via) for o in _config_operands(interpreter, args)]
+
+
+def _snakemake_params(args: list[str]) -> list[str]:
+    """Snakemake's `--config`/`-C` KEY=VALUE overrides, verbatim (a
+    committed record keeps a secret-named key's value as `<v>`)."""
+    values: list[str] = []
+    collecting = False
+    for token in args:
+        if not isinstance(token, str):
+            collecting = False
+            continue
+        if token in _SNAKEMAKE_PARAM_FLAGS:
+            collecting = True
+            continue
+        if token.startswith("--config="):
+            collecting = True
+            token = token[len("--config="):]
+        elif token.startswith("-C") and len(token) > 2:
+            collecting = True
+            token = token[2:]
+        elif token.startswith("-"):
+            collecting = False
+            continue
+        elif not collecting:
+            continue
+        values.append(_clip(token))
+    return values
+
+
+def _snakemake_profile_configs(directory: Path, token: str) -> list[Path]:
+    """The config files of a `--profile` directory: every
+    `config.yaml`/`config.vN+.yaml` in it (which one Snakemake reads depends
+    on its version), searched like Snakemake does for a bare profile name.
+    A profile with none is named by its `config.yaml`, listed as missing."""
+    location = directory
+    if not location.is_dir() and "/" not in token:
+        for root in _snakemake_user_profile_roots():
+            if (root / token).is_dir():
+                location = root / token
+                break
+    try:
+        files = sorted(
+            child for child in location.iterdir()
+            if _SNAKEMAKE_PROFILE_FILE_RX.fullmatch(child.name)
+            and child.name.startswith("config") and child.is_file())
+    except OSError:
+        files = []
+    return files or [location / "config.yaml"]
+
+
+class ConfigBudget:
+    """One budget for every config file a call names, across all its stages:
+    at most CONFIG_MAX_FILES files and CONFIG_BUDGET_SECONDS in total."""
+
+    def __init__(self) -> None:
+        self.deadline = time.monotonic() + CONFIG_BUDGET_SECONDS
+        self.files_left = CONFIG_MAX_FILES
+
+    def take(self) -> bool:
+        if self.files_left <= 0 or time.monotonic() >= self.deadline:
+            return False
+        self.files_left -= 1
+        return True
+
+
+# Every config digest this process took, by path: (dev, ino, size, mtime_ns,
+# ctime_ns) when read, and the digest. The proof pass reuses a digest whose
+# file still has that identity instead of reading it again, so the whole
+# config budget is the one ConfigBudget spends.
+_HASHED_CONFIGS: dict[str, tuple[tuple[int, int, int, int, int], str]] = {}
+
+
+def _hash_config(path: Path, deadline: float) -> dict[str, Any]:
+    """Hash one config file: regular file only, opened without blocking or
+    following a final symlink, within the size cap and the call's budget,
+    and only if it provably did not change while it was read."""
+    record: dict[str, Any] = {"path": str(path)}
+    if time.monotonic() >= deadline:
+        record.update(sha256=None, hash_status="skipped-budget")
+        return record
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        record.update(sha256=None, hash_status="missing")
+        return record
+    except OSError:
+        record.update(sha256=None, hash_status="unavailable")
+        return record
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            record.update(sha256=None, hash_status="not-a-regular-file")
+            return record
+        record["size_bytes"] = st.st_size
+        if st.st_size > CONFIG_MAX_BYTES:
+            record.update(sha256=None, hash_status="too-large")
+            return record
+        digest = hashlib.sha256()
+        read = 0
+        while True:
+            if time.monotonic() >= deadline:
+                record.update(sha256=None, hash_status="skipped-budget")
+                return record
+            chunk = os.read(fd, min(1 << 20, CONFIG_MAX_BYTES + 1 - read))
+            if not chunk:
+                break
+            read += len(chunk)
+            if read > CONFIG_MAX_BYTES:
+                record.update(sha256=None, hash_status="too-large")
+                return record
+            digest.update(chunk)
+        ident = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        after = os.fstat(fd)
+        try:
+            on_path = os.stat(path, follow_symlinks=False)
+        except OSError:
+            on_path = None
+        if on_path is None or any(
+                (x.st_dev, x.st_ino, x.st_size, x.st_mtime_ns, x.st_ctime_ns) != ident
+                for x in (after, on_path)):
+            record.update(sha256=None, hash_status="unstable")
+            return record
+        record.update(sha256=digest.hexdigest(), hash_status="hashed-at-post",
+                      hash_origin="hook-post")
+        _HASHED_CONFIGS[str(path)] = (ident, record["sha256"])
+        return record
+    finally:
+        os.close(fd)
+
+
+def _matched_operand_index(bash_cmd: str, offset: int, operand_offset: Any,
+                           argv_length: int) -> int | None:
+    """The argv index of the word starting at ``operand_offset`` in the
+    simple command starting at ``offset``: the number of words before it.
+    None when unknown or out of range (callers then search by spelling)."""
+    if not isinstance(operand_offset, int) or operand_offset <= offset:
+        return None
+    words = _stage_raw_words(bash_cmd[offset:operand_offset])
+    if words is None or not 0 < len(words) < argv_length:
+        return None
+    return len(words)
+
+
+def build_step(
+    bash_cmd: str,
+    invocation: dict[str, Any] | None,
+    inline_source: str | None,
+    io_cwd: Path | None,
+    budget: "ConfigBudget | None" = None,
+) -> dict[str, Any]:
+    """The `step` object for one detection: argv, interpreter, script
+    arguments, environment assignments, config files, and literal seeds of
+    the stage that ran it. Partial, with a reason, where it cannot tell."""
+    if invocation and invocation.get("kind") == "runner" and invocation.get("offset") is None:
+        # Only an unambiguous runner stage is used: with several runner
+        # words, which stage this detection ran is not known here.
+        found = list(_RUNNER_WORD_RX.finditer(bash_cmd))
+        if len(found) == 1:
+            invocation = {**invocation, "offset": found[0].start(1)}
+        elif len(found) > 1:
+            return {"partial": True, "reason": "runner-stage-ambiguous"}
+    if not invocation or invocation.get("offset") is None:
+        kind = (invocation or {}).get("kind") or "unknown"
+        return {"partial": True, "reason": f"{kind}-argv-not-captured"}
+    offset = invocation["offset"]
+    start = _simple_command_start(bash_cmd, offset)
+    suffix = _simple_command_suffix(bash_cmd, offset)
+    argv = _simple_command_argv(suffix) if suffix is not None else None
+    step: dict[str, Any] = {}
+    if not argv:
+        return {"partial": True, "reason": "unmodeled-shell-structure"}
+    env, wrappers, prefix_partial = _prefix_settings(bash_cmd[start:offset])
+    interpreter = _interpreter_name(argv[0])
+    kind = invocation.get("kind")
+    # Where the step's own operands begin.
+    operand_index: int | None = None
+    shown: list[Any] = list(argv)
+    # The word the detector matched, by position: a startup option may take
+    # a value spelled like the operand (`python -X -c -c 'print(1)'`,
+    # `python -X fit.py fit.py`), so a search by spelling finds the wrong one.
+    matched = _matched_operand_index(bash_cmd, offset, invocation.get("operand_offset"),
+                                     len(argv))
+    if matched is not None and kind == "inline" and interpreter == "python" \
+            and argv[matched - 1] == "-c":
+        shown[matched] = _inline_placeholder(argv[matched])
+        operand_index = matched + 1
+    elif matched is not None and kind == "inline" and interpreter != "python" \
+            and argv[matched - 1] in ("-e", "--eval"):
+        # R evaluates every `-e` from the matched one up to `--args`.
+        shown[matched] = _inline_placeholder(argv[matched])
+        operand_index = matched + 1
+        for index in range(matched + 1, len(argv) - 1):
+            token = argv[index]
+            if token == "--args":
+                operand_index = index + 1
+                break
+            if token in ("-e", "--eval"):
+                shown[index + 1] = _inline_placeholder(argv[index + 1])
+                operand_index = index + 2
+    elif matched is not None and kind == "module" and argv[matched - 1] == "-m" \
+            and argv[matched] == invocation.get("script_word"):
+        operand_index = matched + 1
+    elif matched is not None and kind in ("script", "unresolved") \
+            and invocation.get("form") != "r-file" \
+            and argv[matched] == invocation.get("script_word"):
+        operand_index = matched + 1
+    elif kind == "inline":
+        if interpreter == "python":
+            # Python takes one `-c` body; everything after it is sys.argv.
+            for index, token in enumerate(argv[:-1]):
+                if token == "-c":
+                    shown[index + 1] = _inline_placeholder(argv[index + 1])
+                    operand_index = index + 2
+                    break
+        else:
+            # R evaluates every `-e` up to `--args`; after it, arguments.
+            for index, token in enumerate(argv[:-1]):
+                if token == "--args":
+                    operand_index = index + 1
+                    break
+                if token in ("-e", "--eval"):
+                    shown[index + 1] = _inline_placeholder(argv[index + 1])
+                    operand_index = index + 2
+    elif kind == "module":
+        for index, token in enumerate(argv[:-1]):
+            if token == "-m" and argv[index + 1] == invocation.get("script_word"):
+                operand_index = index + 2
+                break
+    elif kind in ("script", "unresolved") and invocation.get("form") == "r-file":
+        # `R -f X` / `R --file=X`: R reads its own options anywhere before
+        # `--args`; the script's arguments are only the words after it.
+        operand_index = len(argv)
+        for index, token in enumerate(argv[1:], start=1):
+            if token == "--args":
+                operand_index = index + 1
+                break
+    elif kind in ("script", "unresolved"):
+        word = invocation.get("script_word")
+        for index, token in enumerate(argv[1:], start=1):
+            if token == word:
+                operand_index = index + 1
+                break
+    script_args = argv[operand_index:] if operand_index is not None else []
+    # Seeds and config paths are read from a list where a word a secret flag
+    # consumed (`--password --seed=482731`, where the option parser takes
+    # `--seed=482731` as the password) is masked: it is neither.
+    masked = _secret_values_masked(argv)
+    step["argv"], truncated = _clipped_argv(shown)
+    step["executable"] = argv[0]
+    step["interpreter"] = interpreter
+    step["script_args"], _ = _clipped_argv(script_args)
+    if env:
+        step["env"] = env
+    if wrappers:
+        step["wrappers"] = wrappers
+    if interpreter == "snakemake":
+        params = _snakemake_params(argv[1:])
+        if params:
+            step["params"] = params
+    # Config files: the operands after the script for script runners, the
+    # whole argv for runners driven by flags. Each is resolved by the shell's
+    # expansion of the word as written, so the raw words ride along.
+    scan_from = operand_index if operand_index else 1
+    raws = _stage_raw_words(suffix)
+    if raws is not None and len(raws) != len(argv):
+        raws = None  # the two scans disagree: treat the quoting as unknown
+    resolved: list[tuple[str, str, Path | None]] = []
+    remote: list[dict[str, Any]] = []
+    # bash expands a bare `~` with the command's HOME: when anything before
+    # this stage may have set it, the hook's own HOME proves nothing.
+    home_stable = not _home_may_change(bash_cmd[:offset], suffix or "")
+    for operand in _config_operands(interpreter, masked[scan_from:]):
+        if _is_url(operand.token):
+            # A remote config is not a local file: never resolved against
+            # the cwd or hashed. One a flag names is kept as a reference (a
+            # committed record has no evidence for it: `<v>`); a bare `.yaml`
+            # URL may be anything.
+            if operand.via != "suffix":
+                remote.append({"path": operand.token, "via": operand.via,
+                               "sha256": None, "hash_status": "remote"})
+            continue
+        raw = raws[scan_from + operand.index] if raws is not None else None
+        if raw is not None and operand.eq is not None:
+            prefix = operand.eq + "="
+            raw = raw[len(prefix):] if raw.startswith(prefix) else None
+        base = io_cwd
+        if interpreter == "snakemake" and operand.via in _SNAKEMAKE_LAUNCH_RELATIVE \
+                and "launch_cwd" in invocation:
+            # Snakemake reads its profile (argument parsing) and its
+            # `--configfile`s (ConfigSettings, built before WorkflowApi
+            # changes into `--directory`) from the invocation directory.
+            base = invocation["launch_cwd"]
+        path = _resolve(operand.token, base, raw, tilde=operand.eq is None,
+                        home=home_stable)
+        if operand.via == "--profile":
+            if path is None:
+                resolved.append((str(Path(operand.token) / "config.yaml"), operand.via, None))
+            else:
+                resolved.extend((str(p), operand.via, p)
+                                for p in _snakemake_profile_configs(path, operand.token))
+            continue
+        resolved.append((operand.token, operand.via, path))
+    budget = budget or ConfigBudget()
+    configs: list[dict[str, Any]] = list(remote)
+    skipped = 0
+    for token, via, path in resolved:
+        if path is None:
+            configs.append({"path": token, "via": via, "sha256": None,
+                            "hash_status": "unresolved"})
+            continue
+        if via == "suffix" and not path.exists():
+            continue  # a config-like operand that is not a file may be an output
+        if not budget.take():
+            skipped += 1
+            configs.append({"path": str(path), "via": via, "sha256": None,
+                            "hash_status": "skipped-budget"})
+            continue
+        record = _hash_config(path, budget.deadline)
+        record["via"] = via
+        if record.get("sha256") is not None:
+            # Unproven until the Pre snapshot says otherwise: with no
+            # snapshot (no observer, a failed Pre) the digest describes the
+            # file after the call, so the settings the step read are unknown.
+            record["pre_run_proven"] = False
+            record["proof_reason"] = "no-pre-snapshot"
+        configs.append(record)
+    if skipped:
+        step["config_files_over_budget"] = skipped
+    if configs:
+        step["config_files"] = configs
+    seeds: list[dict[str, Any]] = []
+    expect_seed = False
+    for token in (masked[operand_index:] if operand_index is not None else []):
+        if not isinstance(token, str):
+            expect_seed = False
+            continue
+        if token == "--":
+            # An operand boundary: after it, an option parser (argparse,
+            # getopt, optparse) reads every word as a positional value, so
+            # `-- --seed 4839…` names no seed.
+            break
+        if expect_seed:
+            expect_seed = False
+            if re.fullmatch(r"-?\d{1,19}", token):
+                seeds.append({"value": int(token), "origin": "argv"})
+            continue
+        name, eq, value = token.partition("=")
+        if name in _SEED_FLAGS:
+            if eq and re.fullmatch(r"-?\d{1,19}", value):
+                seeds.append({"value": int(value), "origin": "argv"})
+            elif not eq:
+                expect_seed = True
+    if seeds:
+        step["seeds"] = seeds
+    if truncated:
+        step["truncated"] = True
+    if prefix_partial:
+        step["partial"] = True
+        step["reason"] = "unparsed-prefix"
+    return step
+
+
+def data_command_step(bash_cmd: str, named_paths: list[str] | None = None) -> dict[str, Any] | None:
+    """The argv of the data command's working stage: the first stage that
+    names one of the data paths the record lists, else the first stage that
+    does something other than change directory or set variables."""
+    named =[p for p in named_paths or [] if isinstance(p, str) and p]
+    fallback: dict[str, Any] | None = None
+    offset = 0
+    stages = 0
+    while offset < len(bash_cmd) and stages < 256:
+        stages += 1
+        suffix = _simple_command_suffix(bash_cmd, offset)
+        if suffix is None:
+            return fallback or {"partial": True, "reason": "unmodeled-shell-structure"}
+        argv = _simple_command_argv(suffix)
+        if argv:
+            words = [w for w in argv if not (_NAME_RX.fullmatch(w.partition("=")[0])
+                                              and "=" in w)]
+            if words and words[0] not in _NON_RUN_WORDS:
+                record = {"argv": _clipped_argv(argv)[0],
+                          "executable": words[0]}
+                if named and any(any(p in w or w in p for p in named) for w in argv[1:]
+                                 if len(w) > 1):
+                    return {**record, "stage": "names-data"}
+                if fallback is None:
+                    fallback = {**record, "stage": "first-run-stage"}
+                if not named:
+                    return fallback
+        offset += len(suffix)
+        if offset < len(bash_cmd) and bash_cmd[offset] == "#":
+            newline = bash_cmd.find("\n", offset)
+            offset = len(bash_cmd) if newline < 0 else newline
+        offset += 1
+        while offset < len(bash_cmd) and bash_cmd[offset] in " \t;&|\n":
+            offset += 1
+    return fallback
+
+
 def _event_dict(
     args: argparse.Namespace,
     script_path: Path | None,
@@ -5857,7 +7257,7 @@ def _event_dict(
         "ts": args.ts,
         "agent_id": args.agent_id or None,
         "agent_type": args.agent_type or None,
-        "bash_cmd": args.bash_cmd,
+        "bash_cmd": getattr(args, "recorded_bash_cmd", args.bash_cmd),
         "bash_exit": getattr(args, "bash_exit", None),
         "bash_wall_s": None,
         "script": str(script_path) if script_path else None,
@@ -5869,10 +7269,113 @@ def _event_dict(
         "outputs": outputs,
         "io_detection": io_detection,
         "lineage_warnings": lineage_warnings,
-        "filters_detected": filters,
+        # `filters_detected` is no longer written (v2): it held unevaluated
+        # regex text. Evaluated row/feature access is a separate, in-process
+        # record (docs/plans/row-feature-access.md).
         "seeds_detected": seeds,
         **_observation_fields(args),
     }
+
+
+def _record_root(args: argparse.Namespace, cwd: Path) -> str | None:
+    """The physical repository root this record's paths are relative to.
+
+    The tracker passes the root it already resolved; without it (a direct
+    call), git is asked once and the answer is cached on ``args``.
+    """
+    cached = getattr(args, "_record_root", False)
+    if cached is not False:
+        return cached
+    raw = getattr(args, "repo_root", None)
+    root = Path(raw) if raw else _repository_root(cwd)
+    resolved = os.path.realpath(root) if root is not None else None
+    args._record_root = resolved
+    return resolved
+
+
+def _stamp_file_frame(record: dict, root: str | None) -> None:
+    """Add `rel_path`, the record's path relative to its own root, with the
+    observer's rules: no `..`, no symlinked component below the root. A
+    path that cannot be framed keeps `rel_path: null` and says why, so the
+    index never joins it to a repository path by guesswork."""
+    raw = record.get("path")
+    if not isinstance(raw, str):
+        return
+    if _is_url(raw):
+        # A remote reference (a config URL): nothing under any root. The
+        # schema's reason for a path outside the repository fits it.
+        record["rel_path"] = None
+        record["rel_path_reason"] = "outside-scope"
+        return
+    if root is None:
+        record["rel_path"] = None
+        record["rel_path_reason"] = "no-repository-root"
+        return
+    import io_observer
+
+    rel, reason = io_observer.repo_relative_unfollowed(raw, root)
+    record["rel_path"] = rel
+    if reason is not None:
+        record["rel_path_reason"] = reason
+
+
+def _stamp_v2(record: dict, args: argparse.Namespace, cwd: Path) -> dict:
+    """Identity and frame every v2 lineage record carries.
+
+    `event_id` is minted here unless the builder already set one (data
+    commands do). `host_session_id` falls back to the observation's, which
+    the observer took from the same payload. `ts_ns` orders records within
+    a second; the observation's journal sequence orders writes without any
+    clock.
+    """
+    record.setdefault("event_id", uuid.uuid4().hex)
+    observation = getattr(args, "observation", None) or {}
+    record["host"] = getattr(args, "host", None) or record.get("host")
+    record["host_session_id"] = (
+        getattr(args, "host_session_id", None)
+        or observation.get("host_session_id")
+        or record.get("host_session_id")
+    )
+    record["ts_ns"] = time.time_ns()
+    root = _record_root(args, cwd)
+    record["repo_root"] = root
+    for key in ("inputs", "outputs"):
+        for file_rec in record.get(key) or []:
+            if isinstance(file_rec, dict):
+                _stamp_file_frame(file_rec, root)
+                _stamp_hash_origin(file_rec, is_input=key == "inputs")
+    step = record.get("step") if isinstance(record.get("step"), dict) else None
+    for config in (step or {}).get("config_files") or []:
+        if isinstance(config, dict) and isinstance(config.get("path"), str):
+            _stamp_file_frame(config, root)
+            if config.get("sha256") is not None:
+                _stamp_hash_origin(config, is_input=True)
+                if config.get("pre_run_proven") is False:
+                    # Changed (or unprovable) across the call: the digest is
+                    # of the file afterwards, not what the step read.
+                    config["effective"] = "unknown"
+    return record
+
+
+def _stamp_hash_origin(record: dict, *, is_input: bool) -> None:
+    """Say how a recorded hash was taken, so no reader overstates it.
+
+    - `pre-run-proven`: the bytes at the path matched the Pre snapshot (an
+      input the observer proved unchanged across the call).
+    - `hashed-at-post`: the observer's stable protocol hash, taken at Post,
+      without a pre-run proof.
+    - `hook-post`: the hook's plain digest at Post, with no stability or
+      timing guarantee (outputs, and inputs no proof was attempted for,
+      which 0.9.7 labelled `hash_status: hashed-at-post`).
+    """
+    if record.get("sha256") is None:
+        return
+    if is_input and record.get("pre_run_proven") is True:
+        record["hash_origin"] = "pre-run-proven"
+    elif is_input and record.get("hash_status") not in (None, "hashed-at-post"):
+        record["hash_origin"] = "hashed-at-post"
+    else:
+        record["hash_origin"] = "hook-post"
 
 
 def write_events(lines: list[str], append_to: Path | None) -> None:
@@ -5936,7 +7439,7 @@ def _record_unowned_data_command(
             "skip_id": uuid.uuid4().hex,
             "skip_reason": "data-command-failed",
             "detail": type(exc).__name__,
-            "bash_cmd": args.bash_cmd,
+            "bash_cmd": getattr(args, "recorded_bash_cmd", args.bash_cmd),
             "agent_id": args.agent_id or None,
             "agent_type": args.agent_type or None,
             "bash_exit": args.bash_exit,
@@ -5944,6 +7447,13 @@ def _record_unowned_data_command(
     if event is None:
         return
     event.update(keys)
+    if event.get("kind") == "data_command":
+        step = data_command_step(args.bash_cmd, event.get("named_paths"))
+        if step is not None:
+            event["step"] = step
+        _stamp_v2(event, args, cwd)
+    else:
+        event["ts_ns"] = time.time_ns()
     # A failed append propagates: the guarded main exits 70, which the
     # tracker records as a `detector-failed` gap rather than silence.
     _append_with_stable_lock(args.data_command_to, json.dumps(event) + "\n")
@@ -6033,10 +7543,47 @@ def _apply_input_proofs(events: list[dict], args: argparse.Namespace, cwd: Path)
     observation = getattr(args, "observation", None) or {}
     snapshot = observation.get("pre_snapshot")
     state_dir = observation.get("state_dir")
-    root = _repository_root(cwd)
-    if not snapshot or not state_dir or root is None:
+    if not snapshot or not state_dir:
         return
-    paths = [r["path"] for e in events for r in e.get("inputs", []) if r.get("path")]
+    root_text = _record_root(args, cwd)
+    if root_text is None:
+        return
+    root = Path(root_text)
+
+    def proved_records(event: dict) -> list[dict]:
+        # Inputs, and the config files a step named: a config replaced
+        # during the call must not pass as the settings the step read.
+        step = event.get("step") if isinstance(event.get("step"), dict) else {}
+        configs = [c for c in step.get("config_files") or []
+                   if isinstance(c, dict) and c.get("sha256") is not None]
+        return [*event.get("inputs", []), *configs]
+
+    # The config budget was spent in build_step: reuse each config digest
+    # whose file still has the identity it was read with, so the proof pass
+    # reads no config bytes again. A config that changed since is unstable
+    # and is not proved (proving it would mean reading it a second time).
+    reused: dict[tuple[int, int, int, int, int], str] = {}
+    for event in events:
+        step = event.get("step") if isinstance(event.get("step"), dict) else {}
+        for config in step.get("config_files") or []:
+            if not isinstance(config, dict) or config.get("sha256") is None:
+                continue
+            known = _HASHED_CONFIGS.get(config.get("path"))
+            if known is None or known[1] != config["sha256"]:
+                continue  # not a digest this process took: proved as before
+            try:
+                st = os.stat(config["path"], follow_symlinks=False)
+                ident = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+            except (OSError, ValueError):
+                ident = None
+            if ident != known[0]:
+                config.update(sha256=None, hash_status="unstable", pre_run_proven=False,
+                              proof_reason="changed-after-hash")
+                config.pop("hash_origin", None)
+                continue
+            reused[ident] = known[1]
+
+    paths = [r["path"] for e in events for r in proved_records(e) if r.get("path")]
     if not paths:
         try:
             os.unlink(snapshot)
@@ -6046,9 +7593,14 @@ def _apply_input_proofs(events: list[dict], args: argparse.Namespace, cwd: Path)
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import io_observer
 
-    proofs = io_observer.prove_inputs(Path(state_dir), Path(snapshot), root, paths)
+    # Configs hashed this call are offered by identity, so the proof pass
+    # reads none of them again (one config budget, not two).
+    seeded = {":".join(str(part) for part in ident): digest
+              for ident, digest in (reused or {}).items()}
+    proofs = io_observer.prove_inputs(Path(state_dir), Path(snapshot), root, paths,
+                                      known_digests=seeded)
     for event in events:
-        for record in event.get("inputs", []):
+        for record in proved_records(event):
             proof = proofs.get(record.get("path"))
             if not proof:
                 continue
@@ -6067,6 +7619,21 @@ def _apply_input_proofs(events: list[dict], args: argparse.Namespace, cwd: Path)
                 # No protocol hash was attempted (outside the watched scope,
                 # a symlinked path): the digest is of the content at Post.
                 record["hash_status"] = "hashed-at-post"
+
+
+def _in_command_order(
+    detections: list[Any], invocations: list[dict[str, Any]]
+) -> tuple[list[Any], list[dict[str, Any] | None]]:
+    """Detections, each with its invocation, sorted by shell offset. A
+    detection without a known offset keeps its place relative to the others
+    without one, after every positioned stage."""
+    paired = [(d, invocations[i] if i < len(invocations) else None)
+              for i, d in enumerate(detections)]
+    order = sorted(range(len(paired)), key=lambda i: (
+        (paired[i][1] or {}).get("offset") is None,
+        (paired[i][1] or {}).get("offset") or 0,
+        i))
+    return [paired[i][0] for i in order], [paired[i][1] for i in order]
 
 
 def main() -> int:
@@ -6113,6 +7680,15 @@ def main() -> int:
     ap.add_argument("--host", default=None)
     ap.add_argument("--host-session-id", default=None)
     ap.add_argument(
+        "--repo-root",
+        default=None,
+        help=(
+            "The repository root the hook resolved. Every record stores it "
+            "and frames its file paths relative to it (`rel_path`); without "
+            "it, git is asked."
+        ),
+    )
+    ap.add_argument(
         "--observation-json",
         default=None,
         help=(
@@ -6124,6 +7700,10 @@ def main() -> int:
     ap.add_argument("--outcome", choices=("success", "failure", "unknown"), default=None)
     args = ap.parse_args()
     args.observation = _parse_observation(args.observation_json)
+    # Detection reads `$PY run.py` as the interpreter it was assigned; the
+    # record keeps the command as written.
+    args.recorded_bash_cmd = args.bash_cmd
+    args.bash_cmd = _expand_interpreter_variables(args.bash_cmd)
     if args.data_command_to is not None and not (
         args.check_execution and args.host and args.host_session_id
     ):
@@ -6131,6 +7711,7 @@ def main() -> int:
 
     cwd = Path(args.cwd)
     detections = []
+    invocations: list[dict[str, Any]] = []
     analysis_named = is_analysis(args.bash_cmd)
     if analysis_named:
         detections = _detect_scripts_with_cwd(
@@ -6139,6 +7720,7 @@ def main() -> int:
             bash_exit=args.bash_exit,
             require_execution_evidence=True,
             include_inline=not args.check_post_action,
+            invocations=invocations,
         )
     if args.check_execution or args.check_post_action:
         if detections:
@@ -6154,7 +7736,11 @@ def main() -> int:
         # minimal record of its own kind, never an analysis event.
         event = build_data_command_event(args, cwd, analysis_named)
         if event is not None:
+            step = data_command_step(args.bash_cmd, event.get("named_paths"))
+            if step is not None:
+                event["step"] = step
             _apply_input_proofs([event], args, cwd)
+            _stamp_v2(event, args, cwd)
             write_events([json.dumps(event) + "\n"], args.append_to)
         else:
             _apply_input_proofs([], args, cwd)
@@ -6165,16 +7751,51 @@ def main() -> int:
 
     events: list[dict] = []
     unreadable: list[str] = []
-    for script_path, inline_source, effective_cwd in detections:
+    budget = ConfigBudget()
+    # Several runner stages in one call: the n-th runner detection is the
+    # n-th runner word, but only when the counts agree (a runner name in an
+    # echo would otherwise shift every stage).
+    runner_matches = list(_RUNNER_WORD_RX.finditer(args.bash_cmd))
+    runner_words = [m.start(1) for m in runner_matches]
+    runner_names = {os.path.basename(m.group(1)) for m in runner_matches}
+    runner_slots = [i for i, inv in enumerate(invocations) if inv.get("kind") == "runner"]
+    # Detection lists one runner type's stages in command order, but not
+    # different types relative to each other: assign only for one type.
+    if (len(runner_slots) > 1 and len(runner_words) == len(runner_slots)
+            and len(runner_names) == 1):
+        for slot, offset in zip(runner_slots, runner_words):
+            invocations[slot] = {**invocations[slot], "offset": offset}
+    # Detection groups runs by interpreter and form; the cap and the shared
+    # config budget go to the stages that ran first, so order by position.
+    detections, invocations = _in_command_order(detections, invocations)
+    dropped = max(0, len(detections) - MAX_EVENTS_PER_CALL)
+    detections = detections[:MAX_EVENTS_PER_CALL]
+    for index, (script_path, inline_source, effective_cwd) in enumerate(detections):
         event = build_event_for_detection(
             (script_path, inline_source), args, effective_cwd, git_sha
         )
         if event is not None:
+            invocation = invocations[index] if index < len(invocations) else None
+            step = build_step(args.bash_cmd, invocation, inline_source, effective_cwd, budget)
+            source_seeds = [{"value": v, "origin": "source"}
+                            for v in event.get("seeds_detected") or []]
+            if source_seeds:
+                step["seeds"] = [*step.get("seeds", []), *source_seeds]
+            event["step"] = step
             events.append(event)
         elif isinstance(script_path, Path):
             unreadable.append(str(script_path))
 
+    if dropped and events:
+        # A loop or generated chain of distinct runs: recording each with the
+        # whole command text would grow quadratically, so the rest is named.
+        events[-1]["lineage_warnings"].append(
+            f"This call ran {dropped} more analysis stage(s) than the "
+            f"{MAX_EVENTS_PER_CALL} recorded; their runs are not separately listed.")
+        events[-1]["stages_not_recorded"] = dropped
     _apply_input_proofs(events, args, cwd)
+    for event in events:
+        _stamp_v2(event, args, cwd)
     write_events([json.dumps(event) + "\n" for event in events], args.append_to)
     if args.append_to is not None:
         # A detected script that is gone or unreadable at hook time (often a

@@ -303,73 +303,34 @@ def test_scan_outputs_h5ad() -> None:
     assert outputs == ["processed.h5ad"]
 
 
-# ---------- scan_source: filters (NEW v2 patterns) ----------
+# ---------- scan_source: filters are no longer collected ----------
 
 
-def test_filter_query() -> None:
-    src = "df.query('a > 5')"
+@pytest.mark.parametrize(
+    "src",
+    [
+        "df.query('a > 5')",
+        "subset = df[df.score > 0.5]",
+        "out = a.merge(b, on='key', how='left')",
+        "subset = df.loc[df.score > 0.5, 'col_a']",
+        "all_df = pd.concat([df1, df2], ignore_index=True)",
+    ],
+)
+def test_filters_are_not_collected(src: str) -> None:
+    # The v1 regex pack recorded unevaluated text with false positives and
+    # nothing read it; v2 drops it (evaluated access is item 7's helper).
     _, _, filters, _ = scan_source(src)
-    assert any(".query(" in f for f in filters)
+    assert filters == []
 
 
-def test_filter_boolean_mask_attribute() -> None:
-    src = "subset = df[df.score > 0.5]"
-    _, _, filters, _ = scan_source(src)
-    assert any("df.score" in f for f in filters), (
-        f"expected boolean-mask match, got: {filters}"
-    )
+def test_seed_inside_a_string_is_not_a_seed() -> None:
+    _, _, _, seeds = scan_source("print('np.random.seed(7)')", "python")
+    assert seeds == []
 
 
-def test_filter_boolean_mask_bracket() -> None:
-    src = "subset = resolved[resolved['pmid'] != '']"
-    _, _, filters, _ = scan_source(src)
-    assert any("resolved['pmid']" in f or "'pmid'" in f for f in filters), filters
-
-
-def test_filter_boolean_mask_negated() -> None:
-    src = "subset = df[~df.dropped]"
-    _, _, filters, _ = scan_source(src)
-    assert any("~df.dropped" in f for f in filters), filters
-
-
-def test_filter_merge() -> None:
-    src = "out = a.merge(b, on='key', how='left')"
-    _, _, filters, _ = scan_source(src)
-    assert any(".merge(" in f for f in filters), filters
-
-
-def test_filter_join() -> None:
-    src = "result = df1.join(df2, on='id')"
-    _, _, filters, _ = scan_source(src)
-    assert any(".join(" in f for f in filters), filters
-
-
-def test_filter_pd_concat() -> None:
-    src = "all_df = pd.concat([df1, df2], ignore_index=True)"
-    _, _, filters, _ = scan_source(src)
-    assert any("pd.concat(" in f for f in filters), filters
-
-
-def test_filter_loc_mask() -> None:
-    src = "subset = df.loc[df.score > 0.5, 'col_a']"
-    _, _, filters, _ = scan_source(src)
-    assert any(".loc[" in f for f in filters), filters
-
-
-def test_filter_combination_real_kg_pattern() -> None:
-    # Pattern from the real captured KG event[3]
-    src = """
-resolved_pmids = resolved[resolved['pmid'] != ''][['doi','pmid']].copy()
-merged = lookup.merge(resolved_pmids[['doi_lc','pmid_new']], on='doi_lc', how='left')
-mask = (merged['pmid'] == '') & (merged['pmid_new'].notna())
-merged.loc[mask, 'pmid'] = merged.loc[mask, 'pmid_new']
-"""
-    _, _, filters, _ = scan_source(src)
-    # Must catch: the boolean-mask subset, the merge
-    has_mask = any("resolved['pmid']" in f or "resolved[resolved" in f for f in filters)
-    has_merge = any(".merge(" in f for f in filters)
-    assert has_mask, f"missed boolean mask in {filters}"
-    assert has_merge, f"missed merge in {filters}"
+def test_r_set_seed_is_a_seed() -> None:
+    _, _, _, seeds = scan_source("set.seed(123)\nx <- rnorm(5)\n# set.seed(9)\n", "r")
+    assert seeds == [123]
 
 
 # ---------- scan_source: seeds ----------

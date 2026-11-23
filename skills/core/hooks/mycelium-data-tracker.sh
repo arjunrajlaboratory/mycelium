@@ -98,6 +98,12 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
   OBSERVATION_FLAGS=()
   OBS_SID=$(mycelium_json_get_optional_string 'session_id' INPUT) || OBS_SID=""
   OBS_CALL=$(mycelium_json_get_optional_string 'tool_use_id' INPUT) || OBS_CALL=""
+  # Every skip this call records names the call, so the lineage index can
+  # match it to the call's observation instead of treating it as a gap.
+  export MYCELIUM__SKIP_HOST MYCELIUM__SKIP_SESSION MYCELIUM__SKIP_CALL
+  MYCELIUM__SKIP_HOST="$(mycelium_hook_host)"
+  MYCELIUM__SKIP_SESSION="$OBS_SID"
+  MYCELIUM__SKIP_CALL="$OBS_CALL"
   OBSERVER="${MYCELIUM_IO_OBSERVER:-$HERE/../scripts/io_observer.py}"
   if [[ -n "$OBS_SID" && -n "$OBS_CALL" && -f "$OBSERVER" ]] \
     && mycelium_valid_session_id "$OBS_SID" \
@@ -111,9 +117,14 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
     # host moved a long foreground command to the background at its
     # timeout (Claude Code then returns a backgroundTaskId). Either way the
     # job may still be writing, so its interval stays open.
+    OBS_TASK_ID=$(mycelium_json_get 'tool_response.backgroundTaskId' INPUT)
     if [[ "$(mycelium_json_get 'tool_input.run_in_background' INPUT)" == "True" \
-      || -n "$(mycelium_json_get 'tool_response.backgroundTaskId' INPUT)" ]]; then
+      || -n "$OBS_TASK_ID" ]]; then
       OBS_ARGS+=(--background)
+      # The host's task id lets a later Stop snapshot end the job.
+      if [[ "$OBS_TASK_ID" =~ ^[A-Za-z0-9_.:-]{1,128}$ ]]; then
+        OBS_ARGS+=(--task-id "$OBS_TASK_ID")
+      fi
     fi
     OBS_SUMMARY=$(python3 "$OBSERVER" "${OBS_ARGS[@]}" 2>/dev/null) \
       || OBS_SUMMARY='{"status": "unavailable", "reason": "observer-failed"}'
@@ -175,6 +186,7 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
       --ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       --bash-cmd "$COMMAND" \
       --check-execution \
+      --repo-root "$REPO_ROOT" \
       ${DATA_COMMAND_FLAGS[@]+"${DATA_COMMAND_FLAGS[@]}"} \
       ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} \
       ${OBSERVATION_FLAGS[@]+"${OBSERVATION_FLAGS[@]}"} >/dev/null 2>&1 || CHECK_STATUS=$?
@@ -228,11 +240,18 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
   if [[ "$STRICT_CAPTURE" == "1" ]]; then
     EXTRACTOR_ERR=$(mktemp "${TMPDIR:-/tmp}/mycelium-extractor-err.XXXXXX")
   fi
+  # Identity for the v2 record: host, host session, and the root its paths
+  # are framed against. The host is kept even without a session id.
+  IDENTITY_FLAGS=(--host "$(mycelium_hook_host)" --repo-root "$REPO_ROOT")
+  if [[ -n "$OBS_SID" ]] && mycelium_valid_session_id "$OBS_SID"; then
+    IDENTITY_FLAGS+=(--host-session-id "$OBS_SID")
+  fi
   EXTRACTOR_OUT=$(python3 "$HELPER" \
     --cwd "$SESSION_CWD" \
     --ts "$TS" \
     --bash-cmd "$COMMAND" \
     --append-to "$EVENTS_FILE" \
+    "${IDENTITY_FLAGS[@]}" \
     ${AGENT_FLAGS[@]+"${AGENT_FLAGS[@]}"} \
     ${EXIT_FLAGS[@]+"${EXIT_FLAGS[@]}"} \
     ${OBSERVATION_FLAGS[@]+"${OBSERVATION_FLAGS[@]}"} 2>"$EXTRACTOR_ERR") || EXTRACTOR_STATUS=$?

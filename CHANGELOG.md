@@ -7,7 +7,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A project-level lineage index** (`skills/core/scripts/lineage_index.py`).
+  It answers three questions across sessions: which events read a content
+  hash, which call produced it, and whether that write is still current.
+  `query --hash`, `--path` and `--event` return:
+  - a record verdict: `current-in-record`, `superseded` (naming the
+    superseding call), `superseded-unverified`, or `unknown` with reasons;
+  - a separate disk check.
+
+  The headline is `current` only when both agree. How it decides:
+  - Writes come from observations, one set per call.
+  - Order comes only from the observer's call journal, never clocks.
+  - A gap the record cannot rule out makes the verdict `unknown`.
+  - Readers carry their `hash_origin`, so proven reads are told apart from
+    weaker digests.
+  - With no observation store at all (Antigravity installs no observer),
+    `no-recorded-write` carries the reason `no-observations`.
+
+  The index is a derived, per-checkout cache rebuilt incrementally on query.
+  It never runs on the hook path.
+- **v2 lineage records.**
+  - Every analysis event and data command gets an identity: `event_id`,
+    `host`, `host_session_id`, `ts_ns` and `repo_root`.
+  - File records get a framed `rel_path` and a `hash_origin`.
+  - Manifests carry `schema: mycelium.data_lineage.manifest.v2` and are
+    written atomically.
+  - Observations (version 2) record their journal position and checkout.
+  - A Post against another checkout's Pre snapshot claims nothing.
+  - Edit tools (Write, Edit, MultiEdit, NotebookEdit, and Codex apply_patch)
+    are now observed by path, with post-edit hashes taken before the call's
+    interval closes.
+
+  0.9.7 manifests and observations still load, as v1.
+- **Step settings.** Each event has a `step`: the matched stage's own argv,
+  interpreter, script arguments, environment assignments, config files and
+  literal seeds.
+  - Two runs of one script with different arguments are two events.
+  - Config files follow per-interpreter operand rules, are hashed under one
+    budget per call, and are proven against the Pre snapshot like inputs.
+  - A call with more than 64 analysis stages records the first 64 and says
+    so.
+- **Hash-linked report values.**
+  - `register_value(..., source={"path", "locator"})` records the source
+    file's repository-relative path, SHA-256 and locator.
+  - New `check_report_values.py` flags a number whose source changed
+    (`stale-value`), is gone, or is malformed. Unlinked numbers are
+    `unchecked-value` warnings.
+  - `sync_html_report.py` blocks on stale numbers, and `check_html_report.py
+    --manifest` and the TeX gate run the same check.
+  - Fragment writes take a sidecar lock, so parallel scripts no longer drop
+    entries.
+  - The fix for a stale number is to rerun its analysis, never to refresh
+    the hash.
+- **A standard sample ledger.** `samples.tsv` with a `samples.ledger.json`
+  spec (templates in `skills/core/templates/`) names the sample id, group,
+  replication nesting and crossed batch variables. The ingest skill writes it.
+  `data_contract_check.py --ledger` checks unique ids, nesting, units per
+  group (`rows: samples`), each batch against the group (the existing
+  `batch_confounding`), and pairing. `--emit-contract` gives analyses a
+  starting contract, with its table path relative to `--root`.
+  - New check kinds: `unique`, `nesting`, and `batch_estimability`.
+    `batch_estimability` blocks when batch columns adjusted for together
+    make a contrast level inestimable, even if each passes alone.
+  - `unit_of_replication` gains `rows: samples` and `unit_scope` (local
+    labels), and `batch_confounding` gains `batch_scope`.
+  - `pairing` blocks with fewer than two levels.
+  - A ledger pairing may declare its expected levels. When the pairing
+    licenses units across groups, it must cover every group present.
+- **`skills/core/references/provenance-schema.json`**, one JSON Schema file
+  for manifests (v1 and v2), events, data commands, skips, observations, index
+  results, report fragments, numbers, findings and the ledger. Tests validate
+  real outputs against it, and CI requires the validator.
+- **Row and feature access records (item 7).** `record_ids(name, ids,
+  axis=row|feature, role=read|used|written|excluded)` in `register_value.py`
+  records which cells, samples or genes a step used or dropped. It stores a
+  count, a distinct count and a fingerprint of the id set (never the ids) in
+  `analysis/<name>/outputs/access.json`. `record_access.R` is the R version;
+  it shares the Python implementation through `register_value.py record-ids`.
+  The analyze skill recommends it at filter, subset and split steps. Design and
+  decisions: `docs/plans/row-feature-access.md`.
+- **Multi-file report sources.** `register_value(..., source=[...])` links a
+  number to several files, for example the table and the config that set its
+  threshold. The number is stale when any of them changes. Live runs showed
+  why: a threshold change left the table byte-identical while changing the
+  number.
+
 ### Changed
+
+- **Committed lineage manifests keep only allowlisted words**
+  (`text_policy: "allowlist-v1"`). Six review rounds kept finding secrets
+  that survived the denylist redaction, which can never cover every shell,
+  CLI and language. Manifests under `.living/log/data-lineage/` are
+  committed, so at Stop every free-text field of every record they hold now
+  keeps only the command word, option and assignment names, short numbers
+  (not after a secret-named option), operators, and the record's own paths.
+  Everything else becomes `<v>`, and a heredoc body becomes
+  `<heredoc: N lines>`. The fields covered are `bash_cmd`, `step.argv`,
+  `script_args`, `params`, `env` values, `wrappers`, `script_candidate`,
+  lineage warnings, skip details, and the `bash_cmd` of observations.
+  `script_source` is no longer committed; `script_sha256`,
+  `script_source_bytes` and `script_source_lines` are. A historical event's
+  `filters_detected` is dropped from new manifests. Manifests without
+  `text_policy` (0.9.7 and earlier) still load. Events recorded before an
+  upgrade get the allowlist when they are consolidated into a new manifest.
+- **The allowlist is the only text policy.** The blocklist redaction
+  (`redact_command` and friends, and `script_sha256_of: "sanitized"`
+  digests) is deleted. Stores that outlive a session keep allowlisted text
+  too: an observation's `bash_cmd` in `.mycelium/io/obs/`, and the
+  accepted and abandoned event archives. Only the event queue, consumed at
+  each Stop, holds raw text. A script digest is the plain file digest. The
+  extractor parses raw text, except that a secret-named option's value is
+  never read as a config path or seed. Old records with a sanitized digest
+  still load.
+
+- `filters_detected` is no longer recorded. It held unevaluated regex text
+  with false positives, and nothing read it. Historical records keep it.
+  Seeds now skip string literals and recognize R `set.seed`.
 
 - The README's Codex install section now says where to approve hooks in the
   desktop app (Settings → Hooks, under From Plugins, or the composer's

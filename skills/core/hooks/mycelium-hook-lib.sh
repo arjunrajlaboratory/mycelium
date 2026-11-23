@@ -620,10 +620,13 @@ mycelium__prepare_locked_post_tool_state_once() {
 # (`lineage-skips-unowned.ndjson.lock`) because Stop rewrites it by atomic
 # replacement: a failed rewrite leaves the original records in place.
 MYCELIUM__PY_LINEAGE_SKIP='
-import fcntl, json, os, sys, uuid
+import fcntl, json, os, sys, time, uuid
 path, ts, command, reason, detail = sys.argv[1:6]
 # skip_id makes a record countable once however often a retry moves it.
-record = {"ts": ts, "kind": "skip", "skip_id": uuid.uuid4().hex,
+# ts_ns places the gap among the records of the same second. The command
+# is kept as the host showed it: Stop consumes the record within the turn
+# and commits only allowlisted words of it.
+record = {"ts": ts, "ts_ns": time.time_ns(), "kind": "skip", "skip_id": uuid.uuid4().hex,
           "skip_reason": reason, "detail": detail,
           "bash_cmd": command, "agent_id": None, "agent_type": None,
           "bash_exit": None}
@@ -650,6 +653,15 @@ while len(rest) >= 2:
         once = value == "true"
     elif flag == "--stable-lock":
         stable_lock = value == "true"
+# The call this skip belongs to, when the tracker knows it: the index then
+# matches the skip to that call observation rather than counting a gap.
+call = os.environ.get("MYCELIUM__SKIP_CALL", "")
+skip_host = record.get("host") or os.environ.get("MYCELIUM__SKIP_HOST", "")
+if call and skip_host:
+    record["observation_id"] = skip_host + ":" + call
+    record.setdefault("host", skip_host)
+    if os.environ.get("MYCELIUM__SKIP_SESSION"):
+        record.setdefault("host_session_id", os.environ["MYCELIUM__SKIP_SESSION"])
 line = (json.dumps(record) + "\n").encode("ascii")
 lock_path = path + ".lock" if stable_lock else path
 lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
@@ -684,6 +696,21 @@ finally:
 # Caller holds the session lock and owns the transaction.
 mycelium_record_lineage_skip() {
   python3 -c "$MYCELIUM__PY_LINEAGE_SKIP" "$@" >/dev/null 2>&1 || true
+}
+
+# mycelium_archive_lineage_stream STREAM ARCHIVE: an abandoned session's raw
+# event stream is kept only with every record under the commit allowlist
+# (an accepted Stop keeps the copy consolidation wrote). The raw stream is
+# removed either way.
+mycelium_archive_lineage_stream() {
+  python3 -c '
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[3])
+import extract_data_lineage
+extract_data_lineage.commit_stream(Path(sys.argv[1]), Path(sys.argv[2]))
+' "$1" "$2" "$MYCELIUM__HOOKS_DIR/../scripts" >/dev/null 2>&1 || true
+  rm -f "$1"
 }
 
 # mycelium_record_unowned_lineage_skip REPO_ROOT PAYLOAD COMMAND REASON DETAIL
@@ -737,6 +764,12 @@ try:
         mode = stat.S_IMODE(os.fstat(handle.fileno()).st_mode)
         lines = handle.read().splitlines(keepends=True)
     taken, kept, waiting = [], [], []
+    # A shared state directory can serve several checkouts: a v2 record
+    # names its own, and only this checkout takes it.
+    this_root = ""
+    if os.environ.get("MYCELIUM__LINEAGE_DIR"):
+        this_root = os.path.realpath(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.environ["MYCELIUM__LINEAGE_DIR"]))))
     for raw in lines:
         try:
             record = json.loads(raw)
@@ -745,6 +778,9 @@ try:
             continue
         if not (isinstance(record, dict) and record.get("host") == host
                 and record.get("host_session_id") == sid):
+            kept.append(raw)
+        elif (this_root and isinstance(record.get("repo_root"), str)
+              and os.path.realpath(record["repo_root"]) != this_root):
             kept.append(raw)
         elif dest or record.get("kind") != "data_command":
             taken.append(record)
