@@ -236,9 +236,11 @@ hook, filesystem, or lifecycle boundaries.
       every section has a nonblank, non-heading body line after obsolete
       lifecycle prose is removed. Cleanup and completeness validation share one implementation,
       and the finalizer enforces that post-cleanup contract before writing. It
-      atomically publishes an authoritative accepted-status block; an absent,
-      stale, malformed, partial, or cleanup-emptied handoff is replaced
-      atomically with a complete fallback. Only an accepted Stop publishes the
+      atomically publishes an authoritative accepted-status block. A fresh
+      handoff that fails the check blocks Stop once per transaction with its
+      specific problems; an absent or stale handoff, one still failing on the
+      retry, or a validator error is replaced atomically with a complete
+      fallback without a block. Only an accepted Stop publishes the
       private handoff to shared `.mycelium/last-session.md`.
 - [ ] Stop updates factual registry fields without overwriting an agent-authored
       Summary, Key Outputs, or Tags for the same session.
@@ -627,7 +629,7 @@ exercise them.
 | `R -e`, `R -q -e`, `R --vanilla -q -e`, `R -e … --args`, `Rscript -e`, and `python -c` run; or `R -f script.R`, `R --file=script.R`, `R CMD BATCH script.R`, and `Rscript script.R` run | Every inline one-liner is exempt from the post-action check yet still recorded as lineage; every script run opens the post-action cycle and records its script. `R -e … --version`, `R --args -e …`, `R -d lldb -e …`, and `R -f script.R RHOME` record nothing. |
 | `--help`/`--version` or `-h`/`-V` precedes an apparent interpreter payload | No execution or lineage is attributed, including terminal short-option clusters and adjacent R/Jupyter forms. |
 | Atomic session-log replacement fails after registry/context preparation | Stop blocks, frontmatter remains unaccepted with no footer, active state survives resume/compact, and one retry produces one footer. |
-| The agent writes a fresh five-section private `last-session.md` before Stop | Stop validates the post-cleanup body, preserves authored content, adds/updates its authoritative accepted-status block, and removes stale standalone "Stop pending" lines. A missing, stale, partial, or cleanup-emptied handoff receives an atomic five-section fallback instead; direct finalizer rejection leaves both source and destination unchanged. Accepted Stop atomically publishes the complete file to shared `.mycelium/last-session.md`; blocked Stop does not. |
+| The agent writes a fresh five-section private `last-session.md` before Stop | Stop validates the post-cleanup body, preserves authored content, adds/updates its authoritative accepted-status block, and removes stale standalone "Stop pending" lines. A fresh partial or cleanup-emptied handoff blocks Stop once with its problems named; a missing or stale one, or one still failing on retry, receives an atomic five-section fallback instead; direct finalizer rejection leaves both source and destination unchanged. Accepted Stop atomically publishes the complete file to shared `.mycelium/last-session.md`; blocked Stop does not. |
 | A code-mode local tool returns model-facing `input_text` blocks containing serialized result JSON | Exit status is recovered recursively for lineage, conditional execution, and failed-edit activity classification. |
 | Current Codex Bash PostToolUse supplies an empty `tool_response` before its outer command event completes | The analysis execution is retained, exit status and wall time stay null, and no success value is fabricated. |
 | Current Claude SessionStart or PostToolUse returns context | The raw hook response uses `hookSpecificOutput` with the matching event name, and a fresh Claude task receives the context in its model-visible system reminder. |

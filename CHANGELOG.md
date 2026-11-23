@@ -160,6 +160,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The handoff instructions now name the exact five headings Stop accepts.**
+  The `SESSION HANDOFF PATH` line that SessionStart injects and rule 10 of
+  the `MYCELIUM.md` template asked only for a "five-section handoff", and
+  step 10 of the post-action protocol gave loose names ("What worked on",
+  "Key decisions", "Blockers") that the validator's whole-line match
+  rejects. An agent that had not read the core skill could write five
+  sections under its own headings (an Antigravity App run used
+  `## 1. Accomplished` … `## 5. Next Steps`). Stop then rejected that
+  handoff and published the generic fallback in its place. All three
+  instructions now list `## What was worked on`, `## Key decisions made`,
+  `## Blockers & surprises`, `## Current state` and `## Next steps` in
+  order, and say that a handoff matching no supported heading schema gets
+  the fallback (the older `## Current State` / `## What Was Done` schema is
+  still accepted). They also say each section needs a line of prose or a
+  bullet besides its `###` subheadings (`- None.` when there is nothing to
+  report), since a section holding only a subheading counts as empty, and
+  that `## Current state` describes the project, not Stop status.
+- **Stop now explains a handoff it would replace, once, instead of replacing
+  it silently.** When the agent wrote a handoff during the session that
+  fails the completeness check, Stop blocks with the handoff's path and its
+  problems: missing, duplicated or out-of-order headings, sections with no
+  prose or bullet, and Stop-status lines that cleanup removes. The block
+  happens once per session transaction. If the retry still fails, or the
+  handoff is missing or stale, Stop publishes the generic fallback as
+  before. If the check itself errors, Stop also falls back without
+  blocking. Complete handoffs, including the older `## Current State` /
+  `## What Was Done` schema, are accepted without a block. A leading
+  byte-order mark or trailing whitespace on a heading line no longer makes
+  a heading count as missing. The check runs before the registry row is
+  written, so a blocked attempt never reads as complete. On the Antigravity
+  adapter's last allowed Stop, where a block could not reach the agent,
+  Stop publishes the fallback at once. The one-time marker is cleared when
+  Stop accepts or SessionStart replaces the transaction, and it moves with
+  a session adopted into a worktree, so the move does not grant a second
+  explanation. A heading inside a closed fenced code block that starts at
+  column 0 is an example, not a section. Any handoff the previous check
+  accepted is still accepted. After waiting on the registry, Stop reads the
+  handoff once and publishes exactly those bytes (or the fallback), so a
+  handoff written while Stop waited is kept. A failed late attempt no longer
+  replaces `last-session.md` with an unpublished fallback.
+  `finalize_handoff.py --diagnose` reports the problems: exit 0 for a
+  complete handoff, 3 with a one-line diagnosis, 1 on error. Existing projects pick up the new rule 10 the next time
+  `init_repo.py` or migration refreshes their `MYCELIUM.md`.
 - **A routine accepted Stop no longer gives Claude another turn.** On
   Claude Code, `additionalContext` on a Stop hook continues the conversation.
   Mycelium used it for the ".living/ updated" confirmation, so every accepted

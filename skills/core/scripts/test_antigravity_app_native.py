@@ -807,6 +807,48 @@ def test_command_still_running_at_the_final_stop_allowance_is_recorded_unverifie
     assert turn["unverified_provenance"] == {"5": ag.FINAL_PENDING} and data_calls(calls) == []
 
 
+def test_only_the_last_allowed_stop_tells_the_hook_no_continuation_remains(native, monkeypatch):
+    """A block on the last allowed Stop never reaches the agent (the turn is marked
+    incomplete), so the shared hook is told and publishes the fallback instead."""
+    home, repo, payload, calls, db = native
+    seen = []
+
+    def hook(name, data, root, plugin, **kw):
+        calls.append((ag.active_host(), name, data))
+        if name == "mycelium-stop-check.sh":
+            seen.append(kw.get("last_stop"))
+            if len(seen) <= ag.MAX_STOP_RETRIES:
+                return {"decision": "block", "reason": "triage first"}
+        return {}
+
+    monkeypatch.setattr(ag, "run_hook", hook)
+    for attempt in range(ag.MAX_STOP_RETRIES):
+        assert app("Stop", stop(payload, executionNum=attempt))["decision"] == "continue"
+    assert app("Stop", stop(payload, executionNum=ag.MAX_STOP_RETRIES)) == {}
+    assert seen == [False] * ag.MAX_STOP_RETRIES + [True]
+    assert state_of(repo)["status"] == "accepted"
+
+
+def test_run_hook_sets_the_no_continuation_flag_only_when_asked(monkeypatch, tmp_path):
+    captured = []
+    monkeypatch.setenv(ag.NO_CONTINUATION_ENV, "1")
+    monkeypatch.setattr(ag, "active_host", lambda: "antigravity-app")
+
+    class Captured(Exception):
+        pass
+
+    def fake_run(*args, **kwargs):
+        captured.append(kwargs["env"])
+        raise Captured
+
+    monkeypatch.setattr(ag.subprocess, "run", fake_run)
+    for last_stop in (False, True):
+        with pytest.raises(Captured):
+            ag.run_hook("mycelium-stop-check.sh", {"session_id": "s"}, tmp_path, tmp_path,
+                        last_stop=last_stop)
+    assert [env.get(ag.NO_CONTINUATION_ENV) for env in captured] == [None, "1"]
+
+
 # ---- Post-action reminders queued after the last PreInvocation reach the agent at Stop ----------
 
 def remind_and_block(monkeypatch, calls, stop_blocks=0):

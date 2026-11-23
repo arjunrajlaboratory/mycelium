@@ -144,6 +144,17 @@ def _owned_log(root: Path, host: str, sid: str = SID) -> Path:
     return Path(marker.read_text().splitlines()[0])
 
 
+# Complete, so the accepted Stop keeps it; an incomplete handoff written this
+# transaction would get the one-time handoff explanation instead.
+MOVED_HANDOFF = (
+    "## What was worked on\n- Handoff written before the move.\n\n"
+    "## Key decisions made\n- None.\n\n"
+    "## Blockers & surprises\n- None.\n\n"
+    "## Current state\n- Analysis edited in the worktree.\n\n"
+    "## Next steps\n- Continue in the worktree.\n"
+)
+
+
 @pytest.mark.parametrize("host", HOSTS)
 def test_moving_into_a_worktree_keeps_one_transaction(tmp_path, host):
     main, worktree = _checkouts(tmp_path)
@@ -157,7 +168,7 @@ def test_moving_into_a_worktree_keeps_one_transaction(tmp_path, host):
     start_ts = int((_run_dir(main, host) / "session-start-ts.tmp").read_text())
     started = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(start_ts))
     handoff = _run_dir(main, host) / "last-session.md"
-    handoff.write_text("# Handoff written before the move\n")
+    handoff.write_text(MOVED_HANDOFF)
 
     # The session moves into the worktree and works there.
     _edit(host, worktree, worktree / "analysis.py", "x = 2\n")
@@ -166,7 +177,7 @@ def test_moving_into_a_worktree_keeps_one_transaction(tmp_path, host):
     # and the handoff written at the path SessionStart announced.
     assert not _run_dir(main, host).exists()
     assert (_run_dir(worktree, host) / "last-session.md").read_text() \
-        == "# Handoff written before the move\n"
+        == MOVED_HANDOFF
     log = _owned_log(worktree, host)
     assert re.search(r"^started: (.+)$", log.read_text(), re.M).group(1) \
         == started
@@ -378,3 +389,33 @@ def test_a_malformed_owner_token_is_not_taken(tmp_path):
 
     assert stub.is_file()
     assert owner.is_file()
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_handoff_explanation_given_before_a_move_is_not_given_again(
+    tmp_path, host
+):
+    """The one-time handoff block moves with the session: the adopting
+    checkout's Stop falls back instead of explaining a second time."""
+    main, worktree = _checkouts(tmp_path)
+    _start(host, main)
+    # A shell edit records no activity, so the reservation stays adoptable.
+    (main / "report.py").write_text("y = 3\n")
+    with (main / ".living" / "learnings.md").open("a") as handle:
+        handle.write("\n### Main learning\n- noted\n")
+    handoff = _run_dir(main, host) / "last-session.md"
+    handoff.write_text("## 1. Accomplished\n- Numbered headings.\n")
+    future = time.time() + 2
+    os.utime(handoff, (future, future))
+    first = _stop(host, main, active=False)
+    assert _blocked(first), first.stdout
+    assert "would be replaced by a generic fallback" in json.loads(first.stdout)["reason"]
+    assert (_run_dir(main, host) / "handoff-check-blocked.tmp").is_file()
+
+    _edit(host, worktree, worktree / "analysis.py", "x = 3\n")
+    assert (_run_dir(worktree, host) / "handoff-check-blocked.tmp").read_text() == "carried\n"
+    with (worktree / ".living" / "learnings.md").open("a") as handle:
+        handle.write("\n### Worktree learning\n- noted\n")
+    stop = _stop(host, worktree, active=True)
+    reason = json.loads(stop.stdout)["reason"] if _blocked(stop) else ""
+    assert "would be replaced by a generic fallback" not in reason

@@ -44,29 +44,91 @@ _STALE_STOP_LINE = re.compile(
 _MARKDOWN_HEADING = re.compile(r"^ {0,3}#{1,6}(?:\s|$)")
 
 
+_FENCE = re.compile(r"^(`{3,}|~{3,})")
+
+
+def _outside_fences(lines: list[str]) -> list[bool]:
+    """Mark the lines that are not inside a fenced code block.
+
+    A fenced example of a handoff is text, not structure. Deliberately
+    minimal: a fence opens only at column 0, where a section heading must
+    start, and only when a matching line (at least as many of the same
+    character, nothing after) closes it later. An unclosed run is ordinary
+    text, so it can never swallow the sections that follow it.
+    """
+    outside = [True] * len(lines)
+    index = 0
+    while index < len(lines):
+        opened = _FENCE.match(lines[index])
+        if opened and not (
+            opened.group(1)[0] == "`" and "`" in lines[index][opened.end():]
+        ):
+            marker = opened.group(1)
+            for close in range(index + 1, len(lines)):
+                closing = _FENCE.match(lines[close])
+                if (
+                    closing
+                    and closing.group(1)[0] == marker[0]
+                    and len(closing.group(1)) >= len(marker)
+                    and not lines[close][closing.end():].strip()
+                ):
+                    for inside in range(index, close + 1):
+                        outside[inside] = False
+                    index = close
+                    break
+        index += 1
+    return outside
+
+
+def _is_body(line: str, outside: bool) -> bool:
+    # A subheading is structure; inside a fence every nonblank line is text.
+    return bool(line.strip()) and (not outside or not _MARKDOWN_HEADING.match(line))
+
+
 def clean_handoff_body(content: str) -> str:
-    content = _STATUS_BLOCK.sub("", content)
+    # Editors may save a byte-order mark; it is not part of the first heading.
+    content = _STATUS_BLOCK.sub("", content.removeprefix("\ufeff"))
     kept = [line for line in content.splitlines() if not _STALE_STOP_LINE.match(line)]
     return "\n".join(kept).strip("\n")
 
 
-def handoff_has_complete_sections(content: str) -> bool:
-    lines = content.splitlines()
+def _section_starts(lines: list[str], *, tolerant: bool) -> dict[str, list[int]]:
+    """Where each schema heading occurs.
+
+    The strict reading is the original contract: whole-line equality,
+    anywhere. The tolerant reading forgives trailing whitespace on a heading
+    and ignores lines inside fenced examples. A handoff passing either is
+    complete, so tolerance can only ever accept more than the strict reading.
+    """
+    outside = _outside_fences(lines) if tolerant else [True] * len(lines)
+    found: dict[str, list[int]] = {}
+    for headings in HANDOFF_SCHEMAS:
+        for heading in headings:
+            found[heading] = [
+                index
+                for index, line in enumerate(lines)
+                if outside[index]
+                and (line.rstrip() == heading if tolerant else line == heading)
+            ]
+    return found
+
+
+def _complete_under(lines: list[str], *, tolerant: bool) -> bool:
+    starts = _section_starts(lines, tolerant=tolerant)
+    outside = _outside_fences(lines) if tolerant else [True] * len(lines)
     for headings in HANDOFF_SCHEMAS:
         positions: list[int] = []
         for heading in headings:
-            matches = [index for index, line in enumerate(lines) if line == heading]
-            if len(matches) != 1:
+            if len(starts[heading]) != 1:
                 break
-            positions.append(matches[0])
+            positions.append(starts[heading][0])
         else:
             if positions != sorted(positions):
                 continue
             for index, start in enumerate(positions):
                 end = positions[index + 1] if index + 1 < len(positions) else len(lines)
                 if not any(
-                    line.strip() and not _MARKDOWN_HEADING.match(line)
-                    for line in lines[start + 1 : end]
+                    _is_body(lines[line], outside[line]) for line in range(start + 1, end)
                 ):
                     break
             else:
@@ -74,8 +136,69 @@ def handoff_has_complete_sections(content: str) -> bool:
     return False
 
 
+def handoff_has_complete_sections(content: str) -> bool:
+    lines = content.splitlines()
+    return _complete_under(lines, tolerant=False) or _complete_under(lines, tolerant=True)
+
+
 def handoff_is_complete_after_cleanup(content: str) -> bool:
     return handoff_has_complete_sections(clean_handoff_body(content))
+
+
+def _quoted(headings: list[str] | tuple[str, ...]) -> str:
+    return ", ".join(f"`{heading}`" for heading in headings)
+
+
+def describe_handoff_problems(content: str) -> list[str]:
+    """Say why a handoff fails, measured against the canonical schema.
+
+    Returns an empty list for a handoff Stop would preserve. Each problem is a
+    short single-line phrase an agent can act on without reading this file.
+    """
+    if handoff_is_complete_after_cleanup(content):
+        return []
+    headings = HANDOFF_SCHEMAS[0]
+    without_status = _STATUS_BLOCK.sub("", content)
+    stripped = [
+        line.strip()
+        for line in without_status.splitlines()
+        if _STALE_STOP_LINE.match(line)
+    ]
+    lines = clean_handoff_body(content).splitlines()
+    outside = _outside_fences(lines)
+    found = _section_starts(lines, tolerant=True)
+    positions = {heading: found[heading] for heading in headings}
+    problems: list[str] = []
+    missing = [heading for heading in headings if not positions[heading]]
+    if missing:
+        problems.append(f"missing {_quoted(missing)}")
+    for heading in headings:
+        if len(positions[heading]) > 1:
+            problems.append(f"`{heading}` appears {len(positions[heading])} times")
+    single = [heading for heading in headings if len(positions[heading]) == 1]
+    found_order = sorted(single, key=lambda heading: positions[heading][0])
+    if found_order != single:
+        problems.append(f"headings out of order ({_quoted(found_order)})")
+    # Every occurrence ends the section before it, so a duplicate heading's
+    # body is never credited to the empty section above it.
+    starts = sorted(position for found in positions.values() for position in found)
+    for heading in single:
+        start = positions[heading][0]
+        later = [position for position in starts if position > start]
+        end = later[0] if later else len(lines)
+        if not any(
+            _is_body(lines[line], outside[line]) for line in range(start + 1, end)
+        ):
+            problems.append(f"`{heading}` has no prose or bullet")
+    if stripped:
+        sample = stripped[0][:120]
+        problems.append(
+            f"{len(stripped)} Stop-status line(s) are removed before the check "
+            f'(e.g. "{sample}")'
+        )
+    if not problems:
+        problems.append("its sections do not match a supported heading schema")
+    return problems
 
 
 def finalize(content: str, accepted_at: str) -> str:
@@ -147,9 +270,26 @@ def main() -> int:
     parser.add_argument("--accepted-at")
     parser.add_argument("--publish-to", type=Path)
     parser.add_argument("--check-complete", action="store_true")
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="exit 0 if complete, 3 with a one-line diagnosis if not, 1 on error",
+    )
     args = parser.parse_args()
     try:
         content, mode = read_regular(args.handoff)
+        if args.diagnose:
+            if (
+                args.check_complete
+                or args.accepted_at is not None
+                or args.publish_to is not None
+            ):
+                return 1
+            problems = describe_handoff_problems(content)
+            if not problems:
+                return 0
+            print("; ".join(problems).replace("\n", " "))
+            return 3
         if args.check_complete:
             if args.accepted_at is not None or args.publish_to is not None:
                 return 1

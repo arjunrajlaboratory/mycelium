@@ -267,3 +267,231 @@ def test_section_holding_only_subheadings_is_incomplete() -> None:
     )
 
     assert not handoff_is_complete_after_cleanup(handoff)
+
+
+NUMBERED_HANDOFF = Path(__file__).with_name("testdata") / "antigravity-app-numbered-handoff.md"
+
+
+def _diagnose(tmp_path: Path, content: str) -> subprocess.CompletedProcess:
+    handoff = tmp_path / "last-session.md"
+    handoff.write_text(content)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--handoff", str(handoff), "--diagnose"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_diagnose_accepts_canonical_and_legacy_handoffs(tmp_path: Path) -> None:
+    legacy = (
+        "## Current State\n- Tests passed.\n\n"
+        "## What Was Done\n- Lifecycle smoke audit.\n\n"
+        "## Key Decisions\n- Preserve the authored handoff.\n\n"
+        "## Next Steps\n- Continue review.\n\n"
+        "## Relevant Files\n- `.living/learnings.md`.\n"
+    )
+    for content in (_complete_handoff(), legacy):
+        result = _diagnose(tmp_path, content)
+        assert (result.returncode, result.stdout) == (0, "")
+
+
+def test_diagnose_names_the_numbered_headings_of_a_real_app_handoff(
+    tmp_path: Path,
+) -> None:
+    result = _diagnose(tmp_path, NUMBERED_HANDOFF.read_text(encoding="utf-8"))
+
+    assert result.returncode == 3
+    assert result.stdout.count("\n") == 1
+    assert result.stdout.strip() == (
+        "missing `## What was worked on`, `## Key decisions made`, "
+        "`## Blockers & surprises`, `## Current state`, `## Next steps`"
+    )
+
+
+def test_diagnose_names_a_section_holding_only_a_subheading(tmp_path: Path) -> None:
+    handoff = _complete_handoff().replace(
+        "## Key decisions made\n- Preserve complete authored handoffs.\n",
+        "## Key decisions made\n\n### Locked decisions\n",
+    )
+
+    result = _diagnose(tmp_path, handoff)
+
+    assert result.returncode == 3
+    assert result.stdout.strip() == "`## Key decisions made` has no prose or bullet"
+
+
+def test_diagnose_explains_a_stripped_stop_status_bullet(tmp_path: Path) -> None:
+    handoff = _complete_handoff(
+        current_state="- Natural Stop finalization remains pending."
+    )
+
+    result = _diagnose(tmp_path, handoff)
+
+    assert result.returncode == 3
+    assert "`## Current state` has no prose or bullet" in result.stdout
+    assert "1 Stop-status line(s) are removed before the check" in result.stdout
+    assert "Natural Stop finalization remains pending." in result.stdout
+
+
+def test_diagnose_names_duplicated_and_misordered_headings(tmp_path: Path) -> None:
+    duplicated = _complete_handoff() + "\n## Next steps\n- Again.\n"
+    misordered = _complete_handoff().replace(
+        "## What was worked on\n- Lifecycle finalization.\n\n", ""
+    ) + "\n## What was worked on\n- Lifecycle finalization.\n"
+
+    assert "`## Next steps` appears 2 times" in _diagnose(tmp_path, duplicated).stdout
+    assert "headings out of order (`## Key decisions made`" in _diagnose(
+        tmp_path, misordered
+    ).stdout
+
+
+def test_diagnose_fails_closed_to_an_error_status_on_unreadable_input(
+    tmp_path: Path,
+) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--handoff",
+            str(tmp_path / "absent.md"),
+            "--diagnose",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+
+
+def test_byte_order_mark_and_trailing_heading_space_are_complete(
+    tmp_path: Path,
+) -> None:
+    # Both are invisible in an editor; the check and the diagnosis share one
+    # normalisation, so neither costs the agent its authored handoff.
+    for raw in (
+        b"\xef\xbb\xbf" + _complete_handoff().encode(),
+        _complete_handoff().replace("## Current state", "## Current state  \t").encode(),
+    ):
+        handoff = tmp_path / "last-session.md"
+        handoff.write_bytes(raw)
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--handoff", str(handoff), "--diagnose"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert (result.returncode, result.stdout) == (0, "")
+        assert finalize(raw.decode("utf-8"), "2026-11-23T12:00:00-0500").count(
+            "﻿"
+        ) == 0
+
+
+def test_diagnose_names_an_empty_section_before_a_duplicate(tmp_path: Path) -> None:
+    handoff = _complete_handoff().replace(
+        "## Current state\n- Analysis complete.\n\n", "## Current state\n\n"
+    ) + "\n## Next steps\n- A second list.\n"
+
+    result = _diagnose(tmp_path, handoff)
+
+    assert result.returncode == 3
+    assert "`## Next steps` appears 2 times" in result.stdout
+    assert "`## Current state` has no prose or bullet" in result.stdout
+
+
+LEGACY_WITH_FENCED_EXAMPLE = (
+    "## Current State\n- Tests passed.\n\n"
+    "## What Was Done\n- Documented the handoff format:\n\n"
+    "{fence}markdown\n## Next Steps  \n- example bullet\n{fence}\n\n"
+    "## Key Decisions\n- Preserve the authored handoff.\n\n"
+    "## Next Steps\n- Continue review.\n\n"
+    "## Relevant Files\n- `.living/learnings.md`.\n"
+)
+
+
+def test_headings_inside_fenced_code_are_examples_not_sections(tmp_path: Path) -> None:
+    from finalize_handoff import handoff_is_complete_after_cleanup
+
+    canonical_example = _complete_handoff().replace(
+        "## Key decisions made\n- Preserve complete authored handoffs.\n",
+        "## Key decisions made\n- Preserve complete authored handoffs.\n\n"
+        "```\n## Current state\n```\n",
+    )
+    for content in (
+        LEGACY_WITH_FENCED_EXAMPLE.format(fence="```"),
+        LEGACY_WITH_FENCED_EXAMPLE.format(fence="~~~~"),
+        canonical_example,
+    ):
+        assert handoff_is_complete_after_cleanup(content)
+        result = _diagnose(tmp_path, content)
+        assert (result.returncode, result.stdout) == (0, "")
+
+
+FENCE = "`" * 3
+LIST_ITEM_FENCE = "\n".join((
+    "## Current State", "- Checks pass.", "",
+    "## What Was Done", "- " + FENCE + "sh", "  python -m pytest -q", "  " + FENCE, "",
+    "## Key Decisions", "- Keep the current format.", "",
+    "## Next Steps", "- Publish the report.", "",
+    "## Relevant Files", "- report.md", "",
+))
+NESTED_FENCE = "\n".join((
+    "## What was worked on", "- Example:", "",
+    "````markdown", FENCE, "## Current state", FENCE, "````", "",
+    "## Key decisions made", "- None.", "",
+    "## Blockers & surprises", "- None.", "",
+    "## Current state", "- Ready.", "",
+    "## Next steps", "- " + FENCE + "unclosed inline example", "- Continue.", "",
+))
+UNCLOSED_FENCE = _complete_handoff().replace(
+    "## Current state", FENCE + "\n## Current state"
+)
+
+
+def _main_accepts(content: str) -> bool:
+    """origin/main's validator, the floor this branch must never go below."""
+    source = subprocess.run(
+        ["git", "show", "origin/main:skills/core/scripts/finalize_handoff.py"],
+        capture_output=True, text=True, check=False, cwd=Path(__file__).parent,
+    )
+    if source.returncode:
+        import pytest
+
+        pytest.skip("origin/main is not available")
+    namespace: dict = {}
+    exec(source.stdout, namespace)
+    return namespace["handoff_is_complete_after_cleanup"](content)
+
+
+def test_fences_never_make_the_check_stricter_than_main(tmp_path: Path) -> None:
+    from finalize_handoff import handoff_is_complete_after_cleanup
+
+    cases = {
+        "list-item fence": LIST_ITEM_FENCE,
+        "nested fence": NESTED_FENCE,
+        "unclosed fence": UNCLOSED_FENCE,
+        "handoff wrapped in a fence": FENCE + "markdown\n" + _complete_handoff() + FENCE + "\n",
+    }
+    for name, content in cases.items():
+        if _main_accepts(content):
+            assert handoff_is_complete_after_cleanup(content), name
+            result = _diagnose(tmp_path, content)
+            assert (result.returncode, result.stdout) == (0, ""), name
+    # The reviewer's regressions: main accepts both, so the branch must too.
+    assert _main_accepts(cases["list-item fence"])
+    assert _main_accepts(cases["unclosed fence"])
+    # Beyond main: a heading inside a closed column-0 fence is an example.
+    assert handoff_is_complete_after_cleanup(cases["nested fence"])
+
+
+def test_a_fenced_example_counts_as_section_body() -> None:
+    from finalize_handoff import handoff_is_complete_after_cleanup
+
+    content = _complete_handoff().replace(
+        "## Blockers & surprises\n- None.\n",
+        "## Blockers & surprises\n```\n## not a section\n```\n",
+    )
+
+    assert handoff_is_complete_after_cleanup(content)

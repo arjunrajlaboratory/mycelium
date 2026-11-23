@@ -485,11 +485,14 @@ branch: main
 ---
 LOG_EOF
 
-  # active-session-log.tmp: line 1 = log path, line 2 = owner_ts
-  printf '%s\n%s\n' "$LOG_PATH" "$(date +%s)" > "$REPO/.mycelium/active-session-log.tmp"
+  # active-session-log.tmp: line 1 = log path, line 2 = owner_ts. A legacy
+  # marker whose owner_ts differs from session-start-ts.tmp is a subagent, so
+  # both take one reading: two `date` calls can straddle a second.
+  NOW=$(date +%s)
+  printf '%s\n%s\n' "$LOG_PATH" "$NOW" > "$REPO/.mycelium/active-session-log.tmp"
 
   # Record an ordinary fresh session start.
-  date +%s > "$REPO/.mycelium/session-start-ts.tmp"
+  echo "$NOW" > "$REPO/.mycelium/session-start-ts.tmp"
 
   # No activity file, no git changes → FILES_CHANGED = 0
   # Duration = 0 min (start_ts = now)
@@ -700,8 +703,11 @@ files_changed:
 ## Session Log
 LOG_EOF
 
-  date +%s > "$REPO/.mycelium/session-start-ts.tmp"
-  printf '%s\n%s\n' "$LOG_PATH" "$(date +%s)" > "$REPO/.mycelium/active-session-log.tmp"
+  # One reading for both: a legacy marker whose owner_ts differs from
+  # session-start-ts.tmp is treated as a subagent and skips finalization.
+  NOW=$(date +%s)
+  echo "$NOW" > "$REPO/.mycelium/session-start-ts.tmp"
+  printf '%s\n%s\n' "$LOG_PATH" "$NOW" > "$REPO/.mycelium/active-session-log.tmp"
   echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
   touch "$REPO/.living/learnings.md"
   python3 "$HERE/../scripts/session_file_changes.py" snapshot \
