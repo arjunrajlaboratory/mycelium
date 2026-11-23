@@ -160,7 +160,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `## Blockers & surprises`, `## Current state` and `## Next steps` in
   order, and say that a handoff matching no supported heading schema gets
   the fallback (the older `## Current State` / `## What Was Done` schema is
-  still accepted). Existing projects pick up the new rule 10 the next time
+  still accepted). They also say each section needs a line of prose or a
+  bullet besides its `###` subheadings (`- None.` when there is nothing to
+  report), since a section holding only a subheading counts as empty. Existing projects pick up the new rule 10 the next time
   `init_repo.py` or migration refreshes their `MYCELIUM.md`.
 
 ## [0.9.7] - 2026-11-21

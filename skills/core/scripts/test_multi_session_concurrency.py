@@ -246,6 +246,11 @@ FALLBACK_RULE = (
     "Use these headings; a handoff that does not match a supported heading "
     "schema is replaced by a generic fallback at Stop."
 )
+# A section holding only a ### subheading counts as empty to the finalizer.
+BODY_RULE = (
+    "Each section needs at least one line of prose or a bullet besides its "
+    "subheadings; write `- None.` when there is nothing to report."
+)
 
 
 def _named_headings(instruction):
@@ -280,6 +285,7 @@ def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
     )
     assert _named_headings(handoff_line) == list(headings)
     assert FALLBACK_RULE in handoff_line
+    assert BODY_RULE in handoff_line
 
     template = (
         Path(__file__).resolve().parent.parent / "templates" / "MYCELIUM.md.template"
@@ -290,6 +296,7 @@ def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
     )
     assert _named_headings(summary_rule) == list(headings)
     assert FALLBACK_RULE in summary_rule
+    assert BODY_RULE in summary_rule
 
     acted = _run_hook(
         "mycelium-post-action.sh",
@@ -307,6 +314,7 @@ def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
     summary_step = directive[directive.index("10. SESSION SUMMARY:"):]
     assert _named_headings(summary_step) == list(headings)
     assert FALLBACK_RULE in summary_step
+    assert BODY_RULE in summary_step
     assert "### Locked decisions" in summary_step
     assert "### Dead ends — do not redo" in summary_step
 
