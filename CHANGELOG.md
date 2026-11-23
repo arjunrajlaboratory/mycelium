@@ -145,6 +145,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MYCELIUM.md` template and the core skill's verification table give the
   current hook counts (seven Claude scripts, eight Codex command hooks).
 
+### Fixed
+
+- **The handoff instructions now name the exact five headings Stop accepts.**
+  The `SESSION HANDOFF PATH` line that SessionStart injects and rule 10 of
+  the `MYCELIUM.md` template asked only for a "five-section handoff". An
+  agent that had not read the core skill could write five sections under
+  its own headings (an Antigravity App run used `## 1. Accomplished` …
+  `## 5. Next Steps`). Stop then rejected that handoff and published the
+  generic fallback in its place. Both instructions now list
+  `## What was worked on`, `## Key decisions made`, `## Blockers & surprises`,
+  `## Current state` and `## Next steps`, and say that other headings get the
+  fallback. Existing projects pick up the new rule 10 the next time
+  `init_repo.py` or migration refreshes their `MYCELIUM.md`.
+
 ## [0.9.7] - 2026-11-21
 
 ### Added

@@ -239,6 +239,44 @@ def test_identified_start_exposes_exact_private_handoff_path(tmp_path):
     assert str(state / "last-session.md") in started.stdout
 
 
+def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
+    # An Antigravity App agent that never read the core skill followed the
+    # injected "five-section handoff" instruction with its own numbered
+    # headings; Stop then rejected the handoff and published the generic
+    # fallback. Every instruction that asks for the handoff must name the
+    # exact headings the finalizer accepts.
+    from finalize_handoff import HANDOFF_SCHEMAS
+
+    headings = HANDOFF_SCHEMAS[0]
+    repo = _repo(tmp_path)
+    session_id = "handoff-heading-guidance-root"
+    _run_state(repo, "codex", session_id)
+
+    started = _run_hook(
+        "mycelium-health.sh",
+        repo,
+        {"cwd": str(repo), "source": "startup", "session_id": session_id},
+    )
+
+    assert started.returncode == 0
+    context = json.loads(started.stdout)["hookSpecificOutput"]["additionalContext"]
+    handoff_line = next(
+        line for line in context.splitlines() if "SESSION HANDOFF PATH" in line
+    )
+    for heading in headings:
+        assert f"`{heading}`" in handoff_line
+
+    template = (
+        Path(__file__).resolve().parent.parent / "templates" / "MYCELIUM.md.template"
+    ).read_text(encoding="utf-8")
+    summary_rule = next(
+        line for line in template.splitlines()
+        if line.startswith("10. **Session summary**:")
+    )
+    for heading in headings:
+        assert f"`{heading}`" in summary_rule
+
+
 def test_blocked_stop_names_exact_private_handoff_path(tmp_path):
     repo = _repo(tmp_path)
     session_id = "blocked-handoff-guidance-root"
