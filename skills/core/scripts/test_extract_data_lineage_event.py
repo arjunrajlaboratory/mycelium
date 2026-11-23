@@ -4778,7 +4778,7 @@ def test_stdlib_io_that_is_not_statically_certain_stays_unresolved(
     assert event["io_detection"] == "unresolved"
 
 
-def test_stdlib_parameter_resolves_through_every_call_site(tmp_path: Path) -> None:
+def test_stdlib_parameter_resolves_from_its_single_call_site(tmp_path: Path) -> None:
     _, inputs, outputs = _stdlib_event(
         tmp_path,
         "from pathlib import Path\n"
@@ -4787,11 +4787,12 @@ def test_stdlib_parameter_resolves_through_every_call_site(tmp_path: Path) -> No
         "        return handle.read()\n"
         "def save(text, dest=Path('out') / 'x.txt'):\n"
         "    dest.write_text(text)\n"
-        "a = load('a.csv')\n"
-        "b = load(path=Path('b.csv'))\n"
-        "save(a + b)\n",
+        "def main():\n"
+        "    save(load(path=Path('b.csv')))\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
     )
-    assert inputs == [str(tmp_path / "a.csv"), str(tmp_path / "b.csv")]
+    assert inputs == [str(tmp_path / "b.csv")]
     assert outputs == [str(tmp_path / "out/x.txt")]
 
 
@@ -4820,9 +4821,13 @@ _ARGPARSE_SCRIPT = (
     "    text, source = read_source(config_path, {'key': 't'}, mode='r')\n"
     "    return text\n"
     "\n"
-    "def load_table(table_path: Path):\n"
-    "    with table_path.open(newline='') as handle:\n"
+    "def load_counts(counts_path: Path):\n"
+    "    with counts_path.open(newline='') as handle:\n"
     "        return list(csv.DictReader(handle, delimiter='\\t'))\n"
+    "\n"
+    "def load_samples(samples_path: Path):\n"
+    "    text, source = read_source(samples_path, {'column': 'id'}, mode='r')\n"
+    "    return text\n"
     "\n"
     "def main(argv=None):\n"
     "    parser = argparse.ArgumentParser(description='demo')\n"
@@ -4836,8 +4841,8 @@ _ARGPARSE_SCRIPT = (
     "    parser.add_argument('--threshold', type=float, default=2.0)\n"
     "    args = parser.parse_args(argv)\n"
     "    load_config(args.config)\n"
-    "    load_table(args.counts)\n"
-    "    load_table(args.samples)\n"
+    "    load_counts(args.counts)\n"
+    "    load_samples(args.samples)\n"
     "    args.output.parent.mkdir(parents=True, exist_ok=True)\n"
     "    with args.output.open('w', encoding='utf-8', newline='') as handle:\n"
     "        csv.writer(handle).writerow(['gene'])\n"
@@ -4965,3 +4970,145 @@ def test_stdlib_argparse_positional_argument_is_resolved(tmp_path: Path) -> None
     )
     assert inputs == [str(tmp_path / "data/t.csv")]
     assert outputs == [str(tmp_path / "result.txt")]
+
+
+
+# Review probes (PR #155): each case names its source, the script's literal
+# arguments, and the (inputs, outputs) the narrowed grammar must record. A
+# wrong path is worse than none, so most stay unresolved.
+_STDLIB_REVIEW_CASES = {
+    "chdir": ('import os\nos.chdir("sub")\nopen("x.csv","w")\n', [], ([], [])),
+    "uncalled_fn": ('def never():\n    open("debug.csv","w")\nopen("in.csv")\n', [],
+                    (["in.csv"], [])),
+    "dict_update": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="out.csv")\nargs=p.parse_args()\nargs.__dict__.update({"out":"other.csv"})\nopen(args.out,"w")\n', [], ([], [])),
+    "vars_update": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="out.csv")\nargs=p.parse_args()\nvars(args).update({"out":"other.csv"})\nopen(args.out,"w")\n', [], ([], [])),
+    "mode_kw": ('open("a.csv", mode="a")\nopen(file="b.csv", mode="r+")\nm="x"\nopen("c.csv", m)\n', [],
+                (["b.csv"], ["a.csv", "b.csv", "c.csv"])),
+    "mode_var_reassigned": ('import sys\nm="r"\nif len(sys.argv)>1:\n    m="w"\nopen("c.csv", m)\n', [], ([], [])),
+    "cond_path": ('import sys\nif sys.argv[1:]:\n    out="a.csv"\nelse:\n    out="b.csv"\nopen(out,"w")\n', [], ([], [])),
+    "argv_override": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nopen(a.out,"w")\n', ["--out", "given.csv"], ([], ["given.csv"])),
+    "argv_abbrev": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--output", default="d.csv")\na=p.parse_args()\nopen(a.output,"w")\n', ["--out=given.csv"], ([], ["given.csv"])),
+    "argv_none": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nopen(a.out,"w")\n', None, ([], [])),
+    "getattr_ns": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nopen(getattr(a,"out"),"w")\n', [], ([], [])),
+    "alias_mut": ('import argparse,os\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nb=a\nb.out="x.csv"\nopen(a.out,"w")\n', [], ([], [])),
+    "obj_setattr": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nobject.__setattr__(a, "out", "z.csv")\nopen(a.out,"w")\n', [], ([], [])),
+    "escape_helper": ('import argparse\nfrom cfg import merge\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nmerge(a)\nopen(a.out,"w")\n', [], ([], [])),
+    "fromfile": ('import argparse\np=argparse.ArgumentParser(fromfile_prefix_chars="@")\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nopen(a.out,"w")\n', [], ([], [])),
+    "envvar_dflt_via_name": ('import argparse,os\nD=os.environ.get("O","d.csv")\np=argparse.ArgumentParser()\np.add_argument("--out", default=D)\na=p.parse_args()\nopen(a.out,"w")\n', [], ([], [])),
+    "path_open_str": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\na.out.open("w")\n', [], ([], [])),
+    "param_dead_branch": ('import sys\ndef save(p):\n    open(p,"w")\nif "--dry" in sys.argv:\n    save("dry.csv")\nelse:\n    save("real.csv")\n', [], ([], [])),
+    "class_attr": ('class C:\n    out="c.csv"\nopen(C.out,"w")\n', [], ([], [])),
+    "module_attr_store": ('import sys\nOUT="a.csv"\nsys.modules[__name__].OUT="b.csv"\nopen(OUT,"w")\n', [], ([], [])),
+    "fstring": ('x="a"\nopen(f"{x}.csv","w")\n', [], ([], [])),
+    "gzip": ('import gzip\ngzip.open("a.gz","wt")\n', [], ([], [])),
+    "walrus_after": ('p="a.csv"\nopen(p,"w")\n[(p:=1)]\n', [], ([], [])),
+    "with_as_rebind": ('p="a.csv"\nwith open("b.csv") as p:\n    pass\nopen(p)\n', [], (["b.csv"], [])),
+    "exec_string": ('exec("x=1")\nopen("a.csv")\n', [], ([], [])),
+    "Path_mode_kw": ('from pathlib import Path\nPath("a.txt").open(mode="a")\nPath("b.txt").open("x")\n', [], ([], ["a.txt", "b.txt"])),
+    "open_modes": ('open("a.csv","rU")\nopen("b.csv","rt")\nopen("c.csv","wb+")\n', [], (["b.csv"], ["c.csv"])),
+    "path_join_abs": ('import os\nopen(os.path.join("data","/etc/hosts"))\n', [], (["/etc/hosts"], [])),
+    "star_kwargs": ('kw={"mode":"w"}\nopen("a.csv", **kw)\n', [], ([], [])),
+    "default_param": ('def save(p="def.csv"):\n    open(p,"w")\nsave()\nsave(p="x.csv")\n', [], ([], [])),
+    "str_dot_open": ('import os\np=os.path.join("a","b")\np.open("w")\n', [], ([], [])),
+    "nargs_q_const": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", nargs="?", const="c.csv", default="d.csv")\na=p.parse_args()\nopen(a.out,"w")\n', ["--out"], ([], [])),
+    "positional": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("inp")\np.add_argument("out")\na=p.parse_args()\nopen(a.inp)\nopen(a.out,"w")\n', ["i.csv", "o.csv"], (["i.csv"], ["o.csv"])),
+    "dash_dash": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\np.add_argument("rest", nargs="*")\na=p.parse_args()\nopen(a.out,"w")\n', ["--", "--out", "x.csv"], ([], ["d.csv"])),
+    "main_never_called": ('import argparse\ndef main():\n    p=argparse.ArgumentParser()\n    p.add_argument("--out", default="d.csv")\n    a=p.parse_args()\n    open(a.out,"w")\nif __name__=="__main__":\n    pass\n', [], ([], [])),
+    "Path_write_on_str": ('p="a.txt"\np.write_text("x")\n', [], ([], [])),
+    "type_path_default": ('import argparse\nfrom pathlib import Path\np=argparse.ArgumentParser()\np.add_argument("--out", type=Path, default="d.csv")\na=p.parse_args()\na.out.open("w")\n', [], ([], ["d.csv"])),
+    "type_int_string_default": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--n", type=int, default="01")\na=p.parse_args()\nopen(str(a.n) + ".txt","w")\n', [], ([], [])),
+    "duplicate_dest": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\np.add_argument("--o2", dest="out", default="e.csv")\na=p.parse_args()\nopen(a.out,"w")\n', [], ([], [])),
+    "sys_argv_mutated": ('import argparse, sys\nsys.argv.append("--out=x.csv")\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nopen(a.out,"w")\n', [], ([], [])),
+    "func_attr_store": ('def f(p):\n    open(p,"w")\nf.__defaults__ = ("x",)\nf("a.csv")\n', [], ([], [])),
+    "func_defaults_rebind": ('def f(p="a.csv"):\n    open(p,"w")\nf.__defaults__ = ("x.csv",)\nf()\n', [], ([], [])),
+    "if_main_args": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\nif __name__=="__main__":\n    a=p.parse_args()\n    open(a.out,"w")\n', ["--out", "g.csv"], ([], ["g.csv"])),
+    "mode_param": ('def f(p, mode):\n    open(p, mode)\nf("a.csv","w")\nf("b.csv","r")\n', [], ([], [])),
+    "cross_join": ('import os\ndef f(d, name):\n    open(os.path.join(d, name), "w")\nf("a", "x.csv")\nf("b", "y.csv")\n', [], ([], [])),
+    "cross_path_mode": ('def save(p, m):\n    open(p, m)\nsave("raw.csv", "r")\nsave("clean.csv", "w")\n', [], ([], [])),
+    "single_call_site": ('import os\ndef save(d, name, m):\n    open(os.path.join(d, name), m)\nsave("out", "x.csv", "w")\n', [], ([], ["out/x.csv"])),
+    "io_open_rebound": ('import io\nio.open = other\nio.open("a.csv")\n', [], ([], [])),
+    "custom_opener": ('open("a.csv", "w", opener=my_opener)\n', [], ([], [])),
+    "pure_path": ('from pathlib import PurePath\nPurePath("a.csv").read_text()\n', [], ([], [])),
+    "tilde_literal": ('open("~sample.csv")\n', [], (["~sample.csv"], [])),
+    "dotdot": ('open("link/../data.csv")\n', [], ([], [])),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_STDLIB_REVIEW_CASES))
+def test_stdlib_review_probe(case: str) -> None:
+    source, script_args, expected = _STDLIB_REVIEW_CASES[case]
+    assert lineage_event._stdlib_static_io(source, script_args) == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'def f(p):\n    open(p+p+p+p,"w")\n' + "".join(f'f("p{i}")\n' for i in range(300)),
+        'a0="x"\n' + "".join(f"a{i}=a{i-1}+a{i-1}\n" for i in range(1, 40)) + 'open(a39,"w")\n',
+        'import os\na0="x"\n'
+        + "".join(f"a{i}=os.path.join(a{i-1},a{i-1})\n" for i in range(1, 40))
+        + 'open(a39,"w")\n',
+        'from pathlib import Path\na0=Path("x")\n'
+        + "".join(f"a{i}=a{i-1}/a{i-1}\n" for i in range(1, 40))
+        + 'open(a39,"w")\n',
+        "".join(f"x{i}='a'\nopen(x{i} + x{i} + x{i}, 'w')\n" for i in range(3000)),
+    ],
+    ids=["call-sites", "doubling", "join-chain", "div-chain", "many-sinks"],
+)
+def test_stdlib_pathological_script_is_bounded(source: str) -> None:
+    import time
+
+    start = time.perf_counter()
+    lineage_event._stdlib_static_io(source, [])
+    assert time.perf_counter() - start < 1.0
+
+
+def test_chdir_leaves_relative_reader_paths_unresolved(tmp_path: Path) -> None:
+    event, inputs, outputs = _stdlib_event(
+        tmp_path,
+        "import os\nimport pandas as pd\nos.chdir('sub')\n"
+        "pd.read_csv('a.csv')\nopen('/abs/b.csv')\n",
+    )
+    assert inputs == ["/abs/b.csv"]
+    assert outputs == []
+    assert any("chdir" in w for w in event["lineage_warnings"])
+
+
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("python3 run.py --out a.csv > log.txt 2>&1", ["a.csv"]),
+        ("timeout 50 python3 run.py --out t.csv", ["t.csv"]),
+        ("python3 run.py --out a.csv # --out z.csv", ["a.csv"]),
+        ("python3 run.py --out={a,b}.csv", []),
+        ("python3 run.py --out a.csv {x,y}", []),
+        ("python3 run.py --out a\\ b.csv", []),
+        ('python3 run.py --out "sample\\$1.txt"', []),
+        ("python3 run.py --out=$'a\\x2ecsv'", []),
+        ("python3 run.py --out `echo q`.csv", []),
+        ("python3 run.py --out a.csv >(cat)", []),
+    ],
+)
+def test_main_stdlib_argparse_needs_exactly_decoded_words(
+    tmp_path: Path, command: str, expected: list[str]
+) -> None:
+    (tmp_path / "run.py").write_text(
+        "import argparse\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('--out', default='default.csv')\n"
+        "p.add_argument('rest', nargs='*')\n"
+        "a = p.parse_args()\n"
+        "open(a.out, 'w').write('x')\n"
+    )
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+    result = subprocess.run(
+        [sys.executable, str(extractor), "--cwd", str(tmp_path),
+         "--ts", "2026-11-23T12:00:00Z", "--bash-cmd", command,
+         "--bash-exit", "0", "--append-to", str(target)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    events = [json.loads(line) for line in target.read_text().splitlines()]
+    assert len(events) == 1
+    assert [Path(o["path"]).name for o in events[0]["outputs"]] == expected

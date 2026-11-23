@@ -5277,13 +5277,21 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
 # A script that reads and writes through the standard library names its
 # paths in `open(...)`, `Path(...).read_text()` or `args.output.open("w")`,
 # not in a pandas-style reader the regex scan knows. On a host with no I/O
-# observer (Antigravity App) this static reading is the only record, so the
-# paths are resolved here from the script's AST, and only when certain: a
-# string literal, a name bound exactly once in the file, `os.path.join` or
-# `Path /` of those, a parameter every one of whose call sites passes such a
-# value, or an argparse option parsed from the command line as written (the
-# real `argparse` parses it, so abbreviations, `=` and defaults behave as at
-# run time). Anything else leaves that call out; nothing is guessed.
+# observer (Antigravity App) this static reading is the only record.
+#
+# This is deliberately not an interpreter. A path or mode resolves only from
+# a small grammar, and every expression has at most one value:
+#   - a string literal;
+#   - a module-level name assigned exactly once in the whole file;
+#   - `os.path.join`, `Path(...)`, `Path / x`, `.joinpath`, `str` or `+` of those;
+#   - a parameter of a module-level function with exactly one call site,
+#     evaluated from that call (so a sink's path and mode come from the same
+#     call);
+#   - an option of an argparse namespace that never leaves view, replayed
+#     through the real `argparse` with the command's literal arguments.
+# Only calls in module-level code or in a function reachable from it count.
+# Anything else, or a scan over its work budget, is left unresolved: a wrong
+# path is worse than none.
 
 
 class _StdPath(NamedTuple):
@@ -5291,22 +5299,26 @@ class _StdPath(NamedTuple):
     is_path: bool  # a pathlib.Path (has `.open`), not a str
 
 
-_STDLIB_PATH_CONSTRUCTORS = frozenset({
-    "pathlib.Path", "pathlib.PurePath", "pathlib.PosixPath", "pathlib.PurePosixPath",
-})
+_STDLIB_PATH_CONSTRUCTORS = frozenset({"pathlib.Path", "pathlib.PosixPath"})
 _STDLIB_PATH_METHODS = {
     "read_text": "r", "read_bytes": "r", "write_text": "w", "write_bytes": "w",
 }
 # Mycelium's own reader (`text, source = read_source(path, ..., mode="r")`).
 _STDLIB_READER_HELPERS = frozenset({"register_value.read_source"})
+# Attribute names that, when assigned anywhere, may rebind an I/O call.
+_STDLIB_GUARDED_ATTRS = frozenset({
+    "open", "read_text", "read_bytes", "write_text", "write_bytes",
+    "read_source", "join", "joinpath", "Path", "PosixPath", "fspath", "argv",
+})
 # Names whose use can rebind or mutate anything in the module unseen.
 _STDLIB_OPAQUE_BUILTINS = frozenset({
     "__import__", "delattr", "eval", "exec", "globals", "locals", "setattr", "vars",
 })
+_STDLIB_WORK_LIMIT = 20_000  # value evaluations per script
+_STDLIB_PATH_LIMIT = 4096
 _ARGPARSE_PARSER_KEYWORDS = frozenset({
     "add_help", "allow_abbrev", "color", "description", "epilog",
-    "exit_on_error", "formatter_class", "prefix_chars", "prog",
-    "suggest_on_error", "usage",
+    "formatter_class", "prefix_chars", "prog", "suggest_on_error", "usage",
 })
 _ARGPARSE_PARSER_PASSED = frozenset({"add_help", "allow_abbrev", "prefix_chars"})
 _ARGPARSE_ARGUMENT_KEYWORDS = frozenset({
@@ -5321,6 +5333,10 @@ _ARGPARSE_ACTIONS = frozenset({
 _ARGPARSE_INERT_METHODS = frozenset({
     "error", "exit", "format_help", "format_usage", "print_help", "print_usage",
 })
+
+
+class _OverBudget(Exception):
+    """The scan did more work than a hook may spend on it."""
 
 
 class _ArgparseExit(Exception):
@@ -5342,6 +5358,8 @@ def _open_mode_directions(mode: Any) -> tuple[str, ...]:
     """("input", "output", or both) for an `open` mode, () if not a mode."""
     if not isinstance(mode, str) or not re.fullmatch(r"[rwxabt+]+", mode):
         return ()
+    if len(set(mode)) != len(mode) or ("b" in mode and "t" in mode):
+        return ()
     kinds = set(mode) & set("rwxa")
     if len(kinds) != 1:
         return ()
@@ -5350,6 +5368,21 @@ def _open_mode_directions(mode: Any) -> tuple[str, ...]:
     if "a" in kinds and "+" in mode:
         return ("input", "output")
     return ("output",)
+
+
+def _is_main_guard(node: ast.AST) -> bool:
+    """`if __name__ == "__main__":`"""
+    test = node.test if isinstance(node, ast.If) else None
+    return (
+        isinstance(test, ast.Compare) and isinstance(test.left, ast.Name)
+        and test.left.id == "__name__" and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq) and len(test.comparators) == 1
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value == "__main__"
+    )
+
+
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.Module)
 
 
 class _StdlibIO:
@@ -5364,13 +5397,28 @@ class _StdlibIO:
         self.imports: dict[str, str] = {}
         self.loads: dict[str, list[ast.Name]] = {}
         self.stored_attrs: set[str] = set()
+        self.mutated_names: set[str] = set()  # `X.attr = ...`
         self.opaque = False
-        self.namespaces: dict[int, Any] = {}
+        self.chdir = False
+        self.work = 0
+        self.memo: dict[str, _StdPath | None] = {}
+        self.namespaces: dict[str, dict[str, Any] | None] = {}
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
                 self.parents[child] = node
         for node in ast.walk(tree):
             self._index(node)
+        self.functions = {
+            node.name: node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and not node.decorator_list
+            and self.counts.get(node.name) == 1 and node.name not in self.mutated_names
+        }
+        self.reachable = self._reachable_functions()
+
+    def _tick(self) -> None:
+        self.work += 1
+        if self.work > _STDLIB_WORK_LIMIT:
+            raise _OverBudget
 
     def _bind(self, name: str, binder: ast.AST, weight: int = 1) -> None:
         self.counts[name] = self.counts.get(name, 0) + weight
@@ -5378,14 +5426,23 @@ class _StdlibIO:
 
     def _index(self, node: ast.AST) -> None:
         if isinstance(node, ast.Name):
+            if node.id in ("chdir", "fchdir"):
+                self.chdir = True
             if isinstance(node.ctx, ast.Load):
                 self.loads.setdefault(node.id, []).append(node)
                 if node.id in _STDLIB_OPAQUE_BUILTINS:
                     self.opaque = True
             else:
                 self._bind(node.id, self.parents.get(node, node))
-        elif isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load):
-            self.stored_attrs.add(node.attr)
+        elif isinstance(node, ast.Attribute):
+            if node.attr in ("chdir", "fchdir"):
+                self.chdir = True
+            if not isinstance(node.ctx, ast.Load):
+                self.stored_attrs.add(node.attr)
+                if node.attr in _STDLIB_GUARDED_ATTRS:
+                    self.opaque = True
+                if isinstance(node.value, ast.Name):
+                    self.mutated_names.add(node.value.id)
         elif isinstance(node, ast.arg):
             self._bind(node.arg, node)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -5406,6 +5463,8 @@ class _StdlibIO:
                 self._bind(local, node)
                 if target is not None:
                     self.imports[local] = target
+                    if target.rsplit(".", 1)[-1] in ("chdir", "fchdir"):
+                        self.chdir = True
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             for name in node.names:
                 self._bind(name, node, weight=2)
@@ -5416,7 +5475,51 @@ class _StdlibIO:
         elif isinstance(node, ast.MatchMapping) and node.rest:
             self._bind(node.rest, node)
 
-    # -- names --
+    # -- structure --
+
+    def _scope(self, node: ast.AST) -> ast.AST:
+        parent = self.parents.get(node)
+        while parent is not None and not isinstance(parent, _SCOPES):
+            parent = self.parents.get(parent)
+        return parent if parent is not None else self.tree
+
+    def _call_sites(self, name: str) -> list[ast.Call] | None:
+        """Every call of a module function, or None if it is used otherwise."""
+        calls = []
+        for load in self.loads.get(name, []):
+            call = self.parents.get(load)
+            if not isinstance(call, ast.Call) or call.func is not load:
+                return None
+            if any(isinstance(a, ast.Starred) for a in call.args) or any(
+                k.arg is None for k in call.keywords
+            ):
+                return None
+            calls.append(call)
+        return calls
+
+    def _reachable_functions(self) -> set[str]:
+        """Module functions called from module-level code, transitively."""
+        reachable: set[str] = set()
+        pending: list[ast.AST] = [self.tree]
+        while pending:
+            scope = pending.pop()
+            for node in ast.walk(scope):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                    continue
+                name = node.func.id
+                if name in self.functions and name not in reachable \
+                        and self._scope(node) is scope:
+                    reachable.add(name)
+                    pending.append(self.functions[name])
+        return reachable
+
+    def _runs(self, node: ast.AST) -> bool:
+        """Whether a node is in module code or a reachable function."""
+        scope = self._scope(node)
+        return scope is self.tree or (
+            isinstance(scope, ast.FunctionDef) and scope.name in self.reachable
+            and self.functions.get(scope.name) is scope
+        )
 
     def canonical(self, func: ast.AST) -> str | None:
         """The dotted name a callee denotes, through one import or a builtin."""
@@ -5431,133 +5534,96 @@ class _StdlibIO:
             return self.imports[root] + ("." + rest if rest else "")
         return None
 
-    def _unique_value(self, name: str) -> ast.AST | None:
-        if self.counts.get(name) != 1:
-            return None
-        binder = self.binders.get(name)
-        if isinstance(binder, ast.Assign) and all(
-            isinstance(target, ast.Name) for target in binder.targets
-        ):
-            return binder.value
-        if isinstance(binder, ast.AnnAssign) and binder.value is not None \
-                and isinstance(binder.target, ast.Name):
-            return binder.value
-        return None
-
     # -- values --
 
-    def values(
-        self, node: ast.AST, guard: frozenset = frozenset()
-    ) -> frozenset[_StdPath] | None:
-        """Every value a path expression can take, or None if not certain."""
-        if len(guard) > 32:
-            return None
+    def _bounded(self, text: str, is_path: bool) -> _StdPath | None:
+        return _StdPath(text, is_path) if len(text) <= _STDLIB_PATH_LIMIT else None
+
+    def value(self, node: ast.AST | None) -> _StdPath | None:
+        """The one value a path or mode expression has, or None."""
+        self._tick()
         if isinstance(node, ast.Constant):
-            return frozenset({_StdPath(node.value, False)}) \
-                if isinstance(node.value, str) else None
+            return self._bounded(node.value, False) if isinstance(node.value, str) else None
         if isinstance(node, ast.Name):
-            return self._name_values(node.id, guard)
+            return self._name_value(node.id)
         if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Div)):
-            left = self.values(node.left, guard)
-            right = self.values(node.right, guard)
+            left = self.value(node.left)
+            right = self.value(node.right) if left is not None else None
             if left is None or right is None:
                 return None
-            out = set()
-            for a in left:
-                for b in right:
-                    if isinstance(node.op, ast.Add):
-                        if a.is_path or b.is_path:
-                            return None  # Path + str is a TypeError
-                        out.add(_StdPath(a.text + b.text, False))
-                    elif a.is_path or b.is_path:
-                        out.add(_StdPath(str(Path(a.text, b.text)), True))
-                    else:
-                        return None  # str / str is a TypeError
-            return frozenset(out)
+            if isinstance(node.op, ast.Add):
+                if left.is_path or right.is_path:
+                    return None  # Path + str is a TypeError
+                return self._bounded(left.text + right.text, False)
+            if not (left.is_path or right.is_path):
+                return None  # str / str is a TypeError
+            return self._bounded(str(Path(left.text, right.text)), True)
         if isinstance(node, ast.Call):
-            return self._call_values(node, guard)
+            return self._call_value(node)
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            return self._namespace_attribute(node.value.id, node.attr, guard)
+            return self._namespace_value(node.value.id, node.attr)
         return None
 
-    def _combine(self, parts: list[ast.AST], guard, join, is_path):
-        combos: list[tuple[str, ...]] = [()]
-        for part in parts:
-            options = self.values(part, guard)
-            if options is None:
+    def _all(self, nodes: list[ast.AST]) -> list[str] | None:
+        out = []
+        for node in nodes:
+            item = self.value(node)
+            if item is None:
                 return None
-            combos = [c + (o.text,) for c in combos for o in options]
-            if len(combos) > 64:
-                return None
-        return frozenset(_StdPath(join(*c), is_path) for c in combos)
+            out.append(item.text)
+        return out
 
-    def _call_values(self, node: ast.Call, guard) -> frozenset[_StdPath] | None:
-        if any(isinstance(a, ast.Starred) for a in node.args):
+    def _call_value(self, node: ast.Call) -> _StdPath | None:
+        if node.keywords or any(isinstance(a, ast.Starred) for a in node.args):
             return None
         name = self.canonical(node.func)
-        if name in _STDLIB_PATH_CONSTRUCTORS and not node.keywords:
-            if not node.args:
-                return frozenset({_StdPath(".", True)})
-            return self._combine(node.args, guard, lambda *p: str(Path(*p)), True)
-        if name == "os.path.join" and node.args and not node.keywords:
-            return self._combine(node.args, guard, os.path.join, False)
-        if name in ("str", "os.fspath") and len(node.args) == 1 and not node.keywords:
-            inner = self.values(node.args[0], guard)
-            return None if inner is None else frozenset(
-                _StdPath(v.text, False) for v in inner)
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "joinpath" \
-                and not node.keywords:
-            base = self.values(node.func.value, guard)
-            if base is None or not all(v.is_path for v in base):
-                return None
-            rest = self._combine(node.args, guard, lambda *p: str(Path(*p)), True) \
-                if node.args else frozenset({_StdPath(".", True)})
-            if rest is None:
-                return None
-            return frozenset(_StdPath(str(Path(b.text, r.text)), True)
-                             for b in base for r in rest)
+        if name in _STDLIB_PATH_CONSTRUCTORS:
+            parts = self._all(node.args)
+            return None if parts is None else self._bounded(str(Path(*parts)), True)
+        if name == "os.path.join" and node.args:
+            parts = self._all(node.args)
+            return None if parts is None else self._bounded(os.path.join(*parts), False)
+        if name in ("str", "os.fspath") and len(node.args) == 1:
+            inner = self.value(node.args[0])
+            return None if inner is None else _StdPath(inner.text, False)
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "joinpath":
+            base = self.value(node.func.value)
+            parts = self._all(node.args) if base is not None and base.is_path else None
+            return None if parts is None else self._bounded(
+                str(Path(base.text, *parts)), True)
         return None
 
-    def _name_values(self, name: str, guard) -> frozenset[_StdPath] | None:
-        if name in guard or self.counts.get(name) != 1:
-            return None
-        value = self._unique_value(name)
-        if value is not None:
-            return self.values(value, guard | {name})
-        binder = self.binders.get(name)
-        if isinstance(binder, ast.arg):
-            return self._parameter_values(binder, guard | {name})
-        return None
+    def _name_value(self, name: str) -> _StdPath | None:
+        if name in self.memo:
+            return self.memo[name]
+        self.memo[name] = None  # a cycle resolves to nothing
+        result = None
+        if self.counts.get(name) == 1 and name not in self.stored_attrs:
+            binder = self.binders.get(name)
+            if isinstance(binder, ast.Assign) and self.parents.get(binder) is self.tree \
+                    and all(isinstance(t, ast.Name) for t in binder.targets):
+                result = self.value(binder.value)
+            elif isinstance(binder, ast.arg):
+                result = self._parameter_value(binder)
+        self.memo[name] = result
+        return result
 
-    def _function_of(self, arg: ast.arg) -> ast.FunctionDef | None:
+    def _parameter_value(self, arg: ast.arg) -> _StdPath | None:
         arguments = self.parents.get(arg)
-        function = self.parents.get(arguments) if arguments is not None else None
-        if not isinstance(function, ast.FunctionDef) or function.decorator_list:
+        function = self.parents.get(arguments)
+        if not isinstance(function, ast.FunctionDef) \
+                or self.functions.get(function.name) is not function \
+                or function.name not in self.reachable:
             return None
-        if isinstance(self.parents.get(function), ast.ClassDef):
-            return None  # a method: its callers are not found by name
-        if self.counts.get(function.name) != 1:
+        calls = self._call_sites(function.name)
+        if calls is None or len(calls) != 1:
             return None
-        return function
-
-    def _call_sites(self, function: ast.FunctionDef) -> list[ast.Call] | None:
-        """Every call of a function, or None if it is also used as a value."""
-        calls = []
-        for name in self.loads.get(function.name, []):
-            call = self.parents.get(name)
-            if not isinstance(call, ast.Call) or call.func is not name:
-                return None
-            if any(isinstance(a, ast.Starred) for a in call.args) or any(
-                k.arg is None for k in call.keywords
-            ):
-                return None
-            calls.append(call)
-        return calls
+        certain, expression = self._argument_at(function, arg, calls[0])
+        return self.value(expression) if certain and expression is not None else None
 
     def _argument_at(self, function: ast.FunctionDef, arg: ast.arg,
                      call: ast.Call) -> tuple[bool, ast.AST | None]:
-        """(certain, the expression passed for `arg`; None for an omitted
-        parameter with no default)."""
+        """(certain, the expression one call passes for `arg`)."""
         spec = function.args
         if arg is spec.vararg or arg is spec.kwarg:
             return False, None
@@ -5580,103 +5646,121 @@ class _StdlibIO:
             return (True, default) if default is not None else (False, None)
         return False, None
 
-    def _parameter_values(self, arg: ast.arg, guard) -> frozenset[_StdPath] | None:
-        function = self._function_of(arg)
-        calls = self._call_sites(function) if function is not None else None
-        if calls is None:
-            return None
-        out: set[_StdPath] = set()
-        for call in calls:
-            certain, expression = self._argument_at(function, arg, call)
-            if not certain or expression is None:
-                return None
-            options = self.values(expression, guard)
-            if options is None:
-                return None
-            out |= options
-        return frozenset(out)
-
     # -- argparse --
 
-    def _is_process_argv(self, node: ast.AST | None, guard) -> bool:
+    def _is_process_argv(self, node: ast.AST | None, guard: frozenset = frozenset()) -> bool:
         """Whether a `parse_args` argument means the script's own argv."""
         if node is None or (isinstance(node, ast.Constant) and node.value is None):
-            return True
-        if isinstance(node, ast.Subscript) and self.canonical(node.value) == "sys.argv" \
-                and isinstance(node.slice, ast.Slice) and node.slice.upper is None \
-                and node.slice.step is None and isinstance(node.slice.lower, ast.Constant) \
-                and node.slice.lower.value == 1:
             return True
         if isinstance(node, ast.Name) and node.id not in guard \
                 and self.counts.get(node.id) == 1 \
                 and isinstance(self.binders.get(node.id), ast.arg):
             arg = self.binders[node.id]
-            function = self._function_of(arg)
-            calls = self._call_sites(function) if function is not None else None
-            if not calls:
+            function = self.parents.get(self.parents.get(arg))
+            if not isinstance(function, ast.FunctionDef) \
+                    or self.functions.get(function.name) is not function:
                 return False
-            for call in calls:
-                certain, expression = self._argument_at(function, arg, call)
-                if not certain or not self._is_process_argv(expression, guard | {node.id}):
-                    return False
-            return True
+            calls = self._call_sites(function.name)
+            if not calls or len(calls) != 1:
+                return False
+            certain, expression = self._argument_at(function, arg, calls[0])
+            return certain and self._is_process_argv(expression, guard | {node.id})
         return False
 
-    def _namespace(self, name: str, guard) -> dict[str, Any] | None:
-        """The parsed `argparse.Namespace` a name holds, as {dest: value}."""
-        value = self._unique_value(name)
-        if not (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
-                and value.func.attr == "parse_args"
-                and isinstance(value.func.value, ast.Name)):
-            return None
-        key = id(value)
-        if key not in self.namespaces:
-            self.namespaces[key] = None
+    def _sys_argv_touched(self) -> bool:
+        """Any mention of `sys.argv` may change what argparse reads."""
+        for target in self.imports.values():
+            if target == "sys.argv":
+                return True
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Attribute) and node.attr == "argv" \
+                    and self.canonical(node) == "sys.argv":
+                return True
+        return False
+
+    def _namespace_escapes(self, name: str) -> bool:
+        """Whether a namespace is used other than by reading `ns.option`."""
+        for load in self.loads.get(name, []):
+            attribute = self.parents.get(load)
+            if not isinstance(attribute, ast.Attribute) or attribute.value is not load \
+                    or not isinstance(attribute.ctx, ast.Load) \
+                    or attribute.attr.startswith("_"):
+                return True
+            # `ns.option` itself must not be called or mutated through.
+            outer = self.parents.get(attribute)
+            if isinstance(outer, ast.Call) and outer.func is attribute:
+                return True
+        return name in self.mutated_names
+
+    def _namespace(self, name: str) -> dict[str, Any] | None:
+        if name not in self.namespaces:
+            self.namespaces[name] = None
             try:
-                self.namespaces[key] = self._replay_parser(
-                    self.binders[name], value, value.func.value.id, guard)
+                self.namespaces[name] = self._replay_parser(name)
+            except _OverBudget:
+                raise
             except Exception:  # argparse exits, or a value is not a literal
-                self.namespaces[key] = None
-        return self.namespaces[key]
+                self.namespaces[name] = None
+        return self.namespaces[name]
 
-    def _literal(self, node: ast.AST) -> Any:
-        return ast.literal_eval(node)  # raises ValueError if not a literal
-
-    def _replay_parser(self, args_stmt: ast.AST, parse_call: ast.Call,
-                       parser_name: str, guard) -> dict[str, Any] | None:
-        if self.script_args is None or self.opaque:
+    def _replay_parser(self, name: str) -> dict[str, Any] | None:
+        if self.script_args is None or self.opaque or self.counts.get(name) != 1:
+            return None
+        args_stmt = self.binders.get(name)
+        if not (isinstance(args_stmt, ast.Assign) and len(args_stmt.targets) == 1
+                and isinstance(args_stmt.targets[0], ast.Name)):
+            return None
+        parse_call = args_stmt.value
+        if not (isinstance(parse_call, ast.Call) and isinstance(parse_call.func, ast.Attribute)
+                and parse_call.func.attr == "parse_args"
+                and isinstance(parse_call.func.value, ast.Name)):
             return None
         if parse_call.keywords or len(parse_call.args) > 1 or not self._is_process_argv(
-                parse_call.args[0] if parse_call.args else None, guard):
+                parse_call.args[0] if parse_call.args else None):
             return None
-        parser_value = self._unique_value(parser_name)
+        if self._namespace_escapes(name) or self._sys_argv_touched():
+            return None
+        if not self._runs(args_stmt):
+            return None
+        parser_name = parse_call.func.value.id
+        if self.counts.get(parser_name) != 1 or parser_name in self.mutated_names:
+            return None
+        parser_stmt = self.binders[parser_name]
+        parser_value = parser_stmt.value if isinstance(parser_stmt, ast.Assign) else None
         if not isinstance(parser_value, ast.Call) \
                 or self.canonical(parser_value.func) != "argparse.ArgumentParser" \
-                or len(parser_value.args) > 1:
+                or len(parser_value.args) > 1 or len(parser_stmt.targets) != 1:
             return None
         settings: dict[str, Any] = {}
         for keyword in parser_value.keywords:
             if keyword.arg not in _ARGPARSE_PARSER_KEYWORDS:
                 return None
             if keyword.arg in _ARGPARSE_PARSER_PASSED:
-                settings[keyword.arg] = self._literal(keyword.value)
-        parser_stmt = self.binders[parser_name]
+                settings[keyword.arg] = ast.literal_eval(keyword.value)
         block = self._block_of(parser_stmt)
-        if block is None or self._block_of(args_stmt) is not block:
+        if block is None:
             return None
-        start, end = block.index(parser_stmt), block.index(args_stmt)
+        start = block.index(parser_stmt)
+        # `args = parser.parse_args()` follows in the same block, or in an
+        # `if __name__ == "__main__":` that does.
+        if self._block_of(args_stmt) is block:
+            end = block.index(args_stmt)
+        else:
+            guard = self.parents.get(args_stmt)
+            if not (_is_main_guard(guard) and args_stmt in guard.body
+                    and self._block_of(guard) is block):
+                return None
+            end = block.index(guard)
         if start >= end:
             return None
         add_calls = []
-        for name in self.loads.get(parser_name, []):
-            attribute = self.parents.get(name)
+        for load in self.loads.get(parser_name, []):
+            attribute = self.parents.get(load)
             call = self.parents.get(attribute)
             if not isinstance(attribute, ast.Attribute) or not isinstance(call, ast.Call) \
                     or call.func is not attribute:
                 return None
-            if attribute.attr in _ARGPARSE_INERT_METHODS:
-                continue
-            if call is parse_call:
+            if attribute.attr in _ARGPARSE_INERT_METHODS or call is parse_call:
                 continue
             statement = self.parents.get(call)
             if attribute.attr != "add_argument" or not isinstance(statement, ast.Expr) \
@@ -5685,17 +5769,21 @@ class _StdlibIO:
                 return None
             add_calls.append(call)
         parser = _ReplayParser(prog="script", **settings)
-        defaults: dict[str, tuple[object, ast.AST | None, bool]] = {}
+        # dest -> (marker, default expression, type is Path) for the options
+        # whose value can be a path: a plain `store` with no nargs or const.
+        eligible: dict[str, tuple[object, ast.AST | None, bool]] = {}
+        dests: set[str] = set()
         for call in add_calls:
+            if call.keywords and any(k.arg is None for k in call.keywords):
+                return None
             if any(isinstance(a, ast.Starred) for a in call.args):
                 return None
-            flags = [self._literal(a) for a in call.args]
+            flags = [ast.literal_eval(a) for a in call.args]
             if not all(isinstance(f, str) for f in flags):
                 return None
             options: dict[str, Any] = {}
-            type_is_path = False
+            type_kind = "str"
             default_node: ast.AST | None = None
-            marker = object()
             for keyword in call.keywords:
                 if keyword.arg not in _ARGPARSE_ARGUMENT_KEYWORDS:
                     return None
@@ -5704,43 +5792,40 @@ class _StdlibIO:
                 if keyword.arg == "type":
                     kind = self.canonical(keyword.value)
                     if kind in _STDLIB_PATH_CONSTRUCTORS:
-                        type_is_path = True
+                        type_kind = "path"
                     elif kind in ("int", "float"):
+                        type_kind = "number"
                         options["type"] = int if kind == "int" else float
                     elif kind != "str":
                         return None  # an unknown converter may reject a value
                 elif keyword.arg == "default":
                     default_node = keyword.value
                 else:
-                    options[keyword.arg] = self._literal(keyword.value)
+                    options[keyword.arg] = ast.literal_eval(keyword.value)
             action_name = options.get("action", "store")
             if action_name not in _ARGPARSE_ACTIONS:
                 return None
-            if "const" in options:
-                type_is_path = False  # argparse never converts a const
-            if action_name == "store":
+            path_like = action_name == "store" and type_kind != "number" \
+                and "nargs" not in options and "const" not in options
+            marker = object()
+            if path_like:
                 # A marker tells a default apart from a value given on the
                 # command line; the default expression is resolved lazily.
                 options["default"] = marker
             action = parser.add_argument(*flags, **options)
-            if action.default is marker:
-                defaults[action.dest] = (marker, default_node, type_is_path)
+            if action.dest in dests:
+                return None  # two options write one attribute
+            dests.add(action.dest)
+            if path_like:
+                eligible[action.dest] = (marker, default_node, type_kind == "path")
         namespace = parser.parse_args(list(self.script_args))
-        if any(action.dest in self.stored_attrs for action in parser._actions):
-            return None  # the script reassigns a parsed value somewhere
         result: dict[str, Any] = {}
-        for action in parser._actions:
-            if not hasattr(namespace, action.dest):
-                continue
-            raw = getattr(namespace, action.dest)
-            marker, default_node, type_is_path = defaults.get(
-                action.dest, (None, None, False))
-            if marker is not None and raw is marker:
-                result[action.dest] = ("default", default_node, type_is_path)
-            elif isinstance(raw, str) and action.dest in defaults:
-                result[action.dest] = ("value", _StdPath(raw, type_is_path))
-            else:
-                result[action.dest] = ("other",)
+        for dest, (marker, default_node, type_is_path) in eligible.items():
+            raw = getattr(namespace, dest, None)
+            if raw is marker:
+                result[dest] = ("default", default_node, type_is_path)
+            elif isinstance(raw, str):
+                result[dest] = ("value", _StdPath(raw, type_is_path))
         return result
 
     def _block_of(self, statement: ast.AST) -> list[ast.stmt] | None:
@@ -5751,71 +5836,54 @@ class _StdlibIO:
                 return block
         return None
 
-    def _namespace_attribute(self, name: str, attr: str, guard):
-        if attr in self.stored_attrs or name in guard or self.counts.get(name) != 1:
+    def _namespace_value(self, name: str, attr: str) -> _StdPath | None:
+        namespace = self._namespace(name)
+        entry = namespace.get(attr) if namespace is not None else None
+        if entry is None:
             return None
-        namespace = self._namespace(name, guard | {name})
-        if namespace is None or attr not in namespace:
-            return None
-        entry = namespace[attr]
         if entry[0] == "value":
-            return frozenset({entry[1]})
-        if entry[0] == "default" and entry[1] is not None:
-            options = self.values(entry[1], guard | {name})
-            if options is None:
-                return None
-            # argparse converts a string default with the option's `type`.
-            return frozenset(
-                _StdPath(v.text, v.is_path or entry[2]) for v in options)
-        return None
+            return entry[1]
+        if entry[1] is None:
+            return None
+        default = self.value(entry[1])
+        if default is None:
+            return None
+        # argparse converts a string default with the option's `type`.
+        return _StdPath(default.text, default.is_path or entry[2])
 
     # -- sinks --
 
     def collect(self) -> tuple[list[str], list[str]]:
-        inputs: list[str] = []
-        outputs: list[str] = []
+        inputs: set[str] = set()
+        outputs: set[str] = set()
         if self.opaque:
-            return inputs, outputs
+            return [], []
         for node in ast.walk(self.tree):
             if not isinstance(node, ast.Call) or any(
                 isinstance(a, ast.Starred) for a in node.args
-            ) or any(k.arg is None for k in node.keywords):
+            ) or any(k.arg is None or k.arg == "opener" for k in node.keywords):
                 continue
             found = self._sink(node)
-            if found is None:
+            if found is None or not self._runs(node):
                 continue
             path_node, mode_node, needs_path = found
-            if path_node is None:
-                continue
-            directions = self._directions(mode_node)
-            path_values = self.values(path_node)
-            if not directions or not path_values:
-                continue
-            if needs_path and not all(v.is_path for v in path_values):
+            path = self.value(path_node) if path_node is not None else None
+            if path is None or (needs_path and not path.is_path):
                 continue  # a str has no `.open`: the call fails
-            for value in sorted(path_values):
-                text = value.text
-                if not text or "\0" in text or text.startswith("~") \
-                        or _is_url(text):
-                    continue
-                for direction in directions:
-                    (inputs if direction == "input" else outputs).append(text)
-        return _dedupe(inputs), _dedupe(outputs)
-
-    def _directions(self, mode: ast.AST | str) -> tuple[str, ...]:
-        """Every direction an `open` mode can take, () if any is unknown."""
-        if isinstance(mode, str):
-            return _open_mode_directions(mode)
-        options = self.values(mode)
-        if not options:
-            return ()
-        out: list[str] = []
-        for option in sorted(options):
-            directions = _open_mode_directions(option.text)
-            if not directions:
-                return ()
-            out.extend(d for d in directions if d not in out)
-        return tuple(out)
+            if isinstance(mode_node, str):
+                directions = _open_mode_directions(mode_node)
+            else:
+                mode = self.value(mode_node)
+                directions = _open_mode_directions(mode.text) if mode else ()
+            text = path.text
+            if not directions or not text or "\0" in text or _is_url(text) \
+                    or ".." in Path(text).parts:
+                continue
+            if self.chdir and not os.path.isabs(text):
+                continue  # the working directory may have changed
+            for direction in directions:
+                (inputs if direction == "input" else outputs).add(text)
+        return sorted(inputs), sorted(outputs)
 
     def _keyword(self, node: ast.Call, name: str) -> ast.AST | None:
         for keyword in node.keywords:
@@ -5853,8 +5921,17 @@ def _stdlib_static_io(
         return [], []
     try:
         return _StdlibIO(tree, script_args).collect()
-    except RecursionError:
+    except (_OverBudget, RecursionError, MemoryError):
         return [], []
+
+
+_CHDIR_RX = re.compile(r"\b(?:f?chdir)\b")
+
+
+def _python_changes_directory(source: str) -> bool:
+    """Whether a Python source may change its working directory, which
+    makes every relative path it names ambiguous."""
+    return bool(_CHDIR_RX.search(source))
 
 
 def _repository_literal_io(
@@ -7026,6 +7103,11 @@ def build_event_for_detection(
         or getattr(inline_source, "language", None)
     )
     inputs, outputs, filters, seeds = scan_source(source, language)
+    changes_directory = language == "python" and _python_changes_directory(source)
+    if changes_directory:
+        # After `os.chdir`, a relative path may name a file anywhere.
+        inputs = [p for p in inputs if os.path.isabs(p) or _is_url(p)]
+        outputs = [p for p in outputs if os.path.isabs(p) or _is_url(p)]
     if language == "python":
         # `open`, pathlib and argparse I/O the reader/writer scan cannot see.
         stdlib_inputs, stdlib_outputs = _stdlib_static_io(source, script_args)
@@ -7063,9 +7145,8 @@ def build_event_for_detection(
         )
     inputs, _ = _merge_recovered_paths(inputs, stdlib_inputs, cwd)
     outputs, _ = _merge_recovered_paths(outputs, stdlib_outputs, cwd)
-    recovered_inputs, recovered_outputs = _repository_literal_io(
-        source, cwd, inputs, outputs
-    )
+    recovered_inputs, recovered_outputs = ([], []) if changes_directory else \
+        _repository_literal_io(source, cwd, inputs, outputs)
     inputs, added_inputs = _merge_recovered_paths(inputs, recovered_inputs, cwd)
     outputs, added_outputs = _merge_recovered_paths(outputs, recovered_outputs, cwd)
     if added_inputs or added_outputs:
@@ -7077,6 +7158,11 @@ def build_event_for_detection(
         lineage_warnings.append(
             "No literal input/output paths were detected; the script may "
             "resolve paths dynamically or delegate I/O through imports."
+        )
+    if changes_directory:
+        lineage_warnings.append(
+            "The script changes its working directory (chdir), so relative "
+            "paths it names were not recorded."
         )
     lineage_warnings.extend(remote_warnings)
 
@@ -7587,6 +7673,7 @@ def build_step(
     io_cwd: Path | None,
     budget: "ConfigBudget | None" = None,
     literal_args: list[list[str]] | None = None,
+    literal_only: bool = False,
 ) -> dict[str, Any]:
     """The `step` object for one detection: argv, interpreter, script
     arguments, environment assignments, config files, and literal seeds of
@@ -7594,7 +7681,8 @@ def build_step(
 
     When the script's arguments are all literal words (no expansion, glob,
     or tilde the shell would rewrite), they are appended to
-    ``literal_args`` so the script's argparse options can be resolved."""
+    ``literal_args`` so the script's argparse options can be resolved.
+    ``literal_only`` stops there, before any config file is hashed."""
     if invocation and invocation.get("kind") == "runner" and invocation.get("offset") is None:
         # Only an unambiguous runner stage is used: with several runner
         # words, which stage this detection ran is not known here.
@@ -7710,10 +7798,15 @@ def build_step(
         raws = None  # the two scans disagree: treat the quoting as unknown
     if literal_args is not None and operand_index is not None and raws is not None \
             and not prefix_partial and not truncated and all(
-                not _expansion(raw)[0] and not _has_unquoted_pattern(raw)
+                # A backslash needs the shell's quote-dependent decoding:
+                # decline rather than risk a different word.
+                "\\" not in raw
+                and not _expansion(raw)[0] and not _has_unquoted_pattern(raw)
                 and all(char != "~" for _, char in _unquoted_chars(raw))
                 for raw in raws[operand_index:]):
         literal_args.append(list(script_args))
+    if literal_only:
+        return step
     resolved: list[tuple[str, str, Path | None]] = []
     remote: list[dict[str, Any]] = []
     # bash expands a bare `~` with the command's HOME: when anything before
@@ -8381,21 +8474,19 @@ def main() -> int:
     detections = detections[:MAX_EVENTS_PER_CALL]
     for index, (script_path, inline_source, effective_cwd) in enumerate(detections):
         invocation = invocations[index] if index < len(invocations) else None
+        # The script's literal arguments resolve its argparse paths. This
+        # pass hashes no config, so a stage that is later discarded spends
+        # no budget.
         literal_args: list[list[str]] = []
-        step = None
-        if not (isinstance(script_path, Path) and not script_path.exists()):
-            # The step first: its literal script arguments resolve argparse
-            # paths. A missing script is skipped, and spends no budget.
-            step = build_step(args.bash_cmd, invocation, inline_source,
-                              effective_cwd, budget, literal_args)
+        build_step(args.bash_cmd, invocation, inline_source, effective_cwd,
+                   None, literal_args, literal_only=True)
         event = build_event_for_detection(
             (script_path, inline_source), args, effective_cwd, git_sha,
             script_args=literal_args[0] if literal_args else None,
         )
         if event is not None:
-            if step is None:
-                step = build_step(args.bash_cmd, invocation, inline_source,
-                                  effective_cwd, budget)
+            step = build_step(args.bash_cmd, invocation, inline_source,
+                              effective_cwd, budget)
             source_seeds = [{"value": v, "origin": "source"}
                             for v in event.get("seeds_detected") or []]
             if source_seeds:

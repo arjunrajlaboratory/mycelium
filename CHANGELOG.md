@@ -152,21 +152,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writers were recognised. Now `open(...)` (mode gives the direction),
   `Path.open/read_text/write_text/read_bytes/write_bytes`, and Mycelium's
   `read_source` are resolved too, which covers `csv` readers and writers on
-  those handles. A path resolves when it is certain:
+  those handles.
+
+  The resolver is a small single-valued grammar, not an interpreter. A path
+  or mode resolves only from:
   - a literal;
-  - a name bound once in the file;
-  - `os.path.join` or `Path /` of those;
-  - a parameter whose every call site passes one;
+  - a module-level name assigned once;
+  - `os.path.join`, `Path(...)` or `Path /` of those;
+  - a parameter of a function with exactly one call site;
   - an `argparse` option replayed through the real `argparse` with the
-    command's literal arguments (so `--config x.yaml`, `=` forms,
-    abbreviations and defaults behave as at run time).
+    command's literal arguments. The namespace must only ever be read as
+    `args.option`.
 
-  Anything else stays `unresolved`, including:
-  - a shell expansion in the arguments;
-  - `set_defaults` or another unmodelled parser call;
-  - a reassigned option;
-  - `__file__`-relative paths.
+  Only calls in module code or in functions reachable from it count. A call
+  on a branch that may not run is still recorded, as with the reader scan.
+  Everything else stays `unresolved`, including:
+  - values that differ across call sites;
+  - an escaping or mutated namespace;
+  - `sys.argv` touched anywhere;
+  - shell expansions or backslashes in the arguments;
+  - `__file__`-relative paths;
+  - a scan over its work budget.
 
+  A script that calls `chdir` now records no relative paths from either scan.
   On Antigravity App, which installs no I/O observer, stdlib-only analyses
   had recorded `io_detection: "unresolved"` with no producer.
 
