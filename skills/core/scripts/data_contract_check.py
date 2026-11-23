@@ -594,6 +594,11 @@ def check_paired_batch(check, columns, rows):
     scopes = check.get("batch_scopes") or {}
     for column in batches:
         rows = scoped(rows, column, as_list(scopes.get(column)))
+    listed = distinct_levels(check.get("levels"))
+    if listed:
+        # Only the declared contrast: an optional extra visit in its own run
+        # says nothing about the levels the pairing compares.
+        rows = [r for r in rows if is_missing(r[within]) or r[within] in listed]
     keys = [unit, within] + ([group] if group else [])
     kept, alerts = drop_missing(rows, keys + batches, "paired_batch")
 
@@ -612,16 +617,19 @@ def check_paired_batch(check, columns, rows):
             observed=", ".join(_side_label(group, s) for s in lost)))
         return alerts
     cells = sorted({(r[unit],) + side(r) + tuple(r[b] for b in batches) for r in kept})
+    # Every row with its unit and level, batch or not: what the pairs
+    # estimate before rows missing a batch are dropped.
+    whole = sorted({(r[unit],) + side(r) for r in having(rows, *keys)})
     batch_levels = [sorted({c[3 + i] for c in cells}) for i in range(len(batches))]
     # Per group level, every within level but the first is one tested effect.
     effects = []
-    for g in sorted({c[1] for c in cells}, key=str):
-        levels = sorted({c[2] for c in cells if c[1] == g})
+    for g in sorted({c[1] for c in whole}, key=str):
+        levels = sorted({c[2] for c in whole if c[1] == g})
         effects += [(g, lvl, levels[0]) for lvl in levels[1:]]
     if not effects:
         return alerts
 
-    def design(with_batch, drop=None):
+    def design(with_batch, drop=None, cells=cells):
         # The intercept and unit indicators are absorbed: each unit's first
         # cell is subtracted from its other cells, since rank([1, U, X]) is
         # the number of units plus the rank of those within-unit differences.
@@ -639,10 +647,25 @@ def check_paired_batch(check, columns, rows):
                 matrix.append([a - b for a, b in zip(row, reference[cell[0]])])
         return matrix or [[0]]
 
-    unbatched, batched = _rank(design(False)), _rank(design(True))
-    confounded = [e for e in effects
-                  if _rank(design(False, drop=e[:2])) < unbatched and
-                  _rank(design(True, drop=e[:2])) == batched]
+    def estimable(with_batch, cells=cells):
+        full = _rank(design(with_batch, cells=cells))
+        return {e for e in effects if _rank(design(with_batch, e[:2], cells)) < full}
+
+    from_pairs, kept_pairs, adjusted = estimable(False, whole), estimable(False), estimable(True)
+    erased = [e for e in effects if e in from_pairs and e not in kept_pairs]
+    if erased:
+        # Each side has rows with a batch, but no unit keeps both: a
+        # batch-adjusted model drops the rows missing a batch, and with them
+        # every pair the pairing check counted.
+        alerts.append(alert(
+            "paired_batch",
+            "missing {} values leave no {} with both sides of the {} contrast, so a model "
+            "adjusting for batch has no pair to estimate it from".format(
+                ", ".join(batches), unit, within), True,
+            expected="pairs with batch values on both sides",
+            observed="no complete pair: " + "; ".join(
+                "{} vs {}".format(_side_label(group, (g, lvl)), ref) for g, lvl, ref in erased)))
+    confounded = [e for e in effects if e in kept_pairs and e not in adjusted]
     if confounded:
         involved = {(g, lvl) for g, lvl, _ in confounded} | {(g, ref) for g, _, ref in confounded}
         by_unit = defaultdict(list)
@@ -664,18 +687,26 @@ def check_paired_batch(check, columns, rows):
         return alerts
     # Estimable is not the same as well supported: eight donors split in step
     # (base in run 1, week 4 in run 2) and two unsplit leave the effect
-    # resting on two donors. A unit's split is offset by one in the opposite
-    # direction (counterbalancing); the rest are in step with the contrast.
+    # resting on two donors. Each split unit moves one unit of weight from
+    # its reference-side batch to its other-side batch; splits balance when
+    # every batch gains as much as it loses (a reverse split, or a rotation
+    # r1->r2, r2->r3, r3->r1). The weight left unbalanced is in step.
     for g, lvl, ref in effects:
-        if (g, lvl, ref) in confounded:
+        if (g, lvl, ref) in confounded or (g, lvl, ref) in erased:
             continue
         sides = defaultdict(lambda: (set(), set()))
         for cell in cells:
             if cell[1] == g and cell[2] in (ref, lvl):
                 sides[cell[0]][cell[2] == lvl].add(cell[3:])
         paired = {u: (a, b) for u, (a, b) in sides.items() if a and b}
-        splits = Counter((frozenset(a), frozenset(b)) for a, b in paired.values() if not a & b)
-        in_step = sum(n - min(n, splits.get((b, a), 0)) for (a, b), n in splits.items())
+        net = defaultdict(float)
+        for a, b in paired.values():
+            if not a & b:
+                for t in a:
+                    net[t] -= 1.0 / len(a)
+                for t in b:
+                    net[t] += 1.0 / len(b)
+        in_step = round(sum(abs(v) for v in net.values()) / 2, 6)
         if paired and in_step / len(paired) > share:
             alerts.append(alert(
                 "paired_batch",
@@ -683,8 +714,8 @@ def check_paired_batch(check, columns, rows):
                 "step with it".format(unit, within, _side_label(group, (g, lvl)), ref,
                                       ", ".join(batches)), False,
                 expected="at most {} of {} split in step".format(percent(share), unit),
-                observed="{} of {} units split in step, not offset by a reverse split".format(
-                    in_step, len(paired))))
+                observed="{:g} of {} units split in step, not offset by splits the other "
+                         "way".format(in_step, len(paired))))
     return alerts
 
 
@@ -946,7 +977,8 @@ KIND_KEYS = {
     "pairing": {"unit", "within", "levels", "unit_scope", "exact_levels", "min_levels"},
     "batch_confounding": {"batch", "contrast", "max_share", "batch_scope"},
     "batch_estimability": {"batch", "contrast", "batch_scopes"},
-    "paired_batch": {"unit", "within", "batch", "group", "unit_scope", "batch_scopes", "max_share"},
+    "paired_batch": {"unit", "within", "batch", "group", "unit_scope", "batch_scopes", "max_share",
+                     "levels"},
     "unique": {"columns"},
     "nesting": {"levels", "local_labels"},
 }
@@ -1046,6 +1078,7 @@ def validate_contract(contract):
                 fail(where, "'batch_scopes' must map batch columns to lists of columns")
             if kind == "paired_batch":
                 validate_share(where, check)
+                validate_levels(where, check)
                 validate_column(where, check, "unit", required=True)
                 validate_column(where, check, "within", required=True)
                 validate_column(where, check, "group")
@@ -1175,6 +1208,10 @@ def run_contract(contract, base_dir):
             if kind in ("batch_estimability", "paired_batch"):
                 identity += as_list(check.get("batch"))
             identity += as_list(check.get("within")) + as_list(check.get("unit_scope"))
+            # Parents that qualify a local batch label are part of its identity.
+            identity += as_list(check.get("batch_scope"))
+            for scope in (check.get("batch_scopes") or {}).values():
+                identity += as_list(scope)
             if kind in ("unique", "nesting"):
                 identity += as_list(check.get("columns")) + as_list(check.get("levels"))
             found.extend(spelling_variants(rows, sorted(set(identity)), kind))
@@ -1327,6 +1364,8 @@ def ledger_contract(spec, spec_dir):
             scopes = {column: ancestors(column) for column in columns if ancestors(column)}
             if scopes:
                 paired["batch_scopes"] = scopes
+            if pairing.get("levels"):
+                paired["levels"] = distinct_levels(pairing["levels"])
             if len(columns) >= 2:
                 paired["note"] = "for a paired analysis that adjusts for all of these batch terms"
             checks.append(paired)

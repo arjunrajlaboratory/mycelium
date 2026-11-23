@@ -613,3 +613,66 @@ def test_a_crossover_groups_by_treatment_not_sequence() -> None:
     assert dcc.check_paired_batch(by_treatment, [], rows) == []
     by_sequence = {**by_treatment, "group": "seq"}
     assert any(a["blocking"] for a in dcc.check_paired_batch(by_sequence, [], rows))
+
+
+def test_missing_batches_that_erase_every_pair_block(tmp_path: Path) -> None:
+    # Every donor has both visits, but each lacks the run for one of them:
+    # the rows a batch-adjusted model keeps hold both visits and no pair.
+    design = []
+    for i in range(4):
+        design += [(f"d{i}", "W", "base", "r1" if i % 2 else "NA"),
+                   (f"d{i}", "W", "wk4", "NA" if i % 2 else "r2")]
+    summaries, alerts = _paired(tmp_path, design, within="visit")
+    assert not any(a["kind"] == "pairing" and a["blocking"] for a in alerts)
+    assert _paired_status(summaries) == ["block"]
+    assert any(a["kind"] == "paired_batch" and a["blocking"] and "missing" in a["message"]
+               for a in alerts)
+
+
+def test_a_ledger_paired_batch_keeps_to_the_declared_levels(tmp_path: Path) -> None:
+    # An optional extra visit always run in r9 is outside the declared
+    # base/wk4 contrast, which is estimable.
+    design = [(f"d{i}", "W", v, f"r{i % 2}") for i in range(4) for v in ("base", "wk4")]
+    design += [("d0", "W", "wk8", "r9"), ("d1", "W", "wk8", "r9")]
+    table = tmp_path / "samples.tsv"
+    table.write_text("sample_id\tcondition\tdonor\tvisit\trun\n" + "".join(
+        f"s{i}\t{c}\t{d}\t{v}\t{r}\n" for i, (d, c, v, r) in enumerate(design)))
+    spec = {"schema": dcc.LEDGER_SCHEMA, "file": "samples.tsv", "sample_id": "sample_id",
+            "group": "condition", "unit_of_replication": "donor", "nesting": ["donor"],
+            "batch": ["run"], "pairing": {"unit": "donor", "within": "visit",
+                                          "levels": ["base", "wk4"]}}
+    contract = dcc.ledger_contract(spec, str(tmp_path))
+    paired = next(c for c in contract["checks"] if c["kind"] == "paired_batch")
+    assert paired["levels"] == ["base", "wk4"]
+    summaries, _ = dcc.run_contract(contract, str(tmp_path))
+    assert _paired_status(summaries) == ["pass"]
+    unlimited = {**paired}
+    unlimited.pop("levels")
+    rows = [{"donor": d, "condition": c, "visit": v, "run": r} for d, c, v, r in design]
+    assert any(a["blocking"] for a in dcc.check_paired_batch(unlimited, [], rows))
+
+
+def test_a_rotation_through_three_batches_is_balanced(tmp_path: Path) -> None:
+    # Pairs split r1->r2, r2->r3 and r3->r1 in equal numbers: every run is
+    # as often the treated side as the control side.
+    design = []
+    for i in range(6):
+        first, second = [("r1", "r2"), ("r2", "r3"), ("r3", "r1")][i % 3]
+        design += [(f"d{i}", "treated", "v", first), (f"d{i}", "control", "v", second)]
+    assert _paired_status(_paired(tmp_path, design)[0]) == ["pass"]
+
+
+@pytest.mark.parametrize("kind", ["paired_batch", "batch_estimability", "batch_confounding"])
+def test_batch_scope_parents_are_spelling_checked(tmp_path: Path, kind: str) -> None:
+    table = tmp_path / "t.tsv"
+    table.write_text("donor\tarm\tsite\trun\n" + "".join(
+        f"d{i}\t{a}\t{'site1' if i else 'site1 '}\tr{i % 2}\n" for i in range(4) for a in "CT"))
+    check = {"paired_batch": {"kind": kind, "unit": "donor", "within": "arm", "batch": ["run"],
+                              "batch_scopes": {"run": ["site"]}},
+             "batch_estimability": {"kind": kind, "batch": ["run", "donor"], "contrast": "arm",
+                                    "batch_scopes": {"run": ["site"]}},
+             "batch_confounding": {"kind": kind, "batch": "run", "contrast": "arm",
+                                   "batch_scope": ["site"]}}[kind]
+    _, alerts = dcc.run_contract({"schema": dcc.SCHEMA, "table": str(table), "checks": [check]},
+                                 str(tmp_path))
+    assert any("'site'" in a["message"] and "whitespace" in a["message"] for a in alerts)

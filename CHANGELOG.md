@@ -87,8 +87,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is not the group, the within effect is checked in each group, so a
     genotype-by-visit interaction confounded with batch also blocks. With
     `max_share` (ledger contracts set 0.5) it warns when a contrast it can
-    still estimate rests mostly on pairs split in step with batch. For a
+    still estimate rests mostly on pairs split in step with batch (splits
+    that balance across batches, including rotations, do not count). It also
+    blocks when missing batch values leave no complete pair, and it compares
+    only the pairing's declared levels when the ledger lists them. For a
     crossover, the group should be the treatment, not the sequence.
+  - The parent columns in `batch_scope` and `batch_scopes` are spelling-checked
+    like `unit_scope`, so `site1` and `site1 ` no longer split a batch silently.
 - **`skills/core/references/provenance-schema.json`**, one JSON Schema file
   for manifests (v1 and v2), events, data commands, skips, observations, index
   results, report fragments, numbers, findings and the ledger. Tests validate

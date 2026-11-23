@@ -131,7 +131,9 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   has a level not listed, or lacks a listed one. Ledger contracts set this when
   the pairing licenses units across groups.
 - `batch_estimability` takes `batch_scopes`, a map from batch column to the
-  parent columns that qualify its local labels.
+  parent columns that qualify its local labels. Those parent columns, like
+  `unit_scope` and `batch_scope`, are part of the identity, so a value
+  spelled two ways (`site1` and `site1 `) blocks.
 - `paired_batch`: for a paired design, whether the contrast between the
   `within` levels inside each `unit` survives the `batch` columns (one or
   more, adjusted for together). The model is unit + batch + within, so batch
@@ -147,14 +149,21 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   when the visit effect alone is estimable from the other genotype. A
   contrast no unit observes on both sides is left to `pairing`, and a within
   level with no row carrying every batch column blocks, since it cannot be
-  checked. It takes `unit_scope` and `batch_scopes` for local labels. When
+  checked. It also blocks when missing batch values erase every complete
+  pair: each donor lacks the run for one visit, so both visits keep rows
+  with a run but no donor keeps both, and a batch-adjusted model has no pair
+  to estimate from (`pairing`, counting all rows, passes). With `levels`, only
+  those `within` levels are compared; ledger contracts pass the pairing's
+  declared levels, so an optional extra visit in its own run does not block. It takes `unit_scope` and `batch_scopes` for local labels. When
   `group` is a between-unit factor, a batch that coincides with it is
   `batch_confounding`'s block (the unit absorbs the group, so this check
   does not see it); when the group is the `within` factor, both checks
   block. Blocking is exact; with `max_share` (above 0, at most 1) it also
   warns when, for a contrast it can still estimate, more than that share of
-  the units with both sides are split across batches in step with it, not
-  offset by a unit split the other way (counterbalanced). Eight donors with
+  the units with both sides are split across batches in step with it. Splits
+  that balance across the batches are counterbalanced and do not count: a
+  unit split the other way, or equal numbers split r1 to r2, r2 to r3 and r3
+  to r1, since each batch is then as often on one side as on the other. Eight donors with
   base in run 1 and week 4 in run 2, plus two with both visits in run 3,
   warn: the visit effect rests on two donors. Ledger contracts set
   `"max_share": 0.5`.
