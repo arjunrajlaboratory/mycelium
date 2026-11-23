@@ -5317,11 +5317,13 @@ _STDLIB_OPAQUE_BUILTINS = frozenset({
 # The whole scan is bounded: a source over the size cap is not parsed, every
 # AST node visited and every value evaluated costs a tick, and a wall-clock
 # deadline is checked as it ticks. Over any bound, nothing is resolved.
-_STDLIB_SOURCE_LIMIT = 256 * 1024
-_STDLIB_WORK_LIMIT = 400_000
+_STDLIB_SOURCE_LIMIT = 128 * 1024  # ast.parse cannot be interrupted
+_STDLIB_WORK_LIMIT = 100_000
+# At most this many paths are added; more means none (never a partial set).
+_STDLIB_PATH_CAP = 64
 # `open` keywords that cannot change which file is opened, when literal.
 _STDLIB_OPEN_LITERAL_KEYWORDS = frozenset({"buffering", "encoding", "errors", "newline"})
-_STDLIB_DEADLINE_SECONDS = 0.3
+_STDLIB_DEADLINE_SECONDS = 0.4  # parse, walks, resolution, stat and hashing
 _STDLIB_PATH_LIMIT = 4096
 # argparse replay is quadratic in options x arguments (prefix matching).
 _ARGPARSE_REPLAY_LIMIT = 256
@@ -5424,9 +5426,9 @@ class _StdlibIO:
         self.blocks: dict[ast.AST, tuple[list, int]] = {}
         self.calls_by_scope: dict[ast.AST, list[ast.Call]] = {}
         self.argv_touched = False  # any `x.argv`: argparse may not see the command line
-        # The reader/writer scan's view of imports, for `_io_call_direction`.
-        self.io_aliases: dict[str, str] = {}
-        self.local_roots: set[str] = set()
+        # Nodes inside a `try` body with handlers or `with suppress(...)`:
+        # an open there may fail and be recovered from.
+        self.guarded: set[ast.AST] = set()
         self.root_stores: list[ast.AST] = []
         self.counts: dict[str, int] = {}
         self.binders: dict[str, ast.AST] = {}
@@ -5449,9 +5451,22 @@ class _StdlibIO:
                 if isinstance(block, list):
                     for index, statement in enumerate(block):
                         self.blocks[statement] = (block, index)
+            guarded_body = node in self.guarded or (
+                isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try)))
+                and node.handlers
+            ) or (
+                isinstance(node, (ast.With, ast.AsyncWith)) and any(
+                    isinstance(item.context_expr, ast.Call)
+                    and (_call_name(item.context_expr.func) or "").rsplit(".", 1)[-1]
+                    == "suppress" for item in node.items)
+            )
+            body = set(map(id, getattr(node, "body", []) or [])) \
+                if guarded_body and node not in self.guarded else None
             for child in ast.iter_child_nodes(node):
                 self.parents[child] = node
                 self.scopes[child] = inner
+                if node in self.guarded or (body is not None and id(child) in body):
+                    self.guarded.add(child)
             self._index(node)
         self._finish_index()
         self.functions = {
@@ -5464,15 +5479,13 @@ class _StdlibIO:
     def _tick(self) -> None:
         self.work += 1
         if self.work > _STDLIB_WORK_LIMIT or (
-            not self.work & 1023 and time.monotonic() > self.deadline
+            not self.work & 255 and time.monotonic() > self.deadline
         ):
             raise _OverBudget
 
     def _bind(self, name: str, binder: ast.AST, weight: int = 1) -> None:
         self.counts[name] = self.counts.get(name, 0) + weight
         self.binders[name] = binder
-        if not isinstance(binder, (ast.Import, ast.ImportFrom)):
-            self.local_roots.add(name)
 
     def _index(self, node: ast.AST) -> None:
         if isinstance(node, ast.Name):
@@ -5491,6 +5504,8 @@ class _StdlibIO:
                 self.chdir = True
             if node.attr == "argv":
                 self.argv_touched = True
+            if node.attr == "mock":
+                self.opaque = True  # `unittest.mock.patch(...)`
             if node.attr in _STDLIB_NAMESPACE_ATTRS or node.attr in _STDLIB_OPAQUE_BUILTINS:
                 self.opaque = True  # `x.__dict__[...]`, `builtins.exec(...)`
             if not isinstance(node.ctx, ast.Load):
@@ -5528,14 +5543,15 @@ class _StdlibIO:
                 if isinstance(node, ast.Import):
                     local = alias.asname or alias.name.split(".", 1)[0]
                     target = alias.name if alias.asname else local
-                    self.io_aliases[local] = alias.name
                 elif node.module and node.level == 0:
                     local = alias.asname or alias.name
                     target = f"{node.module}.{alias.name}"
-                    self.io_aliases[local] = target
                 else:
                     local, target = alias.asname or alias.name, None
                 self._bind(local, node)
+                if "mock" in (getattr(node, "module", None) or "").split(".") \
+                        + alias.name.split("."):
+                    self.opaque = True  # `patch("builtins.open", ...)` and friends
                 if target is not None:
                     self.imports[local] = target
                     if target.rsplit(".", 1)[-1] in ("chdir", "fchdir"):
@@ -5966,12 +5982,7 @@ class _StdlibIO:
             ) or any(k.arg is None for k in node.keywords):
                 continue
             found = self._sink(node)
-            if found is None and self.chdir:
-                # The reader scan drops relative paths after a chdir; a
-                # path with an absolute base does not depend on the cwd.
-                self._absolute_reader_call(node, inputs, outputs)
-                continue
-            if found is None or not self._runs(node):
+            if found is None or node in self.guarded or not self._runs(node):
                 continue
             path_node, mode_node, needs_path = found
             path = self.value(path_node) if path_node is not None else None
@@ -5991,21 +6002,6 @@ class _StdlibIO:
             for direction in directions:
                 (inputs if direction == "input" else outputs).add(text)
         return sorted(inputs), sorted(outputs)
-
-    def _absolute_reader_call(self, node: ast.Call, inputs: set[str],
-                              outputs: set[str]) -> None:
-        direction = _io_call_direction(node, self.io_aliases, self.local_roots)
-        if direction is None or not self._runs(node):
-            return
-        expressions = list(node.args[:1]) + [
-            k.value for k in node.keywords if k.arg in _PATH_KEYWORDS]
-        if len(expressions) != 1:
-            return
-        path = self.value(expressions[0])
-        if path is None or not os.path.isabs(path.text) or "\0" in path.text \
-                or ".." in Path(path.text).parts:
-            return
-        (inputs if direction == "input" else outputs).add(path.text)
 
     def _keyword(self, node: ast.Call, name: str) -> ast.AST | None:
         for keyword in node.keywords:
@@ -6051,25 +6047,7 @@ class _StdlibIO:
         return None
 
 
-class _StdlibAnalysis(NamedTuple):
-    inputs: list[str]
-    outputs: list[str]
-    changes_directory: bool  # the source may chdir: relative paths are ambiguous
-
-
-_CHDIR_RX = re.compile(r"\b(?:f?chdir)\b")
 _CODING_COOKIE_RX = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)", re.MULTILINE)
-
-
-def _text_may_chdir(source: str) -> bool:
-    """The fallback check, outside comments and strings (all of the source
-    when it cannot be tokenized)."""
-    if not _CHDIR_RX.search(source):
-        return False
-    spans = _python_spans(source)
-    if spans is not None:
-        source = _blank(source, spans.comments + spans.strings)
-    return bool(_CHDIR_RX.search(source))
 
 
 def _decoded_as_python_would(source: str) -> bool:
@@ -6083,31 +6061,30 @@ def _decoded_as_python_would(source: str) -> bool:
         "utf-8", "utf8", "utf-8-sig")
 
 
-def _stdlib_analysis(source: str, script_args: list[str] | None) -> _StdlibAnalysis:
+def _stdlib_analysis(
+    source: str, script_args: list[str] | None, deadline: float | None = None
+) -> tuple[list[str], list[str]] | None:
     """Paths a Python source certainly opens through the standard library,
-    and whether it may change its working directory.
-
-    The chdir answer comes from the AST (a call or reference that resolves
-    to a `chdir`). Where the source cannot be analysed (too large, not
-    parsable, over budget) it falls back to the conservative text check."""
+    or None when it cannot be analysed within the bounds (too large, not
+    parsable, not decoded as Python would, over the work budget or past
+    ``deadline``)."""
+    if deadline is None:
+        deadline = time.monotonic() + _STDLIB_DEADLINE_SECONDS
     if len(source) > _STDLIB_SOURCE_LIMIT \
             or len(source.encode("utf-8", "surrogatepass")) > _STDLIB_SOURCE_LIMIT:
-        return _StdlibAnalysis([], [], _text_may_chdir(source))
-    fallback = _StdlibAnalysis([], [], _text_may_chdir(source))
+        return None
     if not _decoded_as_python_would(source):
-        # A literal may decode to another name than the file Python opened.
-        return fallback
-    deadline = time.monotonic() + _STDLIB_DEADLINE_SECONDS
+        return None  # a literal may name another file than Python opened
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
-        return fallback
+        return None
+    if time.monotonic() > deadline:
+        return None
     try:
-        resolver = _StdlibIO(tree, script_args, deadline)
-        inputs, outputs = resolver.collect()
+        return _StdlibIO(tree, script_args, deadline).collect()
     except (_OverBudget, RecursionError, MemoryError):
-        return fallback
-    return _StdlibAnalysis(inputs, outputs, resolver.chdir)
+        return None
 
 
 class _HashBudget:
@@ -6119,6 +6096,11 @@ class _HashBudget:
     def __init__(self, max_bytes: int = 128 * 1024**2, seconds: float = 0.25) -> None:
         self.bytes_left = max_bytes
         self.deadline = time.monotonic() + seconds
+
+    def until(self, deadline: float) -> "_HashBudget":
+        """This budget's bytes, with the earlier of the two deadlines."""
+        self.deadline = min(self.deadline, deadline)
+        return self
 
     def take(self, size: int) -> bool:
         if size > self.bytes_left or time.monotonic() >= self.deadline:
@@ -6167,8 +6149,70 @@ def _stdlib_static_io(
     source: str, script_args: list[str] | None
 ) -> tuple[list[str], list[str]]:
     """Paths a Python source certainly opens through the standard library."""
-    analysis = _stdlib_analysis(source, script_args)
-    return analysis.inputs, analysis.outputs
+    return _stdlib_analysis(source, script_args) or ([], [])
+
+
+def _stdlib_additions(
+    source: str,
+    language: str | None,
+    script_args: list[str] | None,
+    cwd: Path,
+    args: argparse.Namespace,
+    inputs: list[str],
+    outputs: list[str],
+    hash_budget: _HashBudget | None,
+) -> tuple[list[dict], list[dict]]:
+    """File records the stdlib scan adds to what the reader/writer scan and
+    repository recovery found. Additive only: it reads their result but never
+    changes it. Only paths inside the repository that are not already
+    recorded (by full path identity) are added, at most `_STDLIB_PATH_CAP`;
+    parse, walks, resolution, stat and hashing share one deadline, and over
+    any bound nothing is added."""
+    if language != "python":
+        return [], []
+    deadline = time.monotonic() + _STDLIB_DEADLINE_SECONDS
+    found = _stdlib_analysis(source, script_args, deadline)
+    if not found or not (found[0] or found[1]):
+        return [], []
+    if len(found[0]) + len(found[1]) > _STDLIB_PATH_CAP:
+        return [], []
+    root = _record_root(args, cwd)
+    if root is None:
+        return [], []
+    try:
+        physical_cwd = os.path.realpath(cwd)
+    except (OSError, ValueError):
+        return [], []
+
+    def identity(value: str) -> str:
+        path = Path(value)
+        if not path.is_absolute():
+            path = cwd / path
+        return os.path.normpath(os.path.abspath(path))
+
+    budget = (hash_budget or _HashBudget()).until(deadline)
+    added: tuple[list[dict], list[dict]] = ([], [])
+    for found_paths, existing, out in zip(found, (inputs, outputs), added):
+        known = {identity(value) for value in existing}
+        for value in found_paths:
+            if time.monotonic() > deadline:
+                return [], []
+            if identity(value) in known:
+                continue
+            located = os.path.normpath(os.path.join(physical_cwd, value))
+            try:
+                inside = os.path.commonpath([located, root]) == root
+            except ValueError:
+                inside = False
+            if not inside:
+                continue  # framing a path outside the repository is unbounded
+            known.add(identity(value))
+            record = _budgeted_file_record(value, cwd, budget)
+            record["source"] = "inferred-static"
+            out.append(record)
+    if time.monotonic() > deadline + 0.05:
+        return [], []  # a stat or hash chunk overran: add nothing
+    return added
 
 
 def _repository_literal_io(
@@ -7271,13 +7315,14 @@ def build_event_for_detection(
     git_sha: str | None,
     *,
     script_args: list[str] | None = None,
-    hash_budget: _HashBudget | None = None,
+    hash_budget: "_HashBudget | None" = None,
 ) -> dict | None:
     """Build one NDJSON event dict for a single (script_path, inline) detection.
 
     ``script_args`` are the script's own arguments when every word is
-    literal (no shell expansion), so argparse options can be resolved; None
-    when they are unknown.
+    literal, so argparse options can be resolved; None when unknown. The
+    standard-library scan only ever adds records to what the reader/writer
+    scan and repository recovery found (see `_stdlib_additions`).
 
     ``cwd`` is the directory the run's relative I/O resolves against, or
     ``None`` when a runner moved the run somewhere unknowable; its literal
@@ -7342,23 +7387,11 @@ def build_event_for_detection(
     else:
         return None
 
-    language = (
+    inputs, outputs, filters, seeds = scan_source(
+        source,
         source_language(script_path if isinstance(script_path, Path) else None)
-        or getattr(inline_source, "language", None)
+        or getattr(inline_source, "language", None),
     )
-    inputs, outputs, filters, seeds = scan_source(source, language)
-    stdlib_inputs: list[str] = []
-    stdlib_outputs: list[str] = []
-    changes_directory = False
-    if language == "python":
-        # `open`, pathlib and argparse I/O the reader/writer scan cannot see,
-        # and one chdir check shared by both scans.
-        stdlib_inputs, stdlib_outputs, changes_directory = _stdlib_analysis(
-            source, script_args)
-    if changes_directory:
-        # After `os.chdir`, a relative path may name a file anywhere.
-        inputs = [p for p in inputs if os.path.isabs(p) or _is_url(p)]
-        outputs = [p for p in outputs if os.path.isabs(p) or _is_url(p)]
     # A URL literal (`pd.read_csv("https://...")`) is remote I/O, not a
     # file under the cwd: it is never resolved, hashed, or recorded as a
     # path, and is named only in a warning.
@@ -7389,13 +7422,9 @@ def build_event_for_detection(
             filters=filters,
             seeds=seeds,
         )
-    inputs, stdlib_added_inputs = _merge_recovered_paths(inputs, stdlib_inputs, cwd)
-    outputs, stdlib_added_outputs = _merge_recovered_paths(outputs, stdlib_outputs, cwd)
-    # Files only the stdlib scan inferred are hashed under a shared budget.
-    stdlib_only = set(stdlib_added_inputs) | set(stdlib_added_outputs)
-    budget = hash_budget if hash_budget is not None else _HashBudget()
-    recovered_inputs, recovered_outputs = ([], []) if changes_directory else \
-        _repository_literal_io(source, cwd, inputs, outputs)
+    recovered_inputs, recovered_outputs = _repository_literal_io(
+        source, cwd, inputs, outputs
+    )
     inputs, added_inputs = _merge_recovered_paths(inputs, recovered_inputs, cwd)
     outputs, added_outputs = _merge_recovered_paths(outputs, recovered_outputs, cwd)
     if added_inputs or added_outputs:
@@ -7408,21 +7437,26 @@ def build_event_for_detection(
             "No literal input/output paths were detected; the script may "
             "resolve paths dynamically or delegate I/O through imports."
         )
-    if changes_directory:
-        lineage_warnings.append(
-            "The script changes its working directory (chdir), so relative "
-            "paths it names were not recorded."
-        )
     lineage_warnings.extend(remote_warnings)
 
     recovered = set(added_inputs) | set(added_outputs)
+
+    language = (
+        source_language(script_path if isinstance(script_path, Path) else None)
+        or getattr(inline_source, "language", None)
+    )
+    extra_inputs, extra_outputs = _stdlib_additions(
+        source, language, script_args, cwd, args, inputs, outputs, hash_budget)
+    if (extra_inputs or extra_outputs) and io_detection == "unresolved":
+        io_detection = "static"
+        lineage_warnings = [w for w in lineage_warnings
+                            if not w.startswith("No literal input/output paths")]
 
     def labelled(path: str) -> dict:
         # Which inference produced the path: the reader/writer call scan,
         # or the repository recovery of a dynamic path. Never "observed":
         # observations live in the call's observation record.
-        record = _budgeted_file_record(path, cwd, budget) if path in stdlib_only \
-            else file_record(path, cwd)
+        record = file_record(path, cwd)
         record["source"] = "inferred-repository" if path in recovered else "inferred-static"
         return record
 
@@ -7432,8 +7466,8 @@ def build_event_for_detection(
         script_sha,
         script_source_embed,
         git_sha,
-        inputs=[labelled(p) for p in inputs],
-        outputs=[labelled(p) for p in outputs],
+        inputs=[labelled(p) for p in inputs] + extra_inputs,
+        outputs=[labelled(p) for p in outputs] + extra_outputs,
         io_detection=io_detection,
         lineage_warnings=lineage_warnings,
         filters=filters,
@@ -7552,6 +7586,26 @@ def _env_value(value: str) -> Any:
 def _inline_placeholder(body: str) -> dict[str, Any]:
     return {"inline_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
             "length": len(body)}
+
+
+# Characters that zsh or bash may expand or treat specially when unquoted:
+# globs (and zsh's extended `^ # ~`), braces, history `!`, parameter and
+# command substitution, and shell syntax.
+_REPLAY_UNSAFE_UNQUOTED = frozenset("*?[]{}~^#!$`()<>|&;")
+
+
+def _replay_safe_word(raw: str) -> bool:
+    """Whether a script argument, as written, is the same literal word under
+    zsh (which Codex runs commands in) and bash, so argparse can be replayed
+    with it. A leading unquoted `=` is zsh's `=command` expansion."""
+    if "\\" in raw or any(char in raw for char in "\r\x0b\x0c"):
+        return False  # escapes and splitting characters shlex reads differently
+    if _expansion(raw)[0]:
+        return False
+    unquoted = list(_unquoted_chars(raw))
+    if unquoted and unquoted[0] == (0, "="):
+        return False
+    return not any(char in _REPLAY_UNSAFE_UNQUOTED for _, char in unquoted)
 
 
 def _stage_raw_words(fragment: str) -> list[str] | None:
@@ -8047,15 +8101,8 @@ def build_step(
     if raws is not None and len(raws) != len(argv):
         raws = None  # the two scans disagree: treat the quoting as unknown
     if literal_args is not None and operand_index is not None and raws is not None \
-            and not prefix_partial and not truncated and all(
-                # A backslash needs the shell's quote-dependent decoding:
-                # decline rather than risk a different word.
-                "\\" not in raw
-                # shlex splits on these; the shell keeps them in the word.
-                and not any(char in raw for char in "\r\x0b\x0c")
-                and not _expansion(raw)[0] and not _has_unquoted_pattern(raw)
-                and all(char != "~" for _, char in _unquoted_chars(raw))
-                for raw in raws[operand_index:]):
+            and not prefix_partial and not truncated \
+            and all(_replay_safe_word(raw) for raw in raws[operand_index:]):
         literal_args.append(list(script_args))
     if literal_only:
         return step

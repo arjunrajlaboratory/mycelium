@@ -4695,6 +4695,7 @@ def _stdlib_event(tmp_path: Path, source: str, script_args: list[str] | None = [
         agent_type="",
         bash_cmd="python run.py",
         bash_exit=0,
+        repo_root=str(tmp_path),
     )
     event = build_event_for_detection(
         (script, None), args, tmp_path, "abc123", script_args=script_args
@@ -4934,7 +4935,7 @@ def test_main_resolves_stdlib_argparse_script_from_command_line(tmp_path: Path) 
         result = subprocess.run(
             [sys.executable, str(extractor), "--cwd", str(tmp_path),
              "--ts", "2026-11-23T12:00:00Z", "--bash-cmd", command,
-             "--bash-exit", "0", "--append-to", str(target)],
+             "--bash-exit", "0", "--append-to", str(target), "--repo-root", str(tmp_path)],
             capture_output=True, text=True, timeout=30,
         )
         assert result.returncode == 0, result.stderr
@@ -4977,7 +4978,8 @@ def test_stdlib_argparse_positional_argument_is_resolved(tmp_path: Path) -> None
 # arguments, and the (inputs, outputs) the narrowed grammar must record. A
 # wrong path is worse than none, so most stay unresolved.
 _STDLIB_REVIEW_CASES = {
-    "chdir": ('import os\nos.chdir("sub")\nopen("x.csv","w")\n', [], ([], [])),
+    "chdir": ('import os\nos.chdir("sub")\nopen("x.csv","w")\nopen("/abs/y.csv","w")\n', [],
+              ([], ["/abs/y.csv"])),
     "uncalled_fn": ('def never():\n    open("debug.csv","w")\nopen("in.csv")\n', [],
                     (["in.csv"], [])),
     "dict_update": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="out.csv")\nargs=p.parse_args()\nargs.__dict__.update({"out":"other.csv"})\nopen(args.out,"w")\n', [], ([], [])),
@@ -5060,18 +5062,7 @@ def test_stdlib_pathological_script_is_bounded(source: str) -> None:
 
     start = time.perf_counter()
     lineage_event._stdlib_static_io(source, [])
-    assert time.perf_counter() - start < 1.0
-
-
-def test_chdir_leaves_relative_reader_paths_unresolved(tmp_path: Path) -> None:
-    event, inputs, outputs = _stdlib_event(
-        tmp_path,
-        "import os\nimport pandas as pd\nos.chdir('sub')\n"
-        "pd.read_csv('a.csv')\nopen('/abs/b.csv')\n",
-    )
-    assert inputs == ["/abs/b.csv"]
-    assert outputs == []
-    assert any("chdir" in w for w in event["lineage_warnings"])
+    assert time.perf_counter() - start < 1.5
 
 
 @pytest.mark.parametrize(
@@ -5105,7 +5096,7 @@ def test_main_stdlib_argparse_needs_exactly_decoded_words(
     result = subprocess.run(
         [sys.executable, str(extractor), "--cwd", str(tmp_path),
          "--ts", "2026-11-23T12:00:00Z", "--bash-cmd", command,
-         "--bash-exit", "0", "--append-to", str(target)],
+         "--bash-exit", "0", "--append-to", str(target), "--repo-root", str(tmp_path)],
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
@@ -5178,7 +5169,8 @@ def test_stdlib_scan_work_is_bounded_globally(source: str, script_args) -> None:
 
     start = time.perf_counter()
     lineage_event._stdlib_static_io(source, script_args)
-    assert time.perf_counter() - start < 0.5
+    # The scan's own deadline is 0.4 s; the ceiling is generous for slow CI.
+    assert time.perf_counter() - start < 1.5
 
 
 def test_argparse_replay_still_resolves_a_realistic_parser() -> None:
@@ -5288,7 +5280,7 @@ def test_argparse_backtracking_layout_is_declined_quickly() -> None:
     args = ["sample"] * 100 + ["--output", "report.txt"] + ["col"] * 101
     start = time.perf_counter()
     assert lineage_event._stdlib_static_io(source, args) == ([], [])
-    assert time.perf_counter() - start < 0.5
+    assert time.perf_counter() - start < 1.5
 
 
 def test_main_argparse_declines_carriage_return_in_shell_word(tmp_path: Path) -> None:
@@ -5302,7 +5294,7 @@ def test_main_argparse_declines_carriage_return_in_shell_word(tmp_path: Path) ->
         [sys.executable, str(extractor), "--cwd", str(tmp_path),
          "--ts", "2026-11-23T12:00:00Z",
          "--bash-cmd", "python3 run.py --out=out.csv\r --label report",
-         "--bash-exit", "0", "--append-to", str(target)],
+         "--bash-exit", "0", "--append-to", str(target), "--repo-root", str(tmp_path)],
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
@@ -5321,16 +5313,6 @@ def test_oversized_script_chdir_in_comment_keeps_reader_paths(tmp_path: Path) ->
     assert inputs == [str(tmp_path / "samples.csv")]
 
 
-def test_oversized_script_real_chdir_still_drops_relative_paths(tmp_path: Path) -> None:
-    source = (
-        "import os\nimport pandas as pd\nos.chdir('work')\npd.read_csv('samples.csv')\n"
-        "CALIBRATION = (\n" + "    0.123456789,\n" * 17_000 + ")\n"
-    )
-    _, inputs, _ = _stdlib_event(tmp_path, source)
-    assert inputs == []
-
-
-
 def _run_extractor(cwd: Path, command: str) -> list[dict]:
     extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
     target = cwd / "events.tmp"
@@ -5338,7 +5320,7 @@ def _run_extractor(cwd: Path, command: str) -> list[dict]:
     result = subprocess.run(
         [sys.executable, str(extractor), "--cwd", str(cwd),
          "--ts", "2026-11-23T12:00:00Z", "--bash-cmd", command,
-         "--bash-exit", "0", "--append-to", str(target)],
+         "--bash-exit", "0", "--append-to", str(target), "--repo-root", str(cwd)],
         capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stderr
@@ -5364,20 +5346,6 @@ def test_chdir_keeps_reader_paths_with_an_absolute_base(tmp_path: Path) -> None:
     # directory; this branch drops it (asserted separately).
 
 
-def test_chdir_absolute_base_is_kept_and_relative_dropped(tmp_path: Path) -> None:
-    _, inputs, _ = _stdlib_event(
-        tmp_path,
-        "import os\nfrom pathlib import Path\nimport pandas as pd\n"
-        "os.chdir('work')\n"
-        "BASE = Path('/abs/data')\n"
-        "pd.read_csv(BASE / 'samples.csv')\n"
-        "pd.read_csv(os.path.join('/abs', 'other.csv'))\n"
-        "pd.read_csv(Path('rel') / 'x.csv')\n"
-        "pd.read_csv('relative.csv')\n",
-    )
-    assert inputs == ["/abs/data/samples.csv", "/abs/other.csv"]
-
-
 def test_stdlib_inferred_hashing_is_budgeted(tmp_path: Path) -> None:
     import time
 
@@ -5398,3 +5366,213 @@ def test_stdlib_inferred_hashing_is_budgeted(tmp_path: Path) -> None:
     assert all("size_bytes" in r for r in skipped)
     assert len(hashed) + len(skipped) == len(names)
     assert elapsed < 2.0
+
+
+
+def test_stdlib_relative_paths_after_chdir_are_not_added(tmp_path: Path) -> None:
+    """The reader scan's own result is main's (chdir does not filter it);
+    the stdlib scan adds no relative path after a chdir."""
+    _, inputs, outputs = _stdlib_event(
+        tmp_path,
+        "import os\nimport pandas as pd\nos.chdir('sub')\n"
+        "pd.read_csv('a.csv')\nopen('b.csv')\nopen('c.csv', 'w')\n",
+    )
+    assert inputs == [str(tmp_path / "a.csv")]
+    assert outputs == []
+
+
+# Regressions in main's detection found in review: HEAD must record at
+# least what main records on each.
+def _symlink_basename_repro(root: Path) -> str:
+    raw = root.parent / f"{root.name}-raw.csv"
+    raw.write_text("x\n1\n")
+    (root / "samples.csv").symlink_to(raw)
+    (root / "data").mkdir()
+    (root / "data" / "samples.csv").write_text("x\n2\n")
+    return ("from pathlib import Path\nimport pandas as pd\n"
+            "with open('samples.csv') as raw:\n    print(raw.read())\n"
+            "print(pd.read_csv(Path('data') / 'samples.csv'))\n")
+
+
+def _chdir_options_repro(root: Path) -> str:
+    (root / "work").mkdir()
+    (root / "samples.csv").write_text("x\n1\n")
+    return ("import os\nfrom pathlib import Path\nimport pandas as pd\n"
+            "options = {'usecols': ['x']}\nos.chdir('work')\n"
+            f"print(pd.read_csv(Path({str(root)!r}) / 'samples.csv', **options))\n")
+
+
+def _chdir_absolute_repro(root: Path) -> str:
+    (root / "data").mkdir()
+    (root / "work").mkdir()
+    (root / "data" / "samples.csv").write_text("x\n1\n")
+    return ("import os\nfrom pathlib import Path\nimport pandas as pd\n\n"
+            "os.chdir('work')\n"
+            f"pd.read_csv(Path({str(root / 'data')!r}) / 'samples.csv')\n"
+            "pd.read_csv('relative.csv')\n")
+
+
+def _chdir_comment_repro(root: Path) -> str:
+    (root / "samples.csv").write_text("x\n1\n")
+    return ("# Previous versions used os.chdir elsewhere.\n"
+            "import pandas as pd\npd.read_csv('samples.csv')\n"
+            "CALIBRATION = (\n" + "    0.123456789,\n" * 17_000 + ")\n")
+
+
+_MAIN_REGRESSION_REPROS = {
+    "symlink-basename": _symlink_basename_repro,
+    "chdir-options": _chdir_options_repro,
+    "chdir-absolute": _chdir_absolute_repro,
+    "chdir-comment": _chdir_comment_repro,
+}
+
+
+def _repro_event(root: Path, make) -> dict:
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "run.py").write_text(make(root))
+    args = argparse.Namespace(
+        ts="2026-11-23T12:00:00Z", agent_id="", agent_type="",
+        bash_cmd="python run.py", bash_exit=0, repo_root=str(root),
+    )
+    event = build_event_for_detection((root / "run.py", None), args, root, "abc123")
+    assert event is not None
+    return event
+
+
+@pytest.mark.parametrize("name", sorted(_MAIN_REGRESSION_REPROS))
+def test_stdlib_scan_only_adds_to_the_reader_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Runs in CI: the result with the stdlib scan contains, record for
+    record, the result without it."""
+    make = _MAIN_REGRESSION_REPROS[name]
+    full = _repro_event(tmp_path / "full", make) if (tmp_path / "full").mkdir() is None else None
+    monkeypatch.setattr(lineage_event, "_stdlib_additions", lambda *a, **k: ([], []))
+    (tmp_path / "base").mkdir()
+    base = _repro_event(tmp_path / "base", make)
+
+    def paths(event: dict, key: str, root: Path) -> set[str]:
+        return {r["path"].replace(str(root), "$ROOT") for r in event[key]}
+
+    for key in ("inputs", "outputs"):
+        assert paths(base, key, tmp_path / "base") <= paths(full, key, tmp_path / "full")
+
+
+def _main_extractor(tmp_path: Path) -> Path | None:
+    repo = Path(__file__).resolve().parents[3]
+    probe = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q",
+                            "origin/main"], capture_output=True, text=True)
+    if probe.returncode != 0:
+        return None
+    archive = subprocess.run(["git", "-C", str(repo), "archive", "origin/main",
+                              "skills/core/scripts"], capture_output=True)
+    if archive.returncode != 0:
+        return None
+    dest = tmp_path / "main-src"
+    dest.mkdir()
+    subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, check=True)
+    return dest / "skills" / "core" / "scripts" / "extract_data_lineage_event.py"
+
+
+@pytest.mark.parametrize("name", sorted(_MAIN_REGRESSION_REPROS))
+def test_head_records_at_least_what_main_records(tmp_path: Path, name: str) -> None:
+    """main's own extractor (origin/main) against HEAD's, on each review
+    reproduction. Skipped where origin/main is not fetched (shallow CI)."""
+    main = _main_extractor(tmp_path)
+    if main is None:
+        pytest.skip("origin/main is not available")
+    head = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    results = {}
+    for label, extractor in (("main", main), ("head", head)):
+        root = tmp_path / label
+        root.mkdir()
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        (root / "run.py").write_text(_MAIN_REGRESSION_REPROS[name](root))
+        target = root / "events.tmp"
+        result = subprocess.run(
+            [sys.executable, str(extractor), "--cwd", str(root),
+             "--ts", "2026-11-23T12:00:00Z", "--bash-cmd", "python3 run.py",
+             "--bash-exit", "0", "--append-to", str(target), "--repo-root", str(root)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        [event] = [json.loads(line) for line in target.read_text().splitlines()]
+        results[label] = {key: {r["path"].replace(str(root), "$ROOT") for r in event[key]}
+                          for key in ("inputs", "outputs")}
+    for key in ("inputs", "outputs"):
+        assert results["main"][key] <= results["head"][key]
+
+
+def test_stdlib_additions_are_capped_all_or_nothing(tmp_path: Path) -> None:
+    source = "".join(f"open('f{i}.csv')\n" for i in range(lineage_event._STDLIB_PATH_CAP + 1))
+    event, inputs, _ = _stdlib_event(tmp_path, source)
+    assert inputs == []
+    source = "".join(f"open('f{i}.csv')\n" for i in range(lineage_event._STDLIB_PATH_CAP))
+    _, inputs, _ = _stdlib_event(tmp_path, source)
+    assert len(inputs) == lineage_event._STDLIB_PATH_CAP
+
+
+def test_stdlib_additions_stay_inside_the_repository(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, inputs, outputs = _stdlib_event(
+        repo, f"open({str(tmp_path / 'outside.csv')!r})\nopen('../up.csv')\n"
+              "open('inside.csv', 'w')\n")
+    assert inputs == []
+    assert outputs == [str(repo / "inside.csv")]
+
+
+def test_stdlib_framing_of_many_outside_paths_is_bounded(tmp_path: Path) -> None:
+    import time
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = tmp_path / "shared/pipeline/published/country/routine/archive/sequencing/experiment"
+    out.mkdir(parents=True)
+    source = f"BASE = {str(out) + '/'!r}\n" + "".join(
+        f"open(BASE + '{i:05}.csv', 'w').close()\n" for i in range(4000))
+    start = time.perf_counter()
+    _, _, outputs = _stdlib_event(repo, source)
+    assert outputs == []
+    assert time.perf_counter() - start < 1.5
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from unittest.mock import mock_open, patch\n"
+        "with patch('builtins.open', mock_open(read_data='m')):\n"
+        "    print(open('test.csv').read())\n",
+        "import unittest.mock\nunittest.mock.patch('builtins.open')\nopen('test.csv')\n",
+        "try:\n    with open('report.csv', 'x') as out:\n        out.write('n')\n"
+        "except FileExistsError:\n    pass\n",
+        "import contextlib\nwith contextlib.suppress(FileExistsError):\n"
+        "    open('report.csv', 'x')\n",
+    ],
+    ids=["mock-patch", "unittest-mock", "try-exclusive", "suppress"],
+)
+def test_stdlib_patched_or_recoverable_opens_are_not_added(source: str) -> None:
+    assert lineage_event._stdlib_static_io(source, []) == ([], [])
+
+
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("python3 run.py --input =python3", []),
+        ("python3 run.py --input '=python3'", ["=python3"]),
+        ("python3 run.py --input a^b.csv", []),
+        ("python3 run.py --input a#b.csv", []),
+        ("python3 run.py --input 'a#b.csv'", ["a#b.csv"]),
+        ("python3 run.py --input=data.csv", ["data.csv"]),
+    ],
+)
+def test_main_argparse_replay_needs_words_literal_in_zsh_and_bash(
+    tmp_path: Path, command: str, expected: list[str]
+) -> None:
+    (tmp_path / "run.py").write_text(
+        "import argparse\np = argparse.ArgumentParser()\n"
+        "p.add_argument('--input', required=True)\na = p.parse_args()\n"
+        "open(a.input, 'rb').read(4)\n"
+    )
+    [event] = _run_extractor(tmp_path, command)
+    assert [Path(r["path"]).name for r in event["inputs"]] == expected

@@ -183,16 +183,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - values that differ across call sites;
   - an escaping or mutated namespace;
   - `sys.argv` touched anywhere;
-  - shell expansions or backslashes in the arguments;
+  - argument words that zsh or bash may expand (globs, `~`, a leading `=`,
+    `$`, backslashes);
   - `__file__`-relative paths;
-  - a scan over its work budget.
+  - opens inside `try` with handlers or `contextlib.suppress`;
+  - files that import `mock`.
 
-  A script that calls `chdir` now records no relative paths from either scan.
-  Paths with an absolute base are still recorded.
+  The scan only adds to the existing result. The reader/writer scan and
+  repository recovery run exactly as before, and the stdlib scan never feeds,
+  filters or suppresses them. It adds only paths that:
+  - are inside the repository;
+  - are not already recorded (compared by full path);
+  - are not relative paths in a script that calls `chdir`.
 
-  Files that only this scan inferred are hashed under a shared budget (128 MB
-  and 0.25 s per call). A file over the budget is recorded with
-  `sha256: null` and `hash_status: "skipped-budget"`.
+  Parse, walks, resolution, stat and hashing share one 0.4 s deadline and a
+  work budget. Sources over 128 KB are not scanned. More than 64 paths, or
+  any bound exceeded, means nothing is added. Files are hashed within 128 MB;
+  over that, a file is recorded with `sha256: null` and
+  `hash_status: "skipped-budget"`.
+
   On Antigravity App, which installs no I/O observer, stdlib-only analyses
   had recorded `io_detection: "unresolved"` with no producer.
 
