@@ -133,6 +133,84 @@ def test_a_command_naming_no_data_leaves_nothing(project, command):
     assert _event(command, project) is None
 
 
+# Replaying the SNP-tree transcripts, most silent misses named analysis output
+# as `analysis/<name>/output/` (that project's convention) or relatively, from
+# a working directory inside `analysis/`, so the word itself never showed
+# `analysis/`. Mentions are judged as written and, for a relative word, as
+# resolved against the call's directory and any literal `cd` before it.
+
+
+@pytest.mark.parametrize(
+    ("command", "subdir", "named"),
+    [
+        ("ls analysis/x/output/", "", ["analysis/x/output/"]),
+        ("wc -l analysis/x/output/run1/log", "", ["analysis/x/output/run1/log"]),
+        ("ls x/outputs/", "analysis", ["x/outputs/"]),
+        ("head outputs/run1/log", "analysis/x", ["outputs/run1/log"]),
+        ("ls raw/", "data", ["raw/"]),
+        ("cd analysis && ls x/output/run1", "", ["x/output/run1"]),
+        ("cd analysis; cd x; head outputs/log", "", ["outputs/log"]),
+        ("cd {root}/analysis/x; head outputs/log", "", ["outputs/log"]),
+    ],
+)
+def test_analysis_output_is_judged_from_where_the_call_runs(project, command, subdir, named):
+    (project / ".git").mkdir()
+    event = _event(command.replace("{root}", str(project)), project / subdir if subdir else project)
+    assert event is not None
+    assert event["named_paths"] == named
+
+
+@pytest.mark.parametrize(
+    ("command", "subdir"),
+    [
+        ("ls output/", ""),  # not under analysis/
+        ("ls x/outputs/", ""),
+        ("cd analysis; ls x/scripts", ""),
+        ("ls ../../outputs/", "analysis/x"),  # resolves outside analysis/
+        ("cd /elsewhere/analysis/x; ls outputs/", ""),  # outside the project
+        ("cd -; ls outputs/", "analysis"),  # an unknown directory
+        ("cd $D; ls outputs/", "analysis"),
+        ("ls analysis/x/outputs_backup.md", ""),
+        ("head notes", "data"),  # a bare word is not a path
+    ],
+)
+def test_relative_words_outside_analysis_output_stay_unnamed(project, command, subdir):
+    (project / ".git").mkdir()
+    assert _event(command, project / subdir if subdir else project) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "named"),
+    [
+        ("wc -l analysis/x/registry/{samples,studies}.tsv",
+         ["analysis/x/registry/{samples,studies}.tsv"]),
+        ("ls -lh 'tables/{a,b}_summary.csv'", ["tables/{a,b}_summary.csv"]),
+        ("cat {x,y}.vcf.gz", ["{x,y}.vcf.gz"]),
+        # A parameter expansion's brace is not a brace group.
+        ("head ${HOME}/data/x.csv", ["/data/x.csv"]),
+    ],
+)
+def test_a_brace_expanded_data_word_is_named(project, command, named):
+    event = _event(command, project)
+    assert event is not None
+    assert event["named_paths"] == named
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["echo {a,b}", "ls src/{a,b}.py", "for f in {1,2}; do echo $f; done",
+     "awk '{print $1, $2}' README.md"],
+)
+def test_a_brace_word_naming_no_data_stays_unnamed(project, command):
+    assert _event(command, project) is None
+
+
+def test_brace_words_scan_linearly(project):
+    command = "ls " + "{a," * 20000 + "b}" * 3 + " " + "x{" * 20000
+    event, seconds = _timed_event(command, project)
+    assert seconds < SCAN_CPU_LIMIT_SECONDS
+
+
 def test_named_paths_are_capped_and_marked_truncated(project):
     command = "ls " + " ".join(f"data/f{i}.csv" for i in range(200))
     event = _event(command, project)
@@ -918,6 +996,25 @@ def test_a_wrapped_unproven_run_is_labelled(project, command, label):
     assert _has_label(event["analysis_candidates"], label), event
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 - <<'PY'\nprint(1)\nPY\n"
+        "python3 /opt/mycelium/skills/core/scripts/validate_structure.py --strict",
+        "python3 /opt/mycelium/skills/core/scripts/validate_structure.py .\n"
+        ".venv/bin/python - <<'PY'\nprint(1)\nPY",
+    ],
+)
+def test_a_helper_run_does_not_hide_a_stdin_fed_run_beside_it(project, command):
+    # Transcript replay: the helper was the only run the detector could see,
+    # it was dropped as Mycelium's own, and the heredoc run went unlabelled.
+    event = _event(command, project)
+    assert event is not None
+    labels = event["analysis_candidates"]
+    assert any(label.endswith("<<heredoc") for label in labels), labels
+    assert not any("validate_structure" in label for label in labels), labels
+
+
 def test_a_helper_named_in_an_argument_does_not_hide_the_run(project):
     command = (
         "for n in a; do Rscript fit.R --helper "
@@ -1245,6 +1342,53 @@ def test_stdin_fed_python_with_valued_options_is_labelled(project, command):
 
 def test_stdin_fed_python_printing_its_version_is_not_a_run(project):
     assert _event("printf x | xargs python3 -uV", project) is None
+
+
+# After `-` the interpreter reads no more options: the rest is the stdin
+# program's own argv. Transcript replay found these left silent.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 - \"$SHA\" <<'EOF'\nimport sys\nEOF",
+        "python3 -I - x.html <<'EOF'\nimport sys\nEOF",
+        "python3 - -c --version <<'EOF'\nimport sys\nEOF",
+        "Rscript - a b <<'RS'\nprint(1)\nRS",
+    ],
+)
+def test_stdin_fed_program_with_arguments_is_labelled(project, command):
+    event = _event(command, project)
+    assert event is not None
+    assert any(label.endswith("<<heredoc") for label in event["analysis_candidates"])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A substitution splits the segment before the heredoc operator.
+        "for u in a b; do python3 - ft/$(basename $u).txt <<'EOF'\nprint(1)\nEOF\ndone",
+        "cat fit.py | python3 - --flag",
+    ],
+)
+def test_an_explicit_dash_marks_a_stdin_fed_run(project, command):
+    event = _event(command, project)
+    assert event is not None
+    assert any(label.startswith("python3 -") for label in event["analysis_candidates"]), event
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 -V - x <<'EOF'\nimport sys\nEOF",  # prints and exits first
+        "python3 x.py - <<'EOF'\nimport sys\nEOF",  # a script, not stdin
+        "python3 -c 'print(1)' - <<'EOF'\nEOF",
+    ],
+)
+def test_options_before_the_dash_still_decide(project, command):
+    event = _event(command, project)
+    labels = event["analysis_candidates"] if event else []
+    assert not any(label.endswith("<<heredoc") for label in labels)
 
 
 # ---------- Codex review round 13 ----------

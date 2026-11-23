@@ -788,5 +788,91 @@ worktree's `init_repo.py`):
 **Not yet run:**
 
 - the Codex live audit, which needs the hooks approved in the desktop app
-  for a candidate install;
-- the 95% transcript replay (item 1's criterion).
+  for a candidate install.
+
+## Transcript replay (item 1's criterion, measured 2026-11-23)
+
+Item 1 is done when replaying the recorder's detector over the AP1-learning
+and SNP-tree transcripts gives an event for at least 95% of data-touching
+commands, and the remainder are logged skips with reasons.
+
+**Tool.** `tools/lineage_replay.py` reads the Claude Code transcripts for a
+project and its worktrees (subagents included) and the Codex rollouts whose
+session cwd is inside it (`.jsonl` and `.jsonl.zst`; code-mode
+`tools.exec_command({cmd: ...})` calls are parsed out of the JavaScript).
+Each Bash call is fed to `extract_data_lineage_event.py` exactly as
+`mycelium-data-tracker.sh` calls it on an owned transaction, and the outcome
+is read as the tracker reads it: an appended record is an event (an
+analysis event or a `data_command`), a nonzero exit or an unreadable
+script is a logged skip, and nothing at all is a silent miss. Calls that
+never ran (a permission denial, an interrupted call with no result) are
+dropped, since no hook fires for them. Claude's exit status comes from the
+hook contract (PostToolUse means 0; a failure's `Exit code N`); Codex
+code-mode calls have no per-call status and replay with it unknown, the
+conservative case. The replay is read-only on the projects: the detector
+reads files and runs `git rev-parse`, and its appends go to a scratch
+file. A worktree that no longer exists is replayed from the matching
+directory of the main checkout (7 SNP-tree calls). The report holds counts
+and content-free shape labels only; `--show-misses` prints raw commands to
+stderr for local debugging and is never committed.
+
+**Which commands touch data** is decided by the tool's own `classify`, not by
+the detector: an interpreter running a program file (`script`) or code from
+the command or stdin (`inline`), or any word naming a data-like path
+(`shell-data`: a data file extension, or a path under `data/`, `outputs/`,
+`output/` or `results/`). Terminal-only modes, tooling modules, Mycelium's
+own helpers, tooling and Mycelium state, URLs, and search patterns (a
+grep/rg pattern operand, negated globs, pathspec magic, regex syntax) do
+not count. The rule is in one block at the top of the classifier and is
+tested with paired positives and negatives.
+
+**Result.** Same classifier, detector before (`origin/main` at d0054d9) and
+after this change:
+
+| | SNP-tree | AP1-learning |
+|---|---|---|
+| Claude transcripts / Codex rollouts | 25 / 7 | 27 / 145 |
+| Bash calls replayed (Claude + Codex) | 3,755 (1,353 + 2,402) | 9,348 (732 + 8,616) |
+| Data-touching | 1,574 | 4,751 |
+| Events, before | 1,451 (92.2%) | 4,724 (99.4%) |
+| Silent misses, before | 118 | 8 |
+| **Events, after** | **1,569 (99.7%)** | **4,732 (99.6%)** |
+| **Logged skips, after** | **5** (all `script-unreadable`) | **19** (all `script-unreadable`) |
+| **Silent misses, after** | **0** | **0** |
+
+Both projects pass: at least 95% events, and every other data-touching
+command is a logged skip with a reason. The skips are scratch scripts that
+no longer exist on disk, which is also what the hook records when a
+command deletes its own script. 176 AP1 code-mode calls build their
+command in JavaScript (`cmd: someVar`) and cannot be replayed; they are
+counted, not classified.
+
+**What the replay fixed.** The silent misses fell into four detector gaps,
+each fixed with tests in `test_lineage_data_commands.py`:
+
+- analysis output under `analysis/<name>/output/` (SNP-tree's convention;
+  78 such directories), which the data-path rule did not recognize (about
+  73 calls);
+- a relative path read from inside `analysis/` (`ls outputs/` in
+  `analysis/x`, or after `cd analysis`), which never shows `analysis/` in
+  the word itself (about 46 calls). Relative words are now also judged as
+  resolved against the call's directory and each literal `cd` before them;
+- a stdin-fed interpreter that was unlabelled when it had arguments
+  (`python3 - "$F" <<'EOF'`), when a `$(...)` argument split the segment
+  before its heredoc, or when the call's only other run was a Mycelium
+  helper;
+- a brace-expanded data word (`registry/{samples,studies}.tsv`).
+
+The rest of the first run's misses were the classifier's own false
+positives (a data directory named inside a grep pattern or an exclusion
+glob), fixed in the classifier rather than the detector.
+
+**Re-run.** From the repository root:
+
+```bash
+python3 tools/lineage_replay.py --project SNP-tree=~/code/SNP-tree \
+  --project AP1-learning=~/code/AP1-learning --json /tmp/replay.json
+```
+
+`--detector-dir` replays another checkout's `skills/core/scripts` for a
+before and after comparison. It takes about 2.5 minutes with 12 workers.

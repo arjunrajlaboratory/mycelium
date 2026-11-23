@@ -5531,6 +5531,11 @@ def _project_root(cwd: str) -> str | None:
     return None
 
 
+# An analysis's output directory: Mycelium's `outputs`, and `output`, which
+# older projects use (SNP-tree has 78 `analysis/<name>/output/` directories).
+_ANALYSIS_OUTPUT_SEGMENTS = frozenset({"outputs", "output"})
+
+
 def _is_data_like_path(word: str, root: str | None = None) -> bool:
     """Whether a literal word names data: a data file extension, or a path
     under `data/` or `analysis/**/outputs/`. Tooling and Mycelium state are
@@ -5562,31 +5567,112 @@ def _is_data_like_path(word: str, root: str | None = None) -> bool:
     for index, segment in enumerate(segments):
         if segment == "data" and (index < len(segments) - 1 or "/" in word):
             return True
-        if segment == "outputs" and analysis_seen:
+        if segment in _ANALYSIS_OUTPUT_SEGMENTS and analysis_seen:
             return True
         analysis_seen = analysis_seen or segment == "analysis"
     return False
 
 
-def _data_path_mentions(command: str, root: str | None = None) -> tuple[list[str], bool]:
+def _mentioned_from(word: str, base: str | None, root: str | None) -> bool:
+    """Whether a relative word names data once read from ``base``, a
+    directory inside the project (`ls outputs/` run in `analysis/x`). Only
+    a word written as a path counts: in `data/`, `ls` is a command, not
+    `data/ls`."""
+    if (not base or not root or "/" not in word
+            or word.startswith(("/", "~", "$", "-"))):
+        return False
+    joined = os.path.normpath(os.path.join(base, word))
+    return joined.startswith(root + "/") and _is_data_like_path(joined, root)
+
+
+def _data_path_mentions(
+    command: str, root: str | None = None, cwd: str | None = None
+) -> tuple[list[str], bool]:
     """Literal data-like words the command text names, in first-seen order.
 
     This is a mention list, not an access list: the word may sit in a
     comment, an `echo`, or an unexecuted branch. Returns (words, truncated).
+
+    A relative word is also judged from where it was likely read: the
+    call's directory, moved by each literal `cd` before it in the text. That
+    is a lexical reading, not a model of the shell (a `cd` may fail or sit in
+    a subshell), which is enough for a mention; a `cd` to anything but a
+    literal path leaves the directory unknown.
     """
     seen: dict[str, None] = {}
+    base = cwd
+    previous = None
+    brace_ends = {group.end() for group in _BRACE_GROUP_RX.finditer(command)}
 
     for match in _DATA_COMMAND_WORD_RX.finditer(command):
         # Quote removal joins a partly quoted word (`"data"/x.csv`). A
         # quoted name holding a space is read in pieces (`data/my`), which
         # still marks the call as touching data.
         word = match.group(0).replace("'", "").replace('"', "")
-        if word in seen or not _is_data_like_path(word, root):
+        if match.start() in brace_ends:
+            # The tail of a brace word (`{a,b}.csv`): judged whole below.
+            previous = word
+            continue
+        if previous == "cd":
+            if word.startswith("/"):
+                base = os.path.normpath(word)
+            elif base and not word.startswith(("~", "$", "-")):
+                base = os.path.normpath(os.path.join(base, word))
+            else:
+                base = None
+        previous = word
+        if word in seen or not (
+            _is_data_like_path(word, root) or _mentioned_from(word, base, root)
+        ):
+            continue
+        if len(seen) >= DATA_COMMAND_NAMED_PATH_LIMIT:
+            return list(seen), True
+        seen[word] = None
+    # The word scan splits a brace expansion (`registry/{a,b}.tsv`) into
+    # pieces none of which looks like data; judge each alternative whole.
+    for word in _brace_words(command):
+        if word in seen or not any(
+            _is_data_like_path(alternative, root) or _mentioned_from(alternative, cwd, root)
+            for alternative in _brace_alternatives(word)
+        ):
             continue
         if len(seen) >= DATA_COMMAND_NAMED_PATH_LIMIT:
             return list(seen), True
         seen[word] = None
     return list(seen), False
+
+
+_BRACE_GROUP_RX = re.compile(r"\{[^\s{}]*,[^\s{}]*\}")
+# Characters that end a word around a brace group (the word scan's
+# delimiters, without the comma, plus the braces themselves).
+_BRACE_WORD_STOP = frozenset(" \t\r\n`;|&<>(){}[]=:")
+_BRACE_WORD_LIMIT = 1024
+
+
+def _brace_words(command: str) -> Iterator[str]:
+    """Words holding one comma brace group, quotes removed. Each group
+    extends at most a bounded distance to either side, so the scan stays
+    linear in the command (pattern 42)."""
+    for match in _BRACE_GROUP_RX.finditer(command):
+        left = match.start()
+        floor = max(0, left - _BRACE_WORD_LIMIT)
+        while left > floor and command[left - 1] not in _BRACE_WORD_STOP:
+            left -= 1
+        right = match.end()
+        ceiling = min(len(command), right + _BRACE_WORD_LIMIT)
+        while right < ceiling and command[right] not in _BRACE_WORD_STOP:
+            right += 1
+        word = command[left:right].replace("'", "").replace('"', "")
+        if "{" in word:
+            yield word
+
+
+def _brace_alternatives(word: str) -> list[str]:
+    match = _BRACE_GROUP_RX.search(word)
+    if match is None:
+        return []
+    head, tail = word[: match.start()], word[match.end():]
+    return [head + part + tail for part in match.group(0)[1:-1].split(",")]
 
 
 # Flags that leave `cp SRC... DST` / `mv SRC... DST` operand roles unchanged
@@ -6005,9 +6091,12 @@ def _stdin_fed_run_label(
     """An interpreter that reads its program or file names from stdin, which
     the detector cannot see: `python3 - <<'PY'`, `R --no-save <<'RS'`,
     `... | xargs python3`. Only a bare interpreter (options, or `-`, and no
-    other operand) qualifies, so `python3 --version` and the like do not."""
+    other operand) qualifies, so `python3 --version` and the like do not.
+    An explicit `-` operand names stdin as the program whatever feeds it (a
+    pipe, or a heredoc the segment split cut off at a `$(...)` argument)."""
     name = run_words[0].rsplit("/", 1)[-1]
-    if not (heredoc or via_xargs) or not _STDIN_INTERPRETER_RX.fullmatch(name):
+    if (not (heredoc or via_xargs or "-" in run_words[1:])
+            or not _STDIN_INTERPRETER_RX.fullmatch(name)):
         return []
     rest = run_words[1:]
     python = name not in ("R", "Rscript")
@@ -6018,8 +6107,9 @@ def _stdin_fed_run_label(
             position += 2  # an option and its separate value
             continue
         if word == "-":
-            position += 1
-            continue
+            # The program comes from stdin; every later word is its own
+            # argv (`python3 - "$F" <<'PY'`), never an interpreter option.
+            break
         if not word.startswith("-") or word in ("-c", "-m", "-e", "-f", "--file"):
             return []  # a payload operand: the detector's case, not stdin's
         if word in _STDIN_TERMINAL_FLAGS:
@@ -6302,6 +6392,11 @@ def _unproven_analysis_candidates(
         if label not in seen:
             seen.add(label)
             candidates.append(label)
+    if not candidates:
+        # Every run the detector saw was Mycelium's own helper. A stdin-fed
+        # interpreter beside it (`python3 - <<'PY'`) is invisible to the
+        # detector, so the command-position scan still has to look.
+        return _interpreter_runs_named(command, cwd)
     return candidates
 
 
@@ -6311,7 +6406,7 @@ def build_data_command_event(
     """One minimal `data_command` record for a Bash call that touches data
     and has no analysis event, or None when the call names no data and no
     analysis run."""
-    named, truncated = _data_path_mentions(args.bash_cmd, _project_root(str(cwd)))
+    named, truncated = _data_path_mentions(args.bash_cmd, _project_root(str(cwd)), str(cwd))
     candidates = _unproven_analysis_candidates(args.bash_cmd, cwd, analysis_named)
     io = _certain_shell_io(args.bash_cmd, cwd, getattr(args, "bash_exit", None))
     observation = getattr(args, "observation", None) or {}

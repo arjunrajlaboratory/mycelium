@@ -172,7 +172,13 @@ how many times the data was looked at:
 - shell operations on data (`head`, `zcat`, `awk`, `cut`, `sort`, `cp`, `mv`,
   `samtools`, …) whose text names a data-like path: a file with a data
   extension (the scan list plus compressed and common genomics, tree, and
-  image formats), a path under `data/`, or a path under `analysis/**/outputs`.
+  image formats), a path under `data/`, or a path under `analysis/**/outputs`
+  (or `analysis/**/output`, which older projects use). A relative word is
+  also judged as resolved against the call's directory and any literal
+  `cd` before it in the text (`ls outputs/` run in `analysis/x`); a word
+  with no `/` is never resolved, since in `data/` a bare `ls` is a command.
+  A brace word (`registry/{samples,studies}.tsv`) is judged by its
+  alternatives.
   Tooling and Mycelium state (`.living/`, `.mycelium/`, `.git/`, `.claude/`,
   `.codex/`, `node_modules/`, `package.json`, `requirements.txt`, …) and URLs
   are not data;
@@ -186,7 +192,9 @@ how many times the data was looked at:
   tooling modules (`python -m pytest`), and Mycelium's own helpers are
   excluded exactly as there. Labels are the resolved script path or
   `<interpreter> (inline)`; an interpreter reading its program from stdin
-  (heredoc, `xargs python3`) is labelled by name. Quoted text
+  (heredoc, `xargs python3`, an explicit `-` operand whatever follows it)
+  is labelled by name, also when the call's only other run is a Mycelium
+  helper. Quoted text
   (`echo "python a.py"`) and heredoc bodies (a README written with
   `cat <<EOF`) are not runs. Labels are hints, never claims.
 

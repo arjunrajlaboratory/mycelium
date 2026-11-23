@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A transcript replay for data lineage** (`tools/lineage_replay.py`). It
+  feeds every Bash call in a project's Claude Code and Codex transcripts
+  through the lineage detector the way the PostToolUse hook does, and
+  counts events, logged skips, and silent misses among data-touching
+  commands (decided by its own reviewable rule). It reports counts only,
+  never command text. Over the SNP-tree and AP1-learning transcripts, 99.7%
+  and 99.6% of data-touching commands now leave an event and the rest a
+  logged skip, with no silent misses (92.2% and 99.4%, with 118 and 8
+  silent misses, before the fixes below). This meets item 1's acceptance
+  criterion; numbers are in `docs/plans/provenance-index.md`.
+
 - **A project-level lineage index** (`skills/core/scripts/lineage_index.py`).
   It answers three questions across sessions: which events read a content
   hash, which call produced it, and whether that write is still current.
@@ -96,6 +107,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Data commands recognize more of what touches data.** A path under
+  `analysis/<name>/output/` (as well as `outputs/`) counts as data. A
+  relative path is also judged from where the call reads it: the call's
+  directory and any literal `cd` before it (`ls outputs/` in `analysis/x`).
+  A brace word (`registry/{a,b}.tsv`) is judged by its alternatives. A
+  stdin-fed interpreter is labelled when it has arguments
+  (`python3 - "$F" <<'EOF'`), when its only sign of stdin is an explicit
+  `-`, and when the call's only other run is a Mycelium helper. Each of
+  these left a data-touching call with no record at all.
 - **Committed lineage manifests keep only allowlisted words**
   (`text_policy: "allowlist-v1"`). Six review rounds kept finding secrets
   that survived the denylist redaction, which can never cover every shell,
