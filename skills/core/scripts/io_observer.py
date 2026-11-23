@@ -461,8 +461,12 @@ def _locked(path: Path) -> Iterator[None]:
 
 
 def append_line(path: Path, record: dict[str, Any], *, io_root: Path) -> None:
-    """Append one JSON line under the file's stable lock."""
+    """Append one JSON line under the file's stable lock. The observation
+    store is kept long-term, so an observation's command text is stored
+    under the commit allowlist (its change entries are the evidence)."""
     _check_dir(io_root, path.parent)
+    if record.get("kind") == "observation" and isinstance(record.get("bash_cmd"), str):
+        record = _allowlisted(record)
     line = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
     with _locked(path):
         fd = os.open(
@@ -1553,15 +1557,14 @@ def _input_proofs(
     return proofs
 
 
-def _redacted(text: str | None) -> str | None:
-    """The command text with secrets removed, by the policy every lineage
-    record shares (lineage_redact)."""
-    if not text:
-        return text
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+def _allowlisted(observation: dict[str, Any]) -> dict[str, Any]:
+    """The observation with its command text under the commit allowlist."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
     import lineage_redact
 
-    return lineage_redact.redact_command(text)
+    return {**observation, "bash_cmd": lineage_redact.commit_observation_command(observation)}
 
 
 def post(
@@ -1646,7 +1649,7 @@ def post(
         "host_session_id": session,
         "agent_id": agent,
         "tool": tool,
-        "bash_cmd": _redacted(bash_cmd),
+        "bash_cmd": bash_cmd,
         "outcome": outcome,
         "bash_exit": bash_exit,
         "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

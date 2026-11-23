@@ -3,7 +3,7 @@
 1. A URL literal (`pd.read_csv("https://user:pass@host/x.csv")`) is never
    recorded as a local path, so its userinfo never reaches `inputs[].path`
    or `rel_path`; the same for outputs, data-command redirections, and
-   config operands (kept only as a redacted remote reference).
+   config operands (kept only as a remote reference).
 2. A bare `~` in a config operand is resolved with the hook's HOME only
    when nothing before the stage may have changed HOME.
 3. A 0.9.7 pairing listing one level keeps its 0.9.7 behavior; only
@@ -26,6 +26,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import data_contract_check as dcc  # noqa: E402
+import extract_data_lineage as stop  # noqa: E402
 import extract_data_lineage_event as ev  # noqa: E402
 
 EXTRACTOR = HERE / "extract_data_lineage_event.py"
@@ -44,11 +45,15 @@ def repo(tmp_path: Path) -> Path:
 
 
 def run(repo: Path, command: str, env: dict | None = None) -> tuple[list[dict], str]:
+    """(records, the records as a committed manifest holds them, as text)."""
     result = subprocess.run(
         [sys.executable, str(EXTRACTOR), "--cwd", str(repo), "--ts", "2026-11-22T10:00:00Z",
          "--bash-cmd", command, "--bash-exit", "0", "--repo-root", str(repo)],
         capture_output=True, text=True, check=True, env=env)
-    return [json.loads(line) for line in result.stdout.splitlines() if line.strip()], result.stdout
+    records = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    return records, json.dumps([
+        (stop.commit_data_command if r.get("kind") == "data_command" else stop.commit_event)(r)
+        for r in records])
 
 
 def _file_paths(record: dict) -> list[str]:
@@ -74,8 +79,7 @@ def test_url_input_password_never_reaches_inputs(repo: Path) -> None:
     assert not any(ev._is_url(p) for p in paths), paths
     assert [Path(rec["path"]).name for rec in record["outputs"]] == ["out.csv"]
     assert record["inputs"] == []
-    assert any("https://<redacted>@example.invalid/data.csv" in w
-               for w in record["lineage_warnings"])
+    assert any("Remote URLs" in w for w in record["lineage_warnings"])
 
 
 def test_url_output_password_never_reaches_outputs(repo: Path) -> None:
@@ -102,26 +106,25 @@ def test_shell_io_never_records_a_url_shaped_word(command: str, repo: Path) -> N
         assert not any("s3:" in p for p in _file_paths(record))
 
 
-def test_url_config_operand_is_a_redacted_remote_reference(repo: Path) -> None:
+def test_url_config_operand_is_a_remote_reference(repo: Path) -> None:
     step = ev.build_step("python fit.py --config https://tok@h.invalid/c.yaml?key=Q1",
                          {"offset": 0, "kind": "script", "script_word": "fit.py"}, None, repo)
     (config,) = step["config_files"]
     assert config["hash_status"] == "remote"
     assert config["sha256"] is None
-    assert "tok" not in config["path"] and "Q1" not in config["path"]
-    assert config["path"].startswith("https://<redacted>@h.invalid/c.yaml")
+    # No evidence: a committed record keeps none of it.
+    (committed,) = stop._commit_config_files([config])
+    assert committed["path"] == "<v>"
 
 
 def test_url_config_never_framed_as_a_repository_path(repo: Path) -> None:
-    (record,), stdout = run(repo, "python fit.py --config https://tok@h.invalid/c.yaml")
+    (record,), committed = run(repo, "python fit.py --config https://tok@h.invalid/c.yaml")
     (config,) = record["step"]["config_files"]
     assert config["rel_path"] is None
-    assert "tok@" not in json.dumps(config)
+    assert "tok@" not in committed
 
 
-def test_redact_url_strips_userinfo_and_query() -> None:
-    assert ev._redact_url("https://user:pw@h/x.csv") == "https://<redacted>@h/x.csv"
-    assert ev._redact_url("gs://h/x.csv?sig=abc#f") == "gs://h/x.csv?<redacted>"
+def test_url_shapes() -> None:
     assert ev._is_url("s3:/b/x.csv") and not ev._is_url("C:/data/x.csv")
     assert not ev._is_url("data/x.csv")
 

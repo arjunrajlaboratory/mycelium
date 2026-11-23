@@ -1,11 +1,10 @@
 """The commit allowlist (text_policy allowlist-v1).
 
-A committed manifest keeps only words known to be safe; the denylist in
-lineage_redact can never be complete. These tests replay the secret corpus
-of every earlier review round (the parametrized commands of
-test_provenance_review_*.py) through a full consolidation and assert that
-no sentinel reaches the manifest, and check that the allowlist still leaves
-a readable command.
+A committed manifest keeps only words known to be safe; no list of secret
+shapes is ever complete. These tests replay the secret corpus of every
+earlier review round through a full consolidation and assert that no
+sentinel reaches the manifest, and check that the allowlist still leaves a
+readable command.
 """
 
 from __future__ import annotations
@@ -27,65 +26,128 @@ import lineage_redact as lr  # noqa: E402
 V = lr.COMMIT_VALUE
 RANDOM_TOKEN = "9f8a7b6c5d4e3f2a1b0c"
 HEX = "a" * 64  # a digest: file evidence for a record path
-_SENTINEL_NAMES = ("SECRET", "TOKEN", "SENTINEL")
 
 
 # -- the corpus ----------------------------------------------------------------
+#
+# (case id, text, sentinel): the secret corpus of every earlier review round
+# (the denylist-era cases of test_provenance_review_*.py), and a few that no
+# denylist could catch.
 
-
-def _strings(value) -> list[str]:
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, (tuple, list)):
-        return [s for item in value for s in _strings(item)]
-    return []
-
-
-def _corpus() -> list[tuple[str, str, str]]:
-    """(case id, text, sentinel) for every parametrized string of the review
-    tests that holds that module's secret sentinel, or that a `(command,
-    secret)` pair names as its secret."""
-    cases: list[tuple[str, str, str]] = []
-    for path in sorted(HERE.glob("test_provenance_review_*.py")):
-        module = importlib.import_module(path.stem)
-        sentinels = [getattr(module, n) for n in _SENTINEL_NAMES
-                     if isinstance(getattr(module, n, None), str)]
-        for name, func in sorted(vars(module).items()):
-            for mark in getattr(func, "pytestmark", []) or []:
-                if mark.name != "parametrize":
-                    continue
-                for index, param in enumerate(mark.args[1]):
-                    values = getattr(param, "values", param)
-                    strings = _strings(values)
-                    found = [(text, s) for text in strings for s in sentinels if s in text]
-                    if isinstance(values, tuple) and len(strings) == 2 and \
-                            strings[1] and strings[1] in strings[0] and strings[1] != strings[0]:
-                        found.append((strings[0], strings[1]))
-                    for text, sentinel in found:
-                        cases.append((f"{path.stem}.{name}[{index}]", text, sentinel))
-    # Rounds that inline their sentinels rather than naming them.
-    cases += [
-        ("p1a.url-io", "cp https://u:SEC3@h/a.csv data/b.csv", "SEC3"),
-        ("p1b.dash-led", "python fit.py --password -123456 x", "123456"),
-        ("random-token", f"tool -k {RANDOM_TOKEN}", RANDOM_TOKEN),
-        ("random-token-eq", f"tool --key-id={RANDOM_TOKEN} data/in.csv", RANDOM_TOKEN),
-        ("random-token-env", f"X_ID={RANDOM_TOKEN} python fit.py", RANDOM_TOKEN),
-        ("glued-short", "mysql -pS3cr3tValue db", "S3cr3tValue"),
-        ("heredoc", f"cat <<EOF > cfg.txt\nkey: {RANDOM_TOKEN}\nEOF", RANDOM_TOKEN),
-        ("pin", "tool --pin 482913", "482913"),
-    ]
-    return cases
-
-
-CORPUS = _corpus()
-
-
-def test_the_corpus_was_collected() -> None:
-    # Every earlier round contributed; a refactor of the review tests that
-    # hides their parameters would silently empty this file's main test.
-    rounds = {case.split(".")[0] for case, _, _ in CORPUS}
-    assert len(CORPUS) >= 30
-    assert len([r for r in rounds if r.startswith("test_provenance_review_")]) >= 5
+CORPUS = [
+    ('p1b.test_a_secret_value_led_by_a_dash_is_redacted[1]',
+     '-xTEST_SECRET_123', 'TEST_SECRET_123'),
+    ('p1b.test_url_tokens_and_secret_query_values_are_redacted[0]',
+     'git clone https://ghp_TEST_SECRET_123@github.com/o/r.git', 'TEST_SECRET_123'),
+    ('p1b.test_url_tokens_and_secret_query_values_are_redacted[1]',
+     "wget 'https://h/c.yaml?key=TEST_SECRET_123&format=csv'", 'TEST_SECRET_123'),
+    ('p1b.test_url_tokens_and_secret_query_values_are_redacted[2]',
+     "aws s3 cp 's3://b/k?X-Amz-Signature=TEST_SECRET_123&X-Amz-Date=1' .", 'TEST_SECRET_123'),
+    ('p2b.test_annotated_secret_literals_are_redacted[0]',
+     'API_TOKEN: str = "FAKE_TOKEN_42"\n', 'FAKE_TOKEN_42'),
+    ('p2b.test_annotated_secret_literals_are_redacted[1]',
+     'secret: Final[str] = "FAKE_TOKEN_42"\n', 'FAKE_TOKEN_42'),
+    ('p2b.test_annotated_secret_literals_are_redacted[2]',
+     'password: "str | None" = "FAKE_TOKEN_42"\n', 'FAKE_TOKEN_42'),
+    ('p2b.test_the_whole_url_userinfo_is_redacted[0]',
+     'python fit.py --config https://FAKE_TOKEN_42:x-oauth-basic@host.invalid/settings.yaml', 'FAKE_TOKEN_42'),
+    ('p2b.test_the_whole_url_userinfo_is_redacted[1]',
+     'git clone https://user:FAKE_TOKEN_42@host/x.git', 'FAKE_TOKEN_42'),
+    ('p2b.test_the_whole_url_userinfo_is_redacted[2]',
+     'git clone https://FAKE_TOKEN_42@host/x.git', 'FAKE_TOKEN_42'),
+    ('p3b.test_parenthesized_and_concatenated_literals_are_redacted[0]',
+     'password = ("abcMY_FAKE_SECRET"\n    "def")\n', 'MY_FAKE_SECRET'),
+    ('p3b.test_parenthesized_and_concatenated_literals_are_redacted[1]',
+     'token = "a" "MY_FAKE_SECRET"\n', 'MY_FAKE_SECRET'),
+    ('p3b.test_substitutions_and_nested_keys_are_redacted[0]',
+     "API_TOKEN=$(printf %s MY_FAKE_SECRET) python3 -c 'print(1)'", 'MY_FAKE_SECRET'),
+    ('p3b.test_substitutions_and_nested_keys_are_redacted[1]',
+     'API_TOKEN=`printf %s MY_FAKE_SECRET` python3 x.py', 'MY_FAKE_SECRET'),
+    ('p3b.test_substitutions_and_nested_keys_are_redacted[2]',
+     'snakemake --config=api_token=MY_FAKE_SECRET', 'MY_FAKE_SECRET'),
+    ('p3b.test_substitutions_and_nested_keys_are_redacted[3]',
+     'snakemake -C db.password=MY_FAKE_SECRET', 'MY_FAKE_SECRET'),
+    ('p3b.test_substitutions_and_nested_keys_are_redacted[4]',
+     'tool --opts=a=1,token=MY_FAKE_SECRET', 'MY_FAKE_SECRET'),
+    ('p4b.test_secrets_in_heredocs_substitutions_and_option_shapes_are_redacted[0]',
+     "curl -H @- https://example.invalid/c.csv <<'EOF'\nAuthorization: Bearer synthetic-secret\nEOF", 'synthetic-secret'),
+    ('p4b.test_secrets_in_heredocs_substitutions_and_option_shapes_are_redacted[1]',
+     'trait=$(python fetch.py --token synthetic-secret); python fit.py "$trait"', 'synthetic-secret'),
+    ('p4b.test_secrets_in_heredocs_substitutions_and_option_shapes_are_redacted[2]',
+     'x=`fetch --password synthetic-secret` && run', 'synthetic-secret'),
+    ('p4b.test_secrets_in_heredocs_substitutions_and_option_shapes_are_redacted[3]',
+     'echo "$(fetch --api-key synthetic-secret)"', 'synthetic-secret'),
+    ('p4b.test_secrets_in_heredocs_substitutions_and_option_shapes_are_redacted[4]',
+     'y=$(fetch --token synthetic-secret', 'synthetic-secret'),
+    ('p4b.test_secrets_in_heredocs_substitutions_and_option_shapes_are_redacted[5]',
+     'python app.py --password --ab9_synthetic-secret', 'synthetic-secret'),
+    ('p5b.test_digest_headers_and_combined_url_credentials_are_redacted[0]',
+     'curl -H "Authorization: Digest username=\\"my user\\", response=\\"sentinel_value_9\\"" https://x', 'sentinel_value_9'),
+    ('p5b.test_digest_headers_and_combined_url_credentials_are_redacted[1]',
+     "curl 'https://user:pass@example.com/file?api_key=sentinel_value_9'", 'sentinel_value_9'),
+    ('p5b.test_digest_headers_and_combined_url_credentials_are_redacted[2]',
+     'wget https://tok@example.com/f.csv?token=sentinel_value_9&page=2', 'sentinel_value_9'),
+    ('p6.test_attached_heredoc_and_nested_command_credentials_are_redacted[0]',
+     'curl --header=\'Authorization: Digest username="alice", response="FIXTURE_VALUE_7"\' https://x/f.csv', 'FIXTURE_VALUE_7'),
+    ('p6.test_attached_heredoc_and_nested_command_credentials_are_redacted[1]',
+     'curl -H\'Authorization: Digest username="alice", response="FIXTURE_VALUE_7"\' https://x/f.csv', 'FIXTURE_VALUE_7'),
+    ('p6.test_attached_heredoc_and_nested_command_credentials_are_redacted[2]',
+     'curl --header @- https://x/f.csv <<\'EOF\'\nAuthorization: Digest username="alice", response="FIXTURE_VALUE_7"\nEOF', 'FIXTURE_VALUE_7'),
+    ('p6.test_attached_heredoc_and_nested_command_credentials_are_redacted[3]',
+     "bash -c 'curl --oauth2-bearer FIXTURE_VALUE_7 https://example.test/file.csv'", 'FIXTURE_VALUE_7'),
+    ('p6.test_attached_heredoc_and_nested_command_credentials_are_redacted[4]',
+     "ssh host 'export API_TOKEN=FIXTURE_VALUE_7; run'", 'FIXTURE_VALUE_7'),
+    ('r1.test_whole_shell_words_are_redacted[0]',
+     'tool --token pre"post secret" next', 'secret'),
+    ('r1.test_whole_shell_words_are_redacted[1]',
+     'TOKEN=abc\\ def run', 'def'),
+    ('r1.test_whole_shell_words_are_redacted[2]',
+     'SESSION_ID=s3ssi0n run', 's3ssi0n'),
+    ('r1.test_whole_shell_words_are_redacted[3]',
+     "tool --api-key='a b c' x", 'a b c'),
+    ('r2_index.test_commands_are_redacted_after_shell_decoding[0]',
+     "python fit.py '--token' s3cret-value", 's3cret-value'),
+    ('r2_index.test_commands_are_redacted_after_shell_decoding[1]',
+     'python fit.py "--api-key=s3cret-value" data/in.csv', 's3cret-value'),
+    ('r2_index.test_commands_are_redacted_after_shell_decoding[2]',
+     'python -c "password = \\"s3cret-value\\"; print(1)"', 's3cret-value'),
+    ('r2_index.test_commands_are_redacted_after_shell_decoding[3]',
+     'curl -H \'Authorization: Digest username="u", response="s3cret-value"\' https://x', 's3cret-value'),
+    ('r2_index.test_commands_are_redacted_after_shell_decoding[4]',
+     'curl -H "Authorization: Bearer s3cret-value" https://x/data.csv', 's3cret-value'),
+    ('r2_index.test_quoted_secret_keys_in_source_are_redacted[0]',
+     'h = {"Authorization": "Bearer s3cret-value"}\n', 's3cret-value'),
+    ('r2_index.test_quoted_secret_keys_in_source_are_redacted[1]',
+     'cfg = {"api_key": "s3cret-value"}\n', 's3cret-value'),
+    ('r2_index.test_quoted_secret_keys_in_source_are_redacted[2]',
+     'headers["Authorization"] = "Digest a=1, response=s3cret-value"\n', 's3cret-value'),
+    ('p1a.url-io',
+     'cp https://u:SEC3@h/a.csv data/b.csv', 'SEC3'),
+    ('p1b.dash-led',
+     'python fit.py --password -123456 x', '123456'),
+    ('random-token',
+     'tool -k 9f8a7b6c5d4e3f2a1b0c', '9f8a7b6c5d4e3f2a1b0c'),
+    ('random-token-eq',
+     'tool --key-id=9f8a7b6c5d4e3f2a1b0c data/in.csv', '9f8a7b6c5d4e3f2a1b0c'),
+    ('random-token-env',
+     'X_ID=9f8a7b6c5d4e3f2a1b0c python fit.py', '9f8a7b6c5d4e3f2a1b0c'),
+    ('glued-short',
+     'mysql -pS3cr3tValue db', 'S3cr3tValue'),
+    ('heredoc',
+     'cat <<EOF > cfg.txt\nkey: 9f8a7b6c5d4e3f2a1b0c\nEOF', '9f8a7b6c5d4e3f2a1b0c'),
+    ('pin',
+     'tool --pin 482913', '482913'),
+    ("p1a.url-io", "cp https://u:SEC3@h/a.csv data/b.csv", "SEC3"),
+    ("p1b.dash-led", "python fit.py --password -123456 x", "123456"),
+    ("random-token", f"tool -k {RANDOM_TOKEN}", RANDOM_TOKEN),
+    ("random-token-eq", f"tool --key-id={RANDOM_TOKEN} data/in.csv", RANDOM_TOKEN),
+    ("random-token-env", f"X_ID={RANDOM_TOKEN} python fit.py", RANDOM_TOKEN),
+    ("glued-short", "mysql -pS3cr3tValue db", "S3cr3tValue"),
+    ("heredoc", f"cat <<EOF > cfg.txt\nkey: {RANDOM_TOKEN}\nEOF", RANDOM_TOKEN),
+    ("pin", "tool --pin 482913", "482913"),
+    ("p1b.continued", "python fit.py --api-key \\\n  'TEST_SECRET_123' --input data/in.csv",
+     "TEST_SECRET_123"),
+]
 
 
 def _write_session(root: Path, text: str, source: str | None = None) -> Path:
@@ -220,8 +282,6 @@ def test_a_number_after_a_secret_option_is_dropped() -> None:
 
 
 def test_a_random_token_with_an_innocent_name_is_dropped() -> None:
-    # Exactly what the denylist could never catch.
-    assert lr.redact_command(f"curl -k {RANDOM_TOKEN}") == f"curl -k {RANDOM_TOKEN}"
     assert lr.commit_safe_command(f"curl -k {RANDOM_TOKEN}", set()) == f"curl -k {V}"
 
 
@@ -302,7 +362,6 @@ def test_a_manifest_without_a_policy_still_validates() -> None:
 # option or name of the fixed option/name shape, a short number, or exactly
 # one of the record's own evidence-backed paths. Shape and position alone
 # never prove a word safe.
-
 
 
 def test_a_missing_config_operand_is_not_a_record_path() -> None:
@@ -664,3 +723,24 @@ def test_an_existing_file_with_a_pending_hash_keeps_its_path() -> None:
              "inputs": [{"path": "/repo/big.h5", "rel_path": "big.h5", "size_bytes": 10,
                          "hash_status": "skipped-budget"}], "outputs": []}
     assert stop.commit_event(event)["inputs"][0]["rel_path"] == "big.h5"
+
+
+# -- stores that outlive a session ---------------------------------------------
+
+
+def test_an_archived_event_stream_holds_only_allowlisted_text(tmp_path: Path) -> None:
+    # An accepted or abandoned session's queue is archived, not deleted.
+    events = _write_session(tmp_path, f"tool -k {RANDOM_TOKEN} --pin 482913")
+    archive = tmp_path / "archive.tmp"
+    stop.commit_stream(events, archive)
+    text = archive.read_text()
+    assert RANDOM_TOKEN not in text and "482913" not in text
+    assert [json.loads(line).get("kind") for line in text.splitlines()] == \
+        [None, "data_command", "skip"]
+
+
+def test_the_observation_store_holds_only_allowlisted_text() -> None:
+    observation = {"kind": "observation", "repo_root": "/r",
+                   "bash_cmd": f"python3 fit.py -k {RANDOM_TOKEN} > out/x.csv",
+                   "changes": {"created": [{"path": "out/x.csv"}]}}
+    assert lr.commit_observation_command(observation) == f"python3 {V} -k {V} > out/x.csv"

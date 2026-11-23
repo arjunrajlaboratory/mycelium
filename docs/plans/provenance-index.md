@@ -97,7 +97,7 @@ Sorting the 43 findings showed two design choices behind most of them:
   - small numbers;
   - shell operators.
 
-  Everything else becomes `<v>`, and script source is not committed (`text_policy: allowlist-v1`). Full text stays in the machine-local `.mycelium` stores, at the same trust level as shell history.
+  Everything else becomes `<v>`, and script source is not committed (`text_policy: allowlist-v1`). The old blocklist is gone: the allowlist is the only text policy. Stores that outlive a session (the observation store, the event archives) hold allowlisted text too; only the transient event queue, consumed at each Stop, keeps raw text, and the extractor parses it raw except that a secret-named option's value is never a config path or seed.
 - **`current` needs positive proof.** Before, a verdict was `current` unless some code path had recorded a gap, so each failure mode needed its own gap. Now `current-in-record` also requires that everything since the write is accounted for:
   - the write is in the current journal;
   - it started after the compaction `floor` that compaction now records;
@@ -441,6 +441,9 @@ it.
   stays populated for v1 readers.
 
 ### One redaction policy (v2) for every place the command text is stored
+
+*Superseded: this blocklist was deleted in favor of the commit allowlist
+(see "Structural fixes").*
 
 It applies before serialization, in the event, the data command, the
 observation and the skip. It covers `bash_cmd`, `argv`, `script_args`, `env`,

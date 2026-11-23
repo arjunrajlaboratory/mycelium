@@ -623,16 +623,9 @@ MYCELIUM__PY_LINEAGE_SKIP='
 import fcntl, json, os, sys, time, uuid
 path, ts, command, reason, detail = sys.argv[1:6]
 # skip_id makes a record countable once however often a retry moves it.
-# ts_ns places the gap among the records of the same second.
-# The command passes through the shared redaction policy before it is
-# stored anywhere; if that policy cannot be loaded, the command is omitted
-# rather than written raw.
-try:
-    sys.path.insert(0, os.environ["MYCELIUM__SCRIPTS_DIR"])
-    import lineage_redact
-    command = lineage_redact.redact_command(command)
-except Exception:
-    command = "<command omitted: redaction unavailable>"
+# ts_ns places the gap among the records of the same second. The command
+# is kept as the host showed it: Stop consumes the record within the turn
+# and commits only allowlisted words of it.
 record = {"ts": ts, "ts_ns": time.time_ns(), "kind": "skip", "skip_id": uuid.uuid4().hex,
           "skip_reason": reason, "detail": detail,
           "bash_cmd": command, "agent_id": None, "agent_type": None,
@@ -702,8 +695,22 @@ finally:
 # mycelium_record_lineage_skip EVENTS_FILE TS COMMAND REASON DETAIL [FLAGS...]
 # Caller holds the session lock and owns the transaction.
 mycelium_record_lineage_skip() {
-  MYCELIUM__SCRIPTS_DIR="$MYCELIUM__HOOKS_DIR/../scripts" \
-    python3 -c "$MYCELIUM__PY_LINEAGE_SKIP" "$@" >/dev/null 2>&1 || true
+  python3 -c "$MYCELIUM__PY_LINEAGE_SKIP" "$@" >/dev/null 2>&1 || true
+}
+
+# mycelium_archive_lineage_stream STREAM ARCHIVE: an abandoned session's raw
+# event stream is kept only with every record under the commit allowlist
+# (an accepted Stop keeps the copy consolidation wrote). The raw stream is
+# removed either way.
+mycelium_archive_lineage_stream() {
+  python3 -c '
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[3])
+import extract_data_lineage
+extract_data_lineage.commit_stream(Path(sys.argv[1]), Path(sys.argv[2]))
+' "$1" "$2" "$MYCELIUM__HOOKS_DIR/../scripts" >/dev/null 2>&1 || true
+  rm -f "$1"
 }
 
 # mycelium_record_unowned_lineage_skip REPO_ROOT PAYLOAD COMMAND REASON DETAIL

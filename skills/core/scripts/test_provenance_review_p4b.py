@@ -1,6 +1,6 @@
-"""Regressions for the fourth P1-only Codex pass (PR #154): heredoc headers,
-options inside substitutions, option-shaped secret values, scope roots
-spelled in another case, and deletions on case-insensitive volumes."""
+"""Regressions for the fourth P1-only Codex pass (PR #154): flags that take
+no value, scope roots spelled in another case, and deletions on
+case-insensitive volumes."""
 
 from __future__ import annotations
 
@@ -20,38 +20,15 @@ import lineage_redact as redact  # noqa: E402
 import test_lineage_index as tli  # noqa: E402
 import test_provenance_review_r2_index as r2  # noqa: E402
 
-SECRET = "synthetic-secret"
-
 
 def sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-@pytest.mark.parametrize("command", [
-    f"curl -H @- https://example.invalid/c.csv <<'EOF'\nAuthorization: Bearer {SECRET}\nEOF",
-    f"trait=$(python fetch.py --token {SECRET}); python fit.py \"$trait\"",
-    f"x=`fetch --password {SECRET}` && run",
-    f"echo \"$(fetch --api-key {SECRET})\"",
-    f"y=$(fetch --token {SECRET}",
-    f"python app.py --password --ab9_{SECRET}",
-])
-def test_secrets_in_heredocs_substitutions_and_option_shapes_are_redacted(
-        command: str) -> None:
-    assert SECRET not in redact.redact_command(command)
-
-
-def test_an_option_shaped_value_is_redacted_in_argv() -> None:
-    assert redact.redact_argv(["app.py", "--password", f"--ab9_{SECRET}"]) == \
-        ["app.py", "--password", redact.REDACTED]
-
-
-@pytest.mark.parametrize("command", [
-    "tool --ask-password --input a.csv",
-    "docker login --password-stdin --username u",
-    "echo $(date) && python x.py",
-])
-def test_flags_that_take_no_value_keep_the_next_word(command: str) -> None:
-    assert redact.redact_command(command) == command
+@pytest.mark.parametrize("flag", ["--ask-password", "--password-stdin", "--no-password"])
+def test_flags_that_take_no_value_mask_nothing(flag: str) -> None:
+    assert not redact.takes_secret_value(flag)
+    assert redact.takes_secret_value("--password")
 
 
 @pytest.fixture()

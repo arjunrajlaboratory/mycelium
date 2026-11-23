@@ -5377,36 +5377,15 @@ def _is_url(value: object) -> bool:
     return isinstance(value, str) and bool(_URL_RX.match(value.strip()))
 
 
-def _redact_url(value: str) -> str:
-    """A URL as it may be kept: the shared redaction policy first (userinfo
-    passwords, `https://user:pass@host`), then any userinfo left (a bare
-    token, `https://ghp_x@host`) and any query or fragment (`?api_key=`),
-    which can carry credentials the policy does not name."""
-    import lineage_redact
-
-    text = lineage_redact.redact_text(value)
-    match = re.match(r"([A-Za-z][A-Za-z0-9+.-]*://)([^/?#]*)(.*)\Z", text, re.S)
-    if not match:
-        return text
-    scheme, authority, rest = match.groups()
-    if "@" in authority:
-        authority = lineage_redact.REDACTED + "@" + authority.rpartition("@")[2]
-    for mark in ("?", "#"):
-        if mark in rest:
-            rest = rest.split(mark, 1)[0] + mark + lineage_redact.REDACTED
-            break
-    return scheme + authority + rest
-
-
 def _split_urls(paths: list[str]) -> tuple[list[str], list[str]]:
-    """(local paths, redacted URLs) from scanned literals."""
+    """(local paths, URLs) from scanned literals. A URL reaches the
+    transient queue only; the committed warning keeps none of it."""
     local: list[str] = []
     remote: list[str] = []
     for value in paths:
         if _is_url(value):
-            redacted = _redact_url(value.strip())
-            if redacted not in remote:
-                remote.append(redacted)
+            if value.strip() not in remote:
+                remote.append(value.strip())
         else:
             local.append(value)
     return local, remote
@@ -6327,8 +6306,7 @@ def build_data_command_event(
     """One minimal `data_command` record for a Bash call that touches data
     and has no analysis event, or None when the call names no data and no
     analysis run."""
-    named, truncated = _data_path_mentions(_redact_command_cached(args.bash_cmd),
-                                           _project_root(str(cwd)))
+    named, truncated = _data_path_mentions(args.bash_cmd, _project_root(str(cwd)))
     candidates = _unproven_analysis_candidates(args.bash_cmd, cwd, analysis_named)
     io = _certain_shell_io(args.bash_cmd, cwd, getattr(args, "bash_exit", None))
     observation = getattr(args, "observation", None) or {}
@@ -6424,8 +6402,6 @@ def build_event_for_detection(
     source = ""
     script_sha: str | None = None
     script_source_embed: str | None = None
-    sanitized_digest = False
-    args._sanitized_digest = False
 
     if script_path:
         # A script that does not exist is no evidence of an execution: the
@@ -6440,16 +6416,8 @@ def build_event_for_detection(
             return None
         script_sha = sha256_file(script_path)
         if len(source.encode("utf-8")) < EMBED_LIMIT_BYTES:
-            # Sanitized, with its digest, by _redact_record (a shell body by
-            # the command redaction, which `export HF_TOKEN=…` needs).
+            # In the transient queue only: a manifest keeps its digest.
             script_source_embed = source
-        else:
-            # Not embedded: the digest alone, under the same rule.
-            sanitized = _sanitize_script_text(script_path, source)
-            if sanitized != source:
-                script_sha = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
-                sanitized_digest = True
-                args._sanitized_digest = True
     elif inline_source:
         source = inline_source
         script_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
@@ -6464,7 +6432,7 @@ def build_event_for_detection(
     )
     # A URL literal (`pd.read_csv("https://...")`) is remote I/O, not a
     # file under the cwd: it is never resolved, hashed, or recorded as a
-    # path, and is named only in a warning with its credentials redacted.
+    # path, and is named only in a warning.
     inputs, remote_inputs = _split_urls(inputs)
     outputs, remote_outputs = _split_urls(outputs)
     remote_warnings = []
@@ -6539,7 +6507,8 @@ def build_event_for_detection(
 # Read from the detected stage's own text: its argv, the assignments and
 # wrappers before the interpreter, config files it names, and literal seeds.
 # Nothing is expanded or guessed; what the parser cannot model is marked
-# `partial`. Every string passes through one redaction policy first.
+# `partial`. The text is raw (the queue is transient); a committed manifest
+# keeps only what the commit allowlist allows.
 
 _CONFIG_SUFFIXES = frozenset({".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"})
 _SCRIPT_CONFIG_FLAGS = frozenset({
@@ -6560,54 +6529,39 @@ CONFIG_MAX_BYTES = 5 * 1024 * 1024
 CONFIG_BUDGET_SECONDS = 0.25
 STEP_TOKEN_MAX = 4096
 _TRUNCATED_MARK = "…[truncated]"
-# A secret-like key followed by a value separator (`"api_key": `, `token=`).
-_SECRET_KEY_VALUE_RX = re.compile(
-    r"(?i)(?:token|secret|passw(?:or)?d?|pwd|api[_-]?key|private[_-]?key|credential"
-    r"|auth(?!or)|cookie|session)[A-Za-z0-9_-]*[\"']?\]?\s*(?:=|:)")
 
 
-def _clip_redacted_token(original: Any, redacted: Any) -> tuple[Any, bool]:
-    """Clip one already-redacted token to STEP_TOKEN_MAX; (token, clipped).
+def _clip(token: Any) -> Any:
+    """One token clipped to STEP_TOKEN_MAX (a clipped word is never kept
+    in a committed record: the allowlist makes it `<v>`)."""
+    if isinstance(token, str) and len(token) > STEP_TOKEN_MAX:
+        return token[:STEP_TOKEN_MAX] + _TRUNCATED_MARK
+    return token
 
-    Redaction ran on the whole token first, so a secret whose closing quote
-    lies past the cap was still recognized. When the token looked secret
-    at all (a secret-like name anywhere in the unclipped text, or redaction
-    changed it), the kept prefix also stops before the first secret-like
-    name or redaction marker in it: no partial literal can survive a cut
-    that redaction did not foresee (an unterminated quote, say).
-    """
+
+def _clipped_argv(argv: list[Any]) -> tuple[list[Any], bool]:
+    """(argv with each long token clipped, whether any was)."""
+    out = [_clip(token) for token in argv]
+    return out, out != list(argv)
+
+
+def _secret_values_masked(argv: list[Any]) -> list[Any]:
+    """The argv with each value a secret-named option or assignment takes
+    (`--token X`, `--token=X`, `API_KEY=X`) replaced by None, in place, so
+    it is never read as a config path or a seed."""
     import lineage_redact
 
-    if not isinstance(redacted, str) or len(redacted) <= STEP_TOKEN_MAX:
-        return redacted, False
-    kept = redacted[:STEP_TOKEN_MAX]
-    if isinstance(original, str) and (
-        lineage_redact.is_secret_name(original) or redacted != original
-    ):
-        cuts = [m.start() for m in [lineage_redact.SECRET_NAME_RX.search(kept)] if m]
-        marker = kept.find(lineage_redact.REDACTED)
-        if marker >= 0:
-            cuts.append(marker)
-        if cuts:
-            kept = kept[: min(cuts)] + lineage_redact.REDACTED
-    return kept + _TRUNCATED_MARK, True
-
-
-def _redacted_clipped_argv(argv: list[Any]) -> tuple[list[Any], bool]:
-    """Redact the complete argv, then clip each long token; (argv, any clipped).
-
-    Clipping first would cut a secret's closing quote off before redaction
-    could see it, leaving the secret's prefix in the record."""
-    import lineage_redact
-
-    redacted = lineage_redact.redact_argv(list(argv))
     out: list[Any] = []
-    truncated = False
-    for original, token in zip(argv, redacted):
-        token, clipped = _clip_redacted_token(original, token)
-        truncated = truncated or clipped
-        out.append(token)
-    return out, truncated
+    masked = False
+    for token in argv:
+        if masked or not isinstance(token, str):
+            out.append(None)
+            masked = False
+            continue
+        name, eq, _ = token.partition("=")
+        out.append(None if eq and lineage_redact.is_secret_name(name) else token)
+        masked = lineage_redact.takes_secret_value(token)
+    return out
 
 
 _NAME_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -6637,7 +6591,7 @@ def _prefix_settings(prefix: str) -> tuple[dict[str, Any], list[str], bool]:
     for word in words:
         name, eq, value = word.partition("=")
         if eq and _NAME_RX.fullmatch(name):
-            env[name] = _env_value(name, value)
+            env[name] = _env_value(value)
             continue
         if word == "env":
             in_env = True
@@ -6650,28 +6604,15 @@ def _prefix_settings(prefix: str) -> tuple[dict[str, Any], list[str], bool]:
     return env, wrappers, False
 
 
-def _env_value(name: str, value: str) -> Any:
-    import lineage_redact
-
-    if lineage_redact.is_secret_name(name):
-        return {"redacted": True}
-    value = lineage_redact.redact_command(value)
+def _env_value(value: str) -> Any:
     if "$" in value or "`" in value:
         return {"text": value, "expanded": False}
     return value
 
 
 def _inline_placeholder(body: str) -> dict[str, Any]:
-    import lineage_redact
-
-    sanitized = lineage_redact.redact_source(body)
-    placeholder: dict[str, Any] = {
-        "inline_sha256": hashlib.sha256(sanitized.encode("utf-8")).hexdigest(),
-        "length": len(body),
-    }
-    if sanitized != body:
-        placeholder["sha256_of"] = "sanitized"
-    return placeholder
+    return {"inline_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "length": len(body)}
 
 
 def _stage_raw_words(fragment: str) -> list[str] | None:
@@ -6896,10 +6837,8 @@ def _config_candidates(interpreter: str, args: list[str]) -> list[tuple[str, str
 
 
 def _snakemake_params(args: list[str]) -> list[str]:
-    """Snakemake's `--config`/`-C` KEY=VALUE overrides, verbatim, with a
-    secret-named key's value redacted."""
-    import lineage_redact
-
+    """Snakemake's `--config`/`-C` KEY=VALUE overrides, verbatim (a
+    committed record keeps a secret-named key's value as `<v>`)."""
     values: list[str] = []
     collecting = False
     for token in args:
@@ -6920,12 +6859,7 @@ def _snakemake_params(args: list[str]) -> list[str]:
             continue
         elif not collecting:
             continue
-        key, eq, _ = token.partition("=")
-        if eq and lineage_redact.is_secret_name(key):
-            values.append(f"{key}={lineage_redact.REDACTED}")
-        else:
-            (redacted,) = lineage_redact.redact_argv([token])
-            values.append(_clip_redacted_token(token, redacted)[0])
+        values.append(_clip(token))
     return values
 
 
@@ -7053,8 +6987,6 @@ def build_step(
     """The `step` object for one detection: argv, interpreter, script
     arguments, environment assignments, config files, and literal seeds of
     the stage that ran it. Partial, with a reason, where it cannot tell."""
-    import lineage_redact
-
     if invocation and invocation.get("kind") == "runner" and invocation.get("offset") is None:
         # Only an unambiguous runner stage is used: with several runner
         # words, which stage this detection ran is not known here.
@@ -7145,21 +7077,20 @@ def build_step(
                 operand_index = index + 1
                 break
     script_args = argv[operand_index:] if operand_index is not None else []
-    # Every field read from the arguments reads the redacted list, the one
-    # stored: a word a secret flag consumed (`--password --seed=482731`,
-    # where the option parser takes `--seed=482731` as the password) is
-    # masked there, so it never surfaces as a seed or a parameter.
-    redacted_script_args = lineage_redact.redact_argv(list(script_args))
-    step["argv"], truncated = _redacted_clipped_argv(shown)
+    # Seeds and config paths are read from a list where a word a secret flag
+    # consumed (`--password --seed=482731`, where the option parser takes
+    # `--seed=482731` as the password) is masked: it is neither.
+    masked = _secret_values_masked(argv)
+    step["argv"], truncated = _clipped_argv(shown)
     step["executable"] = argv[0]
     step["interpreter"] = interpreter
-    step["script_args"], _ = _redacted_clipped_argv(script_args)
+    step["script_args"], _ = _clipped_argv(script_args)
     if env:
         step["env"] = env
     if wrappers:
-        step["wrappers"] = lineage_redact.redact_argv(wrappers)
+        step["wrappers"] = wrappers
     if interpreter == "snakemake":
-        params = _snakemake_params(lineage_redact.redact_argv(argv[1:]))
+        params = _snakemake_params(argv[1:])
         if params:
             step["params"] = params
     # Config files: the operands after the script for script runners, the
@@ -7174,22 +7105,15 @@ def build_step(
     # bash expands a bare `~` with the command's HOME: when anything before
     # this stage may have set it, the hook's own HOME proves nothing.
     home_stable = not _home_may_change(bash_cmd[:offset], suffix or "")
-    for operand in _config_operands(
-            interpreter, lineage_redact.redact_argv(argv[scan_from:])):
+    for operand in _config_operands(interpreter, masked[scan_from:]):
         if _is_url(operand.token):
             # A remote config is not a local file: never resolved against
-            # the cwd or hashed. One a flag names is kept as a reference with
-            # its userinfo redacted; a bare `.yaml` URL may be anything.
+            # the cwd or hashed. One a flag names is kept as a reference (a
+            # committed record has no evidence for it: `<v>`); a bare `.yaml`
+            # URL may be anything.
             if operand.via != "suffix":
-                remote.append({"path": _redact_url(operand.token), "via": operand.via,
+                remote.append({"path": operand.token, "via": operand.via,
                                "sha256": None, "hash_status": "remote"})
-            continue
-        if lineage_redact.REDACTED in operand.token:
-            continue  # a redacted local value is never a config path
-        if _SECRET_KEY_VALUE_RX.search(operand.token):
-            # `--params '{"api_key": "…'` with no closing quote: redaction
-            # cannot delimit the literal, and no config path looks like
-            # this, so it is never recorded as one.
             continue
         raw = raws[scan_from + operand.index] if raws is not None else None
         if raw is not None and operand.eq is not None:
@@ -7242,7 +7166,7 @@ def build_step(
         step["config_files"] = configs
     seeds: list[dict[str, Any]] = []
     expect_seed = False
-    for token in redacted_script_args:
+    for token in (masked[operand_index:] if operand_index is not None else []):
         if not isinstance(token, str):
             expect_seed = False
             continue
@@ -7290,7 +7214,7 @@ def data_command_step(bash_cmd: str, named_paths: list[str] | None = None) -> di
             words = [w for w in argv if not (_NAME_RX.fullmatch(w.partition("=")[0])
                                               and "=" in w)]
             if words and words[0] not in _NON_RUN_WORDS:
-                record = {"argv": _redacted_clipped_argv(argv)[0],
+                record = {"argv": _clipped_argv(argv)[0],
                           "executable": words[0]}
                 if named and any(any(p in w or w in p for p in named) for w in argv[1:]
                                  if len(w) > 1):
@@ -7345,10 +7269,6 @@ def _event_dict(
         # record (docs/plans/row-feature-access.md).
         "seeds_detected": seeds,
         **_observation_fields(args),
-        # A large script whose source held a secret literal: its digest is
-        # of the sanitized text, never of the secret-bearing body.
-        **({"script_sha256_of": "sanitized"} if getattr(args, "_sanitized_digest", False)
-           else {}),
     }
 
 
@@ -7429,54 +7349,7 @@ def _stamp_v2(record: dict, args: argparse.Namespace, cwd: Path) -> dict:
                     # Changed (or unprovable) across the call: the digest is
                     # of the file afterwards, not what the step read.
                     config["effective"] = "unknown"
-    _redact_record(record)
     return record
-
-
-@functools.lru_cache(maxsize=4)
-def _redact_command_cached(text: str) -> str:
-    """One redaction per command text, however many records repeat it."""
-    import lineage_redact
-
-    return lineage_redact.redact_command(text)
-
-
-_SHELL_SOURCE_SUFFIXES = (".sh", ".bash", ".zsh", ".ksh")
-_SHELL_SHEBANG_RX = re.compile(r"#![ \t]*\S*/(?:env[ \t]+(?:-\S+[ \t]+)*)?(?:ba|z|da|k)?sh\b")
-
-
-def _is_shell_source(script: Any, source: str | None) -> bool:
-    """A script body the shell runs: named `.sh`/`.bash`/`.zsh`/`.ksh`, or
-    opening with a shell shebang (an sbatch job file). Its secrets are shell
-    words (`export HF_TOKEN=…`), not only quoted literals, so it takes the
-    command redaction rather than the source-literal one."""
-    if isinstance(script, (str, Path)) and str(script).endswith(_SHELL_SOURCE_SUFFIXES):
-        return True
-    return isinstance(source, str) and bool(_SHELL_SHEBANG_RX.match(source))
-
-
-def _sanitize_script_text(script: Any, source: str) -> str:
-    """The one redaction a script body gets before it is embedded or hashed."""
-    import lineage_redact
-
-    if _is_shell_source(script, source):
-        return lineage_redact.redact_command(source)
-    return lineage_redact.redact_source(source)
-
-
-def _redact_record(record: dict) -> None:
-    """Apply the one redaction policy to every command text the record
-    keeps. A changed embedded source gets the hash of the sanitized text,
-    labelled, so no digest of a secret-bearing body is stored."""
-    if isinstance(record.get("bash_cmd"), str):
-        record["bash_cmd"] = _redact_command_cached(record["bash_cmd"])
-    source = record.get("script_source")
-    if isinstance(source, str):
-        sanitized = _sanitize_script_text(record.get("script"), source)
-        if sanitized != source:
-            record["script_source"] = sanitized
-            record["script_sha256"] = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
-            record["script_sha256_of"] = "sanitized"
 
 
 def _stamp_hash_origin(record: dict, *, is_input: bool) -> None:
@@ -7576,7 +7449,6 @@ def _record_unowned_data_command(
         _stamp_v2(event, args, cwd)
     else:
         event["ts_ns"] = time.time_ns()
-        _redact_record(event)
     # A failed append propagates: the guarded main exits 70, which the
     # tracker records as a `detector-failed` gap rather than silence.
     _append_with_stable_lock(args.data_command_to, json.dumps(event) + "\n")

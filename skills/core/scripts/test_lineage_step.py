@@ -21,7 +21,6 @@ sys.path.insert(0, str(HERE))
 
 import extract_data_lineage as stop  # noqa: E402
 import io_observer as io  # noqa: E402
-import lineage_redact  # noqa: E402
 
 EXTRACTOR = HERE / "extract_data_lineage_event.py"
 
@@ -74,16 +73,13 @@ def test_argv_interpreter_and_environment(repo: Path) -> None:
     assert "filters_detected" not in event
 
 
-def test_secrets_are_redacted_everywhere(repo: Path) -> None:
+def test_secrets_never_reach_the_committed_record(repo: Path) -> None:
     command = ("HF_TOKEN=hf_abcdef123 python fit.py --api-key sk-live-999 "
                "--password=hunter2 --url https://bob:pw123@example.org/x")
     (event,) = run(repo, command)
-    text = json.dumps(event)
+    text = json.dumps(stop.commit_event(event))
     for secret in ("hf_abcdef123", "sk-live-999", "hunter2", "pw123"):
         assert secret not in text, secret
-    assert event["step"]["env"]["HF_TOKEN"] == {"redacted": True}
-    assert "--api-key" in event["step"]["script_args"]
-    assert "<redacted>" in event["bash_cmd"]
 
 
 def test_inline_bodies_become_placeholders(repo: Path) -> None:
@@ -94,13 +90,13 @@ def test_inline_bodies_become_placeholders(repo: Path) -> None:
     assert placeholder["inline_sha256"] == hashlib.sha256(body.encode()).hexdigest()
 
 
-def test_a_secret_literal_in_source_is_redacted_with_a_labelled_hash(repo: Path) -> None:
-    (repo / "secret.py").write_text("api_key = 'sk-abcdefghij'\nimport pandas as pd\n"
-                                    "pd.read_csv('data/in.csv')\n")
+def test_a_script_keeps_its_file_digest_and_commits_no_source(repo: Path) -> None:
+    body = "api_key = 'sk-abcdefghij'\nimport pandas as pd\npd.read_csv('data/in.csv')\n"
+    (repo / "secret.py").write_text(body)
     (event,) = run(repo, "python secret.py")
-    assert "sk-abcdefghij" not in event["script_source"]
-    assert event["script_sha256_of"] == "sanitized"
-    assert event["script_sha256"] == hashlib.sha256(event["script_source"].encode()).hexdigest()
+    assert "script_sha256_of" not in event
+    assert event["script_sha256"] == hashlib.sha256(body.encode()).hexdigest()
+    assert "sk-abcdefghij" not in json.dumps(stop.commit_event(event))
 
 
 def test_config_files_by_interpreter_rules(repo: Path) -> None:
@@ -206,16 +202,18 @@ def test_an_unchanged_config_is_proven(repo: Path) -> None:
     assert "effective" not in config
 
 
-def test_observations_store_redacted_commands(tmp_path: Path) -> None:
+def test_observations_store_allowlisted_commands(tmp_path: Path) -> None:
     repo = tmp_path / "r"
     repo.mkdir()
     state = repo / ".mycelium"
     state.mkdir()
     io.pre(state, host="claude", session="s", call_id="c", tool="Bash", repo_root=repo,
            snapshot=True)
-    observation = io.post(state, host="claude", session="s", call_id="c", tool="Bash",
-                          repo_root=repo, bash_cmd="DB_PASSWORD=x9y8z7 make")
-    assert "x9y8z7" not in observation["bash_cmd"]
+    io.post(state, host="claude", session="s", call_id="c", tool="Bash", repo_root=repo,
+            bash_cmd="DB_PASSWORD=x9y8z7 make -k 9f8a7b6c5d4e3f2a1b0c")
+    (stored,) = [json.loads(line) for line in
+                 io.observations_path(state, "claude", "s").read_text().splitlines()]
+    assert stored["bash_cmd"] == "DB_PASSWORD=<v> make -k <v>"
 
 
 def test_consolidation_redacts_historical_records(tmp_path: Path) -> None:
@@ -232,32 +230,12 @@ def test_consolidation_redacts_historical_records(tmp_path: Path) -> None:
     assert "abc123secret" not in text and "tok999" not in text
 
 
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ("export AWS_SECRET_ACCESS_KEY=abc && run", "export AWS_SECRET_ACCESS_KEY=<redacted> && run"),
-        ("tool --author Jane --token=t0k", "tool --author Jane --token=<redacted>"),
-        ("git clone https://user:pa55@host/x.git", "git clone https://<redacted>@host/x.git"),
-        ("python fit.py --seed 3", "python fit.py --seed 3"),
-        ("AUTHOR=me make", "AUTHOR=me make"),
-    ],
-)
-def test_redaction_policy(text: str, expected: str) -> None:
-    assert lineage_redact.redact_text(text) == expected
-
-
-def test_source_redaction_keeps_ordinary_code() -> None:
-    code = "token = os.environ['HF_TOKEN']\nsession_key = make_key()\n"
-    assert lineage_redact.redact_source(code) == code
-    assert "'s3cr3tvalue'" not in lineage_redact.redact_source("password = 's3cr3tvalue'\n")
-
-
 def test_secrets_inside_environment_values_and_inline_bodies(repo: Path) -> None:
     (event,) = run(repo, "HTTPS_PROXY=https://user:pa55w0rd@proxy:8080 python fit.py")
-    assert "pa55w0rd" not in json.dumps(event)
+    assert "pa55w0rd" not in json.dumps(stop.commit_event(event))
     body = "password = 'example-secret'; import pandas as pd; pd.read_csv('data/in.csv')"
     (inline,) = run(repo, f'python -c "{body}"')
-    assert "example-secret" not in json.dumps(inline)
+    assert "example-secret" not in json.dumps(stop.commit_event(inline))
 
 
 def test_the_sanitized_label_survives_consolidation(tmp_path: Path) -> None:
@@ -268,17 +246,6 @@ def test_the_sanitized_label_survives_consolidation(tmp_path: Path) -> None:
                                   "outputs": []}) + "\n")
     (action,) = stop.extract(events, "s", str(tmp_path))["actions"]
     assert action["script_sha256_of"] == "sanitized"
-
-
-def test_the_shell_skip_writer_redacts(tmp_path: Path) -> None:
-    lib = HERE.parent / "hooks" / "mycelium-hook-lib.sh"
-    target = tmp_path / "events.tmp"
-    subprocess.run(["bash", "-c", f'source "{lib}"; mycelium_record_lineage_skip "{target}" '
-                    '2026-11-22T00:00:00Z "API_TOKEN=s3cr3tvalue python fit.py" '
-                    'detector-failed "exit 70"'], check=True)
-    (record,) = [json.loads(line) for line in target.read_text().splitlines()]
-    assert "s3cr3tvalue" not in record["bash_cmd"]
-    assert "<redacted>" in record["bash_cmd"]
 
 
 def test_a_failed_patch_claims_no_tombstone(tmp_path: Path) -> None:

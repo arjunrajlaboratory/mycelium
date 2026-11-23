@@ -265,27 +265,9 @@ def enrich_file_record(rec: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _redact(text: Any) -> Any:
-    """Command text through the shared redaction policy. v2 records were
-    redacted at hook time; this also covers v1 records re-consolidated
-    here and skips written by the shell hooks."""
-    if not isinstance(text, str) or not text:
-        return text
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import lineage_redact
-
-    return lineage_redact.redact_command(text)
-
-
-def _redact_observation(observation: dict[str, Any]) -> dict[str, Any]:
-    if isinstance(observation, dict) and isinstance(observation.get("bash_cmd"), str):
-        return {**observation, "bash_cmd": _redact(observation["bash_cmd"])}
-    return observation
-
-
 # --- the commit allowlist ---------------------------------------------------
 #
-# A manifest is committed; the stores under .mycelium/ are machine-local.
+# A manifest is committed; the event queue it is built from is transient.
 # Every free-text field of every record a manifest holds keeps only words
 # the allowlist in lineage_redact knows to be safe (TEXT_POLICY): vocabulary
 # command words, option and assignment names of the fixed shape, short
@@ -395,7 +377,7 @@ def _commit_env(env: Any, keep: set[str]) -> Any:
             hidden += 1
             out[f"{lr.COMMIT_VALUE}#{hidden}"] = lr.COMMIT_VALUE
             continue
-        secret = lr._commit_secret_name(str(name))
+        secret = lr.is_secret_name(str(name))
         if isinstance(value, str):
             out[name] = lr.commit_safe_value(value, keep, secret)
         elif isinstance(value, dict) and isinstance(value.get("text"), str):
@@ -578,19 +560,8 @@ def commit_observation(observation: Any) -> Any:
     lr = _lr()
     if not isinstance(observation, dict) or not isinstance(observation.get("bash_cmd"), str):
         return observation
-    # An observation's change entries are evidence: the walk saw each file.
-    paths: list[str] = []
-    root = observation.get("repo_root")
-    changes = observation.get("changes")
-    if isinstance(changes, dict):
-        for kind in ("created", "modified", "deleted"):
-            for entry in changes.get(kind) or []:
-                if isinstance(entry, dict) and isinstance(entry.get("path"), str):
-                    paths.append(entry["path"])
-                    if isinstance(root, str):
-                        paths.append(os.path.join(root, entry["path"]))
-    keep = lr.commit_keep_paths(paths)
-    return {**observation, "bash_cmd": lr.commit_safe_command(observation["bash_cmd"], keep)}
+    # The observer stores this form; an older store holds text it did not.
+    return {**observation, "bash_cmd": lr.commit_observation_command(observation)}
 
 
 def normalize_event(
@@ -608,7 +579,7 @@ def normalize_event(
         "ts": raw["ts"],
         "agent_id": raw.get("agent_id"),
         "agent_type": raw.get("agent_type"),
-        "bash_cmd": _redact(raw.get("bash_cmd")),
+        "bash_cmd": raw.get("bash_cmd"),
         "bash_exit": raw.get("bash_exit"),
         "bash_wall_s": raw.get("bash_wall_s"),
         "script": raw.get("script"),
@@ -633,67 +604,21 @@ def normalize_event(
     if isinstance(raw.get("step"), dict):
         event["step"] = raw["step"]
     if raw.get("script_sha256_of") == "sanitized":
-        # The digest is of the redacted source: the label must travel with it.
+        # An older recorder hashed a redacted source: the label travels
+        # with that digest.
         event["script_sha256_of"] = "sanitized"
     if isinstance(raw.get("stages_not_recorded"), int):
         event["stages_not_recorded"] = raw["stages_not_recorded"]
 
     if event["script"] and event["script_sha256"] is None:
-        script_path = Path(event["script"])
-        _digest_script_file(event, script_path)
-    _sanitize_embedded_source(event)
+        _digest_script_file(event, Path(event["script"]))
 
     return event
 
 
-_SHELL_SOURCE_SUFFIXES = (".sh", ".bash", ".zsh", ".ksh")
-_SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
-
-
-def _shell_shebang(text: str) -> bool:
-    """`#!/bin/bash`, `#!/usr/bin/env -S zsh`, … (an sbatch job file)."""
-    if not text.startswith("#!"):
-        return False
-    words = text[2:].split("\n", 1)[0].split()
-    if not words:
-        return False
-    names = [os.path.basename(words[0])]
-    if names[0] == "env":
-        names = [w for w in words[1:] if not w.startswith("-")][:1]
-    return bool(names) and names[0] in _SHELL_NAMES
-
-
-def _redact_script_text(script: Any, text: str) -> str:
-    """A shell script's body (`run.sh`) takes the command redaction, since
-    `export HF_TOKEN=…` is a shell word, not a quoted literal; any other
-    script the source-literal one. The extractor applies the same rule."""
-    import lineage_redact
-
-    if (isinstance(script, str) and script.endswith(_SHELL_SOURCE_SUFFIXES)) or _shell_shebang(
-            text):
-        return lineage_redact.redact_command(text)
-    return lineage_redact.redact_source(text)
-
-
-def _sanitize_embedded_source(event: dict) -> None:
-    """A pre-v2 event (recorded by 0.9.7, finalized after an upgrade) still
-    carries its raw source and digest: redact it here, and hash and label
-    the sanitized text, so no secret or digest of one is published."""
-    source = event.get("script_source")
-    if not isinstance(source, str):
-        return
-    sanitized = _redact_script_text(event.get("script"), source)
-    if sanitized != source:
-        event["script_source"] = sanitized
-        event["script_sha256"] = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
-        event["script_sha256_of"] = "sanitized"
-
-
 def _digest_script_file(event: dict, script_path: Path) -> None:
-    """A digest recomputed from the file, under the same rule as embedded
-    source: one bounded read from a descriptor proven to be a regular file
-    (a FIFO or device never blocks Stop), and a sanitized, labelled digest
-    when the text holds a secret."""
+    """The script file's digest, from one bounded read of a descriptor
+    proven to be a regular file (a FIFO or device never blocks Stop)."""
     try:
         fd = _open_regular_fd(script_path)
     except OSError:
@@ -705,14 +630,7 @@ def _digest_script_file(event: dict, script_path: Path) -> None:
             data = handle.read(SIZE_LIMIT_BYTES + 1)
     except OSError:
         return
-    if len(data) > SIZE_LIMIT_BYTES:
-        return
-    text = data.decode("utf-8", errors="replace")
-    sanitized = _redact_script_text(event.get("script"), text)
-    if sanitized != text:
-        event["script_sha256"] = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
-        event["script_sha256_of"] = "sanitized"
-    else:
+    if len(data) <= SIZE_LIMIT_BYTES:
         event["script_sha256"] = hashlib.sha256(data).hexdigest()
 
 
@@ -727,7 +645,7 @@ def normalize_skip(raw: dict[str, Any]) -> dict[str, Any]:
         **({"observation_id": raw["observation_id"]}
            if isinstance(raw.get("observation_id"), str) else {}),
         "detail": raw.get("detail"),
-        "bash_cmd": _redact(raw.get("bash_cmd")),
+        "bash_cmd": raw.get("bash_cmd"),
         "bash_exit": raw.get("bash_exit"),
         "agent_id": raw.get("agent_id"),
         "agent_type": raw.get("agent_type"),
@@ -744,7 +662,7 @@ def normalize_data_command(raw: dict[str, Any]) -> dict[str, Any]:
         "event_id": raw.get("event_id"),
         "agent_id": raw.get("agent_id"),
         "agent_type": raw.get("agent_type"),
-        "bash_cmd": _redact(raw.get("bash_cmd")),
+        "bash_cmd": raw.get("bash_cmd"),
         "bash_exit": raw.get("bash_exit"),
         "cwd": raw.get("cwd"),
         "signals": list(raw.get("signals") or []),
@@ -1273,7 +1191,7 @@ def extract(
         "text_policy": TEXT_POLICY,
         **build_manifest(events, session_id, repo_root, warnings, skipped, data_commands),
     }
-    manifest["observations"] = [commit_observation(_redact_observation(o))
+    manifest["observations"] = [commit_observation(o)
                                 for o in observations]
     counts: dict[str, int] = {}
     for observation in observations:
@@ -1283,6 +1201,24 @@ def extract(
     manifest["summary"]["observations_missing"] = missing
     manifest["summary"]["unresolved_calls"] = unresolved
     return manifest
+
+
+def commit_stream(source: Path, archive: Path) -> None:
+    """Archive a raw event stream (it outlives its session) with every
+    record under the commit allowlist; nothing but the stream is read."""
+    commit = {"skip": commit_skip, "data_command": commit_data_command}
+    lines = []
+    for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            record = commit.get(record.get("kind"), commit_event)(record)
+            lines.append(json.dumps(record) + "\n")
+    temp = archive.with_name(f".{archive.name}.tmp")
+    temp.write_text("".join(lines), encoding="utf-8")
+    os.replace(temp, archive)
 
 
 def main() -> int:
@@ -1304,6 +1240,13 @@ def main() -> int:
         help="An earlier manifest id of this transaction that this manifest "
         "replaces; its claims on unresolved calls carry over.",
     )
+    ap.add_argument(
+        "--archive",
+        type=Path,
+        default=None,
+        help="Also write the event stream, allowlisted, here (commit_stream): "
+        "the copy an accepted Stop keeps.",
+    )
     args = ap.parse_args()
 
     consumed: list[Path] = []
@@ -1313,6 +1256,8 @@ def main() -> int:
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     write_manifest_atomic(args.output, manifest)
+    if args.archive is not None:
+        commit_stream(args.events_file, args.archive)
     # Listed in a written manifest: claimed by it, so a blocked Stop's retry
     # (which rewrites this manifest) still lists them and a later
     # transaction does not report them again.

@@ -1,6 +1,6 @@
-"""Regressions for the first P1-only Codex pass (PR #154): redaction of
-continued lines and dash-led values, the index cache, background launches
-without an observation, unreadable checkouts, and FIFO script paths."""
+"""Regressions for the first P1-only Codex pass (PR #154): the index
+cache, background launches without an observation, unreadable checkouts,
+and FIFO script paths."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ sys.path.insert(0, str(HERE))
 import extract_data_lineage as stop  # noqa: E402
 import io_observer as io  # noqa: E402
 import lineage_index as li  # noqa: E402
-import lineage_redact as redact  # noqa: E402
 import test_lineage_index as tli  # noqa: E402
 import test_provenance_review_r2_index as r2  # noqa: E402
 
@@ -37,41 +36,6 @@ def project(tmp_path: Path) -> Path:
     (root / ".mycelium").mkdir()
     (root / "out").mkdir()
     return root
-
-
-# -- redaction ---------------------------------------------------------------
-
-
-def test_a_continued_secret_option_is_redacted() -> None:
-    command = f"python fit.py --api-key \\\n  '{SECRET}' --input data/in.csv"
-    out = redact.redact_command(command)
-    assert SECRET not in out and "data/in.csv" in out
-
-
-@pytest.mark.parametrize("value", ["-123456", "-x" + SECRET])
-def test_a_secret_value_led_by_a_dash_is_redacted(value: str) -> None:
-    assert value not in redact.redact_command(f"python fit.py --password {value} x")
-    assert value not in redact.redact_argv(["python", "fit.py", "--password", value])
-
-
-@pytest.mark.parametrize("command", [
-    f"git clone https://ghp_{SECRET}@github.com/o/r.git",
-    f"wget 'https://h/c.yaml?key={SECRET}&format=csv'",
-    f"aws s3 cp 's3://b/k?X-Amz-Signature={SECRET}&X-Amz-Date=1' .",
-])
-def test_url_tokens_and_secret_query_values_are_redacted(command: str) -> None:
-    assert SECRET not in redact.redact_command(command)
-    assert SECRET not in json.dumps(redact.redact_argv(command.split()))
-
-
-def test_ordinary_query_strings_are_kept() -> None:
-    text = "curl 'https://h/data.csv?page=2&sort=asc'"
-    assert redact.redact_command(text) == text
-
-
-def test_a_flag_followed_by_another_long_option_keeps_it() -> None:
-    assert redact.redact_argv(["tool", "--ask-password", "--input", "a.csv"]) == \
-        ["tool", "--ask-password", "--input", "a.csv"]
 
 
 # -- index cache -------------------------------------------------------------
@@ -146,16 +110,11 @@ def test_a_fifo_script_path_does_not_hang_consolidation(tmp_path: Path) -> None:
     assert result["event"]["script_sha256"] is None
 
 
-def test_a_regular_script_with_a_secret_gets_a_sanitized_digest(tmp_path: Path) -> None:
+def test_a_recomputed_script_digest_is_the_file_digest(tmp_path: Path) -> None:
     script = tmp_path / "fit.py"
     script.write_text(f'token = "{SECRET}"\n')
     raw = {"ts": "2026-11-01T00:00:00Z", "bash_cmd": "python fit.py", "script": str(script),
            "script_sha256": None}
     event = stop.normalize_event(raw, [], 0)
-    assert event["script_sha256_of"] == "sanitized"
-    assert event["script_sha256"] != hashlib.sha256(script.read_bytes()).hexdigest()
-    plain = tmp_path / "plain.py"
-    plain.write_text("print(1)\n")
-    event = stop.normalize_event({**raw, "script": str(plain)}, [], 0)
-    assert event["script_sha256"] == hashlib.sha256(plain.read_bytes()).hexdigest()
-    assert json.dumps(event)
+    assert "script_sha256_of" not in event
+    assert event["script_sha256"] == hashlib.sha256(script.read_bytes()).hexdigest()

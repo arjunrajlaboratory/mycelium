@@ -187,7 +187,7 @@
       ]
     },
     "step": {
-      "description": "v2: the settings a step ran with, read from its own shell stage. Partial (with a reason) where the parser could not tell. Every string has passed the redaction policy.",
+      "description": "v2: the settings a step ran with, read from its own shell stage. Partial (with a reason) where the parser could not tell. In a committed manifest every string has passed the commit allowlist.",
       "type": "object",
       "properties": {
         "argv": {
@@ -406,12 +406,12 @@
             "string",
             "null"
           ],
-          "description": "The embedded (redacted) source. Never present in a manifest with text_policy allowlist-v1: it stays in the machine-local event queue, and script_sha256 identifies it."
+          "description": "The embedded source. Never present in a manifest with text_policy allowlist-v1: it stays in the transient event queue, and script_sha256 identifies it."
         },
         "script_source_bytes": {
           "type": "integer",
           "minimum": 0,
-          "description": "allowlist-v1: UTF-8 size of the embedded (redacted) source that the manifest does not carry."
+          "description": "allowlist-v1: UTF-8 size of the embedded source that the manifest does not carry."
         },
         "script_source_lines": {
           "type": "integer",

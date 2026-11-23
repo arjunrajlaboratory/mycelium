@@ -1437,7 +1437,7 @@ def test_same_root_session_recovers_an_abandoned_owned_transaction(tmp_path):
         (repo / ".mycelium" / "mycelium-data-events-abandoned").glob("*.tmp")
     )
     assert len(archives) == 1
-    assert archives[0].read_text() == '{"script":"analysis/old.py"}\n'
+    assert json.loads(archives[0].read_text())["script"] == "analysis/old.py"
 
     replacement_stop = _run_hook(
         "mycelium-stop-check.sh",
@@ -4319,7 +4319,9 @@ def test_data_lineage_state_survives_blocked_stop_until_acceptance(tmp_path):
     assert not session_marker.exists()
     assert not events_file.exists()
     archived_events = state / "mycelium-data-events-prev" / f"{session_id}.tmp"
-    assert archived_events.read_text() == first_event + second_event
+    # Archived under the commit allowlist: the records, not the raw text.
+    assert [json.loads(line)["script"] for line in archived_events.read_text().splitlines()] == [
+        "analysis/first.py", "analysis/second.py"]
 
 
 def test_lineage_only_session_preserves_log_and_reserves_session_id(tmp_path):

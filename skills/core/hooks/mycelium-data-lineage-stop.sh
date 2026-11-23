@@ -141,6 +141,7 @@ python3 "$EXTRACTOR" \
   --output "$OUT_FILE" \
   --session-id "$SESSION_ID" \
   --repo-root "$REPO_ROOT" \
+  --archive "$EVENTS_FILE.archive" \
   ${OBSERVATION_FLAGS[@]+"${OBSERVATION_FLAGS[@]}"} \
   > "$LOG_TMP" 2>&1
 EXIT_CODE=$?

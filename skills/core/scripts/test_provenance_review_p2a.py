@@ -8,9 +8,8 @@
    CDPATH may be set (hook environment, a prefix, or anything earlier in the
    command), the cwd is unknown, so no relative script, config or I/O is
    claimed against the guessed directory.
-3. argv / script_args / data-command argv are redacted whole before each
-   word is clipped to 4 KiB, and a clipped word that looked secret keeps no
-   partial literal.
+3. argv / script_args / data-command argv words are clipped to 4 KiB, and
+   a clipped word is never committed (the allowlist makes it `<v>`).
 """
 from __future__ import annotations
 
@@ -27,6 +26,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import data_contract_check as dcc  # noqa: E402
+import extract_data_lineage as stop  # noqa: E402
 import extract_data_lineage_event as ev  # noqa: E402
 
 EXTRACTOR = HERE / "extract_data_lineage_event.py"
@@ -239,7 +239,7 @@ def test_common_case_still_follows_cd(command: str, cdrepo: Path) -> None:
     assert str(cdrepo / "run" / "settings.yaml") in _claims(records, cdrepo)
 
 
-# 3. Redact whole arguments, then clip -------------------------------------
+# 3. Clip long arguments; a clipped word is never committed -----------------
 
 LONG = "A" * 6000
 
@@ -250,55 +250,29 @@ def _step(command: str, word: str = "fit.py") -> dict:
                          None, None)
 
 
-def test_long_json_secret_is_redacted_before_the_clip() -> None:
-    arg = '{"api_key": "SECRETPREFIX' + LONG + '"}'
-    step = _step(f"python fit.py --params '{arg}'")
-    text = json.dumps(step)
-    assert "SECRETPREFIX" not in text
-    assert step["argv"][-1] == '{"api_key": "<redacted>"}'
-    assert step["script_args"][-1] == '{"api_key": "<redacted>"}'
-
-
-def test_unterminated_secret_literal_leaves_no_partial_value() -> None:
-    arg = '{"api_key": "SECRETPREFIX' + LONG
-    step = _step(f"python fit.py --params '{arg}'")
-    assert "SECRETPREFIX" not in json.dumps(step)
-    assert step["truncated"] is True
-    assert step["argv"][-1].endswith("…[truncated]")
-    assert step["script_args"][-1].endswith("…[truncated]")
-
-
-def test_secret_after_a_redacted_one_in_a_long_word() -> None:
-    arg = '{"token": "S3CRET", "password": "PW_PREFIX' + LONG
-    step = _step(f"python fit.py '{arg}'")
-    text = json.dumps(step)
-    assert "S3CRET" not in text and "PW_PREFIX" not in text
-
-
 def test_long_plain_word_is_still_clipped_verbatim() -> None:
     step = _step(f"python fit.py --blob {LONG}")
     assert step["argv"][-1] == "A" * ev.STEP_TOKEN_MAX + "…[truncated]"
     assert step["truncated"] is True
 
 
-def test_data_command_argv_redacts_before_the_clip() -> None:
-    arg = '{"api_key": "SECRETPREFIX' + LONG + '"}'
-    step = ev.data_command_step(f"curl -d '{arg}' -o data/out.csv https://example.invalid/x")
-    assert "SECRETPREFIX" not in json.dumps(step)
-    unterminated = '{"api_key": "SECRETPREFIX' + LONG
-    step = ev.data_command_step(f"curl -d '{unterminated}' -o data/out.csv")
-    assert "SECRETPREFIX" not in json.dumps(step)
+@pytest.mark.parametrize("arg", [
+    '{"api_key": "SECRETPREFIX' + LONG + '"}',
+    '{"api_key": "SECRETPREFIX' + LONG,
+    '{"token": "S3CRET", "password": "SECRETPREFIX' + LONG,
+])
+def test_a_long_secret_word_is_never_committed(arg: str) -> None:
+    step = _step(f"python fit.py --params '{arg}'")
+    data = ev.data_command_step(f"curl -d '{arg}' -o data/out.csv https://example.invalid/x")
+    params = ev._snakemake_params(["--config", "blob=" + arg])
+    committed = json.dumps([stop.commit_event({"ts": "t", "step": step}),
+                            stop.commit_data_command({"step": data}),
+                            stop.commit_event({"ts": "t", "step": {"params": params}})])
+    assert "SECRETPREFIX" not in committed and "S3CRET" not in committed
 
 
-def test_snakemake_param_unterminated_secret_leaves_no_partial_value() -> None:
-    values = ev._snakemake_params(["--config", 'blob={"api_key": "SECRETPREFIX' + LONG])
-    assert "SECRETPREFIX" not in json.dumps(values)
-
-
-def test_extractor_end_to_end_never_records_the_secret_prefix(cdrepo: Path) -> None:
+def test_extractor_end_to_end_never_commits_the_secret_prefix(cdrepo: Path) -> None:
     arg = '{"api_key": "SECRETPREFIX' + LONG + '"}'
     records = _run(cdrepo, f"python3 tools/tool.py --params '{arg}'")
     assert records
-    for record in records:
-        step = record["step"]
-        assert "SECRETPREFIX" not in json.dumps(step)
+    assert "SECRETPREFIX" not in json.dumps([stop.commit_event(r) for r in records])

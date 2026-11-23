@@ -1,5 +1,5 @@
-"""Regressions for the second P1-only Codex pass (PR #154): URL usernames,
-annotated secret literals, scope-root spelling, and edits through links."""
+"""Regressions for the second P1-only Codex pass (PR #154): scope-root
+spelling and edits through links."""
 
 from __future__ import annotations
 
@@ -15,44 +15,12 @@ sys.path.insert(0, str(HERE))
 
 import io_observer as io  # noqa: E402
 import lineage_index as li  # noqa: E402
-import lineage_redact as redact  # noqa: E402
 import test_lineage_index as tli  # noqa: E402
 import test_provenance_review_r2_index as r2  # noqa: E402
-
-TOKEN = "FAKE_TOKEN_42"
 
 
 def sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
-
-
-@pytest.mark.parametrize("command", [
-    f"python fit.py --config https://{TOKEN}:x-oauth-basic@host.invalid/settings.yaml",
-    f"git clone https://user:{TOKEN}@host/x.git",
-    f"git clone https://{TOKEN}@host/x.git",
-])
-def test_the_whole_url_userinfo_is_redacted(command: str) -> None:
-    assert TOKEN not in redact.redact_command(command)
-    assert TOKEN not in " ".join(redact.redact_argv(command.split()))
-
-
-@pytest.mark.parametrize("source", [
-    f'API_TOKEN: str = "{TOKEN}"\n',
-    f'secret: Final[str] = "{TOKEN}"\n',
-    f'password: "str | None" = "{TOKEN}"\n',
-])
-def test_annotated_secret_literals_are_redacted(source: str) -> None:
-    assert TOKEN not in redact.redact_source(source)
-
-
-def test_annotated_inline_code_is_redacted() -> None:
-    assert TOKEN not in redact.redact_command(
-        f"python3 -c 'API_TOKEN: str = \"{TOKEN}\"; print(1)'")
-
-
-def test_annotations_without_a_secret_literal_are_kept() -> None:
-    for source in ("token: str = os.environ['T']\n", "x: int = 3\n"):
-        assert redact.redact_source(source) == source
 
 
 @pytest.fixture()

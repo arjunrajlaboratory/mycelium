@@ -19,7 +19,6 @@ import data_contract_check as dcc  # noqa: E402
 import extract_data_lineage as stop  # noqa: E402
 import io_observer as io  # noqa: E402
 import lineage_index as li  # noqa: E402
-import lineage_redact  # noqa: E402
 import test_lineage_index as tli  # noqa: E402
 
 EXTRACTOR = HERE / "extract_data_lineage_event.py"
@@ -27,34 +26,6 @@ EXTRACTOR = HERE / "extract_data_lineage_event.py"
 
 def sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
-
-
-# -- redaction ----------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("command", "secret"),
-    [
-        ('tool --token pre"post secret" next', "secret"),
-        (r"TOKEN=abc\ def run", "def"),
-        ("SESSION_ID=s3ssi0n run", "s3ssi0n"),
-        ("tool --api-key='a b c' x", "a b c"),
-    ],
-)
-def test_whole_shell_words_are_redacted(command: str, secret: str) -> None:
-    assert secret not in lineage_redact.redact_text(command)
-
-
-@pytest.mark.parametrize(
-    "source",
-    ['token <- "abc"\n', 'password = """multi\nline"""\n', 'api_key = "a\\"b\\"c"\n'],
-)
-def test_source_literals_of_any_shape_are_redacted(source: str) -> None:
-    out = lineage_redact.redact_source(source)
-    assert "<redacted>" in out
-    for fragment in ("abc", "multi", "line", 'a\\"b'):
-        if fragment in source:
-            assert fragment not in out
 
 
 @pytest.fixture()
@@ -79,19 +50,20 @@ def run(repo: Path, command: str, *extra: str) -> list[dict]:
 def test_a_secret_value_never_becomes_a_config_path_or_data_path(repo: Path) -> None:
     (repo / "s3cret.yaml").write_text("x: 1\n")
     (event,) = run(repo, "python fit.py --token s3cret.yaml --config data/in.csv")
-    assert "s3cret" not in json.dumps(event)
+    assert "s3cret" not in json.dumps(event["step"]["config_files"])
+    assert "s3cret" not in json.dumps(stop.commit_event(event))
     (command,) = run(repo, "cat data/in.csv --password hunter2.csv")
-    assert "hunter2" not in json.dumps(command)
+    assert "hunter2" not in json.dumps(stop.commit_data_command(command))
 
 
-def test_a_large_script_with_a_secret_gets_a_sanitized_digest(repo: Path) -> None:
+def test_a_large_script_keeps_its_file_digest(repo: Path) -> None:
     body = "password = 'example-secret'\n" + "# pad\n" * 30000 + \
         "import pandas as pd\npd.read_csv('data/in.csv')\n"
     (repo / "big.py").write_text(body)
     (event,) = run(repo, "python big.py")
     assert event["script_source"] is None
-    assert event["script_sha256"] != hashlib.sha256(body.encode()).hexdigest()
-    assert event["script_sha256_of"] == "sanitized"
+    assert event["script_sha256"] == hashlib.sha256(body.encode()).hexdigest()
+    assert "script_sha256_of" not in event
 
 
 # -- step settings ---------------------------------------------------------------

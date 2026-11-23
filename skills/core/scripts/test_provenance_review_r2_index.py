@@ -1,4 +1,4 @@
-"""Regressions for the second Codex review round (PR #154): redaction,
+"""Regressions for the second Codex review round (PR #154): legacy source,
 the index's gap accounting, and the observer's scope handling."""
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ sys.path.insert(0, str(HERE))
 import extract_data_lineage as stop  # noqa: E402
 import io_observer as io  # noqa: E402
 import lineage_index as li  # noqa: E402
-import lineage_redact as redact  # noqa: E402
 import test_lineage_index as tli  # noqa: E402
 
 SECRET = "s3cret-value"
@@ -29,49 +28,11 @@ def sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-# -- redaction ---------------------------------------------------------------
-
-
-@pytest.mark.parametrize("command", [
-    f"python fit.py '--token' {SECRET}",
-    f'python fit.py "--api-key={SECRET}" data/in.csv',
-    f'python -c "password = \\"{SECRET}\\"; print(1)"',
-    f"curl -H 'Authorization: Digest username=\"u\", response=\"{SECRET}\"' https://x",
-    f'curl -H "Authorization: Bearer {SECRET}" https://x/data.csv',
-])
-def test_commands_are_redacted_after_shell_decoding(command: str) -> None:
-    assert SECRET not in redact.redact_command(command)
-
-
-@pytest.mark.parametrize("source", [
-    f'h = {{"Authorization": "Bearer {SECRET}"}}\n',
-    f'cfg = {{"api_key": "{SECRET}"}}\n',
-    f'headers["Authorization"] = "Digest a=1, response={SECRET}"\n',
-])
-def test_quoted_secret_keys_in_source_are_redacted(source: str) -> None:
-    assert SECRET not in redact.redact_source(source)
-
-
-def test_a_digest_header_in_argv_goes_whole() -> None:
-    out = redact.redact_argv(["curl", "-H", f'Authorization: Digest a="b", response="{SECRET}"'])
-    assert SECRET not in json.dumps(out)
-
-
-def test_ordinary_text_is_untouched() -> None:
-    for text in ("python fit.py --input data/in.csv --seed 3", 'author = "Jane"\n',
-                 "token = os.environ['TOKEN']\n"):
-        assert redact.redact_command(text) == text
-
-
-def test_a_legacy_event_has_its_source_sanitized_at_consolidation() -> None:
+def test_a_legacy_events_source_is_never_committed() -> None:
     body = f'password = "{SECRET}"\nimport pandas\n'
     raw = {"ts": "2026-11-01T00:00:00Z", "bash_cmd": "python fit.py", "script": None,
            "script_source": body, "script_sha256": hashlib.sha256(body.encode()).hexdigest()}
-    event = stop.normalize_event(raw, [], 0)
-    assert SECRET not in json.dumps(event)
-    assert event["script_sha256_of"] == "sanitized"
-    assert event["script_sha256"] == hashlib.sha256(
-        event["script_source"].encode()).hexdigest()
+    assert SECRET not in json.dumps(stop.commit_event(stop.normalize_event(raw, [], 0)))
 
 
 # -- index -------------------------------------------------------------------

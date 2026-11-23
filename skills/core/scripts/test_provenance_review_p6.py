@@ -1,14 +1,11 @@
-"""Regressions for the sixth P1-only Codex pass (PR #154): attached-option
-and heredoc Digest headers, `bash -c` bodies, uninspectable entries,
-shared attribution in --explain, case probes for digit-named checkouts,
-and unverifiable deletions."""
+"""Regressions for the sixth P1-only Codex pass (PR #154): uninspectable
+entries, shared attribution in --explain, case probes for digit-named
+checkouts, and unverifiable deletions."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
-import shlex
 import sys
 from pathlib import Path
 
@@ -20,37 +17,10 @@ sys.path.insert(0, str(HERE))
 import check_report_values as crv  # noqa: E402
 import io_observer as io  # noqa: E402
 import lineage_index as li  # noqa: E402
-import lineage_redact as redact  # noqa: E402
-
-SECRET = "FIXTURE_VALUE_7"
 
 
 def sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
-
-
-DIGEST = f'Digest username="alice", response="{SECRET}"'
-
-
-@pytest.mark.parametrize("command", [
-    f"curl --header='Authorization: {DIGEST}' https://x/f.csv",
-    f"curl -H'Authorization: {DIGEST}' https://x/f.csv",
-    f"curl --header @- https://x/f.csv <<'EOF'\nAuthorization: {DIGEST}\nEOF",
-    f"bash -c 'curl --oauth2-bearer {SECRET} https://example.test/file.csv'",
-    f"ssh host 'export API_TOKEN={SECRET}; run'",
-])
-def test_attached_heredoc_and_nested_command_credentials_are_redacted(command: str) -> None:
-    assert SECRET not in redact.redact_command(command)
-
-
-def test_attached_header_in_argv_is_redacted() -> None:
-    out = redact.redact_argv(shlex.split(f"curl --header='Authorization: {DIGEST}' u"))
-    assert SECRET not in json.dumps(out) and out[1].startswith("--header=")
-
-
-def test_quoted_commands_without_secrets_are_kept() -> None:
-    text = "bash -c 'python fit.py --input data/in.csv'"
-    assert redact.redact_command(text) == text
 
 
 def test_an_uninspectable_entry_is_unwatched(tmp_path: Path, monkeypatch) -> None:

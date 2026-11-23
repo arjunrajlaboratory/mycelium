@@ -47,11 +47,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     budget per call, and are proven against the Pre snapshot like inputs.
   - A call with more than 64 analysis stages records the first 64 and says
     so.
-- **One redaction policy** (`lineage_redact.py`) for every stored command
-  text: events, data commands, observations, skips, `step` fields, and
-  embedded script source. It covers secret-named assignments and options,
-  URL passwords, auth headers, and quoted secret literals in code. Values
-  are redacted, never hashed.
 - **Hash-linked report values.**
   - `register_value(..., source={"path", "locator"})` records the source
     file's repository-relative path, SHA-256 and locator.
@@ -112,11 +107,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lineage warnings, skip details, and the `bash_cmd` of observations.
   `script_source` is no longer committed; `script_sha256`,
   `script_source_bytes` and `script_source_lines` are. A historical event's
-  `filters_detected` is dropped from new manifests. The full
-  (denylist-redacted) text stays in the gitignored stores under
-  `.mycelium/`. Manifests without `text_policy` (0.9.7 and earlier) still
-  load. Events recorded before an upgrade get the allowlist when they are
-  consolidated into a new manifest.
+  `filters_detected` is dropped from new manifests. Manifests without
+  `text_policy` (0.9.7 and earlier) still load. Events recorded before an
+  upgrade get the allowlist when they are consolidated into a new manifest.
+- **The allowlist is the only text policy.** The blocklist redaction
+  (`redact_command` and friends, and `script_sha256_of: "sanitized"`
+  digests) is deleted. Stores that outlive a session keep allowlisted text
+  too: an observation's `bash_cmd` in `.mycelium/io/obs/`, and the
+  accepted and abandoned event archives. Only the event queue, consumed at
+  each Stop, holds raw text. A script digest is the plain file digest. The
+  extractor parses raw text, except that a secret-named option's value is
+  never read as a config path or seed. Old records with a sanitized digest
+  still load.
 
 - `filters_detected` is no longer recorded. It held unevaluated regex text
   with false positives, and nothing read it. Historical records keep it.

@@ -1,84 +1,50 @@
-"""lineage_redact — one redaction policy for every recorded command text.
+"""lineage_redact — the commit allowlist for lineage record text.
 
-Lineage records keep command text (`bash_cmd`), parsed settings (`argv`,
-`env`, `script_args`), and embedded script source. A secret passed on a
-command line must not survive into any of them. Values are replaced by
-``<redacted>``; nothing is hashed, because a digest of a short secret can
-be reversed by guessing.
+Records that are committed or kept long-term (the per-session manifests
+under .living/log/data-lineage/; the observation store and the event
+archives under .mycelium/) keep only words known to be safe; everything
+else becomes ``<v>`` (text_policy "allowlist-v1"; see the block comment
+below). Command text is unbounded (every shell, CLI and language), so no
+list of secret shapes is ever complete: nothing here looks for secrets, it
+keeps evidence.
 
-Redacted:
-
-- shell assignments whose name looks secret (``HF_TOKEN=…``, ``export
-  DB_PASSWORD=…``, ``env API_KEY=… cmd``), as whole shell words, so adjacent
-  quoted fragments and escaped spaces go too;
-- the values of options whose name looks secret, in ``--token X`` and
-  ``--token=X`` form, again as whole words;
-- URL userinfo passwords (``https://user:pass@host``);
-- ``Authorization:`` header values;
-- quoted secret literals in code, of any length, including escaped quotes
-  and triple-quoted strings.
-
-Stdlib only; imported by the hook-path extractor and observer, so it must
-stay cheap.
+Stdlib only; imported by the hook-path observer and the Stop-time
+consolidator, so it must stay cheap.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 from typing import Any
 
+# A placeholder an older recorder wrote (0.9.7 and the denylist era); hidden
+# from the word scanner like `<v>`, and never part of a kept value.
 REDACTED = "<redacted>"
 
-_SECRET_WORD = (r"(?:token|secret|passw(?:or)?d?|pwd|api[_-]?key|private[_-]?key|credential"
-                r"|auth(?!or)|cookie|session)")
-SECRET_NAME_RX = re.compile(rf"(?i){_SECRET_WORD}")
-# A shell variable, or an argument's key (`db.password=X`, `api-key=X`).
-_NAME_RX = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
-# The whole userinfo goes: a token may sit in the username
-# (`https://ghp_x@host`, `https://TOKEN:x-oauth-basic@host`) as easily as
-# in the password. And query parameters whose name looks secret.
-_URL_USERINFO_RX = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^\s/@'\"<>]+)@")
-_URL_QUERY_SECRET_RX = re.compile(
-    rf"(?i)([?&][^=&\s'\"#]*(?:{_SECRET_WORD[3:-1]}|key|sig(?:nature)?|credential)"
-    rf"[^=&\s'\"#]*=)([^&\s'\"#]+)")
-# The whole header value goes, not its first token: a Digest header carries
-# its response in later fields. Unquoted text stops at a quote or line end;
-# a header inside a shell word is handled on the decoded word first.
-# The value stops before a backslash too, so an escaped quote inside a
-# double-quoted header (`"Authorization: Digest a=\"b\""`) keeps its
-# escape and the word pass still sees one word, which it redacts whole.
-_AUTH_HEADER_RX = re.compile(r"(?i)(authorization\s*:\s*)([^\n'\"\\]+)")
-_AUTH_WORD_RX = re.compile(r"(?i)\s*authorization\s*:")
-# A header inside one word, possibly behind an attached option.
-_AUTH_IN_WORD_RX = re.compile(r"(?i)((?:-{1,2}[A-Za-z][\w-]*=?)?)\s*authorization\s*:")
-_AUTH_LINE_RX = re.compile(r"(?im)^(\s*authorization\s*:\s*)(\S.*)$")
+# Names whose value is a secret: an option (`--api-key`), an assignment
+# (`HF_TOKEN=`), an argument key. Numeric one-time codes count too. The
+# extractor uses the same rule so such a value never becomes a config path
+# or a seed.
+_SECRET_NAME_RX = re.compile(
+    r"(?i)token|secret|passw(?:or)?d?|pwd|api[_-]?key|private[_-]?key|credential"
+    r"|auth(?!or)|cookie|session|(?:^|[-_])(?:pin|otp|totp|mfa|passcode|2fa)(?:$|[-_])")
+# Secret-named flags that take no value (`--no-password`, `--ask-pass`,
+# `--password-stdin`): the word after them is not their value.
+_NO_VALUE_FLAG_RX = re.compile(r"(?i)^--?(?:no-|ask-|prompt-)|-stdin$")
 _OPERATORS = set(";&|<>()\n")
 
 
-# A URL span; an earlier pass's `<redacted>` inside it does not end it.
-_URL_SPAN_RX = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,30}://(?:<redacted>|[^\s'\"<>`])*")
+def is_secret_name(name: str) -> bool:
+    return bool(_SECRET_NAME_RX.search(name))
 
 
-def _redact_url_span(url: str) -> str:
-    url = _URL_USERINFO_RX.sub(lambda m: f"{m.group(1)}{REDACTED}@", url)
-    if "?" in url:
-        url = _URL_QUERY_SECRET_RX.sub(lambda q: f"{q.group(1)}{REDACTED}", url)
-    return url
-
-
-def _redact_urls(text: str) -> str:
-    """URL credentials: the whole userinfo, and query parameters named like
-    secrets (`?key=…`, `&X-Amz-Signature=…`), both in one pass over each
-    URL span of the original text. Query parameters are looked for only
-    inside URL spans: text full of `?` that is not a URL (SQL placeholders)
-    is never rescanned from each one."""
-    if "://" not in text:
-        return text
-    return _URL_SPAN_RX.sub(lambda m: _redact_url_span(m.group(0)), text)
-
-
-_LONG_OPTION_RX = re.compile(r"--[A-Za-z][A-Za-z0-9_-]*(?:=|\Z)")
+def takes_secret_value(word: str) -> bool:
+    """A secret-named option written alone (`--token`): the next word is its
+    value."""
+    return (word.startswith("-") and "=" not in word and is_secret_name(word)
+            and not _NO_VALUE_FLAG_RX.search(word))
 
 
 def _words(text: str) -> list[tuple[int, int]]:
@@ -181,29 +147,6 @@ def _substitution_span(text: str, i: int) -> tuple[int, bool]:
     return n, False
 
 
-# A secret-named key nested inside a value: `--config=api_token=X`,
-# `-C db.password=X`, `opts=a=1,token=X`.
-_NESTED_SECRET_RX = re.compile(
-    rf"(?i)[=,:;]\s*[A-Za-z0-9_.-]*{_SECRET_WORD}[A-Za-z0-9_.-]*=")
-
-
-def _nested_secret_cut(decoded: str) -> str | None:
-    """The decoded word cut after a nested secret name's `=`, or None."""
-    match = _NESTED_SECRET_RX.search(decoded)
-    if match is None:
-        return None
-    return decoded[:match.end()] + REDACTED
-
-
-def _unquoted_head(word: str) -> str:
-    """The part of a word before its first quote or escape (where a name or
-    an option name lives)."""
-    for i, c in enumerate(word):
-        if c in "'\"\\":
-            return word[:i]
-    return word
-
-
 def _decode(word: str) -> str:
     """A shell word with its quoting removed, as the program receives it.
     Expansions are left as written; this only decides what is secret."""
@@ -241,236 +184,8 @@ def _decode(word: str) -> str:
     return "".join(out)
 
 
-def redact_text(text: str) -> str:
-    """The text with every secret value replaced; unchanged when none.
-
-    Words are judged on their decoded form, so a quoted option name
-    (``"--token" X``, ``'--api-key=X'``) is caught like a bare one."""
-    if not text:
-        return text
-    # Header lines first, on the raw text: a header in a heredoc body is
-    # not one shell word, so its value would survive the word pass.
-    # A line that is itself a header (a heredoc or here-string body) goes
-    # to its end, quotes and all.
-    text = _AUTH_LINE_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", text)
-    text = _AUTH_HEADER_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", text)
-    replacements: list[tuple[int, int, str]] = []
-    spans = _words(text)
-    redact_next = False
-    for start, end in spans:
-        word = text[start:end]
-        head = _decode(word)
-        header = _AUTH_IN_WORD_RX.match(head)
-        if header:
-            # `Authorization: …`, `--header=Authorization: …`,
-            # `-HAuthorization: …`: the whole decoded value goes.
-            replacements.append((start, end, shlex.quote(
-                f"{header.group(1)}Authorization: {REDACTED}")))
-            redact_next = False
-            continue
-        if redact_next:
-            redact_next = False
-            # The value may look like an option (`--password --ab9_Xm3q`
-            # is a password to getopt): the next word always goes, except
-            # after a flag that plainly takes none.
-            replacements.append((start, end, REDACTED))
-            continue
-        name, eq, _ = head.partition("=")
-        if eq and _NAME_RX.match(name) and SECRET_NAME_RX.search(name):
-            replacements.append((start, end, f"{name}={REDACTED}"))
-        elif eq and name.startswith("-") and SECRET_NAME_RX.search(name):
-            replacements.append((start, end, f"{name}={REDACTED}"))
-        elif not eq and head.startswith("-") and SECRET_NAME_RX.search(head):
-            redact_next = not _NO_VALUE_FLAG_RX.search(head)
-        elif eq and (cut := _nested_secret_cut(head)) is not None:
-            replacements.append((start, end, shlex.quote(cut)))
-        elif "$(" in word or "`" in word:
-            # Options inside a substitution are options too:
-            # `x=$(fetch --token T)`.
-            inner = _redact_substitutions(word)
-            if inner != word:
-                replacements.append((start, end, inner))
-    out = text
-    for start, end, new in reversed(replacements):
-        out = out[:start] + new + out[end:]
-    out = _redact_urls(out)
-    out = _AUTH_HEADER_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", out)
-    return out
-
-
-# Secret-named flags that take no value (`--no-password`, `--ask-pass`,
-# `--password-stdin`): the word after them is kept.
-_NO_VALUE_FLAG_RX = re.compile(r"(?i)^--?(?:no-|ask-|prompt-)|-stdin$")
-
-
-def _redact_substitutions(word: str, depth: int = 0) -> str:
-    """The word with the text inside each `$( … )` or backtick redacted as
-    a command of its own. An unclosed substitution (whose end cannot be
-    found) has everything after its opening redacted."""
-    out: list[str] = []
-    i = 0
-    n = len(word)
-    while i < n:
-        c = word[i]
-        opens = 2 if word.startswith("$(", i) else 1 if c == "`" else 0
-        if not opens:
-            out.append(c)
-            i += 1
-            continue
-        end, closed = _substitution_span(word, i)
-        if not closed:
-            out.append(word[i:i + opens] + REDACTED)
-            break
-        inner = word[i + opens:end - 1]
-        out.append(word[i:i + opens]
-                   + (redact_command(inner) if depth < 8 else REDACTED)
-                   + word[end - 1])
-        i = end
-    return "".join(out)
-
-
-def _redact_decoded_words(text: str) -> str:
-    """Secret literals hidden by shell quoting: ``python -c "pw = \\"x\\""``
-    holds ``pw = "x"`` only once the shell has decoded it. A word whose
-    decoded body changes is replaced by the quoted, redacted body."""
-    replacements: list[tuple[int, int, str]] = []
-    for start, end in _words(text):
-        word = text[start:end]
-        if not any(c in word for c in "'\"\\"):
-            continue
-        decoded = _decode(word)
-        # The decoded body may itself be a command (`bash -c '…'`,
-        # `ssh h '…'`): shell-level rules apply to it too. redact_text does
-        # not come back here, so this recursion is one level deep.
-        redacted = redact_source(redact_text(decoded))
-        if redacted != decoded:
-            replacements.append((start, end, shlex.quote(redacted)))
-    out = text
-    for start, end, new in reversed(replacements):
-        out = out[:start] + new + out[end:]
-    return out
-
-
-_LITERAL = (r"(?:[rRbBuUfF]{1,2})?(?:'''[\s\S]*?'''|\"\"\"[\s\S]*?\"\"\""
-            r"|'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\")")
-# A secret-named key followed by a literal: `token = "x"`, `token <- 'x'`,
-# and the quoted-key forms `{"api_key": "x"}` and `headers["Authorization"]
-# = "x"` (the closing quote and bracket of the key are optional).
-_SOURCE_LITERAL_RX = re.compile(
-    rf"""(?i)\b([A-Za-z_][A-Za-z0-9_]*{_SECRET_WORD}[A-Za-z0-9_]*|{_SECRET_WORD}[A-Za-z0-9_]*"""
-    rf"""|authorization)"""
-    # An annotation may sit between the name and `=` (`API_TOKEN: str = …`,
-    # `key: Final[str] = …`).
-    rf"""(["']?\]?(?:\s*:\s*(?:[A-Za-z_][\w.\[\], |]*?|"[^"\n]*"|'[^'\n]*')(?=\s*=))?"""
-    rf"""\s*(?:=|:|<-|,)\s*)"""
-    # A parenthesized value, and adjacent literals that concatenate
-    # (`("abc" "def")`), go whole.
-    rf"""(\(\s*)?({_LITERAL}(?:\s*{_LITERAL})*)"""
-)
-
-
-def _keep_quotes(head: str, literal: str) -> str:
-    """The literal with its prefix and quotes kept and its body redacted."""
-    quote_at = next(i for i, c in enumerate(literal) if c in "'\"")
-    prefix = literal[:quote_at]
-    quote = literal[quote_at:quote_at + 3]
-    if quote not in ("'''", '"""'):
-        quote = literal[quote_at]
-    return f"{head}{prefix}{quote}{REDACTED}{quote}"
-
-
-def redact_source(text: str) -> str:
-    """Script source with secret *literals* redacted.
-
-    Code assigns secret-named variables all the time (``token =
-    os.environ[...]``); only a quoted literal value is a secret written
-    into the script, plus URL passwords and header values.
-    """
-    if not text:
-        return text
-    out = _redact_urls(text)
-    out = _AUTH_HEADER_RX.sub(lambda m: f"{m.group(1)}{REDACTED}", out)
-    return _SOURCE_LITERAL_RX.sub(
-        lambda m: _keep_quotes(m.group(1) + m.group(2) + (m.group(3) or ""), m.group(4)), out
-    )
-
-
-def redact_command(text: str) -> str:
-    """Command text: shell-level secrets (assignments, options, URL
-    passwords, headers) and secret literals inside inline code bodies
-    (``python -c "password = '…'"``) both redacted."""
-    if not text:
-        return text
-    return redact_source(_redact_decoded_words(redact_text(text)))
-
-
-def redact_argv(argv: list[Any]) -> list[Any]:
-    """An argv list with secret option values and assignments redacted.
-
-    Token-wise, so ``["--token", "abc"]`` and ``["--token=abc"]`` are both
-    caught; non-string tokens (an inline-body placeholder) pass through.
-    """
-    out: list[Any] = []
-    redact_next = False
-    # A secret value that opens a command substitution a naive split broke
-    # up (`TOKEN=$(printf %s x)` as three tokens): its tokens are redacted
-    # until the substitution closes.
-    open_depth = 0
-    for token in argv:
-        if open_depth and isinstance(token, str):
-            open_depth += token.count("(") - token.count(")")
-            if token.count("`") % 2:
-                open_depth = 0 if open_depth <= 1 else open_depth - 1
-            open_depth = max(open_depth, 0)
-            out.append(REDACTED)
-            continue
-        if not isinstance(token, str):
-            out.append(token)
-            redact_next = False
-            continue
-        name_part, eq_part, value_part = token.partition("=")
-        if (eq_part and SECRET_NAME_RX.search(name_part)
-                and (value_part.startswith("$(") or value_part.startswith("`"))):
-            depth = value_part.count("(") - value_part.count(")")
-            ticks = value_part.count("`") % 2
-            open_depth = max(depth, 1 if ticks else 0)
-        if redact_next:
-            out.append(REDACTED)
-            redact_next = False
-            continue
-        redact_next = False
-        header = _AUTH_IN_WORD_RX.match(token)
-        if header:
-            out.append(f"{header.group(1)}Authorization: {REDACTED}")
-            continue
-        name, eq, _ = token.partition("=")
-        if eq and name.startswith("-") and SECRET_NAME_RX.search(name):
-            out.append(f"{name}={REDACTED}")
-        elif eq and _NAME_RX.match(name) and SECRET_NAME_RX.search(name):
-            out.append(f"{name}={REDACTED}")
-        elif token.startswith("-") and not eq and SECRET_NAME_RX.search(token):
-            out.append(token)
-            redact_next = not _NO_VALUE_FLAG_RX.search(token)
-        elif eq and (cut := _nested_secret_cut(token)) is not None:
-            out.append(cut)
-        else:
-            out.append(redact_command(token))
-    return out
-
-
-def is_secret_name(name: str) -> bool:
-    return bool(SECRET_NAME_RX.search(name))
-
-
 # ---------------------------------------------------------------------------
 # Commit allowlist (text_policy "allowlist-v1")
-#
-# The functions above are a denylist: they find secrets they know the shape
-# of. Command text is unbounded (every shell, CLI and language), so a
-# denylist is never complete. Records that are COMMITTED (the per-session
-# manifests under .living/log/data-lineage/) therefore keep only words known
-# to be safe; everything else becomes `<v>`. Full (denylist-redacted) text
-# stays in the machine-local stores under .mycelium/.
 #
 # A word is kept only on EVIDENCE, never because of where it stands or what
 # it looks like:
@@ -647,8 +362,6 @@ _SHORT_OPT_RX = re.compile(r"-(?:[A-Za-z]{1,2}|[a-z]{3}|[A-Za-z][0-9]{1,2})\Z")
 _NAME_SHAPE_RX = re.compile(r"(?:[a-z_][a-z0-9_.-]{0,40}|[A-Z_][A-Z0-9_.-]{0,40})\Z")
 _ASSIGN_RX = re.compile(r"([A-Za-z_][A-Za-z0-9_.-]{0,63})=")
 _NUMBER_RX = re.compile(r"-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?\Z")
-# Numeric one-time codes are secrets too, though no denylist name covers them.
-_EXTRA_SECRET_RX = re.compile(r"(?i)(?:^|[-_])(?:pin|otp|totp|mfa|passcode|2fa)(?:$|[-_])")
 _SHELL_KEYWORDS = frozenset({
     "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for",
     "case", "esac", "function", "{", "}", "!", "[[", "]]", "select", "coproc",
@@ -656,15 +369,11 @@ _SHELL_KEYWORDS = frozenset({
 _WRAPPERS = frozenset({"env", "nohup", "time", "exec", "command", "builtin", "nice",
                        "sudo", "timeout", "xargs", "srun"})
 _HEREDOC_RX = re.compile(r"<<(?!<)(-?)[ \t]*(?:'([^'\n]*)'|\"([^\"\n]*)\"|\\?([^\s;&|<>()'\"]+))")
-# Placeholders already in the text (`<redacted>` from the denylist, `<v>`)
+# Placeholders already in the text (`<v>`, an old record's `<redacted>`)
 # are values; they are hidden from the word scanner, which splits on `<>`.
 _HIDDEN = "\x01"
 # An unquoted comment, while the shell scanner runs.
 _COMMENT = "\x02"
-
-
-def _commit_secret_name(name: str) -> bool:
-    return is_secret_name(name) or bool(_EXTRA_SECRET_RX.search(name))
 
 
 def _digits(text: str) -> int:
@@ -819,7 +528,7 @@ def _commit_assignment(dec: str, match: re.Match, keep_paths: set[str]) -> str:
     if not _name_ok(name):
         return COMMIT_VALUE
     return match.group(0) + commit_safe_value(
-        dec[match.end():], keep_paths, _commit_secret_name(name))
+        dec[match.end():], keep_paths, is_secret_name(name))
 
 
 def _set_prog(state: _CommitState, dec: str, command: bool, word: str) -> None:
@@ -889,8 +598,8 @@ def _commit_word(raw: str, dec: str, keep_paths: set[str], state: _CommitState) 
         long_eq = _LONG_OPT_EQ_RX.match(dec)
         if long_eq and _long_option_ok(long_eq.group(1), state):
             return long_eq.group(0) + commit_safe_value(
-                dec[long_eq.end():], keep_paths, _commit_secret_name(long_eq.group(1)))
-        if "=" not in dec and _commit_secret_name(dec) and not _NO_VALUE_FLAG_RX.search(dec):
+                dec[long_eq.end():], keep_paths, is_secret_name(long_eq.group(1)))
+        if takes_secret_value(dec):
             state.secret_next = True
         if _option_ok(dec, state):
             return dec
@@ -904,7 +613,7 @@ def _commit_word(raw: str, dec: str, keep_paths: set[str], state: _CommitState) 
                 # follow are that command's.
                 _set_prog(state, dec, True, dec)
             return dec
-    if _is_number(dec) or _keep_match(dec, keep_paths) or _HIDDEN in dec:
+    if _is_number(dec) or _keep_match(dec, keep_paths):
         return commit_safe_value(dec, keep_paths)
     if assign:
         return _commit_assignment(dec, assign, keep_paths)
@@ -989,8 +698,11 @@ def _strip_comment(line: str, quote: str | None) -> tuple[str, str | None]:
 
 
 def _hide_placeholders(text: str) -> str:
-    return text.replace(REDACTED, _HIDDEN).replace(COMMIT_VALUE, _HIDDEN).replace(
-        _COMMENT, _HIDDEN)
+    text = text.replace(_COMMENT, _HIDDEN).replace(REDACTED, _HIDDEN).replace(
+        COMMIT_VALUE, _HIDDEN)
+    # Text committed once already (an observation, consolidated again at
+    # Stop) keeps its comment markers.
+    return text.replace(COMMIT_COMMENT, _COMMENT)
 
 
 def _show_placeholders(text: str) -> str:
@@ -1036,7 +748,9 @@ def commit_safe_command(text: Any, keep_paths: set[str] | None = None,
                 pending.pop(0)
                 body = 0
             else:
-                body += 1
+                # A body committed once already keeps its count.
+                prior = re.fullmatch(r"<heredoc: (\d{1,9}) lines>", content)
+                body += int(prior.group(1)) if prior else 1
             continue
         line, quote = _strip_comment(line, quote)
         shell.append(line)
@@ -1052,6 +766,22 @@ def commit_safe_command(text: Any, keep_paths: set[str] | None = None,
     if pending:
         out.append(f"<heredoc: {body} lines>")
     return _show_placeholders("".join(out))
+
+
+def commit_observation_command(observation: dict[str, Any]) -> Any:
+    """An observation's `bash_cmd` under the allowlist. Its change entries
+    are its evidence: the walk saw each of those files. The observer stores
+    this form, and consolidation applies it again (it is idempotent)."""
+    paths: list[str] = []
+    root = observation.get("repo_root")
+    changes = observation.get("changes")
+    for kind in ("created", "modified", "deleted"):
+        for entry in (changes.get(kind) or []) if isinstance(changes, dict) else []:
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+                paths.append(entry["path"])
+                if isinstance(root, str):
+                    paths.append(os.path.join(root, entry["path"]))
+    return commit_safe_command(observation.get("bash_cmd"), commit_keep_paths(paths))
 
 
 def commit_safe_argv(argv: Any, keep_paths: set[str] | None = None,

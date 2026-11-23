@@ -1,12 +1,10 @@
-"""Regressions for the fifth P1-only Codex pass (PR #154): Digest headers
-with escaped quotes, URLs with both userinfo and a secret query, failed
-edits, and case aliases in path queries."""
+"""Regressions for the fifth P1-only Codex pass (PR #154): a stable allowlist,
+failed edits, and case aliases in path queries."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import shlex
 import sys
 from pathlib import Path
 
@@ -21,26 +19,20 @@ import lineage_redact as redact  # noqa: E402
 import test_lineage_index as tli  # noqa: E402
 import test_provenance_review_r2_index as r2  # noqa: E402
 
-SECRET = "sentinel_value_9"
-
 
 def sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
 @pytest.mark.parametrize("command", [
-    f'curl -H "Authorization: Digest username=\\"my user\\", response=\\"{SECRET}\\"" https://x',
-    f"curl 'https://user:pass@example.com/file?api_key={SECRET}'",
-    f"wget https://tok@example.com/f.csv?token={SECRET}&page=2",
+    "python3 fit.py  # a note",
+    "python3 - <<'EOF'\nimport os\nprint(os.environ)\nEOF\necho done",
+    "API_TOKEN=$(printf %s x) python3 fit.py && snakemake -C db.password=y",
 ])
-def test_digest_headers_and_combined_url_credentials_are_redacted(command: str) -> None:
-    assert SECRET not in redact.redact_command(command)
-    assert SECRET not in json.dumps(redact.redact_argv(shlex.split(command)))
-
-
-def test_redaction_is_stable_when_applied_twice() -> None:
-    once = redact.redact_command(f"curl 'https://u:p@h/f?api_key={SECRET}'")
-    assert redact.redact_command(once) == once
+def test_the_allowlist_is_stable_when_applied_twice(command: str) -> None:
+    # The observer stores allowlisted text, and Stop applies it again.
+    once = redact.commit_safe_command(command, set())
+    assert redact.commit_safe_command(once, set()) == once
 
 
 @pytest.fixture()

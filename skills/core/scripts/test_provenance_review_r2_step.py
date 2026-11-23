@@ -22,6 +22,7 @@ import pytest
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import extract_data_lineage as stop  # noqa: E402
 import extract_data_lineage_event as ev  # noqa: E402
 import io_observer as io  # noqa: E402
 
@@ -280,8 +281,9 @@ def test_snakemake_config_overrides_are_params(tmp_path: Path) -> None:
     step = ev.build_step(
         "snakemake --config alpha=0.1 api_token=s3cr3t out=x.yaml --cores 2 -C beta=2",
         {"offset": 0, "kind": "runner"}, None, tmp_path)
-    assert step["params"] == ["alpha=0.1", "api_token=<redacted>", "out=x.yaml", "beta=2"]
-    assert "s3cr3t" not in json.dumps(step)
+    assert step["params"] == ["alpha=0.1", "api_token=s3cr3t", "out=x.yaml", "beta=2"]
+    assert stop._commit_step(step, set())["params"] == ["alpha=0.1", "api_token=<v>",
+                                                         "out=<v>", "beta=2"]
     # A --config value is not a config file operand.
     assert not any(c.get("via") == "suffix" for c in step.get("config_files", []))
 

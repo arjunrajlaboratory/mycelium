@@ -33,11 +33,9 @@ def sha(text: str) -> str:
 
 @pytest.mark.parametrize("literal", ['r"example-secret"', "b'example-secret'", 'f"example-secret"',
                                      'rb"example-secret"'])
-def test_prefixed_secret_literals_are_redacted(literal: str) -> None:
+def test_prefixed_secret_literals_are_not_committed(literal: str) -> None:
     command = f"python -c 'password = {literal}; print(1)'"
-    redacted = lineage_redact.redact_command(command)
-    assert "example-secret" not in redacted
-    assert "<redacted>" in redacted
+    assert lineage_redact.commit_safe_command(command, set()) == "python -c <v>"
 
 
 def test_a_scope_change_is_not_a_deletion(tmp_path: Path) -> None:

@@ -77,7 +77,7 @@ UUID fallback if mycelium hasn't recorded an active session):
 ```
 .mycelium/
   mycelium-data-events.tmp                  # NDJSON, one event per detected script
-  mycelium-data-events-prev/<sid>.tmp       # rotated on accepted Stop (20-file cap)
+  mycelium-data-events-prev/<sid>.tmp       # archived on accepted Stop, allowlisted (20-file cap)
 .living/
   log/
     data-lineage/<sid>.json                 # consolidated manifest
@@ -384,8 +384,9 @@ Read from the detected stage's own text, never guessed:
     makes a later unqualified `cd` CDPATH-uncertain.
   - A URL operand (`--config https://host/c.yaml`) is never resolved against
     the directory or hashed. A flag's URL value is kept as `hash_status:
-    remote` with `rel_path: null`, its userinfo, query and fragment
-    replaced by `<redacted>`. A URL that only has a config suffix is left out.
+    remote` with `rel_path: null` (a committed manifest has no evidence
+    for it, so its `path` is `<v>`). A URL that only has a config suffix is
+    left out.
   - Snakemake `--profile P`: every `config.yaml`/`config.vN+.yaml` in the
     profile directory (a bare name is also searched in the user config
     directories). A profile with none is listed as a missing `config.yaml`.
@@ -393,13 +394,12 @@ Read from the detected stage's own text, never guessed:
     `--configfile` (when it builds its config settings) from the invocation
     directory, before it changes into `--directory`, so both are resolved
     there; positional targets and the workflow's I/O use `--directory`.
-- `params` (snakemake): the `--config`/`-C` `KEY=VALUE` overrides, verbatim,
-  with the value of a secret-named key redacted.
+- `params` (snakemake): the `--config`/`-C` `KEY=VALUE` overrides, verbatim.
 - `seeds`: literal seeds from argv (`--seed N`) and source (`np.random.seed`,
-  `set.seed`), with their origin. Argv seeds, like `params` and config
-  operands, are read from the redacted arguments: in
+  `set.seed`), with their origin. A word a secret-named option or
+  assignment takes is never read as a seed or a config path: in
   `fit.py --password --seed=482731` the parser takes `--seed=482731` as the
-  password, so it is masked and never recorded as a seed. The scan stops at
+  password, so it is not a seed. The scan stops at
   a `--` word: after it, an option parser reads every word as a positional
   value, so `-- --seed 4839…` names no seed. A committed manifest keeps a
   seed only as the Redaction section allows.
@@ -416,13 +416,37 @@ row and feature access is a separate, in-process record (see
 
 ### Redaction
 
-Two levels apply, by where a record is stored.
+One policy applies: an allowlist (`text_policy: "allowlist-v1"`). No list
+of secret shapes can cover every shell, CLI and language, so nothing looks
+for secrets; a word is kept only on evidence that it is safe. Where record
+text is stored decides when the allowlist applies:
 
-**Committed manifests: an allowlist (`text_policy: "allowlist-v1"`).** The
-per-session manifests under `.living/log/data-lineage/` are committed and
-shared, so their records keep only words known to be safe. A denylist of
-secret shapes (below) can never cover every shell, CLI and language, so a
-manifest does not rely on it. At Stop, `extract_data_lineage.py` passes
+- **Committed manifests** (`.living/log/data-lineage/`): every free-text
+  field, at Stop (below).
+- **Stores that outlive a session**, under `.mycelium/`: the observation
+  store (`io/obs/`) keeps an observation's `bash_cmd` in its allowlisted
+  form, with the observation's own change entries as evidence, written so
+  by the observer. The event archives (`mycelium-data-events-prev/`, on an
+  accepted Stop, and `mycelium-data-events-abandoned/`, for a session that
+  never stopped) keep each record as a manifest would
+  (`extract_data_lineage.commit_stream`); the raw stream is removed either
+  way, even if the archive cannot be written.
+- **The transient event queue** (`mycelium-data-events.tmp`, including skip
+  records) and parked records in `lineage-skips-unowned.ndjson` hold the
+  raw command text and embedded `script_source`. Each Stop consumes them
+  (a blocked Stop keeps the queue for its retry), so they are machine-local
+  working state at the trust level of shell history. A host session that
+  ends without any further Stop can leave parked records behind.
+
+The extractor parses raw text. One rule protects parsing: a word a
+secret-named option or assignment takes (`--token X`, `--token=X`,
+`API_KEY=X`; the names are below) is never read as a config path or a
+seed. Everything else that could carry a secret into a manifest is stopped
+at consolidation: a config path without file evidence becomes `<v>`, a seed
+is kept only where the committed argv still shows it, and a named path only
+if it is exactly an evidence-backed record.
+
+**Committed manifests.** At Stop, `extract_data_lineage.py` passes
 every free-text field of every record through the allowlist in
 `lineage_redact.py` (`commit_safe_command`, `commit_safe_argv`,
 `commit_safe_prose`). That covers each action's `bash_cmd`, `step.argv`,
@@ -483,8 +507,10 @@ and an embedded observation's `bash_cmd`. A word is kept only on
   published. A value is also kept if it is a plain number of at most 6
   characters (`3`, `0.05`, `1e-3`), or one of `/dev/null`, `/dev/stdin`,
   `/dev/stdout` or `/dev/stderr`. A number given to a secret-named option or
-  assignment is never kept (the denylist's names, plus `pin`, `otp`,
-  `totp`, `mfa`, `passcode`, `2fa`).
+  assignment is never kept. Secret names hold `token`, `secret`, `password`
+  (`passwd`, `pwd`), `api key`, `private key`, `credential`, `auth`,
+  `cookie` or `session`, or are `pin`, `otp`, `totp`, `mfa`, `passcode` or
+  `2fa` as a whole name part.
 - **Layout.** Operators, redirections and the whitespace layout are kept. A
   heredoc delimiter is kept if it is in a fixed list (`EOF`, `PY`, `END`,
   ...).
@@ -524,9 +550,12 @@ characters, after `--`, or taken by a secret flag) is dropped. A source seed
 under the short-number rule, because the source is not committed. A step
 left with no seeds has no `seeds` field.
 
-`script_source` is never committed. The manifest keeps `script_sha256` (with
-`script_sha256_of` as before) and adds `script_source_bytes` and
-`script_source_lines`. `filters_detected` (0.9.7 regex text) is dropped.
+`script_source` is never committed. The manifest keeps `script_sha256`, the
+plain digest of the script file or inline body, and adds
+`script_source_bytes` and `script_source_lines`. Records from older
+recorders may carry `script_sha256_of: "sanitized"` (a digest of
+denylist-redacted text) or an inline placeholder's `sha256_of`; both still
+load and pass through. `filters_detected` (0.9.7 regex text) is dropped.
 Input and output records' `path` and `rel_path`, the event's `script`, and
 `cwd` and `repo_root` are structured data and stay, whether or not they
 carry evidence. Events recorded before an upgrade get the same treatment
@@ -541,43 +570,13 @@ assignment or loop name (`SECRETVALUE=1`), since it cannot be told apart
 from a variable. Structured input/output paths and `script` are
 published as recorded.
 
-**Machine-local stores: the denylist.** The stores under `.mycelium/` (the
-per-call event queue, observation stores, the journal) are gitignored and
-local, at the trust level of shell history. They keep the full
-denylist-redacted text, including `script_source`. Every stored command text
-goes through one policy (`lineage_redact.py`):
-`bash_cmd`, `argv`, `script_args`, `env`, `params`, embedded `script_source`, and the
-`bash_cmd` of observations and skips. These values become `<redacted>`:
-
-- secret-named assignments and options (token, secret, password, api key,
-  credential, auth, cookie);
-- URL passwords;
-- `Authorization:` header values;
-- quoted secret literals in code.
-
-A shell script's body (a `.sh`, `.bash`, `.zsh` or `.ksh` file, or one with a
-shell shebang, such as an sbatch job file) gets the full command redaction, so
-`export HF_TOKEN=...` is caught as well as quoted literals. Other scripts
-(Python, R) get only the quoted-literal rule, since code names secret
-variables all the time.
-
-Nothing is hashed, because a short secret's digest can be guessed. A
-redacted embedded source has `script_sha256_of: "sanitized"`, and its
-`script_sha256` is the digest of the sanitized text. A script too large to
-embed follows the same rule for its digest. Manifest consolidation applies
-the same rule, choosing the shell redaction by the `.sh`/`.bash`/`.zsh`/`.ksh`
-suffix of the event's `script` or a shell shebang.
-
 `argv`, `script_args`, `params`, and a data command's `argv` keep at most
-4 KiB per word (`…[truncated]`). Each whole argv is redacted before any word
-is clipped, so a secret whose closing quote lies past the cap is still
-found. A clipped word that looked secret (a secret-like name anywhere in it,
-or redaction changed it) is also cut before the first secret-like name or
-`<redacted>` marker in what is kept, so no partial literal survives.
+4 KiB per word (`…[truncated]`); a clipped word is never kept in a
+committed record.
 
 A URL is never a local path. A script's URL literal (`pd.read_csv("https://...")`,
 `to_csv("s3://...")`) is left out of `inputs` and `outputs`. It is named in
-`lineage_warnings` with its userinfo, query and fragment redacted. A
+`lineage_warnings` (a committed warning keeps none of it). A
 URL-shaped word in a data command's redirection or `cp`/`mv` operands is
 not an input or output either.
 
@@ -601,7 +600,7 @@ including adjacent quoted, bare, and backslash-escaped components such as
 A `python a.py && python b.py` chain emits **two** events (one per detected
 script). Inline `-c` scripts emit one event each; their `script` field is
 `null`, with the source embedded under `script_source` and identified by
-`script_sha256`. The embedded source stays in the machine-local event queue;
+`script_sha256`. The embedded source stays in the transient event queue;
 a committed manifest keeps only the digest and the size (see Redaction).
 
 `script_candidate` is `null` except for an R script run (`R -f`,

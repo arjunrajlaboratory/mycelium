@@ -1,6 +1,6 @@
-"""Regressions for the third P1-only Codex pass (PR #154): substitutions and
-nested keys in redaction, bounded URL scanning, filename spelling on
-case-insensitive volumes, and unlistable record directories."""
+"""Regressions for the third P1-only Codex pass (PR #154): a bounded scan of
+long command text, filename spelling on case-insensitive volumes, and
+unlistable record directories."""
 
 from __future__ import annotations
 
@@ -20,44 +20,16 @@ import lineage_index as li  # noqa: E402
 import lineage_redact as redact  # noqa: E402
 import test_lineage_index as tli  # noqa: E402
 
-SECRET = "MY_FAKE_SECRET"
-
 
 def sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-@pytest.mark.parametrize("command", [
-    f"API_TOKEN=$(printf %s {SECRET}) python3 -c 'print(1)'",
-    f"API_TOKEN=`printf %s {SECRET}` python3 x.py",
-    f"snakemake --config=api_token={SECRET}",
-    f"snakemake -C db.password={SECRET}",
-    f"tool --opts=a=1,token={SECRET}",
-])
-def test_substitutions_and_nested_keys_are_redacted(command: str) -> None:
-    assert SECRET not in redact.redact_command(command)
-    assert SECRET not in " ".join(redact.redact_argv(command.split()))
-
-
-@pytest.mark.parametrize("source", [
-    f'password = ("abc{SECRET}"\n    "def")\n',
-    f'token = "a" "{SECRET}"\n',
-])
-def test_parenthesized_and_concatenated_literals_are_redacted(source: str) -> None:
-    assert SECRET not in redact.redact_source(source)
-
-
-def test_plain_commands_keep_their_substitutions() -> None:
-    for text in ("echo $(date) && python x.py", "x = (\"a\" \"b\")\n",
-                 "python fit.py --opt a=1,b=2"):
-        assert redact.redact_command(text) == text
-
-
-def test_sql_placeholders_do_not_stall_redaction() -> None:
+def test_sql_placeholders_do_not_stall_the_allowlist() -> None:
     sql = "INSERT INTO t VALUES " + ",".join(["(?,?,?)"] * 24000)
     command = f"python3 -c \"c.execute('{sql}')\""
     started = time.perf_counter()
-    redact.redact_command(command)
+    redact.commit_safe_command(command, set())
     assert time.perf_counter() - started < 1.0
 
 
