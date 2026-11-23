@@ -4732,11 +4732,11 @@ def test_stdlib_open_and_pathlib_literals_are_resolved(tmp_path: Path) -> None:
     assert inputs == sorted(
         str(tmp_path / p)
         for p in ("data/counts.tsv", "data/raw/meta.csv", "params.yaml",
-                  "data/raw/blob.bin", "state.json")
+                  "data/raw/blob.bin")
     )
     assert outputs == sorted(
         str(tmp_path / p)
-        for p in ("out/table.csv", "out/notes.txt", "data/raw/log.txt", "state.json")
+        for p in ("out/table.csv", "out/notes.txt", "data/raw/log.txt")
     )
 
 
@@ -4985,7 +4985,7 @@ _STDLIB_REVIEW_CASES = {
     "dict_update": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="out.csv")\nargs=p.parse_args()\nargs.__dict__.update({"out":"other.csv"})\nopen(args.out,"w")\n', [], ([], [])),
     "vars_update": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="out.csv")\nargs=p.parse_args()\nvars(args).update({"out":"other.csv"})\nopen(args.out,"w")\n', [], ([], [])),
     "mode_kw": ('open("a.csv", mode="a")\nopen(file="b.csv", mode="r+")\nm="x"\nopen("c.csv", m)\n', [],
-                (["b.csv"], ["a.csv", "b.csv", "c.csv"])),
+                ([], ["a.csv", "c.csv"])),
     "mode_var_reassigned": ('import sys\nm="r"\nif len(sys.argv)>1:\n    m="w"\nopen("c.csv", m)\n', [], ([], [])),
     "cond_path": ('import sys\nif sys.argv[1:]:\n    out="a.csv"\nelse:\n    out="b.csv"\nopen(out,"w")\n', [], ([], [])),
     "argv_override": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nopen(a.out,"w")\n', ["--out", "given.csv"], ([], ["given.csv"])),
@@ -5007,7 +5007,7 @@ _STDLIB_REVIEW_CASES = {
     "with_as_rebind": ('p="a.csv"\nwith open("b.csv") as p:\n    pass\nopen(p)\n', [], (["b.csv"], [])),
     "exec_string": ('exec("x=1")\nopen("a.csv")\n', [], ([], [])),
     "Path_mode_kw": ('from pathlib import Path\nPath("a.txt").open(mode="a")\nPath("b.txt").open("x")\n', [], ([], ["a.txt", "b.txt"])),
-    "open_modes": ('open("a.csv","rU")\nopen("b.csv","rt")\nopen("c.csv","wb+")\n', [], (["b.csv"], ["c.csv"])),
+    "open_modes": ('open("a.csv","rU")\nopen("b.csv","rt")\nopen("c.csv","wb+")\n', [], (["b.csv"], [])),
     "path_join_abs": ('import os\nopen(os.path.join("data","/etc/hosts"))\n', [], (["/etc/hosts"], [])),
     "star_kwargs": ('kw={"mode":"w"}\nopen("a.csv", **kw)\n', [], ([], [])),
     "default_param": ('def save(p="def.csv"):\n    open(p,"w")\nsave()\nsave(p="x.csv")\n', [], ([], [])),
@@ -5597,7 +5597,12 @@ def test_main_argparse_replay_needs_words_literal_in_zsh_and_bash(
         ("from pathlib import Path\nwith Path('p.csv').open() as f:\n    f.read()\n",
          (["p.csv"], [])),
         ("import csv\nwith open('rows.csv', 'a+', newline='') as out:\n"
-         "    csv.writer(out).writerow(['next', 1])\n", ([], ["rows.csv"])),
+         "    csv.writer(out).writerow(['next', 1])\n", ([], [])),
+        # An update handle may only read (`seek(0)` then `read()`), only
+        # write, or both: its direction is unknown.
+        ("with open('rows.csv', 'a+') as f:\n    f.seek(0)\n    print(f.read())\n",
+         ([], [])),
+        ("open('s.json', 'r+')\nopen('t.json', 'w+')\nopen('u.bin', 'rb+')\n", ([], [])),
         ("open('log.txt', 'a')\n", ([], ["log.txt"])),
         ("import builtins\nfrom builtins import setattr as set_attr\n"
          "original_open = builtins.open\n"
@@ -5607,7 +5612,8 @@ def test_main_argparse_replay_needs_words_literal_in_zsh_and_bash(
         ("__builtins__.open = None\nopen('x.csv')\n", ([], [])),
     ],
     ids=["guarded-helper-and-alias", "guarded-transitive", "other-context-manager",
-         "plain-with-open", "path-open-with", "append-plus", "append",
+         "plain-with-open", "path-open-with", "append-plus", "append-plus-read-only",
+         "update-modes", "append",
          "builtins-alias", "builtins-name"],
 )
 def test_stdlib_final_round_probe(source: str, expected) -> None:

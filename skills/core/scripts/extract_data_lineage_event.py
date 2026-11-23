@@ -5373,7 +5373,9 @@ class _ReplayParser(argparse.ArgumentParser):
 
 
 def _open_mode_directions(mode: Any) -> tuple[str, ...]:
-    """("input", "output", or both) for an `open` mode, () if not a mode."""
+    """("input",) for `r`, ("output",) for `w`/`x`/`a`, and () for anything
+    else, including the update modes (`r+`, `w+`, `a+`): such a handle may
+    only read, only write, or both, so its direction is unknown."""
     if not isinstance(mode, str) or not re.fullmatch(r"[rwxabt+]+", mode):
         return ()
     if len(set(mode)) != len(mode) or ("b" in mode and "t" in mode):
@@ -5381,9 +5383,9 @@ def _open_mode_directions(mode: Any) -> tuple[str, ...]:
     kinds = set(mode) & set("rwxa")
     if len(kinds) != 1:
         return ()
-    if "r" in kinds:
-        return ("input", "output") if "+" in mode else ("input",)
-    return ("output",)  # w, x, a, and a+: an append need not read
+    if "+" in mode:
+        return ()
+    return ("input",) if "r" in kinds else ("output",)
 
 
 def _is_literal(node: ast.AST) -> bool:

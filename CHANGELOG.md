@@ -190,7 +190,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     or in a function called from one;
   - files that import `mock` or `builtins`.
 
-  Append modes (`a`, `a+`) are recorded as outputs only.
+  Plain `r` is an input and `w`, `x` and `a` are outputs. The update modes
+  (`r+`, `w+`, `a+`) stay unresolved, because the handle may only read, only
+  write, or both.
 
   The scan only adds to the existing result. The reader/writer scan and
   repository recovery run exactly as before, and the stdlib scan never feeds,
