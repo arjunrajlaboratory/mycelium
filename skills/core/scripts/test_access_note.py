@@ -437,3 +437,22 @@ def test_remember_command_line(tmp_path):
     done = subprocess.run([sys.executable, str(HERE / "access_note.py"), "--remember",
                            str(seen), "a.py\t1"], capture_output=True, text=True)
     assert done.returncode == 0 and seen.read_text() == "a.py\t1\n"
+
+
+def test_deadline_bounds_the_manifest_scan_itself(tmp_path, repo, monkeypatch):
+    monkeypatch.setattr(an, "TIME_BUDGET_SECONDS", -1.0)
+    reads = []
+    monkeypatch.setattr(an._Records, "read", lambda self, path, own: reads.append(path))
+    assert _note(repo, _manifest(tmp_path, [_action(repo)] * 50)) == ""
+    assert reads == []  # stopped before any access file was opened
+
+
+def test_each_output_is_resolved_once(tmp_path, repo, monkeypatch):
+    calls = []
+    real = an._is_table
+    monkeypatch.setattr(an, "_is_table", lambda record, root: (calls.append(1),
+                                                               real(record, root))[1])
+    actions = [_action(repo, ts=f"2026-11-23T12:00:{i:02d}Z",
+                       observation_id=f"claude:call_{i}") for i in range(10, 40)]
+    assert _note(repo, _manifest(tmp_path, actions))
+    assert len(calls) == 1

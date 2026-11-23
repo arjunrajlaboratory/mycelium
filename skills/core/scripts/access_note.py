@@ -158,9 +158,25 @@ def _ended(record: Any) -> datetime.datetime | None:
     return _parse_ts(record.get("ts")) if isinstance(record, dict) else None
 
 
-def _table_steps(manifest: Any, repo: Path) -> list[_Step]:
+def _table_steps(manifest: Any, repo: Path, deadline: float | None = None) -> list[_Step]:
     if not isinstance(manifest, dict) or not isinstance(manifest.get("actions"), list):
         return []
+    # Each output resolved once: realpath dominates the cost on big manifests.
+    tables_seen: dict[tuple[Any, Any], Path | None] = {}
+
+    def table(record: Any) -> Path | None:
+        if not isinstance(record, dict):
+            return None
+        key = (record.get("path") or record.get("rel_path"), record.get("observed_change"))
+        if not isinstance(key[0], str):
+            return None
+        if key not in tables_seen:
+            tables_seen[key] = _is_table(record, repo)
+        return tables_seen[key]
+
+    def check_deadline() -> None:
+        if deadline is not None and time.monotonic() > deadline:
+            raise _Unknown("budget")
     # When every recorded call ended: the window of the call after it.
     ends = sorted(t for t in (
         _ended(r) for key in ("actions", "data_commands")
@@ -173,11 +189,13 @@ def _table_steps(manifest: Any, repo: Path) -> list[_Step]:
     for action in manifest["actions"]:
         if isinstance(action, dict) and isinstance(action.get("observation_id"), str):
             outputs = action.get("outputs") if isinstance(action.get("outputs"), list) else []
-            for path in {t for t in (_is_table(o, repo) for o in outputs) if t}:
+            check_deadline()
+            for path in {t for t in (table(o) for o in outputs) if t}:
                 key = (action["observation_id"], path)
                 shared[key] = shared.get(key, 0) + 1
     last: dict[Path, _Step] = {}
     for action in manifest["actions"]:
+        check_deadline()
         if not isinstance(action, dict):
             continue
         script = _in_repo(action.get("script"), repo)
@@ -191,7 +209,7 @@ def _table_steps(manifest: Any, repo: Path) -> list[_Step]:
         # overlapping or background call, the change may be the other's.
         alone = action.get("observation_status") == "no-known-overlap"
         tables = [] if failed or not alone else [
-            t for t in (_is_table(o, repo) for o in outputs) if t]
+            t for t in (table(o) for o in outputs) if t]
         observation = action.get("observation_id")
         if isinstance(observation, str):
             tables = [t for t in tables if shared.get((observation, t), 0) <= 1]
@@ -247,7 +265,7 @@ def _candidates(repo: Path, steps: list[_Step]) -> tuple[list[Path], list[Path]]
                 if not entry.is_dir(follow_symlinks=False):
                     continue
                 path = Path(entry.path) / "outputs" / "access.json"
-                if path in own or not os.path.lexists(path) or not _contained(path, repo):
+                if path in own or not _contained(path, repo) or not os.path.lexists(path):
                     continue
                 others.append(path)
                 if len(own) + len(others) > MAX_ACCESS_FILES:
@@ -457,7 +475,8 @@ def note_lines(manifest_path: Path, repo_root: Path, since: float | None = None,
             return []
         manifest = json.loads(data.decode("utf-8"))
         seen = _read_seen(seen_path)
-        steps = [s for s in _table_steps(manifest, repo) if _key(s, repo) not in seen]
+        steps = [s for s in _table_steps(manifest, repo, deadline)
+                 if _key(s, repo) not in seen]
         if not steps:
             return []
         since_at = (datetime.datetime.fromtimestamp(since, datetime.timezone.utc)
