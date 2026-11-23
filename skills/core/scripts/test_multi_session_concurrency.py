@@ -276,6 +276,25 @@ def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
     for heading in headings:
         assert f"`{heading}`" in summary_rule
 
+    acted = _run_hook(
+        "mycelium-post-action.sh",
+        repo,
+        {
+            "cwd": str(repo),
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "python analysis.py"},
+        },
+    )
+    assert acted.returncode == 0, acted.stderr
+    directive = json.loads(acted.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "MYCELIUM POST-ACTION PROTOCOL" in directive
+    summary_step = directive[directive.index("10. SESSION SUMMARY:"):]
+    for heading in headings:
+        assert f"`{heading}`" in summary_step
+    assert "### Locked decisions" in summary_step
+    assert "### Dead ends — do not redo" in summary_step
+
 
 def test_blocked_stop_names_exact_private_handoff_path(tmp_path):
     repo = _repo(tmp_path)
