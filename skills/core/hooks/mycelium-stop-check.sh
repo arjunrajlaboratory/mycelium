@@ -75,6 +75,9 @@ mycelium_report_unowned_lineage_gaps() {
     fi
   fi
   if [[ -n "$gap" ]]; then
+    # For the user now, and for the agent at the next SessionStart: an
+    # accepted Stop cannot tell the agent without continuing the turn.
+    mycelium_queue_agent_note "$gap"
     mycelium_emit_context "Stop" "$gap"
   fi
 }
@@ -1153,6 +1156,8 @@ if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
     mycelium_block_for_carried_baseline
     exit 0
   fi
+  # This Stop accepts: keep its gaps for the agent's next SessionStart.
+  mycelium_queue_agent_note "$LINEAGE_GAP_MSG"
   mycelium_consume_reported_unrecorded
   rm -f "$ACTIVE_LOG_FILE"
   rm -f "$ACTIVE_OWNER_FILE"
@@ -1209,6 +1214,8 @@ if [ "$LIVING_UPDATED" = true ]; then
     mycelium_block_for_carried_baseline
     exit 0
   fi
+  # This Stop accepts: keep its gaps for the agent's next SessionStart.
+  mycelium_queue_agent_note "$LINEAGE_GAP_MSG"
   mycelium_consume_reported_unrecorded
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"

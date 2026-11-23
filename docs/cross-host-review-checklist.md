@@ -228,8 +228,10 @@ hook, filesystem, or lifecycle boundaries.
       do not enter an infinite retry loop.
 - [ ] An accepted Stop emits only `systemMessage`, on every host. On Claude,
       `hookSpecificOutput.additionalContext` on a Stop continues the
-      conversation like a block; anything the agent must act on is a block
-      reason, never accepted-Stop output.
+      conversation like a block. Anything the agent must act on is a block
+      reason, or, if Stop still accepts, a note queued for the next
+      SessionStart (`mycelium_queue_agent_note`). It is never accepted-Stop
+      output.
 - [ ] Stop preserves the authored content of a fresh, complete five-section
       handoff, where every required heading occurs exactly once in order and
       every section has a nonblank, non-heading body line after obsolete

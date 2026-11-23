@@ -166,7 +166,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unrecorded-event notes, so every accepted Stop with an update made the
   model reply again (confirmed in a live `claude -p` run). Those messages are
   for the user, so an accepted Stop now emits only `systemMessage` on every
-  host, as Codex already did. Blocked Stops are unchanged.
+  host, as Codex already did. Blocked Stops are unchanged. A lineage gap or
+  unrecorded-event warning is also something the agent needs, since it marks a
+  command's provenance as unknown. So it is also queued in
+  `.mycelium/pending-agent-notes.txt` and handed to the agent once, in the next
+  SessionStart's context.
 
 ## [0.9.7] - 2026-11-21
 

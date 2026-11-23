@@ -137,3 +137,94 @@ def test_blocks_are_unchanged(tmp_path, host):
 
     assert blocked.get("decision") == "block", blocked
     assert blocked["reason"].startswith("STOP BLOCKED"), blocked
+
+
+# A gap is also something the agent must know: a command whose provenance is
+# unknown. The accepted Stop cannot tell it without continuing the turn, so
+# the warning is kept and given to the agent by the next SessionStart, once.
+
+def _start_context(host: str, repo: Path, sid: str, source: str) -> str:
+    result = _run(host, "mycelium-health.sh", repo,
+                  {"cwd": str(repo), "source": source, "session_id": sid,
+                   "hook_event_name": "SessionStart"})
+    out = json.loads(result.stdout) if result.stdout.strip() else {}
+    return out.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+
+@pytest.mark.parametrize("source", ["resume", "startup"])
+@pytest.mark.parametrize("host", HOSTS)
+def test_gap_without_a_transaction_reaches_the_next_session_start_once(tmp_path, host, source):
+    repo = _repo(tmp_path)
+    _start(host, repo, "s5")
+    assert _stop(host, repo, "s5") == {}
+    _park_skip(repo, host, "s5")
+    _assert_accepted_message(_stop(host, repo, "s5"), "detector-failed x1")
+
+    first = _start_context(host, repo, "s5", source)
+    second = _start_context(host, repo, "s5", source)
+
+    assert first.count("detector-failed x1") == 1, first
+    assert "detector-failed" not in second, second
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_gap_at_an_accepting_transaction_reaches_the_next_session_start_once(tmp_path, host):
+    repo = _repo(tmp_path)
+    _park_skip(repo, host, "s6")
+    _start(host, repo, "s6")
+    _assert_accepted_message(_stop(host, repo, "s6"), "detector-failed x1")
+
+    first = _start_context(host, repo, "s6", "resume")
+    second = _start_context(host, repo, "s6", "resume")
+
+    assert first.count("detector-failed x1") == 1, first
+    assert "detector-failed" not in second, second
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_blocked_stop_queues_nothing(tmp_path, host):
+    repo = _repo(tmp_path)
+    _park_skip(repo, host, "s7")
+    _start(host, repo, "s7")
+    _edit(host, repo, "s7")
+    assert _stop(host, repo, "s7").get("decision") == "block"
+    with (repo / ".living" / "learnings.md").open("a") as handle:
+        handle.write("- learned\n")
+    _stop(host, repo, "s7", retry=True)
+
+    context = _start_context(host, repo, "s7", "resume")
+
+    # Reported once, by the accepting Stop, not again for the block before it.
+    assert context.count("detector-failed x1") == 1, context
+
+
+def _notes(state: Path, *commands: str) -> str:
+    script = f'source "{HOOKS_DIR / "mycelium-hook-lib.sh"}"\n' + "\n".join(commands)
+    env = dict(os.environ, MYCELIUM_SHARED_STATE_DIR=str(state))
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                            env=env, check=False, timeout=60)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_notes_are_taken_once_and_one_line_each(tmp_path):
+    out = _notes(tmp_path, "mycelium_queue_agent_note $'first\\nline'",
+                 "mycelium_queue_agent_note second", "mycelium_queue_agent_note ''",
+                 "mycelium_take_agent_notes", "echo ---", "mycelium_take_agent_notes")
+    assert out == "first line\nsecond\n---\n"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_linked_notes_file_is_never_followed(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    target = tmp_path / "outside.txt"
+    target.write_text("outside\n")
+    notes = state / "pending-agent-notes.txt"
+    notes.symlink_to(target)
+
+    out = _notes(state, "mycelium_queue_agent_note gap", "mycelium_take_agent_notes")
+
+    assert out == ""
+    assert target.read_text() == "outside\n"
+    assert list(state.iterdir()) == []
