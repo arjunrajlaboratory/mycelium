@@ -145,6 +145,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MYCELIUM.md` template and the core skill's verification table give the
   current hook counts (seven Claude scripts, eight Codex command hooks).
 
+### Fixed
+
+- **Static lineage now resolves standard-library I/O** in Python scripts
+  (`extract_data_lineage_event.py`). Previously only pandas-style readers and
+  writers were recognised. Now `open(...)` (mode gives the direction),
+  `Path.open/read_text/write_text/read_bytes/write_bytes`, and Mycelium's
+  `read_source` are resolved too, which covers `csv` readers and writers on
+  those handles. A path resolves when it is certain:
+  - a literal;
+  - a name bound once in the file;
+  - `os.path.join` or `Path /` of those;
+  - a parameter whose every call site passes one;
+  - an `argparse` option replayed through the real `argparse` with the
+    command's literal arguments (so `--config x.yaml`, `=` forms,
+    abbreviations and defaults behave as at run time).
+
+  Anything else stays `unresolved`, including:
+  - a shell expansion in the arguments;
+  - `set_defaults` or another unmodelled parser call;
+  - a reassigned option;
+  - `__file__`-relative paths.
+
+  On Antigravity App, which installs no I/O observer, stdlib-only analyses
+  had recorded `io_detection: "unresolved"` with no producer.
+
 ## [0.9.7] - 2026-11-21
 
 ### Added

@@ -4681,3 +4681,287 @@ def test_quoted_heredoc_delimiter_is_not_expanded(tmp_path: Path) -> None:
         (tmp_path / name).write_text("print(1)\n")
     command = 'R -f first.R <<"${EOF:-$DEFAULT}" --file=second.R\nx\n${EOF:-$DEFAULT}'
     assert detect_scripts(command, tmp_path) == [(tmp_path / "second.R", None)]
+
+
+# ---------- standard-library static I/O ----------
+
+
+def _stdlib_event(tmp_path: Path, source: str, script_args: list[str] | None = []):
+    script = tmp_path / "run.py"
+    script.write_text(source)
+    args = argparse.Namespace(
+        ts="2026-11-23T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+    )
+    event = build_event_for_detection(
+        (script, None), args, tmp_path, "abc123", script_args=script_args
+    )
+    assert event is not None
+    return (
+        event,
+        sorted(item["path"] for item in event["inputs"]),
+        sorted(item["path"] for item in event["outputs"]),
+    )
+
+
+def test_stdlib_open_and_pathlib_literals_are_resolved(tmp_path: Path) -> None:
+    event, inputs, outputs = _stdlib_event(
+        tmp_path,
+        "import csv, os\n"
+        "from pathlib import Path\n"
+        "DATA = Path('data') / 'raw'\n"
+        "COUNTS = os.path.join('data', 'counts.tsv')\n"
+        "with open(COUNTS) as handle:\n"
+        "    rows = list(csv.DictReader(handle, delimiter='\\t'))\n"
+        "meta = list(csv.reader(open(DATA / 'meta.csv', newline='')))\n"
+        "cfg = Path('params.yaml').read_text()\n"
+        "blob = (DATA / 'blob.bin').read_bytes()\n"
+        "with open('out/table.csv', 'w', newline='') as out:\n"
+        "    csv.writer(out).writerow(['a'])\n"
+        "Path('out/notes.txt').write_text('done')\n"
+        "with DATA.joinpath('log.txt').open(mode='a') as log:\n"
+        "    log.write('x')\n"
+        "with open('state.json', 'r+') as state:\n"
+        "    state.read()\n",
+    )
+    assert event["io_detection"] == "static"
+    assert inputs == sorted(
+        str(tmp_path / p)
+        for p in ("data/counts.tsv", "data/raw/meta.csv", "params.yaml",
+                  "data/raw/blob.bin", "state.json")
+    )
+    assert outputs == sorted(
+        str(tmp_path / p)
+        for p in ("out/table.csv", "out/notes.txt", "data/raw/log.txt", "state.json")
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # A run-time value: the command line, the environment, input().
+        "import sys\nopen(sys.argv[1])\n",
+        "import os\nopen(os.environ['IN'])\n",
+        # A name bound more than once may hold either value.
+        "p = 'a.csv'\nif x:\n    p = 'b.csv'\nopen(p)\n",
+        "p = 'a.csv'\np += '.bak'\nopen(p)\n",
+        # `open` rebound to something else.
+        "from gzip import open\nopen('a.csv')\n",
+        "def open(p):\n    return p\nopen('a.csv')\n",
+        # A str has no `.open`/`.read_text`: the call fails, nothing is read.
+        "'a.csv'.read_text()\n",
+        "P = 'a.csv'\nP.open()\n",
+        # Unmodelled path pieces: f-strings, __file__, resolve(), a call.
+        "name = 'a'\nopen(f'{name}.csv')\n",
+        "from pathlib import Path\n(Path(__file__).parent / 'a.csv').read_text()\n",
+        "from pathlib import Path\nPath('a.csv').resolve().read_text()\n",
+        "open(helper('a.csv'))\n",
+        # A dynamic mode.
+        "open('a.csv', mode)\n",
+        # A parameter whose function is passed around, so its callers are unknown.
+        "def load(p):\n    return open(p).read()\nload('a.csv')\nmap(load, names)\n",
+        # A parameter with a star-args call site.
+        "def load(p):\n    return open(p).read()\nload(*names)\n",
+        # Code that can rebind any name unseen.
+        "from helpers import *\nopen('a.csv')\n",
+        "exec(code)\nopen('a.csv')\n",
+    ],
+)
+def test_stdlib_io_that_is_not_statically_certain_stays_unresolved(
+    tmp_path: Path, source: str
+) -> None:
+    event, inputs, outputs = _stdlib_event(tmp_path, source)
+    assert (inputs, outputs) == ([], [])
+    assert event["io_detection"] == "unresolved"
+
+
+def test_stdlib_parameter_resolves_through_every_call_site(tmp_path: Path) -> None:
+    _, inputs, outputs = _stdlib_event(
+        tmp_path,
+        "from pathlib import Path\n"
+        "def load(path, mode='r'):\n"
+        "    with open(path, mode) as handle:\n"
+        "        return handle.read()\n"
+        "def save(text, dest=Path('out') / 'x.txt'):\n"
+        "    dest.write_text(text)\n"
+        "a = load('a.csv')\n"
+        "b = load(path=Path('b.csv'))\n"
+        "save(a + b)\n",
+    )
+    assert inputs == [str(tmp_path / "a.csv"), str(tmp_path / "b.csv")]
+    assert outputs == [str(tmp_path / "out/x.txt")]
+
+
+def test_stdlib_parameter_with_one_unknown_call_site_stays_unresolved(
+    tmp_path: Path,
+) -> None:
+    event, inputs, _ = _stdlib_event(
+        tmp_path,
+        "import sys\n"
+        "def load(path):\n"
+        "    return open(path).read()\n"
+        "load('a.csv')\n"
+        "load(sys.argv[1])\n",
+    )
+    assert inputs == []
+    assert event["io_detection"] == "unresolved"
+
+
+_ARGPARSE_SCRIPT = (
+    "import argparse\n"
+    "import csv\n"
+    "from pathlib import Path\n"
+    "from register_value import read_source\n"
+    "\n"
+    "def load_config(config_path: Path):\n"
+    "    text, source = read_source(config_path, {'key': 't'}, mode='r')\n"
+    "    return text\n"
+    "\n"
+    "def load_table(table_path: Path):\n"
+    "    with table_path.open(newline='') as handle:\n"
+    "        return list(csv.DictReader(handle, delimiter='\\t'))\n"
+    "\n"
+    "def main(argv=None):\n"
+    "    parser = argparse.ArgumentParser(description='demo')\n"
+    "    parser.add_argument('--config', type=Path, required=True, help='cfg')\n"
+    "    parser.add_argument('--counts', type=Path,\n"
+    "                        default=Path('data/raw/counts.tsv'))\n"
+    "    parser.add_argument('--samples', type=Path,\n"
+    "                        default=Path('data/meta/samples.tsv'))\n"
+    "    parser.add_argument('--output', type=Path,\n"
+    "                        default=Path('analysis/de/outputs/gene_means.csv'))\n"
+    "    parser.add_argument('--threshold', type=float, default=2.0)\n"
+    "    args = parser.parse_args(argv)\n"
+    "    load_config(args.config)\n"
+    "    load_table(args.counts)\n"
+    "    load_table(args.samples)\n"
+    "    args.output.parent.mkdir(parents=True, exist_ok=True)\n"
+    "    with args.output.open('w', encoding='utf-8', newline='') as handle:\n"
+    "        csv.writer(handle).writerow(['gene'])\n"
+    "    return 0\n"
+    "\n"
+    "if __name__ == '__main__':\n"
+    "    raise SystemExit(main())\n"
+)
+
+
+@pytest.mark.parametrize(
+    "script_args,expected_inputs,expected_outputs",
+    [
+        (
+            ["--config", "analysis/de/params.yaml"],
+            ["analysis/de/params.yaml", "data/meta/samples.tsv", "data/raw/counts.tsv"],
+            ["analysis/de/outputs/gene_means.csv"],
+        ),
+        (
+            # `=` spelling, an argparse abbreviation, and a non-path option.
+            ["--config=p.yaml", "--coun", "other.tsv", "--threshold", "3"],
+            ["data/meta/samples.tsv", "other.tsv", "p.yaml"],
+            ["analysis/de/outputs/gene_means.csv"],
+        ),
+    ],
+)
+def test_stdlib_argparse_values_come_from_the_command_line_or_defaults(
+    tmp_path: Path, script_args, expected_inputs, expected_outputs
+) -> None:
+    event, inputs, outputs = _stdlib_event(tmp_path, _ARGPARSE_SCRIPT, script_args)
+    assert event["io_detection"] == "static"
+    assert inputs == sorted(str(tmp_path / p) for p in expected_inputs)
+    assert outputs == sorted(str(tmp_path / p) for p in expected_outputs)
+
+
+@pytest.mark.parametrize(
+    "script_args",
+    [
+        None,  # the argv is unknown (an expansion, an unparsed command)
+        ["--help"],  # argparse prints help and exits: no I/O
+        ["--output", "o.csv"],  # --config is required: argparse exits
+        ["--config", "p.yaml", "--bogus"],  # an unknown option: argparse exits
+    ],
+)
+def test_stdlib_argparse_values_unknown_or_exiting_stay_unresolved(
+    tmp_path: Path, script_args
+) -> None:
+    event, inputs, outputs = _stdlib_event(tmp_path, _ARGPARSE_SCRIPT, script_args)
+    assert (inputs, outputs) == ([], [])
+    assert event["io_detection"] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        # Anything that changes argparse beyond the modelled calls.
+        ("    args = parser.parse_args(argv)\n",
+         "    parser.set_defaults(counts=Path('x.tsv'))\n"
+         "    args = parser.parse_args(argv)\n"),
+        ("    args = parser.parse_args(argv)\n",
+         "    args = parser.parse_args(['--config', 'c.yaml'] + extra)\n"),
+        ("    parser = argparse.ArgumentParser(description='demo')\n",
+         "    parser = argparse.ArgumentParser(fromfile_prefix_chars='@')\n"),
+        ("    raise SystemExit(main())\n", "    raise SystemExit(main(sys.argv))\n"),
+        ("    args = parser.parse_args(argv)\n",
+         "    args = parser.parse_args(argv)\n    args.counts = Path('y.tsv')\n"),
+    ],
+)
+def test_stdlib_argparse_unmodelled_parsers_stay_unresolved(
+    tmp_path: Path, mutation
+) -> None:
+    old, new = mutation
+    assert old in _ARGPARSE_SCRIPT
+    source = _ARGPARSE_SCRIPT.replace(old, new)
+    _, inputs, outputs = _stdlib_event(tmp_path, source, ["--config", "p.yaml"])
+    assert (inputs, outputs) == ([], [])
+
+
+def test_main_resolves_stdlib_argparse_script_from_command_line(tmp_path: Path) -> None:
+    analysis = tmp_path / "analysis" / "de"
+    analysis.mkdir(parents=True)
+    (analysis / "run.py").write_text(_ARGPARSE_SCRIPT)
+    (analysis / "params.yaml").write_text("t: 2\n")
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    def run(command: str) -> dict:
+        target.unlink(missing_ok=True)
+        result = subprocess.run(
+            [sys.executable, str(extractor), "--cwd", str(tmp_path),
+             "--ts", "2026-11-23T12:00:00Z", "--bash-cmd", command,
+             "--bash-exit", "0", "--append-to", str(target)],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        [event] = [json.loads(line) for line in target.read_text().splitlines()]
+        return event
+
+    event = run("python3 analysis/de/run.py --config analysis/de/params.yaml")
+    assert event["io_detection"] == "static"
+    assert sorted(i["path"] for i in event["inputs"]) == sorted(
+        str(tmp_path / p) for p in
+        ("analysis/de/params.yaml", "data/meta/samples.tsv", "data/raw/counts.tsv"))
+    assert [o["path"] for o in event["outputs"]] == [
+        str(tmp_path / "analysis/de/outputs/gene_means.csv")]
+    assert {i["source"] for i in event["inputs"]} == {"inferred-static"}
+
+    # A shell expansion in the script's argv: its value is unknown.
+    event = run('python3 analysis/de/run.py --config "$CFG"')
+    assert event["inputs"] == [] and event["outputs"] == []
+    assert event["io_detection"] == "unresolved"
+
+
+def test_stdlib_argparse_positional_argument_is_resolved(tmp_path: Path) -> None:
+    _, inputs, outputs = _stdlib_event(
+        tmp_path,
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('table')\n"
+        "parser.add_argument('-o', '--out', default='result.txt')\n"
+        "args = parser.parse_args()\n"
+        "rows = open(args.table).read()\n"
+        "open(args.out, 'w').write(rows)\n",
+        ["data/t.csv"],
+    )
+    assert inputs == [str(tmp_path / "data/t.csv")]
+    assert outputs == [str(tmp_path / "result.txt")]
