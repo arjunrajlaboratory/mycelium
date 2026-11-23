@@ -65,7 +65,18 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
   AGENT_TYPE=$(mycelium_json_get 'agent_type' INPUT)
   HOOK_EVENT=$(mycelium_json_get_optional_string 'hook_event_name' INPUT) || HOOK_EVENT=""
   OUTCOME=unknown
-  if [[ "$HOOK_EVENT" == "PostToolUseFailure" ]]; then
+  # A background launch (the agent asked for one, or the host moved a long
+  # command to the background and returned a backgroundTaskId) fires
+  # PostToolUse when the job starts, not when it ends: its exit status is
+  # unknown, so nothing may claim the job's writes as completed.
+  BACKGROUND_LAUNCH=0
+  if [[ "$(mycelium_json_get 'tool_input.run_in_background' INPUT)" == "True" \
+    || -n "$(mycelium_json_get 'tool_response.backgroundTaskId' INPUT)" ]]; then
+    BACKGROUND_LAUNCH=1
+  fi
+  if [[ "$BACKGROUND_LAUNCH" == 1 && "$HOOK_EVENT" != "PostToolUseFailure" ]]; then
+    BASH_EXIT=""
+  elif [[ "$HOOK_EVENT" == "PostToolUseFailure" ]]; then
     # Claude Code's failure event carries no tool_response; its `error`
     # text starts "Exit code N" for an ordinary nonzero exit. An interrupt
     # or timeout may carry no code: the exit stays unknown, never 0.
@@ -118,8 +129,7 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
     # timeout (Claude Code then returns a backgroundTaskId). Either way the
     # job may still be writing, so its interval stays open.
     OBS_TASK_ID=$(mycelium_json_get 'tool_response.backgroundTaskId' INPUT)
-    if [[ "$(mycelium_json_get 'tool_input.run_in_background' INPUT)" == "True" \
-      || -n "$OBS_TASK_ID" ]]; then
+    if [[ "$BACKGROUND_LAUNCH" == 1 ]]; then
       OBS_ARGS+=(--background)
       # The host's task id lets a later Stop snapshot end the job.
       if [[ "$OBS_TASK_ID" =~ ^[A-Za-z0-9_.:-]{1,128}$ ]]; then

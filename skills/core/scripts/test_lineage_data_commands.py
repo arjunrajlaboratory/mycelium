@@ -310,6 +310,37 @@ def test_mention_scan_shapes_stay_fast(project, command):
     assert time.process_time() - start < 0.2
 
 
+def _extract_cpu(project: Path, command: str, out: Path) -> float:
+    """CPU seconds for one extractor run through its entry point."""
+    argv = ["extract_data_lineage_event.py", "--cwd", str(project), "--ts", "T",
+            "--bash-cmd", command, "--bash-exit", "0", "--append-to", str(out)]
+    old = sys.argv
+    sys.argv = argv
+    try:
+        start = time.process_time()
+        assert lineage_event.main() == 0
+        return time.process_time() - start
+    finally:
+        sys.argv = old
+
+
+def test_a_long_stage_does_not_slow_step_construction(project):
+    # Review of #159: recognizing `analysis/<x>/output/` sent a 250 KB quoted
+    # argument through shlex in data_command_step (3 s), where main, which
+    # never named the path, built no step at all.
+    _output_tree(project)
+    long_arg = "x" * 250_000
+    named = f"printf '%s' '{long_arg}' analysis/x/output/ >/dev/null"
+    unnamed = f"printf '%s' '{long_arg}' analysis/x/scripts/ >/dev/null"
+    baseline = _extract_cpu(project, unnamed, project / "a.ndjson")
+    elapsed = _extract_cpu(project, named, project / "b.ndjson")
+    assert not (project / "a.ndjson").exists() or not (project / "a.ndjson").read_text()
+    record = json.loads((project / "b.ndjson").read_text())
+    assert record["named_paths"] == ["analysis/x/output/"]
+    assert record["step"] == {"partial": True, "reason": "stage-too-long"}
+    assert elapsed < baseline * 1.5 + 0.2, (elapsed, baseline)
+
+
 def test_relative_resolution_stats_a_bounded_number_of_words(project):
     _output_tree(project)
     command = "ls " + " ".join(f"outputs/f{i}.log" for i in range(20000))

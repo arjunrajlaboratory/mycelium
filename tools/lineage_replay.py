@@ -93,12 +93,45 @@ def _claude_files(projects_dir: Path, root: Path) -> list[Path]:
     return files
 
 
+_NOTIFICATION_RX = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
+_LAUNCH_TEXT_RX = re.compile(r"^Command running in background with ID: ")
+
+
+def _completed_with_exit_zero(text: str) -> set[str]:
+    """Tool-use ids whose background job a task notification reports as
+    completed with exit code 0."""
+    done = set()
+    for body in _NOTIFICATION_RX.findall(text):
+        tool = re.search(r"<tool-use-id>([^<]+)</tool-use-id>", body)
+        status = re.search(r"<status>([^<]+)</status>", body)
+        summary = re.search(r"<summary>(.*?)</summary>", body, re.S)
+        if (tool and status and status.group(1) == "completed" and summary
+                and re.search(r"\(exit code 0\)\s*$", summary.group(1))):
+            done.add(tool.group(1))
+    return done
+
+
+def _content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(c.get("text", "") for c in content if isinstance(c, dict))
+    return ""
+
+
 def extract_claude(path: Path, project: str,
                    unproven: Counter | None = None) -> Iterator[Command]:
-    """Bash calls with a non-error result. Each call left out (a failure, a
-    refusal, a hook block, or no result) is counted in ``unproven``."""
-    uses: dict[str, tuple[str, str]] = {}
+    """Bash calls with a non-error result. A background launch (the call
+    asked for `run_in_background`, or its result carries a
+    `backgroundTaskId`) fired its hook at launch, so it counts only when a
+    task notification in the same transcript reports that job completed
+    with exit code 0. Each call left out (a failure, a refusal, a hook
+    block, no result, a launch without such a completion) is counted in
+    ``unproven``."""
+    uses: dict[str, tuple[str, str, bool]] = {}
     results: dict[str, dict] = {}
+    launched: set[str] = set()
+    completed: set[str] = set()
     order: list[str] = []
     subagent = "subagents" in path.parts
     with open(path, encoding="utf-8", errors="replace") as fh:
@@ -107,35 +140,49 @@ def extract_claude(path: Path, project: str,
                 rec = json.loads(line)
             except ValueError:
                 continue
+            # A completion is a host message that is itself a notification:
+            # a queued message, or a user turn, whose text starts with one.
+            if rec.get("type") in ("queue-operation", "user"):
+                raw = rec.get("content") if rec.get("type") == "queue-operation" else (
+                    (rec.get("message") or {}).get("content")
+                    if isinstance(rec.get("message"), dict) else None)
+                if isinstance(raw, str) and raw.lstrip().startswith("<task-notification>"):
+                    completed |= _completed_with_exit_zero(raw)
             msg = rec.get("message")
             if not isinstance(msg, dict) or not isinstance(msg.get("content"), list):
                 continue
+            tool_result = rec.get("toolUseResult")
             for block in msg["content"]:
                 if not isinstance(block, dict):
                     continue
                 if block.get("type") == "tool_use" and block.get("name") == "Bash":
-                    cmd = (block.get("input") or {}).get("command")
+                    tool_input = block.get("input") or {}
+                    cmd = tool_input.get("command")
                     if isinstance(cmd, str) and block.get("id") not in uses:
-                        uses[block["id"]] = (cmd, rec.get("cwd") or "")
+                        uses[block["id"]] = (cmd, rec.get("cwd") or "",
+                                             tool_input.get("run_in_background") is True)
                         order.append(block["id"])
                 elif block.get("type") == "tool_result":
-                    results[block.get("tool_use_id")] = block
+                    call = block.get("tool_use_id")
+                    results[call] = block
+                    if ((isinstance(tool_result, dict) and tool_result.get("backgroundTaskId"))
+                            or _LAUNCH_TEXT_RX.match(_content_text(block.get("content")))):
+                        launched.add(call)
     for call_id in order:
         result = results.get(call_id)
-        if result is None:
-            if unproven is not None:
-                unproven["claude"] += 1
-            continue  # interrupted before a result: no PostToolUse
-        cmd, cwd = uses[call_id]
-        if result.get("is_error"):
-            # A failure, a permission refusal, or a hook block (`Blocked:`):
-            # without positive evidence that the call ran and succeeded it
-            # stays out of the replay.
+        cmd, cwd, background = uses[call_id]
+        if (result is None or result.get("is_error")
+                or ((background or call_id in launched) and call_id not in completed)):
+            # No result (interrupted), a failure, a permission refusal, a
+            # hook block (`Blocked:`), or a launch whose job is not known to
+            # have succeeded: no positive evidence that the call succeeded.
             if unproven is not None:
                 unproven["claude"] += 1
             continue
-        # PostToolUse fires only for successful Bash calls.
-        yield Command(project, "claude", cmd, cwd, 0, call_id, subagent)
+        # The hook ran at launch, where a background job's status is
+        # unknown (mycelium-data-tracker.sh passes no exit); replay it so.
+        bash_exit = None if (background or call_id in launched) else 0
+        yield Command(project, "claude", cmd, cwd, bash_exit, call_id, subagent)
 
 
 def _read_rollout(path: Path) -> list[bytes]:

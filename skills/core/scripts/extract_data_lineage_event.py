@@ -7382,6 +7382,10 @@ def build_step(
     return step
 
 
+# The longest simple command data_command_step tokenizes.
+_STEP_STAGE_LIMIT = 16 * 1024
+
+
 def data_command_step(bash_cmd: str, named_paths: list[str] | None = None) -> dict[str, Any] | None:
     """The argv of the data command's working stage: the first stage that
     names one of the data paths the record lists, else the first stage that
@@ -7395,6 +7399,11 @@ def data_command_step(bash_cmd: str, named_paths: list[str] | None = None) -> di
         suffix = _simple_command_suffix(bash_cmd, offset)
         if suffix is None:
             return fallback or {"partial": True, "reason": "unmodeled-shell-structure"}
+        if len(suffix) > _STEP_STAGE_LIMIT:
+            # shlex builds a token one character at a time: a stage holding
+            # a long literal (a 250 KB quoted argument) would cost seconds on
+            # the hook path. Such a stage is not tokenized.
+            return fallback or {"partial": True, "reason": "stage-too-long"}
         argv = _simple_command_argv(suffix)
         if argv:
             words = [w for w in argv if not (_NAME_RX.fullmatch(w.partition("=")[0])

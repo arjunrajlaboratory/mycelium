@@ -188,6 +188,47 @@ def test_extract_claude_keeps_only_successful_calls(tmp_path):
     assert unproven["claude"] == 4
 
 
+def _notification(call: str, summary: str, status: str = "completed") -> str:
+    return (f"<task-notification>\n<task-id>t</task-id>\n<tool-use-id>{call}</tool-use-id>\n"
+            f"<status>{status}</status>\n<summary>{summary}</summary>\n</task-notification>")
+
+
+def test_background_launches_need_a_completion_with_exit_zero(tmp_path):
+    def launch(i, cmd, *, flag=True, task=True):
+        use = {"type": "tool_use", "id": i, "name": "Bash",
+               "input": {"command": cmd, **({"run_in_background": True} if flag else {})}}
+        result = json.loads(_claude_line([{"type": "tool_result", "tool_use_id": i,
+                                           "content": "Command running in background with ID: x"
+                                           if flag else ""}], "user"))
+        if task:
+            result["toolUseResult"] = {"backgroundTaskId": "x" + i}
+        return [_claude_line([use]), json.dumps(result)]
+    lines = [
+        *launch("a", "sleep 1 && head data/a.csv"),
+        *launch("b", "sleep 1 && head data/b.csv"),
+        *launch("c", "sleep 1 && head data/c.csv"),
+        *launch("d", "sleep 1 && head data/d.csv", flag=False),  # moved to the background
+        *launch("e", "sleep 1 && head data/e.csv"),
+        json.dumps({"type": "queue-operation", "operation": "enqueue",
+                    "content": _notification("a", 'Background command "x" completed (exit code 0)')}),
+        json.dumps({"type": "queue-operation", "operation": "enqueue",
+                    "content": _notification("b", 'Background command "x" failed with exit code 1',
+                                             status="failed")}),
+        json.dumps({"type": "queue-operation", "operation": "enqueue",
+                    "content": _notification("c", 'Background command "x" completed')}),
+        _claude_line(_notification("d", 'Background command "x" completed (exit code 0)'), "user"),
+        # Quoted inside a tool result, a notification is not one.
+        _claude_line([{"type": "tool_result", "tool_use_id": "zz",
+                       "content": _notification("e", 'x completed (exit code 0)')}], "user"),
+    ]
+    path = tmp_path / "s.jsonl"
+    path.write_text("\n".join(lines) + "\n")
+    unproven = replay.Counter()
+    got = [(c.command, c.bash_exit) for c in replay.extract_claude(path, "P", unproven)]
+    assert got == [("sleep 1 && head data/a.csv", None), ("sleep 1 && head data/d.csv", None)]
+    assert unproven["claude"] == 3
+
+
 def test_claude_files_include_worktrees_and_subagents(tmp_path):
     root = Path("/Users/me/code/Proj")
     base = tmp_path / "projects"

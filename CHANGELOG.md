@@ -213,6 +213,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Claude Code background launch no longer claims writes as done.**
+  Claude Code runs PostToolUse when a background job starts
+  (`run_in_background`, or a command moved to the background with a
+  `backgroundTaskId`). The data tracker passed exit 0 for it. A redirection
+  or `cp`/`mv` target that already existed was then recorded as the job's
+  output, with its old content, while the job was still waiting to run. This
+  affected 0.9.7 for data-extension paths too. The tracker now passes no exit
+  status for a launch, so nothing directional is claimed.
+- A data command's `step` no longer tokenizes a stage longer than 16 KB.
+  `shlex` built a 250 KB quoted argument one character at a time, taking
+  seconds on the hook path. Such a stage is recorded as `partial` with
+  `reason: "stage-too-long"`.
 - A Claude Code session working in a linked git worktree (such as the
   desktop app's `.claude/worktrees/<name>/` side sessions) is now judged on
   that worktree. Stop and the Bash post-action hook took the repository root

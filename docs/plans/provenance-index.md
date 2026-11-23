@@ -811,8 +811,15 @@ as executed:
 
 - a Claude call with a non-error tool result (PostToolUse fires only for a
   successful Bash call). A failure, a permission refusal, a hook block
-  (`Blocked:`), or a call with no result is left out (56 in SNP-tree, 19 in
-  AP1-learning);
+  (`Blocked:`), or a call with no result is left out (58 in SNP-tree, 21 in
+  AP1-learning, counted with the launches below);
+- a Claude background launch (`run_in_background`, or a result carrying a
+  `backgroundTaskId`) only when a task notification in the same transcript
+  reports that job `completed (exit code 0)`. The hook runs at launch, when
+  the job's status is unknown, so these replay with no exit status, as the
+  tracker now passes them (21 such calls in SNP-tree, 17 data-touching; 10
+  in AP1-learning, 8 data-touching). A launch without that completion is
+  left out;
 - a Codex direct call whose own status header (the lines from `Chunk ID:` to
   `Output:`) says `Process exited with code 0`. A nonzero exit, a call still
   running when its result came back, a rejection, or no result is left out
@@ -867,11 +874,11 @@ detector at `origin/main` d0054d9; "after" is this change.
 
 | | SNP-tree, Claude | SNP-tree, Codex direct | AP1-learning, Claude |
 |---|---|---|---|
-| Calls replayed | 1,299 | 2,042 | 713 |
-| Data-touching | 599 | 701 | 320 |
-| Events, before | 543 (90.7%), 54 silent | 644 (91.9%), 57 silent | 316 (98.8%), 4 silent |
-| **Events, after** | **597 (99.7%)** | **701 (100%)** | **320 (100%)** |
-| … of which analysis / `data_command` | 127 / 470 | 373 / 328 | 62 / 258 |
+| Calls replayed | 1,297 | 2,042 | 711 |
+| Data-touching | 598 | 701 | 320 |
+| Events, before | 542 (90.6%), 54 silent | 644 (91.9%), 57 silent | 316 (98.8%), 4 silent |
+| **Events, after** | **596 (99.7%)** | **701 (100%)** | **320 (100%)** |
+| … of which analysis / `data_command` | 127 / 469 | 373 / 328 | 62 / 258 |
 | **Logged skips, after** | **2** | **0** | **0** |
 | **Silent misses, after** | **0** | **0** | **0** |
 

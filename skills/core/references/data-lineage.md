@@ -245,11 +245,15 @@ of literal simple commands, so every command in it ran and succeeded:
 
 Pipes, `;`, `||`, backgrounding, subshells, substitutions, `$` expansions,
 globs, braces, tilde, heredocs, and an unknown exit status claim nothing. A
+Claude Code background launch (`run_in_background`, or a result carrying a
+`backgroundTaskId`) fires PostToolUse when the job starts, so the tracker
+passes no exit status for it and its writes are never claimed as done. A
 command's own operands (`head data/x.csv`) are never inputs: that would need
 each tool's grammar. Files are hashed at hook time; a FIFO, device, or
 directory is recorded without being opened, and every open is non-blocking
-with a regular-file check on the descriptor. Long commands stay linear: the
-words are read by a one-pass tokenizer, and the label pass falls back to a
+with a regular-file check on the descriptor. Long commands stay linear: a
+record's `step` is not tokenized from a stage over 16 KB (it is `partial`
+with `reason: "stage-too-long"`), the words are read by a one-pass tokenizer, and the label pass falls back to a
 command-position scan beyond 64 KB.
 
 A call with a proven analysis run gets its analysis events and no data

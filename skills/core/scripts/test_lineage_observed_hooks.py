@@ -266,6 +266,46 @@ def test_command_the_host_moved_to_the_background_stays_open(tmp_path):
     assert [o["call"] for o in second["overlapping"]] == ["long"]
 
 
+@pytest.mark.parametrize("target", ["analysis/demo/output/counts", "data/counts.csv"])
+@pytest.mark.parametrize("launch", [
+    {"tool_input": {"run_in_background": True},
+     "tool_response": {"stdout": "", "backgroundTaskId": "b1"}},
+    {"tool_input": {}, "tool_response": {"stdout": "", "backgroundTaskId": "b2"}},
+    {"tool_input": {"run_in_background": True}, "tool_response": {"stdout": ""}},
+])
+def test_a_background_launch_claims_no_completed_write(tmp_path, target, launch):
+    # Claude Code fires PostToolUse when it launches a background job, not
+    # when the job ends. The launch is not exit 0 of the command: a write
+    # the job has not made yet must not be recorded with the old content.
+    host, repo, sid = "claude", _repo(tmp_path), "owned"
+    (repo / target).parent.mkdir(parents=True, exist_ok=True)
+    (repo / target).write_text("old")
+    _start(host, repo, sid)
+    command = f"sleep 60 && printf changed > {repo / target}"
+    _pre(host, repo, sid, "bg", command)
+    payload = {"cwd": str(repo), "session_id": sid, "hook_event_name": "PostToolUse",
+               "tool_name": "Bash", "tool_use_id": "bg",
+               "tool_input": {"command": command, **launch["tool_input"]},
+               "tool_response": launch["tool_response"]}
+    assert _run(host, "mycelium-data-tracker.sh", repo, payload).returncode == 0
+    (record,) = [e for e in _stream(repo, host, sid) if e.get("kind") == "data_command"]
+    assert record["bash_exit"] is None
+    assert record["outputs"] == []
+    assert record["tool_outcome"] == "unknown"
+
+
+def test_a_foreground_success_still_claims_its_write(tmp_path):
+    host, repo, sid = "claude", _repo(tmp_path), "owned"
+    _start(host, repo, sid)
+    command = f"printf changed > {repo / 'data' / 'counts.csv'}"
+    _pre(host, repo, sid, "fg", command)
+    (repo / "data" / "counts.csv").write_text("changed")
+    _post(host, repo, sid, "fg", command)
+    (record,) = [e for e in _stream(repo, host, sid) if e.get("kind") == "data_command"]
+    assert record["bash_exit"] == 0
+    assert [o["path"] for o in record["outputs"]] == [str(repo / "data" / "counts.csv")]
+
+
 def test_edit_tool_beside_bash_marks_overlap(tmp_path):
     host, repo, sid = "claude", _repo(tmp_path), "owned"
     _start(host, repo, sid)
