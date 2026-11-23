@@ -825,7 +825,9 @@ class MissingKeyMatrixTest(unittest.TestCase):
         (BATCH, ["batch", "level"], BATCH_BASE, ["b3", "NA"], 0, "nothing new"),
         (COHORT, ["cohort"], COHORT_BASE, None, 0, "base passes"),
         (PAIRED, ["donor", "arm", "run"], PAIRED_BASE, None, 0, "base passes"),
-        (PAIRED, ["donor", "arm", "run"], PAIRED_BASE, ["d3", "X", "NA"], 2, "arm X has no batch"),
+        (PAIRED, ["donor", "arm", "run"], PAIRED_BASE, ["d3", "X", "NA"], 0, "X has no pair; pairing's"),
+        (PAIRED, ["donor", "arm", "run"], PAIRED_BASE + [["d3", "T", "r3"], ["d3", "C", "NA"]], None, 0,
+         "d3's pair is only in the warning"),
         (PAIRED, ["donor", "arm", "run"], PAIRED_BASE, ["d1", "T", "NA"], 0, "nothing new"),
         (COHORT, ["cohort"], COHORT_BASE, ["NA"], 0, "an NA row is not a cohort row"),
     ]

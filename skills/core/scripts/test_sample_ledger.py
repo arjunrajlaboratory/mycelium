@@ -549,19 +549,20 @@ def test_local_labels_qualify_paired_batch_units_and_batches(ledger: Path) -> No
     assert "batch_scopes" not in paired[1]
 
 
-def test_a_few_hundred_paired_units_check_quickly() -> None:
-    # Unit indicators are absorbed by differencing within units, so the rank
-    # work grows with the cells, not with units squared.
+def test_a_thousand_paired_units_check_within_a_second() -> None:
+    # One sparse exact elimination per design, units absorbed by differencing.
     import random
     import time
 
-    rng = random.Random(1)
-    rows = [{"donor": f"d{i}", "g": "WK"[i % 2], "visit": v, "run": f"r{rng.randrange(12)}",
-             "date": f"x{rng.randrange(10)}"} for i in range(300) for v in ("v0", "v1", "v2")]
-    check = {"unit": "donor", "within": "visit", "group": "g", "batch": ["run", "date"]}
+    rng = random.Random(42)
+    rows = [{"donor": f"d{i:04d}", "g": "AB"[i % 2], "visit": f"v{v}",
+             "run": f"r{rng.randrange(120):03d}", "date": f"x{rng.randrange(10)}"}
+            for i in range(1000) for v in range(3)]
+    check = {"unit": "donor", "within": "visit", "group": "g", "batch": ["run", "date"],
+             "max_share": 0.5}
     start = time.perf_counter()
     assert dcc.check_paired_batch(check, [], rows) == []
-    assert time.perf_counter() - start < 5
+    assert time.perf_counter() - start < 1
 
 
 def test_pairs_mostly_split_in_step_warn(tmp_path: Path) -> None:
@@ -676,3 +677,64 @@ def test_batch_scope_parents_are_spelling_checked(tmp_path: Path, kind: str) -> 
     _, alerts = dcc.run_contract({"schema": dcc.SCHEMA, "table": str(table), "checks": [check]},
                                  str(tmp_path))
     assert any("'site'" in a["message"] and "whitespace" in a["message"] for a in alerts)
+
+
+
+def _blocks(check: dict, rows: list[dict]) -> bool:
+    return any(a["blocking"] for a in dcc.check_paired_batch(check, [], rows))
+
+
+def test_blank_group_labels_cannot_hide_an_alias(tmp_path: Path) -> None:
+    # Baselines carry no cohort; the cohort is filled from the donor, so
+    # every base-in-r1, week-4-in-r2 pair stays in the design.
+    design = []
+    for d, cohort in (("d1", "A"), ("d2", "A"), ("d3", "B"), ("d4", "B")):
+        design += [(d, "", "base", "r1"), (d, cohort, "wk4", "r2")]
+    summaries, _ = _paired(tmp_path, design, within="visit")
+    assert _paired_status(summaries) == ["block"]
+
+
+def test_a_group_that_varies_within_the_unit_keeps_its_main_effect() -> None:
+    # Each donor has a control and a knockout line: control base r1, wk4 r2;
+    # knockout both visits in r2. r2 = knockout + control week 4.
+    rows = [{"donor": d, "genotype": g, "visit": v, "run": r} for d in ("d1", "d2")
+            for g, v, r in (("C", "base", "r1"), ("C", "wk4", "r2"),
+                            ("K", "base", "r2"), ("K", "wk4", "r2"))]
+    assert _blocks({"unit": "donor", "within": "visit", "group": "genotype",
+                    "batch": ["run"]}, rows)
+
+
+def test_a_scoped_batch_never_rewrites_the_within_factor() -> None:
+    # `visit` is the within factor and, scoped by site, the batch: each site
+    # runs a visit in one batch, so visit is batch.
+    rows = [{"site": s, "donor": f"{s}-{c}", "cohort": c, "visit": v}
+            for s in ("s1", "s2") for c in ("A", "B") for v in ("base", "wk4")]
+    assert _blocks({"unit": "donor", "within": "visit", "group": "cohort", "batch": ["visit"],
+                    "batch_scopes": {"visit": ["site"]}, "levels": ["base", "wk4"]}, rows)
+
+
+def test_an_undeclared_visit_still_identifies_batch() -> None:
+    # base all r1, wk4 all r2, but wk8 splits r1/r2 within each cohort, so
+    # the run effect, and with it wk4 - base, is estimable.
+    rows = []
+    for d, c, r8 in (("d1", "A", "r1"), ("d2", "A", "r2"), ("d3", "B", "r1"), ("d4", "B", "r2")):
+        rows += [{"donor": d, "cohort": c, "visit": v, "run": r}
+                 for v, r in (("base", "r1"), ("wk4", "r2"), ("wk8", r8))]
+    check = {"unit": "donor", "within": "visit", "group": "cohort", "batch": ["run"],
+             "levels": ["base", "wk4"]}
+    assert not _blocks(check, rows)
+    without = [r for r in rows if r["visit"] != "wk8"]
+    assert _blocks(check, without)  # the analysis that drops wk8 is confounded
+
+
+def test_an_unused_batch_scope_is_not_spelling_checked(tmp_path: Path) -> None:
+    table = tmp_path / "t.tsv"
+    table.write_text("condition\trun\tplate\tsite\n" + "".join(
+        f"{c}\t{r}\t{p}\t{s}\n" for c, r, p, s in (
+            ("A", "r1", "p1", "North"), ("B", "r1", "p1", "North "),
+            ("A", "r2", "p2", "North"), ("B", "r2", "p2", "North "))))
+    contract = {"schema": dcc.SCHEMA, "table": str(table), "checks": [
+        {"kind": "batch_estimability", "batch": ["run", "plate"], "contrast": "condition",
+         "batch_scopes": {"local_run": ["site"]}}]}
+    summaries, alerts = dcc.run_contract(contract, str(tmp_path))
+    assert summaries[0]["status"] == "pass", alerts

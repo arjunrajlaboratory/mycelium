@@ -134,39 +134,54 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   parent columns that qualify its local labels. Those parent columns, like
   `unit_scope` and `batch_scope`, are part of the identity, so a value
   spelled two ways (`site1` and `site1 `) blocks.
-- `paired_batch`: for a paired design, whether the contrast between the
-  `within` levels inside each `unit` survives the `batch` columns (one or
-  more, adjusted for together). The model is unit + batch + within, so batch
-  matters only inside units. It blocks when a within contrast that the pairs
-  do estimate becomes inestimable once batch is added: the pairs are split
-  across batches in step with the within factor. Donor 1 with treated in run
-  1 and control in run 2, and donor 2 with treated in run 2 and control in
-  run 3, blocks, although `batch_confounding` only warns (run 2 holds both
-  levels). Swapping the runs for donor 2, or running each pair in one run,
-  passes. With `group` (a between-unit factor other than `within`, such as
-  genotype with visit within donors), the within contrast is checked in each
-  group, so a genotype-by-visit interaction confounded with batch blocks even
-  when the visit effect alone is estimable from the other genotype. A
-  contrast no unit observes on both sides is left to `pairing`, and a within
-  level with no row carrying every batch column blocks, since it cannot be
-  checked. It also blocks when missing batch values erase every complete
-  pair: each donor lacks the run for one visit, so both visits keep rows
-  with a run but no donor keeps both, and a batch-adjusted model has no pair
-  to estimate from (`pairing`, counting all rows, passes). With `levels`, only
-  those `within` levels are compared; ledger contracts pass the pairing's
-  declared levels, so an optional extra visit in its own run does not block. It takes `unit_scope` and `batch_scopes` for local labels. When
-  `group` is a between-unit factor, a batch that coincides with it is
-  `batch_confounding`'s block (the unit absorbs the group, so this check
-  does not see it); when the group is the `within` factor, both checks
-  block. Blocking is exact; with `max_share` (above 0, at most 1) it also
-  warns when, for a contrast it can still estimate, more than that share of
-  the units with both sides are split across batches in step with it. Splits
-  that balance across the batches are counterbalanced and do not count: a
-  unit split the other way, or equal numbers split r1 to r2, r2 to r3 and r3
-  to r1, since each batch is then as often on one side as on the other. Eight donors with
-  base in run 1 and week 4 in run 2, plus two with both visits in run 3,
-  warn: the visit effect rests on two donors. Ledger contracts set
-  `"max_share": 0.5`.
+- `paired_batch`: for a paired design, whether the contrasts between the
+  `within` levels inside each `unit` survive the `batch` columns (one or
+  more, adjusted for together). It builds one design and tests it exactly
+  (sparse rational elimination, so no rounding):
+  - rows with a known unit and `within` value;
+  - a parameter for every observed (`group`, `within`) cell, which carries the
+    group main effect and the group-by-within interaction, so a group that
+    varies inside a unit (a donor's control and knockout lines) is modelled;
+  - the unit absorbed by differencing each unit's rows against its first;
+  - one indicator per batch level, scoped by `batch_scopes` apart from the
+    raw `within` value, so a column that is both keeps its levels.
+
+  Every observed `within` level is in the design. `levels` only chooses
+  which contrasts are tested (each against the first listed level observed,
+  within each group), since a visit outside the contrast can still identify
+  a batch. To model without a visit, filter it out. A missing `group` is
+  filled from the unit when the unit has one group. Otherwise the row keeps
+  cells of its own, with a warning.
+
+  A contrast blocks in two cases:
+  - it is estimable from the pairs but not once rows missing a batch are
+    dropped (each donor lacks the run for one visit, so no donor keeps both
+    sides; `pairing`, counting all rows, passes);
+  - it is estimable after the drop but not once batch is added: the pairs are
+    split across batches in step with the within factor.
+
+  Donor 1 with treated in run 1 and control in run 2, and donor 2 with
+  treated in run 2 and control in run 3, blocks, although
+  `batch_confounding` only warns (run 2 holds both levels). Swapping the runs
+  for donor 2, or running each pair in one run, passes. With `group`, a
+  genotype-by-visit interaction confounded with batch blocks even when the
+  visit effect alone is estimable from the other genotype. A contrast no
+  unit observes on both sides is left to `pairing`. When `group` is constant
+  within units, a batch that coincides with it is `batch_confounding`'s block
+  (the unit absorbs the group, so this check does not see it); when the
+  group is the `within` factor, both checks block.
+
+  Blocking is exact. With `max_share` (above 0, at most 1) it also warns
+  when, for a contrast it can still estimate, one batch holds one side of
+  the pairs split across batches for more than that share of the paired
+  units. Eight donors with base in run 1 and week 4 in run 2, plus two with
+  both visits in run 3, warn: the visit effect rests on two donors.
+  Counterbalanced splits (half each way, a rotation through three runs) and
+  randomized runs spread both sides out and pass. Ledger contracts set
+  `"max_share": 0.5`. It takes `unit_scope` and `batch_scopes` for local
+  labels, and checks 1000 units with three visits and two batch columns in
+  well under a second. Time grows with the number of batch levels: a design
+  with hundreds of runs and hundreds of dates takes seconds.
 - For a crossover, make the group the treatment, not the sequence. With
   `group` set to the sequence (AB, BA), each sequence's treatment effect is
   aliased with period by design, so a period batch blocks; with the

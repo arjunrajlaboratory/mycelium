@@ -570,19 +570,86 @@ def check_estimability(check, columns, rows):
     return alerts
 
 
-def check_paired_batch(check, columns, rows):
-    """Whether the within-unit contrast of a paired design survives batch.
+class _Echelon:
+    """An exact row echelon form over the rationals, sparse and fraction-free.
 
-    A paired analysis compares the `within` levels inside each `unit` (a
-    donor's treated and control samples), so the unit absorbs everything
-    between units and batch matters only inside them. The model is unit +
-    batch + within, with the within effect per `group` level when the group
-    is a separate between-unit factor (genotype, with visit within donors):
-    the group-by-within interaction is then checked too. A within effect is
-    lost when its indicator adds no rank beyond the unit and batch
-    indicators, as when every pair is split across batches in step with the
-    within factor. A contrast already lost without batch (no unit holds
-    both sides) is left to the pairing check.
+    Rows are {column: integer}. Each added row is reduced against the pivots
+    in the order they were made, so membership of a vector in the row space
+    is one reduction: it is in the row space when nothing is left.
+    """
+
+    def __init__(self, prefer=None):
+        self.prefer = prefer or (lambda column: 0)
+        self.pivots, self.order = {}, {}
+
+    def reduce(self, row):
+        import heapq
+        from math import gcd
+
+        row = {k: v for k, v in row.items() if v}
+        heap = [(self.order[k], k) for k in row if k in self.pivots]
+        heapq.heapify(heap)
+        while heap:
+            _, column = heapq.heappop(heap)
+            a = row.get(column)
+            if not a:
+                continue
+            pivot = self.pivots[column]
+            b = pivot[column]
+            out = {k: v * b for k, v in row.items()}
+            for k, v in pivot.items():
+                value = out.get(k, 0) - a * v
+                if value:
+                    if k not in out and k in self.pivots:
+                        heapq.heappush(heap, (self.order[k], k))
+                    out[k] = value
+                else:
+                    out.pop(k, None)
+            common = 0
+            for v in out.values():
+                common = gcd(common, v)
+                if common == 1:
+                    break
+            row = {k: v // common for k, v in out.items()} if common > 1 else out
+        return row
+
+    def add(self, row):
+        row = self.reduce(row)
+        if row:
+            column = min(row, key=self.prefer)
+            if row[column] < 0:
+                row = {k: -v for k, v in row.items()}
+            self.order[column] = len(self.order)
+            self.pivots[column] = row
+
+    def spans(self, row):
+        return not self.reduce(row)
+
+
+UNKNOWN_GROUP = object()  # a row whose group is unknown: its own nuisance cells
+
+
+def check_paired_batch(check, columns, rows):
+    """Whether the within-unit contrasts of a paired design survive batch.
+
+    One design for the whole check: rows with a known unit and `within`
+    value; a cell parameter for every observed (group, within) pair, every
+    within level included whether `levels` declares it or not (a level
+    outside the contrast can still identify a batch); the unit absorbed by
+    differencing each unit's cells against its first; and one indicator per
+    batch level. Cell parameters carry the group main effect and the
+    group-by-within interaction, so a group that varies inside a unit (a
+    donor's control and knockout lines) is modelled. A missing group is
+    filled from the unit when the unit has one group, else the row keeps
+    its own nuisance cells. Batch identities are scoped apart from the raw
+    within value, so a column that is both keeps its levels.
+
+    Contrasts: each `levels` level (default: every level) against the first
+    one observed, within each group. A contrast blocks when it is estimable
+    from the pairs before rows missing a batch are dropped but not after
+    (missing values erased it), or estimable after the drop without batch
+    but not with it (confounded). A contrast the pairs never estimate is
+    left to the pairing check.
     """
     unit = need(check, "unit")
     within = need(check, "within")
@@ -590,132 +657,149 @@ def check_paired_batch(check, columns, rows):
     group = check.get("group")
     if group == within:
         group = None
-    rows = scoped(rows, unit, as_list(check.get("unit_scope")))
     scopes = check.get("batch_scopes") or {}
-    for column in batches:
-        rows = scoped(rows, column, as_list(scopes.get(column)))
-    listed = distinct_levels(check.get("levels"))
-    if listed:
-        # Only the declared contrast: an optional extra visit in its own run
-        # says nothing about the levels the pairing compares.
-        rows = [r for r in rows if is_missing(r[within]) or r[within] in listed]
-    keys = [unit, within] + ([group] if group else [])
-    kept, alerts = drop_missing(rows, keys + batches, "paired_batch")
-
-    def side(r):
-        return (r[group] if group else None, r[within])
-
-    present = sorted({side(r) for r in having(rows, *keys)})
-    complete = {side(r) for r in kept}
-    lost = [s for s in present if s not in complete]
-    if lost:
+    unit_ids = [r[unit] for r in scoped(rows, unit, as_list(check.get("unit_scope")))]
+    batch_ids = [[r[b] for r in scoped(rows, b, as_list(scopes.get(b)))] for b in batches]
+    # One record per row: (unit, group, within, batch identities), with the
+    # raw within value whatever the batch scoping did to its column.
+    records = [(unit_ids[i], r[group] if group else None, r[within],
+                tuple(ids[i] for ids in batch_ids)) for i, r in enumerate(rows)]
+    alerts = []
+    if group:
+        known = defaultdict(set)
+        for u, g, _, _ in records:
+            if not is_missing(u) and not is_missing(g):
+                known[u].add(g)
+        filled = []
+        for u, g, w, b in records:
+            if is_missing(g):
+                g = next(iter(known[u])) if len(known.get(u, ())) == 1 else UNKNOWN_GROUP
+            filled.append((u, g, w, b))
+        unknown = sum(1 for u, g, w, _ in filled if g is UNKNOWN_GROUP and
+                      not is_missing(u) and not is_missing(w))
+        if unknown:
+            alerts.append(alert(
+                "paired_batch", "{} rows have no '{}' and their {} has no single one to fill it "
+                "from; they are modelled as an unknown group".format(unknown, group, unit), False,
+                observed="{} of {} rows".format(unknown, len(rows))))
+        records = filled
+    paired_rows = [r for r in records if not is_missing(r[0]) and not is_missing(r[2])]
+    batched = [r for r in paired_rows if not any(is_missing(b) for b in r[3])]
+    if len(batched) < len(paired_rows):
         alerts.append(alert(
-            "paired_batch",
-            "within levels with no row carrying every batch column ({}); their batch "
-            "confounding cannot be checked".format(", ".join(batches)), True,
-            expected="each level of {} with complete batch values".format(within),
-            observed=", ".join(_side_label(group, s) for s in lost)))
-        return alerts
-    cells = sorted({(r[unit],) + side(r) + tuple(r[b] for b in batches) for r in kept})
-    # Every row with its unit and level, batch or not: what the pairs
-    # estimate before rows missing a batch are dropped.
-    whole = sorted({(r[unit],) + side(r) for r in having(rows, *keys)})
-    batch_levels = [sorted({c[3 + i] for c in cells}) for i in range(len(batches))]
-    # Per group level, every within level but the first is one tested effect.
-    effects = []
-    for g in sorted({c[1] for c in whole}, key=str):
-        levels = sorted({c[2] for c in whole if c[1] == g})
-        effects += [(g, lvl, levels[0]) for lvl in levels[1:]]
-    if not effects:
+            "paired_batch", "{} rows have a missing value in {}; a model adjusting for batch "
+            "drops them (checked below for lost pairs)".format(len(paired_rows) - len(batched),
+                                                    ", ".join(batches)), False,
+            observed="{} of {} rows".format(len(paired_rows) - len(batched), len(paired_rows))))
+    contrasts = []
+    listed = distinct_levels(check.get("levels"))
+    observed = defaultdict(set)
+    for _, g, w, _ in paired_rows:
+        observed[g].add(w)
+    for g in sorted((g for g in observed if g is not UNKNOWN_GROUP), key=str):
+        levels = [lvl for lvl in (listed or sorted(observed[g])) if lvl in observed[g]]
+        contrasts += [(g, lvl, levels[0]) for lvl in levels[1:]]
+    if not contrasts:
         return alerts
 
-    def design(with_batch, drop=None, cells=cells):
-        # The intercept and unit indicators are absorbed: each unit's first
-        # cell is subtracted from its other cells, since rank([1, U, X]) is
-        # the number of units plus the rank of those within-unit differences.
-        # The elimination then grows with the cells, not with units squared.
-        reference, matrix = {}, []
-        for cell in cells:
-            row = [1 if (cell[1], cell[2]) == (g, lvl) else 0
-                   for g, lvl, _ in effects if (g, lvl) != drop]
+    def key(g):
+        return "?" if g is UNKNOWN_GROUP else g
+
+    def echelon(records, with_batch):
+        ech = _Echelon(prefer=lambda column: (0 if column[0] == "b" else 1, column))
+        first = {}
+        for u, g, w, b in records:
+            vector = {("c", key(g), w): 1}
             if with_batch:
-                for i, values in enumerate(batch_levels):
-                    row += [1 if cell[3 + i] == v else 0 for v in values[1:]]
-            if cell[0] not in reference:
-                reference[cell[0]] = row
-            else:
-                matrix.append([a - b for a, b in zip(row, reference[cell[0]])])
-        return matrix or [[0]]
+                vector.update((("b", i, v), 1) for i, v in enumerate(b))
+            if u not in first:
+                first[u] = vector
+                continue
+            difference = dict(vector)
+            for k, v in first[u].items():
+                difference[k] = difference.get(k, 0) - v
+            ech.add(difference)
+        return ech
 
-    def estimable(with_batch, cells=cells):
-        full = _rank(design(with_batch, cells=cells))
-        return {e for e in effects if _rank(design(with_batch, e[:2], cells)) < full}
+    def vector(contrast):
+        g, lvl, ref = contrast
+        return {("c", g, lvl): 1, ("c", g, ref): -1}
 
-    from_pairs, kept_pairs, adjusted = estimable(False, whole), estimable(False), estimable(True)
-    erased = [e for e in effects if e in from_pairs and e not in kept_pairs]
+    before, after = echelon(paired_rows, False), echelon(batched, False)
+    adjusted = echelon(batched, True)
+    erased, confounded = [], []
+    for contrast in contrasts:
+        if not before.spans(vector(contrast)):
+            continue  # no pair estimates it: the pairing check's to report
+        if not after.spans(vector(contrast)):
+            erased.append(contrast)
+        elif not adjusted.spans(vector(contrast)):
+            confounded.append(contrast)
+
+    def label(contrasts):
+        return "; ".join("{} vs {}".format(_side_label(group, (g, lvl)), ref)
+                         for g, lvl, ref in contrasts)
+
     if erased:
-        # Each side has rows with a batch, but no unit keeps both: a
-        # batch-adjusted model drops the rows missing a batch, and with them
-        # every pair the pairing check counted.
         alerts.append(alert(
             "paired_batch",
             "missing {} values leave no {} with both sides of the {} contrast, so a model "
             "adjusting for batch has no pair to estimate it from".format(
                 ", ".join(batches), unit, within), True,
             expected="pairs with batch values on both sides",
-            observed="no complete pair: " + "; ".join(
-                "{} vs {}".format(_side_label(group, (g, lvl)), ref) for g, lvl, ref in erased)))
-    confounded = [e for e in effects if e in kept_pairs and e not in adjusted]
+            observed="no complete pair: " + label(erased)))
     if confounded:
         involved = {(g, lvl) for g, lvl, _ in confounded} | {(g, ref) for g, _, ref in confounded}
-        by_unit = defaultdict(list)
-        for cell in cells:
-            if cell[1:3] in involved:
-                by_unit[cell[0]].append("{}@{}".format(cell[2], "/".join(cell[3:])))
+        by_unit = defaultdict(set)
+        for u, g, w, b in batched:
+            if (g, w) in involved:
+                by_unit[u].add("{}@{}".format(w, "/".join(b)))
         alerts.append(alert(
             "paired_batch",
             "within {}, the {} contrast cannot be separated from {}: the pairs are split "
             "across batches in step with it".format(unit, within, ", ".join(batches)), True,
             expected="each {} contrast estimable within {} after adjusting for {}".format(
                 within, unit, ", ".join(batches)),
-            observed="not estimable: " + "; ".join(
-                "{} vs {}".format(_side_label(group, (g, lvl)), ref) for g, lvl, ref in confounded),
+            observed="not estimable: " + label(confounded),
             evidence=["{}={}: {}".format(unit, u, ", ".join(sorted(v)))
                       for u, v in sorted(by_unit.items())][:5]))
     share = check.get("max_share")
     if share is None:
         return alerts
-    # Estimable is not the same as well supported: eight donors split in step
-    # (base in run 1, week 4 in run 2) and two unsplit leave the effect
-    # resting on two donors. Each split unit moves one unit of weight from
-    # its reference-side batch to its other-side batch; splits balance when
-    # every batch gains as much as it loses (a reverse split, or a rotation
-    # r1->r2, r2->r3, r3->r1). The weight left unbalanced is in step.
-    for g, lvl, ref in effects:
-        if (g, lvl, ref) in confounded or (g, lvl, ref) in erased:
+    # Estimable is not the same as well supported: eight donors with base in
+    # run 1 and week 4 in run 2, and two with both visits in run 3, leave the
+    # visit effect resting on two donors. Among the units split across
+    # batches, the most common batch on one side is the step; it warns when
+    # that one batch carries one side for more than `max_share` of the
+    # paired units. Counterbalanced splits (half each way, or a rotation
+    # through three runs) and randomized runs spread both sides out.
+    for contrast in contrasts:
+        g, lvl, ref = contrast
+        if contrast in confounded or contrast in erased:
             continue
         sides = defaultdict(lambda: (set(), set()))
-        for cell in cells:
-            if cell[1] == g and cell[2] in (ref, lvl):
-                sides[cell[0]][cell[2] == lvl].add(cell[3:])
-        paired = {u: (a, b) for u, (a, b) in sides.items() if a and b}
-        net = defaultdict(float)
-        for a, b in paired.values():
+        for u, cg, w, b in batched:
+            if cg == g and w in (ref, lvl):
+                sides[u][w == lvl].add(b)
+        pairs = [(a, b) for a, b in sides.values() if a and b]
+        steps = Counter()
+        for a, b in pairs:
             if not a & b:
-                for t in a:
-                    net[t] -= 1.0 / len(a)
-                for t in b:
-                    net[t] += 1.0 / len(b)
-        in_step = round(sum(abs(v) for v in net.values()) / 2, 6)
-        if paired and in_step / len(paired) > share:
+                steps.update((ref, t) for t in a)
+                steps.update((lvl, t) for t in b)
+        if not steps:
+            continue
+        (level, batch), count = max(sorted(steps.items(), key=str), key=lambda item: item[1])
+        if count / len(pairs) > share:
             alerts.append(alert(
                 "paired_batch",
                 "within {}, the {} contrast {} vs {} rests mostly on pairs split across {} in "
                 "step with it".format(unit, within, _side_label(group, (g, lvl)), ref,
                                       ", ".join(batches)), False,
-                expected="at most {} of {} split in step".format(percent(share), unit),
-                observed="{:g} of {} units split in step, not offset by splits the other "
-                         "way".format(in_step, len(paired))))
+                expected="at most {} of {} with one side in the same batch and the other "
+                         "elsewhere".format(percent(share), unit),
+                observed="{} of {} units have {} in {} and the other side in another "
+                         "batch".format(count, len(pairs), level, "/".join(batch))))
     return alerts
 
 
@@ -1208,10 +1292,12 @@ def run_contract(contract, base_dir):
             if kind in ("batch_estimability", "paired_batch"):
                 identity += as_list(check.get("batch"))
             identity += as_list(check.get("within")) + as_list(check.get("unit_scope"))
-            # Parents that qualify a local batch label are part of its identity.
+            # Parents that qualify a local batch label are part of its
+            # identity: those of the batch columns this check uses.
             identity += as_list(check.get("batch_scope"))
-            for scope in (check.get("batch_scopes") or {}).values():
-                identity += as_list(scope)
+            scopes = check.get("batch_scopes") or {}
+            for column in as_list(check.get("batch")):
+                identity += as_list(scopes.get(column))
             if kind in ("unique", "nesting"):
                 identity += as_list(check.get("columns")) + as_list(check.get("levels"))
             found.extend(spelling_variants(rows, sorted(set(identity)), kind))

@@ -637,9 +637,9 @@ ledger table, and runs:
   is the existing check, now reachable from ingest.
 - `pairing`, when declared.
 - `paired_batch` (added after #154), when a pairing and batch columns are
-  declared: one per batch column and one joint. It blocks when the
-  within-unit contrast cannot be separated from batch with the unit in the
-  model (unit + batch + within, per group when `within` is not the group).
+  declared: one per batch column and one joint. It blocks when a
+  within-unit contrast the pairs estimate is lost to batch, in one exact
+  design: unit (absorbed) + every observed group-by-within cell + batch.
   Blocking, like `batch_estimability`, because an inestimable contrast is a
   design fact no analysis choice recovers.
 

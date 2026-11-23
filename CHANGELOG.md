@@ -77,23 +77,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A ledger pairing may declare its expected levels. When the pairing
     licenses units across groups, it must cover every group present.
   - New check kind `paired_batch`. A ledger with a pairing and batch columns
-    gets one per batch column, plus one for all of them together. It blocks
-    when the within-unit contrast (treated against control in each donor, or
-    visit within donor) cannot be separated from batch once the unit is in
-    the model: the pairs are split across batches in step with the within
-    factor, as when donor 1 runs treated in run 1 and control in run 2 and
-    donor 2 runs treated in run 2 and control in run 3. `batch_confounding`
-    only warns there, since run 2 holds both levels. When the within factor
-    is not the group, the within effect is checked in each group, so a
-    genotype-by-visit interaction confounded with batch also blocks. With
-    `max_share` (ledger contracts set 0.5) it warns when a contrast it can
-    still estimate rests mostly on pairs split in step with batch (splits
-    that balance across batches, including rotations, do not count). It also
-    blocks when missing batch values leave no complete pair, and it compares
-    only the pairing's declared levels when the ledger lists them. For a
-    crossover, the group should be the treatment, not the sequence.
-  - The parent columns in `batch_scope` and `batch_scopes` are spelling-checked
-    like `unit_scope`, so `site1` and `site1 ` no longer split a batch silently.
+    gets one per batch column, plus one for all of them together. It tests,
+    exactly, one design: unit (absorbed) + every observed group-by-within
+    cell + batch. It blocks when a within-unit contrast the pairs estimate
+    is lost to batch: the pairs are split across batches in step with the
+    within factor (donor 1 treated in run 1 and control in run 2, donor 2
+    treated in run 2 and control in run 3, where `batch_confounding` only
+    warns), or missing batch values erase every complete pair. Per-group
+    contrasts catch a genotype-by-visit interaction confounded with batch,
+    and a group varying inside a unit keeps its main effect. The pairing's
+    declared levels choose the tested contrasts; undeclared visits stay in
+    the design, since they can identify a batch. With `max_share` (ledger
+    contracts set 0.5) it warns when one batch holds one side of the split
+    pairs for most units. For a crossover, the group should be the treatment,
+    not the sequence.
+  - The parent columns in `batch_scope`, and the `batch_scopes` entries of the
+    batch columns a check uses, are spelling-checked like `unit_scope`, so
+    `site1` and `site1 ` no longer split a batch silently.
 - **`skills/core/references/provenance-schema.json`**, one JSON Schema file
   for manifests (v1 and v2), events, data commands, skips, observations, index
   results, report fragments, numbers, findings and the ledger. Tests validate
