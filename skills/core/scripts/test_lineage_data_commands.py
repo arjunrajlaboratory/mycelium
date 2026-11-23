@@ -137,7 +137,17 @@ def test_a_command_naming_no_data_leaves_nothing(project, command):
 # as `analysis/<name>/output/` (that project's convention) or relatively, from
 # a working directory inside `analysis/`, so the word itself never showed
 # `analysis/`. Mentions are judged as written and, for a relative word, as
-# resolved against the call's directory and any literal `cd` before it.
+# resolved against the call's directory and each `cd` in command position
+# before it, when the resolved path exists at hook time.
+
+
+def _output_tree(project: Path) -> None:
+    (project / ".git").mkdir()
+    for path in ("analysis/x/output/run1/log", "analysis/x/outputs/run1/log",
+                 "analysis/x/outputs/log", "analysis/x/outputs/a.log",
+                 "analysis/x/outputs/b.log"):
+        (project / path).parent.mkdir(parents=True, exist_ok=True)
+        (project / path).write_text("1\n")
 
 
 @pytest.mark.parametrize(
@@ -151,10 +161,18 @@ def test_a_command_naming_no_data_leaves_nothing(project, command):
         ("cd analysis && ls x/output/run1", "", ["x/output/run1"]),
         ("cd analysis; cd x; head outputs/log", "", ["outputs/log"]),
         ("cd {root}/analysis/x; head outputs/log", "", ["outputs/log"]),
+        # `cd` as an argument moves nothing.
+        ("echo cd /elsewhere; head outputs/log", "analysis/x", ["outputs/log"]),
+        ("git log --format='cd /elsewhere' && head outputs/log", "analysis/x", ["outputs/log"]),
+        # A glob is judged by the directory it expands in, which exists.
+        ("for d in outputs/run*; do ls $d; done", "analysis/x", ["outputs/run*"]),
+        ("ls x/output/*/log", "analysis", ["x/output/*/log"]),
+        # A brace word is read from the directory in effect where it sits.
+        ("cd analysis/x && wc -l outputs/{a,b}.log", "", ["outputs/{a,b}.log"]),
     ],
 )
 def test_analysis_output_is_judged_from_where_the_call_runs(project, command, subdir, named):
-    (project / ".git").mkdir()
+    _output_tree(project)
     event = _event(command.replace("{root}", str(project)), project / subdir if subdir else project)
     assert event is not None
     assert event["named_paths"] == named
@@ -172,18 +190,28 @@ def test_analysis_output_is_judged_from_where_the_call_runs(project, command, su
         ("cd $D; ls outputs/", "analysis"),
         ("ls analysis/x/outputs_backup.md", ""),
         ("head notes", "data"),  # a bare word is not a path
+        # Text that is not a file where the call runs: a program, a pathspec.
+        ("perl -pe 's/foo/bar/g' log", "analysis/x/outputs"),
+        ("git log -- src/main.py", "analysis/x/outputs"),
+        ("head outputs/missing.log", "analysis/x"),
+        ("ls outputs/nowhere/*.log", "analysis/x"),
+        # A bare `cd` goes home: later relative words are not read from here.
+        ("cd && head outputs/log", "analysis/x"),
+        ("cd\nhead outputs/log", "analysis/x"),
+        # A brace word after a `cd` elsewhere is not read from the call's cwd.
+        ("cd /elsewhere && wc -l outputs/{a,b}.log", "analysis/x"),
     ],
 )
 def test_relative_words_outside_analysis_output_stay_unnamed(project, command, subdir):
-    (project / ".git").mkdir()
+    _output_tree(project)
     assert _event(command, project / subdir if subdir else project) is None
 
 
 @pytest.mark.parametrize(
     ("command", "named"),
     [
-        ("wc -l analysis/x/registry/{samples,studies}.tsv",
-         ["analysis/x/registry/{samples,studies}.tsv"]),
+        ("wc -l analysis/x/tables/{first,second}.tsv",
+         ["analysis/x/tables/{first,second}.tsv"]),
         ("ls -lh 'tables/{a,b}_summary.csv'", ["tables/{a,b}_summary.csv"]),
         ("cat {x,y}.vcf.gz", ["{x,y}.vcf.gz"]),
         # A parameter expansion's brace is not a brace group.
@@ -205,9 +233,25 @@ def test_a_brace_word_naming_no_data_stays_unnamed(project, command):
     assert _event(command, project) is None
 
 
-def test_brace_words_scan_linearly(project):
-    command = "ls " + "{a," * 20000 + "b}" * 3 + " " + "x{" * 20000
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls " + "{a," * 20000 + "b}" * 3 + " " + "x{" * 20000,
+        # An unclosed `{` before a long comma run (minified JSON in an echo)
+        # once retried the group at every comma: 8 s on 85 KB.
+        "echo '{" + "1," * 40000 + "' > data/x.csv",
+        "echo '" + "{\"k\":[" + "1," * 40000 + "]}' | head",
+    ],
+)
+def test_brace_words_scan_linearly(project, command):
     event, seconds = _timed_event(command, project)
+    assert seconds < SCAN_CPU_LIMIT_SECONDS
+
+
+def test_relative_resolution_stats_a_bounded_number_of_words(project):
+    _output_tree(project)
+    command = "ls " + " ".join(f"outputs/f{i}.log" for i in range(20000))
+    event, seconds = _timed_event(command, project / "analysis" / "x")
     assert seconds < SCAN_CPU_LIMIT_SECONDS
 
 

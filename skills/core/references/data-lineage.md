@@ -174,9 +174,12 @@ how many times the data was looked at:
   extension (the scan list plus compressed and common genomics, tree, and
   image formats), a path under `data/`, or a path under `analysis/**/outputs`
   (or `analysis/**/output`, which older projects use). A relative word is
-  also judged as resolved against the call's directory and any literal
-  `cd` before it in the text (`ls outputs/` run in `analysis/x`); a word
-  with no `/` is never resolved, since in `data/` a bare `ls` is a command.
+  also judged as resolved against the call's directory and each `cd` in
+  command position before it whose operand is a literal path
+  (`ls outputs/` run in `analysis/x`), but only when the resolved path (for
+  a glob, its directory) exists at hook time, and for at most 256 words a
+  call. A word with no `/` is never resolved, since in `data/` a bare `ls`
+  is a command.
   A brace word (`registry/{samples,studies}.tsv`) is judged by its
   alternatives.
   Tooling and Mycelium state (`.living/`, `.mycelium/`, `.git/`, `.claude/`,

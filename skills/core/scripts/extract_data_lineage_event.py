@@ -5573,16 +5573,59 @@ def _is_data_like_path(word: str, root: str | None = None) -> bool:
     return False
 
 
-def _mentioned_from(word: str, base: str | None, root: str | None) -> bool:
-    """Whether a relative word names data once read from ``base``, a
-    directory inside the project (`ls outputs/` run in `analysis/x`). Only
-    a word written as a path counts: in `data/`, `ls` is a command, not
-    `data/ls`."""
-    if (not base or not root or "/" not in word
-            or word.startswith(("/", "~", "$", "-"))):
-        return False
-    joined = os.path.normpath(os.path.join(base, word))
-    return joined.startswith(root + "/") and _is_data_like_path(joined, root)
+# How many relative words one call may resolve against the filesystem: a
+# mention is a hint, and the hook must stay cheap on long commands.
+_MENTION_STAT_BUDGET = 256
+
+
+class _MentionBase:
+    """Where a relative word is read from, with a bounded stat budget."""
+
+    __slots__ = ("root", "stats")
+
+    def __init__(self, root: str | None) -> None:
+        self.root = root
+        self.stats = _MENTION_STAT_BUDGET
+
+    def names_data(self, word: str, base: str | None) -> bool:
+        """Whether a relative word names data once read from ``base``, a
+        directory inside the project (`ls outputs/` run in `analysis/x`).
+
+        Only a word written as a path counts (in `data/`, `ls` is a
+        command, not `data/ls`), and only when the resolved path exists:
+        from inside an output directory, a `perl -pe 's/a/b/g'` program or a
+        `git log -- src/main.py` pathspec is text, not a file there."""
+        root = self.root
+        if (not base or not root or "/" not in word
+                or word.startswith(("/", "~", "$", "-"))):
+            return False
+        joined = os.path.normpath(os.path.join(base, word))
+        if not joined.startswith(root + "/") or not _is_data_like_path(joined, root):
+            return False
+        if self.stats <= 0:
+            return False
+        self.stats -= 1
+        # A glob (`outputs/run*`) exists as the directory it expands in:
+        # the longest prefix without a pattern character.
+        if any(ch in word for ch in "*?["):
+            literal = re.split(r"[*?\[]", joined, maxsplit=1)[0]
+            joined = literal.rsplit("/", 1)[0] if not literal.endswith("/") else literal
+        return os.path.lexists(joined)
+
+
+# Text between two words that puts the second in command position.
+_COMMAND_BREAK = frozenset(";|&\n(`{")
+_COMMAND_KEYWORDS = frozenset({"then", "do", "else", "!", "time"})
+
+
+def _cd_target_base(target: str | None, base: str | None) -> str | None:
+    """The directory a literal `cd TARGET` moves to, or None when unknown
+    (no operand: home; an option, `-`, `~`, or an expansion)."""
+    if target is None or target.startswith(("~", "$", "-", "`")):
+        return None
+    if target.startswith("/"):
+        return os.path.normpath(target)
+    return os.path.normpath(os.path.join(base, target)) if base else None
 
 
 def _data_path_mentions(
@@ -5594,45 +5637,64 @@ def _data_path_mentions(
     comment, an `echo`, or an unexecuted branch. Returns (words, truncated).
 
     A relative word is also judged from where it was likely read: the
-    call's directory, moved by each literal `cd` before it in the text. That
-    is a lexical reading, not a model of the shell (a `cd` may fail or sit in
-    a subshell), which is enough for a mention; a `cd` to anything but a
-    literal path leaves the directory unknown.
+    call's directory, moved by each `cd` in command position whose operand
+    is a literal path. That is a lexical reading, not a model of the shell
+    (a `cd` may fail or sit in a subshell), which is enough for a mention;
+    a `cd` to anything else leaves the directory unknown.
     """
     seen: dict[str, None] = {}
     base = cwd
-    previous = None
-    brace_ends = {group.end() for group in _BRACE_GROUP_RX.finditer(command)}
+    resolver = _MentionBase(root)
+    # (offset, directory) from each change of directory on, so a brace word
+    # is read from where it sits.
+    bases: list[tuple[int, str | None]] = [(0, cwd)]
+    previous: str | None = None
+    previous_end = 0
+    pending_cd = False
+    # Brace words in order; every word-scan piece inside one (`outputs/`,
+    # `.txt` in `outputs/{a,b}.txt`) is judged with the whole word below.
+    brace_words = list(_brace_words(command, list(_BRACE_GROUP_RX.finditer(command))))
+    brace_index = 0
 
     for match in _DATA_COMMAND_WORD_RX.finditer(command):
         # Quote removal joins a partly quoted word (`"data"/x.csv`). A
         # quoted name holding a space is read in pieces (`data/my`), which
         # still marks the call as touching data.
         word = match.group(0).replace("'", "").replace('"', "")
-        if match.start() in brace_ends:
-            # The tail of a brace word (`{a,b}.csv`): judged whole below.
-            previous = word
-            continue
-        if previous == "cd":
-            if word.startswith("/"):
-                base = os.path.normpath(word)
-            elif base and not word.startswith(("~", "$", "-")):
-                base = os.path.normpath(os.path.join(base, word))
-            else:
-                base = None
-        previous = word
+        gap = command[previous_end:match.start()]
+        command_position = (previous is None or previous in _COMMAND_KEYWORDS
+                            or any(ch in _COMMAND_BREAK for ch in gap))
+        if pending_cd:
+            pending_cd = False
+            # `cd && x`: no operand before the operator, so home.
+            base = _cd_target_base(None if command_position else word, base)
+            bases.append((match.start(), base))
+        elif word == "cd" and command_position:
+            pending_cd = True
+        previous, previous_end = word, match.end()
+        while (brace_index < len(brace_words)
+               and brace_words[brace_index][2] <= match.start()):
+            brace_index += 1
+        if brace_index < len(brace_words) and brace_words[brace_index][0] <= match.start():
+            continue  # a piece of a brace word: judged whole below
         if word in seen or not (
-            _is_data_like_path(word, root) or _mentioned_from(word, base, root)
+            _is_data_like_path(word, root) or resolver.names_data(word, base)
         ):
             continue
         if len(seen) >= DATA_COMMAND_NAMED_PATH_LIMIT:
             return list(seen), True
         seen[word] = None
+    if pending_cd:
+        bases.append((len(command), None))
     # The word scan splits a brace expansion (`registry/{a,b}.tsv`) into
-    # pieces none of which looks like data; judge each alternative whole.
-    for word in _brace_words(command):
+    # pieces none of which looks like data; judge each alternative whole,
+    # from the directory in effect where the word starts.
+    offsets = [offset for offset, _ in bases]
+    for start, word, _ in brace_words:
+        word_base = bases[bisect.bisect_right(offsets, start) - 1][1]
         if word in seen or not any(
-            _is_data_like_path(alternative, root) or _mentioned_from(alternative, cwd, root)
+            _is_data_like_path(alternative, root)
+            or resolver.names_data(alternative, word_base)
             for alternative in _brace_alternatives(word)
         ):
             continue
@@ -5642,18 +5704,23 @@ def _data_path_mentions(
     return list(seen), False
 
 
-_BRACE_GROUP_RX = re.compile(r"\{[^\s{}]*,[^\s{}]*\}")
+# A comma brace group. The first run excludes the comma, so a `{` followed by
+# a long comma run with no closing brace (minified JSON in an `echo`) fails
+# in one pass instead of retrying every comma (pattern 42).
+_BRACE_GROUP_RX = re.compile(r"\{[^\s{},]*,[^\s{}]*\}")
 # Characters that end a word around a brace group (the word scan's
 # delimiters, without the comma, plus the braces themselves).
 _BRACE_WORD_STOP = frozenset(" \t\r\n`;|&<>(){}[]=:")
 _BRACE_WORD_LIMIT = 1024
 
 
-def _brace_words(command: str) -> Iterator[str]:
-    """Words holding one comma brace group, quotes removed. Each group
-    extends at most a bounded distance to either side, so the scan stays
-    linear in the command (pattern 42)."""
-    for match in _BRACE_GROUP_RX.finditer(command):
+def _brace_words(
+    command: str, groups: list[re.Match[str]]
+) -> Iterator[tuple[int, str, int]]:
+    """(start, word, end) for words holding one comma brace group, quotes
+    removed. Each group extends at most a bounded distance to either side,
+    so the scan stays linear in the command (pattern 42)."""
+    for match in groups:
         left = match.start()
         floor = max(0, left - _BRACE_WORD_LIMIT)
         while left > floor and command[left - 1] not in _BRACE_WORD_STOP:
@@ -5664,7 +5731,7 @@ def _brace_words(command: str) -> Iterator[str]:
             right += 1
         word = command[left:right].replace("'", "").replace('"', "")
         if "{" in word:
-            yield word
+            yield left, word, right
 
 
 def _brace_alternatives(word: str) -> list[str]:

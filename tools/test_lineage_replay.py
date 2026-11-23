@@ -39,7 +39,11 @@ SPEC.loader.exec_module(replay)
     ("ls analysis/a1/outputs/", "shell-data"),
     ("cp table.tsv backup.tsv", "shell-data"),
     ("wc -l results/summary.txt", "shell-data"),
-    ("wc -l registry/{samples,studies}.tsv", "shell-data"),
+    ("wc -l tables/{first,second}.tsv", "shell-data"),
+    ("cat sample.{csv,tsv}", "shell-data"),
+    ("head 'data/my file.tsv'", "shell-data"),
+    ("grep -f patterns.list data/x", "shell-data"),
+    ("echo 'a <<EOF' && head data/x.csv", "shell-data"),
     ("head $HOME/proj/data/x.csv", "shell-data"),
     ("ls /tmp/run/output/", "shell-data"),
     ("grep -c TP53 data/genes.tsv", "shell-data"),
@@ -48,6 +52,34 @@ SPEC.loader.exec_module(replay)
 ])
 def test_classify_positive(command, expected):
     assert replay.classify(command) == expected
+
+
+@pytest.mark.parametrize("command", [
+    # A project's own script with a helper's name, or anything else under a
+    # plugin cache, is not Mycelium's.
+    "python3 scripts/register_value.py",
+    "python3 /x/plugins/cache/other/tool/run.py",
+])
+def test_only_mycelium_layouts_are_helpers(command):
+    assert replay.classify(command) == "script"
+
+
+def test_relative_paths_are_judged_from_the_call_directory(tmp_path):
+    root = str(tmp_path)
+    assert replay.classify("head raw/counts", f"{root}/data", root) == "shell-data"
+    assert replay.classify("cd data && head raw/counts", root, root) == "shell-data"
+    assert replay.classify("head raw/counts", root, root) is None
+    assert replay.classify("echo cd data; head raw/counts", root, root) is None
+    # From inside a data directory, URLs and redirections are not its files.
+    inside = f"{root}/data/raw"
+    assert replay.classify("curl -fsSL https://example.org/suppl/list.html", inside, root) is None
+    assert replay.classify("ps aux 2>/dev/null | head -3", inside, root) is None
+
+
+def test_absolute_patterns_do_not_depend_on_this_machine():
+    assert replay.is_pattern("/output/runs/")
+    assert not replay.is_pattern("/scratch/run/output/")
+    assert not replay.is_pattern("/Users/x/data/a.csv")
 
 
 @pytest.mark.parametrize("command", [
@@ -65,6 +97,11 @@ def test_classify_positive(command, expected):
     "echo 'python3 run.py'",
     "python3 /x/plugins/cache/mycelium/mycelium/0.9.7/skills/core/scripts/register_value.py",
     "python3 skills/core/scripts/init_repo.py --help",
+    'python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/finalize_handoff.py"',
+    "git commit -m 'Add data/x.csv to the notes'",
+    # A quoted pipe or heredoc operator is text, not syntax.
+    "echo 'cat x | python3'",
+    "echo 'python3 <<EOF'",
     # A heredoc body that writes a script is not a data access.
     "cat > fit.py <<'EOF'\nimport pandas as pd\npd.read_csv('data/x.csv')\nEOF",
     "sed -n '1,40p' README.md",
@@ -105,9 +142,19 @@ def test_parse_code_mode_literal_and_computed_calls():
           "const e = tools.exec_command({cmd: 'cat ' + f, workdir: '/p'});\n"
           "const g = tools.exec_command({ cmd : 'wc -l data/y.csv' , yield_time_ms: 5 });\n")
     calls, unparsed = replay.parse_code_mode(js)
-    assert calls == [('head -2 "data/x.csv"', "/p"), ("ls data/", "/p/sub"),
-                     ("wc -l data/y.csv", None)]
+    assert calls == [('head -2 "data/x.csv"', "/p", "literal"), ("ls data/", "/p/sub", "literal"),
+                     ("wc -l data/y.csv", None, "omitted")]
     assert unparsed == 3
+
+
+def test_parse_code_mode_skips_comments_and_marks_computed_workdirs():
+    js = ("// tools.exec_command({cmd: 'head data/a.csv'})\n"
+          "/* tools.exec_command({cmd: 'head data/b.csv'}) */\n"
+          "const s = '// not a comment'; tools.exec_command({cmd: 'ls data/', workdir: dir});\n"
+          "tools.exec_command({cmd: 'ls data/', workdir});\n")
+    calls, unparsed = replay.parse_code_mode(js)
+    assert calls == [("ls data/", None, "computed"), ("ls data/", None, "computed")]
+    assert unparsed == 0
 
 
 # ---- extraction ---------------------------------------------------------------
@@ -157,15 +204,45 @@ def test_extract_codex_function_and_code_mode_calls(tmp_path):
                                               "output": "Process exited with code 0\n"}},
         {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": "2",
                                               "input": 'tools.exec_command({cmd:"ls data/", workdir:"/p/w"})'}},
+        {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "2",
+                                              "output": "Script completed"}},
+        # A relative workdir is the session's; a background run has no exit.
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+                                              "call_id": "3",
+                                              "arguments": json.dumps({"cmd": "wc -l data/x.csv",
+                                                                       "workdir": "sub"})}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "3",
+                                              "output": "Process running with session ID 7"}},
+        # Rejected, or no result: no hook ran.
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+                                              "call_id": "4",
+                                              "arguments": json.dumps({"cmd": "head data/z.csv"})}},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "4",
+                                              "output": "rejected by user"}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+                                              "call_id": "5",
+                                              "arguments": json.dumps({"cmd": "head data/w.csv"})}},
+        # A snippet with no output did not run.
+        {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": "6",
+                                              "input": 'tools.exec_command({cmd:"ls data/"})'}},
     ]
     path = tmp_path / "rollout-1.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in rec) + "\n")
-    cmds, unparsed = replay.extract_codex(path, "P", Path("/p"))
-    assert [(c.command, c.cwd, c.bash_exit) for c in cmds] == [
-        ("head data/x.csv", "/p", 0), ("ls data/", "/p/w", None)]
-    assert unparsed == 0
+    cmds, stats = replay.extract_codex(path, "P", Path("/p"))
+    assert [(c.command, c.cwd, c.bash_exit, c.evidence) for c in cmds] == [
+        ("head data/x.csv", "/p", 0, "exit-status"),
+        ("ls data/", "/p/w", None, "code-mode-source"),
+        ("wc -l data/x.csv", "/p/sub", None, "exit-status")]
+    assert (stats.computed_cmd, stats.not_run) == (0, 3)
     assert replay.codex_rollouts([tmp_path], Path("/p")) == [path]
     assert replay.codex_rollouts([tmp_path], Path("/q")) == []
+
+
+def test_an_unreadable_rollout_is_reported(tmp_path):
+    (tmp_path / "rollout-bad.jsonl.zst").write_bytes(b"not zstd")
+    unreadable: list[Path] = []
+    assert replay.codex_rollouts([tmp_path], Path("/p"), unreadable) == []
+    assert unreadable == [tmp_path / "rollout-bad.jsonl.zst"]
 
 
 def test_resolve_cwd_maps_a_removed_worktree(tmp_path):
@@ -178,7 +255,7 @@ def test_resolve_cwd_maps_a_removed_worktree(tmp_path):
 
 # ---- end to end ---------------------------------------------------------------
 
-def test_replay_counts_events_skips_and_misses(tmp_path):
+def test_replay_counts_events_skips_and_misses(tmp_path, monkeypatch):
     """Drives the real detector: a script run and a data look are events, a
     deleted script is a logged skip, and nothing data-touching is silent."""
     root = tmp_path / "Proj"
@@ -197,13 +274,20 @@ def test_replay_counts_events_skips_and_misses(tmp_path):
         lines.append(_claude_line([{"type": "tool_result", "tool_use_id": str(n), "content": ""}],
                                   "user", cwd=str(root)))
     (tdir / "s.jsonl").write_text("\n".join(lines) + "\n")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(replay.tempfile, "tempdir", str(scratch))
     report = replay.run([("P", root)], projects, [tmp_path / "none"])
-    p = report["projects"]["P"]
-    assert p["commands"] == 4
+    project = report["projects"]["P"]
+    assert project["commands"] == 4
+    p = project["populations"]["executed"]
     assert p["data_touching"] == 3
     assert (p["event"], p["skip"], p["silent_miss"]) == (2, 1, 0)
-    assert p["by_category"]["claude:script"]["skip:script-unreadable"] == 1
-    # No command text reaches the report.
+    assert (p["event_analysis"], p["event_data_command"]) == (1, 1)
+    assert p["skip_reasons"] == {"script-unreadable": 1}
+    assert project["populations"]["code-mode-source"]["data_touching"] == 0
+    # No command text reaches the report, and no scratch file is left.
     text = json.dumps(report)
     for c in cmds:
         assert c not in text
+    assert list(scratch.iterdir()) == []

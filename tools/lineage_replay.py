@@ -61,6 +61,13 @@ class Command:
     bash_exit: int | None
     call_id: str
     subagent: bool = False
+    # How we know the call ran: "hook-result" (a Claude tool result that is
+    # not a refusal), "exit-status" (a Codex direct call whose output reports
+    # an exit or a running process), or "code-mode-source" (a Codex code-mode
+    # call read from the JavaScript source: the snippet ran, but whether this
+    # call inside it did is not recorded per call).
+    evidence: str = "hook-result"
+    workdir: str = "literal"  # Codex: "literal", "omitted", or "computed"
 
 
 def _claude_files(projects_dir: Path, root: Path) -> list[Path]:
@@ -209,11 +216,43 @@ def _skip_value(js: str, pos: int) -> int:
     return pos
 
 
-def parse_code_mode(js: str) -> tuple[list[tuple[str, str | None]], int]:
+def strip_js_comments(js: str) -> str:
+    """Blank `//` and `/* */` comments outside string literals, so a call
+    shown in a comment is not read as one. Regular-expression literals are
+    not modelled (a `/'/` could hide the rest of a line)."""
+    out: list[str] = []
+    i = 0
+    while i < len(js):
+        ch = js[i]
+        if ch in "\"'`":
+            _, end = _js_string(js, i)
+            out.append(js[i:end])
+            i = end
+        elif js.startswith("//", i):
+            end = js.find("\n", i)
+            end = len(js) if end < 0 else end
+            out.append(" " * (end - i))
+            i = end
+        elif js.startswith("/*", i):
+            end = js.find("*/", i + 2)
+            end = len(js) if end < 0 else end + 2
+            out.append(re.sub(r"[^\n]", " ", js[i:end]))
+            i = end
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def parse_code_mode(js: str) -> tuple[list[tuple[str, str | None, str]], int]:
     """``tools.exec_command({cmd: ..., workdir: ...})`` calls in a Codex
-    code-mode ``exec`` snippet. Returns the literal calls and how many calls
-    had a computed (non-literal) command."""
-    calls: list[tuple[str, str | None]] = []
+    code-mode ``exec`` snippet, comments excluded. Returns (cmd, workdir,
+    workdir state) for each call with a literal command, and how many calls
+    had a computed (non-literal) command. The state is "literal",
+    "omitted", or "computed". A call in a branch that never ran is still
+    read: the source does not say which branches ran."""
+    js = strip_js_comments(js)
+    calls: list[tuple[str, str | None, str]] = []
     unparsed = 0
     for m in _EXEC_CALL_RX.finditer(js):
         pos = m.end()
@@ -233,7 +272,9 @@ def parse_code_mode(js: str) -> tuple[list[tuple[str, str | None]], int]:
             while pos < len(js) and js[pos] in " \t\r\n":
                 pos += 1
             if pos >= len(js) or js[pos] != ":":
-                break  # shorthand property: a computed value
+                if key in ("cmd", "workdir"):
+                    values.setdefault(key, None)  # shorthand: computed
+                break
             pos += 1
             while pos < len(js) and js[pos] in " \t\r\n":
                 pos += 1
@@ -249,26 +290,46 @@ def parse_code_mode(js: str) -> tuple[list[tuple[str, str | None]], int]:
             if key in ("cmd", "workdir") and key not in values:
                 values[key] = value
         if values.get("cmd"):
-            calls.append((values["cmd"], values.get("workdir")))
+            if "workdir" not in values:
+                state = "omitted"
+            else:
+                state = "literal" if values["workdir"] else "computed"
+            calls.append((values["cmd"], values.get("workdir"), state))
         else:
             unparsed += 1
     return calls, unparsed
 
 
-_CODEX_EXIT_RX = re.compile(r"(?:Process exited with code|exit_code\W{1,4})\s*(-?\d+)")
+_CODEX_EXIT_RX = re.compile(r"Process exited with code (-?\d+)")
+_CODEX_RUNNING_RX = re.compile(r"Process running with session ID")
 
 
-def extract_codex(path: Path, project: str, root: Path) -> tuple[list[Command], int]:
+def _join_workdir(workdir: str | None, session_cwd: str) -> str:
+    """A Codex workdir as the tool used it: relative to the session cwd."""
+    if not workdir:
+        return session_cwd
+    return os.path.normpath(os.path.join(session_cwd, workdir))
+
+
+@dataclass
+class CodexStats:
+    computed_cmd: int = 0
+    not_run: int = 0
+    computed_workdir: int = 0
+
+
+def extract_codex(path: Path, project: str, root: Path) -> tuple[list[Command], CodexStats]:
     lines = _read_rollout(path)
     commands: list[Command] = []
-    unparsed = 0
+    stats = CodexStats()
     try:
         meta = json.loads(lines[0]).get("payload", {})
     except (ValueError, IndexError):
-        return commands, 0
+        return commands, stats
     session_cwd = meta.get("cwd") or str(root)
     outputs: dict[str, str] = {}
-    calls: list[tuple[str, str, str | None]] = []
+    # (call_id, cmd, workdir, workdir state, code mode)
+    calls: list[tuple[str, str, str | None, str, bool]] = []
     for raw in lines:
         try:
             rec = json.loads(raw)
@@ -280,34 +341,54 @@ def extract_codex(path: Path, project: str, root: Path) -> tuple[list[Command], 
             try:
                 args = json.loads(pl.get("arguments") or "{}")
             except ValueError:
-                unparsed += 1
+                stats.computed_cmd += 1
                 continue
             cmd = args.get("cmd") or args.get("command")
             if isinstance(cmd, list):
                 cmd = shlex.join(cmd) if cmd[:2] not in (["bash", "-lc"], ["bash", "-c"]) else cmd[2]
             if not isinstance(cmd, str):
-                unparsed += 1
+                stats.computed_cmd += 1
                 continue
-            calls.append((pl.get("call_id", ""), cmd, args.get("workdir")))
+            workdir = args.get("workdir")
+            state = "omitted" if workdir is None else "literal" if isinstance(workdir, str) else "computed"
+            calls.append((pl.get("call_id", ""), cmd, workdir if isinstance(workdir, str) else None,
+                          state, False))
         elif kind == "custom_tool_call" and pl.get("name") == "exec":
             found, bad = parse_code_mode(pl.get("input") or "")
-            unparsed += bad
-            for n, (cmd, workdir) in enumerate(found):
-                calls.append((f"{pl.get('call_id', '')}#{n}", cmd, workdir))
+            stats.computed_cmd += bad
+            for n, (cmd, workdir, state) in enumerate(found):
+                calls.append((f"{pl.get('call_id', '')}#{n}", cmd, workdir, state, True))
         elif kind in ("function_call_output", "custom_tool_call_output"):
             out = pl.get("output")
             outputs[pl.get("call_id", "")] = out if isinstance(out, str) else json.dumps(out)
-    for call_id, cmd, workdir in calls:
+    for call_id, cmd, workdir, state, code_mode in calls:
         bash_exit = None
-        if "#" not in call_id:  # a code-mode snippet's output is not per call
-            m = _CODEX_EXIT_RX.search(outputs.get(call_id, ""))
-            bash_exit = int(m.group(1)) if m else None
-        commands.append(Command(project, "codex", cmd, workdir or session_cwd,
-                                bash_exit, call_id))
-    return commands, unparsed
+        if code_mode:
+            # The snippet must have produced output at all; a call inside it
+            # has no result of its own.
+            if call_id.split("#", 1)[0] not in outputs:
+                stats.not_run += 1
+                continue
+            evidence = "code-mode-source"
+        else:
+            output = outputs.get(call_id)
+            m = _CODEX_EXIT_RX.search(output or "")
+            if m:
+                bash_exit = int(m.group(1))
+            elif not (output and _CODEX_RUNNING_RX.search(output)):
+                stats.not_run += 1  # no result, or rejected: no hook ran
+                continue
+            evidence = "exit-status"
+        stats.computed_workdir += state == "computed"
+        commands.append(Command(project, "codex", cmd, _join_workdir(workdir, session_cwd),
+                                bash_exit, call_id, evidence=evidence, workdir=state))
+    return commands, stats
 
 
-def codex_rollouts(sessions_dirs: Iterable[Path], root: Path) -> list[Path]:
+def codex_rollouts(sessions_dirs: Iterable[Path], root: Path,
+                   unreadable: list[Path] | None = None) -> list[Path]:
+    """Rollouts whose session cwd is inside ``root``. One that cannot be
+    read is appended to ``unreadable`` (when given), never skipped silently."""
     found = []
     for base in sessions_dirs:
         if not base.is_dir():
@@ -319,6 +400,8 @@ def codex_rollouts(sessions_dirs: Iterable[Path], root: Path) -> list[Path]:
                 first = _read_rollout(path)[0]
                 cwd = json.loads(first).get("payload", {}).get("cwd") or ""
             except (subprocess.CalledProcessError, ValueError, IndexError, OSError):
+                if unreadable is not None:
+                    unreadable.append(path)
                 continue
             if cwd == str(root) or cwd.startswith(str(root) + "/"):
                 found.append(path)
@@ -386,12 +469,44 @@ def _mycelium_helpers() -> frozenset[str]:
 MYCELIUM_HELPERS = _mycelium_helpers()
 
 
+def mask_quotes(text: str, quote: str | None = None) -> tuple[str, str | None]:
+    """``text`` with quoted characters (and the quotes) blanked, so shell
+    syntax inside a string (`echo "a <<EOF | b"`) is not read as syntax.
+    Takes and returns the open quote, for text that spans lines."""
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(text):
+                out.append("  ")
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            out.append(" " if ch != "\n" else ch)
+        elif ch == "\\" and i + 1 < len(text):
+            out.append("  ")
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+            out.append(" ")
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out), quote
+
+
 def strip_heredoc_bodies(command: str) -> tuple[str, bool]:
-    """Remove heredoc bodies; report whether any heredoc was present."""
+    """Remove heredoc bodies; report whether any heredoc was present. A
+    `<<` inside quotes is text, and so is everything in a body (its quotes
+    may not balance)."""
     lines = command.split("\n")
     out: list[str] = []
     pending: list[tuple[str, bool]] = []
     had = False
+    quote: str | None = None
     for line in lines:
         if pending:
             delim, strip_tabs = pending[0]
@@ -399,10 +514,14 @@ def strip_heredoc_bodies(command: str) -> tuple[str, bool]:
                 pending.pop(0)
             continue
         out.append(line)
-        # `<<<` is a here-string, not a heredoc.
-        for m in re.finditer(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_][\w.-]*)\2", line):
-            pending.append((m.group(3), m.group(1) == "-"))
-            had = True
+        masked, quote = mask_quotes(line, quote)
+        # `<<<` is a here-string, not a heredoc. The delimiter may itself be
+        # quoted, so it is read from the original line at the same offset.
+        for m in re.finditer(r"(?<!<)<<(?!<)-?", masked):
+            dm = re.match(r"(-?)\s*(['\"]?)([A-Za-z_][\w.-]*)\2", line[m.start() + 2:])
+            if dm:
+                pending.append((dm.group(3), dm.group(1) == "-"))
+                had = True
     return "\n".join(out), had
 
 
@@ -437,6 +556,9 @@ def split_segments(text: str) -> list[str]:
             while i < len(text) and text[i] != "\n":
                 i += 1
             continue
+        elif ch in "{}" and not ((i == 0 or text[i - 1] in " \t\n;&|(")
+                                 and (i + 1 == len(text) or text[i + 1] in " \t\n;")):
+            buf.append(ch)  # a brace inside a word (`a.{csv,tsv}`, `${x}`)
         elif ch in ";&|()\n`{}" or (ch == "$" and text[i + 1:i + 2] == "("):
             segments.append("".join(buf))
             buf = []
@@ -490,8 +612,15 @@ def _unwrap(words: list[str]) -> list[str]:
 
 
 def _is_helper(path: str) -> bool:
-    return (os.path.basename(path) in MYCELIUM_HELPERS
-            or "/plugins/cache/" in path or "/mycelium/skills/" in path)
+    """A Mycelium helper: one of the plugin's own script names, reached
+    through a plugin layout (`skills/<skill>/scripts/`, `skills/<skill>/
+    hooks/`, or `.mycelium/plugin-root`). A project's own
+    `scripts/register_value.py` is not one, nor is anything else under a
+    plugin cache."""
+    if os.path.basename(path) not in MYCELIUM_HELPERS:
+        return False
+    return (".mycelium/plugin-root" in path
+            or re.search(r"(^|/)skills/[\w-]+/(scripts|hooks)/[^/]+$", path) is not None)
 
 
 def _python_kind(args: list[str], fed: bool) -> str | None:
@@ -560,30 +689,65 @@ def interpreter_kind(segment: str, fed: bool) -> str | None:
     return None
 
 
+# Top-level directories an absolute path on a workstation or cluster starts
+# with. Fixed, so classification never depends on this machine's mounts.
+ROOT_DIRS = frozenset({
+    "Users", "home", "private", "tmp", "var", "opt", "usr", "etc", "Volumes",
+    "mnt", "media", "srv", "root", "data", "scratch", "work", "project",
+    "projects", "groups", "group", "nfs", "lustre", "gpfs", "fs", "storage",
+    "shared", "lab", "Library", "Applications", "System", "workspace",
+})
+
+
 def is_pattern(word: str) -> bool:
     """A search pattern or exclusion, not a path: a negated glob
     (`'!**/output/**'`), git pathspec magic (`':!x'`, `':(exclude)x'`),
     regex alternation, anchors or escapes (`'a|b'`, `'^x'`, `x$`, `\\.`), or
-    an absolute path whose top-level directory does not exist here
-    (`grep -v '/output/runs/'`)."""
+    an absolute path whose top-level directory is not one paths start
+    with (`grep -v '/output/runs/'`; see ROOT_DIRS)."""
     if word.startswith(("!", ":!", ":(", ":^")):
         return True
     if any(c in word for c in "|^\\") or word.endswith("$"):
         return True
     if word.startswith("/"):
         top = word.split("/", 2)[1]
-        return bool(top) and not os.path.isdir("/" + top)
+        return bool(top) and top not in ROOT_DIRS
     return False
 
 
-def is_data_path(word: str) -> bool:
+_BRACE_RX = re.compile(r"\{([^{}\s]*,[^{}\s]*)\}")
+
+
+def brace_alternatives(word: str) -> list[str]:
+    """The words a single comma brace group expands to (`a.{csv,tsv}`), or
+    the word itself."""
+    m = _BRACE_RX.search(word)
+    if not m:
+        return [word]
+    return [word[:m.start()] + alt + word[m.end():] for alt in m.group(1).split(",")]
+
+
+def _path_text(word: str) -> str:
+    """A word as the path it may name: quotes, an `--opt=` or `VAR=`
+    prefix, and a redirection prefix (`2>/dev/null`) removed."""
     word = word.strip("'\"")
-    if is_pattern(word):
-        return False
     if "=" in word and not word.startswith(("/", ".")):
         word = word.split("=", 1)[1]
-    word = word.lstrip("<>&|0123456789")
-    if not word or "://" in word or any(c.isspace() for c in word):
+    return word.lstrip("<>&|0123456789")
+
+
+def is_data_path(word: str) -> bool:
+    if is_pattern(word.strip("'\"")):
+        return False
+    word = _path_text(word)
+    if "{" in word and _BRACE_RX.search(word):
+        return any(is_data_path(alt) for alt in brace_alternatives(word))
+    # A quoted file name may hold spaces (`'data/my file.tsv'`); a space
+    # before the last `/` is prose (`git commit -m "Add data/x.csv"`).
+    if not word or "://" in word:
+        return False
+    head = word.rsplit("/", 1)[0] if "/" in word else word
+    if any(c.isspace() for c in head):
         return False
     parts = [p for p in word.split("/") if p]
     if not parts or EXCLUDED_COMPONENTS.intersection(parts):
@@ -639,6 +803,11 @@ def path_words(segment: str) -> list[str]:
             pattern_given = True
             i += 2
             continue
+        if a in ("-f", "--file"):
+            pattern_given = True  # patterns come from a file: all operands are paths
+            kept.extend(args[i:i + 2])
+            i += 2
+            continue
         if a.startswith("--regexp="):
             pattern_given = True
         elif a in _SEARCH_VALUE_OPTIONS:
@@ -656,12 +825,30 @@ def path_words(segment: str) -> list[str]:
     return kept
 
 
-def classify(command: str) -> str | None:
-    """``"script"``, ``"inline"``, ``"shell-data"``, or None (not data)."""
+def _relative_data(word: str, base: str | None, root: str | None) -> bool:
+    """A relative path word read from ``base`` (`head raw/counts` run in
+    `data/`), judged by its path inside the project. Lexical only."""
+    word = _path_text(word)
+    if (not word or not base or not root or "/" not in word or "://" in word
+            or is_pattern(word) or word.startswith(("/", "~", "$", "-"))):
+        return False
+    joined = os.path.normpath(os.path.join(base, word))
+    if not joined.startswith(root.rstrip("/") + "/"):
+        return False
+    rel = os.path.relpath(joined, root)
+    return is_data_path(rel + ("/" if word.endswith("/") else ""))
+
+
+def classify(command: str, cwd: str | None = None, root: str | None = None) -> str | None:
+    """``"script"``, ``"inline"``, ``"shell-data"``, or None (not data).
+
+    With ``cwd`` and ``root``, a relative path word is also judged as read
+    from the call's directory, moved by each literal `cd` in command
+    position."""
     stripped, heredoc = strip_heredoc_bodies(command)
     segments = split_segments(stripped)
     kinds = set()
-    piped = "|" in stripped
+    piped = "|" in mask_quotes(stripped)[0]
     for seg in segments:
         kind = interpreter_kind(seg, fed=heredoc or piped)
         if kind:
@@ -670,9 +857,20 @@ def classify(command: str) -> str | None:
         return "script"
     if "inline" in kinds:
         return "inline"
+    base = cwd
     for seg in segments:
-        for w in path_words(seg):
-            if is_data_path(w):
+        words = path_words(seg)
+        run = _unwrap(_words(seg))
+        if run[:1] == ["cd"]:
+            target = run[1] if len(run) > 1 else None
+            if target is None or target.startswith(("~", "$", "-")):
+                base = None
+            elif target.startswith("/"):
+                base = os.path.normpath(target)
+            elif base:
+                base = os.path.normpath(os.path.join(base, target))
+        for w in words:
+            if is_data_path(w) or _relative_data(w, base, root):
                 return "shell-data"
     return None
 
@@ -727,6 +925,8 @@ class Outcome:
     result: str  # "event" | "skip" | "none"
     kinds: list[str] = field(default_factory=list)
     skip_reasons: list[str] = field(default_factory=list)
+    # A data_command whose shell syntax proved an input or output direction.
+    directed: bool = False
 
 
 def replay_one(detector, command: str, cwd: str, bash_exit: int | None,
@@ -749,13 +949,18 @@ def replay_one(detector, command: str, cwd: str, bash_exit: int | None,
     finally:
         sys.argv = old_argv
     kinds = []
+    directed = False
     for line in events_file.read_text().splitlines():
         try:
-            kinds.append(json.loads(line).get("kind") or "analysis")
+            record = json.loads(line)
         except ValueError:
-            pass
+            continue
+        kinds.append(record.get("kind") or "analysis")
+        if record.get("kind") == "data_command" and (record.get("inputs") or record.get("outputs")):
+            directed = True
+    events_file.write_text("")  # the scratch file never keeps command text
     if kinds:
-        return Outcome("event", kinds)
+        return Outcome("event", kinds, directed=directed)
     if status != 0:
         return Outcome("skip", skip_reasons=["extractor-failed"])
     unreadable = [l for l in out.getvalue().splitlines() if "unreadable_script" in l]
@@ -770,15 +975,15 @@ def replay_one(detector, command: str, cwd: str, bash_exit: int | None,
 _WORKER: dict = {}
 
 
-def _worker_init() -> None:
+def _worker_init(scratch_root: str) -> None:
     _WORKER["detector"] = _load_detector()
-    _WORKER["scratch"] = Path(tempfile.mkdtemp(prefix="lineage-replay-"))
+    scratch = Path(scratch_root) / f"worker-{os.getpid()}"
+    scratch.mkdir(exist_ok=True)
+    _WORKER["scratch"] = scratch
 
 
 def _worker_replay(job: tuple[str, str, int | None]) -> Outcome:
     command, cwd, bash_exit = job
-    if "detector" not in _WORKER:
-        _worker_init()
     return replay_one(_WORKER["detector"], command, cwd, bash_exit, _WORKER["scratch"])
 
 
@@ -788,12 +993,15 @@ def collect(name: str, root: Path, claude_dir: Path,
     files = _claude_files(claude_dir, root)
     for f in files:
         commands.extend(extract_claude(f, name))
-    rollouts = codex_rollouts(codex_dirs, root)
-    unparsed = 0
+    unreadable: list[Path] = []
+    rollouts = codex_rollouts(codex_dirs, root, unreadable)
+    stats = CodexStats()
     for r in rollouts:
-        found, bad = extract_codex(r, name, root)
+        found, one = extract_codex(r, name, root)
         commands.extend(found)
-        unparsed += bad
+        stats.computed_cmd += one.computed_cmd
+        stats.not_run += one.not_run
+        stats.computed_workdir += one.computed_workdir
     seen: set[tuple[str, str]] = set()
     unique: list[Command] = []
     for c in commands:
@@ -802,70 +1010,114 @@ def collect(name: str, root: Path, claude_dir: Path,
             seen.add(key)
             unique.append(c)
     meta = {"claude_transcripts": len(files), "codex_rollouts": len(rollouts),
-            "codex_calls_with_computed_cmd": unparsed}
+            # Rollouts that could not be read at all, so their project is
+            # unknown: counted for every project, never skipped silently.
+            "codex_rollouts_unreadable": len(unreadable),
+            "codex_calls_with_computed_cmd": stats.computed_cmd,
+            "codex_calls_not_run": stats.not_run,
+            "codex_calls_with_computed_workdir": stats.computed_workdir}
     return unique, meta
+
+
+POPULATIONS = {
+    # Calls with evidence that they executed: what the criterion is judged on.
+    "executed": ("hook-result", "exit-status"),
+    # Codex code-mode calls read from source: the snippet ran, the call may
+    # not have (a branch not taken), and its exit status is unknown.
+    "code-mode-source": ("code-mode-source",),
+}
+
+
+def _summary(rows: list[tuple[Command, str | None, Outcome]]) -> dict:
+    by_cat: dict[str, Counter] = {}
+    misses: Counter = Counter()
+    total: Counter = Counter()
+    not_data_events = 0
+    for c, cat, outcome in rows:
+        if cat is None:
+            not_data_events += outcome.result == "event"
+            continue
+        bucket = by_cat.setdefault(f"{c.host}:{cat}", Counter())
+        bucket[outcome.result] += 1
+        total[outcome.result] += 1
+        if outcome.result == "event":
+            # One call yields analysis events or one data_command, never both.
+            kind = "analysis" if "data_command" not in outcome.kinds else "data_command"
+            bucket["event:" + kind] += 1
+            total["event:" + kind] += 1
+            if outcome.directed:
+                total["data_command_with_direction"] += 1
+        for reason in set(outcome.skip_reasons):
+            bucket["skip:" + reason] += 1
+            total["skip:" + reason] += 1
+        if outcome.result == "none":
+            misses[f"{cat}:{shape(c.command)}"] += 1
+    data = total["event"] + total["skip"] + total["none"]
+    return {
+        "data_touching": data,
+        "event": total["event"],
+        "event_analysis": total["event:analysis"],
+        "event_data_command": total["event:data_command"],
+        "data_command_with_direction": total["data_command_with_direction"],
+        "skip": total["skip"],
+        "skip_reasons": {k[5:]: v for k, v in sorted(total.items()) if k.startswith("skip:")},
+        "silent_miss": total["none"],
+        "event_share": round(total["event"] / data, 4) if data else None,
+        "events_on_non_data_commands": not_data_events,
+        "by_category": {k: dict(sorted(v.items())) for k, v in sorted(by_cat.items())},
+        "silent_miss_shapes": dict(misses.most_common()),
+    }
 
 
 def run(projects: list[tuple[str, Path]], claude_dir: Path, codex_dirs: list[Path],
         show_misses: int = 0, jobs: int = 1) -> dict:
     report: dict = {"projects": {}, "rule": "tools/lineage_replay.py:classify"}
-    for name, root in projects:
-        unique, meta = collect(name, root, claude_dir, codex_dirs)
-        resolved = [resolve_cwd(c.cwd, root) for c in unique]
-        work = [(c.command, cwd, c.bash_exit) for c, (cwd, _) in zip(unique, resolved)]
-        if jobs > 1 and len(work) > 1:
-            import multiprocessing
-            with multiprocessing.get_context("spawn").Pool(jobs, _worker_init) as pool:
-                outcomes = []
-                for n, o in enumerate(pool.imap(_worker_replay, work, chunksize=8), 1):
-                    outcomes.append(o)
-                    if n % 500 == 0:
-                        print(f"{name}: {n}/{len(work)}", file=sys.stderr, flush=True)
-        else:
-            outcomes = [_worker_replay(w) for w in work]
-        counts: Counter = Counter()
-        by_cat: dict[str, Counter] = {}
-        misses: Counter = Counter()
-        not_data_events = 0
-        shown = 0
-        for c, (cwd, _), outcome in zip(unique, resolved, outcomes):
-            cat = classify(c.command)
-            counts[c.host] += 1
-            if cat is None:
-                not_data_events += outcome.result == "event"
-                continue
-            bucket = by_cat.setdefault(f"{c.host}:{cat}", Counter())
-            bucket[outcome.result] += 1
-            for k in outcome.kinds[:1]:
-                bucket["event:" + k] += 1
-            for reason in set(outcome.skip_reasons):
-                bucket["skip:" + reason] += 1
-            if outcome.result == "none":
-                misses[f"{cat}:{shape(c.command)}"] += 1
-                if shown < show_misses:
-                    shown += 1
-                    print(f"--- MISS ({c.host}, {cat}, cwd={cwd}) [local only; do not commit]\n"
-                          f"{c.command[:600]}", file=sys.stderr)
-        total: Counter = Counter()
-        for b in by_cat.values():
-            for k in ("event", "skip", "none"):
-                total[k] += b[k]
-        data = sum(total.values())
-        report["projects"][name] = {
-            **meta,
-            "commands": len(unique),
-            "commands_by_host": {h: counts[h] for h in ("claude", "codex")},
-            "cwd_remapped": sum(moved for _, moved in resolved),
-            "data_touching": data,
-            "event": total["event"],
-            "skip": total["skip"],
-            "silent_miss": total["none"],
-            "event_share": round(total["event"] / data, 4) if data else None,
-            "events_on_non_data_commands": not_data_events,
-            "by_category": {k: dict(sorted(v.items())) for k, v in sorted(by_cat.items())},
-            "silent_miss_shapes": dict(misses.most_common()),
-        }
+    with tempfile.TemporaryDirectory(prefix="lineage-replay-") as scratch_root:
+        for name, root in projects:
+            report["projects"][name] = _run_project(
+                name, root, claude_dir, codex_dirs, show_misses, jobs, scratch_root)
     return report
+
+
+def _run_project(name: str, root: Path, claude_dir: Path, codex_dirs: list[Path],
+                 show_misses: int, jobs: int, scratch_root: str) -> dict:
+    unique, meta = collect(name, root, claude_dir, codex_dirs)
+    resolved = [resolve_cwd(c.cwd, root) for c in unique]
+    work = [(c.command, cwd, c.bash_exit) for c, (cwd, _) in zip(unique, resolved)]
+    if jobs > 1 and len(work) > 1:
+        import multiprocessing
+        with multiprocessing.get_context("spawn").Pool(
+                jobs, _worker_init, (scratch_root,)) as pool:
+            outcomes = []
+            for n, o in enumerate(pool.imap(_worker_replay, work, chunksize=8), 1):
+                outcomes.append(o)
+                if n % 1000 == 0:
+                    print(f"{name}: {n}/{len(work)}", file=sys.stderr, flush=True)
+    else:
+        _worker_init(scratch_root)
+        outcomes = [_worker_replay(w) for w in work]
+    rows = []
+    counts: Counter = Counter()
+    shown = 0
+    for c, (cwd, _), outcome in zip(unique, resolved, outcomes):
+        cat = classify(c.command, cwd, str(root))
+        counts[(c.host, c.evidence)] += 1
+        rows.append((c, cat, outcome))
+        if cat is not None and outcome.result == "none" and shown < show_misses:
+            shown += 1
+            print(f"--- MISS ({c.host}, {c.evidence}, {cat}, cwd={cwd}) "
+                  f"[local only; do not commit]\n{c.command}", file=sys.stderr)
+    populations = {
+        pop: _summary([r for r in rows if r[0].evidence in kinds])
+        for pop, kinds in POPULATIONS.items()
+    }
+    return {
+        **meta,
+        "commands": len(unique),
+        "commands_by_evidence": {f"{h}:{e}": n for (h, e), n in sorted(counts.items())},
+        "cwd_remapped": sum(moved for _, moved in resolved),
+        "populations": populations,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

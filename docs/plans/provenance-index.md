@@ -798,70 +798,112 @@ commands, and the remainder are logged skips with reasons.
 
 **Tool.** `tools/lineage_replay.py` reads the Claude Code transcripts for a
 project and its worktrees (subagents included) and the Codex rollouts whose
-session cwd is inside it (`.jsonl` and `.jsonl.zst`; code-mode
-`tools.exec_command({cmd: ...})` calls are parsed out of the JavaScript).
-Each Bash call is fed to `extract_data_lineage_event.py` exactly as
-`mycelium-data-tracker.sh` calls it on an owned transaction, and the outcome
-is read as the tracker reads it: an appended record is an event (an
-analysis event or a `data_command`), a nonzero exit or an unreadable
-script is a logged skip, and nothing at all is a silent miss. Calls that
-never ran (a permission denial, an interrupted call with no result) are
-dropped, since no hook fires for them. Claude's exit status comes from the
-hook contract (PostToolUse means 0; a failure's `Exit code N`); Codex
-code-mode calls have no per-call status and replay with it unknown, the
-conservative case. The replay is read-only on the projects: the detector
-reads files and runs `git rev-parse`, and its appends go to a scratch
-file. A worktree that no longer exists is replayed from the matching
-directory of the main checkout (7 SNP-tree calls). The report holds counts
-and content-free shape labels only; `--show-misses` prints raw commands to
-stderr for local debugging and is never committed.
+session cwd is inside it (`.jsonl` and `.jsonl.zst`; a rollout that cannot
+be read is counted, not skipped). Each Bash call is fed to
+`extract_data_lineage_event.py` exactly as `mycelium-data-tracker.sh` calls
+it on an owned transaction, and the outcome is read as the tracker reads it:
+an appended record is an event, a nonzero exit or an unreadable script is a
+logged skip, and nothing at all is a silent miss.
+
+Only calls with evidence that they ran are replayed as executed:
+
+- a Claude call with a tool result that is not a refusal (PostToolUse means
+  exit 0; a failure carries `Exit code N`);
+- a Codex direct call whose output reports `Process exited with code N` or a
+  running process (a rejected call, or one with no result, is dropped: 1 in
+  SNP-tree).
+
+Codex code-mode calls are a separate population. AP1-learning ran almost
+entirely in code mode, where each tool call is a JavaScript snippet and its
+`tools.exec_command({cmd: ...})` calls are read from the source (comments
+excluded). The snippet ran, but the source does not say whether a given call
+inside it did (a branch not taken), and no call has its own exit status, so
+these replay with the status unknown. 176 AP1 calls compute their command in
+JavaScript and cannot be replayed at all. A relative Codex `workdir` is
+joined to the session cwd. A worktree that no longer exists is replayed from
+the matching directory of the main checkout (7 SNP-tree calls).
+
+The replay is read-only on the projects: the detector reads files and runs
+`git rev-parse`, and its appends go to scratch files that are emptied after
+each call and removed at the end. The report holds counts and content-free
+shape labels only; `--show-misses` prints raw commands to stderr for local
+debugging and is never committed.
 
 **Which commands touch data** is decided by the tool's own `classify`, not by
-the detector: an interpreter running a program file (`script`) or code from
-the command or stdin (`inline`), or any word naming a data-like path
-(`shell-data`: a data file extension, or a path under `data/`, `outputs/`,
-`output/` or `results/`). Terminal-only modes, tooling modules, Mycelium's
-own helpers, tooling and Mycelium state, URLs, and search patterns (a
-grep/rg pattern operand, negated globs, pathspec magic, regex syntax) do
-not count. The rule is in one block at the top of the classifier and is
-tested with paired positives and negatives.
+the detector:
 
-**Result.** Same classifier, detector before (`origin/main` at d0054d9) and
-after this change:
+- an interpreter running a program file (`script`);
+- an interpreter running code from the command or from stdin (`inline`);
+- any word naming a data-like path (`shell-data`): a data file extension, or
+  a path under `data/`, `outputs/`, `output/` or `results/`, as written or
+  read from the call's directory (with each literal `cd` in command
+  position), with a brace word judged by its alternatives.
 
-| | SNP-tree | AP1-learning |
-|---|---|---|
-| Claude transcripts / Codex rollouts | 25 / 7 | 27 / 145 |
-| Bash calls replayed (Claude + Codex) | 3,755 (1,353 + 2,402) | 9,348 (732 + 8,616) |
-| Data-touching | 1,574 | 4,751 |
-| Events, before | 1,451 (92.2%) | 4,724 (99.4%) |
-| Silent misses, before | 118 | 8 |
-| **Events, after** | **1,569 (99.7%)** | **4,732 (99.6%)** |
-| **Logged skips, after** | **5** (all `script-unreadable`) | **19** (all `script-unreadable`) |
-| **Silent misses, after** | **0** | **0** |
+These do not count: terminal-only modes, tooling modules, Mycelium's own
+helpers (reached through a plugin layout, not merely sharing a helper's
+name), tooling and Mycelium state, URLs, and search patterns (a grep or rg
+pattern operand, negated globs, pathspec magic, regex syntax, an absolute
+path that does not start with a usual top-level directory). The rule is in
+one block at the top of the classifier and is tested with paired positives
+and negatives.
 
-Both projects pass: at least 95% events, and every other data-touching
-command is a logged skip with a reason. The skips are scratch scripts that
-no longer exist on disk, which is also what the hook records when a
-command deletes its own script. 176 AP1 code-mode calls build their
-command in JavaScript (`cmd: someVar`) and cannot be replayed; they are
-counted, not classified.
+**Result.** Same classifier throughout. "Before" is the detector at
+`origin/main` d0054d9; "after" is this change.
+
+| | SNP-tree, executed | AP1-learning, executed | AP1-learning, code-mode source |
+|---|---|---|---|
+| Calls replayed | 3,754 (1,353 Claude + 2,401 Codex) | 732 (Claude) | 8,616 (Codex) |
+| Data-touching | 1,576 | 326 | 4,429 |
+| Events, before | 1,451 (92.1%) | 322 (98.8%) | 4,411 (99.6%) |
+| Silent misses, before | 120 | 4 | 4 |
+| **Events, after** | **1,571 (99.7%)** | **326 (100%)** | **4,415 (99.7%)** |
+| … of which analysis events | 731 | 64 | 872 |
+| … of which `data_command` | 840 | 262 | 3,543 |
+| **Logged skips, after** | **5** | **0** | **14** |
+| **Silent misses, after** | **0** | **0** | **0** |
+
+Every population passes: at least 95% events, and every other data-touching
+command is a logged skip with a reason (all `script-unreadable`). By cause:
+
+- SNP-tree's 5: project scripts that no longer exist.
+- AP1-learning's 14:
+  - 6 project scripts that no longer exist;
+  - 2 temporary scripts under `/tmp`;
+  - 6 Mycelium helpers named through a path the replay cannot resolve: an
+    old plugin-cache version, `$(cat .mycelium/plugin-root)`, or
+    `$plugin_root`.
+
+**What an event is.** Most events are `data_command` records, not analysis
+events. A `data_command` lists the data-like paths the command names, as
+mentions with no direction, and any unproven interpreter runs. It records
+an input or an output only where shell syntax proves the direction: a
+redirection, or a modelled `cp`/`mv`, in an exit-0 `&&` list of literal
+words. In these transcripts no `data_command` met that bar, so none records
+a direction. An event therefore means "this call is in the record, and it
+touched these paths", not "its inputs and outputs are known".
+
+**What "no silent misses" means.** It holds under the classification rule
+above, not for every data access. The rule shares the detector's blind
+spots, such as a data file named only inside a variable, a script's own
+reads, or a path with no data-like shape. In a review of this change, a hand
+sample of 80 suspicious calls the rule did not classify found 4 or 5 that
+touched data and left no record.
 
 **What the replay fixed.** The silent misses fell into four detector gaps,
 each fixed with tests in `test_lineage_data_commands.py`:
 
-- analysis output under `analysis/<name>/output/` (SNP-tree's convention;
-  78 such directories), which the data-path rule did not recognize (about
-  73 calls);
+- analysis output under `analysis/<name>/output/`: SNP-tree's convention,
+  with 78 such directories, which the data-path rule did not recognize;
 - a relative path read from inside `analysis/` (`ls outputs/` in
   `analysis/x`, or after `cd analysis`), which never shows `analysis/` in
-  the word itself (about 46 calls). Relative words are now also judged as
-  resolved against the call's directory and each literal `cd` before them;
+  the word itself. Such a word is now also judged as resolved against the
+  call's directory and each `cd` in command position before it, when the
+  resolved path (for a glob, its directory) exists at hook time;
 - a stdin-fed interpreter that was unlabelled when it had arguments
   (`python3 - "$F" <<'EOF'`), when a `$(...)` argument split the segment
   before its heredoc, or when the call's only other run was a Mycelium
   helper;
-- a brace-expanded data word (`registry/{samples,studies}.tsv`).
+- a brace-expanded data word (`tables/{first,second}.tsv`).
 
 The rest of the first run's misses were the classifier's own false
 positives (a data directory named inside a grep pattern or an exclusion
