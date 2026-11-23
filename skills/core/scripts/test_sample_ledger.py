@@ -936,3 +936,73 @@ def test_the_emitted_contract_replays_on_the_released_kinds(tmp_path: Path) -> N
     emitted = json.loads(out.read_text())
     assert emitted["schema"] == dcc.SCHEMA
     assert {c["kind"] for c in emitted["checks"]} <= MAIN_KINDS
+
+
+# Moved from the public contract tests: paired_batch is ledger-internal.
+
+PAIRED = {"kind": "paired_batch", "unit": "donor", "within": "arm", "batch": ["run"]}
+PAIRED_BASE = [["d1", "T", "r1"], ["d1", "C", "r1"], ["d2", "T", "r2"], ["d2", "C", "r2"]]
+
+
+@pytest.mark.parametrize("added, why", [
+    (None, "base passes"),
+    ([["d3", "X", "NA"]], "X has no pair; pairing's"),
+    ([["d3", "T", "r3"], ["d3", "C", "NA"]], "d3's pair is only in the warning"),
+    ([["d1", "T", "NA"]], "nothing new"),
+])
+def test_paired_batch_missing_keys(tmp_path: Path, added: list, why: str) -> None:
+    table = tmp_path / "t.tsv"
+    table.write_text("donor\tarm\trun\n" + "".join(
+        "\t".join(r) + "\n" for r in PAIRED_BASE + (added or [])))
+    summaries, alerts = dcc.run_contract({"schema": dcc.SCHEMA, "table": str(table),
+                                          "checks": [PAIRED]}, str(tmp_path))
+    assert not any(a["blocking"] for a in alerts), why
+    if added and any("NA" in r for r in added):
+        assert any("missing value" in a["message"] for a in alerts), why
+
+
+def test_paired_batch_keys_are_validated_internally() -> None:
+    def bad(check: dict, fragment: str) -> None:
+        with pytest.raises(dcc.ContractError, match=fragment):
+            dcc.validate_contract({"schema": dcc.SCHEMA, "table": "t.tsv", "checks": [check]})
+
+    bad({k: v for k, v in PAIRED.items() if k != "batch"}, "needs 'batch'")
+    bad({k: v for k, v in PAIRED.items() if k != "within"}, "needs 'within'")
+    bad({**PAIRED, "group": ["cohort"]}, "'group' must be a column name")
+    bad({**PAIRED, "batch_scopes": {"run": "site"}}, "batch_scopes")
+    bad({**PAIRED, "contrast": "arm"}, "unknown key 'contrast'")
+
+
+def test_a_hand_written_contract_may_not_use_paired_batch(tmp_path: Path) -> None:
+    (tmp_path / "t.tsv").write_text("u\tv\tb\nd1\tv1\tr1\nd1\tv2\tr1\n")
+    (tmp_path / "c.json").write_text(json.dumps({"schema": dcc.SCHEMA, "table": "t.tsv",
+                                                 "checks": [{"kind": "paired_batch", "unit": "u",
+                                                             "within": "v", "batch": ["b"]}]}))
+    result = subprocess.run([sys.executable, str(CHECKER), "--contract", str(tmp_path / "c.json"),
+                             "--root", str(tmp_path), "--json"], capture_output=True, text=True)
+    assert result.returncode == 1 and "unknown check kind" in result.stderr
+
+
+def test_thousands_of_erased_contrasts_stay_within_the_budget(tmp_path: Path) -> None:
+    # Codex's shape: 500 long group labels x 11 visits, every follow-up run
+    # missing, so 5,500 contrasts are erased; the warning tier must not
+    # rescan them, and its work is charged to the shared budget.
+    import time
+
+    rows = []
+    for u in range(1000):
+        group = "g" * 8192 + f"{u // 2:04}"
+        for v in range(12):
+            rows += [[f"s{u}-{v}-{k}", f"d{u:04}", group, f"v{v:02}", "R" if v == 0 else ""]
+                     for k in range(2)]
+    spec = _write_ledger(tmp_path, ["sample", "donor", "group", "visit", "run"], rows,
+                         sample_id="sample", group="group", unit_of_replication="donor",
+                         batch=["run"], pairing={"unit": "donor", "within": "visit"})
+    contract = dcc.ledger_contract(json.loads(spec.read_text()), str(tmp_path))
+    paired = [c for c in contract["checks"] if c["kind"] == "paired_batch"]
+    table = dcc.read_table(contract["table"])[1]
+    start = time.perf_counter()
+    alerts = dcc.check_paired_batch(paired[0], [], table)
+    assert time.perf_counter() - start < dcc.ADVISORY_SECONDS + 0.5
+    assert not any(a["blocking"] for a in alerts)
+    assert all(len(a["observed"]) < 100000 for a in alerts if "observed" in a)  # 5 listed, not 5,500
