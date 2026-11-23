@@ -323,6 +323,30 @@ def test_an_unreadable_rollout_is_reported(tmp_path):
     assert unreadable == [tmp_path / "rollout-bad.jsonl.zst"]
 
 
+def test_only_calls_inside_the_project_count(tmp_path):
+    # `Proj--other` shares the encoded prefix of `Proj` plus `--`; its
+    # transcript is found by name but its calls are not in the project.
+    root = tmp_path / "Proj"
+    other = tmp_path / "Proj--other"
+    for d in (root, other):
+        (d / "data").mkdir(parents=True)
+    projects = tmp_path / "projects"
+    enc = lambda p: "-" + str(p).strip("/").replace("/", "-").replace(".", "-")
+    for d, cmd in ((other, "head data/example.csv"), (root, "head data/mine.csv")):
+        tdir = projects / enc(d)
+        tdir.mkdir(parents=True)
+        (tdir / "s.jsonl").write_text("\n".join([
+            _claude_line([{"type": "tool_use", "id": cmd, "name": "Bash",
+                           "input": {"command": cmd}}], cwd=str(d)),
+            _claude_line([{"type": "tool_result", "tool_use_id": cmd, "content": ""}],
+                         "user", cwd=str(d))]) + "\n")
+    cmds, meta = replay.collect("P", root, projects, [])
+    assert [c.command for c in cmds] == ["head data/mine.csv"]
+    assert meta["calls_outside_project"] == 1
+    assert replay.within(str(root / ".claude" / "worktrees" / "w"), [root])
+    assert not replay.within(str(other), [root])
+
+
 def test_resolve_cwd_maps_a_removed_worktree(tmp_path):
     root = tmp_path / "Proj"
     (root / "analysis").mkdir(parents=True)

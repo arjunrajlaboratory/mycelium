@@ -294,6 +294,30 @@ def test_a_background_launch_claims_no_completed_write(tmp_path, target, launch)
     assert record["tool_outcome"] == "unknown"
 
 
+@pytest.mark.parametrize("launch", [
+    {"tool_input": {"run_in_background": True}, "tool_response": {"stdout": ""}},
+    {"tool_input": {}, "tool_response": {"stdout": "", "backgroundTaskId": "b3"}},
+])
+def test_a_background_analysis_launch_hashes_no_output(tmp_path, launch):
+    # The script's static scan predicts `out.csv`, which already holds old
+    # bytes. At launch nothing has been written: no hash, no `outputs` entry.
+    # 0.9.7 recorded the old digest as the run's output.
+    host, repo, sid = "claude", _repo(tmp_path), "owned"
+    (repo / "out.csv").write_text("old")
+    _start(host, repo, sid)
+    command = "python3 analysis.py"
+    _pre(host, repo, sid, "bga", command)
+    payload = {"cwd": str(repo), "session_id": sid, "hook_event_name": "PostToolUse",
+               "tool_name": "Bash", "tool_use_id": "bga",
+               "tool_input": {"command": command, **launch["tool_input"]},
+               "tool_response": launch["tool_response"]}
+    assert _run(host, "mycelium-data-tracker.sh", repo, payload).returncode == 0
+    (event,) = [e for e in _stream(repo, host, sid) if e.get("kind") is None]
+    assert event["outputs"] == []
+    assert event["unconfirmed_outputs"] == [str(repo / "out.csv")]
+    assert "sha256" not in json.dumps(event["unconfirmed_outputs"])
+
+
 def test_a_foreground_success_still_claims_its_write(tmp_path):
     host, repo, sid = "claude", _repo(tmp_path), "owned"
     _start(host, repo, sid)

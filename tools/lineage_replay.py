@@ -516,7 +516,7 @@ def codex_rollouts(sessions_dirs: Iterable[Path], root: Path,
                 if unreadable is not None:
                     unreadable.append(path)
                 continue
-            if cwd == str(root) or cwd.startswith(str(root) + "/"):
+            if within(cwd, [root]):
                 found.append(path)
     return found
 
@@ -1100,6 +1100,31 @@ def _worker_replay(job: tuple[str, str, int | None]) -> Outcome:
     return replay_one(_WORKER["detector"], command, cwd, bash_exit, _WORKER["scratch"])
 
 
+def project_roots(root: Path) -> list[Path]:
+    """The project and its linked git worktrees (`git worktree list`)."""
+    roots = [root]
+    try:
+        out = subprocess.run(["git", "-C", str(root), "worktree", "list", "--porcelain"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            path = Path(line[len("worktree "):])
+            if path not in roots:
+                roots.append(path)
+    return roots
+
+
+def within(path: str, roots: list[Path]) -> bool:
+    """Whether ``path`` is one of ``roots`` or inside one, compared by path
+    components (`/p/Proj--other` is not inside `/p/Proj`)."""
+    if not path:
+        return False
+    parts = Path(os.path.normpath(path)).parts
+    return any(parts[:len(r.parts)] == r.parts for r in roots)
+
+
 def collect(name: str, root: Path, claude_dir: Path,
             codex_dirs: list[Path]) -> tuple[list[Command], dict]:
     commands: list[Command] = []
@@ -1116,6 +1141,11 @@ def collect(name: str, root: Path, claude_dir: Path,
         stats.computed_cmd += one.computed_cmd
         stats.not_run += one.not_run
         stats.computed_workdir += one.computed_workdir
+    # Transcript directories are found by name, which another project can
+    # share a prefix of; only calls made inside this project count.
+    roots = project_roots(root)
+    outside = sum(1 for c in commands if not within(c.cwd, roots))
+    commands = [c for c in commands if within(c.cwd, roots)]
     seen: set[tuple[str, str]] = set()
     unique: list[Command] = []
     for c in commands:
@@ -1133,7 +1163,8 @@ def collect(name: str, root: Path, claude_dir: Path,
             # call still running, a snippet that failed or never finished).
             "claude_calls_unproven": unproven["claude"],
             "codex_calls_unproven": stats.not_run,
-            "codex_calls_with_computed_workdir": stats.computed_workdir}
+            "codex_calls_with_computed_workdir": stats.computed_workdir,
+            "calls_outside_project": outside}
     return unique, meta
 
 

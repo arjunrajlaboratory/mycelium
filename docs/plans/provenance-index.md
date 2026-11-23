@@ -886,7 +886,7 @@ Every executed population passes: at least 95% events, and every other
 data-touching command is a logged skip with a reason. Both of SNP-tree's
 skips are `script-unreadable`: project scripts that no longer exist.
 
-Secondary, unverified: **AP1-learning Codex code mode** has 8,292 call
+Secondary, unverified: **AP1-learning Codex code mode** has 8,291 call
 sites from completed snippets. 4,172 of them are data-touching:
 
 - before: 4,157 events (99.6%) and 4 silent misses;
@@ -905,6 +905,18 @@ redirection, or a modelled `cp`/`mv`, in an exit-0 `&&` list of literal
 words. In these transcripts no `data_command` met that bar, so none records
 a direction. An event therefore means "this call is in the record, and it
 touched these paths", not "its inputs and outputs are known".
+
+**Known limits of the replay** (documented, not fixed):
+
+- A task notification typed into a user message is read like the host's
+  own. A spoofed `completed (exit code 0)` could therefore admit a
+  background launch.
+- In code mode, a `tools.exec_command(...)` written inside a nested template
+  literal's interpolation is read as a call site. Code mode is the
+  secondary, unverified figure for this reason among others.
+- Claude transcript directories are found by their encoded name. Only calls
+  whose recorded cwd is the project or one of its `git worktree list`
+  worktrees (compared by path components) are counted.
 
 **What "no silent misses" means.** It holds under the classification rule
 above, not for every data access. The rule shares the detector's blind

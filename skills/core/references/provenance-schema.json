@@ -442,6 +442,13 @@
             "$ref": "#/$defs/file_record"
           }
         },
+        "unconfirmed_outputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "At a background launch: paths the job is expected to write, unhashed. Never a completed write."
+        },
         "io_detection": {
           "enum": [
             "static",
@@ -559,6 +566,13 @@
           "items": {
             "$ref": "#/$defs/file_record"
           }
+        },
+        "unconfirmed_outputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "At a background launch: paths the job is expected to write, unhashed. Never a completed write."
         },
         "io_detection": {
           "const": "unresolved"

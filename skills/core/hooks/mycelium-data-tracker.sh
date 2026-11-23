@@ -145,6 +145,9 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
   # The call's outcome reaches the lineage record even without an exit
   # code (an interrupted or timed-out call is a failure, not a success).
   OBSERVATION_FLAGS+=(--outcome "$OUTCOME")
+  if [[ "$BACKGROUND_LAUNCH" == 1 ]]; then
+    OBSERVATION_FLAGS+=(--background-launch)
+  fi
 
   # Locate the Python extractor helper. Default: sibling in skills/core/scripts/.
   HELPER="${MYCELIUM_DATA_HELPER:-$HERE/../scripts/extract_data_lineage_event.py}"

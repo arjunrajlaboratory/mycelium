@@ -173,7 +173,8 @@ how many times the data was looked at:
   `samtools`, …) whose text names a data-like path: a file with a data
   extension (the scan list plus compressed and common genomics, tree, and
   image formats), a path under `data/`, or a path under `analysis/**/outputs`
-  (or `analysis/**/output`, which older projects use). A relative word is
+  (or `analysis/**/output`, which older projects use, for a command up to
+  16 KB; a longer command gets 0.9.7's rules exactly). A relative word is
   also judged as resolved against the call's directory and each `cd` in
   command position before it whose operand is a literal path
   (`ls outputs/` run in `analysis/x`), but only when the resolved path (for
@@ -247,7 +248,12 @@ Pipes, `;`, `||`, backgrounding, subshells, substitutions, `$` expansions,
 globs, braces, tilde, heredocs, and an unknown exit status claim nothing. A
 Claude Code background launch (`run_in_background`, or a result carrying a
 `backgroundTaskId`) fires PostToolUse when the job starts, so the tracker
-passes no exit status for it and its writes are never claimed as done. A
+passes no exit status and `--background-launch` for it. A launch, or any call
+the observer saw leave a job running, records no `outputs` at all, from any
+source: a path it is expected to write is listed, unhashed, in
+`unconfirmed_outputs`. After `printf -v`, `read`, `readarray`, `mapfile`,
+`getopts`, or `let` (any of which can set `PATH`), nothing later in the list
+is claimed, as after `export` or a `PATH=` assignment. A
 command's own operands (`head data/x.csv`) are never inputs: that would need
 each tool's grammar. Files are hashed at hook time; a FIFO, device, or
 directory is recorded without being opened, and every open is non-blocking

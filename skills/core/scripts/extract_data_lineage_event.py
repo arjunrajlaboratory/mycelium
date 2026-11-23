@@ -5534,9 +5534,21 @@ def _project_root(cwd: str) -> str | None:
 # An analysis's output directory: Mycelium's `outputs`, and `output`, which
 # older projects use (SNP-tree has 78 `analysis/<name>/output/` directories).
 _ANALYSIS_OUTPUT_SEGMENTS = frozenset({"outputs", "output"})
+# 0.9.7's rule, kept exactly for a command over the size cap below.
+_LEGACY_OUTPUT_SEGMENTS = frozenset({"outputs"})
+# A command longer than this gets 0.9.7's data-command reading exactly:
+# none of the added rules (`output/`, relative words, brace words) run, so
+# their cost and their claims stay off the hook path for huge commands.
+DATA_RULES_SIZE_CAP = 16 * 1024
 
 
-def _is_data_like_path(word: str, root: str | None = None) -> bool:
+def _output_segments(command: str) -> frozenset[str]:
+    return (_LEGACY_OUTPUT_SEGMENTS if len(command) > DATA_RULES_SIZE_CAP
+            else _ANALYSIS_OUTPUT_SEGMENTS)
+
+
+def _is_data_like_path(word: str, root: str | None = None,
+                       output_segments: frozenset[str] = _ANALYSIS_OUTPUT_SEGMENTS) -> bool:
     """Whether a literal word names data: a data file extension, or a path
     under `data/` or `analysis/**/outputs/`. Tooling and Mycelium state are
     not data. Under the project root, only the part inside it is judged, so
@@ -5567,7 +5579,7 @@ def _is_data_like_path(word: str, root: str | None = None) -> bool:
     for index, segment in enumerate(segments):
         if segment == "data" and (index < len(segments) - 1 or "/" in word):
             return True
-        if segment in _ANALYSIS_OUTPUT_SEGMENTS and analysis_seen:
+        if segment in output_segments and analysis_seen:
             return True
         analysis_seen = analysis_seen or segment == "analysis"
     return False
@@ -5616,9 +5628,6 @@ class _MentionBase:
 # Text between two words that puts the second in command position.
 _COMMAND_BREAK = frozenset(";|&\n(`{")
 _COMMAND_KEYWORDS = frozenset({"then", "do", "else", "!", "time"})
-# The added mention readings (relative words, brace words) run only on
-# commands up to this size; above it a call gets exactly the literal scan.
-_MENTION_EXTRA_LIMIT = 16 * 1024
 # A tracked directory longer than this stops relative resolution, so a
 # chain of `cd x` cannot grow the work per word.
 _TRACKED_DIR_LIMIT = 1024
@@ -5651,7 +5660,7 @@ def _data_path_mentions(
     comment, an `echo`, or an unexecuted branch. Returns (words, truncated).
 
     The literal scan comes first and is never narrowed. For a command up
-    to `_MENTION_EXTRA_LIMIT`, two readings may then add mentions:
+    to `DATA_RULES_SIZE_CAP`, two readings may then add mentions:
     a relative word judged from where it was likely read (the call's
     directory, moved by each `cd` in command position whose operand is a
     literal path, when the resolved path exists), and a brace word inside
@@ -5660,17 +5669,18 @@ def _data_path_mentions(
     `cd` may fail or sit in a subshell), which is enough for a mention.
     """
     seen: dict[str, None] = {}
+    segments = _output_segments(command)
     for match in _DATA_COMMAND_WORD_RX.finditer(command):
         # Quote removal joins a partly quoted word (`"data"/x.csv`). A
         # quoted name holding a space is read in pieces (`data/my`), which
         # still marks the call as touching data.
         word = match.group(0).replace("'", "").replace('"', "")
-        if word in seen or not _is_data_like_path(word, root):
+        if word in seen or not _is_data_like_path(word, root, segments):
             continue
         if len(seen) >= DATA_COMMAND_NAMED_PATH_LIMIT:
             return list(seen), True
         seen[word] = None
-    if len(command) > _MENTION_EXTRA_LIMIT:
+    if len(command) > DATA_RULES_SIZE_CAP:
         return list(seen), False
 
     def add(word: str) -> bool:
@@ -5784,6 +5794,9 @@ _STATUS_UNPROVEN_WORDS = frozenset(
      "hash", "unset", "export", "declare", "typeset", "readonly", "local",
      "unalias"}
 )
+# Builtins that set a shell variable named by an operand (besides those in
+# _STATUS_UNPROVEN_WORDS); `printf -v NAME` is checked where it is used.
+_VARIABLE_SETTING_WORDS = frozenset({"read", "readarray", "mapfile", "getopts", "let"})
 # Commands that cannot move or remove a directory, so the remembered working
 # directory still names the shell's own after they run.
 _CWD_STABLE_COMMANDS = frozenset(
@@ -6025,6 +6038,7 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
     if bash_exit != 0:
         return io
     root = _project_root(str(cwd))
+    segments = _output_segments(command)
     parts = _literal_and_list(command)
     if parts is None:
         return io
@@ -6052,6 +6066,11 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
                 return io  # the command name may now resolve elsewhere
             first += 1
         argv = argv[first:]
+        if argv and (argv[0] in _VARIABLE_SETTING_WORDS
+                     or (argv[0] == "printf" and "-v" in argv[1:2])):
+            # `printf -v PATH ...`, `read PATH`: any variable, PATH included,
+            # may now differ, so a later `cp` may not be cp.
+            return io
         if argv and argv[0] in _STATUS_UNPROVEN_WORDS:
             # `exit 0 && ...`, `set -n && ...`, `! cmd < missing`: the final
             # status no longer proves this or any later command ran (or
@@ -6062,8 +6081,8 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
                 # A URL-shaped word (`> s3://user:pass@b/o.csv`) is never
                 # recorded as a local path: it would carry its userinfo.
                 continue
-            if not _is_data_like_path(target, root) and not _is_data_like_path(
-                str(_resolve_shell_path(target, current) or ""), root
+            if not _is_data_like_path(target, root, segments) and not _is_data_like_path(
+                str(_resolve_shell_path(target, current) or ""), root, segments
             ):
                 continue
             path = _resolve_shell_path(target, current)
@@ -6081,8 +6100,8 @@ def _certain_shell_io(command: str, cwd: Path, bash_exit: int | None) -> _ShellI
             pairs = _copy_move_pairs(argv, current) if inert_after[position] and not any(
                 _is_url(word) for word in argv[1:]) else None
             for source, target in pairs or []:
-                if _is_data_like_path(str(source), root) or _is_data_like_path(
-                    str(target), root
+                if _is_data_like_path(str(source), root, segments) or _is_data_like_path(
+                    str(target), root, segments
                 ):
                     io.inputs.append((str(source), argv[0]))
                     io.outputs.append((str(target), argv[0]))
@@ -7382,15 +7401,20 @@ def build_step(
     return step
 
 
-# The longest simple command data_command_step tokenizes.
+# The longest simple command data_command_step tokenizes, and the longest
+# named path it matches against a stage's words.
 _STEP_STAGE_LIMIT = 16 * 1024
+_STEP_NAMED_PATH_LIMIT = 1024
 
 
 def data_command_step(bash_cmd: str, named_paths: list[str] | None = None) -> dict[str, Any] | None:
     """The argv of the data command's working stage: the first stage that
     names one of the data paths the record lists, else the first stage that
     does something other than change directory or set variables."""
-    named =[p for p in named_paths or [] if isinstance(p, str) and p]
+    # A named path over 1 KB is never compared: each argument would scan it
+    # whole (a 114 KB path against thousands of words cost seconds).
+    named = [p for p in named_paths or []
+             if isinstance(p, str) and p and len(p) <= _STEP_NAMED_PATH_LIMIT]
     fallback: dict[str, Any] | None = None
     offset = 0
     stages = 0
@@ -7641,6 +7665,7 @@ def _record_unowned_data_command(
         step = data_command_step(args.bash_cmd, event.get("named_paths"))
         if step is not None:
             event["step"] = step
+        _withhold_launch_outputs(event, args)
         _stamp_v2(event, args, cwd)
     else:
         event["ts_ns"] = time.time_ns()
@@ -7650,6 +7675,29 @@ def _record_unowned_data_command(
 
 
 _OBSERVATION_STATUSES = frozenset({"no-known-overlap", "overlap", "background", "unavailable"})
+
+
+def _is_background_launch(args: argparse.Namespace) -> bool:
+    """The hook ran when a background job started, not when it ended: the
+    tracker says so (`--background-launch`), or the observer saw the call
+    leave a job running."""
+    observation = getattr(args, "observation", None) or {}
+    return bool(getattr(args, "background_launch", False)
+                or observation.get("status") == "background")
+
+
+def _withhold_launch_outputs(record: dict, args: argparse.Namespace) -> None:
+    """At a background launch nothing has been written yet: a predicted
+    output keeps only its path, in `unconfirmed_outputs`, never a hash or a
+    place in `outputs` (which every reader takes as a completed write)."""
+    if not _is_background_launch(args) or not record.get("outputs"):
+        return
+    paths = [o.get("path") for o in record["outputs"] if isinstance(o, dict) and o.get("path")]
+    record["outputs"] = []
+    record["unconfirmed_outputs"] = paths
+    record.setdefault("lineage_warnings", []).append(
+        "Background launch: the job had not finished when this was recorded, "
+        "so its outputs are listed unhashed in unconfirmed_outputs.")
 
 
 def _parse_observation(raw: str | None) -> dict | None:
@@ -7888,6 +7936,14 @@ def main() -> int:
         ),
     )
     ap.add_argument("--outcome", choices=("success", "failure", "unknown"), default=None)
+    ap.add_argument(
+        "--background-launch",
+        action="store_true",
+        help=(
+            "The hook ran when a background job started (the host's launch "
+            "acknowledgement): no output is recorded as written."
+        ),
+    )
     args = ap.parse_args()
     args.observation = _parse_observation(args.observation_json)
     # Detection reads `$PY run.py` as the interpreter it was assigned; the
@@ -7929,6 +7985,7 @@ def main() -> int:
             step = data_command_step(args.bash_cmd, event.get("named_paths"))
             if step is not None:
                 event["step"] = step
+            _withhold_launch_outputs(event, args)
             _apply_input_proofs([event], args, cwd)
             _stamp_v2(event, args, cwd)
             write_events([json.dumps(event) + "\n"], args.append_to)
@@ -7983,6 +8040,8 @@ def main() -> int:
             f"This call ran {dropped} more analysis stage(s) than the "
             f"{MAX_EVENTS_PER_CALL} recorded; their runs are not separately listed.")
         events[-1]["stages_not_recorded"] = dropped
+    for event in events:
+        _withhold_launch_outputs(event, args)
     _apply_input_proofs(events, args, cwd)
     for event in events:
         _stamp_v2(event, args, cwd)

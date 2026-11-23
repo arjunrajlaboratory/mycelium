@@ -126,9 +126,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     path, or a glob's directory, exists.
   - A brace word inside one unquoted shell word (`tables/{a,b}.tsv`) is
     judged by its alternatives.
-  - These readings only add mentions to the literal scan, run only on
-    commands up to 16 KB, and are bounded (tracked directory length,
-    distinct alternatives, total expansion work).
+  - These readings only add mentions to the literal scan, and are bounded
+    (tracked directory length, distinct alternatives, total expansion
+    work). A command over 16 KB gets 0.9.7's rules exactly, `output/`
+    included.
   - A stdin-fed interpreter is now labelled in three more cases: it has
     arguments (`python3 - "$F" <<'EOF'`), its only sign of stdin is an
     explicit `-`, or the call's only other run is a Mycelium helper.
@@ -220,11 +221,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or `cp`/`mv` target that already existed was then recorded as the job's
   output, with its old content, while the job was still waiting to run. This
   affected 0.9.7 for data-extension paths too. The tracker now passes no exit
-  status for a launch, so nothing directional is claimed.
+  status for a launch, plus `--background-launch`. A launch, or a call the
+  observer saw leave a job running, records no `outputs` at all. Its
+  predicted outputs are listed unhashed in a new `unconfirmed_outputs`
+  field. This includes a script's statically inferred outputs, which 0.9.7
+  also hashed at launch.
+- After `printf -v`, `read`, `readarray`, `mapfile`, `getopts`, or `let`,
+  any of which can set `PATH`, a later `cp`/`mv` in the same `&&` list no
+  longer counts as proven. 0.9.7 recorded a copy that a `PATH`-shadowed `cp`
+  never made.
 - A data command's `step` no longer tokenizes a stage longer than 16 KB.
   `shlex` built a 250 KB quoted argument one character at a time, taking
   seconds on the hook path. Such a stage is recorded as `partial` with
-  `reason: "stage-too-long"`.
+  `reason: "stage-too-long"`, and a named path over 1 KB is not matched
+  against a stage's words.
 - A Claude Code session working in a linked git worktree (such as the
   desktop app's `.claude/worktrees/<name>/` side sessions) is now judged on
   that worktree. Stop and the Bash post-action hook took the repository root

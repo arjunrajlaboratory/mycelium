@@ -325,20 +325,95 @@ def _extract_cpu(project: Path, command: str, out: Path) -> float:
 
 
 def test_a_long_stage_does_not_slow_step_construction(project):
-    # Review of #159: recognizing `analysis/<x>/output/` sent a 250 KB quoted
-    # argument through shlex in data_command_step (3 s), where main, which
-    # never named the path, built no step at all.
+    # Review of #159: a 250 KB quoted argument went through shlex in
+    # data_command_step (3 s) once the stage named data. A command naming
+    # no data never builds a step, so it is the baseline.
     _output_tree(project)
     long_arg = "x" * 250_000
-    named = f"printf '%s' '{long_arg}' analysis/x/output/ >/dev/null"
+    named = f"printf '%s' '{long_arg}' data/ >/dev/null"
     unnamed = f"printf '%s' '{long_arg}' analysis/x/scripts/ >/dev/null"
     baseline = _extract_cpu(project, unnamed, project / "a.ndjson")
     elapsed = _extract_cpu(project, named, project / "b.ndjson")
     assert not (project / "a.ndjson").exists() or not (project / "a.ndjson").read_text()
     record = json.loads((project / "b.ndjson").read_text())
-    assert record["named_paths"] == ["analysis/x/output/"]
+    assert record["named_paths"] == ["data/"]
     assert record["step"] == {"partial": True, "reason": "stage-too-long"}
     assert elapsed < baseline * 1.5 + 0.2, (elapsed, baseline)
+
+
+def test_a_command_over_the_size_cap_gets_the_0_9_7_reading(project):
+    # Over DATA_RULES_SIZE_CAP none of the added rules run: `output/` is not
+    # analysis output, and relative and brace words are not resolved.
+    _output_tree(project)
+    pad = " #" + "x" * lineage_event.DATA_RULES_SIZE_CAP
+    for command in ("ls analysis/x/output/", "wc -l analysis/x/tables/{a,b}.tsv"):
+        assert _event(command, project) is not None
+        assert _event(command + pad, project) is None
+    assert _event("head outputs/log", project / "analysis" / "x") is not None
+    assert _event("head outputs/log" + pad, project / "analysis" / "x") is None
+    # 0.9.7's own rules still apply.
+    assert _event("head data/x.csv" + pad, project)["named_paths"] == ["data/x.csv"]
+
+
+@pytest.mark.parametrize("tail", ["analysis/x/output/", "data/"])
+def test_a_huge_command_costs_what_main_does(project, tail):
+    # Review of #159: 192 KB with one 114 KB path took 2.3 s against main's
+    # 0.5 s, as the step matched every short word against the long path.
+    # The same input with a path no rule names is main's path: no record.
+    _output_tree(project)
+
+    def command(path: str) -> str:
+        return (("true " + "ab " * 3000 + "; ") * 8 + "true " + "ab " * 2000
+                + f"; printf '%s' {path}" + "a" * 114000 + " >/dev/null")
+
+    baseline = _extract_cpu(project, command("analysis/x/scripts/"), project / "a.ndjson")
+    elapsed = _extract_cpu(project, command(tail), project / "b.ndjson")
+    assert elapsed < baseline * 1.5 + 0.2, (elapsed, baseline)
+
+
+@pytest.mark.parametrize("setter", [
+    "printf -v PATH %s ./fakebin",
+    "read PATH < data/x.csv",
+    "export PATH=./fakebin",
+    "declare PATH=./fakebin",
+    "PATH=./fakebin",
+])
+@pytest.mark.parametrize("pair", ["analysis/x/output/src analysis/x/output/dst",
+                                  "data/x.csv data/y.csv"])
+def test_a_path_change_ends_what_a_copy_proves(project, setter, pair):
+    # `cp` after PATH changes may be any program (`fakebin/cp -> true`):
+    # a zero exit no longer proves the copy read or wrote anything.
+    _output_tree(project)
+    for name in ("analysis/x/output/src", "analysis/x/output/dst", "data/y.csv"):
+        (project / name).write_text("1\n")
+    event = _event(f"{setter} && cp {pair}", project)
+    assert event is not None
+    assert event["inputs"] == [] and event["outputs"] == []
+
+
+@pytest.mark.parametrize("flags", [
+    ["--background-launch"],
+    ["--observation-json", '{"status": "background", "host_session_id": "s"}'],
+])
+def test_a_launch_records_outputs_only_as_unhashed_paths(project, flags):
+    (project / "out.csv").write_text("old")
+    script = project / "fit.py"
+    script.write_text("import pandas as pd\npd.DataFrame().to_csv('out.csv')\n")
+    for command in ("python3 fit.py", "sleep 9 && printf x > data/x.csv"):
+        out = project / "events.ndjson"
+        out.unlink(missing_ok=True)
+        old = sys.argv
+        sys.argv = ["x", "--cwd", str(project), "--ts", "T", "--bash-cmd", command,
+                    "--append-to", str(out), *flags]
+        try:
+            assert lineage_event.main() == 0
+        finally:
+            sys.argv = old
+        (record,) = [json.loads(line) for line in out.read_text().splitlines()]
+        assert record["outputs"] == []
+        if command.startswith("python3"):
+            # The static scan's prediction, as a bare path.
+            assert record["unconfirmed_outputs"] == [str(project / "out.csv")]
 
 
 def test_relative_resolution_stats_a_bounded_number_of_words(project):
