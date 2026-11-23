@@ -121,6 +121,7 @@ APP_EDIT_SHAPE_WARNING = (
 STATE_SCHEMA = 2
 PLUGIN = Path(__file__).resolve().parents[3]
 MAX_STOP_RETRIES = 3
+NO_CONTINUATION_ENV = "MYCELIUM_STOP_NO_CONTINUATION"
 # A command still pending when the Stop allowance ends can no longer be settled.
 FINAL_PENDING = ("Native command step had no terminal evidence when the Stop allowance ended; "
                  "output provenance is not recorded")
@@ -266,9 +267,14 @@ def hook_environment(host, plugin, *, batch=False):
     return env
 
 
-def run_hook(name, data, root, plugin, *, timeout=12, batch=False):
+def run_hook(name, data, root, plugin, *, timeout=12, batch=False, last_stop=False):
     host = active_host()
     env = hook_environment(host, plugin, batch=batch)
+    # On the last allowed Stop a block cannot reach the agent, so the shared
+    # Stop hook skips blocks that only explain (it publishes the fallback).
+    env.pop(NO_CONTINUATION_ENV, None)
+    if last_stop:
+        env[NO_CONTINUATION_ENV] = "1"
     override = env.get("MYCELIUM_STATE_DIR")
     if override and Path(root, override).resolve() != (Path(root) / ".mycelium").resolve():
         # The adapter reads markers and receipts only under <root>/.mycelium.
@@ -1046,7 +1052,8 @@ def _dispatch(event, payload, plugin_root, host):
                     try:
                         budget = {} if app_stop_deadline is None else {
                             "timeout": max(0.001, app_stop_deadline - time.monotonic())}
-                        result = run_hook("mycelium-stop-check.sh", data, root, plugin_root, **budget)
+                        result = run_hook("mycelium-stop-check.sh", data, root, plugin_root,
+                                          last_stop=turn["retries"] >= MAX_STOP_RETRIES, **budget)
                     except (subprocess.SubprocessError, OSError, RuntimeError, ValueError) as error:
                         if not app:
                             raise

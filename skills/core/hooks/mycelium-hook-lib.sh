@@ -1154,6 +1154,16 @@ mycelium__take_moved_from() {
       if [[ "$start_ts" =~ ^[0-9]{1,18}$ ]]; then
         MYCELIUM_MOVED_START_TS="$start_ts"
       fi
+      # A one-time handoff explanation that transaction already received
+      # moves with it, so the move cannot grant a second one. The adopting
+      # transaction has no log yet, so the marker says "carried", not an ID.
+      if [[ -f "$run/handoff-check-blocked.tmp" && ! -L "$run/handoff-check-blocked.tmp" ]]; then
+        text=$(head -n 1 "$run/handoff-check-blocked.tmp" 2>/dev/null || true)
+        if [[ "$text" == carried \
+          || "$text" == "$(sed -n '/^session_id:/{s/^session_id:[[:space:]]*//;p;q;}' "$log" 2>/dev/null || true)" ]]; then
+          printf 'carried\n' > "$STATE_DIR/handoff-check-blocked.tmp" 2>/dev/null || break
+        fi
+      fi
       # The handoff the agent wrote at the path SessionStart announced. When
       # this checkout already holds one, append it rather than lose either.
       if [[ -f "$run/last-session.md" && ! -L "$run/last-session.md" ]]; then
