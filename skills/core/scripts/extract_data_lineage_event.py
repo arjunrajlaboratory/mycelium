@@ -7246,6 +7246,11 @@ def build_step(
         if not isinstance(token, str):
             expect_seed = False
             continue
+        if token == "--":
+            # An operand boundary: after it, an option parser (argparse,
+            # getopt, optparse) reads every word as a positional value, so
+            # `-- --seed 4839…` names no seed.
+            break
         if expect_seed:
             expect_seed = False
             if re.fullmatch(r"-?\d{1,19}", token):

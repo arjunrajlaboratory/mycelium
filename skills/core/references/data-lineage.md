@@ -399,7 +399,10 @@ Read from the detected stage's own text, never guessed:
   `set.seed`), with their origin. Argv seeds, like `params` and config
   operands, are read from the redacted arguments: in
   `fit.py --password --seed=482731` the parser takes `--seed=482731` as the
-  password, so it is masked and never recorded as a seed.
+  password, so it is masked and never recorded as a seed. The scan stops at
+  a `--` word: after it, an option parser reads every word as a positional
+  value, so `-- --seed 4839…` names no seed. A committed manifest keeps a
+  seed only as the Redaction section allows.
 
 Two runs of one script with different arguments are two events. Identical
 stages (a loop body) are one. A call with more than 64 analysis stages records
@@ -445,12 +448,28 @@ and an embedded observation's `bash_cmd`. A word is kept only on
 - **Subcommands.** The first operand after a vocabulary command is kept if
   it is a fixed subcommand (`git status`, `uv run python`, `R CMD BATCH`,
   `python3 -m pytest`).
-- **Option names** are kept only in a fixed shape, with at most 3 digits:
-  `--[a-z][a-z0-9-]{0,40}`, `-x`, `-xy`, three lower-case letters (`-xzf`),
-  or a letter and one or two digits (`-O2`). For `--opt=value`, `--opt=` is
-  kept and the value takes the value rule. Anything else shaped like an
-  option is a value (`--Q0t3SG…`, `-pS3cr3t`, `-resume`, `--min_count`).
-  After a `--` word, every later word of that simple command is an operand.
+- **Short options** are kept in a fixed shape, with at most 3 digits: `-x`,
+  `-xy`, three lower-case letters (`-xzf`), or a letter and one or two
+  digits (`-O2`).
+- **Long options** must have the shape `--[a-z][a-z0-9-]{0,40}` (at most 3
+  digits), but the shape alone is not evidence: `--cinder-lattice-sable-amber`
+  has it. A long option is kept only when one of these shows its role:
+  - it is one of about 55 common options (`--help`, `--verbose`, `--dry-run`,
+    `--output`, `--config`, `--seed`, `--threads`, ...);
+  - it is a known option of the vocabulary command that receives it
+    (`git log --oneline`, `grep --ignore-case`, `timeout --signal`). One
+    command's options are not lent to another (`cat --oneline` is `<v>`);
+  - the words go to an interpreter (`python3`, `Rscript`, `bash`, ...), or
+    they are the step's `script_args` or `params`, and the run's own source
+    spells `--name` as a whole token. The source is the event's
+    `script_source`: the inline body, or the embedded copy of a script under
+    100 KB. A larger script lends no names. Consolidation reads nothing
+    from disk.
+
+  For `--opt=value`, `--opt=` follows the same rule and the value takes the
+  value rule. Anything else shaped like an option is a value (`--Q0t3SG…`,
+  `-pS3cr3t`, `-resume`, `--min_count`, an unknown `--proof`). After a `--`
+  word, every later word of that simple command is an operand.
 - **Names.** Assignment names (`NAME=`) and loop variable names are kept
   only in one case (`OMP_NUM_THREADS`, `lr`, `trainer.max_epochs`), with at
   most 3 digits. The value takes the value rule.
@@ -495,6 +514,15 @@ if it is exactly an evidence-backed path. A config record without evidence
 `"<v>"`. Consolidating committed text reads no file system, so an
 unresponsive mount cannot hang Stop.
 
+Seeds are derived from the argv and the source, so they follow the same
+policy. An argv seed in `step.seeds` is kept only where the committed argv
+still shows it: a seed flag and its value both kept, side by side (`--seed
+42`) or joined (`--seed=42`). A value the argv masks (more than 6
+characters, after `--`, or taken by a secret flag) is dropped. A source seed
+(`step.seeds` with `origin: source`, and `seeds_detected`) is kept only
+under the short-number rule, because the source is not committed. A step
+left with no seeds has no `seeds` field.
+
 `script_source` is never committed. The manifest keeps `script_sha256` (with
 `script_sha256_of` as before) and adds `script_source_bytes` and
 `script_source_lines`. `filters_detected` (0.9.7 regex text) is dropped.
@@ -505,10 +533,11 @@ when a new manifest consolidates them. A manifest without `text_policy` was
 written by 0.9.7 or earlier and still loads.
 
 Known limits of the allowlist. A secret is kept if it is exactly a
-vocabulary word, a fixed subcommand, or a short number. It is also kept if
-it is shaped as a lower-case option name (`--abcdef`), or as a one-case
+vocabulary word, a fixed subcommand, a common or command-known option
+name, or a short number. It is also kept if the run's own source spells it
+as `--name` and it is passed to that run, or if it is shaped as a one-case
 assignment or loop name (`SECRETVALUE=1`), since it cannot be told apart
-from a flag or a variable. Structured input/output paths and `script` are
+from a variable. Structured input/output paths and `script` are
 published as recorded.
 
 **Machine-local stores: the denylist.** The stores under `.mycelium/` (the
@@ -698,7 +727,14 @@ recorded gap. It needs everything since the write to be accounted for:
 
 Anything else is `unknown` with the reason `coverage-unproven`, and the
 unaccounted calls are listed under `unaccounted`. Calls still running are
-listed under `open_calls` instead.
+listed under `open_calls` instead. Some calls never vouch for a write:
+
+- a call that started before the write ended and ran on past it, because
+  its two walks do not bracket the write;
+- another checkout's call recorded in a shared state directory, which could
+  still write here by absolute path;
+- any call when the journal has a line that does not parse. A torn line may
+  have been a Post. Appends write every byte.
 
 **Identity continuity.** A disk query can still answer `current`, with
 `basis: identity-unchanged-since-write`, when three things hold:
@@ -717,7 +753,9 @@ the host shows it ended. For Claude, that is when a later Stop's
 `background_tasks` snapshot omits the job's `backgroundTaskId` or lists it as
 finished. An unknown status, a job with no task id, or a Codex job stays open.
 Absence from the snapshot ends only the main agent's own jobs; a background
-subagent's job needs a finished status. The end is also written to the
+subagent's job needs a finished status. A command that may leave a process
+running after its shell (`&`, `nohup`, `setsid`, `disown`) is marked detached
+at Pre, and no host task status ends it. The end is also written to the
 session's store, so it outlives journal compaction. While any background job
 may still be running (one not ended and not yet past the journal's age bound),
 identity continuity is not used. A process that still holds a file open, for

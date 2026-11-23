@@ -234,6 +234,59 @@ def test_the_stop_payload_reaches_the_journal(project: Path, monkeypatch) -> Non
     assert any(r.get("ev") == "end" and r.get("task") == "t-1" for r in records)
 
 
+def test_a_torn_journal_line_proves_nothing(project: Path) -> None:
+    bash(project, "c1", write_x(project, "A"))
+    journal = io.journal_path(project / ".mycelium")
+    with journal.open("a") as handle:
+        handle.write('{"seq": 90, "ev": "post", "call": "B", "ho')  # torn mid-append
+    record = status(project, "A", disk=False)["record"]
+    assert record["status"] == "unknown"
+    assert record["unaccounted"][0]["kind"] == "journal-discontinuous"
+
+
+def test_a_detached_process_outlives_its_host_task(project: Path) -> None:
+    import json
+
+    state = project / ".mycelium"
+    payload = {"session_id": "s1", "tool_use_id": "bg", "tool_name": "Bash",
+               "hook_event_name": "PreToolUse", "cwd": str(project),
+               "tool_input": {"command": "nohup setsid sh -c 'sleep 30' &",
+                              "run_in_background": True}}
+    io.hook(state, project, "claude", json.dumps(payload))
+    io.post(state, host="claude", session="s1", call_id="bg", tool="Bash",
+            repo_root=project, outcome="success", bash_exit=0, background=True,
+            task_id="t-detached")
+    # The host reports the outer task finished; the detached child may not be.
+    assert io.end_finished_background(state, host="claude", session="s1", tasks=[]) == 0
+
+
+def test_a_call_running_past_the_write_cannot_vouch(project: Path) -> None:
+    state = project / ".mycelium"
+    io.pre(state, host="claude", session="s1", call_id="B", tool="Bash",
+           repo_root=project, snapshot=True)
+    bash(project, "A", write_x(project, "A"))
+    io.post(state, host="claude", session="s1", call_id="B", tool="Bash",
+            repo_root=project, outcome="success", bash_exit=0)
+    result = li.query_hash(li.load(project, write=False), sha("A"), disk=False)
+    writes = result["paths"][0]["writes"]
+    assert writes and all(w["record"]["status"] == "unknown" for w in writes)
+    (by_a,) = [w for w in writes if w["call"] == "s1|claude:A"]
+    assert {"kind": "overlapping-call", "call": "s1|claude:B"} in by_a["record"]["unaccounted"]
+
+
+def test_another_checkouts_call_cannot_vouch(project: Path, tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    (other / "out").mkdir(parents=True)
+    bash(project, "A", write_x(project, "A"))
+    state = project / ".mycelium"  # a state directory shared by two checkouts
+    io.pre(state, host="claude", session="s1", call_id="F", tool="Bash",
+           repo_root=other, snapshot=True)
+    io.post(state, host="claude", session="s1", call_id="F", tool="Bash",
+            repo_root=other, outcome="success", bash_exit=0)
+    record = status(project, "A", disk=False)["record"]
+    assert {"kind": "foreign-call", "call": "s1|claude:F"} in record["unaccounted"]
+
+
 def test_every_new_observation_records_identity(project: Path) -> None:
     observation = bash(project, "c1", write_x(project, "A"))
     (created,) = observation["changes"]["created"]

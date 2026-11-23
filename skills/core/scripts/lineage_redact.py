@@ -482,10 +482,16 @@ def is_secret_name(name: str) -> bool:
 #   `for` list are values;
 # - the first operand after a vocabulary command only if it is a fixed
 #   subcommand (`git status`, `uv run`, `python3 -m pytest`);
-# - option names only in a fixed shape: `--[a-z][a-z0-9-]{0,40}`, `-x`,
-#   `-xy`, `-xzf` (three lower-case letters), `-O2`; at most 3 digits. For
-#   `--opt=value`, `--opt=` and the value rule. After a `--` word every
-#   word of that simple command is an operand;
+# - short options in a fixed shape: `-x`, `-xy`, `-xzf` (three lower-case
+#   letters), `-O2`; at most 3 digits;
+# - long options (`--[a-z][a-z0-9-]{0,40}`, at most 3 digits) only on
+#   evidence of the role, never by shape alone: a common option
+#   (`_COMMIT_COMMON_OPTIONS`), a known option of the vocabulary command
+#   receiving it (`_COMMIT_COMMAND_OPTIONS`), or, in the words an
+#   interpreter or the run's own script receives, a name the run's source
+#   spells as a whole token (`commit_source_options`). For `--opt=value`,
+#   `--opt=` on the same evidence and the value rule. After a `--` word
+#   every word of that simple command is an operand;
 # - assignment and loop-variable names only in one case (`OMP_NUM_THREADS`,
 #   `lr`, `trainer.max_epochs`), at most 3 digits;
 # - values only if they are exactly (after shell quote removal; one leading
@@ -541,6 +547,100 @@ _COMMIT_DELIMITERS = frozenset("""
 EOF EOT END EOS STOP DONE HEREDOC DOC TEXT TXT DATA INPUT OUTPUT CODE SCRIPT PY PYTHON R
 RSCRIPT SH BASH SQL JSON YAML YML CSV TSV TOML INI CFG CONFIG MD HTML XML MSG BODY PATCH
 """.split())
+# Long option names are kept only on evidence of their role, never by shape
+# alone (`--cinder-lattice-sable-amber` is shaped like one): a fixed list of
+# common options, the known options of the vocabulary command that receives
+# it, or the literal `--name` in the source of the script the record ran.
+_COMMIT_COMMON_OPTIONS = frozenset("""
+--help --version --verbose --quiet --silent --debug --dry-run --force --yes --all
+--output --out --outdir --output-dir --input --input-dir --config --configfile --profile
+--seed --random-seed --random-state --threads --jobs --cores --workers --cpus --gpus
+--device --batch-size --epochs --lr --learning-rate --format --overwrite --resume
+--recursive --directory --file --log-level --log-file --no-cache --color --no-color
+--json --limit --sample --samples --name --mode --model --data --prefix --tmpdir
+""".split())
+_COMMIT_COMMAND_OPTIONS: dict[str, frozenset[str]] = {name: frozenset(words.split()) for
+                                                      names, words in (
+    ("git", """--amend --oneline --stat --cached --staged --no-verify --hard --soft --short
+     --branch --porcelain --name-only --name-status --graph --decorate --message --patch
+     --global --list --tags --rebase --ff-only --no-ff --depth --set-upstream --delete
+     --pretty --since --until --author --reverse --abbrev-commit --no-pager --show-current
+     --untracked-files --show-toplevel --abbrev-ref --no-edit --continue --abort --prune"""),
+    ("grep egrep fgrep rg", """--ignore-case --line-number --count --files-with-matches
+     --invert-match --word-regexp --fixed-strings --extended-regexp --include --exclude
+     --exclude-dir --context --after-context --before-context --max-count --only-matching
+     --hidden --glob --type --files --no-ignore --smart-case --perl-regexp --no-filename
+     --with-filename --null --binary-files"""),
+    ("cat head tail less more", "--lines --bytes --number --follow --show-all --squeeze-blank"),
+    ("ls", "--long --human-readable --sort --reverse --almost-all --classify"),
+    ("cp mv rm ln mkdir rmdir touch chmod chown", """--interactive --preserve --no-clobber
+     --parents --archive --symbolic --reference --no-dereference --target-directory"""),
+    ("sort uniq wc cut paste join tr comm split column seq", """--numeric-sort --reverse
+     --unique --key --field-separator --general-numeric-sort --human-numeric-sort --stable
+     --repeated --ignore-case --words --chars --bytes --fields --delimiter --characters
+     --delimiters --serial --delete --squeeze-repeats --complement --table --separator
+     --equal-width --numeric-suffixes --additional-suffix --lines --check-order"""),
+    ("tar gzip gunzip zcat bzip2 bunzip2 xz unxz zstd zip unzip bgzip tabix", """--create
+     --extract --list --gzip --bzip2 --xz --exclude --decompress --stdout --keep --best
+     --fast --to-stdout --preset"""),
+    ("curl wget", """--location --fail --header --request --insecure --remote-name --retry
+     --compressed --show-error --max-time --output-document --continue
+     --no-check-certificate --directory-prefix --head --include --progress-bar"""),
+    ("pip pip3 pipx uv uvx poetry conda mamba micromamba pixi npm npx", """--upgrade --user
+     --editable --requirement --no-deps --channel --env --override-channels --frozen
+     --locked --no-sync --project --with --python --save-dev --global --system --dev
+     --group --extra --all-extras --no-install-project --offline"""),
+    ("pytest", """--maxfail --tb --cov --cov-report --durations --lf --ff --exitfirst
+     --capture --collect-only --deselect --ignore --junitxml --no-header --runxfail
+     --strict-markers --basetemp --rootdir --import-mode --showlocals --last-failed
+     --failed-first --keyword --markers --no-cov --numprocesses --dist --timeout"""),
+    ("Rscript R", """--vanilla --no-save --no-restore --slave --default-packages --args
+     --no-echo --no-environ --no-site-file --no-init-file --restore --save"""),
+    ("snakemake", """--snakefile --use-conda --use-singularity --use-apptainer --forceall
+     --forcerun --until --printshellcmds --reason --keep-going --rerun-incomplete --unlock
+     --dag --rulegraph --latency-wait --cluster --conda-frontend --conda-prefix --sdm
+     --executor --software-deployment-method --rerun-triggers --list-rules --summary
+     --touch --notemp --keep-incomplete --nolock --show-failed-logs"""),
+    ("jupyter jupytext papermill quarto pandoc", """--to --execute --inplace --kernel
+     --parameters --output-format --standalone --from --log-output --set-kernel --sync
+     --update --pipe --template --toc"""),
+    ("jq yq", """--raw-output --compact-output --slurp --arg --argjson --null-input
+     --sort-keys --exit-status --tab --indent --join-output"""),
+    ("sed awk gawk", """--in-place --expression --regexp-extended --assign
+     --null-data --posix --sandbox"""),
+    ("xargs", "--null --max-args --max-procs --replace --no-run-if-empty --arg-file"),
+    ("env", "--unset --ignore-environment --chdir --split-string --null"),
+    ("timeout", "--signal --kill-after --preserve-status --foreground"),
+    ("nice", "--adjustment"),
+    ("sudo", "--user --group --preserve-env --login --non-interactive"),
+    ("srun sbatch squeue scancel sacct", """--ntasks --cpus-per-task --mem --time
+     --partition --nodes --gres --job-name --error --array --account --qos --wrap
+     --dependency --mem-per-cpu --exclusive --pty --me --state --format"""),
+    ("docker singularity apptainer", """--rm --volume --workdir --entrypoint --interactive
+     --tty --network --user --platform --bind --nv --cleanenv --containall --pwd"""),
+    ("rsync scp", "--archive --compress --delete --progress --exclude --include --partial "
+                  "--human-readable --checksum --update --times"),
+    ("diff cmp", "--unified --brief --side-by-side --ignore-all-space --new-file"),
+    ("md5sum sha1sum sha256sum shasum", "--check --algorithm --status --tag --binary"),
+    ("du df", "--human-readable --summarize --max-depth --total --block-size"),
+    ("make cmake", "--keep-going --always-make --build --target --parallel --install"),
+    ("date", "--utc --date --reference"),
+    ("realpath readlink basename dirname stat file", """--canonicalize
+     --canonicalize-existing --relative-to --relative-base --suffix --multiple --zero
+     --printf --mime-type --brief --dereference"""),
+    ("tee", "--append --ignore-interrupts"),
+    ("which type command", "--skip-alias --read-alias"),
+    ("samtools bcftools bedtools", "--threads --output-fmt --reference --write-index"),
+    ("nextflow", "--outdir --input --genome --max-cpus --max-memory"),
+) for name in names.split()}
+# Interpreters: the long options of the run's own source (a script or an
+# inline body) may be lent to the words such a command receives.
+_COMMIT_SOURCE_RECEIVERS = frozenset({
+    "python", "python2", "python3", "pypy", "pypy3", "ipython", "Rscript", "R",
+    "bash", "sh", "zsh", "dash", "ksh", "snakemake",
+})
+# A whole `--name` token in source text (a quote, space or `=` around it).
+_SOURCE_OPT_RX = re.compile(r"(?<![A-Za-z0-9_-])(--[a-z][a-z0-9-]{0,40})(?![A-Za-z0-9_-])")
 _LONG_OPT_RX = re.compile(r"--[a-z][a-z0-9-]{0,40}\Z")
 _LONG_OPT_EQ_RX = re.compile(r"(--[a-z][a-z0-9-]{0,40})=")
 _SHORT_OPT_RX = re.compile(r"-(?:[A-Za-z]{1,2}|[a-z]{3}|[A-Za-z][0-9]{1,2})\Z")
@@ -573,6 +673,42 @@ def _digits(text: str) -> int:
 
 def _option_name_ok(name: str) -> bool:
     return bool(_LONG_OPT_RX.match(name) or _SHORT_OPT_RX.match(name)) and _digits(name) <= 3
+
+
+def commit_source_options(source: Any) -> set[str]:
+    """The long option names (`--min-count`) the run's own source text
+    names as whole tokens: evidence that such a word is one of the script's
+    options. Only names of the option shape are returned."""
+    if not isinstance(source, str):
+        return set()
+    return {name for name in _SOURCE_OPT_RX.findall(source) if _option_name_ok(name)}
+
+
+def _prog_key(base: str) -> str:
+    """`python3.11` and `python3` share the options of `python`."""
+    if _COMMIT_VERSIONED_RX.match(base) and not base.startswith("pip"):
+        return "python"
+    return base
+
+
+def _long_option_ok(name: str, state: "_CommitState") -> bool:
+    """A long option name is kept on evidence of its role: a common option,
+    a known option of the command receiving it, or (in words an interpreter
+    or the run's own script receives) a name the run's source spells."""
+    if not _option_name_ok(name) or not name.startswith("--"):
+        return False
+    if name in _COMMIT_COMMON_OPTIONS:
+        return True
+    if state.prog is not None and name in _COMMIT_COMMAND_OPTIONS.get(state.prog, ()):
+        return True
+    return state.receiver and name in state.known
+
+
+def _option_ok(word: str, state: "_CommitState") -> bool:
+    """An option word: a long option on evidence, a short one by shape."""
+    if word.startswith("--"):
+        return _long_option_ok(word, state)
+    return bool(_SHORT_OPT_RX.match(word)) and _digits(word) <= 3
 
 
 def _name_ok(name: str) -> bool:
@@ -659,15 +795,23 @@ def _commit_command(dec: str, keep_paths: set[str]) -> tuple[str, bool]:
 
 
 class _CommitState:
-    __slots__ = ("cmd", "wrapper", "secret_next", "loop_name", "operands", "sub")
+    __slots__ = ("cmd", "wrapper", "secret_next", "loop_name", "operands", "sub",
+                 "prog", "receiver", "known")
 
-    def __init__(self, cmd: bool) -> None:
+    def __init__(self, cmd: bool, known: frozenset[str] | set[str] = frozenset()) -> None:
         self.cmd = cmd
         self.wrapper = False
         self.secret_next = False
         self.loop_name = False
         self.operands = False  # after `--`: every word is an operand
         self.sub = False  # the next operand may be a subcommand
+        # The vocabulary command whose options the next words may be.
+        self.prog: str | None = None
+        # Whether the words go to an interpreter or the run's own script, so
+        # that the source's option names (``known``) may be lent to them. A
+        # list of operands only (`script_args`) is the script's own.
+        self.receiver = not cmd
+        self.known = known
 
 
 def _commit_assignment(dec: str, match: re.Match, keep_paths: set[str]) -> str:
@@ -676,6 +820,19 @@ def _commit_assignment(dec: str, match: re.Match, keep_paths: set[str]) -> str:
         return COMMIT_VALUE
     return match.group(0) + commit_safe_value(
         dec[match.end():], keep_paths, _commit_secret_name(name))
+
+
+def _set_prog(state: _CommitState, dec: str, command: bool, word: str) -> None:
+    """Record which command the next words go to: a vocabulary command (its
+    known options), the run's own script named by an evidence path (the
+    source's options), or an unknown word (common options only)."""
+    if command:
+        base = _prog_key(dec.rpartition("/")[2])
+        state.prog = base
+        state.receiver = base in _COMMIT_SOURCE_RECEIVERS
+    else:
+        state.prog = None
+        state.receiver = word != COMMIT_VALUE
 
 
 def _commit_word(raw: str, dec: str, keep_paths: set[str], state: _CommitState) -> str:
@@ -699,7 +856,7 @@ def _commit_word(raw: str, dec: str, keep_paths: set[str], state: _CommitState) 
             return dec
         if raw == dec and dec in _SHELL_KEYWORDS:
             return dec
-        if state.wrapper and (_option_name_ok(dec) or _is_number(dec)):
+        if state.wrapper and (_option_ok(dec, state) or _is_number(dec)):
             return dec
         wrapped = state.wrapper
         state.cmd = state.wrapper = False
@@ -710,6 +867,7 @@ def _commit_word(raw: str, dec: str, keep_paths: set[str], state: _CommitState) 
             # and it is still judged as a command word.
             state.cmd = state.wrapper = True
             return word
+        _set_prog(state, dec, command, word)
         if command:
             if dec.rpartition("/")[2] in _WRAPPERS:
                 state.cmd = state.wrapper = True
@@ -729,18 +887,22 @@ def _commit_word(raw: str, dec: str, keep_paths: set[str], state: _CommitState) 
         return dec
     if dec.startswith("-") and not _is_number(dec):
         long_eq = _LONG_OPT_EQ_RX.match(dec)
-        if long_eq and _option_name_ok(long_eq.group(1)):
+        if long_eq and _long_option_ok(long_eq.group(1), state):
             return long_eq.group(0) + commit_safe_value(
                 dec[long_eq.end():], keep_paths, _commit_secret_name(long_eq.group(1)))
         if "=" not in dec and _commit_secret_name(dec) and not _NO_VALUE_FLAG_RX.search(dec):
             state.secret_next = True
-        if _option_name_ok(dec):
+        if _option_ok(dec, state):
             return dec
         return commit_safe_value(dec, keep_paths)
     if state.sub:
         state.sub = False
         if raw == dec and (dec in _COMMIT_SUBCOMMANDS or _is_command(dec)):
             state.sub = dec in _COMMIT_CHAIN or _is_command(dec)
+            if _is_command(dec):
+                # `uv run python`, `python3 -m pytest`: the options that
+                # follow are that command's.
+                _set_prog(state, dec, True, dec)
             return dec
     if _is_number(dec) or _keep_match(dec, keep_paths) or _HIDDEN in dec:
         return commit_safe_value(dec, keep_paths)
@@ -768,16 +930,17 @@ def _gap_kind(gap: str) -> tuple[bool, bool, bool]:
     return sep, redir, heredoc
 
 
-def _commit_shell(text: str, keep_paths: set[str]) -> str:
+def _commit_shell(text: str, keep_paths: set[str],
+                  known: frozenset[str] | set[str] = frozenset()) -> str:
     out: list[str] = []
-    state = _CommitState(cmd=True)
+    state = _CommitState(cmd=True, known=known)
     pos = 0
     for start, end in _words(text):
         gap = text[pos:start]
         out.append(gap)
         sep, redir, heredoc = _gap_kind(gap)
         if sep:
-            state = _CommitState(cmd=True)
+            state = _CommitState(cmd=True, known=known)
         raw = text[start:end]
         pos = end
         if raw == _COMMENT:
@@ -834,14 +997,18 @@ def _show_placeholders(text: str) -> str:
     return text.replace(_HIDDEN, COMMIT_VALUE).replace(_COMMENT, COMMIT_COMMENT)
 
 
-def commit_safe_command(text: Any, keep_paths: set[str] | None = None) -> Any:
+def commit_safe_command(text: Any, keep_paths: set[str] | None = None,
+                        known_options: frozenset[str] | set[str] | None = None) -> Any:
     """Command text for a committed record: only allowlisted words survive
     (see the block comment above); separators and layout are kept, each
     unquoted comment becomes `<comment>`, and each heredoc body collapses to
-    `<heredoc: N lines>`."""
+    `<heredoc: N lines>`. ``known_options`` are the long option names the
+    run's own source spells (commit_source_options): kept in the words an
+    interpreter or that script receives."""
     if not isinstance(text, str) or not text:
         return text
     keep = keep_paths or set()
+    known = known_options or frozenset()
     text = _hide_placeholders(text)
     out: list[str] = []
     shell: list[str] = []
@@ -851,7 +1018,7 @@ def commit_safe_command(text: Any, keep_paths: set[str] | None = None) -> Any:
 
     def flush() -> None:
         if shell:
-            out.append(_commit_shell("".join(shell), keep))
+            out.append(_commit_shell("".join(shell), keep, known))
             shell.clear()
 
     def delim_text(word: str) -> str:
@@ -888,15 +1055,17 @@ def commit_safe_command(text: Any, keep_paths: set[str] | None = None) -> Any:
 
 
 def commit_safe_argv(argv: Any, keep_paths: set[str] | None = None,
-                     command_word: bool = True) -> Any:
+                     command_word: bool = True,
+                     known_options: frozenset[str] | set[str] | None = None) -> Any:
     """An argv list for a committed record, word by word under the same
     allowlist. ``command_word`` says whether the list starts with a command
-    (a full argv, wrappers) or is only operands (`script_args`, `params`).
+    (a full argv, wrappers) or is only operands (`script_args`, `params`:
+    the script's own, so ``known_options`` apply to them).
     Non-string tokens (an inline-body placeholder) pass through."""
     if not isinstance(argv, list):
         return argv
     keep = keep_paths or set()
-    state = _CommitState(cmd=command_word)
+    state = _CommitState(cmd=command_word, known=known_options or frozenset())
     out: list[Any] = []
     for token in argv:
         if not isinstance(token, str):

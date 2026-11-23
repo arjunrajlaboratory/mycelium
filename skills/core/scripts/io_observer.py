@@ -476,6 +476,48 @@ def append_line(path: Path, record: dict[str, Any], *, io_root: Path) -> None:
             os.close(fd)
 
 
+def journal_intact(path: Path) -> bool:
+    """Whether every line of the journal parses as a record. A torn line (a
+    hook that failed mid-append) may have been a Post or an expiry, so the
+    index proves nothing from a journal that is not intact."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            raw = handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    for line in raw.split(b"\n"):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            return False
+        if not isinstance(value, dict) or not isinstance(value.get("seq"), int):
+            return False
+    return True
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """os.write until every byte is written: a short write would tear a
+    journal line."""
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write")
+        view = view[written:]
+
+
 def _read_lines(path: Path) -> list[dict[str, Any]]:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -554,6 +596,9 @@ class Interval(NamedTuple):
     end_reason: str | None = None
     # The host's id for a background job (Claude's backgroundTaskId).
     task: str | None = None
+    # The command may leave a process running after its shell: the host's
+    # task ending is then no evidence that the work ended.
+    detached: bool = False
 
 
 def _journal_records(path: Path) -> list[dict[str, Any]]:
@@ -599,6 +644,7 @@ def _intervals(records: list[dict[str, Any]]) -> dict[str, Interval]:
                 False,
                 int(record.get("wall_ns") or 0),
                 record.get("agent") if isinstance(record.get("agent"), str) else None,
+                detached=record.get("detached") is True,
             )
         elif event == "launch" and key in calls:
             # A background call's own Post: the job may still be running,
@@ -652,6 +698,7 @@ def journal_event(
     meta: dict[str, Any] | None = None,
     observe: bool = False,
     task: str | None = None,
+    detached: bool = False,
 ) -> tuple[int, dict[str, Interval], list[Interval]]:
     """Append one event under the journal lock.
 
@@ -715,6 +762,7 @@ def journal_event(
                 "jid": jid,
                 **({"observe": True} if observe else {}),
                 **({"task": task} if task else {}),
+                **({"detached": True} if detached else {}),
             }
         )
         intervals = _intervals(records)
@@ -748,7 +796,7 @@ def journal_event(
             try:
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
                     raise OSError("journal is not a regular file")
-                os.write(fd, line.encode("utf-8"))
+                _write_all(fd, line.encode("utf-8"))
             finally:
                 os.close(fd)
     _publish_expired(state_dir, jid, expired)
@@ -824,8 +872,9 @@ def end_finished_background(state_dir: Path, *, host: str, session: str,
         lines = []
         for interval in _intervals(records).values():
             if (interval.post_seq is not None or not interval.background or not interval.task
+                    or interval.detached
                     or interval.host != host or interval.session != session):
-                continue
+                continue  # a detached process may outlive the host's task
             status = listed.get(interval.task)
             if status is not None and status not in _TASK_DONE:
                 continue  # still running, or a status we cannot read
@@ -848,7 +897,7 @@ def end_finished_background(state_dir: Path, *, host: str, session: str,
             try:
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
                     raise OSError("journal is not a regular file")
-                os.write(fd, "".join(lines).encode("utf-8"))
+                _write_all(fd, "".join(lines).encode("utf-8"))
             finally:
                 os.close(fd)
     # The end also goes to the session's store: compaction drops the ended
@@ -910,7 +959,7 @@ def turn_end(state_dir: Path, *, host: str, session: str) -> int:
                 try:
                     if not stat.S_ISREG(os.fstat(fd).st_mode):
                         raise OSError("journal is not a regular file")
-                    os.write(fd, "".join(lines).encode("utf-8"))
+                    _write_all(fd, "".join(lines).encode("utf-8"))
                 finally:
                     os.close(fd)
     # Unjournaled foreground calls of this session (their Pre lost the
@@ -1194,6 +1243,7 @@ def pre(
     repo_root: Path | None = None,
     snapshot: bool = False,
     background: bool = False,
+    detached: bool = False,
 ) -> None:
     """Open the call's interval; for Bash, snapshot the watched scope.
 
@@ -1213,7 +1263,7 @@ def pre(
     try:
         seq, _, _ = journal_event(
             state_dir, "pre", call_id, host=host, session=session, agent=agent,
-            tool=tool, background=background,
+            tool=tool, background=background, detached=detached,
         )
     except LockTimeout:
         journal_error = "lock-timeout"
@@ -1901,15 +1951,18 @@ def hook(state_dir: Path, repo_root: Path, host: str, raw: str) -> int:
         return 0
     if event == "PreToolUse":
         background = False
+        detached = False
         if is_bash:
             tool_input = payload.get("tool_input")
             tool_input = tool_input if isinstance(tool_input, dict) else {}
             command = tool_input.get("command")
-            background = tool_input.get("run_in_background") is True or (
-                isinstance(command, str) and starts_background_job(command)
-            )
+            # The command itself may leave a process running after its shell
+            # (`&`, nohup, setsid, disown): the host's task ending does not
+            # end that process.
+            detached = isinstance(command, str) and starts_background_job(command)
+            background = tool_input.get("run_in_background") is True or detached
         pre(state_dir, host=host, session=session, call_id=call_id, tool=tool, agent=agent,
-            repo_root=repo_root, snapshot=is_bash, background=background)
+            repo_root=repo_root, snapshot=is_bash, background=background, detached=detached)
     elif event in ("PostToolUse", "PostToolUseFailure") and not is_bash:
         edited = None
         edit_result = "success"

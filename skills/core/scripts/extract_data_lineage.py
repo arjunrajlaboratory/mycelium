@@ -398,16 +398,68 @@ def _commit_env(env: Any, keep: set[str]) -> Any:
     return out
 
 
-def _commit_step(step: Any, keep: set[str]) -> Any:
+_COMMIT_SEED_FLAGS = frozenset({"--seed", "--random-state", "--random_state", "--random-seed"})
+
+
+def _short_seed(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and \
+        _lr()._is_number(str(value))
+
+
+def _argv_seed_survives(value: int, lists: list[list[Any]]) -> bool:
+    """A seed read from the arguments is published only where the committed
+    argv still shows it: a seed flag and its value both kept, adjacent
+    (`--seed 42`) or joined (`--seed=42`). A value the argv masked (too long,
+    after `--`, consumed by a secret flag) is never republished here."""
+    text = str(value)
+    for words in lists:
+        for index, word in enumerate(words):
+            if not isinstance(word, str):
+                continue
+            name, eq, rest = word.partition("=")
+            if name not in _COMMIT_SEED_FLAGS:
+                continue
+            if eq and rest == text:
+                return True
+            if not eq and index + 1 < len(words) and words[index + 1] == text:
+                return True
+    return False
+
+
+def _commit_seeds(step: dict[str, Any]) -> None:
+    """`step.seeds` under the committed policy (after the argv is committed):
+    an argv seed survives only as the committed argv shows it; a source seed
+    (the source is not committed) only under the short-number rule."""
+    seeds = step.get("seeds")
+    if not isinstance(seeds, list):
+        step.pop("seeds", None)
+        return
+    lists = [step[k] for k in ("script_args", "argv") if isinstance(step.get(k), list)]
+    kept = []
+    for seed in seeds:
+        if not isinstance(seed, dict) or not _short_seed(seed.get("value")):
+            continue
+        if seed.get("origin") == "argv" and not _argv_seed_survives(seed["value"], lists):
+            continue
+        kept.append(seed)
+    if kept:
+        step["seeds"] = kept
+    else:
+        step.pop("seeds", None)
+
+
+def _commit_step(step: Any, keep: set[str], known: set[str] | None = None) -> Any:
+    """``known``: the long option names the run's own source spells (the
+    evidence that such a word in its arguments is one of its options)."""
     lr = _lr()
     if not isinstance(step, dict):
         return step
     step = dict(step)
     if "argv" in step:
-        step["argv"] = lr.commit_safe_argv(step["argv"], keep, command_word=True)
+        step["argv"] = lr.commit_safe_argv(step["argv"], keep, True, known)
     for key in ("script_args", "params"):
         if key in step:
-            step[key] = lr.commit_safe_argv(step[key], keep, command_word=False)
+            step[key] = lr.commit_safe_argv(step[key], keep, False, known)
     if "wrappers" in step:
         step["wrappers"] = lr.commit_safe_argv(step["wrappers"], keep, command_word=True)
     for key in ("executable", "interpreter"):
@@ -415,6 +467,8 @@ def _commit_step(step: Any, keep: set[str]) -> Any:
             step[key] = lr.commit_safe_argv([step[key]], keep, command_word=True)[0]
     if "env" in step:
         step["env"] = _commit_env(step["env"], keep)
+    if "seeds" in step:
+        _commit_seeds(step)
     return step
 
 
@@ -446,10 +500,14 @@ def commit_event(event: dict[str, Any]) -> dict[str, Any]:
     # kept only if it is exactly one of the record's evidence-backed paths.
     safe_candidate = candidate if not isinstance(candidate, str) or lr._keep_match(
         candidate, keep) else lr.COMMIT_VALUE
-    event["bash_cmd"] = lr.commit_safe_command(event.get("bash_cmd"), keep)
+    source = event.pop("script_source", None)
+    # The run's own source (an inline body, or a script small enough to be
+    # embedded) is the evidence that a long option word is one of its
+    # options; nothing is read from disk here.
+    known = lr.commit_source_options(source)
+    event["bash_cmd"] = lr.commit_safe_command(event.get("bash_cmd"), keep, known)
     if "script_candidate" in event:
         event["script_candidate"] = safe_candidate
-    source = event.pop("script_source", None)
     if isinstance(source, str):
         # The source itself stays in the machine-local event queue; its
         # digest (script_sha256) identifies it here.
@@ -463,7 +521,11 @@ def commit_event(event: dict[str, Any]) -> dict[str, Any]:
     # Unevaluated regex text from 0.9.7 recorders: free source text.
     event.pop("filters_detected", None)
     if step is not None:
-        event["step"] = _commit_step(step, keep)
+        event["step"] = _commit_step(step, keep, known)
+    if "seeds_detected" in event:
+        # Source literals (the source is not committed): short numbers only.
+        event["seeds_detected"] = [v for v in event.get("seeds_detected") or []
+                                   if _short_seed(v)]
     return event
 
 

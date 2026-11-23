@@ -88,14 +88,14 @@ def test_the_corpus_was_collected() -> None:
     assert len([r for r in rounds if r.startswith("test_provenance_review_")]) >= 5
 
 
-def _write_session(root: Path, text: str) -> Path:
+def _write_session(root: Path, text: str, source: str | None = None) -> Path:
     """One session whose every free-text field carries ``text``."""
     words = text.split()
     event = {
         "ts": "2026-11-22T10:00:00Z", "event_id": "e1", "host": "claude",
         "host_session_id": "s1", "repo_root": str(root),
         "bash_cmd": text, "bash_exit": 0, "script": None, "script_sha256": None,
-        "script_source": text, "script_candidate": text,
+        "script_source": text if source is None else source, "script_candidate": text,
         "inputs": [{"path": str(root / "data" / "in.csv"), "rel_path": "data/in.csv",
                     "sha256": None, "hash_status": "pending"}],
         "outputs": [],
@@ -140,8 +140,8 @@ def _as_command(text: str) -> str:
     return f"cat {text}"
 
 
-def _manifest_text(root: Path, text: str) -> str:
-    events = _write_session(root, text)
+def _manifest_text(root: Path, text: str, source: str | None = None) -> str:
+    events = _write_session(root, text, source)
     manifest = stop.extract(events, "sess-1", str(root))
     out = root / ".living" / "log" / "data-lineage" / "sess-1.json"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -192,9 +192,13 @@ def test_a_command_naming_only_its_own_paths_is_kept_whole() -> None:
 
 
 def test_unknown_words_become_placeholders() -> None:
-    out = stop.commit_event(_event(
-        "python3 analysis/de/run.py --label 'treated cells' --url https://h/x notes.txt"))
-    assert out["bash_cmd"] == f"python3 analysis/de/run.py --label {V} --url {V} {V}"
+    command = "python3 analysis/de/run.py --label 'treated cells' --url https://h/x notes.txt"
+    out = stop.commit_event(_event(command))
+    # `--label` and `--url` are no common options, and no source names them.
+    assert out["bash_cmd"] == f"python3 analysis/de/run.py {V} {V} {V} {V} {V}"
+    sourced = stop.commit_event(_event(
+        command, script_source="p.add_argument('--label')\np.add_argument('--url')\n"))
+    assert sourced["bash_cmd"] == f"python3 analysis/de/run.py --label {V} --url {V} {V}"
 
 
 def test_a_heredoc_body_collapses() -> None:
@@ -204,10 +208,13 @@ def test_a_heredoc_body_collapses() -> None:
 
 
 def test_a_number_after_a_secret_option_is_dropped() -> None:
-    assert lr.commit_safe_command("curl --password 123456 --n 5", set()) == \
-        f"curl --password {V} --n 5"
-    assert lr.commit_safe_argv(["curl", "--api-key=42", "--n=5"], set()) == \
-        ["curl", f"--api-key={V}", "--n=5"]
+    assert lr.commit_safe_command("curl --password 123456 --retry 5", set()) == \
+        f"curl {V} {V} --retry 5"
+    # Even a name the source spells keeps its secret value masked.
+    assert lr.commit_safe_argv(["--api-key=42", "--threads=5"], set(), False,
+                               {"--api-key"}) == [f"--api-key={V}", "--threads=5"]
+    assert lr.commit_safe_argv(["--api-key", "42"], set(), False, {"--api-key"}) == \
+        ["--api-key", V]
     assert lr.commit_safe_command("DB_PASSWORD=1234 python3 x", set()) == \
         f"DB_PASSWORD={V} python3 {V}"
 
@@ -382,14 +389,24 @@ def test_words_after_double_dash_are_operands() -> None:
 @pytest.mark.parametrize(("command", "expected"), [
     ("--Q0t3SGc0aFpwblJad2M x", f"{V} {V}"),
     ("tool --Q0t3SGc0aFpwblJad2M", f"{V} {V}"),
-    ("ls --min-count 3 --q0t3sgc0afpwbljad2m9", f"ls --min-count 3 {V}"),
+    # The shape is necessary, never sufficient: `--min-count` is no common
+    # option and no option of `ls`.
+    ("ls --min-count 3 --q0t3sgc0afpwbljad2m9", f"ls {V} 3 {V}"),
+    ("ls --all --human-readable --q0t3sgc0afpwbljad2m9", f"ls --all --human-readable {V}"),
     ("ls --a1234", f"ls {V}"),
     ("ls --abc_def", f"ls {V}"),
     ("ls -O2 -xzf -la -Ab -pS3cr3t -resume", f"ls -O2 -xzf -la -Ab {V} {V}"),
-    ("ls --threads=4 --Bad=4 --label=x", f"ls --threads=4 {V} --label={V}"),
+    ("ls --threads=4 --Bad=4 --label=x", f"ls --threads=4 {V} {V}"),
+    ("ls --output=x --format=4", f"ls --output={V} --format=4"),
 ])
 def test_option_names_are_kept_only_in_the_fixed_shape(command: str, expected: str) -> None:
     assert lr.commit_safe_command(command, set()) == expected
+
+
+def test_a_source_spelled_option_of_the_fixed_shape_is_kept_for_the_interpreter() -> None:
+    known = {"--min-count", "--a1234", "--Bad"}
+    assert lr.commit_safe_command("python3 x --min-count 3 --a1234 --Bad=4", set(), known) == \
+        f"python3 {V} --min-count 3 {V} {V}"
 
 
 @pytest.mark.parametrize(("command", "expected"), [
@@ -524,18 +541,73 @@ _SLOTS = {
     "redirect": "echo 1 > {t}",
     "after-semicolon": "ls; {t}",
     "after-pipe": "ls | {t} -n",
+    # All-lower-case tokens of the option-name shape: kept only on evidence
+    # of the role (a common option, the command's own, the source's).
+    "lower-long-option": "python3 -c x --proof --{t}",
+    "lower-long-option-eq": "python3 a.py --{t}=3",
+    "lower-long-option-vocab": "git log --oneline --{t}",
+    "lower-long-option-wrapper": "timeout --{t} 9 python3 a.py",
+    # Long digit strings: a seed value the argv masks is never republished.
+    "seed-after-double-dash": "python3 -c x -- --seed {t}",
+    "seed-long": "python3 a.py --seed {t}",
+    "seed-eq": "python3 a.py --seed={t}",
 }
+_LOWER_SLOTS = frozenset(s for s in _SLOTS if s.startswith("lower-"))
+_DIGIT_SLOTS = frozenset(s for s in _SLOTS if s.startswith("seed-"))
+
+
+def _lower_tokens(count: int = 40) -> list[str]:
+    """Seeded all-lower-case hyphenated tokens of the option-name shape
+    (`cinder-lattice-sable-amber`; at most 3 digits): shape alone must never
+    keep them."""
+    import random
+    import string
+
+    rng = random.Random(20261123)
+    out: list[str] = []
+    while len(out) < count:
+        parts = ["".join(rng.choice(string.ascii_lowercase + string.digits)
+                         for _ in range(rng.randint(5, 9))) for _ in range(rng.randint(2, 4))]
+        token = "-".join(parts)
+        if token[0].isalpha() and sum(c.isdigit() for c in token) <= 3 \
+                and lr._option_name_ok(f"--{token}") \
+                and f"--{token}" not in lr._COMMIT_COMMON_OPTIONS:
+            out.append(token)
+    return out
+
+
+def _digit_tokens(count: int = 40) -> list[str]:
+    """Seeded digit strings too long for the short-number rule (7-19)."""
+    import random
+
+    rng = random.Random(20261124)
+    return [str(rng.randint(1, 9)) + "".join(str(rng.randint(0, 9))
+                                             for _ in range(rng.randint(6, 18)))
+            for _ in range(count)]
+
+
+def _slot_tokens(slot: str, count: int = 40) -> list[str]:
+    if slot in _LOWER_SLOTS:
+        return _lower_tokens(count)
+    if slot in _DIGIT_SLOTS:
+        return _digit_tokens(count)
+    return _tokens(count)
 
 
 def _records_for(slot: str, token: str) -> list[dict]:
     command = _SLOTS[slot].format(t=token)
     words = command.split()
+    seeds = ({"seeds": [{"value": int(token), "origin": "argv"},
+                        {"value": int(token), "origin": "source"}]}
+             if token.isdigit() else {})
     event = {"ts": "t", "bash_cmd": command, "script": None, "script_sha256": HEX,
              "script_candidate": None, "inputs": [], "outputs": [],
              "lineage_warnings": [f"the command names {command}."],
+             "seeds_detected": [int(token)] if token.isdigit() else [],
              "step": {"argv": words, "executable": words[0], "interpreter": words[0],
                       "script_args": words[1:], "params": words[1:], "wrappers": words[:2],
                       "env": {"X": token, "Y": {"text": token, "expanded": False}},
+                      **seeds,
                       "config_files": [
                           {"path": f"/r/{token}", "rel_path": token, "via": "--config",
                            "sha256": None, "hash_status": "missing"},
@@ -556,7 +628,7 @@ def _records_for(slot: str, token: str) -> list[dict]:
 
 @pytest.mark.parametrize("slot", sorted(_SLOTS))
 def test_no_random_token_survives_in_any_slot(slot: str) -> None:
-    for token in _tokens():
+    for token in _slot_tokens(slot):
         committed = json.dumps(_records_for(slot, token))
         assert token not in committed, (slot, token)
         # Nor a long piece of it (a split at `-` or `_` publishing half).
@@ -567,9 +639,9 @@ def test_no_random_token_survives_in_any_slot(slot: str) -> None:
 
 def test_a_random_token_in_a_slot_does_not_reach_a_written_manifest(tmp_path: Path) -> None:
     for index, slot in enumerate(sorted(_SLOTS)):
-        token = _tokens(len(_SLOTS))[index]
+        token = _slot_tokens(slot, len(_SLOTS))[index]
         root = tmp_path / f"repo{index}"
-        written = _manifest_text(root, _SLOTS[slot].format(t=token))
+        written = _manifest_text(root, _SLOTS[slot].format(t=token), "import sys\n")
         assert token not in written.replace(str(root), "<root>"), slot
 
 

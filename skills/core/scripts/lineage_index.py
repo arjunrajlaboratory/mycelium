@@ -623,8 +623,10 @@ class Index:
             floor = max([0] + [r["floor"] for r in records
                                if r.get("ev") == "floor" and isinstance(r.get("floor"), int)])
             intervals = io_observer._intervals(records)
-            # Published only once the whole journal parsed: a journal that
-            # cannot be read proves nothing.
+            # Published only once the whole journal parsed, every line of
+            # it: a torn line may have been a Post, so it proves nothing.
+            if not io_observer.journal_intact(io_observer.journal_path(state_dir)):
+                raise ValueError("journal has an unreadable line")
             self.journal_id = jid
             self.journal_floor = floor
             for key, interval in intervals.items():
@@ -1051,14 +1053,23 @@ class Index:
                 continue  # still running: reported as an open call
             observed = self.observations.get(call)
             if observed is None:
-                if call in self._foreign_calls:
-                    continue  # another checkout's call
-                out.append({"kind": "no-observation", "call": call})
+                # Another checkout's call (a shared state directory) covers
+                # only its own tree; it could still write here by absolute
+                # path, so it does not vouch for this one.
+                kind = "foreign-call" if call in self._foreign_calls else "no-observation"
+                out.append({"kind": kind, "call": call})
                 continue
             write_end = journal.get("post_seq")
             overlaps = not (isinstance(write_end, int)
                             and isinstance(interval.get("pre_seq"), int)
                             and interval["pre_seq"] > write_end)
+            if overlaps and not (isinstance(post, int) and isinstance(write_end, int)
+                                 and post <= write_end):
+                # It started before the write ended and ran on past it: its
+                # own two walks do not bracket the write (it could swap a
+                # parent directory away and back), so it cannot vouch.
+                out.append({"kind": "overlapping-call", "call": call})
+                continue
             if overlaps and _mentions(observed["record"], path):
                 # It ran beside the write and touched the path: its two
                 # walks do not bracket the write, so a restore it made after
