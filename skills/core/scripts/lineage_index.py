@@ -1285,7 +1285,7 @@ def query_hash(index: Index, sha256: str, *, disk: bool = True,
         entry["readers"].append({**read, "event": index.events.get(read["event_id"])})
     for entry in paths.values():
         if not entry["writes"]:
-            entry["record"] = {"status": "no-recorded-write"}
+            entry["record"] = _no_write_record(index)
             if disk:
                 entry.update(index.disk_status(entry["path"], sha256, max_bytes=max_bytes))
     return {"schema": QUERY_SCHEMA, "selector": {"hash": sha256},
@@ -1293,6 +1293,14 @@ def query_hash(index: Index, sha256: str, *, disk: bool = True,
             "readers": len({r["event_id"] for r in readers}),
             "producers": len({w["call"] or w["events"][0] for w in producers}),
             "paths": list(paths.values()), "coverage": _coverage(index)}
+
+
+def _no_write_record(index: Index) -> dict[str, Any]:
+    """With no observation store at all (a host that installs no observer,
+    such as Antigravity), the absence of a write proves nothing."""
+    if any(s.startswith("store:") for s in index.sources):
+        return {"status": "no-recorded-write"}
+    return {"status": "no-recorded-write", "reasons": ["no-observations"]}
 
 
 def query_path(index: Index, path: str, *, disk: bool = True,
@@ -1317,7 +1325,7 @@ def query_path(index: Index, path: str, *, disk: bool = True,
         "coverage": _coverage(index),
     }
     if not writes:
-        result["record"] = {"status": "no-recorded-write"}
+        result["record"] = _no_write_record(index)
         if disk:
             result.update(index.disk_status(path, None, max_bytes=max_bytes))
     return result

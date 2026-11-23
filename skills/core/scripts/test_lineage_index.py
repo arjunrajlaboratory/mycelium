@@ -341,6 +341,19 @@ def test_store_only_and_edit_observations_contribute_writes(repo: Path) -> None:
     assert edit_write["status"] == "current"
 
 
+def test_no_write_without_any_observer_says_so(repo: Path) -> None:
+    # Antigravity installs no observer: its run events reach the manifest,
+    # but the index has no store, so "no recorded write" proves nothing.
+    (repo / "out" / "res.csv").write_text("y")
+    write_manifest(repo, "m1", actions=[action(repo, "e1", "c1")])
+    record = li.query_path(load(repo), "out/res.csv", disk=False)["record"]
+    assert record == {"status": "no-recorded-write", "reasons": ["no-observations"]}
+    write_store(repo, [observation(repo, "c2", created=[("out/other.csv", sha("z"))],
+                                   pre=1, post=2)])
+    record = li.query_path(load(repo), "out/res.csv", disk=False)["record"]
+    assert record == {"status": "no-recorded-write"}
+
+
 def test_observations_of_another_checkout_are_ignored(repo: Path, tmp_path: Path) -> None:
     other = tmp_path / "other"
     other.mkdir()

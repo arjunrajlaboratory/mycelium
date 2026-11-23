@@ -1008,6 +1008,7 @@
               "write-hash-unknown",
               "incomplete-observation",
               "coverage-unproven",
+              "no-observations",
               "earlier-hash-unknown",
               "later-write-hash-unknown"
             ]

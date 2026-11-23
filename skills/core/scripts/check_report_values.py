@@ -428,7 +428,7 @@ def _explain(index, rel: str, actual: str | None) -> dict[str, Any] | None:
         return None
     writes = result.get("writes") or []
     if not writes:
-        return {"status": "no-recorded-write"}
+        return dict(result.get("record") or {"status": "no-recorded-write"})
     if actual is not None:
         writes = _resolve_pending_writes(index, rel, writes, actual)
     incomplete = _incomplete_reasons(index, rel, writes)

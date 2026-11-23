@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A gap the record cannot rule out makes the verdict `unknown`.
   - Readers carry their `hash_origin`, so proven reads are told apart from
     weaker digests.
+  - With no observation store at all (Antigravity installs no observer),
+    `no-recorded-write` carries the reason `no-observations`.
 
   The index is a derived, per-checkout cache rebuilt incrementally on query.
   It never runs on the hook path.
