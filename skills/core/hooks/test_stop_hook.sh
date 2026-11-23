@@ -892,6 +892,27 @@ LOG_EOF
 }
 
 # ─────────────────────────────────────────────────────────────────
+# Access note: a stale note file is never emitted. The note itself, its
+# join and its fail-open behaviour need a real lineage transaction and are
+# tested through the hooks in scripts/test_access_note_stop.py.
+# ─────────────────────────────────────────────────────────────────
+echo ""
+echo "TEST access-note: a stale note file is never emitted"
+{
+  REPO=$(make_repo)
+  mkdir -p "$REPO/.living"
+  printf 'ACCESS NOTE: stale\n' > "$REPO/.mycelium/access-note.tmp"
+  run_hook "$REPO"
+  if [ "$HOOK_EXIT" -eq 0 ] && ! echo "$HOOK_OUTPUT" | grep -q 'ACCESS NOTE' \
+    && [ ! -e "$REPO/.mycelium/access-note.tmp" ]; then
+    pass "Stale access-note.tmp without lineage this Stop → not emitted, removed"
+  else
+    fail "Stale access-note.tmp was emitted" "exit=$HOOK_EXIT output='$HOOK_OUTPUT'"
+  fi
+  rm -rf "$REPO"
+}
+
+# ─────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────
 echo ""
