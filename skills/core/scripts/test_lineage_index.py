@@ -932,6 +932,44 @@ def launch(project: Path, call: str, task: str | None) -> None:
             task_id=task)
 
 
+def test_a_rerun_that_reproduces_its_output_keeps_identity_proof(project: Path) -> None:
+    # Live Codex run: a rerun rewrote gene_means.csv with the same bytes. The
+    # rewrite was only metadata, so the latest recorded identity was the
+    # first run's, and identity continuity could never apply again.
+    bash(project, "c1", write_x(project, "A"))
+    ident = io.identity_of(os.lstat(project / "out" / "x"))
+    io.flush_cache(project / ".mycelium", {io._cache_key(ident): sha("A")})
+    time.sleep(0.01)
+    observation = bash(project, "c2", write_x(project, "A"))  # same bytes, new ctime
+    assert [e["path"] for e in observation["changes"]["rewritten"]] == ["out/x"]
+    io.pre(project / ".mycelium", host="claude", session="s1", call_id="lost", tool="Bash",
+           repo_root=project, snapshot=True)
+    io.turn_end(project / ".mycelium", host="claude", session="s1")  # an unresolved call
+    writes = li.query_hash(li.load(project, write=False), sha("A"))["paths"][0]["writes"]
+    (rerun,) = [w for w in writes if w["call"] == "s1|claude:c2"]
+    assert rerun["record"]["status"] == "unknown"
+    assert rerun["status"] == "current"
+    assert rerun["basis"] == "identity-unchanged-since-write"
+
+
+def test_a_codex_patch_post_is_a_success(project: Path) -> None:
+    import json
+
+    (project / "notes.md").write_text("old\n")
+    payload = {"session_id": "s1", "tool_use_id": "p1", "tool_name": "apply_patch",
+               "hook_event_name": "PreToolUse", "cwd": str(project),
+               "tool_input": {"command": "*** Begin Patch\n*** Update File: notes.md\n"
+                                         "@@\n-old\n+new\n*** End Patch"}}
+    io.hook(project / ".mycelium", project, "codex", json.dumps(payload))
+    (project / "notes.md").write_text("new\n")
+    payload["hook_event_name"] = "PostToolUse"
+    payload["tool_response"] = "Exit code: 0\nWall time: 0 seconds\nOutput:\nDone!"
+    io.hook(project / ".mycelium", project, "codex", json.dumps(payload))
+    (store,) = list((project / ".mycelium" / "io" / "obs" / "codex").glob("*.ndjson"))
+    (record,) = [json.loads(line) for line in store.read_text().splitlines()]
+    assert record["outcome"] == "success"
+
+
 def test_a_change_seen_beside_a_background_job_names_no_producer(project: Path) -> None:
     # Live run: a background job wrote its output while the agent's
     # foreground poll was running, and the index credited the poll.

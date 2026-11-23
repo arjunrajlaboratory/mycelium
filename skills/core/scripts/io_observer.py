@@ -1774,11 +1774,16 @@ def post(
                for p in result.deleted[:change_cap]]
     modified: list[dict] = []
     metadata_only: list[str] = []
+    # Same bytes, new identity (a rerun that reproduced its output): kept
+    # with the new identity, so the latest identity of the file is on
+    # record and an unchanged one can still be proven later.
+    rewritten: list[dict] = []
     for path in result.modified[:change_cap]:
         before = _before_state(pre_snap.entries[path], cache)
         after = after_state(path)
         if (before and after and before["sha256"] and before["sha256"] == after["sha256"]):
             metadata_only.append(path)
+            rewritten.append(_entry(path, before, after))
         else:
             modified.append(_entry(path, before, after))
     capped = any(
@@ -1789,6 +1794,7 @@ def post(
         "modified": modified,
         "deleted": deleted,
         "metadata_only": metadata_only,
+        "rewritten": rewritten,
         "rename_candidates": [
             {"from": a, "to": b} for a, b in result.rename_candidates[:change_cap]
         ],
@@ -1985,6 +1991,12 @@ def hook(state_dir: Path, repo_root: Path, host: str, raw: str) -> int:
                 # the response says; a failed patch may have applied partly, so
                 # its targets become uncertain rather than writes or deletions.
                 verdict = edit_outcome(payload.get("tool_response"))
+                if verdict == "unknown" and host == "codex" and tool == "apply_patch":
+                    # Codex runs PostToolUse for apply_patch only on the Ok
+                    # path (a failed, rejected or denied patch returns an
+                    # error and fires no hook), and its response is plain
+                    # model-facing text: the Post itself is the evidence.
+                    verdict = "success"
                 if verdict == "failure":
                     edited = [(path, "uncertain") for path, _ in edited]
                     edit_result = "failure"

@@ -841,7 +841,8 @@ class Index:
                               **{**base, "journal": bound or None}})
         incomplete = bool(changes.get("capped"))
         for kind, action in (("created", "written"), ("modified", "written"),
-                             ("edited", "written"), ("deleted", "deleted")):
+                             ("edited", "written"), ("rewritten", "written"),
+                             ("deleted", "deleted")):
             entries = changes.get(kind)
             for entry in entries if isinstance(entries, list) else []:
                 if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):

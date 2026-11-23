@@ -819,6 +819,13 @@
             "metadata_only": {
               "type": "array"
             },
+            "rewritten": {
+              "description": "Paths rewritten with the same bytes (a rerun that reproduced its output), with their new identity; also listed in metadata_only.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/change_entry"
+              }
+            },
             "rename_candidates": {
               "type": "array"
             },
