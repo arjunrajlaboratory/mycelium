@@ -88,6 +88,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it shares the Python implementation through `register_value.py record-ids`.
   The analyze skill recommends it at filter, subset and split steps. Design and
   decisions: `docs/plans/row-feature-access.md`.
+- **Stop-time access note (item 7 follow-up).** When a script this turn
+  wrote a table (.csv, .tsv, .parquet or .h5ad, observed created or
+  modified) and no `record_ids` record in `analysis/*/outputs/access.json`
+  joins to it, Stop adds an advisory `ACCESS NOTE` recommending `record_ids`
+  at filter, subset and split steps. A record joins by its `computed_at`
+  script and `run.process_started_at`. The note never blocks Stop or changes
+  the enforcement retry; the helper (`skills/core/scripts/access_note.py`)
+  runs only when the manifest names a table, and fails open.
 - **Multi-file report sources.** `register_value(..., source=[...])` links a
   number to several files, for example the table and the config that set its
   threshold. The number is stale when any of them changes. Live runs showed

@@ -232,6 +232,16 @@ With these records, a reader such as Warrant can catch:
 - two numbers that claim the same population but used different cells (their fingerprints differ);
 - a QC drop that differs from what the report says (the counts disagree).
 
+### The Stop-time access note
+
+When a step this turn ran a script that wrote a table (.csv, .tsv, .parquet or .h5ad, seen created or modified by the observer) and no `access.json` record names that script, Stop adds an advisory paragraph:
+
+```text
+ACCESS NOTE: 1 step(s) this turn wrote a table but recorded no row or feature access: analysis/qc/scripts/filter.py -> analysis/qc/outputs/kept.csv. If a step filters, subsets or splits rows or features, call record_ids there ...
+```
+
+A record covers the step when its `computed_at` names the step's script and its `run.process_started_at` is not after the step ended. The note is advice, not enforcement: it never blocks Stop, and a step that only reshapes or exports data needs no record. Records carry no per-call id, so a record left by an earlier run of the same script also silences it.
+
 Fingerprints show only whether two sets are *equal*. A train set `{a, b}` and test set `{b, c}` give different fingerprints, exactly as two disjoint sets do. Overlap detection needs a separate check that sees the ids, inside the analysis.
 
 Record at filter, subset and split steps. Mycelium recommends it but does not require it.

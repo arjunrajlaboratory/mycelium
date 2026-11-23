@@ -17,9 +17,26 @@ Status: built, 2026-11-22, with these decisions (agreed with the user):
 5. **Recommended, not required.** The analyze skill and the report-values guide
    recommend `record_ids` at filter, subset and split steps.
 
-The Stop-time note for a table-writing step with no access record is **not
-built**. It needs a cross-reference between lineage events and
-`access.json`, and it is left for a later change.
+The Stop-time note for a table-writing step with no access record was built
+on 2026-11-23 (`skills/core/scripts/access_note.py`):
+
+- **What counts as a table step.** A manifest action with a script file
+  that did not fail, and an output the observer saw created or modified
+  whose name ends in .csv, .tsv (optionally .gz), .parquet or .h5ad, outside
+  `.living/` and `.mycelium/`. Inline runs cannot be joined, and an
+  unobserved output is no evidence of a write, so neither counts.
+- **The join.** A record covers the action when its `computed_at` names the
+  action's script (relative to its `analysis/<ns>/`, or absolute) and its
+  `run.process_started_at` is no later than the action's `ts` plus two
+  seconds. Records carry no per-call id, so an older record from the same
+  script also covers it: the note errs toward silence. An unreadable
+  `access.json` makes the answer unknown and suppresses the note too.
+- **Advisory and off the hot path.** The lineage Stop phase runs the helper
+  only after a successful extraction whose manifest names a table, and
+  writes its one paragraph to `access-note.tmp` in the session state
+  directory. Stop appends it to the lineage messages and removes the file.
+  It never blocks Stop or changes the enforcement retry, and any failure
+  prints nothing.
 
 Records go to `analysis/<name>/outputs/access.json` (schema `access_fragment`
 in `skills/core/references/provenance-schema.json`). Each record's `run`
@@ -137,7 +154,7 @@ such, and add the env-var path later only if needed.
    leaving them out until a concrete check needs one.
 5. **Enforcement.** Should the analyze skill require declarations for every
    filter step, or only recommend them? I propose recommending them, plus a
-   Stop-time note when a step that wrote a table recorded no access entries.
+   Stop-time note when a step that wrote a table recorded no access entries. (Built 2026-11-23; see the top of this file.)
 
 ## Cost
 

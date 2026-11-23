@@ -148,6 +148,19 @@ EXIT_CODE=$?
 set -e
 END=$(date +%s)
 
+# Advisory access note (item 7): a step that wrote a table but recorded no
+# record_ids access. Stop reads and removes the file; it never blocks on it.
+# Off the hot path: the helper starts only when the manifest names a table,
+# and any failure leaves no note.
+ACCESS_NOTE_FILE="$STATE_DIR/access-note.tmp"
+rm -f "$ACCESS_NOTE_FILE"
+if [[ "$EXIT_CODE" -eq 0 ]] \
+  && grep -Eqi '\.(csv|tsv|csv\.gz|tsv\.gz|parquet|h5ad)"' "$OUT_FILE" 2>/dev/null; then
+  python3 "${MYCELIUM_ACCESS_NOTE_HELPER:-$HERE/../scripts/access_note.py}" \
+    --manifest "$OUT_FILE" --repo-root "$REPO_ROOT" > "$ACCESS_NOTE_FILE" 2>/dev/null \
+    || rm -f "$ACCESS_NOTE_FILE"
+fi
+
 # Write structured status sentinel via Python (handles quoting safely).
 EVENTS_SIZE=$(mycelium_file_size "$EVENTS_FILE")
 WALL=$((END - START))

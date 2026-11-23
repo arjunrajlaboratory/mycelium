@@ -302,6 +302,10 @@ fi
 # launch sibling command hooks concurrently, so registering consolidation as a
 # separate Stop handler would race the accepted-Stop cleanup below.
 LINEAGE_HOOK="$HERE/mycelium-data-lineage-stop.sh"
+# The lineage phase may leave an advisory access note (access_note.py); only
+# the one it writes during this Stop is read.
+ACCESS_NOTE_FILE="$STATE_DIR/access-note.tmp"
+rm -f "$ACCESS_NOTE_FILE" 2>/dev/null || true
 if [[ -s "$STATE_DIR/mycelium-data-events.tmp" ]]; then
   if [[ ! -x "$LINEAGE_HOOK" ]] \
     || ! printf '%s' "$INPUT" | "$LINEAGE_HOOK"; then
@@ -359,6 +363,16 @@ fi
 if [[ -n "$UNOWNED_GAP_MSG" ]]; then
   LINEAGE_GAP_MSG="${LINEAGE_GAP_MSG:+$LINEAGE_GAP_MSG }$UNOWNED_GAP_MSG"
 fi
+# Advisory only: the note rides along with the lineage messages and never
+# changes whether Stop blocks.
+if [[ -f "$ACCESS_NOTE_FILE" && ! -L "$ACCESS_NOTE_FILE" ]]; then
+  ACCESS_NOTE=$(head -c 4000 "$ACCESS_NOTE_FILE" 2>/dev/null || true)
+  if [[ "$ACCESS_NOTE" == "ACCESS NOTE: "* ]]; then
+    [[ -z "$LINEAGE_GAP_MSG" ]] || LINEAGE_GAP_MSG+=$'\n\n'
+    LINEAGE_GAP_MSG+="$ACCESS_NOTE"
+  fi
+fi
+rm -f "$ACCESS_NOTE_FILE" 2>/dev/null || true
 # Post-tool events of this transaction that a hook could not record (its
 # session lock was unavailable). Take them now, under this Stop's locks. A
 # `work` record (a project edit, a proven analysis run) is work of unknown
