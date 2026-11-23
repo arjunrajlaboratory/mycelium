@@ -3754,8 +3754,9 @@ def test_stop_handoff_block_ignores_a_marker_from_another_transaction(tmp_path):
     assert "1. Accomplished" in handoff.read_text()
 
 
-def test_stop_keeps_a_legacy_handoff_with_a_fenced_heading_example(tmp_path):
-    from test_finalize_handoff import LEGACY_WITH_FENCED_EXAMPLE
+@pytest.mark.parametrize("example", ("fenced-heading", "list-item-fence"))
+def test_stop_keeps_a_legacy_handoff_with_a_fenced_heading_example(tmp_path, example):
+    from test_finalize_handoff import LEGACY_WITH_FENCED_EXAMPLE, LIST_ITEM_FENCE
 
     repo = _repo(tmp_path)
     start = _run_hook(
@@ -3767,7 +3768,11 @@ def test_stop_keeps_a_legacy_handoff_with_a_fenced_heading_example(tmp_path):
     (repo / "work.py").write_text("print('work')\n")
     (repo / ".living" / "learnings.md").write_text("# Learnings\n\nFenced example.\n")
     handoff = repo / ".mycelium" / "last-session.md"
-    authored = LEGACY_WITH_FENCED_EXAMPLE.format(fence="```")
+    authored = (
+        LEGACY_WITH_FENCED_EXAMPLE.format(fence="```")
+        if example == "fenced-heading"
+        else LIST_ITEM_FENCE
+    )
     handoff.write_text(authored)
     future = time.time() + 2
     os.utime(handoff, (future, future))
@@ -3875,41 +3880,33 @@ def test_incomplete_rewrite_during_the_registry_wait_falls_back(tmp_path):
     assert not (repo / ".mycelium" / "active-session-log.tmp").exists()
 
 
-def test_handoff_changed_after_it_was_staged_is_never_overwritten(tmp_path):
+def test_publication_uses_the_bytes_read_after_the_registry_wait(tmp_path):
+    # One snapshot is judged and published. A write that races Stop after it
+    # is undefined (as it always was) but never makes Stop block once the
+    # registry row is complete and the log has ended.
     repo, handoff = _flat_work(tmp_path, "race-staged")
     handoff.unlink(missing_ok=True)
     scripts = Path(__file__).parent
-    newer = _RACE_COMPLETE.replace("Written while Stop waited.", "Newer write.")
+    newer = _RACE_COMPLETE.replace("Written while Stop waited.", "Racing write.")
     finalize_log = _helper_that_writes_first(
         tmp_path, scripts / "finalize_session_log.py", handoff, newer,
         "finalize-log-wrapper.py",
     )
 
-    first = _run_hook(
+    result = _run_hook(
         "mycelium-stop-check.sh",
         repo,
         {"cwd": str(repo), "stop_hook_active": False, "turn_id": "race-staged"},
         {"MYCELIUM_LOG_FINALIZER_HELPER": str(finalize_log)},
     )
 
-    # The fallback staged before the write must not replace it: Stop keeps
-    # its retry state and asks again.
-    assert first.returncode == 0, first.stderr
-    assert "changed while Stop was finalizing" in json.loads(first.stdout)["reason"]
-    assert handoff.read_text() == newer
-    assert (repo / ".mycelium" / "active-session-log.tmp").is_file()
-
-    retried = _run_hook(
-        "mycelium-stop-check.sh",
-        repo,
-        {"cwd": str(repo), "stop_hook_active": True, "turn_id": "race-staged-retry"},
-    )
-
-    assert retried.returncode == 0, retried.stderr
-    assert '"decision": "block"' not in retried.stdout
+    assert result.returncode == 0, result.stderr
+    assert '"decision": "block"' not in result.stdout
     published = handoff.read_text()
-    assert "- Newer write." in published
     assert "Lifecycle status: accepted by Stop" in published
+    assert "Completed the session work recorded" in published
+    assert not (repo / ".mycelium" / "active-session-log.tmp").exists()
+    assert not list(handoff.parent.glob(".last-session.*"))
 
 
 def test_stop_fallback_handoff_contains_all_five_sections(tmp_path):

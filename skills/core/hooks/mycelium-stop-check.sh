@@ -685,54 +685,29 @@ mycelium_block_once_for_incomplete_handoff() {
 }
 
 # Copy the handoff once into a private snapshot that Stop judges and publishes.
-# Sets _HANDOFF_SNAPSHOT_STATE to regular, absent or other (a link or a
-# non-file: not ours to compare, replaced as before). Returns 1 only when the
-# file kept changing while it was copied.
+# Sets _HANDOFF_SNAPSHOT_STATE to regular, absent (also when the copy fails)
+# or other (a non-file, left for publication to reject as before).
 _HANDOFF_SNAPSHOT=""
 _HANDOFF_FALLBACK=""
 _HANDOFF_SNAPSHOT_STATE=absent
 mycelium_snapshot_handoff() {
   local handoff="$1"
-  local attempt=0
   _HANDOFF_SNAPSHOT="$STATE_DIR/.last-session.snapshot"
   _HANDOFF_FALLBACK="$STATE_DIR/.last-session.fallback"
+  _HANDOFF_SNAPSHOT_STATE=absent
   rm -f "$_HANDOFF_SNAPSHOT" "$_HANDOFF_FALLBACK" 2>/dev/null || true
   if [[ -L "$handoff" ]]; then
     # The fallback used to be moved over a link; publication now writes the
     # destination, which must not be a link.
     rm -f "$handoff" 2>/dev/null || true
-  fi
-  if [[ ! -e "$handoff" ]]; then
-    _HANDOFF_SNAPSHOT_STATE=absent
-    return 0
-  fi
-  if [[ ! -f "$handoff" ]]; then
-    _HANDOFF_SNAPSHOT_STATE=other
-    return 0
-  fi
-  while (( attempt < 3 )); do
-    attempt=$((attempt + 1))
-    if cp -p "$handoff" "$_HANDOFF_SNAPSHOT" 2>/dev/null \
-      && cmp -s "$handoff" "$_HANDOFF_SNAPSHOT"; then
+  elif [[ -f "$handoff" ]]; then
+    if cp -p "$handoff" "$_HANDOFF_SNAPSHOT" 2>/dev/null; then
       _HANDOFF_SNAPSHOT_STATE=regular
-      return 0
     fi
-  done
-  rm -f "$_HANDOFF_SNAPSHOT" 2>/dev/null || true
-  return 1
-}
-
-# Succeed when the handoff on disk is no longer what the snapshot read.
-mycelium_handoff_changed_since_snapshot() {
-  local handoff="$1"
-  case "$_HANDOFF_SNAPSHOT_STATE" in
-    absent) [[ -e "$handoff" || -L "$handoff" ]] ;;
-    regular)
-      [[ -L "$handoff" || ! -f "$handoff" ]] && return 0
-      ! cmp -s "$handoff" "$_HANDOFF_SNAPSHOT"
-      ;;
-    *) return 1 ;;
-  esac
+  elif [[ -e "$handoff" ]]; then
+    _HANDOFF_SNAPSHOT_STATE=other
+  fi
+  return 0
 }
 
 # Resolve this hook's mycelium-core dir once, in absolute form. Used to locate
@@ -1020,15 +995,12 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
         exit 0
       fi
 
-      # Read the handoff once, after the registry wait, and judge and publish
-      # exactly those bytes: a handoff the agent wrote while Stop waited is
-      # kept, and a write after this read is never overwritten (see the check
-      # before publication).
-      if ! mycelium_snapshot_handoff "$_SESSION_FILE"; then
-        mycelium_emit_stop_block \
-          "STOP BLOCKED — the session handoff ${_SESSION_FILE} changed while Stop was finalizing it. Active state was preserved; end your turn again so Stop publishes the current handoff."
-        exit 0
-      fi
+      # Read the handoff once, after the registry wait, then judge and publish
+      # exactly those bytes. The early check above ran before that wait, so a
+      # handoff written meanwhile is judged here. Nothing after this point
+      # blocks on the handoff: the registry row is already complete. A write
+      # racing Stop itself is undefined, as it always was.
+      mycelium_snapshot_handoff "$_SESSION_FILE"
       _HANDOFF_SOURCE="$_HANDOFF_SNAPSHOT"
       _SESSION_COMPLETE=false
       _SESSION_FRESH=false
@@ -1193,13 +1165,6 @@ LAST_SESSION_EOF
       # Only now is it truthful to publish an authoritative accepted state in
       # the rich handoff. If this atomic write fails, the pending sentinel keeps
       # SessionStart and Stop on the same retryable transaction.
-      # Never publish over a handoff written after the snapshot: keep the retry
-      # state, and the next Stop judges the newer handoff.
-      if mycelium_handoff_changed_since_snapshot "$_SESSION_FILE"; then
-        mycelium_emit_stop_block \
-          "STOP BLOCKED — the session handoff ${_SESSION_FILE} changed while Stop was finalizing it. Active state was preserved; end your turn again so Stop publishes the current handoff."
-        exit 0
-      fi
       _FINALIZE_HANDOFF_ARGS=(
         --handoff "$_HANDOFF_SOURCE"
         --accepted-at "$ENDED"

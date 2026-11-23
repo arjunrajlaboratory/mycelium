@@ -1186,11 +1186,13 @@ The marker that spends that block holds the transaction's session ID. A retry
 that still fails, an absent or stale handoff, any validator error, and a host
 with no continuation left fall back without blocking. The check and the
 diagnosis share one normalisation (byte-order mark, trailing heading
-whitespace, headings inside fenced code ignored), and the block comes before
-any registry write. Because the early check precedes the registry wait, the
-handoff is read again once after that wait, and publication uses exactly
-those bytes. If the file changes after that read, Stop blocks with its retry
-state kept rather than publish over the newer write.
+whitespace, headings inside a closed column-0 fence ignored). It is accepted
+in addition to the strict whole-line reading, never instead of it, so it can
+never reject a handoff the strict reading accepts. The block comes before any
+registry write. The handoff is read once after the registry wait, and
+publication uses exactly those bytes. Nothing after that read blocks on the
+handoff, and a write racing Stop is undefined. Each attempt to detect such
+races created a new one.
 
 **Regression evidence:** Run Stop on a real numbered-heading handoff, a
 subheading-only section and a section emptied by Stop-status cleanup: each

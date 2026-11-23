@@ -429,16 +429,61 @@ def test_headings_inside_fenced_code_are_examples_not_sections(tmp_path: Path) -
         assert (result.returncode, result.stdout) == (0, "")
 
 
-def test_a_heading_inside_an_unclosed_fence_is_not_a_section() -> None:
+FENCE = "`" * 3
+LIST_ITEM_FENCE = "\n".join((
+    "## Current State", "- Checks pass.", "",
+    "## What Was Done", "- " + FENCE + "sh", "  python -m pytest -q", "  " + FENCE, "",
+    "## Key Decisions", "- Keep the current format.", "",
+    "## Next Steps", "- Publish the report.", "",
+    "## Relevant Files", "- report.md", "",
+))
+NESTED_FENCE = "\n".join((
+    "## What was worked on", "- Example:", "",
+    "````markdown", FENCE, "## Current state", FENCE, "````", "",
+    "## Key decisions made", "- None.", "",
+    "## Blockers & surprises", "- None.", "",
+    "## Current state", "- Ready.", "",
+    "## Next steps", "- " + FENCE + "unclosed inline example", "- Continue.", "",
+))
+UNCLOSED_FENCE = _complete_handoff().replace(
+    "## Current state", FENCE + "\n## Current state"
+)
+
+
+def _main_accepts(content: str) -> bool:
+    """origin/main's validator, the floor this branch must never go below."""
+    source = subprocess.run(
+        ["git", "show", "origin/main:skills/core/scripts/finalize_handoff.py"],
+        capture_output=True, text=True, check=False, cwd=Path(__file__).parent,
+    )
+    if source.returncode:
+        import pytest
+
+        pytest.skip("origin/main is not available")
+    namespace: dict = {}
+    exec(source.stdout, namespace)
+    return namespace["handoff_is_complete_after_cleanup"](content)
+
+
+def test_fences_never_make_the_check_stricter_than_main(tmp_path: Path) -> None:
     from finalize_handoff import handoff_is_complete_after_cleanup
 
-    # An unclosed fence runs to the end of the document, as in CommonMark, so
-    # the sections after it are example text and the handoff is incomplete.
-    content = _complete_handoff().replace(
-        "## Current state", "```\n## Current state"
-    )
-
-    assert not handoff_is_complete_after_cleanup(content)
+    cases = {
+        "list-item fence": LIST_ITEM_FENCE,
+        "nested fence": NESTED_FENCE,
+        "unclosed fence": UNCLOSED_FENCE,
+        "handoff wrapped in a fence": FENCE + "markdown\n" + _complete_handoff() + FENCE + "\n",
+    }
+    for name, content in cases.items():
+        if _main_accepts(content):
+            assert handoff_is_complete_after_cleanup(content), name
+            result = _diagnose(tmp_path, content)
+            assert (result.returncode, result.stdout) == (0, ""), name
+    # The reviewer's regressions: main accepts both, so the branch must too.
+    assert _main_accepts(cases["list-item fence"])
+    assert _main_accepts(cases["unclosed fence"])
+    # Beyond main: a heading inside a closed column-0 fence is an example.
+    assert handoff_is_complete_after_cleanup(cases["nested fence"])
 
 
 def test_a_fenced_example_counts_as_section_body() -> None:

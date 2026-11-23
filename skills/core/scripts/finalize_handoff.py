@@ -44,48 +44,40 @@ _STALE_STOP_LINE = re.compile(
 _MARKDOWN_HEADING = re.compile(r"^ {0,3}#{1,6}(?:\s|$)")
 
 
-_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_FENCE = re.compile(r"^(`{3,}|~{3,})")
 
 
 def _outside_fences(lines: list[str]) -> list[bool]:
     """Mark the lines that are not inside a fenced code block.
 
-    A fenced example of a handoff is text, not structure. As in CommonMark, a
-    fence closes on a line of at least as many of the same character with
-    nothing after it, and an unclosed fence runs to the end of the document.
+    A fenced example of a handoff is text, not structure. Deliberately
+    minimal: a fence opens only at column 0, where a section heading must
+    start, and only when a matching line (at least as many of the same
+    character, nothing after) closes it later. An unclosed run is ordinary
+    text, so it can never swallow the sections that follow it.
     """
-    outside: list[bool] = []
-    fence = ""
-    for line in lines:
-        match = _FENCE.match(line)
-        if not fence:
-            outside.append(not match)
-            if match and not (match.group(1)[0] == "`" and "`" in line[match.end():]):
-                fence = match.group(1)
-        else:
-            outside.append(False)
-            if (
-                match
-                and match.group(1)[0] == fence[0]
-                and len(match.group(1)) >= len(fence)
-                and not line[match.end():].strip()
-            ):
-                fence = ""
+    outside = [True] * len(lines)
+    index = 0
+    while index < len(lines):
+        opened = _FENCE.match(lines[index])
+        if opened and not (
+            opened.group(1)[0] == "`" and "`" in lines[index][opened.end():]
+        ):
+            marker = opened.group(1)
+            for close in range(index + 1, len(lines)):
+                closing = _FENCE.match(lines[close])
+                if (
+                    closing
+                    and closing.group(1)[0] == marker[0]
+                    and len(closing.group(1)) >= len(marker)
+                    and not lines[close][closing.end():].strip()
+                ):
+                    for inside in range(index, close + 1):
+                        outside[inside] = False
+                    index = close
+                    break
+        index += 1
     return outside
-
-
-def _is_heading(line: str, heading: str) -> bool:
-    """Trailing whitespace on a heading line is invisible; it still counts."""
-    return line.rstrip() == heading
-
-
-def _heading_positions(lines: list[str], heading: str) -> list[int]:
-    outside = _outside_fences(lines)
-    return [
-        index
-        for index, line in enumerate(lines)
-        if outside[index] and _is_heading(line, heading)
-    ]
 
 
 def _is_body(line: str, outside: bool) -> bool:
@@ -100,16 +92,36 @@ def clean_handoff_body(content: str) -> str:
     return "\n".join(kept).strip("\n")
 
 
-def handoff_has_complete_sections(content: str) -> bool:
-    lines = content.splitlines()
-    outside = _outside_fences(lines)
+def _section_starts(lines: list[str], *, tolerant: bool) -> dict[str, list[int]]:
+    """Where each schema heading occurs.
+
+    The strict reading is the original contract: whole-line equality,
+    anywhere. The tolerant reading forgives trailing whitespace on a heading
+    and ignores lines inside fenced examples. A handoff passing either is
+    complete, so tolerance can only ever accept more than the strict reading.
+    """
+    outside = _outside_fences(lines) if tolerant else [True] * len(lines)
+    found: dict[str, list[int]] = {}
+    for headings in HANDOFF_SCHEMAS:
+        for heading in headings:
+            found[heading] = [
+                index
+                for index, line in enumerate(lines)
+                if outside[index]
+                and (line.rstrip() == heading if tolerant else line == heading)
+            ]
+    return found
+
+
+def _complete_under(lines: list[str], *, tolerant: bool) -> bool:
+    starts = _section_starts(lines, tolerant=tolerant)
+    outside = _outside_fences(lines) if tolerant else [True] * len(lines)
     for headings in HANDOFF_SCHEMAS:
         positions: list[int] = []
         for heading in headings:
-            matches = _heading_positions(lines, heading)
-            if len(matches) != 1:
+            if len(starts[heading]) != 1:
                 break
-            positions.append(matches[0])
+            positions.append(starts[heading][0])
         else:
             if positions != sorted(positions):
                 continue
@@ -122,6 +134,11 @@ def handoff_has_complete_sections(content: str) -> bool:
             else:
                 return True
     return False
+
+
+def handoff_has_complete_sections(content: str) -> bool:
+    lines = content.splitlines()
+    return _complete_under(lines, tolerant=False) or _complete_under(lines, tolerant=True)
 
 
 def handoff_is_complete_after_cleanup(content: str) -> bool:
@@ -149,10 +166,8 @@ def describe_handoff_problems(content: str) -> list[str]:
     ]
     lines = clean_handoff_body(content).splitlines()
     outside = _outside_fences(lines)
-    positions = {
-        heading: _heading_positions(lines, heading)
-        for heading in headings
-    }
+    found = _section_starts(lines, tolerant=True)
+    positions = {heading: found[heading] for heading in headings}
     problems: list[str] = []
     missing = [heading for heading in headings if not positions[heading]]
     if missing:
