@@ -26,9 +26,10 @@ see a read); their hashes say how they were taken (``hash_origin``).
 Order is asserted only from the observer's call journal (same journal id,
 neither interval expired, one call's end before the other's start). Clock
 time orders display, never a verdict. A content difference is asserted only
-between two known hashes. A gap the record cannot rule out (an unavailable,
-missing or unresolved observation, a capped diff, an unwatched scope) makes
-the lineage status ``unknown`` and says why. The disk is checked
+between two known hashes. ``current-in-record`` needs positive proof: every
+journaled call since the write is accounted for at its path. A gap the
+journal cannot place (an unreadable source, a manifest-only call, a
+background job) also makes the status ``unknown``. The disk is checked
 separately; the headline is ``current`` only when both agree.
 
 The index is derived state: it is cached per checkout under the shared
@@ -584,6 +585,12 @@ def _clock(entry: dict[str, Any]) -> tuple:
             journal.get("pre_seq") or 0)
 
 
+def _fold(text: str) -> str:
+    import unicodedata
+
+    return unicodedata.normalize("NFC", text).casefold()
+
+
 def _mentions(record: dict[str, Any], path: str) -> bool:
     """Whether an observation's change list names ``path`` at all,
     metadata-only changes included."""
@@ -751,27 +758,13 @@ class Index:
                                               "pre_seq": interval["pre_seq"],
                                               "post_seq": None, "expired": False}})
                 continue
-            if interval.get("post_seq") is None:
-                if interval.get("tool") == "Bash":
-                    self.gaps.append({"kind": "call-open", "scope": "info", "call": call_key,
-                                      "journal": {"id": interval["id"],
-                                                  "pre_seq": interval["pre_seq"],
-                                                  "post_seq": None, "expired": False}})
-                continue
-            # A closed call that owed an observation and has none on record:
-            # its Post never ran (the interval aged out), or its store append
-            # failed. What it changed is unknown. A turn end bounds it; an
-            # age expiry does not (the call may still be running).
-            owed = interval.get("tool") == "Bash" or interval.get("observe")
-            if not owed or interval.get("background"):
-                continue
-            bounded = not interval.get("expired") or interval.get("end_reason") == "turn-ended"
-            self.gaps.append({"kind": "observation-missing", "scope": "repo", "call": call_key,
-                              "source": "journal",
-                              "journal": {"id": interval["id"],
-                                          "pre_seq": interval["pre_seq"],
-                                          "post_seq": interval["post_seq"] if bounded else None,
-                                          "expired": bool(interval.get("expired"))}})
+            # A closed call with no observation on record is unaccounted for
+            # by positive proof (`_unaccounted_since`), not a gap here.
+            if interval.get("post_seq") is None and interval.get("tool") == "Bash":
+                self.gaps.append({"kind": "call-open", "scope": "info", "call": call_key,
+                                  "journal": {"id": interval["id"],
+                                              "pre_seq": interval["pre_seq"],
+                                              "post_seq": None, "expired": False}})
         seen_candidates = set()
         for cand in candidates:
             if cand.get("call") in observed_calls:
@@ -789,31 +782,11 @@ class Index:
                 "observed_change": cand.get("observed_change"),
             })
 
-    def _refusal_gaps(self, changes: dict[str, Any], base: dict[str, Any], *,
-                      any_reason: bool) -> None:
-        """Gaps for edit targets the observer could not confirm: a failed
-        or partly applied patch, a deletion that did not happen, or an edit
-        through a link (at its in-checkout referent, or anywhere when that
-        is unknown). With ``any_reason`` (an unconfirmed edit) every
-        in-checkout refusal is uncertain."""
-        uncertain = {"edit-failed", "deletion-not-applied", "edit-via-link"}
-        for refused in changes.get("refused") or []:
-            if not isinstance(refused, dict):
-                continue
-            reason = refused.get("reason")
-            if reason == "edit-target-unknown":
-                self.gaps.append({"kind": "edit-uncertain", "scope": "repo",
-                                  "reason": reason, **base})
-                continue
-            path = refused.get("path")
-            if (isinstance(path, str) and not os.path.isabs(path)
-                    and (any_reason or reason in uncertain or refused.get("casefold"))):
-                self.gaps.append({"kind": "edit-uncertain", "scope": "path", "path": path,
-                                  "reason": reason,
-                                  **({"casefold": True} if refused.get("casefold") else {}),
-                                  **base})
-
     def _add_observation(self, key: str, item: dict[str, Any], events: list[str]) -> None:
+        """Credit an observation's writes. What it could not see (no change
+        list, a capped diff, an unwatched, racy, refused or moved path, an
+        unconfirmed edit) is not recorded here: positive proof finds it at
+        each later write's path (`_unaccounted_since`)."""
         record = item["record"]
         status = record.get("status")
         journal = record.get("journal") if isinstance(record.get("journal"), dict) else None
@@ -823,39 +796,18 @@ class Index:
                 "tool": record.get("tool"), "tool_outcome": record.get("outcome")}
         changes = record.get("changes")
         if status in _GAP_STATUSES or not isinstance(changes, dict):
-            self.gaps.append({"kind": f"observation-{status or 'unknown'}", "scope": "repo",
-                              "reason": record.get("reason"), **base})
+            return
+        if status == "edit" and record.get("outcome") != "success":
+            # An edit not shown to have succeeded: nothing says the call
+            # changed its targets (an edit records no before-state), so no
+            # write is credited to it.
             return
         attribution = {"no-known-overlap": "sole", "overlap": "shared",
                        "background": "uncertain", "edit": "sole"}.get(status, "uncertain")
-        unconfirmed_edit = status == "edit" and record.get("outcome") != "success"
-        if unconfirmed_edit:
-            # An edit not shown to have succeeded: its targets were hashed
-            # after the call, but nothing says the call changed them (an
-            # edit records no before-state). The hashes stay as evidence on
-            # a gap; no write is credited to the call.
-            for kind in ("edited", "created", "modified", "deleted"):
-                for entry in changes.get(kind) or []:
-                    if isinstance(entry, dict) and isinstance(entry.get("path"), str):
-                        self.gaps.append({"kind": "edit-unconfirmed", "scope": "path",
-                                          "path": entry["path"],
-                                          "after": entry.get("after"), **base})
-            self._refusal_gaps(changes, base, any_reason=True)
-            return
         overlapping = [o.get("call") for o in record.get("overlapping") or []
                        if isinstance(o, dict)]
         if overlapping and attribution == "sole":
             attribution = "shared"
-        # Targets an edit could not confirm (a failed or partly applied
-        # patch, a deletion that did not happen): their content is unknown.
-        self._refusal_gaps(changes, base, any_reason=False)
-        # Paths that left or entered the watched scope during the call.
-        for moved in changes.get("coverage_changed") or []:
-            if isinstance(moved, str):
-                self.gaps.append({"kind": "coverage-changed", "scope": "path", "path": moved,
-                                  **base})
-        if changes.get("coverage_changed_truncated"):
-            self.gaps.append({"kind": "coverage-changed", "scope": "repo", **base})
         if status == "background":
             # A background job may keep writing after its launch snapshot;
             # its writes are unknown until the journal bounds its interval.
@@ -873,28 +825,6 @@ class Index:
             self.gaps.append({"kind": "background-job", "scope": "repo",
                               **{**base, "journal": bound or None}})
         incomplete = bool(changes.get("capped"))
-        if incomplete:
-            # A capped diff lists only some changes; its top-level counts
-            # say where the rest are. Without them, anywhere.
-            tops = changes.get("top_level")
-            if isinstance(tops, dict) and tops and changes.get("top_level_complete") is True:
-                for top in tops:
-                    self.gaps.append({"kind": "observation-capped", "scope": "path",
-                                      "path": str(top), "prefix": True, **base})
-            else:
-                self.gaps.append({"kind": "observation-capped", "scope": "repo", **base})
-        scope = record.get("scope") if isinstance(record.get("scope"), dict) else {}
-        for unwatched in scope.get("unwatched") or []:
-            if isinstance(unwatched, dict) and isinstance(unwatched.get("path"), str):
-                self.gaps.append({"kind": "unwatched", "scope": "path",
-                                  "path": unwatched["path"], "prefix": True, **base})
-        racy = [r for r in changes.get("racy_unknown") or [] if isinstance(r, str)]
-        counts = changes.get("counts") if isinstance(changes.get("counts"), dict) else {}
-        racy_count = counts.get("racy_unknown")
-        if isinstance(racy_count, int) and racy_count > len(racy):
-            self.gaps.append({"kind": "racy-truncated", "scope": "repo", **base})
-        for path in racy:
-            self.gaps.append({"kind": "racy", "scope": "path", "path": path, **base})
         for kind, action in (("created", "written"), ("modified", "written"),
                              ("edited", "written"), ("deleted", "deleted")):
             entries = changes.get(kind)
@@ -918,27 +848,6 @@ class Index:
 
     def writes_at(self, path: str) -> list[dict[str, Any]]:
         return sorted((w for w in self.writes if w["path"] == path), key=_clock)
-
-    @staticmethod
-    def _gap_applies(gap: dict[str, Any], path: str) -> bool:
-        if gap.get("scope") == "repo":
-            return True
-        if gap.get("scope") != "path":
-            return False
-        gpath = gap.get("path") or ""
-        if gap.get("casefold"):
-            # A path named in a spelling that could not be checked against
-            # the volume (a deleted file on a case-insensitive disk): it
-            # covers every spelling of that name.
-            import unicodedata
-
-            def fold(text: str) -> str:
-                return unicodedata.normalize("NFC", text).casefold()
-
-            path, gpath = fold(path), fold(gpath)
-        if gap.get("prefix"):
-            return path == gpath or path.startswith(gpath.rstrip("/") + "/")
-        return path == gpath
 
     def record_status(self, write: dict[str, Any]) -> dict[str, Any]:
         """The lineage verdict for one write, from the record alone."""
@@ -975,7 +884,9 @@ class Index:
                 later_diff.append(other)
             elif theirs is None or mine is None:
                 later_maybe.append(other)  # a difference cannot be proven
-        gaps = [g for g in self.gaps if self._gap_applies(g, path)
+        # Every gap left is checkout-wide: what the journal cannot place (an
+        # unreadable source, a manifest-only call, a background job).
+        gaps = [g for g in self.gaps if g.get("scope") == "repo"
                 and (g.get("call") != write["call"] or g.get("kind") == "background-job")
                 and not _ended_before(g.get("journal"), write.get("journal"))]
         if later_diff:
@@ -1041,16 +952,20 @@ class Index:
         if not isinstance(start, int) or start < self.journal_floor:
             return [{"kind": "journal-compacted", "floor": self.journal_floor}]
         out: list[dict[str, Any]] = []
+        placed: set[str] = set()
         for interval in self.journal_now.values():
             call = _obs_key(interval.get("session"),
                             f"{interval.get('host')}:{interval.get('call')}")
             if call is None or call == write.get("call"):
                 continue
             post = interval.get("post_seq")
-            if isinstance(post, int) and post < start:
-                continue  # ended before this write began
             if post is None and not interval.get("background"):
                 continue  # still running: reported as an open call
+            placed.add(call)
+            if (isinstance(post, int) and post < start
+                    and not (interval.get("expired")
+                             and interval.get("end_reason") != "turn-ended")):
+                continue  # ended before this write began (an age expiry is no end)
             observed = self.observations.get(call)
             if observed is None:
                 # Another checkout's call (a shared state directory) covers
@@ -1079,6 +994,19 @@ class Index:
             problem = self._observation_gap_at(observed["record"], path, interval)
             if problem:
                 out.append({"kind": problem, "call": call})
+        # Observations the journal does not place (compacted away, another
+        # journal, a Post that never reached it) are unordered: each counts
+        # unless its own bound shows it ended before the write. A background
+        # launch is the `background-job` gap instead.
+        for call, item in self.observations.items():
+            record = item["record"]
+            if (call in placed or call == write.get("call")
+                    or record.get("status") == "background"
+                    or _ended_before(record.get("journal"), journal)):
+                continue
+            problem = self._observation_gap_at(record, path, {})
+            if problem:
+                out.append({"kind": problem, "call": call})
         return out
 
     def _observation_gap_at(self, record: dict[str, Any], path: str,
@@ -1098,21 +1026,33 @@ class Index:
         if status == "edit" and record.get("outcome") != "success":
             return "edit-unconfirmed"
         if changes.get("capped"):
+            # A capped diff lists only some changes; complete top-level
+            # counts say where the rest are. Without them, anywhere.
             tops = changes.get("top_level")
-            if not (isinstance(tops, dict) and changes.get("top_level_complete") is True
+            if not (isinstance(tops, dict) and tops and changes.get("top_level_complete") is True
                     and path.split("/")[0] not in tops):
                 return "observation-capped"
         if status != "edit":
             scope = record.get("scope") if isinstance(record.get("scope"), dict) else {}
             if io_observer.watch_status(path, scope.get("unwatched") or []) != "watched":
                 return "path-unwatched"
-        for name in ("racy_unknown", "coverage_changed"):
-            if path in (changes.get(name) or []):
-                return f"path-{name.replace('_', '-')}"
+        racy = changes.get("racy_unknown") or []
+        counts = changes.get("counts") if isinstance(changes.get("counts"), dict) else {}
+        if path in racy or (isinstance(counts.get("racy_unknown"), int)
+                            and counts["racy_unknown"] > len(racy)):
+            return "path-racy-unknown"
+        if path in (changes.get("coverage_changed") or []) \
+                or changes.get("coverage_changed_truncated"):
+            return "path-coverage-changed"
         for refused in changes.get("refused") or []:
-            if isinstance(refused, dict) and (refused.get("path") == path
-                                              or refused.get("reason")
-                                              == "edit-target-unknown"):
+            if not isinstance(refused, dict):
+                continue
+            target = refused.get("path")
+            if refused.get("reason") == "edit-target-unknown" or target == path or (
+                    refused.get("casefold") and isinstance(target, str)
+                    and _fold(target) == _fold(path)):
+                # A casefold refusal (a deletion a case-insensitive volume
+                # could not check) covers every spelling of the name.
                 return "path-uncertain"
         return None
 

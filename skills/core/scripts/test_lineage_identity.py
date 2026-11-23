@@ -8,10 +8,12 @@ observations carry the journal position that orders writes without clocks.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -345,3 +347,56 @@ def test_edit_observation_refuses_paths_outside_the_checkout(tmp_path: Path) -> 
     # On a case-insensitive volume the deletion also covers every spelling.
     assert [r for r in refused if not r.get("casefold")] == \
         [{"path": str(tmp_path / "x.txt"), "reason": "outside-scope"}]
+
+
+def test_the_same_call_id_in_two_sessions_consolidates_separately(tmp_path: Path) -> None:
+    obs_dir = tmp_path / "obs"
+    for session in ("s1", "s2"):
+        path = obs_dir / "claude" / f"{session}.ndjson"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"kind": "observation", "observation_id": "claude:t1",
+                                    "host_session_id": session, "status": "no-known-overlap",
+                                    "changes": {"created": [], "modified": [], "deleted": []}})
+                        + "\n")
+    records = [{"observation_id": "claude:t1", "observation_session": "s1", "outputs": []},
+               {"observation_id": "claude:t1", "observation_session": "s2", "outputs": []}]
+    observations, missing, _ = stop.join_observations(records, obs_dir, str(tmp_path), [])
+    assert len(observations) == 2 and missing == []
+
+
+def test_an_output_whose_coverage_changed_is_not_unchanged(tmp_path: Path) -> None:
+    record = {"observation_id": "claude:t1",
+              "outputs": [{"path": str(tmp_path / "data" / "x.csv"), "rel_path": "data/x.csv"}]}
+    observation = {"observation_id": "claude:t1", "status": "no-known-overlap",
+                   "scope": {"unwatched": []},
+                   "changes": {"created": [], "modified": [], "deleted": [],
+                               "coverage_changed": ["data/x.csv"]}}
+    stop._mark_observed_changes([record], {"claude:t1": observation}, str(tmp_path))
+    assert record["outputs"][0]["observed_change"] == "unknown-coverage"
+
+
+def test_a_fifo_script_path_does_not_hang_consolidation(tmp_path: Path) -> None:
+    fifo = tmp_path / "fit.py"
+    os.mkfifo(fifo)
+    raw = {"ts": "2026-11-01T00:00:00Z", "bash_cmd": "python fit.py", "script": str(fifo),
+           "script_sha256": None}
+    result: dict = {}
+    worker = threading.Thread(target=lambda: result.update(
+        event=stop.normalize_event(raw, [], 0)), daemon=True)
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive(), "normalize_event blocked on a FIFO"
+    assert result["event"]["script_sha256"] is None
+
+
+SECRET = "TEST_SECRET_123"
+
+
+def test_a_recomputed_script_digest_is_the_file_digest(tmp_path: Path) -> None:
+    script = tmp_path / "fit.py"
+    script.write_text(f'token = "{SECRET}"\n')
+    raw = {"ts": "2026-11-01T00:00:00Z", "bash_cmd": "python fit.py", "script": str(script),
+           "script_sha256": None}
+    event = stop.normalize_event(raw, [], 0)
+    assert "script_sha256_of" not in event
+    assert event["script_sha256"] == hashlib.sha256(script.read_bytes()).hexdigest()

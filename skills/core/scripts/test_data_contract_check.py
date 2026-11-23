@@ -5,16 +5,24 @@ Copyright (c) 2026 Mikhael Manurung, MIT License. See issue #91.
 """
 
 import csv
+import errno
 import importlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+
+import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+import data_contract_check as dcc  # noqa: E402
 SCRIPT = os.path.join(HERE, "data_contract_check.py")
 FIXTURES = os.path.join(HERE, "..", "tests", "fixtures", "data_contract")
 
@@ -851,3 +859,368 @@ class MissingKeyMatrixTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_joint_batches_that_lose_a_group_block(tmp_path: Path) -> None:
+    table = tmp_path / "t.tsv"
+    table.write_text("u\tg\tdate\trun\nu1\tA\td1\t\nu2\tA\t\tr1\nu3\tB\td1\tr1\nu4\tB\td2\tr2\n")
+    contract = {"schema": dcc.SCHEMA, "table": str(table), "checks": [
+        {"kind": "batch_estimability", "batch": ["date", "run"], "contrast": "g"}]}
+    summaries, _ = dcc.run_contract(contract, str(tmp_path))
+    assert summaries[0]["status"] == "block"
+
+
+def test_joint_batches_respect_local_label_scope(tmp_path: Path) -> None:
+    table = tmp_path / "t.tsv"
+    table.write_text("site\tline\tdate\tg\nS1\tL1\tD1\tA\nS1\tL1\tD2\tB\nS2\tL1\tD1\tB\n")
+    contract = {"schema": dcc.SCHEMA, "table": str(table), "checks": [
+        {"kind": "batch_estimability", "batch": ["line", "date"], "contrast": "g",
+         "batch_scopes": {"line": ["site"]}}]}
+    summaries, _ = dcc.run_contract(contract, str(tmp_path))
+    assert summaries[0]["status"] == "block"
+
+
+def test_pairing_exact_levels_hold_on_the_checked_table(tmp_path: Path) -> None:
+    table = tmp_path / "m.tsv"
+    table.write_text("donor\tg\nd1\tA\nd1\tB\nd2\tA\nd2\tB\n")  # the modeled table lost C
+    contract = {"schema": dcc.SCHEMA, "table": str(table), "checks": [
+        {"kind": "pairing", "unit": "donor", "within": "g", "levels": ["A", "B", "C"],
+         "exact_levels": True}]}
+    summaries, _ = dcc.run_contract(contract, str(tmp_path))
+    assert summaries[0]["status"] == "block"
+
+
+def _blocks(alerts: list) -> bool:
+    return any(a["kind"] == "pairing" and a["blocking"] for a in alerts)
+
+
+def _pairing(tmp_path: Path, rows: str, **check) -> tuple[list, list]:
+    table = tmp_path / "t.tsv"
+    table.write_text("participant\tvisit\n" + rows)
+    contract = {"schema": dcc.SCHEMA, "table": str(table),
+                "checks": [{"kind": "pairing", "unit": "participant", "within": "visit",
+                            **check}]}
+    return dcc.run_contract(contract, str(tmp_path))
+
+
+@pytest.mark.parametrize("levels", [["A", "A"], ["28", 28]])
+def test_a_level_listed_twice_is_one_side(tmp_path: Path, levels) -> None:
+    value = str(levels[0])
+    # With an explicit minimum, a level listed twice counts once.
+    _, alerts = _pairing(tmp_path, f"p1\t{value}\np2\t{value}\n", levels=levels,
+                         min_levels=2)
+    assert _blocks(alerts)
+
+
+def test_two_distinct_listed_levels_still_pass(tmp_path: Path) -> None:
+    _, alerts = _pairing(tmp_path, "p1\tA\np1\tB\np2\tA\np2\tB\n", levels=["A", "A", "B"])
+    assert not _blocks(alerts)
+
+
+def test_a_097_pairing_without_levels_keeps_its_behavior(tmp_path: Path) -> None:
+    _, alerts = _pairing(tmp_path, "p1\tA\np2\tA\n")
+    assert not _blocks(alerts)
+
+
+def test_min_levels_opts_into_the_two_level_minimum(tmp_path: Path) -> None:
+    _, alerts = _pairing(tmp_path, "p1\tA\np2\tA\n", min_levels=2)
+    assert _blocks(alerts)
+    _, alerts = _pairing(tmp_path, "p1\tA\np1\tB\np2\tA\np2\tB\n", min_levels=2)
+    assert not _blocks(alerts)
+
+
+@pytest.mark.parametrize("bad", [1, True, "2", 0])
+def test_min_levels_must_be_a_whole_number_of_at_least_two(bad) -> None:
+    contract = {"schema": dcc.SCHEMA, "table": "t.tsv",
+                "checks": [{"kind": "pairing", "unit": "u", "within": "w", "min_levels": bad}]}
+    with pytest.raises(dcc.ContractError):
+        dcc.validate_contract(contract)
+
+
+def _blocks_2(alerts: list) -> bool:
+    return any(a["blocking"] for a in alerts)
+
+
+def _pairing_2(tmp_path: Path, rows: str, **check) -> list:
+    table = tmp_path / "t.tsv"
+    table.write_text("donor\tvisit\n" + rows)
+    contract = {"schema": dcc.SCHEMA, "table": str(table),
+                "checks": [{"kind": "pairing", "unit": "donor", "within": "visit", **check}]}
+    return dcc.run_contract(contract, str(tmp_path))[1]
+
+
+def test_one_listed_level_passes_as_on_097(tmp_path: Path) -> None:
+    assert not _blocks_2(_pairing_2(tmp_path, "d1\tbaseline\nd2\tbaseline\n", levels=["baseline"]))
+
+
+def test_one_listed_level_with_min_levels_blocks(tmp_path: Path) -> None:
+    alerts = _pairing_2(tmp_path, "d1\tbaseline\nd2\tbaseline\n", levels=["baseline"], min_levels=2)
+    assert _blocks_2(alerts)
+
+
+def test_min_levels_counts_distinct_levels(tmp_path: Path) -> None:
+    alerts = _pairing_2(tmp_path, "d1\tA\nd2\tA\n", levels=["A", "A"], min_levels=2)
+    assert _blocks_2(alerts)
+    alerts = _pairing_2(tmp_path, "d1\tA\nd1\tB\nd2\tA\nd2\tB\n", levels=["A", "B"], min_levels=2)
+    assert not _blocks_2(alerts)
+
+
+def test_one_listed_level_cli_exit_zero(tmp_path: Path) -> None:
+    table = tmp_path / "t.tsv"
+    table.write_text("donor\tvisit\nd1\tbaseline\nd2\tbaseline\n")
+    contract = tmp_path / "c.json"
+    contract.write_text(json.dumps({"schema": dcc.SCHEMA, "table": "t.tsv", "checks": [
+        {"kind": "pairing", "unit": "donor", "within": "visit", "levels": ["baseline"]}]}))
+    assert dcc.main(["--contract", str(contract), "--root", str(tmp_path)]) == 0
+
+
+def _no_temp_files(directory: Path) -> bool:
+    return not [p for p in directory.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_no_clobber_publish_refuses_a_file_created_meanwhile(tmp_path: Path) -> None:
+    dest = tmp_path / "c.json"
+    dest.write_text("theirs\n")
+    with pytest.raises(dcc.ContractError):
+        dcc.write_atomic_json(str(dest), {"a": 1}, replace=False)
+    assert dest.read_text() == "theirs\n"
+    assert _no_temp_files(tmp_path)
+    fresh = tmp_path / "new.json"
+    dcc.write_atomic_json(str(fresh), {"a": 1}, replace=False)
+    assert json.loads(fresh.read_text()) == {"a": 1}
+    assert _no_temp_files(tmp_path)
+
+
+@pytest.fixture()
+def linked(tmp_path: Path) -> Path:
+    """root/ledger/latest -> root/snapshot/staging; the ledger names its
+    table `latest/../samples.tsv`, which the OS opens as
+    root/snapshot/samples.tsv. A decoy root/ledger/samples.tsv is what a
+    lexical collapse of `..` would name instead."""
+    root = tmp_path / "root"
+    templates = Path(HERE).parent / "templates"
+    (root / "ledger").mkdir(parents=True)
+    (root / "snapshot" / "staging").mkdir(parents=True)
+    (root / "ledger" / "latest").symlink_to(root / "snapshot" / "staging")
+    shutil.copy(templates / "samples.tsv", root / "snapshot" / "samples.tsv")
+    shutil.copy(templates / "samples.tsv", root / "ledger" / "samples.tsv")
+    spec = json.loads((templates / "samples.ledger.json").read_text())
+    spec.pop("note", None)
+    spec["file"] = "latest/../samples.tsv"
+    (root / "ledger" / "samples.ledger.json").write_text(json.dumps(spec))
+    return root
+
+
+def _emit(root: Path, dest: Path, *extra: str) -> int:
+    return dcc.main(["--ledger", str(root / "ledger" / "samples.ledger.json"),
+                     "--root", str(root), "--emit-contract", str(dest), *extra])
+
+
+def test_overwrite_never_destroys_the_table_read_through_a_symlink(linked: Path) -> None:
+    table = linked / "snapshot" / "samples.tsv"
+    before = table.read_bytes()
+    assert _emit(linked, table, "--overwrite") == 1
+    assert table.read_bytes() == before
+
+
+def test_overwrite_refuses_the_table_by_its_dotdot_spelling(linked: Path) -> None:
+    table = linked / "snapshot" / "samples.tsv"
+    before = table.read_bytes()
+    dest = linked / "ledger" / "latest" / ".." / "samples.tsv"
+    assert _emit(linked, dest, "--overwrite") == 1
+    assert table.read_bytes() == before
+
+
+def test_emitted_contract_names_the_table_that_was_read(linked: Path) -> None:
+    dest = linked / "data_contract.json"
+    assert _emit(linked, dest) == 0
+    emitted = json.loads(dest.read_text())
+    assert emitted["table"] == os.path.join("snapshot", "samples.tsv")
+    # The contract replays against the same file.
+    assert dcc.main(["--contract", str(dest), "--root", str(linked)]) == 0
+
+
+def test_checks_read_the_resolved_table(linked: Path, capsys) -> None:
+    # Break the decoy: a lexical reading would now fail the schema check.
+    (linked / "ledger" / "samples.tsv").write_text("nothing\n1\n")
+    assert dcc.main(["--ledger", str(linked / "ledger" / "samples.ledger.json"),
+                     "--root", str(linked), "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert {s["table"] for s in out["checks"]} == {
+        os.path.realpath(linked / "snapshot" / "samples.tsv")}
+
+
+def test_ledger_spec_path_resolves_symlinks_before_dotdot(linked: Path) -> None:
+    # The ledger itself named through `latest/..`: its directory is
+    # root/snapshot, so a relative table `samples.tsv` is snapshot's.
+    spec = json.loads((linked / "ledger" / "samples.ledger.json").read_text())
+    spec["file"] = "samples.tsv"
+    (linked / "snapshot" / "samples.ledger.json").write_text(json.dumps(spec))
+    (linked / "ledger" / "samples.tsv").write_text("nothing\n1\n")
+    via = linked / "ledger" / "latest" / ".." / "samples.ledger.json"
+    dest = linked / "data_contract.json"
+    assert dcc.main(["--ledger", str(via), "--root", str(linked),
+                     "--emit-contract", str(dest)]) == 0
+    assert json.loads(dest.read_text())["table"] == os.path.join("snapshot", "samples.tsv")
+    table = linked / "snapshot" / "samples.tsv"
+    before = table.read_bytes()
+    assert dcc.main(["--ledger", str(via), "--root", str(linked),
+                     "--emit-contract", str(table), "--overwrite"]) == 1
+    assert table.read_bytes() == before
+
+
+def test_destination_through_a_symlinked_dotdot_lands_where_the_os_puts_it(
+        linked: Path) -> None:
+    (linked / "out").mkdir()
+    (linked / "out" / "latest").symlink_to(linked / "snapshot" / "staging")
+    dest = linked / "out" / "latest" / ".." / "c.json"
+    assert _emit(linked, dest) == 0
+    assert (linked / "snapshot" / "c.json").is_file()
+    assert not (linked / "out" / "c.json").exists()
+    for directory in (linked / "out", linked / "snapshot"):
+        assert not [p for p in directory.iterdir() if p.name.endswith(".tmp")]
+
+
+def _no_hard_links(monkeypatch, before_failing=None) -> None:
+    def link(src, dst, *args, **kwargs):
+        if before_failing is not None:
+            before_failing(dst)
+        raise OSError(errno.EPERM, "hard links not supported")
+    monkeypatch.setattr(dcc.os, "link", link)
+
+
+def test_fallback_never_replaces_onto_the_destination(tmp_path: Path, monkeypatch) -> None:
+    dest = tmp_path / "contract.json"
+    _no_hard_links(monkeypatch)
+    real_replace = os.replace
+
+    def replace(src, dst, *args, **kwargs):
+        assert os.path.realpath(dst) != os.path.realpath(dest), "os.replace onto a new-only path"
+        return real_replace(src, dst, *args, **kwargs)
+    monkeypatch.setattr(dcc.os, "replace", replace)
+    dcc.write_atomic_json(str(dest), {"a": 1}, replace=False)
+    assert json.loads(dest.read_text()) == {"a": 1}
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_fallback_keeps_a_file_published_concurrently(tmp_path: Path, monkeypatch) -> None:
+    dest = tmp_path / "contract.json"
+    real_lexists = os.path.lexists
+    published = []
+
+    def check_then_publish(path):
+        # Another process publishes right after any existence check.
+        result = real_lexists(path)
+        if os.path.realpath(path) == os.path.realpath(dest) and not real_lexists(dest):
+            dest.write_text('{"theirs": true}\n')
+            published.append(True)
+        return result
+    monkeypatch.setattr(dcc.os.path, "lexists", check_then_publish)
+    _no_hard_links(monkeypatch)
+    try:
+        dcc.write_atomic_json(str(dest), {"a": 1}, replace=False)
+    except dcc.ContractError:
+        pass
+    if published:
+        assert dest.read_text() == '{"theirs": true}\n'
+    else:
+        assert json.loads(dest.read_text()) == {"a": 1}
+
+
+def test_fallback_refuses_an_existing_destination(tmp_path: Path, monkeypatch) -> None:
+    dest = tmp_path / "contract.json"
+
+    def appear(dst):
+        Path(dst).write_text('{"theirs": true}\n')
+    _no_hard_links(monkeypatch, before_failing=appear)
+    with pytest.raises(dcc.ContractError, match="already exists"):
+        dcc.write_atomic_json(str(dest), {"a": 1}, replace=False)
+    assert dest.read_text() == '{"theirs": true}\n'
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_fallback_removes_its_partial_file_on_a_failed_write(
+        tmp_path: Path, monkeypatch) -> None:
+    dest = tmp_path / "contract.json"
+    _no_hard_links(monkeypatch)
+
+    def fsync(fd):
+        raise OSError(errno.EIO, "disk error")
+    monkeypatch.setattr(dcc.os, "fsync", fsync)
+    with pytest.raises(OSError):
+        dcc.write_atomic_json(str(dest), {"a": 1}, replace=False)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_fallback_through_the_cli_exits_one_on_an_existing_file(
+        tmp_path: Path, monkeypatch) -> None:
+    templates = Path(HERE).parent / "templates"
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "samples.tsv").write_text((templates / "samples.tsv").read_text())
+    spec = json.loads((templates / "samples.ledger.json").read_text())
+    spec.pop("note", None)
+    (root / "samples.ledger.json").write_text(json.dumps(spec))
+    dest = tmp_path / "contract.json"
+
+    def appear(dst):
+        Path(dst).write_text('{"theirs": true}\n')
+    _no_hard_links(monkeypatch, before_failing=appear)
+    code = dcc.main(["--ledger", str(root / "samples.ledger.json"), "--root", str(root),
+                     "--emit-contract", str(dest)])
+    assert code == 1
+    assert dest.read_text() == '{"theirs": true}\n'
+
+
+def _pairing_3(tmp_path: Path, rows: str, **check) -> list:
+    table = tmp_path / "t.tsv"
+    table.write_text("participant\tvisit\n" + rows)
+    contract = {"schema": dcc.SCHEMA, "table": str(table),
+                "checks": [{"kind": "pairing", "unit": "participant", "within": "visit",
+                            **check}]}
+    _, alerts = dcc.run_contract(contract, str(tmp_path))
+    return [a for a in alerts if a["kind"] == "pairing"]
+
+
+@pytest.mark.parametrize("levels", [["control", "control"], ["28", 28]])
+def test_a_repeated_level_without_min_levels_passes_as_on_097(tmp_path: Path, levels) -> None:
+    value = str(levels[0])
+    assert _pairing_3(tmp_path, f"p1\t{value}\np2\t{value}\n", levels=levels) == []
+
+
+def test_a_repeated_level_without_min_levels_still_checks_completeness(tmp_path: Path) -> None:
+    # As on 0.9.7: a unit missing the listed level is incomplete.
+    alerts = _pairing_3(tmp_path, "p1\tcontrol\np2\ttreated\n", levels=["control", "control"])
+    assert [a["blocking"] for a in alerts] == [True]
+    assert "missing a level" in alerts[0]["message"]
+
+
+@pytest.fixture()
+def umask_022():
+    old = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(old)
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+def test_overwrite_preserves_existing_mode(tmp_path: Path, umask_022) -> None:
+    dest = tmp_path / "data_contract.json"
+    dest.write_text("{}\n")
+    os.chmod(dest, 0o600)
+    dcc.write_atomic_json(str(dest), {"a": 1}, replace=True)
+    assert json.loads(dest.read_text()) == {"a": 1}
+    assert _mode(dest) == 0o600
+
+
+def test_new_contract_uses_umask(tmp_path: Path, umask_022) -> None:
+    dest = tmp_path / "data_contract.json"
+    dcc.write_atomic_json(str(dest), {"a": 1}, replace=False)
+    assert _mode(dest) == 0o644
+    other = tmp_path / "other.json"
+    dcc.write_atomic_json(str(other), {"a": 1}, replace=True)
+    assert _mode(other) == 0o644

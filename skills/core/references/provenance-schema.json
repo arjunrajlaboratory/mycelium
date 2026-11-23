@@ -1000,6 +1000,7 @@
               "gap",
               "write-hash-unknown",
               "incomplete-observation",
+              "coverage-unproven",
               "earlier-hash-unknown",
               "later-write-hash-unknown"
             ]

@@ -383,9 +383,9 @@ def _incomplete_reasons(index, rel: str, writes: list[dict[str, Any]]) -> list[s
            and _verdict(w) != "superseded" for w in writes):
         reasons.append("write-hash-unknown")
     try:
-        import lineage_index
-
-        if any(lineage_index.Index._gap_applies(g, rel) for g in getattr(index, "gaps", [])):
+        # Every gap the index keeps is checkout-wide (path-level misses are
+        # in each write's own reasons, above).
+        if any(g.get("scope") == "repo" for g in getattr(index, "gaps", [])):
             reasons.append("gap")
     except Exception:  # noqa: BLE001 - cannot rule a gap out
         reasons.append("gap")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -267,3 +268,174 @@ def test_emitted_tables_are_relative_to_root(ledger: Path) -> None:
                              "--emit-contract", str(out)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout
     assert json.loads(out.read_text())["table"] == "samples.tsv"
+
+
+@pytest.fixture()
+def ledger_2(tmp_path: Path) -> Path:
+    import shutil
+
+    templates = HERE.parent / "templates"
+    shutil.copy(templates / "samples.tsv", tmp_path / "samples.tsv")
+    spec = json.loads((templates / "samples.ledger.json").read_text())
+    spec.pop("note")
+    (tmp_path / "samples.ledger.json").write_text(json.dumps(spec))
+    return tmp_path
+
+
+def _ledger_run(spec: Path, *extra: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(HERE / "data_contract_check.py"), "--ledger",
+                           str(spec), "--json", *extra], capture_output=True, text=True)
+
+
+def _spec(ledger_2: Path, **changes) -> Path:
+    path = ledger_2 / "samples.ledger.json"
+    spec = {**json.loads(path.read_text()), **changes}
+    path.write_text(json.dumps(spec))
+    return path
+
+
+def test_a_ledger_pairing_needs_two_distinct_levels(ledger_2: Path) -> None:
+    spec = _spec(ledger_2, pairing={"unit": "derivation", "within": "condition",
+                                  "levels": ["control", "control"]})
+    result = _ledger_run(spec)
+    assert result.returncode == 1
+    assert "distinct" in result.stderr
+
+
+def test_ledger_contracts_opt_into_min_levels(ledger_2: Path) -> None:
+    spec = json.loads(_spec(ledger_2, pairing={"unit": "derivation",
+                                             "within": "condition"}).read_text())
+    contract = dcc.ledger_contract(spec, str(ledger_2))
+    (pair,) = [c for c in contract["checks"] if c["kind"] == "pairing"]
+    assert pair["min_levels"] == 2
+    dcc.validate_contract(contract)
+
+
+def test_emit_contract_refuses_the_ledger_spec(ledger_2: Path) -> None:
+    spec = ledger_2 / "samples.ledger.json"
+    before = spec.read_bytes()
+    result = _ledger_run(spec, "--emit-contract", str(spec))
+    assert result.returncode == 1
+    assert spec.read_bytes() == before
+
+
+@pytest.mark.parametrize("alias", ["same", "symlink", "hardlink"])
+def test_emit_contract_refuses_the_sample_table(ledger_2: Path, alias: str) -> None:
+    table = ledger_2 / "samples.tsv"
+    before = table.read_bytes()
+    if alias == "same":
+        dest = table
+    elif alias == "symlink":
+        dest = ledger_2 / "contract.json"
+        dest.symlink_to(table)
+    else:
+        dest = ledger_2 / "contract.json"
+        os.link(table, dest)
+    result = _ledger_run(ledger_2 / "samples.ledger.json", "--emit-contract", str(dest))
+    assert result.returncode == 1
+    assert table.read_bytes() == before
+
+
+def test_emit_contract_validates_before_writing(ledger_2: Path, monkeypatch, capsys) -> None:
+    out = ledger_2 / "data_contract.json"
+
+    def broken(spec, spec_dir):
+        return {"schema": dcc.SCHEMA, "table": str(ledger_2 / "samples.tsv"),
+                "checks": [{"kind": "no-such-kind"}]}
+
+    monkeypatch.setattr(dcc, "ledger_contract", broken)
+    code = dcc.main(["--ledger", str(ledger_2 / "samples.ledger.json"),
+                     "--emit-contract", str(out), "--root", str(ledger_2)])
+    assert code == 1
+    assert not out.exists()
+    assert [p.name for p in ledger_2.iterdir() if p.name.endswith(".tmp")] == []
+
+
+@pytest.fixture()
+def ledger_3(tmp_path: Path) -> Path:
+    templates = HERE.parent / "templates"
+    shutil.copy(templates / "samples.tsv", tmp_path / "samples.tsv")
+    spec = json.loads((templates / "samples.ledger.json").read_text())
+    spec.pop("note", None)
+    (tmp_path / "samples.ledger.json").write_text(json.dumps(spec))
+    return tmp_path
+
+
+def _no_temp_files(directory: Path) -> bool:
+    return not [p for p in directory.iterdir() if p.name.endswith(".tmp")]
+
+
+def _emit(ledger_3: Path, dest: Path, *extra: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(CHECKER), "--ledger", str(ledger_3 / "samples.ledger.json"),
+         "--root", str(ledger_3), "--emit-contract", str(dest), *extra],
+        capture_output=True, text=True)
+
+
+def test_missing_table_never_replaces_an_existing_contract(ledger_3: Path) -> None:
+    dest = ledger_3 / "data_contract.json"
+    dest.write_text('{"extended": true}\n')
+    (ledger_3 / "samples.tsv").unlink()
+    result = _emit(ledger_3, dest)
+    assert result.returncode == 1
+    assert "already exists" in result.stderr
+    assert dest.read_text() == '{"extended": true}\n'
+    result = _emit(ledger_3, dest, "--overwrite")
+    assert result.returncode == 2
+    assert dest.read_text() == '{"extended": true}\n'
+    assert _no_temp_files(ledger_3)
+
+
+def test_missing_table_writes_no_new_contract(ledger_3: Path) -> None:
+    dest = ledger_3 / "data_contract.json"
+    (ledger_3 / "samples.tsv").unlink()
+    result = _emit(ledger_3, dest)
+    assert result.returncode == 2
+    assert not dest.exists()
+    assert "not written" in result.stderr
+
+
+def test_existing_destination_needs_overwrite(ledger_3: Path) -> None:
+    dest = ledger_3 / "data_contract.json"
+    dest.write_text('{"extended": true}\n')
+    result = _emit(ledger_3, dest)
+    assert result.returncode == 1
+    assert dest.read_text() == '{"extended": true}\n'
+    result = _emit(ledger_3, dest, "--overwrite")
+    assert result.returncode == 0, result.stdout + result.stderr
+    dcc.validate_contract(json.loads(dest.read_text()))
+
+
+def test_dangling_symlink_destination_counts_as_existing(ledger_3: Path) -> None:
+    dest = ledger_3 / "data_contract.json"
+    dest.symlink_to(ledger_3 / "nowhere.json")
+    assert _emit(ledger_3, dest).returncode == 1
+    assert dest.is_symlink() and not (ledger_3 / "nowhere.json").exists()
+
+
+def test_new_destination_is_written_after_the_checks(ledger_3: Path) -> None:
+    dest = ledger_3 / "data_contract.json"
+    result = _emit(ledger_3, dest)
+    assert result.returncode == 0, result.stdout + result.stderr
+    dcc.validate_contract(json.loads(dest.read_text()))
+
+
+def test_overwrite_needs_emit_contract(ledger_3: Path) -> None:
+    code = dcc.main(["--ledger", str(ledger_3 / "samples.ledger.json"), "--overwrite"])
+    assert code == 1
+
+
+def test_pairing_must_cover_every_group_it_licenses(tmp_path: Path) -> None:
+    table = tmp_path / "samples.tsv"
+    rows = ["sample_id\tcondition\tdonor"]
+    for donor in ("d1", "d2", "d3"):
+        rows += [f"{donor}-c\tcontrol\t{donor}", f"{donor}-t\ttreated\t{donor}"]
+    rows += ["d1-r\trescue\td1", "d2-r\trescue\td2"]
+    table.write_text("\n".join(rows) + "\n")
+    spec = {"schema": dcc.LEDGER_SCHEMA, "file": "samples.tsv", "sample_id": "sample_id",
+            "group": "condition", "unit_of_replication": "donor", "nesting": ["donor"],
+            "batch": [], "pairing": {"unit": "donor", "within": "condition",
+                                     "levels": ["control", "treated"]}}
+    contract = dcc.ledger_contract(spec, str(tmp_path))
+    summaries, alerts = dcc.run_contract(contract, str(tmp_path))
+    assert any(a["kind"] == "pairing" and a["blocking"] for a in alerts)

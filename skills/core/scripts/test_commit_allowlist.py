@@ -9,10 +9,13 @@ readable command.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -22,6 +25,7 @@ sys.path.insert(0, str(HERE))
 
 import extract_data_lineage as stop  # noqa: E402
 import lineage_redact as lr  # noqa: E402
+import extract_data_lineage_event as ev  # noqa: E402
 
 V = lr.COMMIT_VALUE
 RANDOM_TOKEN = "9f8a7b6c5d4e3f2a1b0c"
@@ -744,3 +748,324 @@ def test_the_observation_store_holds_only_allowlisted_text() -> None:
                    "bash_cmd": f"python3 fit.py -k {RANDOM_TOKEN} > out/x.csv",
                    "changes": {"created": [{"path": "out/x.csv"}]}}
     assert lr.commit_observation_command(observation) == f"python3 {V} -k {V} > out/x.csv"
+
+
+SECRET = "s3cret-value"
+
+
+def test_a_legacy_events_source_is_never_committed() -> None:
+    body = f'password = "{SECRET}"\nimport pandas\n'
+    raw = {"ts": "2026-11-01T00:00:00Z", "bash_cmd": "python fit.py", "script": None,
+           "script_source": body, "script_sha256": hashlib.sha256(body.encode()).hexdigest()}
+    assert SECRET not in json.dumps(stop.commit_event(stop.normalize_event(raw, [], 0)))
+
+
+def test_an_unusual_env_name_is_not_committed() -> None:
+    import extract_data_lineage as stop
+
+    name = "gH7pQx2LmZ9vRt4K_wN8sYb"
+    committed = stop._commit_env({name: "1", "OMP_NUM_THREADS": "4"}, set())
+    assert name not in committed and committed["OMP_NUM_THREADS"] == "4"
+
+
+LONG = "A" * 6000
+
+
+def _step(command: str, word: str = "fit.py") -> dict:
+    offset = command.index("python")
+    return ev.build_step(command, {"offset": offset, "kind": "script", "script_word": word},
+                         None, None)
+
+
+def test_long_plain_word_is_still_clipped_verbatim() -> None:
+    step = _step(f"python fit.py --blob {LONG}")
+    assert step["argv"][-1] == "A" * ev.STEP_TOKEN_MAX + "…[truncated]"
+    assert step["truncated"] is True
+
+
+@pytest.mark.parametrize("arg", [
+    '{"api_key": "SECRETPREFIX' + LONG + '"}',
+    '{"api_key": "SECRETPREFIX' + LONG,
+    '{"token": "S3CRET", "password": "SECRETPREFIX' + LONG,
+])
+def test_a_long_secret_word_is_never_committed(arg: str) -> None:
+    step = _step(f"python fit.py --params '{arg}'")
+    data = ev.data_command_step(f"curl -d '{arg}' -o data/out.csv https://example.invalid/x")
+    params = ev._snakemake_params(["--config", "blob=" + arg])
+    committed = json.dumps([stop.commit_event({"ts": "t", "step": step}),
+                            stop.commit_data_command({"step": data}),
+                            stop.commit_event({"ts": "t", "step": {"params": params}})])
+    assert "SECRETPREFIX" not in committed and "S3CRET" not in committed
+
+
+EXTRACTOR = HERE / "extract_data_lineage_event.py"
+
+
+def _env(**extra: str) -> dict:
+    env = {k: v for k, v in os.environ.items() if k != "CDPATH"}
+    env.update(extra)
+    return env
+
+
+def _run(repo: Path, command: str, env: dict | None = None) -> list[dict]:
+    result = subprocess.run(
+        [sys.executable, str(EXTRACTOR), "--cwd", str(repo), "--ts", "2026-11-22T10:00:00Z",
+         "--bash-cmd", command, "--bash-exit", "0", "--repo-root", str(repo)],
+        capture_output=True, text=True, check=True, env=env or _env())
+    return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+
+
+@pytest.fixture()
+def cdrepo(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    for directory in ("run", "experiments/run", "experiments/elsewhere", "tools"):
+        (root / directory).mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    for directory in ("run", "experiments/run"):
+        (root / directory / "fit.py").write_text(
+            "import pandas as pd\npd.read_csv('in.csv').to_csv('out.csv')\n")
+        (root / directory / "settings.yaml").write_text(f"where: {directory}\n")
+    (root / "tools" / "tool.py").write_text("print('hi')\n")
+    (root / "fit.py").write_text("print('root')\n")
+    return root
+
+
+def test_extractor_end_to_end_never_commits_the_secret_prefix(cdrepo: Path) -> None:
+    arg = '{"api_key": "SECRETPREFIX' + LONG + '"}'
+    records = _run(cdrepo, f"python3 tools/tool.py --params '{arg}'")
+    assert records
+    assert "SECRETPREFIX" not in json.dumps([stop.commit_event(r) for r in records])
+
+
+def test_sql_placeholders_do_not_stall_the_allowlist() -> None:
+    sql = "INSERT INTO t VALUES " + ",".join(["(?,?,?)"] * 24000)
+    command = f"python3 -c \"c.execute('{sql}')\""
+    started = time.perf_counter()
+    lr.commit_safe_command(command, set())
+    assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize("flag", ["--ask-password", "--password-stdin", "--no-password"])
+def test_flags_that_take_no_value_mask_nothing(flag: str) -> None:
+    assert not lr.takes_secret_value(flag)
+    assert lr.takes_secret_value("--password")
+
+
+def _committed(records: list[dict]) -> str:
+    return json.dumps([stop.commit_event(r) for r in records])
+
+
+@pytest.fixture()
+def repo(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "fit.py").write_text(
+        "import pandas as pd\npd.read_csv('in.csv').to_csv('out.csv')\n")
+    return root
+
+
+def _run_2(repo: Path, command: str) -> list[dict]:
+    result = subprocess.run(
+        [sys.executable, str(EXTRACTOR), "--cwd", str(repo),
+         "--ts", "2026-11-22T10:00:00Z", "--bash-cmd", command, "--bash-exit", "0",
+         "--repo-root", str(repo)],
+        capture_output=True, text=True, check=True)
+    return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+
+
+SENTINEL = "sentinel_file_token"
+
+
+@pytest.mark.parametrize("name,command", [
+    ("run.sh", "bash run.sh"),
+    ("run.bash", "bash run.bash"),
+    ("run.sh", "./run.sh"),
+])
+def test_a_shell_script_body_is_never_committed(repo: Path, name: str, command: str) -> None:
+    script = repo / name
+    script.write_text(f"#!/bin/bash\nexport HF_TOKEN={SENTINEL}\npython fit.py\n")
+    script.chmod(0o755)
+    records = [r for r in _run_2(repo, command) if (r.get("script") or "").endswith(name)]
+    assert records, "the shell script run was not recorded"
+    assert records[0]["script_sha256"] == hashlib.sha256(script.read_bytes()).hexdigest()
+    assert "script_sha256_of" not in records[0]
+    assert SENTINEL not in _committed(records)
+
+
+@pytest.mark.parametrize("command", [
+    "python3 fit.py  # a note",
+    "python3 - <<'EOF'\nimport os\nprint(os.environ)\nEOF\necho done",
+    "API_TOKEN=$(printf %s x) python3 fit.py && snakemake -C db.password=y",
+])
+def test_the_allowlist_is_stable_when_applied_twice(command: str) -> None:
+    # The observer stores allowlisted text, and Stop applies it again.
+    once = lr.commit_safe_command(command, set())
+    assert lr.commit_safe_command(once, set()) == once
+
+
+CREDENTIAL = "--cinder-lattice-sable-amber"
+
+
+@pytest.fixture()
+def repo_2(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    return root
+
+
+def _run_3(repo_2: Path, command: str) -> list[dict]:
+    result = subprocess.run(
+        [sys.executable, str(EXTRACTOR), "--cwd", str(repo_2), "--ts", "2026-11-22T10:00:00Z",
+         "--bash-cmd", command, "--bash-exit", "0", "--repo-root", str(repo_2)],
+        capture_output=True, text=True, check=True)
+    return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+
+
+def _manifest(repo_2: Path, command: str) -> tuple[dict, str]:
+    """The committed manifest for one real extractor run of ``command``."""
+    events = _run_3(repo_2, command)
+    assert events, command
+    queue = repo_2 / ".mycelium" / "events.ndjson"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text("".join(json.dumps(e) + "\n" for e in events))
+    manifest = stop.extract(queue, "sess-1", str(repo_2))
+    out = repo_2 / ".living" / "log" / "data-lineage" / "sess-1.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    stop.write_manifest_atomic(out, manifest)
+    text = out.read_text()
+    return json.loads(text), text
+
+
+def test_an_option_shaped_credential_is_not_published(repo_2: Path) -> None:
+    command = f"python3 -c 'import sys; assert len(sys.argv) == 3' --proof {CREDENTIAL}"
+    manifest, text = _manifest(repo_2, command)
+    assert CREDENTIAL not in text
+    assert "cinder" not in text
+    (action,) = manifest["actions"]
+    assert action["bash_cmd"] == f"python3 -c {V} {V} {V}"
+    assert action["step"]["script_args"] == [V, V]
+    assert action["step"]["argv"][-2:] == [V, V]
+
+
+def test_an_inline_body_never_vouches_for_its_own_options(repo_2: Path) -> None:
+    # The inline body is part of the command it would vouch for: a body
+    # that spells `--tok` would let `--tok` (a credential) through.
+    body = ("import argparse; p = argparse.ArgumentParser(); "
+            "p.add_argument('--min-count', type=int); p.parse_args()")
+    manifest, _ = _manifest(repo_2, f'python3 -c "{body}" --min-count 3 --cinder-x 4')
+    (action,) = manifest["actions"]
+    assert action["step"]["script_args"] == [V, "3", V, "4"]
+    token = "zq-vortex-amber-lattice"
+    _, text = _manifest(repo_2, f"python3 -c 'print(\"--{token}\")' --{token}")
+    assert token not in text
+
+
+def test_an_option_the_script_file_names_is_kept(repo_2: Path) -> None:
+    (repo_2 / "fit.py").write_text(
+        "import argparse\np = argparse.ArgumentParser()\n"
+        "p.add_argument('--min-count')\np.parse_args()\n")
+    manifest, text = _manifest(repo_2, f"python3 fit.py --min-count 3 {CREDENTIAL}")
+    (action,) = manifest["actions"]
+    assert action["step"]["script_args"] == ["--min-count", "3", V]
+    assert action["bash_cmd"] == f"python3 fit.py --min-count 3 {V}"
+    assert CREDENTIAL not in text
+
+
+def test_common_options_stay_without_source_evidence() -> None:
+    assert lr.commit_safe_command("tool --verbose --dry-run --threads=4 --output x", set()) \
+        == f"{V} --verbose --dry-run --threads=4 --output {V}"
+    assert lr.commit_safe_argv(["--seed", "3", "--help"], set(), command_word=False) == \
+        ["--seed", "3", "--help"]
+
+
+@pytest.mark.parametrize(("command", "expected"), [
+    ("git log --oneline --cinder-lattice", f"git log --oneline {V}"),
+    ("grep --ignore-case --cinder-lattice x", f"grep --ignore-case {V} {V}"),
+    # A command's own options are not lent to another command.
+    ("cat --oneline", f"cat {V}"),
+    ("curl --insecure --cinder-lattice=1", f"curl --insecure {V}"),
+    ("timeout --signal 9 python3 --cinder-lattice", f"timeout --signal 9 python3 {V}"),
+    # Short options stay by shape.
+    ("ls -la -xzf -O2", "ls -la -xzf -O2"),
+])
+def test_vocabulary_commands_keep_only_their_known_long_options(
+        command: str, expected: str) -> None:
+    assert lr.commit_safe_command(command, set()) == expected
+
+
+def test_source_options_are_lent_only_to_the_receiving_interpreter() -> None:
+    known = lr.commit_source_options("p.add_argument('--min-count')")
+    assert known == {"--min-count"}
+    assert lr.commit_safe_command("python3 a.py --min-count 3; curl --min-count 3",
+                                  set(), known) == \
+        f"python3 {V} --min-count 3; curl {V} 3"
+    # After `--` it is an operand, whatever the source names.
+    assert lr.commit_safe_argv(["--", "--min-count"], set(), False, known) == ["--", V]
+
+
+def test_source_options_need_the_whole_token() -> None:
+    # `--min-count-x` names neither `--min-count` nor `--min`.
+    assert lr.commit_source_options("x = '--min-count-x'") == {"--min-count-x"}
+    assert lr.commit_source_options("--Foo --a_b") == set()
+    assert lr.commit_source_options(None) == set()
+
+
+def test_the_option_list_holds_no_word_outside_the_option_shape() -> None:
+    lists = [lr._COMMIT_COMMON_OPTIONS, *lr._COMMIT_COMMAND_OPTIONS.values()]
+    for names in lists:
+        for name in names:
+            assert lr._option_name_ok(name), name
+
+
+LONG_SEED = "483921783046129"
+
+
+def test_a_seed_after_double_dash_is_not_published(repo_2: Path) -> None:
+    command = f"python3 -c 'import sys; assert sys.argv[1] == \"--\"' -- --seed {LONG_SEED}"
+    manifest, text = _manifest(repo_2, command)
+    assert LONG_SEED not in text
+    (action,) = manifest["actions"]
+    assert "seeds" not in action["step"]
+
+
+def test_a_long_argv_seed_is_dropped_at_consolidation(repo_2: Path) -> None:
+    (repo_2 / "fit.py").write_text("print(1)\n")
+    manifest, text = _manifest(repo_2, f"python3 fit.py --seed {LONG_SEED}")
+    assert LONG_SEED not in text
+    (action,) = manifest["actions"]
+    assert "seeds" not in action["step"]
+
+
+def test_a_short_argv_seed_is_kept(repo_2: Path) -> None:
+    (repo_2 / "fit.py").write_text("print(1)\n")
+    manifest, _ = _manifest(repo_2, "python3 fit.py --seed 42")
+    (action,) = manifest["actions"]
+    assert action["step"]["seeds"] == [{"value": 42, "origin": "argv"}]
+
+
+def test_committed_seeds_follow_the_committed_argv() -> None:
+    event = {"ts": "t", "bash_cmd": "python3 -c x -- --seed 42", "script": None,
+             "inputs": [], "outputs": [], "seeds_detected": [7, int(LONG_SEED)],
+             "step": {"argv": ["python3", "-c", "x", "--", "--seed", "42"],
+                      "script_args": ["--", "--seed", "42"],
+                      "seeds": [{"value": 42, "origin": "argv"},
+                                {"value": int(LONG_SEED), "origin": "argv"},
+                                {"value": 7, "origin": "source"},
+                                {"value": int(LONG_SEED), "origin": "source"}]}}
+    out = stop.commit_event(event)
+    # `--seed 42` after `--` is masked in the argv, so it is no seed here.
+    assert out["step"]["seeds"] == [{"value": 7, "origin": "source"}]
+    assert out["seeds_detected"] == [7]
+    assert LONG_SEED not in json.dumps(out)
+    eq = stop.commit_event({**event, "step": {"script_args": ["--seed=42"],
+                                              "seeds": [{"value": 42, "origin": "argv"}]}})
+    assert eq["step"]["seeds"] == [{"value": 42, "origin": "argv"}]
+
+
+@pytest.mark.parametrize("literal", ['r"example-secret"', "b'example-secret'", 'f"example-secret"',
+                                     'rb"example-secret"'])
+def test_prefixed_secret_literals_are_not_committed(literal: str) -> None:
+    command = f"python -c 'password = {literal}; print(1)'"
+    assert lr.commit_safe_command(command, set()) == "python -c <v>"

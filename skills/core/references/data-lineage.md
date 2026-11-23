@@ -712,8 +712,12 @@ committed from another checkout contributes readers but never writes.
 
 The headline is `current` only when both agree. Supersession needs journal
 order and two known, different hashes. A gap the record cannot rule out makes
-the status `unknown`, never `current`. Examples of such gaps: an unavailable,
-missing or unresolved observation, a capped diff, an unwatched scope.
+the status `unknown` (reason `gap`), never `current`. Gaps are what the journal
+cannot place: an unreadable manifest, store or store record, a manifest-only
+call (an unreconciled skip, a summary's missing or unresolved observation), and
+a background job. A journaled call that leaves the path unaccounted for (an
+unavailable, missing or unresolved observation, a capped diff, an unwatched
+scope) is found by positive proof instead.
 
 **Positive proof.** `current-in-record` is never assumed from the absence of a
 recorded gap. It needs everything since the write to be accounted for:

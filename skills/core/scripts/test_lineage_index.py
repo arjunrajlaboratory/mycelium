@@ -10,8 +10,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -242,8 +244,31 @@ def test_an_unavailable_observation_after_the_write_is_a_gap(repo: Path) -> None
                                    post=2), gap])
     write = li.query_hash(load(repo), sha("x"))["paths"][0]["writes"][0]
     assert write["status"] == "unknown"
-    assert "gap" in write["record"]["reasons"]
+    assert "coverage-unproven" in write["record"]["reasons"]
+    assert {"kind": "observation-unavailable", "call": "s1|claude:c2"} in \
+        write["record"]["unaccounted"]
     assert write["disk"] == "match"  # reported separately, never promoted
+
+
+@pytest.mark.parametrize("bound", [None, {"id": "other" * 6, "pre_seq": 1, "post_seq": 2,
+                                          "expired": False}])
+def test_an_observation_the_journal_cannot_place_clouds_every_write(repo: Path,
+                                                                     bound) -> None:
+    # No bound in this journal (a Post whose journal append failed, another
+    # journal): the call is unordered, so it may have come after the write.
+    (repo / "out" / "res.csv").write_text("x")
+    lost = observation(repo, "c0", pre=1, post=2, status="unavailable", changes=None)
+    lost["journal"] = bound
+    capped = observation(repo, "c9", pre=1, post=2)
+    capped["journal"] = bound
+    capped["changes"]["capped"] = True
+    write_store(repo, [lost, capped,
+                       observation(repo, "c1", created=[("out/res.csv", sha("x"))], pre=3,
+                                   post=4)])
+    write = li.query_hash(load(repo), sha("x"), disk=False)["paths"][0]["writes"][0]
+    assert write["record"]["status"] == "unknown"
+    kinds = {u["kind"] for u in write["record"]["unaccounted"]}
+    assert kinds == {"observation-unavailable", "observation-capped"}
 
 
 def test_a_gap_provably_before_the_write_does_not_count(repo: Path) -> None:
@@ -714,3 +739,686 @@ def test_an_unlabelled_legacy_digest_stays_unknown_in_a_v2_manifest(repo: Path) 
     write_manifest(repo, "m1", actions=[legacy])
     (read,) = li.query_hash(load(repo), sha("in"), disk=False)["paths"][0]["readers"]
     assert read["hash_origin"] == "unknown"
+
+
+@pytest.fixture()
+def project(tmp_path: Path) -> Path:
+    root = tmp_path / "proj"
+    (root / ".living" / "log" / "data-lineage").mkdir(parents=True)
+    (root / ".mycelium").mkdir()
+    (root / "out").mkdir()
+    return root
+
+
+def observed(project: Path, call: str, bound: dict, **kw) -> dict:
+    return observation(project, call, pre=bound["pre"], post=bound["post"],
+                           jid=bound["id"], **kw)
+
+
+def verdict(project: Path, content: str) -> str:
+    (project / "out" / "x").write_text(content)
+    return li.query_hash(li.load(project), sha(content))["paths"][0]["writes"][0]["status"]
+
+
+def journal(project: Path, call: str, *, tool: str = "Bash", post: bool = True,
+            observe: bool = True) -> dict:
+    """Journal one call; return its bound as an observation records it."""
+    state = project / ".mycelium"
+    meta: dict = {}
+    pre_seq, _, _ = io.journal_event(state, "pre", call, host="claude", session="s1",
+                                     tool=tool, meta=meta)
+    post_seq = None
+    if post:
+        post_seq, _, _ = io.journal_event(state, "post", call, host="claude", session="s1",
+                                          tool=tool, observe=observe)
+    return {"id": meta["journal_id"], "pre": pre_seq, "post": post_seq}
+
+
+def test_a_closed_call_with_no_observation_clouds_earlier_writes(project: Path) -> None:
+    first = journal(project, "c1")
+    journal(project, "c2")  # its observation append failed
+    write_store(project, [observed(project, "c1", first, created=[("out/x", sha("A"))])])
+    assert verdict(project, "A") == "unknown"
+
+
+def test_a_write_after_the_missing_observation_is_current(project: Path) -> None:
+    journal(project, "c1")
+    later = journal(project, "c2")
+    write_store(project, [observed(project, "c2", later, created=[("out/x", sha("B"))])])
+    journal_only = journal(project, "c0")  # noqa: F841 - a later call, observed below
+    write_store(project, [observed(project, "c0", journal_only)])
+    # c1 has no observation, but it ended before c2 started.
+    assert verdict(project, "B") == "current"
+
+
+@pytest.mark.parametrize("observe", [True, False])
+def test_a_closed_edit_with_no_observation_is_unaccounted(project: Path, observe) -> None:
+    # Positive proof: an edit that ran after the write with no observation
+    # on record, whether or not it owed one, is not accounted for.
+    first = journal(project, "c1")
+    journal(project, "e1", tool="Edit", observe=observe)
+    write_store(project, [observed(project, "c1", first, created=[("out/x", sha("A"))])])
+    write = li.query_hash(li.load(project), sha("A"), disk=False)["paths"][0]["writes"][0]
+    assert write["record"]["status"] == "unknown"
+    assert "coverage-unproven" in write["record"]["reasons"]
+
+
+def test_an_age_expired_call_stays_unbounded(project: Path) -> None:
+    state = project / ".mycelium"
+    old = time.time_ns() - (io.OPEN_INTERVAL_MAX_SECONDS + 60) * 1_000_000_000
+    io.journal_event(state, "pre", "stuck", host="claude", session="s1", tool="Bash",
+                     now_ns=old)
+    later = journal(project, "c2")  # its journal_event expires "stuck"
+    write_store(project, [observed(project, "c2", later, created=[("out/x", sha("B"))])])
+    # The stuck call may still be running: c2's write is not provably last.
+    assert verdict(project, "B") == "unknown"
+
+
+def test_a_turn_end_bounds_the_unresolved_call(project: Path) -> None:
+    state = project / ".mycelium"
+    io.pre(state, host="claude", session="s1", call_id="lost", tool="Bash",
+           repo_root=project, snapshot=True)
+    io.turn_end(state, host="claude", session="s1")
+    later = journal(project, "c2")
+    write_store(project, [observed(project, "c2", later, created=[("out/x", sha("B"))])])
+    write_manifest(project, "m1", summary={"unresolved_calls": ["claude:lost"]})
+    assert verdict(project, "B") == "current"
+
+
+def test_a_skip_with_a_session_is_reconciled_only_by_that_session(project: Path) -> None:
+    first = journal(project, "c1")
+    write_store(project, [observed(project, "c1", first, created=[("out/x", sha("A"))])])
+    write_manifest(project, "m1", skipped=[
+        {"skip_reason": "detector-failed", "observation_id": "claude:c1",
+         "host_session_id": "s2"}])
+    assert verdict(project, "A") == "unknown"
+
+
+def test_a_foreign_manifest_summary_clouds_nothing(project: Path) -> None:
+    first = journal(project, "c1")
+    write_store(project, [observed(project, "c1", first, created=[("out/x", sha("A"))])])
+    theirs = write_manifest(project, "theirs", repo_root="/home/someone/proj",
+                                summary={"observations_missing": ["claude:zz"],
+                                         "unresolved_calls": ["claude:yy"]})
+    assert theirs.exists()
+    assert verdict(project, "A") == "current"
+
+
+def test_an_unconfirmed_edit_credits_no_write(project: Path) -> None:
+    first = journal(project, "c1")
+    edit = journal(project, "e1", tool="Edit")
+    unconfirmed = observed(project, "e1", edit, edited=[("out/x", sha("A"))])
+    unconfirmed["outcome"] = "unknown"
+    write_store(project, [observed(project, "c1", first, created=[("out/x", sha("A"))]),
+                              unconfirmed])
+    result = li.query_hash(li.load(project), sha("A"), disk=False)
+    writes = result["paths"][0]["writes"]
+    assert all(w["call"] != "s1|claude:e1" for w in writes)
+    assert writes[0]["status"] == "unknown"
+
+
+def test_a_directory_excluded_only_at_pre_is_a_coverage_gap(project: Path) -> None:
+    state = project / ".mycelium"
+    (project / "data").mkdir()
+    (project / "data" / "x.csv").write_text("x")
+    scope = state / "io" / "scope"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text("exclude data\n")
+    io.pre(state, host="claude", session="s1", call_id="rm", tool="Bash",
+           repo_root=project, snapshot=True)
+    shutil.rmtree(project / "data")
+    scope.write_text("")
+    observation = io.post(state, host="claude", session="s1", call_id="rm", tool="Bash",
+                          repo_root=project, outcome="success", bash_exit=0)
+    assert any(u.get("path") == "data" for u in observation["scope"]["unwatched"])
+
+
+def status(project: Path, content: str, *, disk: bool = True) -> dict:
+    result = li.query_hash(li.load(project, write=False), sha(content), disk=disk)
+    return result["paths"][0]["writes"][0]
+
+
+def bash(project: Path, call: str, action=None, *, background: bool = False) -> dict:
+    """One real Bash call through the observer's Pre and Post."""
+    state = project / ".mycelium"
+    io.pre(state, host="claude", session="s1", call_id=call, tool="Bash",
+           repo_root=project, snapshot=True, background=background)
+    if action:
+        action()
+    return io.post(state, host="claude", session="s1", call_id=call, tool="Bash",
+                   repo_root=project, outcome="success", bash_exit=0, background=background)
+
+
+def write_x(project: Path, content: str):
+    return lambda: (project / "out" / "x").write_text(content)
+
+
+def test_a_fully_observed_history_is_current(project: Path) -> None:
+    bash(project, "c1", write_x(project, "A"))
+    bash(project, "c2", lambda: (project / "out" / "y").write_text("other"))
+    assert status(project, "A", disk=False)["record"]["status"] == "current-in-record"
+    assert status(project, "A")["status"] == "current"
+
+
+def test_a_lost_journal_proves_nothing(project: Path) -> None:
+    bash(project, "c1", write_x(project, "A"))
+    io.journal_path(project / ".mycelium").unlink()
+    io.journal_event(project / ".mycelium", "pre", "later", host="claude", session="s1",
+                     tool="Bash")
+    record = status(project, "A", disk=False)["record"]
+    assert record["status"] == "unknown"
+    assert record["unaccounted"][0]["kind"] == "journal-discontinuous"
+
+
+def test_a_write_from_before_compaction_proves_nothing(project: Path) -> None:
+    bash(project, "c1", write_x(project, "A"))
+    journal = io.journal_path(project / ".mycelium")
+    records = io._journal_records(journal)
+    jid = records[-1]["jid"]
+    floor = max(r["seq"] for r in records) + 1
+    with journal.open("a") as handle:
+        handle.write(f'{{"seq": 0, "ev": "floor", "call": "", "floor": {floor}, '
+                     f'"jid": "{jid}"}}\n')
+    record = status(project, "A", disk=False)["record"]
+    assert record["unaccounted"][0]["kind"] == "journal-compacted"
+
+
+def launch(project: Path, call: str, task: str | None) -> None:
+    state = project / ".mycelium"
+    io.pre(state, host="claude", session="s1", call_id=call, tool="Bash",
+           repo_root=project, snapshot=True, background=True)
+    io.post(state, host="claude", session="s1", call_id=call, tool="Bash",
+            repo_root=project, outcome="success", bash_exit=0, background=True,
+            task_id=task)
+
+
+def test_a_later_background_job_is_unaccounted_but_identity_proves_the_file(
+        project: Path) -> None:
+    bash(project, "c1", write_x(project, "A"))
+    time.sleep(0.01)
+    # A host-backgrounded command after the write (the live-run case): what
+    # it did after launch was never observed.
+    launch(project, "bg", "task-1")
+    entry = status(project, "A")
+    assert entry["record"]["status"] == "unknown"
+    assert "coverage-unproven" in entry["record"]["reasons"]
+    # While the job may still run, identity is not trusted (a live mapping
+    # can change a file without moving its timestamps).
+    assert entry["status"] == "unknown"
+    # Once the host shows it ended, the file's unchanged identity proves it.
+    io.end_finished_background(project / ".mycelium", host="claude", session="s1", tasks=[])
+    entry = status(project, "A")
+    assert entry["record"]["status"] == "unknown"
+    assert entry["status"] == "current"
+    assert entry["basis"] == "identity-unchanged-since-write"
+
+
+def test_a_jobs_end_outlives_journal_compaction(project: Path) -> None:
+    launch(project, "bg", "task-1")
+    io.end_finished_background(project / ".mycelium", host="claude", session="s1", tasks=[])
+    journal = io.journal_path(project / ".mycelium")
+    kept = [r for r in io._journal_records(journal) if r.get("call") != "bg"]
+    journal.write_text("".join(__import__("json").dumps(r) + "\n" for r in kept))
+    index = li.load(project, write=False)
+    (gap,) = [g for g in index.gaps if g.get("kind") == "background-job"]
+    assert isinstance(gap["journal"]["post_seq"], int)
+
+
+def test_a_subagent_job_absent_from_the_snapshot_stays_open(project: Path) -> None:
+    state = project / ".mycelium"
+    io.pre(state, host="claude", session="s1", call_id="sub", tool="Bash", agent="agent-7",
+           repo_root=project, snapshot=True, background=True)
+    io.post(state, host="claude", session="s1", call_id="sub", tool="Bash", agent="agent-7",
+            repo_root=project, outcome="success", bash_exit=0, background=True,
+            task_id="t-sub")
+    assert io.end_finished_background(state, host="claude", session="s1", tasks=[]) == 0
+    assert io.end_finished_background(
+        state, host="claude", session="s1",
+        tasks=[{"id": "t-sub", "status": "completed"}]) == 1
+
+
+def test_an_overlapping_restore_is_unaccounted(project: Path) -> None:
+    state = project / ".mycelium"
+    target = project / "out" / "x"
+    target.write_text("old")
+    # B starts first and sees `old`; A writes `new` and finishes; B restores
+    # `old` and finishes. B's endpoints both show `old`.
+    io.pre(state, host="claude", session="s1", call_id="B", tool="Bash",
+           repo_root=project, snapshot=True)
+    bash(project, "A", lambda: target.write_text("new"))
+    time.sleep(0.01)
+    target.write_text("old")
+    io.post(state, host="claude", session="s1", call_id="B", tool="Bash",
+            repo_root=project, outcome="success", bash_exit=0)
+    record = status(project, "new", disk=False)["record"]
+    assert record["status"] != "current-in-record"
+
+
+def test_an_unparseable_journal_proves_nothing(project: Path) -> None:
+    bash(project, "c1", write_x(project, "A"))
+    journal = io.journal_path(project / ".mycelium")
+    with journal.open("a") as handle:
+        handle.write('{"seq": 99, "ev": "pre", "call": "z", "host": "claude", '
+                     '"session": "s1", "wall_ns": "not-a-number"}\n')
+    record = status(project, "A", disk=False)["record"]
+    assert record["status"] == "unknown"
+
+
+def test_a_touched_file_is_not_rescued_even_with_the_same_bytes(project: Path) -> None:
+    bash(project, "c1", write_x(project, "A"))
+    bash(project, "bg", None, background=True)
+    time.sleep(0.01)
+    # A -> B -> A outside every observation: the bytes match, the identity
+    # does not (ctime moved), so nothing is certified.
+    target = project / "out" / "x"
+    target.write_text("B")
+    target.write_text("A")
+    entry = status(project, "A")
+    assert entry["status"] == "unknown"
+    assert "basis" not in entry
+
+
+def test_whole_second_timestamps_are_never_used_as_proof(project: Path) -> None:
+    bash(project, "c1", write_x(project, "A"))
+    index = li.load(project, write=False)
+    (write,) = [w for w in index.writes if w["path"] == "out/x"]
+    ident = dict(write["identity"])
+    ident["mtime_ns"] = ident["ctime_ns"] = 1_700_000_000_000_000_000
+    assert not index._identity_unchanged({**write, "identity": ident})
+
+
+def test_a_finished_task_bounds_its_job(project: Path) -> None:
+    launch(project, "bg", "bjjs0w6bq")
+    state = project / ".mycelium"
+    assert io.end_finished_background(state, host="claude", session="s1",
+                                      tasks=[{"id": "bjjs0w6bq", "status": "running"}]) == 0
+    assert io.end_finished_background(state, host="claude", session="s1", tasks=[]) == 1
+    bash(project, "c2", write_x(project, "A"))
+    # Written after the job ended: provable from the record alone.
+    assert status(project, "A", disk=False)["record"]["status"] == "current-in-record"
+
+
+@pytest.mark.parametrize("tasks", [
+    [{"id": "bjjs0w6bq", "status": "running"}],
+    [{"id": "bjjs0w6bq", "status": "something-new"}],
+])
+def test_a_running_or_unreadable_task_stays_open(project: Path, tasks) -> None:
+    launch(project, "bg", "bjjs0w6bq")
+    io.end_finished_background(project / ".mycelium", host="claude", session="s1",
+                               tasks=tasks)
+    bash(project, "c2", write_x(project, "A"))
+    assert status(project, "A", disk=False)["record"]["status"] == "unknown"
+
+
+def test_a_job_without_a_task_id_stays_open(project: Path) -> None:
+    launch(project, "bg", None)
+    io.end_finished_background(project / ".mycelium", host="claude", session="s1",
+                               tasks=[])
+    bash(project, "c2", write_x(project, "A"))
+    assert status(project, "A", disk=False)["record"]["status"] == "unknown"
+
+
+def test_the_stop_payload_reaches_the_journal(project: Path, monkeypatch) -> None:
+    import io as stdio
+    import json
+
+    launch(project, "bg", "t-1")
+    monkeypatch.setattr(sys, "stdin", stdio.StringIO(json.dumps({"background_tasks": []})))
+    assert io.main(["turn-end", "--state-dir", str(project / ".mycelium"), "--host",
+                    "claude", "--session", "s1", "--stop-payload-stdin"]) == 0
+    records = io._journal_records(io.journal_path(project / ".mycelium"))
+    assert any(r.get("ev") == "end" and r.get("task") == "t-1" for r in records)
+
+
+def test_a_torn_journal_line_proves_nothing(project: Path) -> None:
+    bash(project, "c1", write_x(project, "A"))
+    journal = io.journal_path(project / ".mycelium")
+    with journal.open("a") as handle:
+        handle.write('{"seq": 90, "ev": "post", "call": "B", "ho')  # torn mid-append
+    record = status(project, "A", disk=False)["record"]
+    assert record["status"] == "unknown"
+    assert record["unaccounted"][0]["kind"] == "journal-discontinuous"
+
+
+def test_a_detached_process_outlives_its_host_task(project: Path) -> None:
+    import json
+
+    state = project / ".mycelium"
+    payload = {"session_id": "s1", "tool_use_id": "bg", "tool_name": "Bash",
+               "hook_event_name": "PreToolUse", "cwd": str(project),
+               "tool_input": {"command": "nohup setsid sh -c 'sleep 30' &",
+                              "run_in_background": True}}
+    io.hook(state, project, "claude", json.dumps(payload))
+    io.post(state, host="claude", session="s1", call_id="bg", tool="Bash",
+            repo_root=project, outcome="success", bash_exit=0, background=True,
+            task_id="t-detached")
+    # The host reports the outer task finished; the detached child may not be.
+    assert io.end_finished_background(state, host="claude", session="s1", tasks=[]) == 0
+
+
+def test_a_call_running_past_the_write_cannot_vouch(project: Path) -> None:
+    state = project / ".mycelium"
+    io.pre(state, host="claude", session="s1", call_id="B", tool="Bash",
+           repo_root=project, snapshot=True)
+    bash(project, "A", write_x(project, "A"))
+    io.post(state, host="claude", session="s1", call_id="B", tool="Bash",
+            repo_root=project, outcome="success", bash_exit=0)
+    result = li.query_hash(li.load(project, write=False), sha("A"), disk=False)
+    writes = result["paths"][0]["writes"]
+    assert writes and all(w["record"]["status"] == "unknown" for w in writes)
+    (by_a,) = [w for w in writes if w["call"] == "s1|claude:A"]
+    assert {"kind": "overlapping-call", "call": "s1|claude:B"} in by_a["record"]["unaccounted"]
+
+
+def test_another_checkouts_call_cannot_vouch(project: Path, tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    (other / "out").mkdir(parents=True)
+    bash(project, "A", write_x(project, "A"))
+    state = project / ".mycelium"  # a state directory shared by two checkouts
+    io.pre(state, host="claude", session="s1", call_id="F", tool="Bash",
+           repo_root=other, snapshot=True)
+    io.post(state, host="claude", session="s1", call_id="F", tool="Bash",
+            repo_root=other, outcome="success", bash_exit=0)
+    record = status(project, "A", disk=False)["record"]
+    assert {"kind": "foreign-call", "call": "s1|claude:F"} in record["unaccounted"]
+
+
+def test_a_background_call_whose_launch_was_lost_blocks_identity_rescue(
+        project: Path) -> None:
+    bash(project, "c1", write_x(project, "A"))
+    # Flagged background at Pre; its Post (the launch) never reached the
+    # journal, so only the open interval says a job may be running.
+    io.pre(project / ".mycelium", host="claude", session="s1", call_id="bg", tool="Bash",
+           repo_root=project, snapshot=True, background=True)
+    index = li.load(project, write=False)
+    assert index._background_open()
+
+
+def test_a_superseded_write_reports_gaps_without_losing_the_verdict(project: Path) -> None:
+    gap = observation(project, "c2", pre=3, post=None, status="background")
+    write_store(project, [
+        observation(project, "c1", created=[("out/x", sha("A"))], pre=1, post=2), gap,
+        observation(project, "c3", modified=[("out/x", sha("B"))], pre=5, post=6)])
+    write = li.query_hash(li.load(project), sha("A"), disk=False)["paths"][0]["writes"][0]
+    assert write["record"]["status"] == "superseded"
+    assert write["record"]["gap_count"] >= 1
+
+
+def test_an_unreconciled_skip_is_a_gap_and_a_reconciled_one_is_not(project: Path) -> None:
+    (project / "out" / "x").write_text("x")
+    write_store(project, [observation(project, "c1", created=[("out/x", sha("x"))],
+                                              pre=1, post=2)])
+    write_manifest(project, "m1", skipped=[
+        {"skip_reason": "detector-failed", "observation_id": "claude:c1",
+         "host_session_id": "s1"}])
+    assert li.query_hash(li.load(project), sha("x"))["paths"][0]["writes"][0]["status"] == \
+        "current"
+    write_manifest(project, "m2", skipped=[{"skip_reason": "extractor-missing"}])
+    write = li.query_hash(li.load(project), sha("x"))["paths"][0]["writes"][0]
+    assert write["status"] == "unknown"
+
+
+def test_an_expired_background_job_stays_a_gap(project: Path) -> None:
+    (project / "out" / "x").write_text("x")
+    background = observation(project, "bg", pre=3, post=9, status="background",
+                                 expired=True)
+    write_store(project, [observation(project, "c1", created=[("out/x", sha("x"))],
+                                              pre=1, post=2), background])
+    write = li.query_hash(li.load(project), sha("x"))["paths"][0]["writes"][0]
+    assert write["status"] == "unknown"
+
+
+def test_open_calls_are_reported_not_counted(project: Path) -> None:
+    (project / "out" / "x").write_text("x")
+    write_store(project, [observation(project, "c1", created=[("out/x", sha("x"))],
+                                              pre=1, post=2)])
+    io.journal_event(project / ".mycelium", "pre", "running", host="claude", session="s9",
+                     tool="Bash")
+    write = li.query_hash(li.load(project), sha("x"))["paths"][0]["writes"][0]
+    assert write["status"] in ("current", "unknown")
+    assert write["record"].get("open_calls")
+
+
+def test_a_foreign_v1_manifest_adds_no_local_writes(project: Path) -> None:
+    (project / "out" / "x").write_text("mine")
+    write_store(project, [observation(project, "c1", created=[("out/x", sha("mine"))],
+                                              pre=1, post=2)])
+    theirs = {"session_id": "t", "repo_root": "/home/someone/proj", "actions": [
+        {"ts": "2026-10-01T00:00:00Z", "inputs": [],
+         "outputs": [{"path": "/home/someone/proj/out/x", "sha256": sha("theirs")}]}]}
+    (project / ".living" / "log" / "data-lineage" / "t.json").write_text(json.dumps(theirs))
+    write = li.query_hash(li.load(project), sha("mine"))["paths"][0]["writes"][0]
+    assert write["status"] == "current"
+
+
+def test_a_linked_cache_directory_is_never_written(project: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(outside, project / ".mycelium" / "lineage")
+    write_manifest(project, "m1")
+    li.load(project)
+    assert list(outside.iterdir()) == []
+
+
+def test_corrupt_store_bytes_are_a_gap(project: Path) -> None:
+    path = io.observations_path(project / ".mycelium", "claude", "s1")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b'{"kind": "observation", "x": "\xff\xfe"}\n')
+    coverage = li.query_path(li.load(project), "out/x", disk=False)["coverage"]["gaps"]
+    assert coverage.get("store-record-unreadable") == 1
+
+
+SECRET = "TEST_SECRET_123"
+
+
+def test_the_cache_never_copies_command_text(project: Path) -> None:
+    record = observation(project, "c1", created=[("out/x", sha("A"))], pre=1, post=2)
+    record["bash_cmd"] = f"curl -H 'Authorization: Bearer {SECRET}' https://x"
+    record["input_proofs"] = [{"path": "data/in.csv", "note": SECRET}]
+    write_store(project, [record])
+    li.load(project)
+    cache = li.cache_file(project, project / ".mycelium")
+    assert cache.exists() and SECRET not in cache.read_text()
+
+
+def test_an_old_cache_is_rebuilt(project: Path) -> None:
+    assert li.BUILDER_VERSION >= 3
+
+
+def test_a_launched_background_job_without_an_observation_stays_a_gap(project: Path) -> None:
+    state = project / ".mycelium"
+    first = journal(project, "c1")
+    write_store(project, [observed(project, "c1", first,
+                                          created=[("out/x", sha("A"))])])
+    io.journal_event(state, "pre", "bg", host="claude", session="s1", tool="Bash",
+                     background=True)
+    io.journal_event(state, "launch", "bg", host="claude", session="s1", tool="Bash",
+                     background=True, observe=True)  # its observation append failed
+    assert verdict(project, "A") == "unknown"
+
+
+@pytest.fixture()
+def project_2(tmp_path: Path) -> Path:
+    root = tmp_path / "proj"
+    (root / ".living" / "log" / "data-lineage").mkdir(parents=True)
+    (root / ".mycelium" / "io").mkdir(parents=True)
+    (root / "data").mkdir()
+    (root / "out").mkdir()
+    return root
+
+
+def test_an_edit_through_a_link_makes_its_referent_uncertain(project_2: Path) -> None:
+    (project_2 / "data" / "v1.csv").write_text("A")
+    os.symlink("v1.csv", project_2 / "data" / "current.csv")
+    written, deleted, refused = io._edit_changes(
+        project_2, [(str(project_2 / "data" / "current.csv"), "written")])
+    assert written == [] and deleted == []
+    assert {"path": "data/v1.csv", "reason": "edit-via-link"} in refused
+
+    first = journal(project_2, "c1")
+    edit = journal(project_2, "e1", tool="Edit")
+    via_link = observed(project_2, "e1", edit, edited=[])
+    via_link["changes"]["edited"] = []
+    via_link["changes"]["refused"] = refused
+    write_store(project_2, [
+        observed(project_2, "c1", first, created=[("data/v1.csv", sha("A"))]), via_link])
+    write = li.query_hash(li.load(project_2), sha("A"))["paths"][0]["writes"][0]
+    assert write["status"] == "unknown"
+
+
+def test_an_edit_whose_target_cannot_be_established_clouds_the_checkout(
+        project_2: Path) -> None:
+    record = {"status": "edit", "outcome": "success",
+              "changes": {"edited": [], "deleted": [],
+                          "refused": [{"path": None, "reason": "edit-target-unknown"}]}}
+    for path in ("data/a.csv", "out/b.csv"):
+        assert li.Index._observation_gap_at(None, record, path, {}) == "path-uncertain"
+
+
+def test_an_unlistable_store_directory_is_a_gap(project: Path, monkeypatch) -> None:
+    (project / "out" / "x").write_text("A")
+    first = observation(project, "c1", created=[("out/x", sha("A"))], pre=1, post=2)
+    write_manifest(project, "m1", observations=[first])
+    obs = project / ".mycelium" / "io" / "obs"
+    (obs / "claude").mkdir(parents=True)
+    real_scandir = os.scandir
+
+    def failing(path="."):
+        if str(path).endswith(os.path.join("obs", "claude")):
+            raise PermissionError("denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(li.os, "scandir", failing)
+    result = li.query_hash(li.load(project, write=False), sha("A"))
+    write = result["paths"][0]["writes"][0]
+    assert write["status"] == "unknown"
+    assert result["coverage"]["gaps"].get("source-unreadable") == 1
+
+
+@pytest.fixture()
+def project_3(tmp_path: Path) -> Path:
+    root = tmp_path / "proj"
+    (root / ".living" / "log" / "data-lineage").mkdir(parents=True)
+    (root / ".mycelium" / "io").mkdir(parents=True)
+    (root / "skills" / "core").mkdir(parents=True)
+    return root
+
+
+def test_a_deletion_in_another_case_clouds_the_recorded_write(project_3: Path) -> None:
+    root = str(project_3.resolve())
+    if not io._case_insensitive(root):
+        pytest.skip("case-sensitive volume")
+    _, deleted, refused = io._edit_changes(
+        project_3, [(str(project_3 / "results-qc-table.csv"), "deleted")])
+    assert deleted == [{"path": "results-qc-table.csv", "after": None}]
+    assert any(r.get("casefold") for r in refused)
+
+    first = journal(project_3, "c1")
+    edit = journal(project_3, "e1", tool="Edit")
+    deletion = observed(project_3, "e1", edit)
+    deletion["status"], deletion["outcome"] = "edit", "success"
+    deletion["changes"] = {"edited": [], "deleted": deleted, "refused": refused}
+    write_store(project_3, [
+        observed(project_3, "c1", first, created=[("results-qc-table.CSV", sha("A"))]),
+        deletion])
+    write = li.query_path(li.load(project_3), "results-qc-table.CSV", disk=False)
+    verdicts = [w["record"]["status"] for w in write["writes"]]
+    assert "current-in-record" not in verdicts
+
+
+@pytest.fixture()
+def project_4(tmp_path: Path) -> Path:
+    root = tmp_path / "proj"
+    (root / ".living" / "log" / "data-lineage").mkdir(parents=True)
+    (root / ".mycelium").mkdir()
+    return root
+
+
+def test_a_failed_edit_makes_its_target_uncertain(project_4: Path) -> None:
+    (project_4 / "notes.md").write_text("A")
+    first = journal(project_4, "c1")
+    write_store(project_4, [observed(project_4, "c1", first,
+                                          created=[("notes.md", sha("A"))])])
+    payload = {"session_id": "s1", "tool_use_id": "w1", "tool_name": "Write",
+               "hook_event_name": "PreToolUse", "cwd": str(project_4),
+               "tool_input": {"file_path": str(project_4 / "notes.md"), "content": "B"}}
+    io.hook(project_4 / ".mycelium", project_4, "claude", json.dumps(payload))
+    (project_4 / "notes.md").write_text("B?")  # a partial write the tool reported failed
+    payload["hook_event_name"] = "PostToolUseFailure"
+    io.hook(project_4 / ".mycelium", project_4, "claude", json.dumps(payload))
+    result = li.query_path(li.load(project_4), "notes.md", disk=False)
+    assert all(w["record"]["status"] != "current-in-record" for w in result["writes"])
+    assert all(w["call"] != "s1|claude:w1" for w in result["writes"])
+
+
+def test_a_query_in_another_case_finds_the_history(project_4: Path) -> None:
+    (project_4 / "README.md").write_text("A")
+    if not io._case_insensitive(str(project_4.resolve())):
+        pytest.skip("case-sensitive volume")
+    first = journal(project_4, "c1")
+    write_store(project_4, [observed(project_4, "c1", first,
+                                          created=[("README.md", sha("A"))])])
+    result = li.query_path(li.load(project_4), "readme.md")
+    assert result["writes"] and result["writes"][0]["status"] == "current"
+    assert result["selector"] == {"path": "readme.md"}
+
+
+def test_an_unverifiable_deletion_is_unverified_not_changed() -> None:
+    assert li._headline("current-in-record", "unverified", "deleted") == "unverified"
+    assert li._headline("current-in-record", "missing", "deleted") == "current"
+    assert li._headline("current-in-record", "match", "deleted") == "changed-outside-record"
+
+
+def test_coverage_changes_are_gaps_in_the_index(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".living" / "log" / "data-lineage").mkdir(parents=True)
+    (repo / "data").mkdir()
+    (repo / "data" / "x.csv").write_text("x")
+    later = observation(repo, "c2", pre=3, post=4)
+    later["changes"]["coverage_changed"] = ["data/x.csv"]
+    write_store(repo, [observation(repo, "c1", created=[("data/x.csv", sha("x"))],
+                                           pre=1, post=2), later])
+    write = li.query_hash(li.load(repo), sha("x"))["paths"][0]["writes"][0]
+    assert write["status"] == "unknown"
+    assert "coverage-unproven" in write["record"]["reasons"]
+    assert {"kind": "path-coverage-changed", "call": "s1|claude:c2"} in \
+        write["record"]["unaccounted"]
+
+
+def test_a_partly_failed_patch_leaves_its_targets_unknown(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".living" / "log" / "data-lineage").mkdir(parents=True)
+    (repo / "out.csv").write_text("v1")
+    failed = observation(repo, "p2", pre=3, post=4, edited=[("other.csv", sha("o"))])
+    failed["changes"] = {"edited": [], "deleted": [],
+                         "refused": [{"path": "out.csv", "reason": "edit-failed"}]}
+    failed["outcome"] = "failure"
+    write_store(repo, [observation(repo, "p1", created=[("out.csv", sha("v1"))],
+                                           pre=1, post=2), failed])
+    write = li.query_hash(li.load(repo), sha("v1"))["paths"][0]["writes"][0]
+    assert write["status"] == "unknown"
+
+
+def test_a_background_job_clouds_later_verdicts_until_bounded(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".living" / "log" / "data-lineage").mkdir(parents=True)
+    (repo / "out.csv").write_text("v1")
+    background = observation(repo, "bg", pre=3, post=None, status="background")
+    write_store(repo, [observation(repo, "c1", created=[("out.csv", sha("v1"))],
+                                           pre=1, post=2), background])
+    write = li.query_hash(li.load(repo), sha("v1"))["paths"][0]["writes"][0]
+    assert write["status"] == "unknown"
+    assert any(g["kind"] == "background-job" for g in write["record"]["gaps"])
+
+
+def test_a_collaborators_v1_observations_stay_theirs(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".living" / "log" / "data-lineage").mkdir(parents=True)
+    (repo / "out.csv").write_text("v1")
+    record = observation(repo, "c1", created=[("out.csv", sha("v1"))], pre=1, post=2)
+    record.pop("repo_root")
+    record["version"] = 1
+    manifest = {"session_id": "theirs", "repo_root": "/home/collaborator/proj", "actions": [],
+                "observations": [record], "summary": {}}
+    (repo / ".living" / "log" / "data-lineage" / "theirs.json").write_text(json.dumps(manifest))
+    assert li.query_hash(li.load(repo), sha("v1"))["found"] is False
