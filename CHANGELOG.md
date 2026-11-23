@@ -76,11 +76,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `pairing` blocks with fewer than two levels.
   - A ledger pairing may declare its expected levels. When the pairing
     licenses units across groups, it must cover every group present.
-  - New check kind `paired_batch`. A ledger with a pairing and batch columns
-    gets one per batch column, plus one for all of them together. It tests,
-    exactly, one design: unit (absorbed) + every observed group-by-within
-    cell + batch. It blocks when a within-unit contrast the pairs estimate
-    is lost to batch: the pairs are split across batches in step with the
+  - New check kind `paired_batch`, **advisory in this release: it warns and
+    never blocks** until proven on real ledgers. A ledger with a pairing and
+    batch columns gets one per batch column, plus one for all of them
+    together. It tests, exactly, one design: unit (absorbed) + every observed
+    group-by-within cell + batch, within a fixed work budget (a design past
+    it is reported as too large to check). It warns when a within-unit
+    contrast the pairs estimate is lost to batch: the pairs are split across batches in step with the
     within factor (donor 1 treated in run 1 and control in run 2, donor 2
     treated in run 2 and control in run 3, where `batch_confounding` only
     warns), or missing batch values erase every complete pair. Per-group
@@ -90,10 +92,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the design, since they can identify a batch. With `max_share` (ledger
     contracts set 0.5) it warns when one batch holds one side of the split
     pairs for most units. For a crossover, the group should be the treatment,
-    not the sequence.
+    not the sequence. Known gaps: a matched-pair contrast across two groups
+    (case matched to control) is not tested, and a missing batch label the
+    nesting determines is not filled before rows are dropped.
   - The parent columns in `batch_scope`, and the `batch_scopes` entries of the
-    batch columns a check uses, are spelling-checked like `unit_scope`, so
-    `site1` and `site1 ` no longer split a batch silently.
+    batch columns a check uses, are spelling-checked, so `site1` and `site1 `
+    no longer split a batch silently. This warns rather than blocks, so a
+    contract that passed before still passes.
 - **`skills/core/references/provenance-schema.json`**, one JSON Schema file
   for manifests (v1 and v2), events, data commands, skips, observations, index
   results, report fragments, numbers, findings and the ledger. Tests validate

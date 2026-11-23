@@ -131,13 +131,17 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   has a level not listed, or lacks a listed one. Ledger contracts set this when
   the pairing licenses units across groups.
 - `batch_estimability` takes `batch_scopes`, a map from batch column to the
-  parent columns that qualify its local labels. Those parent columns, like
-  `unit_scope` and `batch_scope`, are part of the identity, so a value
-  spelled two ways (`site1` and `site1 `) blocks.
-- `paired_batch`: for a paired design, whether the contrasts between the
-  `within` levels inside each `unit` survive the `batch` columns (one or
-  more, adjusted for together). It builds one design and tests it exactly
-  (sparse rational elimination, so no rounding):
+  parent columns that qualify its local labels. The parent columns of the
+  batch columns a check uses (`batch_scope`, or the used `batch_scopes`
+  entries) are part of the batch's identity, so a value spelled two ways
+  (`site1` and `site1 `) warns. It warns rather than blocks in this release,
+  so a contract that passed before still passes.
+- `paired_batch` (**advisory in this release: it warns and never blocks**,
+  including the spelling and no-rows findings that block other kinds, until
+  it has been proven on real ledgers): for a paired design, whether the
+  contrasts between the `within` levels inside each `unit` survive the
+  `batch` columns (one or more, adjusted for together). It builds one design
+  and tests it exactly (sparse rational elimination, so no rounding):
   - rows with a known unit and `within` value;
   - a parameter for every observed (`group`, `within`) cell, which carries the
     group main effect and the group-by-within interaction, so a group that
@@ -151,9 +155,10 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   within each group), since a visit outside the contrast can still identify
   a batch. To model without a visit, filter it out. A missing `group` is
   filled from the unit when the unit has one group. Otherwise the row keeps
-  cells of its own, with a warning.
+  cells of its own (kept apart from any recorded label, `?` included), with a
+  warning.
 
-  A contrast blocks in two cases:
+  A contrast is reported, as a warning, in two cases:
   - it is estimable from the pairs but not once rows missing a batch are
     dropped (each donor lacks the run for one visit, so no donor keeps both
     sides; `pairing`, counting all rows, passes);
@@ -161,17 +166,16 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
     split across batches in step with the within factor.
 
   Donor 1 with treated in run 1 and control in run 2, and donor 2 with
-  treated in run 2 and control in run 3, blocks, although
-  `batch_confounding` only warns (run 2 holds both levels). Swapping the runs
-  for donor 2, or running each pair in one run, passes. With `group`, a
-  genotype-by-visit interaction confounded with batch blocks even when the
-  visit effect alone is estimable from the other genotype. A contrast no
+  treated in run 2 and control in run 3, is reported, where
+  `batch_confounding` only warns that run 2 holds one level. Swapping the
+  runs for donor 2, or running each pair in one run, passes. With `group`, a
+  genotype-by-visit interaction confounded with batch is reported even when
+  the visit effect alone is estimable from the other genotype. A contrast no
   unit observes on both sides is left to `pairing`. When `group` is constant
   within units, a batch that coincides with it is `batch_confounding`'s block
-  (the unit absorbs the group, so this check does not see it); when the
-  group is the `within` factor, both checks block.
+  (the unit absorbs the group, so this check does not see it).
 
-  Blocking is exact. With `max_share` (above 0, at most 1) it also warns
+  The finding is exact. With `max_share` (above 0, at most 1) it also warns
   when, for a contrast it can still estimate, one batch holds one side of
   the pairs split across batches for more than that share of the paired
   units. Eight donors with base in run 1 and week 4 in run 2, plus two with
@@ -180,8 +184,18 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   randomized runs spread both sides out and pass. Ledger contracts set
   `"max_share": 0.5`. It takes `unit_scope` and `batch_scopes` for local
   labels, and checks 1000 units with three visits and two batch columns in
-  well under a second. Time grows with the number of batch levels: a design
-  with hundreds of runs and hundreds of dates takes seconds.
+  well under a second. Its elimination has a fixed work budget (about a
+  second); a design past it, such as hundreds of runs crossed with hundreds
+  of dates, is reported as too large to check, and nothing is concluded.
+
+  Known gaps, open while it is advisory:
+  - a matched-pair design whose two sides are different groups (a case
+    matched to a control, paired by `match` across `role`) produces no
+    tested contrast, since each group has one role, so a cross-group
+    contrast confounded with run is not reported;
+  - a missing batch label that the nesting determines (a donor's baseline
+    site left blank when the donor sits in one site) is not filled from the
+    nesting path, so dropping those rows can report pairs as erased.
 - For a crossover, make the group the treatment, not the sequence. With
   `group` set to the sequence (AB, BA), each sequence's treatment effect is
   aliased with period by design, so a period batch blocks; with the
@@ -247,7 +261,8 @@ Ledger mode runs these checks:
 - the declared `pairing`;
 - with a pairing, one `paired_batch` per batch column, and one for all of
   them together when there are two or more, against the within-unit
-  contrast (per group when `within` is not the group).
+  contrast (per group when `within` is not the group). These are advisory:
+  they warn and never change the exit status.
 
 `--emit-contract` writes that contract so the analysis can extend it. Add
 filters, and point the replication, pairing and batch checks at the

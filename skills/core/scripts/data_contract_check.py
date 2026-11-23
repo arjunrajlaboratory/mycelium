@@ -578,9 +578,13 @@ class _Echelon:
     is one reduction: it is in the row space when nothing is left.
     """
 
-    def __init__(self, prefer=None):
+    def __init__(self, prefer=None, budget=None):
         self.prefer = prefer or (lambda column: 0)
         self.pivots, self.order = {}, {}
+        self.budget = budget  # entry operations allowed before TooLarge
+
+    class TooLarge(Exception):
+        pass
 
     def reduce(self, row):
         import heapq
@@ -595,6 +599,10 @@ class _Echelon:
             if not a:
                 continue
             pivot = self.pivots[column]
+            if self.budget is not None:
+                self.budget -= len(pivot) + len(row)
+                if self.budget < 0:
+                    raise _Echelon.TooLarge()
             b = pivot[column]
             out = {k: v * b for k, v in row.items()}
             for k, v in pivot.items():
@@ -625,6 +633,10 @@ class _Echelon:
     def spans(self, row):
         return not self.reduce(row)
 
+
+# Entry operations one paired_batch check may spend on elimination (about a
+# second); past it the check reports that it did not run.
+PAIRED_BATCH_BUDGET = 5000000
 
 UNKNOWN_GROUP = object()  # a row whose group is unknown: its own nuisance cells
 
@@ -703,30 +715,43 @@ def check_paired_batch(check, columns, rows):
         return alerts
 
     def key(g):
-        return "?" if g is UNKNOWN_GROUP else g
+        # Tagged, so a recorded label (even "?") never meets the unknown group.
+        return ("unknown",) if g is UNKNOWN_GROUP else ("label", g)
 
     def echelon(records, with_batch):
-        ech = _Echelon(prefer=lambda column: (0 if column[0] == "b" else 1, column))
-        first = {}
-        for u, g, w, b in records:
-            vector = {("c", key(g), w): 1}
-            if with_batch:
-                vector.update((("b", i, v), 1) for i, v in enumerate(b))
+        ech = _Echelon(prefer=lambda column: (0 if column[0] == "b" else 1, str(column)),
+                       budget=PAIRED_BATCH_BUDGET)
+        first, seen = {}, set()
+        # Repeated samples of one cell (aliquots, images) add nothing.
+        for u, g, w, b in sorted({(u, key(g), w, b if with_batch else ()) for u, g, w, b in records},
+                                 key=str):
+            vector = {("c", g, w): 1}
+            vector.update((("b", i, v), 1) for i, v in enumerate(b))
             if u not in first:
                 first[u] = vector
                 continue
             difference = dict(vector)
             for k, v in first[u].items():
                 difference[k] = difference.get(k, 0) - v
-            ech.add(difference)
+            signature = frozenset((k, v) for k, v in difference.items() if v)
+            if signature and signature not in seen:
+                seen.add(signature)
+                ech.add(difference)
         return ech
 
     def vector(contrast):
         g, lvl, ref = contrast
-        return {("c", g, lvl): 1, ("c", g, ref): -1}
+        return {("c", key(g), lvl): 1, ("c", key(g), ref): -1}
 
-    before, after = echelon(paired_rows, False), echelon(batched, False)
-    adjusted = echelon(batched, True)
+    try:
+        before, after = echelon(paired_rows, False), echelon(batched, False)
+        adjusted = echelon(batched, True)
+    except _Echelon.TooLarge:
+        alerts.append(alert(
+            "paired_batch", "the design is too large to check exactly within the time this check "
+            "allows, so batch against the {} contrast was not checked".format(within), False,
+            observed="{} rows, {} batch columns".format(len(batched), len(batches))))
+        return alerts
     erased, confounded = [], []
     for contrast in contrasts:
         if not before.spans(vector(contrast)):
@@ -745,7 +770,7 @@ def check_paired_batch(check, columns, rows):
             "paired_batch",
             "missing {} values leave no {} with both sides of the {} contrast, so a model "
             "adjusting for batch has no pair to estimate it from".format(
-                ", ".join(batches), unit, within), True,
+                ", ".join(batches), unit, within), False,
             expected="pairs with batch values on both sides",
             observed="no complete pair: " + label(erased)))
     if confounded:
@@ -757,7 +782,7 @@ def check_paired_batch(check, columns, rows):
         alerts.append(alert(
             "paired_batch",
             "within {}, the {} contrast cannot be separated from {}: the pairs are split "
-            "across batches in step with it".format(unit, within, ", ".join(batches)), True,
+            "across batches in step with it".format(unit, within, ", ".join(batches)), False,
             expected="each {} contrast estimable within {} after adjusting for {}".format(
                 within, unit, ", ".join(batches)),
             observed="not estimable: " + label(confounded),
@@ -773,15 +798,15 @@ def check_paired_batch(check, columns, rows):
     # that one batch carries one side for more than `max_share` of the
     # paired units. Counterbalanced splits (half each way, or a rotation
     # through three runs) and randomized runs spread both sides out.
+    batch_sets = defaultdict(lambda: defaultdict(set))  # (group, within) -> unit -> batches
+    for u, g, w, b in batched:
+        batch_sets[(g, w)][u].add(b)
     for contrast in contrasts:
         g, lvl, ref = contrast
         if contrast in confounded or contrast in erased:
             continue
-        sides = defaultdict(lambda: (set(), set()))
-        for u, cg, w, b in batched:
-            if cg == g and w in (ref, lvl):
-                sides[u][w == lvl].add(b)
-        pairs = [(a, b) for a, b in sides.values() if a and b]
+        on_ref, on_lvl = batch_sets.get((g, ref), {}), batch_sets.get((g, lvl), {})
+        pairs = [(on_ref[u], on_lvl[u]) for u in on_ref if u in on_lvl]
         steps = Counter()
         for a, b in pairs:
             if not a & b:
@@ -1225,6 +1250,19 @@ def filter_columns(filters):
 
 
 RELAXATIONS = ("units_may_span_groups",)
+# Kinds that warn and never block in this release, until proven on real
+# ledgers: paired_batch.
+ADVISORY_KINDS = ("paired_batch",)
+
+
+def advisory(alerts):
+    """The same findings as warnings: reported, never blocking."""
+    out = []
+    for a in alerts:
+        if a["blocking"]:
+            a = dict(a, blocking=False, severity="warning")
+        out.append(a)
+    return out
 
 
 def run_contract(contract, base_dir):
@@ -1292,15 +1330,18 @@ def run_contract(contract, base_dir):
             if kind in ("batch_estimability", "paired_batch"):
                 identity += as_list(check.get("batch"))
             identity += as_list(check.get("within")) + as_list(check.get("unit_scope"))
-            # Parents that qualify a local batch label are part of its
-            # identity: those of the batch columns this check uses.
-            identity += as_list(check.get("batch_scope"))
-            scopes = check.get("batch_scopes") or {}
-            for column in as_list(check.get("batch")):
-                identity += as_list(scopes.get(column))
             if kind in ("unique", "nesting"):
                 identity += as_list(check.get("columns")) + as_list(check.get("levels"))
             found.extend(spelling_variants(rows, sorted(set(identity)), kind))
+            # Parents that qualify a local batch label (of the batch columns
+            # this check uses) are part of its identity. Checked from this
+            # release, so a variant spelling warns rather than blocking a
+            # contract that passed before.
+            parents = as_list(check.get("batch_scope"))
+            scopes = check.get("batch_scopes") or {}
+            for column in as_list(check.get("batch")):
+                parents += as_list(scopes.get(column))
+            found.extend(advisory(spelling_variants(rows, sorted(set(parents) - set(identity)), kind)))
             if not rows:
                 found.append(alert(kind, "no rows left after filters; the check would pass vacuously", True,
                                    expected=">= 1 row",
@@ -1308,6 +1349,9 @@ def run_contract(contract, base_dir):
                                    evidence=[json.dumps(f, sort_keys=True) for f in filters]))
             if rows:
                 found.extend(CHECKS[kind](check, columns, rows))
+            if kind in ADVISORY_KINDS:
+                found = [a for a in found if a["kind"] != kind] + \
+                    advisory([a for a in found if a["kind"] == kind])
         for record in found:
             record["check"] = label
             record["table"] = table

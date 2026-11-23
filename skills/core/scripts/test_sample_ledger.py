@@ -457,6 +457,13 @@ def _paired(tmp_path: Path, design: list[tuple], within: str = "condition",
     return dcc.run_contract(contract, str(tmp_path))
 
 
+def _finds(alerts: list) -> bool:
+    """A paired_batch finding (advisory: a warning) that a contrast is lost to batch."""
+    return any(a["kind"] == "paired_batch" and not a["blocking"] and
+               ("cannot be separated" in a["message"] or "no pair" in a["message"])
+               for a in alerts)
+
+
 def _paired_status(summaries: list) -> list:
     return [s["status"] for s in summaries if s["kind"] == "paired_batch"]
 
@@ -473,7 +480,7 @@ def test_a_ledger_pairing_checks_each_batch_within_units(ledger: Path) -> None:
     assert not any(c["kind"] == "paired_batch" for c in unpaired)
 
 
-def test_pairs_split_across_batches_in_step_block(tmp_path: Path) -> None:
+def test_pairs_split_across_batches_in_step_are_found(tmp_path: Path) -> None:
     # d1: treated in r1, control in r2; d2: treated in r2, control in r3.
     # r2 holds both conditions, so the per-column check only warns, yet every
     # within-donor difference is also a batch difference.
@@ -482,7 +489,7 @@ def test_pairs_split_across_batches_in_step_block(tmp_path: Path) -> None:
     summaries, alerts = _paired(tmp_path, design)
     confounding = [s["status"] for s in summaries if s["kind"] == "batch_confounding"]
     assert confounding == ["warn"]
-    assert _paired_status(summaries) == ["block"]
+    assert _paired_status(summaries) == ["warn"]
     alert = next(a for a in alerts if a["kind"] == "paired_batch")
     assert "treated" in alert["observed"] and any("d1" in e for e in alert["evidence"])
 
@@ -512,7 +519,7 @@ def test_a_within_factor_apart_from_the_group_is_checked(tmp_path: Path) -> None
                                   "pairing": {"unit": "donor", "within": "visit"}},
                                  str(tmp_path))["checks"]
     assert next(c for c in checks if c["kind"] == "paired_batch")["group"] == "condition"
-    assert _paired_status(summaries) == ["block"]
+    assert _paired_status(summaries) == ["warn"]
 
 
 def test_the_group_by_within_interaction_is_checked(tmp_path: Path) -> None:
@@ -523,7 +530,7 @@ def test_the_group_by_within_interaction_is_checked(tmp_path: Path) -> None:
               for v in ("base", "wk4")]
     design += [(d, "KO", v, "r3") for d in ("d3", "d4") for v in ("base", "wk4")]
     summaries, alerts = _paired(tmp_path, design, within="visit")
-    assert _paired_status(summaries) == ["block"]
+    assert _paired_status(summaries) == ["warn"]
     alert = next(a for a in alerts if a["kind"] == "paired_batch")
     assert "WT" in alert["observed"] and "KO" not in alert["observed"]
 
@@ -613,10 +620,10 @@ def test_a_crossover_groups_by_treatment_not_sequence() -> None:
                     "max_share": 0.5}
     assert dcc.check_paired_batch(by_treatment, [], rows) == []
     by_sequence = {**by_treatment, "group": "seq"}
-    assert any(a["blocking"] for a in dcc.check_paired_batch(by_sequence, [], rows))
+    assert _finds(dcc.check_paired_batch(by_sequence, [], rows))
 
 
-def test_missing_batches_that_erase_every_pair_block(tmp_path: Path) -> None:
+def test_missing_batches_that_erase_every_pair_are_found(tmp_path: Path) -> None:
     # Every donor has both visits, but each lacks the run for one of them:
     # the rows a batch-adjusted model keeps hold both visits and no pair.
     design = []
@@ -625,8 +632,8 @@ def test_missing_batches_that_erase_every_pair_block(tmp_path: Path) -> None:
                    (f"d{i}", "W", "wk4", "NA" if i % 2 else "r2")]
     summaries, alerts = _paired(tmp_path, design, within="visit")
     assert not any(a["kind"] == "pairing" and a["blocking"] for a in alerts)
-    assert _paired_status(summaries) == ["block"]
-    assert any(a["kind"] == "paired_batch" and a["blocking"] and "missing" in a["message"]
+    assert _paired_status(summaries) == ["warn"]
+    assert any(a["kind"] == "paired_batch" and not a["blocking"] and "missing" in a["message"]
                for a in alerts)
 
 
@@ -650,7 +657,7 @@ def test_a_ledger_paired_batch_keeps_to_the_declared_levels(tmp_path: Path) -> N
     unlimited = {**paired}
     unlimited.pop("levels")
     rows = [{"donor": d, "condition": c, "visit": v, "run": r} for d, c, v, r in design]
-    assert any(a["blocking"] for a in dcc.check_paired_batch(unlimited, [], rows))
+    assert _finds(dcc.check_paired_batch(unlimited, [], rows))
 
 
 def test_a_rotation_through_three_batches_is_balanced(tmp_path: Path) -> None:
@@ -681,7 +688,8 @@ def test_batch_scope_parents_are_spelling_checked(tmp_path: Path, kind: str) -> 
 
 
 def _blocks(check: dict, rows: list[dict]) -> bool:
-    return any(a["blocking"] for a in dcc.check_paired_batch(check, [], rows))
+    """Whether the check finds a contrast lost to batch (a warning, in this release)."""
+    return _finds(dcc.check_paired_batch(check, [], rows))
 
 
 def test_blank_group_labels_cannot_hide_an_alias(tmp_path: Path) -> None:
@@ -691,7 +699,7 @@ def test_blank_group_labels_cannot_hide_an_alias(tmp_path: Path) -> None:
     for d, cohort in (("d1", "A"), ("d2", "A"), ("d3", "B"), ("d4", "B")):
         design += [(d, "", "base", "r1"), (d, cohort, "wk4", "r2")]
     summaries, _ = _paired(tmp_path, design, within="visit")
-    assert _paired_status(summaries) == ["block"]
+    assert _paired_status(summaries) == ["warn"]
 
 
 def test_a_group_that_varies_within_the_unit_keeps_its_main_effect() -> None:
@@ -738,3 +746,114 @@ def test_an_unused_batch_scope_is_not_spelling_checked(tmp_path: Path) -> None:
          "batch_scopes": {"local_run": ["site"]}}]}
     summaries, alerts = dcc.run_contract(contract, str(tmp_path))
     assert summaries[0]["status"] == "pass", alerts
+
+
+# paired_batch is advisory in this release: it warns, never blocks.
+
+def _ledger_exit(tmp_path: Path, header: list, rows: list, **spec) -> tuple:
+    (tmp_path / "samples.tsv").write_text("\t".join(header) + "\n" + "".join(
+        "\t".join(r) + "\n" for r in rows))
+    (tmp_path / "samples.ledger.json").write_text(json.dumps({
+        "schema": dcc.LEDGER_SCHEMA, "file": "samples.tsv", "sample_id": "sample_id", **spec}))
+    result = run(tmp_path)
+    return result.returncode, json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("design", [
+    # pairs split in step, a visit aliased with run, every pair erased by
+    # missing runs: each a paired_batch finding, none blocking.
+    [("d1", "treated", "v", "r1"), ("d1", "control", "v", "r2"),
+     ("d2", "treated", "v", "r2"), ("d2", "control", "v", "r3")],
+    [(d, "W", v, "r1" if v == "base" else "r2") for d in ("d1", "d2", "d3")
+     for v in ("base", "wk4")],
+    [(d, "W", v, r) for d in ("d1", "d2") for v, r in (("base", "r1"), ("wk4", "NA"))]
+    + [(d, "W", v, r) for d in ("d3", "d4") for v, r in (("base", "NA"), ("wk4", "r2"))],
+])
+def test_no_paired_batch_result_blocks(tmp_path: Path, design: list) -> None:
+    within = "condition" if design[0][1] != "W" else "visit"
+    summaries, alerts = _paired(tmp_path, design, within=within)
+    assert _paired_status(summaries) == ["warn"]
+    assert not any(a["blocking"] for a in alerts if a["check"].endswith("paired_batch"))
+
+
+def test_a_ledger_main_accepts_is_still_accepted(tmp_path: Path) -> None:
+    # Codex's donor-fixed site ledger: baselines lack their site. origin/main
+    # warns and exits 0; it still must.
+    rows = []
+    for d, cohort, site in (("d1", "A", "s1"), ("d2", "B", "s1"), ("d3", "A", "s2"),
+                            ("d4", "B", "s2")):
+        for v, s in (("base", ""), ("wk4", site)):
+            rows += [[f"{d}-{v}-{k}", d, cohort, v, s] for k in ("a", "b")]
+    code, out = _ledger_exit(tmp_path, ["sample_id", "donor", "cohort", "visit", "site"], rows,
+                             group="cohort", unit_of_replication="donor",
+                             nesting=["site", "donor"], batch=["site"],
+                             pairing={"unit": "donor", "within": "visit"})
+    assert code == 0, out
+
+
+def test_scope_spelling_only_warns_on_existing_batch_checks(tmp_path: Path) -> None:
+    table = tmp_path / "t.tsv"
+    table.write_text("arm\trun\tsite\nA\tr1\tNorth\nB\tr1\tNorth\nA\tr2\tNorth \nB\tr2\tNorth \n")
+    contract = {"schema": dcc.SCHEMA, "table": str(table), "checks": [
+        {"kind": "batch_confounding", "batch": "run", "contrast": "arm", "batch_scope": ["site"]}]}
+    summaries, alerts = dcc.run_contract(contract, str(tmp_path))
+    assert summaries[0]["status"] == "warn", alerts
+    assert any("'site'" in a["message"] for a in alerts)
+
+
+def test_a_recorded_question_mark_group_is_not_the_unknown_group() -> None:
+    # p1, p2 are a recorded "?" phenotype with base r1, wk4 r2; p5 has no
+    # phenotype and both visits in r1. p5 must not identify the "?" visit.
+    rows = []
+    for p, pheno, runs in (("p1", "?", ("r1", "r2")), ("p2", "?", ("r1", "r2")),
+                           ("p3", "confirmed", ("r1", "r1")), ("p4", "confirmed", ("r1", "r1")),
+                           ("p5", "", ("r1", "r1"))):
+        rows += [{"participant": p, "phenotype": pheno, "visit": v, "run": r}
+                 for v, r in zip(("base", "wk4"), runs)]
+    alerts = dcc.check_paired_batch({"unit": "participant", "within": "visit",
+                                     "group": "phenotype", "batch": ["run"]}, [], rows)
+    assert any("cannot be separated" in a["message"] and "phenotype=?" in a["observed"]
+               for a in alerts)
+
+
+def _timed(check: dict, rows: list) -> float:
+    import time
+
+    start = time.perf_counter()
+    dcc.check_paired_batch(check, [], rows)
+    return time.perf_counter() - start
+
+
+def test_long_batch_chains_check_quickly() -> None:
+    rows = []
+    for i in range(1000):
+        for v in range(12):
+            if i < 500:
+                r = i + int(v != 0)
+            elif v == 0:
+                r = (i - 500) % 50
+            else:
+                r = 501 + (i - 500) // 4
+            rows += [{"donor": f"d{i}", "cohort": str(i % 2), "visit": f"v{v}", "run": f"{r:04d}"}
+                     for _ in range(2)]
+    assert _timed({"unit": "donor", "within": "visit", "group": "cohort", "batch": ["run"],
+                   "max_share": 0.5}, rows) < 2
+
+
+def test_many_groups_and_visits_check_quickly() -> None:
+    rows = [{"plant": f"p{i}", "cultivar": str(i % 250), "week": f"w{w:02d}",
+             "device": str((i // 250) % 2)} for i in range(1000) for w in range(26) for _ in range(2)]
+    assert _timed({"unit": "plant", "within": "week", "group": "cultivar", "batch": ["device"],
+                   "max_share": 0.5}, rows) < 2
+
+
+def test_a_design_past_the_budget_warns_that_it_was_not_checked(monkeypatch) -> None:
+    import random
+
+    monkeypatch.setattr(dcc, "PAIRED_BATCH_BUDGET", 1000)
+    rng = random.Random(42)
+    rows = [{"donor": f"d{i}", "visit": f"v{v}", "run": f"r{rng.randrange(300)}"}
+            for i in range(300) for v in range(3)]
+    alerts = dcc.check_paired_batch({"unit": "donor", "within": "visit", "batch": ["run"]}, [], rows)
+    assert [a["blocking"] for a in alerts] == [False]
+    assert "too large" in alerts[0]["message"]
