@@ -521,20 +521,99 @@ def _is_managed_utility_path(resolved: Path) -> bool:
     return False
 
 
+# `P=$(cat .mycelium/plugin-root)`, optionally with a literal subdirectory
+# after it (`S="$(cat .mycelium/plugin-root)/skills/core/scripts"`), or a
+# literal absolute path.
 _ROOT_ASSIGNMENT_RX = re.compile(
     r"""(?:^|[;&|\n(]|&&|\|\|)\s*([A-Za-z_][A-Za-z0-9_]*)="""
-    r"""(?:"\$\(cat \.mycelium/plugin-root\)"|\$\(cat \.mycelium/plugin-root\)"""
+    r"""(?:"\$\(cat \.mycelium/plugin-root\)(?P<suffix_q>/[A-Za-z0-9_./-]*)?\""""
+    r"""(?P<suffix_after>/[A-Za-z0-9_./-]*)?"""
+    r"""|\$\(cat \.mycelium/plugin-root\)(?P<suffix>/[A-Za-z0-9_./-]*)?"""
     r"""|'?(/[^\s;&|$'"`]+)'?)(?=[\s;&|]|$)"""
 )
 
 
 # An interpreter held in a variable: `PY=/x/venv/bin/python; $PY run.py`.
-_INTERPRETER_VAR_USE_RX = re.compile(
-    r"(?:^|(?<=[;&|\n(])|(?<=&&)|(?<=\|\|))(?P<lead>[ \t]*)"
-    r"(?P<ref>\"?\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))\"?)"
-    r"(?=[ \t])")
 _INTERPRETER_BASENAME_RX = re.compile(r"python(?:\d+(?:\.\d+)*)?|Rscript|R")
 _LITERAL_VALUE_RX = re.compile(r"'([^']*)'|\"([^\"$`\\]*)\"|([^\s;&|<>()'\"$`\\*?\[\]{}~]+)")
+
+
+_VAR_ASSIGNMENT_AT_RX = re.compile(r"(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=")
+_VAR_USE_AT_RX = re.compile(
+    r"(?:\"\$(?:\{(?P<qb>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<qn>[A-Za-z_][A-Za-z0-9_]*))\""
+    r"|\$(?:\{(?P<b>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<n>[A-Za-z_][A-Za-z0-9_]*)))(?=[ \t])")
+# A bare mention of a name in unquoted shell text: `unset PY`, `read PY`,
+# `declare PY=x`, `PY+=x`, `for PY in`, `cond && PY=x`. `$PY`/`${PY}` are
+# uses, not mentions (the `$` or `{` before the name excludes them).
+_VAR_MENTION_RX = re.compile(
+    r"(?<![^\s;&|()`])([A-Za-z_][A-Za-z0-9_]*)(?=[\s;&|()=+\[<>]|$)")
+_COMMAND_WORD_AT_RX = re.compile(r"[^\s;&|()<>`]+")
+_CONTROL_OPEN_WORDS = frozenset(
+    {"if", "while", "until", "for", "case", "select", "{", "function", "coproc"})
+_CONTROL_CLOSE_WORDS = frozenset({"fi", "done", "esac", "}"})
+
+
+def _shell_command_starts(command: str, masked: str,
+                          visible: str) -> list[tuple[int, str, int, int]]:
+    """(offset, boundary, nesting depth, control depth) for each simple
+    command start in ``command``, found on ``masked`` (quotes, comments and
+    heredoc bodies blanked, offsets kept) so quoted text never starts one.
+    ``visible`` blanks only comments and heredoc bodies: a start whose raw
+    character is blanked there is data, not shell. Nesting depth counts
+    open parentheses (subshells, `$(`) and backticks; control depth counts
+    open `if`/`while`/`for`/`case`/`{` bodies. One linear pass."""
+    starts: list[tuple[int, str, int, int]] = []
+    length = len(command)
+    depth = 0
+    in_backtick = False
+    control = 0
+    boundary = "^"
+    at_start = True
+    index = 0
+    while index < length:
+        char = masked[index]
+        if at_start:
+            raw = command[index]
+            if raw in " \t":
+                index += 1
+                continue
+            if raw not in ";&|()`\n" and visible[index] != " ":
+                starts.append((index, boundary, depth + in_backtick, control))
+                word = _COMMAND_WORD_AT_RX.match(masked, index)
+                if word is not None:
+                    if word.group() in _CONTROL_OPEN_WORDS:
+                        control += 1
+                    elif word.group() in _CONTROL_CLOSE_WORDS:
+                        control = max(0, control - 1)
+            at_start = False
+        if char == "(":
+            depth += 1
+            boundary, at_start = "(", True
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "`":
+            in_backtick = not in_backtick
+            boundary, at_start = "`", True
+        elif char == "\n":
+            boundary, at_start = "\n", True
+        elif char == ";":
+            boundary, at_start = (";;" if masked[index + 1: index + 2] == ";" else ";"), True
+            if boundary == ";;":
+                index += 1
+        elif char in "&|":
+            previous = masked[index - 1] if index else ""
+            following = masked[index + 1] if index + 1 < length else ""
+            if char == "&" and (previous in "<>" or following == ">"):
+                pass  # a redirection (`2>&1`, `&>`), not a control operator
+            elif char == "|" and previous == ">":
+                pass  # `>|`
+            elif following == char:
+                boundary, at_start = char * 2, True
+                index += 1
+            else:
+                boundary, at_start = char, True
+        index += 1
+    return starts
 
 
 def _expand_interpreter_variables(command: str) -> str:
@@ -545,51 +624,69 @@ def _expand_interpreter_variables(command: str) -> str:
     `export`ed) at the top level, ended by `;` or a newline, the last one to
     that name before the use, with no expansion in its value, and a value
     whose basename is python, Rscript, or R. Anything else is left as
-    written (and stays undetected, as before)."""
+    written (and stays undetected, as before).
+
+    Assignments and uses are only seen at command starts in shell text: not
+    in quotes, comments, heredoc bodies, or (for uses) substitutions and
+    subshells. Any other unquoted mention of the name (`unset`, `read`,
+    `declare`, `local`, `readonly`, `typeset`, `+=`, a conditional, piped
+    or nested assignment, a loop variable) voids it until the next plain
+    assignment. One forward pass over the command."""
     if "$" not in command or "=" not in command:
         return command
+    without_heredocs = _blank_heredoc_bodies(command)
+    masked = _unquoted_shell_text(without_heredocs)
+    visible = _strip_unquoted_shell_comments(without_heredocs)
+    if masked is None or visible is None:
+        return command
+    starts = _shell_command_starts(command, masked, visible)
+    mentions = [(m.start(1), m.group(1)) for m in _VAR_MENTION_RX.finditer(masked)]
+    values: dict[str, str | None] = {}
     out: list[str] = []
     last = 0
-    for use in _INTERPRETER_VAR_USE_RX.finditer(command):
-        name = use.group("braced") or use.group("bare")
-        value = _interpreter_assignment(command[:use.start("ref")], name)
+    consumed = -1  # the offset of the name a modeled assignment just set
+    mention_index = 0
+    for offset, boundary, depth, control in starts:
+        # Mentions before this command start apply first, in order.
+        while mention_index < len(mentions) and mentions[mention_index][0] < offset:
+            position, name = mentions[mention_index]
+            mention_index += 1
+            if position != consumed:
+                values[name] = None
+        assignment = _VAR_ASSIGNMENT_AT_RX.match(command, offset)
+        if assignment is not None:
+            name = assignment.group(1)
+            value = None
+            if boundary in ("^", ";", "\n") and depth == 0 and control == 0:
+                value = _plain_interpreter_literal(command, assignment.end())
+            values[name] = value
+            consumed = assignment.start(1)
+            continue
+        if depth:
+            continue
+        use = _VAR_USE_AT_RX.match(command, offset)
+        if use is None:
+            continue
+        name = use.group("qb") or use.group("qn") or use.group("b") or use.group("n")
+        value = values.get(name)
         if value is None:
             continue
-        out.append(command[last:use.start("ref")])
+        out.append(command[last:use.start()])
         out.append(shlex.quote(value))
-        last = use.end("ref")
+        last = use.end()
     if not out:
         return command
     out.append(command[last:])
     return "".join(out)
 
 
-def _interpreter_assignment(prefix: str, name: str) -> str | None:
-    """The literal of the last assignment statement to ``name`` in
-    ``prefix``, when it is plain and unconditional and names an
-    interpreter; None otherwise."""
-    # Every way the name may be set or changed; the last one decides.
-    any_set = re.compile(
-        rf"(?P<boundary>^|&&|\|\||[;&|\n(])[ \t]*"
-        rf"(?P<modifier>(?:export|declare|local|readonly|typeset|unset|read)[ \t]+(?:-\w+[ \t]+)*)?"
-        rf"{re.escape(name)}(?P<op>\+?=|(?=[\s;&|)]|$))")
-    found = None
-    for found in any_set.finditer(prefix):
-        pass
-    if found is None or found.group("op") != "=":
-        return None
-    if found.group("boundary") not in ("", ";", "\n"):
-        return None  # conditional (`&&`, `||`), piped, backgrounded or nested
-    if found.group("modifier") and not found.group("modifier").startswith("export"):
-        return None
-    head = prefix[:found.start()]
-    if head.count("(") != head.count(")") or head.count("`") % 2:
-        return None  # inside a subshell or substitution
-    literal = _LITERAL_VALUE_RX.match(prefix, found.end())
+def _plain_interpreter_literal(command: str, start: int) -> str | None:
+    """The literal value at ``start`` (just after `NAME=`) when it is the
+    whole statement, ended by `;` or a newline, and names an interpreter."""
+    literal = _LITERAL_VALUE_RX.match(command, start)
     if literal is None:
         return None
-    rest = prefix[literal.end():]
-    if not re.match(r"[ \t]*(?:;|\n)", rest):
+    if not re.compile(r"[ \t]*(?:;|\n)").match(command, literal.end()):
         return None  # a prefix assignment (`PY=x cmd`) or more words follow
     value = next(g for g in literal.groups() if g is not None)
     if not value or _INTERPRETER_BASENAME_RX.fullmatch(os.path.basename(value)) is None:
@@ -620,15 +717,18 @@ def _variable_script_path(command: str, offset: int, raw_path: str,
     modeled = [a for a in _ROOT_ASSIGNMENT_RX.finditer(prefix) if a.group(1) == name]
     if not modeled or modeled[-1].start() != last_any:
         return None
-    literal = modeled[-1].group(2)
+    assignment = modeled[-1]
+    literal = assignment.group(5)
+    suffix = "".join(assignment.group(g) or "" for g in ("suffix_q", "suffix_after", "suffix"))
     if literal is not None:
         value = literal
     elif cwd is not None:
         # The bounded, link-refusing pointer reader the accessor path uses.
-        value = _pointer_expansion_value(cwd, "cat")
+        pointer = _pointer_expansion_value(cwd, "cat")
+        value = pointer + suffix if pointer else None
     else:
         value = None
-    if not value or "\0" in value:
+    if not value or "\0" in value or "/../" in f"{suffix}/":
         return None
     return Path(os.path.realpath(value + rest))
 
@@ -4182,13 +4282,16 @@ def _detect_runners(
     bash_exit: int | None,
     require_execution_evidence: bool,
     offsets: list[int] | None = None,
+    launch_cwds: list[Path | None] | None = None,
 ) -> list[tuple[Path | None, str | None, Path | None]]:
     """Detect proven pipeline-runner and shell-script executions.
 
     The third element is the directory the run's I/O resolves against, or
     ``None`` when a runner option moves the run somewhere unknowable. With
     ``offsets``, the position of each detection's runner word is appended
-    in the same order, so its stage settings come from its own argv.
+    in the same order, so its stage settings come from its own argv. With
+    ``launch_cwds``, the directory each runner was started in (before any
+    `--directory` change; None when unknown) is appended likewise.
     """
     out: list[tuple[Path | None, str | None, Path | None]] = []
     for pattern in RUNNER_PATTERNS:
@@ -4229,6 +4332,8 @@ def _detect_runners(
                 out.append((None, run.source, io_cwd))
                 if offsets is not None:
                     offsets.append(m.start())
+                if launch_cwds is not None:
+                    launch_cwds.append(None if cwd_unknown else effective_cwd)
                 continue
             unresolved = Path(run.entry)
             if not unresolved.is_absolute():
@@ -4247,6 +4352,8 @@ def _detect_runners(
             out.append((path, None, io_cwd))
             if offsets is not None:
                 offsets.append(m.start())
+            if launch_cwds is not None:
+                launch_cwds.append(None if cwd_unknown else effective_cwd)
     return out
 
 
@@ -4278,13 +4385,25 @@ def _detect_scripts_with_cwd(
     seen_inline: set[tuple[str, Path | None, Any]] = set()
 
     def record(offset: int | None, kind: str, word: str | None = None,
-               form: str | None = None) -> None:
+               form: str | None = None, *, operand: int | None = None,
+               launch_cwd: Path | None = None) -> None:
         if invocations is not None:
             entry: dict[str, Any] = {"offset": offset, "kind": kind, "script_word": word}
             if form is not None:
                 # `r-file`: an `R -f`/`R --file=` run, whose script arguments
                 # follow `--args` rather than the script word.
                 entry["form"] = form
+            if operand is not None:
+                # Where the matched operand (inline body, module, script
+                # word) begins: a startup option may consume a word spelled
+                # like it (`python -X -c -c 'print(1)'`), so build_step must
+                # not re-find it by spelling.
+                entry["operand_offset"] = operand
+            if launch_cwd is not None:
+                # The directory the runner was started in, before any
+                # `--directory` change (Snakemake reads its profile and
+                # config files there).
+                entry["launch_cwd"] = launch_cwd
             invocations.append(entry)
     inline_patterns = (RX_PYTHON_C, RX_R_E, RX_RSCRIPT_E) if include_inline else ()
     for pattern in inline_patterns:
@@ -4321,7 +4440,7 @@ def _detect_scripts_with_cwd(
             identity = (src, effective_cwd, _stage_key(bash_cmd, m.start()))
             if identity not in seen_inline:
                 out.append((None, src, _known_io_cwd(bash_cmd, m.start(), cwd, effective_cwd)))
-                record(m.start(), "inline")
+                record(m.start(), "inline", operand=m.start("source_word"))
                 seen_inline.add(identity)
     for m in _scan_word_pattern(RX_PYTHON_M, bash_cmd):
         if not _match_has_expected_executable(m, RX_PYTHON_M):
@@ -4340,7 +4459,7 @@ def _detect_scripts_with_cwd(
         identity = (source, effective_cwd, _stage_key(bash_cmd, m.start()))
         if identity not in seen_inline:
             out.append((None, source, _known_io_cwd(bash_cmd, m.start(), cwd, effective_cwd)))
-            record(m.start(), "module", module)
+            record(m.start(), "module", module, operand=m.start("module"))
             seen_inline.add(identity)
     for pattern in (
         RX_PYTHON_SCRIPT_PATH,
@@ -4372,6 +4491,9 @@ def _detect_scripts_with_cwd(
             ):
                 continue
             path_word = m.group("path")
+            # The script word's own position; an R `-f`/BATCH script is read
+            # from its argv instead (the matched word may not be the file).
+            path_operand = m.start("path") if r_script is None else None
             if r_script is not None:
                 if not r_script.known:
                     unresolved_key = (
@@ -4433,7 +4555,8 @@ def _detect_scripts_with_cwd(
                         if unresolved_key not in seen_unresolved:
                             out.append((unresolved_key[0], None, None))
                             record(m.start(), "unresolved", raw_path,
-                                   "r-file" if pattern is RX_R_FILE_PATH else None)
+                                   "r-file" if pattern is RX_R_FILE_PATH else None,
+                                   operand=path_operand)
                             seen_unresolved.add(unresolved_key)
                         continue
                     unresolved = effective_cwd / unresolved
@@ -4455,28 +4578,32 @@ def _detect_scripts_with_cwd(
             if stage_key not in seen_paths:
                 out.append((path, None, None if cwd_unknown else effective_cwd))
                 record(m.start(), "script", raw_path,
-                       "r-file" if pattern is RX_R_FILE_PATH else None)
+                       "r-file" if pattern is RX_R_FILE_PATH else None,
+                       operand=path_operand)
                 seen_paths.add(stage_key)
     runner_offsets: list[int] = []
+    runner_launch_cwds: list[Path | None] = []
     runners = _detect_runners(
         bash_cmd,
         cwd,
         bash_exit=bash_exit,
         require_execution_evidence=require_execution_evidence,
         offsets=runner_offsets,
+        launch_cwds=runner_launch_cwds,
     )
-    for (path, source, io_cwd), offset in zip(runners, runner_offsets):
+    for (path, source, io_cwd), offset, launch_cwd in zip(
+            runners, runner_offsets, runner_launch_cwds):
         # Each runner stage is its own run: the same Snakefile with two
         # different config files is two events, each with its own settings.
         stage = _stage_key(bash_cmd, offset)
         if path is not None:
             if (path, stage) not in seen_paths:
                 out.append((path, None, io_cwd))
-                record(offset, "runner", None)
+                record(offset, "runner", None, launch_cwd=launch_cwd)
                 seen_paths.add((path, stage))
         elif (source, io_cwd, stage) not in seen_inline:
             out.append((None, source, io_cwd))
-            record(offset, "runner", None)
+            record(offset, "runner", None, launch_cwd=launch_cwd)
             seen_inline.add((source, io_cwd, stage))
     return out
 
@@ -6419,6 +6546,12 @@ _SCRIPT_CONFIG_FLAGS = frozenset({
     "--config", "--config-file", "--configfile", "--params", "--params-file", "--settings",
 })
 _SNAKEMAKE_CONFIG_FLAGS = frozenset({"--configfile", "--configfiles"})
+# Operands Snakemake opens before it changes into `--directory`: profiles
+# are resolved while parsing arguments, and `--configfile`s are loaded when
+# its ConfigSettings are built (snakemake.settings.types), both relative to
+# the invocation directory. Positional targets and the workflow's own
+# I/O stay relative to `--directory`.
+_SNAKEMAKE_LAUNCH_RELATIVE = frozenset({"--profile", "--configfile", "--configfiles"})
 _NEXTFLOW_CONFIG_FLAGS = frozenset({"-params-file", "-c", "-config", "-C"})
 _SEED_FLAGS = frozenset({"--seed", "--random-state", "--random_state", "--random-seed"})
 CONFIG_MAX_FILES = 8
@@ -6897,6 +7030,19 @@ def _hash_config(path: Path, deadline: float) -> dict[str, Any]:
         os.close(fd)
 
 
+def _matched_operand_index(bash_cmd: str, offset: int, operand_offset: Any,
+                           argv_length: int) -> int | None:
+    """The argv index of the word starting at ``operand_offset`` in the
+    simple command starting at ``offset``: the number of words before it.
+    None when unknown or out of range (callers then search by spelling)."""
+    if not isinstance(operand_offset, int) or operand_offset <= offset:
+        return None
+    words = _stage_raw_words(bash_cmd[offset:operand_offset])
+    if words is None or not 0 < len(words) < argv_length:
+        return None
+    return len(words)
+
+
 def build_step(
     bash_cmd: str,
     invocation: dict[str, Any] | None,
@@ -6933,7 +7079,36 @@ def build_step(
     # Where the step's own operands begin.
     operand_index: int | None = None
     shown: list[Any] = list(argv)
-    if kind == "inline":
+    # The word the detector matched, by position: a startup option may take
+    # a value spelled like the operand (`python -X -c -c 'print(1)'`,
+    # `python -X fit.py fit.py`), so a search by spelling finds the wrong one.
+    matched = _matched_operand_index(bash_cmd, offset, invocation.get("operand_offset"),
+                                     len(argv))
+    if matched is not None and kind == "inline" and interpreter == "python" \
+            and argv[matched - 1] == "-c":
+        shown[matched] = _inline_placeholder(argv[matched])
+        operand_index = matched + 1
+    elif matched is not None and kind == "inline" and interpreter != "python" \
+            and argv[matched - 1] in ("-e", "--eval"):
+        # R evaluates every `-e` from the matched one up to `--args`.
+        shown[matched] = _inline_placeholder(argv[matched])
+        operand_index = matched + 1
+        for index in range(matched + 1, len(argv) - 1):
+            token = argv[index]
+            if token == "--args":
+                operand_index = index + 1
+                break
+            if token in ("-e", "--eval"):
+                shown[index + 1] = _inline_placeholder(argv[index + 1])
+                operand_index = index + 2
+    elif matched is not None and kind == "module" and argv[matched - 1] == "-m" \
+            and argv[matched] == invocation.get("script_word"):
+        operand_index = matched + 1
+    elif matched is not None and kind in ("script", "unresolved") \
+            and invocation.get("form") != "r-file" \
+            and argv[matched] == invocation.get("script_word"):
+        operand_index = matched + 1
+    elif kind == "inline":
         if interpreter == "python":
             # Python takes one `-c` body; everything after it is sys.argv.
             for index, token in enumerate(argv[:-1]):
@@ -7020,7 +7195,14 @@ def build_step(
         if raw is not None and operand.eq is not None:
             prefix = operand.eq + "="
             raw = raw[len(prefix):] if raw.startswith(prefix) else None
-        path = _resolve(operand.token, io_cwd, raw, tilde=operand.eq is None,
+        base = io_cwd
+        if interpreter == "snakemake" and operand.via in _SNAKEMAKE_LAUNCH_RELATIVE \
+                and "launch_cwd" in invocation:
+            # Snakemake reads its profile (argument parsing) and its
+            # `--configfile`s (ConfigSettings, built before WorkflowApi
+            # changes into `--directory`) from the invocation directory.
+            base = invocation["launch_cwd"]
+        path = _resolve(operand.token, base, raw, tilde=operand.eq is None,
                         home=home_stable)
         if operand.via == "--profile":
             if path is None:

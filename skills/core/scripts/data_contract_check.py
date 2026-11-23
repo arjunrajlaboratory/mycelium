@@ -22,6 +22,7 @@ import csv
 import io
 import json
 import os
+import stat
 import sys
 import tempfile
 from collections import Counter, defaultdict
@@ -1263,9 +1264,22 @@ def write_atomic_json(path, document, replace=True):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(tmp, 0o666 & ~umask)  # as open() would create it, not mkstemp's 0600
+        # A replaced file keeps its own mode (a 0600 contract stays 0600);
+        # a new one gets what open() would create under the umask, not
+        # mkstemp's 0600.
+        mode = None
+        if replace:
+            try:
+                existing = os.stat(path)
+            except OSError:
+                existing = None
+            if existing is not None and stat.S_ISREG(existing.st_mode):
+                mode = stat.S_IMODE(existing.st_mode)
+        if mode is None:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(tmp, mode)
         if replace:
             os.replace(tmp, path)
         else:

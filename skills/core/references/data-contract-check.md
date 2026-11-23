@@ -206,7 +206,9 @@ opens them (a table `latest/../samples.tsv` with `latest` a symlink names
 the file beside the link's target, not beside the ledger), and that one
 path is the one read, checked, guarded and written. It also refuses (exit 1,
 nothing written) a destination that already exists, since that is usually
-the analysis's extended contract; pass `--overwrite` to replace it. Without
+the analysis's extended contract; pass `--overwrite` to replace it (the
+replacement keeps the existing file's permissions, so a 0600 contract stays
+0600; a new file gets the usual umask-derived mode). Without
 `--overwrite` the contract is published only if the name is still free at
 that moment (a hard link, or on a filesystem without hard links an
 exclusive create written in place, which a concurrent reader may see

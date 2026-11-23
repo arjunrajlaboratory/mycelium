@@ -287,51 +287,84 @@ def _redact_observation(observation: dict[str, Any]) -> dict[str, Any]:
 #
 # A manifest is committed; the stores under .mycelium/ are machine-local.
 # Every free-text field of every record a manifest holds keeps only words
-# the allowlist in lineage_redact knows to be safe (TEXT_POLICY): the
-# command word, option and assignment names, short numbers, operators, and
-# the record's own paths. Anything else becomes `<v>`. Embedded script
-# source is never committed (its digest is). File records' paths are
-# structured data and stay as they are.
+# the allowlist in lineage_redact knows to be safe (TEXT_POLICY): vocabulary
+# command words, option and assignment names of the fixed shape, short
+# numbers, operators, and exactly the record's own EVIDENCE-BACKED paths.
+# Anything else becomes `<v>`. Embedded script source is never committed
+# (its digest is).
+#
+# A path is evidence-backed when the record holds proof the file was there:
+# a digest actually taken (`sha256`, `observed_sha256`, or the script's
+# `script_sha256`) or an observed change entry. An operand as typed, a
+# config that was missing or unresolved, an unreadable script, a named path
+# nobody hashed: none of these proves anything, so none lends a word to the
+# command text. A config record without evidence also has its `path` and
+# `rel_path` replaced by `<v>`. Consolidating committed text reads no file
+# system (a named path is never checked on disk: an unresponsive mount would
+# hang Stop).
 
 TEXT_POLICY = "allowlist-v1"
-_PATHISH_RX = re.compile(r"[A-Za-z0-9_./~+-]+\Z")
-_SCRIPT_WORD_RX = re.compile(r"[A-Za-z0-9_./+-]*[A-Za-z0-9_+-]\.[A-Za-z0-9]{1,8}\Z")
+_HEX64_RX = re.compile(r"[0-9a-f]{64}\Z")
+_OBSERVED_CHANGES = frozenset({"created", "modified", "deleted"})
+_LR: Any = None
+_HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def _lr() -> Any:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import lineage_redact
+    global _LR
+    if _LR is None:
+        here = _HERE
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import lineage_redact
 
-    return lineage_redact
-
-
-def _pathish(value: Any) -> bool:
-    """A plain path word, shaped like one the recorder lists (a data path
-    under a directory, or a file with a suffix): path characters only, no
-    option, no URL, no expansion."""
-    return (isinstance(value, str) and bool(_PATHISH_RX.match(value))
-            and not value.startswith("-") and "://" not in value
-            and ("/" in value or _script_word(value)))
+        _LR = lineage_redact
+    return _LR
 
 
-def _script_word(value: Any) -> bool:
-    """A script-shaped word (`a.R`, `analysis/fit.py`): a plain path that
-    ends in a file suffix."""
-    return isinstance(value, str) and bool(_SCRIPT_WORD_RX.match(value))
+def _digest(value: Any) -> bool:
+    return isinstance(value, str) and bool(_HEX64_RX.match(value))
 
 
-def _file_paths(records: Any) -> list[str]:
+def _has_evidence(rec: Any) -> bool:
+    """A file record whose file was provably there: hashed, or in an
+    observation's change list."""
+    if not isinstance(rec, dict):
+        return False
+    return (_digest(rec.get("sha256")) or _digest(rec.get("observed_sha256"))
+            or rec.get("observed_change") in _OBSERVED_CHANGES)
+
+
+def _commit_file_records(records: Any) -> Any:
+    """Input and output records in a committed manifest. A record with no
+    evidence that its file was ever there (no hash, no observed change, no
+    size) names a file that does not exist: its path may be any word the
+    command held (`cp TOKEN out`), so it becomes `<v>`. A file that exists
+    with a pending or skipped hash keeps its path; the index matches on it."""
+    if not isinstance(records, list):
+        return records
+    out = []
+    for rec in records:
+        if isinstance(rec, dict) and not _has_evidence(rec) \
+                and not isinstance(rec.get("size_bytes"), int):
+            rec = {**rec, **{k: _lr().COMMIT_VALUE for k in ("path", "rel_path")
+                             if isinstance(rec.get(k), str)}}
+        out.append(rec)
+    return out
+
+
+def _evidence_paths(records: Any) -> list[str]:
     out: list[str] = []
     for rec in records if isinstance(records, list) else []:
-        if isinstance(rec, dict):
+        if _has_evidence(rec):
             out.extend(rec[k] for k in ("path", "rel_path") if isinstance(rec.get(k), str))
     return out
 
 
 def _commit_config_files(configs: Any) -> Any:
-    """Config records under the allowlist: a resolved file keeps its path; a
-    remote URL, or an operand that could not be resolved and is not a plain
-    path word, is `<v>`."""
+    """Config records under the allowlist: one with evidence keeps its path;
+    any other (missing, unresolved, remote, unhashed) has `path` and
+    `rel_path` as `<v>`, since they are only the operand as typed."""
     lr = _lr()
     if not isinstance(configs, list):
         return configs
@@ -341,13 +374,10 @@ def _commit_config_files(configs: Any) -> Any:
             out.append(config)
             continue
         config = dict(config)
-        path = config.get("path")
-        status = config.get("hash_status")
-        if status == "remote":
-            config["path"] = lr.COMMIT_VALUE
-        elif status == "unresolved" and not (
-                _pathish(path) and ("/" in path or _script_word(path))):
-            config["path"] = lr.COMMIT_VALUE
+        if not _has_evidence(config):
+            for key in ("path", "rel_path"):
+                if isinstance(config.get(key), str):
+                    config[key] = lr.COMMIT_VALUE
         out.append(config)
     return out
 
@@ -388,24 +418,34 @@ def _commit_step(step: Any, keep: set[str]) -> Any:
     return step
 
 
+def _commit_word_list(words: Any, keep: set[str], allowed: tuple[str, ...] = ()) -> list[Any]:
+    """Recorded words (named paths, candidates): each kept only if it is
+    exactly an evidence-backed path (or a fixed marker), never by shape."""
+    lr = _lr()
+    return [w if (w in allowed or (isinstance(w, str) and lr._keep_match(w, keep)))
+            else lr.COMMIT_VALUE for w in words or []]
+
+
 def commit_event(event: dict[str, Any]) -> dict[str, Any]:
     """An analysis event as a committed manifest holds it."""
     lr = _lr()
     event = dict(event)
+    for direction in ("inputs", "outputs"):
+        event[direction] = _commit_file_records(event.get(direction))
     step = dict(event["step"]) if isinstance(event.get("step"), dict) else None
     if step is not None and "config_files" in step:
         step["config_files"] = _commit_config_files(step["config_files"])
-    candidate = event.get("script_candidate")
-    safe_candidate = candidate if _script_word(candidate) else (
-        lr.COMMIT_VALUE if isinstance(candidate, str) else candidate)
-    paths = [*_file_paths(event.get("inputs")), *_file_paths(event.get("outputs"))]
-    if isinstance(event.get("script"), str):
+    paths = [*_evidence_paths(event.get("inputs")), *_evidence_paths(event.get("outputs"))]
+    if isinstance(event.get("script"), str) and _digest(event.get("script_sha256")):
         paths.append(event["script"])
     if step is not None:
-        paths.extend(p for p in _file_paths(step.get("config_files")) if p != lr.COMMIT_VALUE)
-    if isinstance(safe_candidate, str) and safe_candidate != lr.COMMIT_VALUE:
-        paths.append(safe_candidate)
+        paths.extend(_evidence_paths(step.get("config_files")))
     keep = lr.commit_keep_paths(paths)
+    candidate = event.get("script_candidate")
+    # A candidate is never read (R may have run another file), so it is
+    # kept only if it is exactly one of the record's evidence-backed paths.
+    safe_candidate = candidate if not isinstance(candidate, str) or lr._keep_match(
+        candidate, keep) else lr.COMMIT_VALUE
     event["bash_cmd"] = lr.commit_safe_command(event.get("bash_cmd"), keep)
     if "script_candidate" in event:
         event["script_candidate"] = safe_candidate
@@ -428,40 +468,35 @@ def commit_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def commit_skip(skip: dict[str, Any]) -> dict[str, Any]:
+    """A skip has no file records: nothing in it is evidence (an unreadable
+    script's path is only the word the command used)."""
     lr = _lr()
     skip = dict(skip)
-    detail = skip.get("detail")
-    paths = [detail] if (skip.get("skip_reason") == "script-unreadable"
-                         and isinstance(detail, str)) else []
-    keep = lr.commit_keep_paths(paths)
+    keep: set[str] = set()
     skip["bash_cmd"] = lr.commit_safe_command(skip.get("bash_cmd"), keep)
-    skip["detail"] = lr.commit_safe_prose(detail, keep)
+    skip["detail"] = lr.commit_safe_prose(skip.get("detail"), keep)
     return skip
 
 
 def commit_data_command(record: dict[str, Any]) -> dict[str, Any]:
     lr = _lr()
     record = dict(record)
-    # A path shape is not proof: `data/<token>` is shaped like one. A named
-    # word is kept only if it names a file or directory that exists.
-    bases = [b for b in (record.get("cwd"), record.get("repo_root")) if isinstance(b, str)]
-
-    def real(word: Any) -> bool:
-        return _pathish(word) and any(
-            os.path.lexists(os.path.join(base, word)) for base in bases or ["."])
-
-    record["named_paths"] = [p if real(p) else lr.COMMIT_VALUE
-                             for p in record.get("named_paths") or []]
-    record["analysis_candidates"] = [
-        c if c == "(inline)" or real(c) else lr.COMMIT_VALUE
-        for c in record.get("analysis_candidates") or []]
-    paths = [*_file_paths(record.get("inputs")), *_file_paths(record.get("outputs")),
-             *(p for p in record["named_paths"] if p != lr.COMMIT_VALUE),
-             *(c for c in record["analysis_candidates"] if _pathish(c))]
-    for key in ("cwd", "repo_root"):
-        if isinstance(record.get(key), str):
-            paths.append(record[key])
-    keep = lr.commit_keep_paths(paths)
+    for direction in ("inputs", "outputs"):
+        if direction in record:
+            record[direction] = _commit_file_records(record.get(direction))
+    # A path shape is not proof (`data/<token>` is shaped like one), and
+    # neither is a check on disk at Stop (it can hang on a dead mount): a
+    # named word is kept only if it is exactly one of the record's own
+    # evidence-backed file records.
+    evidence = lr.commit_keep_paths(
+        [*_evidence_paths(record.get("inputs")), *_evidence_paths(record.get("outputs"))])
+    record["named_paths"] = _commit_word_list(record.get("named_paths"), evidence)
+    record["analysis_candidates"] = _commit_word_list(
+        record.get("analysis_candidates"), evidence, ("(inline)",))
+    # The cwd and repository root are host-supplied structured fields the
+    # record publishes anyway; their spellings may stay in the command.
+    roots = [record[k] for k in ("cwd", "repo_root") if isinstance(record.get(k), str)]
+    keep = evidence | lr.commit_keep_paths(roots)
     record["bash_cmd"] = lr.commit_safe_command(record.get("bash_cmd"), keep)
     if isinstance(record.get("step"), dict):
         record["step"] = _commit_step(record["step"], keep)
@@ -472,6 +507,7 @@ def commit_observation(observation: Any) -> Any:
     lr = _lr()
     if not isinstance(observation, dict) or not isinstance(observation.get("bash_cmd"), str):
         return observation
+    # An observation's change entries are evidence: the walk saw each file.
     paths: list[str] = []
     root = observation.get("repo_root")
     changes = observation.get("changes")

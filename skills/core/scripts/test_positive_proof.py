@@ -93,13 +93,70 @@ def test_a_later_background_job_is_unaccounted_but_identity_proves_the_file(
     time.sleep(0.01)
     # A host-backgrounded command after the write (the live-run case): what
     # it did after launch was never observed.
-    bash(project, "bg", lambda: (project / "notes.md").write_text("n"), background=True)
+    launch(project, "bg", "task-1")
     entry = status(project, "A")
     assert entry["record"]["status"] == "unknown"
     assert "coverage-unproven" in entry["record"]["reasons"]
-    # The file still has the identity it had right after the write.
+    # While the job may still run, identity is not trusted (a live mapping
+    # can change a file without moving its timestamps).
+    assert entry["status"] == "unknown"
+    # Once the host shows it ended, the file's unchanged identity proves it.
+    io.end_finished_background(project / ".mycelium", host="claude", session="s1", tasks=[])
+    entry = status(project, "A")
+    assert entry["record"]["status"] == "unknown"
     assert entry["status"] == "current"
     assert entry["basis"] == "identity-unchanged-since-write"
+
+
+def test_a_jobs_end_outlives_journal_compaction(project: Path) -> None:
+    launch(project, "bg", "task-1")
+    io.end_finished_background(project / ".mycelium", host="claude", session="s1", tasks=[])
+    journal = io.journal_path(project / ".mycelium")
+    kept = [r for r in io._journal_records(journal) if r.get("call") != "bg"]
+    journal.write_text("".join(__import__("json").dumps(r) + "\n" for r in kept))
+    index = li.load(project, write=False)
+    (gap,) = [g for g in index.gaps if g.get("kind") == "background-job"]
+    assert isinstance(gap["journal"]["post_seq"], int)
+
+
+def test_a_subagent_job_absent_from_the_snapshot_stays_open(project: Path) -> None:
+    state = project / ".mycelium"
+    io.pre(state, host="claude", session="s1", call_id="sub", tool="Bash", agent="agent-7",
+           repo_root=project, snapshot=True, background=True)
+    io.post(state, host="claude", session="s1", call_id="sub", tool="Bash", agent="agent-7",
+            repo_root=project, outcome="success", bash_exit=0, background=True,
+            task_id="t-sub")
+    assert io.end_finished_background(state, host="claude", session="s1", tasks=[]) == 0
+    assert io.end_finished_background(
+        state, host="claude", session="s1",
+        tasks=[{"id": "t-sub", "status": "completed"}]) == 1
+
+
+def test_an_overlapping_restore_is_unaccounted(project: Path) -> None:
+    state = project / ".mycelium"
+    target = project / "out" / "x"
+    target.write_text("old")
+    # B starts first and sees `old`; A writes `new` and finishes; B restores
+    # `old` and finishes. B's endpoints both show `old`.
+    io.pre(state, host="claude", session="s1", call_id="B", tool="Bash",
+           repo_root=project, snapshot=True)
+    bash(project, "A", lambda: target.write_text("new"))
+    time.sleep(0.01)
+    target.write_text("old")
+    io.post(state, host="claude", session="s1", call_id="B", tool="Bash",
+            repo_root=project, outcome="success", bash_exit=0)
+    record = status(project, "new", disk=False)["record"]
+    assert record["status"] != "current-in-record"
+
+
+def test_an_unparseable_journal_proves_nothing(project: Path) -> None:
+    bash(project, "c1", write_x(project, "A"))
+    journal = io.journal_path(project / ".mycelium")
+    with journal.open("a") as handle:
+        handle.write('{"seq": 99, "ev": "pre", "call": "z", "host": "claude", '
+                     '"session": "s1", "wall_ns": "not-a-number"}\n')
+    record = status(project, "A", disk=False)["record"]
+    assert record["status"] == "unknown"
 
 
 def test_a_touched_file_is_not_rescued_even_with_the_same_bytes(project: Path) -> None:

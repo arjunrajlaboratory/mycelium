@@ -26,6 +26,7 @@ import lineage_redact as lr  # noqa: E402
 
 V = lr.COMMIT_VALUE
 RANDOM_TOKEN = "9f8a7b6c5d4e3f2a1b0c"
+HEX = "a" * 64  # a digest: file evidence for a record path
 _SENTINEL_NAMES = ("SECRET", "TOKEN", "SENTINEL")
 
 
@@ -134,10 +135,9 @@ def _write_session(root: Path, text: str) -> Path:
 
 
 def _as_command(text: str) -> str:
-    """A corpus fragment as an argument of a command. The command word of a
-    simple command is kept by design (a secret is never a program name), and
-    several corpus entries are bare values (`-xSECRET`) or a script body."""
-    return f"tool {text}"
+    """A corpus fragment as an argument of a vocabulary command: several
+    corpus entries are bare values (`-xSECRET`) or a script body."""
+    return f"cat {text}"
 
 
 def _manifest_text(root: Path, text: str) -> str:
@@ -176,10 +176,10 @@ def test_the_allowlist_alone_drops_every_corpus_secret(case: str, text: str,
 def _event(command: str, root: str = "/r", **extra) -> dict:
     return {
         "ts": "t", "bash_cmd": command, "script": f"{root}/analysis/de/run.py",
-        "inputs": [], "outputs": [],
+        "script_sha256": HEX, "inputs": [], "outputs": [],
         "step": {"argv": command.split(), "config_files": [
             {"path": f"{root}/analysis/de/params.yaml", "rel_path": "analysis/de/params.yaml",
-             "via": "--config", "sha256": None, "hash_status": "pending"}]},
+             "via": "--config", "sha256": HEX, "hash_status": "hashed"}]},
         **extra,
     }
 
@@ -204,18 +204,18 @@ def test_a_heredoc_body_collapses() -> None:
 
 
 def test_a_number_after_a_secret_option_is_dropped() -> None:
-    assert lr.commit_safe_command("tool --password 123456 --n 5", set()) == \
-        f"tool --password {V} --n 5"
-    assert lr.commit_safe_argv(["tool", "--api-key=42", "--n=5"], set()) == \
-        ["tool", f"--api-key={V}", "--n=5"]
+    assert lr.commit_safe_command("curl --password 123456 --n 5", set()) == \
+        f"curl --password {V} --n 5"
+    assert lr.commit_safe_argv(["curl", "--api-key=42", "--n=5"], set()) == \
+        ["curl", f"--api-key={V}", "--n=5"]
     assert lr.commit_safe_command("DB_PASSWORD=1234 python3 x", set()) == \
         f"DB_PASSWORD={V} python3 {V}"
 
 
 def test_a_random_token_with_an_innocent_name_is_dropped() -> None:
     # Exactly what the denylist could never catch.
-    assert lr.redact_command(f"tool -k {RANDOM_TOKEN}") == f"tool -k {RANDOM_TOKEN}"
-    assert lr.commit_safe_command(f"tool -k {RANDOM_TOKEN}", set()) == f"tool -k {V}"
+    assert lr.redact_command(f"curl -k {RANDOM_TOKEN}") == f"curl -k {RANDOM_TOKEN}"
+    assert lr.commit_safe_command(f"curl -k {RANDOM_TOKEN}", set()) == f"curl -k {V}"
 
 
 def test_operators_layout_and_assignment_names_stay() -> None:
@@ -252,8 +252,13 @@ def test_warnings_keep_their_prose_and_lose_their_variable_parts() -> None:
     assert out["script_candidate"] == V
     assert out["lineage_warnings"] == [
         f"R ran a script, but shell syntax may have changed which one; the command names {V}."]
+    # A candidate is never read, so it is no evidence: shaped like a script
+    # or not, it is kept only when it is exactly an evidence-backed path.
     plain = stop.commit_event(_event("R -f a.R", script=None, script_candidate="a.R"))
-    assert plain["script_candidate"] == "a.R" and plain["bash_cmd"] == "R -f a.R"
+    assert plain["script_candidate"] == V and plain["bash_cmd"] == f"R -f {V}"
+    own = stop.commit_event(_event("R -f analysis/de/params.yaml", script=None,
+                                   script_candidate="analysis/de/params.yaml"))
+    assert own["script_candidate"] == "analysis/de/params.yaml"
 
 
 def test_a_written_manifest_validates_and_declares_its_policy(tmp_path: Path) -> None:
@@ -281,3 +286,309 @@ def test_a_manifest_without_a_policy_still_validates() -> None:
                                               "script_source": "print(1)"}],
               "summary": {}}
     assert list(validator.iter_errors(legacy)) == []
+
+
+# -- evidence, not shape (allowlist hardening) -----------------------------------
+#
+# A word is kept only on evidence: it is a fixed vocabulary word in a role
+# the scanner can prove (a command name, a shell keyword, a subcommand), an
+# option or name of the fixed option/name shape, a short number, or exactly
+# one of the record's own evidence-backed paths. Shape and position alone
+# never prove a word safe.
+
+
+
+def test_a_missing_config_operand_is_not_a_record_path() -> None:
+    # The config was never found, so its "path" is only the operand as typed.
+    secret = "v61cSk8Rl-test"
+    command = f"python3 -c 'print(0)' --config 'client:{secret}'"
+    event = {"ts": "t", "bash_cmd": command, "script": None, "script_sha256": HEX,
+             "inputs": [], "outputs": [],
+             "step": {"argv": ["python3", "-c", "print(0)", "--config", f"client:{secret}"],
+                      "config_files": [{"path": f"/r/client:{secret}",
+                                        "rel_path": f"client:{secret}", "via": "--config",
+                                        "sha256": None, "hash_status": "missing"}]}}
+    out = stop.commit_event(event)
+    assert secret not in json.dumps(out)
+    assert out["bash_cmd"] == f"python3 -c {V} --config {V}"
+    (config,) = out["step"]["config_files"]
+    assert config["path"] == V and config["rel_path"] == V
+    assert config["hash_status"] == "missing"
+
+
+def test_a_hashed_config_keeps_its_path_and_its_word() -> None:
+    command = "python3 -c 'print(0)' --config cfg/p.yaml"
+    event = {"ts": "t", "bash_cmd": command, "script": None, "inputs": [], "outputs": [],
+             "step": {"config_files": [{"path": "/r/cfg/p.yaml", "rel_path": "cfg/p.yaml",
+                                        "via": "--config", "sha256": HEX,
+                                        "hash_status": "hashed"}]}}
+    out = stop.commit_event(event)
+    assert out["bash_cmd"] == f"python3 -c {V} --config cfg/p.yaml"
+    assert out["step"]["config_files"][0]["path"] == "/r/cfg/p.yaml"
+
+
+def test_an_unhashed_input_lends_no_word_to_the_command() -> None:
+    event = {"ts": "t", "bash_cmd": "python3 fit.py data/qR4LoP16xZ.csv", "script": None,
+             "inputs": [{"path": "/r/data/qR4LoP16xZ.csv", "rel_path": "data/qR4LoP16xZ.csv",
+                         "sha256": None, "hash_status": "pending"}], "outputs": []}
+    assert "qR4LoP16xZ" not in stop.commit_event(event)["bash_cmd"]
+    observed = {**event, "inputs": [{**event["inputs"][0], "observed_change": "modified"}]}
+    assert stop.commit_event(observed)["bash_cmd"].endswith("data/qR4LoP16xZ.csv")
+
+
+def test_a_respelled_path_is_published_only_as_approved() -> None:
+    keep = lr.commit_keep_paths(["/r/run.py"])
+    command = "python3 run.py qR4LoP16xZ/../run.py"
+    assert lr.commit_safe_command(command, keep) == f"python3 run.py {V}"
+    assert lr.commit_safe_argv(command.split(), keep) == ["python3", "run.py", V]
+    assert "qR4LoP16xZ" not in lr.commit_safe_prose(f"the command names {command}.", keep)
+    # A single leading `./` is the only respelling, and only when the rest
+    # matches exactly.
+    assert lr.commit_safe_command("python3 ./run.py", keep) == "python3 ./run.py"
+    assert lr.commit_safe_command("python3 .//run.py", keep) == f"python3 {V}"
+    assert lr.commit_safe_command("python3 run.py/.", keep) == f"python3 {V}"
+    event = {"ts": "t", "bash_cmd": command, "script": "/r/run.py", "script_sha256": HEX,
+             "inputs": [], "outputs": []}
+    assert "qR4LoP16xZ" not in json.dumps(stop.commit_event(event))
+
+
+def test_a_recorded_path_with_dot_segments_lends_none_of_them() -> None:
+    keep = lr.commit_keep_paths(["/r/a/../b.csv"])
+    assert ".." not in keep and "." not in keep
+    assert "/r/a/../b.csv" in keep and "b.csv" in keep and "a/../b.csv" not in keep
+
+
+def test_an_unquoted_comment_is_one_placeholder() -> None:
+    token = "qxcvBXOCddjH01-7Aw"
+    command = f"python3 -c 'print(0)' # request example; {token}"
+    assert lr.commit_safe_command(command, set()) == f"python3 -c {V} <comment>"
+    # Quoted and mid-word `#` are not comments; they follow the value rule.
+    assert lr.commit_safe_command("echo '# x' a#b", set()) == f"echo {V} {V}"
+    multi = f"echo 'a\n# {token}' # x; {token}\nls"
+    out = lr.commit_safe_command(multi, set())
+    assert token not in out and out.endswith("<comment>\nls")
+
+
+def test_words_after_double_dash_are_operands() -> None:
+    token = "--Q0t3SGc0aFpwblJad2M"
+    command = f"python3 -c 'print(0)' -- {token} --seed"
+    assert lr.commit_safe_command(command, set()) == f"python3 -c {V} -- {V} {V}"
+    assert lr.commit_safe_argv(command.replace("'", "").split(), set()) == \
+        ["python3", "-c", V, "--", V, V]
+    # A new simple command starts fresh.
+    assert lr.commit_safe_command("ls -- x; ls --all", set()) == f"ls -- {V}; ls --all"
+
+
+@pytest.mark.parametrize(("command", "expected"), [
+    ("--Q0t3SGc0aFpwblJad2M x", f"{V} {V}"),
+    ("tool --Q0t3SGc0aFpwblJad2M", f"{V} {V}"),
+    ("ls --min-count 3 --q0t3sgc0afpwbljad2m9", f"ls --min-count 3 {V}"),
+    ("ls --a1234", f"ls {V}"),
+    ("ls --abc_def", f"ls {V}"),
+    ("ls -O2 -xzf -la -Ab -pS3cr3t -resume", f"ls -O2 -xzf -la -Ab {V} {V}"),
+    ("ls --threads=4 --Bad=4 --label=x", f"ls --threads=4 {V} --label={V}"),
+])
+def test_option_names_are_kept_only_in_the_fixed_shape(command: str, expected: str) -> None:
+    assert lr.commit_safe_command(command, set()) == expected
+
+
+@pytest.mark.parametrize(("command", "expected"), [
+    ("qZ8xLmN3pQ7r --help", f"{V} --help"),
+    ("python3.11 -m pytest -q", "python3.11 -m pytest -q"),
+    ("/usr/bin/python3 -V", "/usr/bin/python3 -V"),
+    ("/opt/qZ8xLmN3pQ7r/bin/python3 -V", f"{V}/python3 -V"),
+    ("git status && git qZ8xLmN3pQ7r", f"git status && git {V}"),
+    ("env OMP_NUM_THREADS=2 nohup Rscript a.R", f"env OMP_NUM_THREADS=2 nohup Rscript {V}"),
+    ("if test -f x; then echo; fi", f"if test -f {V}; then echo; fi"),
+])
+def test_a_command_word_is_kept_only_from_the_vocabulary(command: str, expected: str) -> None:
+    assert lr.commit_safe_command(command, set()) == expected
+
+
+def test_a_command_word_is_kept_when_it_is_an_evidence_path() -> None:
+    keep = lr.commit_keep_paths(["/r/tools/qZ8xLmN3pQ7r.sh"])
+    assert lr.commit_safe_command("./tools/qZ8xLmN3pQ7r.sh -v", keep) == \
+        "./tools/qZ8xLmN3pQ7r.sh -v"
+    assert lr.commit_safe_command("tools/qZ8xLmN3pQ7r.sh -v", keep) == \
+        "tools/qZ8xLmN3pQ7r.sh -v"
+    assert lr.commit_safe_command("tools/qZ8xLmN3pQ7r -v", keep) == f"{V} -v"
+
+
+def test_case_subjects_and_patterns_are_values() -> None:
+    token = "qZ8xLmN3pQ7r"
+    assert lr.commit_safe_command(f"case {token} in a) echo;; esac", set()) == \
+        f"case {V} in {V}) echo;; esac"
+    out = lr.commit_safe_command(f"case $x in\n{token}) echo 1;;\n*) ls;;\nesac", set())
+    assert token not in out
+    assert out == f"case {V} in\n{V}) echo 1;;\n{V}) ls;;\nesac"
+
+
+def test_loop_names_assignment_names_and_heredoc_delimiters_need_their_shape() -> None:
+    token = "qZ8xLmN3pQ7r"
+    assert lr.commit_safe_command(f"for {token} in a; do echo; done", set()) == \
+        f"for {V} in {V}; do echo; done"
+    assert lr.commit_safe_command("for f in a; do echo; done", set()) == \
+        f"for f in {V}; do echo; done"
+    assert lr.commit_safe_command(f"{token}=1 python3 x", set()) == f"{V} python3 {V}"
+    assert lr.commit_safe_command(f"python3 x {token}=1 lr=0.1", set()) == \
+        f"python3 {V} {V} lr=0.1"
+    out = lr.commit_safe_command(f"cat <<{token}\nhello\n{token}\nls", set())
+    assert token not in out and out.endswith("<heredoc: 1 lines>\n" + V + "\nls")
+    assert lr.commit_safe_command("cat <<'EOF'\nx\nEOF", set()) == \
+        "cat <<'EOF'\n<heredoc: 1 lines>\nEOF"
+
+
+def test_consolidating_a_data_command_never_touches_the_disk(monkeypatch) -> None:
+    class NoDisk:
+        """`os` (and `os.path`) with every call that can reach a file system
+        refused; string operations pass through."""
+
+        _PURE = {"join", "basename", "dirname", "split", "splitext", "normpath", "sep",
+                 "isabs", "relpath", "commonpath", "path", "environ", "fspath", "fsencode",
+                 "fsdecode", "getpid"}
+
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            if name == "path":
+                return NoDisk(self._real.path)
+            if name in self._PURE and name != "relpath":
+                return getattr(self._real, name)
+            raise AssertionError(f"committed text consolidation called os.{name}")
+
+    monkeypatch.setattr(stop, "os", NoDisk(os))
+    record = {"kind": "data_command", "cwd": "/r", "bash_cmd": "head data/x.csv data/y.csv",
+              "named_paths": ["data/x.csv", "data/y.csv"],
+              "analysis_candidates": ["(inline)", "data/y.csv"],
+              "inputs": [{"path": "/r/data/x.csv", "rel_path": "data/x.csv", "sha256": HEX}],
+              "outputs": []}
+    out = stop.commit_data_command(record)
+    assert out["named_paths"] == ["data/x.csv", V]
+    assert out["analysis_candidates"] == ["(inline)", V]
+    assert out["bash_cmd"] == f"head data/x.csv {V}"
+
+
+def test_an_unreadable_script_lends_no_word() -> None:
+    skip = {"skip_reason": "script-unreadable", "detail": "qZ8xLmN3pQ7r.py",
+            "bash_cmd": "python3 qZ8xLmN3pQ7r.py"}
+    assert "qZ8xLmN3pQ7r" not in json.dumps(stop.commit_skip(skip))
+
+
+# -- property: a random token in any slot never reaches the manifest -------------
+
+
+def _tokens(count: int = 40) -> list[str]:
+    """Seeded random credential-like tokens (letters, digits, `-`, `_`; 12-40
+    long). Each has an upper- and a lower-case letter: an all-lower-case word
+    in an option-name or variable-name slot is, by design, a name."""
+    import random
+    import string
+
+    rng = random.Random(20261122)
+    alphabet = string.ascii_letters + string.digits + "-_"
+    out: list[str] = []
+    while len(out) < count:
+        token = rng.choice(string.ascii_letters) + "".join(
+            rng.choice(alphabet) for _ in range(rng.randint(11, 39)))
+        if any(c.isupper() for c in token) and any(c.islower() for c in token):
+            out.append(token)
+    return out
+
+
+_SLOTS = {
+    "command-word": "{t} --help",
+    "command-word-path": "/opt/{t}/bin/python3 -V",
+    "after-wrapper": "env {t} -x",
+    "subcommand": "git {t}",
+    "long-option": "python3 a.py --{t}",
+    "short-option": "python3 a.py -{t}",
+    "option-eq": "python3 a.py --{t}=3",
+    "option-value": "python3 a.py --label={t}",
+    "after-double-dash": "python3 -c x -- --{t}",
+    "case-subject": "case {t} in a) echo;; esac",
+    "case-pattern": "case $x in\n{t}) echo 1;;\nesac",
+    "case-pattern-alt": "case $x in a|{t}) echo;; esac",
+    "comment": "python3 -c x # note; {t}",
+    "comment-line": "# {t}\nls",
+    "heredoc-body": "cat <<EOF\n{t}\nEOF",
+    "heredoc-delimiter": "cat <<{t}\nx\n{t}",
+    "assignment-value": "X={t} python3 a.py",
+    "assignment-name": "{t}=1 python3 a.py",
+    "operand-assignment": "python3 a.py lr={t}",
+    "loop-name": "for {t} in a; do echo; done",
+    "function-name": "function {t} {{ echo; }}",
+    "url": "curl https://h/{t}?a=1",
+    "config-operand": "python3 -c x --config {t}",
+    "named-path": "head data/{t}.csv",
+    "redirect": "echo 1 > {t}",
+    "after-semicolon": "ls; {t}",
+    "after-pipe": "ls | {t} -n",
+}
+
+
+def _records_for(slot: str, token: str) -> list[dict]:
+    command = _SLOTS[slot].format(t=token)
+    words = command.split()
+    event = {"ts": "t", "bash_cmd": command, "script": None, "script_sha256": HEX,
+             "script_candidate": None, "inputs": [], "outputs": [],
+             "lineage_warnings": [f"the command names {command}."],
+             "step": {"argv": words, "executable": words[0], "interpreter": words[0],
+                      "script_args": words[1:], "params": words[1:], "wrappers": words[:2],
+                      "env": {"X": token, "Y": {"text": token, "expanded": False}},
+                      "config_files": [
+                          {"path": f"/r/{token}", "rel_path": token, "via": "--config",
+                           "sha256": None, "hash_status": "missing"},
+                          {"path": token, "via": "--config", "sha256": None,
+                           "hash_status": "unresolved"},
+                          {"path": f"https://h/{token}", "via": "--config", "sha256": None,
+                           "hash_status": "remote"}]}}
+    data = {"kind": "data_command", "cwd": "/r", "bash_cmd": command,
+            "named_paths": [f"data/{token}.csv", token, *words],
+            "analysis_candidates": [f"{token}.py", *words], "inputs": [], "outputs": [],
+            "step": {"argv": words, "executable": words[0]}}
+    skip = {"skip_reason": "script-unreadable", "detail": f"{token}.py", "bash_cmd": command}
+    observation = {"bash_cmd": command, "repo_root": "/r",
+                   "changes": {"created": [], "modified": [], "deleted": []}}
+    return [stop.commit_event(event), stop.commit_data_command(data), stop.commit_skip(skip),
+            stop.commit_observation(observation)]
+
+
+@pytest.mark.parametrize("slot", sorted(_SLOTS))
+def test_no_random_token_survives_in_any_slot(slot: str) -> None:
+    for token in _tokens():
+        committed = json.dumps(_records_for(slot, token))
+        assert token not in committed, (slot, token)
+        # Nor a long piece of it (a split at `-` or `_` publishing half).
+        for piece in __import__("re").split(r"[-_]", token):
+            if len(piece) >= 8:
+                assert piece not in committed, (slot, token, piece)
+
+
+def test_a_random_token_in_a_slot_does_not_reach_a_written_manifest(tmp_path: Path) -> None:
+    for index, slot in enumerate(sorted(_SLOTS)):
+        token = _tokens(len(_SLOTS))[index]
+        root = tmp_path / f"repo{index}"
+        written = _manifest_text(root, _SLOTS[slot].format(t=token))
+        assert token not in written.replace(str(root), "<root>"), slot
+
+
+# -- file records for files that never existed ---------------------------------
+
+
+def test_a_missing_input_path_is_not_committed() -> None:
+    token = "Qz8vTxK2mPlR9wYc"
+    record = {"kind": "data_command", "bash_cmd": f"cp {token} out.csv",
+              "inputs": [{"path": f"/repo/{token}", "rel_path": token}],
+              "outputs": [{"path": "/repo/out.csv", "rel_path": "out.csv",
+                           "sha256": "ab" * 32}]}
+    committed = stop.commit_data_command(record)
+    assert token not in json.dumps(committed)
+    assert committed["outputs"][0]["rel_path"] == "out.csv"
+
+
+def test_an_existing_file_with_a_pending_hash_keeps_its_path() -> None:
+    event = {"ts": "t", "bash_cmd": "python3 run.py", "script": None,
+             "inputs": [{"path": "/repo/big.h5", "rel_path": "big.h5", "size_bytes": 10,
+                         "hash_status": "skipped-budget"}], "outputs": []}
+    assert stop.commit_event(event)["inputs"][0]["rel_path"] == "big.h5"

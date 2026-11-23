@@ -415,13 +415,16 @@ def test_parking_needs_check_execution_and_keys(project):
 def test_the_manifest_keeps_data_commands_apart_from_actions(tmp_path):
     action = {"ts": "2026-11-20T00:00:02Z", "bash_cmd": "python a.py",
               "script": "a.py", "inputs": [], "outputs": []}
-    # A named path survives into the committed record only if it exists.
-    (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "x.csv").write_text("a\n")
+    # A named path survives into the committed record only if it is exactly
+    # one of the record's own evidence-backed (hashed) file records; the
+    # disk is never checked at consolidation.
     data = {"ts": "2026-11-20T00:00:01Z", "kind": "data_command", "cwd": str(tmp_path),
             "event_id": "e1", "bash_cmd": "head data/x.csv",
             "named_paths": ["data/x.csv"], "signals": ["data-path"],
-            "inputs": [], "outputs": [], "io_detection": "unresolved"}
+            "inputs": [{"path": str(tmp_path / "data" / "x.csv"), "rel_path": "data/x.csv",
+                        "sha256": "b" * 64, "hash_status": "hashed",
+                        "evidence": "redirection"}],
+            "outputs": [], "io_detection": "unresolved"}
     stream = tmp_path / "events.tmp"
     # A retried transfer can repeat a record: count its event_id once.
     stream.write_text("".join(json.dumps(r) + "\n" for r in (action, data, data)))
@@ -431,6 +434,7 @@ def test_the_manifest_keeps_data_commands_apart_from_actions(tmp_path):
     assert manifest["n_actions"] == 1
     assert [a["script"] for a in manifest["actions"]] == ["a.py"]
     assert [d["bash_cmd"] for d in manifest["data_commands"]] == ["head data/x.csv"]
+    assert [d["named_paths"] for d in manifest["data_commands"]] == [["data/x.csv"]]
     assert manifest["summary"]["data_command_count"] == 1
     assert manifest["summary"]["unique_inputs"] == []
     assert manifest["started_at"] == "2026-11-20T00:00:02Z"
@@ -579,7 +583,9 @@ def test_a_data_command_inside_a_transaction_joins_the_manifest(tmp_path, host):
     assert sid not in (registry.read_text() if registry.exists() else "")
     [manifest] = _manifests(repo)
     assert manifest["n_actions"] == 0
-    assert [d["named_paths"] for d in manifest["data_commands"]] == [["data/x.csv"]]
+    # Named but never hashed or observed: no evidence, so a placeholder in
+    # the committed manifest (the full text stays in the local store).
+    assert [d["named_paths"] for d in manifest["data_commands"]] == [["<v>"]]
 
 
 @pytest.mark.parametrize("host", HOSTS)
@@ -623,7 +629,7 @@ def test_a_stop_without_a_transaction_writes_parked_data_commands(tmp_path, host
     assert path.name == f"data-commands-{host}-{sid}-{parked['event_id'][:12]}.json"
     manifest = json.loads(path.read_text())
     assert manifest["n_actions"] == 0
-    assert [d["bash_cmd"] for d in manifest["data_commands"]] == ["head data/x.csv"]
+    assert [d["bash_cmd"] for d in manifest["data_commands"]] == ["head <v>"]
     assert not (_run_dir(repo, host, sid) / "active-session-log.tmp").exists()
 
 
@@ -640,7 +646,7 @@ def test_a_parked_data_command_joins_a_reopened_session(tmp_path, host):
     assert _unowned(repo) == []
     assert _data_only_manifests(repo) == []
     data_commands = [d for m in _manifests(repo) for d in m["data_commands"]]
-    assert [d["bash_cmd"] for d in data_commands] == ["head data/x.csv"]
+    assert [d["bash_cmd"] for d in data_commands] == ["head <v>"]
 
 
 @pytest.mark.parametrize("host", HOSTS)
@@ -693,7 +699,7 @@ def test_a_session_manifest_replaces_the_data_only_one_after_a_blocked_stop(
     assert _data_only_manifests(repo) == []
     [manifest] = _manifests(repo)
     assert manifest["n_actions"] == 1
-    assert [d["bash_cmd"] for d in manifest["data_commands"]] == ["head data/x.csv"]
+    assert [d["bash_cmd"] for d in manifest["data_commands"]] == ["head <v>"]
 
 
 @pytest.mark.parametrize("host", HOSTS)

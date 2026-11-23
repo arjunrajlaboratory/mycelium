@@ -270,8 +270,13 @@ def _outputs_file(analysis_root: Path, name: str, *,
     if outputs.is_symlink():
         raise error(f"register_value: {outputs} is a symlink; refusing to write through it")
     if not outputs.exists():
-        outputs.mkdir()
-    elif not outputs.is_dir():
+        try:
+            outputs.mkdir()
+        except FileExistsError:
+            pass  # another process created it first: revalidated below
+        if outputs.is_symlink():
+            raise error(f"register_value: {outputs} is a symlink; refusing to write through it")
+    if not outputs.is_dir():
         raise error(f"register_value: {outputs} is not a directory")
     target = outputs / name
     for candidate in (target, Path(f"{target}.lock")):

@@ -367,9 +367,18 @@ def _resolve_pending_writes(index, rel: str, writes: list[dict[str, Any]],
 def _incomplete_reasons(index, rel: str, writes: list[dict[str, Any]]) -> list[str]:
     """Why the record cannot show it holds every change to ``rel``: a write
     whose resulting bytes are unknown and not provably replaced, a gap that
-    applies to the path, or a path Bash observation never watches. Only with
-    none of these may a change be called outside the record."""
-    reasons = []
+    applies to the path, a path Bash observation never watches, or a write
+    whose own index verdict is ``unknown`` (its reasons, such as
+    ``coverage-unproven`` when the index cannot positively prove that every
+    later call was observed at the path, are carried over). Only with none
+    of these may a change be called outside the record."""
+    reasons: list[str] = []
+    for w in writes:
+        record = w.get("record") or {}
+        if record.get("status") != "unknown":
+            continue
+        reasons.extend(r for r in record.get("reasons") or ["record-unknown"]
+                       if isinstance(r, str))
     if any(w.get("sha256") is None and w.get("action") != "deleted"
            and _verdict(w) != "superseded" for w in writes):
         reasons.append("write-hash-unknown")
@@ -387,7 +396,7 @@ def _incomplete_reasons(index, rel: str, writes: list[dict[str, Any]]) -> list[s
             reasons.append("unwatched-path")
     except Exception:  # noqa: BLE001
         reasons.append("unwatched-path")
-    return reasons
+    return list(dict.fromkeys(reasons))
 
 
 def _producer_unknown(reasons: list[str], writes: list[dict[str, Any]],

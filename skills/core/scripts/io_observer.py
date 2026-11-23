@@ -815,6 +815,8 @@ def end_finished_background(state_dir: Path, *, host: str, session: str,
         return 0
     _check_dir(state_dir / "io", path.parent)
     ended = 0
+    ends: list[tuple[str, int]] = []
+    jid = None
     with _locked(path):
         records = _journal_records(path)
         seq = max((r["seq"] for r in records), default=0)
@@ -827,6 +829,11 @@ def end_finished_background(state_dir: Path, *, host: str, session: str,
             status = listed.get(interval.task)
             if status is not None and status not in _TASK_DONE:
                 continue  # still running, or a status we cannot read
+            if status is None and interval.agent is not None:
+                # Absence proves an end only for the main agent's own jobs:
+                # it is stopped while its Stop snapshot is taken, but a
+                # background subagent may launch a job after the snapshot.
+                continue
             seq += 1
             lines.append(json.dumps({"seq": seq, "ev": "end", "call": interval.call,
                                      "host": host, "session": session,
@@ -834,6 +841,7 @@ def end_finished_background(state_dir: Path, *, host: str, session: str,
                                      "wall_ns": time.time_ns(),
                                      **({"jid": jid} if jid else {})},
                                     sort_keys=True) + "\n")
+            ends.append((interval.call, seq))
             ended += 1
         if lines:
             fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -843,6 +851,15 @@ def end_finished_background(state_dir: Path, *, host: str, session: str,
                 os.write(fd, "".join(lines).encode("utf-8"))
             finally:
                 os.close(fd)
+    # The end also goes to the session's store: compaction drops the ended
+    # interval from the journal, and the bound must outlive it.
+    for call, end_seq in ends:
+        with contextlib.suppress(OSError):
+            append_line(observations_path(state_dir, host, session),
+                        {"kind": "background-end", "observation_id": f"{host}:{call}",
+                         "host_session_id": session, "reason": "task-finished",
+                         "journal": {"id": jid, "post_seq": end_seq}},
+                        io_root=state_dir / "io")
     return ended
 
 

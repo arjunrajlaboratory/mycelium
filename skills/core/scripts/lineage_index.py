@@ -261,7 +261,7 @@ def _read_origin(record: dict[str, Any]) -> str:
 
 def _empty() -> dict[str, Any]:
     return {"events": [], "reads": [], "candidates": [], "observations": [], "gaps": [],
-            "pending_gaps": []}
+            "pending_gaps": [], "ends": []}
 
 
 def _manifest_contribution(path: Path, name: str, root_real: str) -> dict[str, Any]:
@@ -409,6 +409,14 @@ def _store_contribution(path: Path, name: str) -> dict[str, Any]:
             # list: its evidence is lost, so the gap is recorded.
             out["gaps"].append({"kind": "store-record-unreadable", "scope": "repo",
                                 "source": name, "detail": f"line {number}"})
+            continue
+        if isinstance(record, dict) and record.get("kind") == "background-end":
+            # A background job's host-confirmed end, kept in the store so it
+            # outlives journal compaction.
+            key = _obs_key(record.get("host_session_id"), record.get("observation_id"))
+            bound = record.get("journal")
+            if key and isinstance(bound, dict) and isinstance(bound.get("post_seq"), int):
+                out["ends"].append({"call": key, "journal": bound})
             continue
         if isinstance(record, dict) and record.get("kind") == "observation":
             out["observations"].append({"record": _slim_observation(record), "source": name})
@@ -576,6 +584,19 @@ def _clock(entry: dict[str, Any]) -> tuple:
             journal.get("pre_seq") or 0)
 
 
+def _mentions(record: dict[str, Any], path: str) -> bool:
+    """Whether an observation's change list names ``path`` at all,
+    metadata-only changes included."""
+    changes = record.get("changes")
+    if not isinstance(changes, dict):
+        return False
+    for kind in ("created", "modified", "edited", "deleted"):
+        for entry in changes.get(kind) or []:
+            if isinstance(entry, dict) and entry.get("path") == path:
+                return True
+    return path in (changes.get("metadata_only") or [])
+
+
 class Index:
     def __init__(self, root: Path, state_dir: Path, sources: dict[str, Any]) -> None:
         self.root = root
@@ -594,15 +615,19 @@ class Index:
         self.journal_id: str | None = None
         self.journal_floor = 0
         self._foreign_calls: set[str] = set()
+        self.background_ends: dict[str, dict[str, Any]] = {}
         try:
             records = io_observer._journal_records(io_observer.journal_path(state_dir))
             jid = next((r["jid"] for r in reversed(records) if isinstance(r.get("jid"), str)),
                        None)
+            floor = max([0] + [r["floor"] for r in records
+                               if r.get("ev") == "floor" and isinstance(r.get("floor"), int)])
+            intervals = io_observer._intervals(records)
+            # Published only once the whole journal parsed: a journal that
+            # cannot be read proves nothing.
             self.journal_id = jid
-            self.journal_floor = max([0] + [r["floor"] for r in records
-                                            if r.get("ev") == "floor"
-                                            and isinstance(r.get("floor"), int)])
-            for key, interval in io_observer._intervals(records).items():
+            self.journal_floor = floor
+            for key, interval in intervals.items():
                 self.journal_now[key] = {"id": jid, "pre_seq": interval.pre_seq,
                                          "post_seq": interval.post_seq,
                                          "expired": interval.expired,
@@ -612,9 +637,11 @@ class Index:
                                          "session": interval.session,
                                          "call": interval.call,
                                          "observe": interval.observe,
-                                         "end_reason": interval.end_reason}
+                                         "end_reason": interval.end_reason,
+                                         "agent": interval.agent}
         except Exception:  # noqa: BLE001 - no journal: background bounds stay open
-            pass
+            self.journal_id = None
+            self.journal_now = {}
         self._aggregate()
 
     # -- building ----------------------------------------------------------
@@ -633,6 +660,8 @@ class Index:
             candidates.extend(part.get("candidates", []))
             self.gaps.extend(part.get("gaps", []))
             pending_gaps.extend(part.get("pending_gaps", []))
+            for end in part.get("ends", []):
+                self.background_ends[end["call"]] = end["journal"]
             for item in part.get("observations", []):
                 record = item["record"]
                 key = _obs_key(record.get("host_session_id"), record.get("observation_id"))
@@ -832,9 +861,13 @@ class Index:
             now = self.journal_now.get(io_observer.interval_key(
                 host, str(record.get("host_session_id") or ""), call))
             bound = dict(now or journal or {})
-            if bound.get("expired"):
+            if bound.get("expired") and bound.get("end_reason") != "turn-ended":
                 # The journal's timeout is not evidence the job stopped.
                 bound["post_seq"] = None
+            end = self.background_ends.get(key)
+            if end and end.get("id") == bound.get("id"):
+                # The host confirmed the end, after compaction dropped it.
+                bound["post_seq"], bound["expired"] = end["post_seq"], False
             self.gaps.append({"kind": "background-job", "scope": "repo",
                               **{**base, "journal": bound or None}})
         incomplete = bool(changes.get("capped"))
@@ -1022,6 +1055,16 @@ class Index:
                     continue  # another checkout's call
                 out.append({"kind": "no-observation", "call": call})
                 continue
+            write_end = journal.get("post_seq")
+            overlaps = not (isinstance(write_end, int)
+                            and isinstance(interval.get("pre_seq"), int)
+                            and interval["pre_seq"] > write_end)
+            if overlaps and _mentions(observed["record"], path):
+                # It ran beside the write and touched the path: its two
+                # walks do not bracket the write, so a restore it made after
+                # the write (old bytes at both of its ends) is invisible.
+                out.append({"kind": "overlapping-touch", "call": call})
+                continue
             problem = self._observation_gap_at(observed["record"], path, interval)
             if problem:
                 out.append({"kind": problem, "call": call})
@@ -1133,7 +1176,7 @@ class Index:
         result["status"] = _headline(record["status"], result.get("disk") if disk else None,
                                      write.get("action"))
         if (disk and result["status"] == "unknown" and result.get("disk") == "match"
-                and self._identity_unchanged(write)):
+                and not self._background_open() and self._identity_unchanged(write)):
             # The record cannot account for everything since this write,
             # but the file itself can: it still has exactly the identity it
             # had right after the write, and its ctime moves on any change
@@ -1141,6 +1184,22 @@ class Index:
             result["status"] = "current"
             result["basis"] = "identity-unchanged-since-write"
         return result
+
+    def _background_open(self) -> bool:
+        """Whether some background job may still be running. Identity
+        continuity is then not used: a process still holding the file open
+        (a shared memory mapping, for one) can change it without moving its
+        timestamps until it flushes."""
+        if getattr(self, "_bg_open", None) is None:
+            # A job past the journal's age bound no longer blocks this (it
+            # stays a gap in the record): a mapping left unflushed for a day
+            # is not a realistic case, and a Codex job never reports an end.
+            open_ = any(g.get("kind") == "background-job"
+                        and (g.get("journal") or {}).get("post_seq") is None
+                        and not (g.get("journal") or {}).get("expired")
+                        for g in self.gaps)
+            self._bg_open = open_
+        return self._bg_open
 
     def _identity_unchanged(self, write: dict[str, Any]) -> bool:
         ident = write.get("identity")

@@ -60,6 +60,25 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
+@pytest.mark.parametrize("assignment", [
+    "R=$(cat .mycelium/plugin-root)/skills/core/scripts",
+    'R="$(cat .mycelium/plugin-root)/skills/core/scripts"',
+    'R="$(cat .mycelium/plugin-root)"/skills/core/scripts',
+])
+def test_a_helper_under_a_suffixed_plugin_root_variable_is_mycelium_s_own(
+        repo: Path, assignment: str) -> None:
+    # Live run: `PY=…; R=$(cat .mycelium/plugin-root)/skills/core/scripts;
+    # $PY "$R/lineage_index.py"` became a run of an unreadable script.
+    plugin = HERE.parent.parent.parent
+    (repo / ".mycelium").mkdir()
+    (repo / ".mycelium" / "plugin-root").write_text(str(plugin) + "\n")
+    command = f'PY={sys.executable}; {assignment}; $PY "$R/lineage_index.py" query'
+    path = ev._variable_script_path(command, command.index("$R/"), "$R/lineage_index.py",
+                                    repo)
+    assert path == (plugin / "skills" / "core" / "scripts" / "lineage_index.py").resolve()
+    assert ev._is_managed_utility_path(path)
+
+
 def test_the_event_keeps_the_command_as_written(repo: Path) -> None:
     command = f"PY={sys.executable}; $PY run.py --config c.yaml"
     result = subprocess.run(

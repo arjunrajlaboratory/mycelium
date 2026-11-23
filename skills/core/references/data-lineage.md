@@ -12,7 +12,13 @@ event when an analysis-script invocation is detected (`python`, `R`, `Rscript`, 
 in a variable counts when the same command assigns it plainly first
 (`PY=/x/venv/bin/python; $PY run.py`). That means an unconditional,
 top-level `NAME=literal` statement, optionally `export`ed, whose value names
-python, Rscript or R. The event keeps the command as written.
+python, Rscript or R. Assignments and uses are read only at command starts in
+shell text, never inside quotes, comments, heredoc bodies or (for uses)
+substitutions and subshells, so `printf '; PY=python3'` changes nothing. Any
+other unquoted mention of the name (`unset`, `read`, `declare`, `local`,
+`readonly`, `typeset`, `+=`, a loop variable, a conditional, piped, nested or
+control-structure assignment) voids it until the next plain assignment. One
+forward pass, linear in the command. The event keeps the command as written.
 
 Pipeline runners are detected too, recording their entry point as the event's
 script: a shell script run as `bash`/`sh`/`zsh run.sh` or `./run.sh`, the
@@ -326,7 +332,10 @@ describes the fields; where the two differ, the schema file wins.
 Read from the detected stage's own text, never guessed:
 
 - `argv`, `executable`, `interpreter` and `script_args`. Inline `-c`/`-e`
-  bodies become `{"inline_sha256", "length"}`. For `R -f X` and
+  bodies become `{"inline_sha256", "length"}`. The body, module or script
+  word is the one the detector matched, by position, so a startup option
+  value spelled like it (`python -X -c -c 'print(1)'`, `python -X fit.py
+  fit.py`) is not mistaken for it. For `R -f X` and
   `R --file=X`, `script_args` are the words after `--args` (R reads its own
   options anywhere before it), so `R --file=a.R --args --seed 1` keeps the seed.
 - `env`: assignment and `env VAR=x` prefixes of that stage. Unexpanded
@@ -380,6 +389,10 @@ Read from the detected stage's own text, never guessed:
   - Snakemake `--profile P`: every `config.yaml`/`config.vN+.yaml` in the
     profile directory (a bare name is also searched in the user config
     directories). A profile with none is listed as a missing `config.yaml`.
+  - Snakemake resolves `--profile` (while parsing arguments) and
+    `--configfile` (when it builds its config settings) from the invocation
+    directory, before it changes into `--directory`, so both are resolved
+    there; positional targets and the workflow's I/O use `--directory`.
 - `params` (snakemake): the `--config`/`-C` `KEY=VALUE` overrides, verbatim,
   with the value of a secret-named key redacted.
 - `seeds`: literal seeds from argv (`--seed N`) and source (`np.random.seed`,
@@ -414,50 +427,89 @@ every free-text field of every record through the allowlist in
 `step.interpreter`, `step.env` values, `script_candidate` and
 `lineage_warnings`. It also covers a data command's `bash_cmd`, `step.argv`,
 `named_paths` and `analysis_candidates`, a skip's `bash_cmd` and `detail`,
-and an embedded observation's `bash_cmd`. Only these words are kept:
+and an embedded observation's `bash_cmd`. A word is kept only on
+**evidence**, never because of its position or shape:
 
-- the command word of each simple command (path characters only, not led by
-  `-`), after any leading `NAME=value` assignments; shell keywords; and the
-  command after a wrapper (`env`, `nohup`, `time`, `exec`, `command`,
-  `builtin`, `nice`);
-- option names: `--long-name`, and single-dash names that are a short
-  cluster (`-x`, `-abc`), a letter and digits (`-O2`), or all-lowercase words
-  (`-resume`, `-params-file`). For `--opt=value`, `--opt=` is kept and the
-  value takes the value rule;
-- assignment names (`NAME=`), with the value rule for the value;
-- values that, decoded, are one of the record's own paths: its inputs,
-  outputs, script and config files, in absolute, repo-relative or any shorter
-  component spelling (`analysis/de/run.py`, `de/run.py`, `run.py`). All of
-  these are already in the record. A data command also counts its `cwd` and
-  its path-shaped `named_paths`;
-- plain numbers of at most 6 characters (`3`, `0.05`, `1e-3`), except the
-  value of a secret-named option or assignment (the denylist's names, plus
-  `pin`, `otp`, `totp`, `mfa`, `passcode`, `2fa`);
-- operators, redirections, and the whitespace layout.
+- **Command words.** The command word of each simple command (after any
+  leading `NAME=value` assignments, or after a wrapper such as `env`,
+  `nohup`, `time`, `nice`, `sudo`, `timeout`, `xargs`) is kept only in two
+  cases. It may be in a fixed vocabulary of common commands and
+  interpreters (`python3`, `python3.11`, `Rscript`, `bash`, `cat`, `git`,
+  `snakemake`, `uv`, ...). A system-directory spelling such as
+  `/usr/bin/python3` is kept whole; any other directory becomes
+  `<v>/python3`. Or it may be exactly one of the record's evidence-backed
+  paths (`./tools/run.sh`). Nothing is looked up on `PATH` or on disk.
+- **Shell keywords** are kept only where a keyword can stand. A `case`
+  subject, a `case` pattern and a `for` list are values. A loop variable
+  name is kept only in the name shape below.
+- **Subcommands.** The first operand after a vocabulary command is kept if
+  it is a fixed subcommand (`git status`, `uv run python`, `R CMD BATCH`,
+  `python3 -m pytest`).
+- **Option names** are kept only in a fixed shape, with at most 3 digits:
+  `--[a-z][a-z0-9-]{0,40}`, `-x`, `-xy`, three lower-case letters (`-xzf`),
+  or a letter and one or two digits (`-O2`). For `--opt=value`, `--opt=` is
+  kept and the value takes the value rule. Anything else shaped like an
+  option is a value (`--Q0t3SG…`, `-pS3cr3t`, `-resume`, `--min_count`).
+  After a `--` word, every later word of that simple command is an operand.
+- **Names.** Assignment names (`NAME=`) and loop variable names are kept
+  only in one case (`OMP_NUM_THREADS`, `lr`, `trainer.max_epochs`), with at
+  most 3 digits. The value takes the value rule.
+- **Values.** A value is kept only if, after shell quote removal, it is
+  exactly one of the record's evidence-backed paths, or exactly that path
+  behind one leading `./`. The path may be absolute, as recorded, or any run
+  of its whole components (`analysis/de/run.py`, `de/run.py`, `run.py`),
+  never with a `.` or `..` component. Nothing is normalized, so
+  `x/../run.py` is not `run.py`: the string approved is the string
+  published. A value is also kept if it is a plain number of at most 6
+  characters (`3`, `0.05`, `1e-3`), or one of `/dev/null`, `/dev/stdin`,
+  `/dev/stdout` or `/dev/stderr`. A number given to a secret-named option or
+  assignment is never kept (the denylist's names, plus `pin`, `otp`,
+  `totp`, `mfa`, `passcode`, `2fa`).
+- **Layout.** Operators, redirections and the whitespace layout are kept. A
+  heredoc delimiter is kept if it is in a fixed list (`EOF`, `PY`, `END`,
+  ...).
+
+A path is **evidence-backed** when the record proves the file was there.
+That means a digest was actually taken (a file record's `sha256` or
+`observed_sha256`, or the event's `script_sha256` for its `script`), or the
+path is an observed change entry (`observed_change` created, modified or
+deleted, or an observation's change list). None of these lend a word: an
+operand as typed, a missing or unresolved config, an unhashed input, an
+unreadable script (a skip's detail), or a script candidate. A data
+command's `cwd` and `repo_root` are host-supplied structured fields, so
+their spellings may stay in its command text.
 
 Every other word becomes `<v>`: quoted strings, inline code bodies, URLs,
-`$(...)` and `$X`, and unknown words. A heredoc body becomes one
-`<heredoc: N lines>` line. So
+`$(...)` and `$X`, and unknown words. An unquoted comment (a `#` that starts
+a word, through the end of the line) becomes `<comment>`. A heredoc body
+becomes one `<heredoc: N lines>` line. So
 `python3 analysis/de/run.py --config analysis/de/params.yaml --seed 3` is
-kept whole when those are the record's paths, while `tool -k
-9f8a7b6c5d4e3f2a1b0c` becomes `tool -k <v>`. Warning and skip-detail text
+kept whole when the script and config were hashed, while `curl -k
+9f8a7b6c5d4e3f2a1b0c` becomes `curl -k <v>`. Warning and skip-detail text
 keeps only the words of the recorders' own messages
-(`COMMIT_PROSE_WORDS`), counts that follow one of those words, and record
-paths. A script candidate is kept only when it is a script-shaped word
-(`a.R`). A config operand that is remote, or unresolved and not path-shaped,
-has `path: "<v>"`.
+(`COMMIT_PROSE_WORDS`), counts that follow one of those words, and exact
+evidence-backed paths. A script candidate, and each of a data command's
+`named_paths` and `analysis_candidates` (except `(inline)`), is kept only
+if it is exactly an evidence-backed path. A config record without evidence
+(missing, unresolved, remote, unhashed) has `path` and `rel_path` set to
+`"<v>"`. Consolidating committed text reads no file system, so an
+unresponsive mount cannot hang Stop.
 
 `script_source` is never committed. The manifest keeps `script_sha256` (with
 `script_sha256_of` as before) and adds `script_source_bytes` and
 `script_source_lines`. `filters_detected` (0.9.7 regex text) is dropped.
-File records' `path` and `rel_path`, `cwd` and `repo_root` are structured
-data and stay. Events recorded before an upgrade get the same treatment
+Input and output records' `path` and `rel_path`, the event's `script`, and
+`cwd` and `repo_root` are structured data and stay, whether or not they
+carry evidence. Events recorded before an upgrade get the same treatment
 when a new manifest consolidates them. A manifest without `text_policy` was
 written by 0.9.7 or earlier and still loads.
 
-Known limits of the allowlist: a secret written as a command name, as an
-all-lowercase word glued to a single dash (`-psecret`), or as an option name
-is kept, since it cannot be told apart from a program or a flag.
+Known limits of the allowlist. A secret is kept if it is exactly a
+vocabulary word, a fixed subcommand, or a short number. It is also kept if
+it is shaped as a lower-case option name (`--abcdef`), or as a one-case
+assignment or loop name (`SECRETVALUE=1`), since it cannot be told apart
+from a flag or a variable. Structured input/output paths and `script` are
+published as recorded.
 
 **Machine-local stores: the denylist.** The stores under `.mycelium/` (the
 per-call event queue, observation stores, the journal) are gitignored and
@@ -664,6 +716,23 @@ way.
 the host shows it ended. For Claude, that is when a later Stop's
 `background_tasks` snapshot omits the job's `backgroundTaskId` or lists it as
 finished. An unknown status, a job with no task id, or a Codex job stays open.
+Absence from the snapshot ends only the main agent's own jobs; a background
+subagent's job needs a finished status. The end is also written to the
+session's store, so it outlives journal compaction. While any background job
+may still be running (one not ended and not yet past the journal's age bound),
+identity continuity is not used. A process that still holds a file open, for
+example through a shared memory mapping, can change it without moving its
+timestamps.
+
+**Out of reach.** The index sees what happens inside a tool call. Two cases are
+outside that:
+
+- Work a call hands to another process that outlives it: `sbatch`, `nohup …
+  &`, `docker run -d`, a daemon. Its later writes look like changes outside the
+  record. When the bytes still match, identity continuity reports the result,
+  not who wrote it.
+- Edits made outside the agent. A disk query finds them, but the record cannot
+  say who made them.
 
 **Readers.** Readers are listed with their `hash_origin`, proven first. A
 hook cannot see reads, so every read stays inferred.
