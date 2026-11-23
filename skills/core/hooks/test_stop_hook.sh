@@ -475,11 +475,14 @@ branch: main
 ---
 LOG_EOF
 
-  # active-session-log.tmp: line 1 = log path, line 2 = owner_ts
-  printf '%s\n%s\n' "$LOG_PATH" "$(date +%s)" > "$REPO/.mycelium/active-session-log.tmp"
+  # active-session-log.tmp: line 1 = log path, line 2 = owner_ts. A legacy
+  # marker whose owner_ts differs from session-start-ts.tmp is a subagent, so
+  # both take one reading: two `date` calls can straddle a second.
+  NOW=$(date +%s)
+  printf '%s\n%s\n' "$LOG_PATH" "$NOW" > "$REPO/.mycelium/active-session-log.tmp"
 
   # Record an ordinary fresh session start.
-  date +%s > "$REPO/.mycelium/session-start-ts.tmp"
+  echo "$NOW" > "$REPO/.mycelium/session-start-ts.tmp"
 
   # No activity file, no git changes → FILES_CHANGED = 0
   # Duration = 0 min (start_ts = now)
@@ -690,8 +693,11 @@ files_changed:
 ## Session Log
 LOG_EOF
 
-  date +%s > "$REPO/.mycelium/session-start-ts.tmp"
-  printf '%s\n%s\n' "$LOG_PATH" "$(date +%s)" > "$REPO/.mycelium/active-session-log.tmp"
+  # One reading for both: a legacy marker whose owner_ts differs from
+  # session-start-ts.tmp is treated as a subagent and skips finalization.
+  NOW=$(date +%s)
+  echo "$NOW" > "$REPO/.mycelium/session-start-ts.tmp"
+  printf '%s\n%s\n' "$LOG_PATH" "$NOW" > "$REPO/.mycelium/active-session-log.tmp"
   echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
   touch "$REPO/.living/learnings.md"
   python3 "$HERE/../scripts/session_file_changes.py" snapshot \
@@ -887,6 +893,27 @@ LOG_EOF
   else
     fail "Blocked analysis mutated final lifecycle state" \
       "log_exists=$([ -f "$LOG_PATH" ] && echo yes || echo no) output='$HOOK_OUTPUT'"
+  fi
+  rm -rf "$REPO"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# Access note: a stale note file is never emitted. The note itself, its
+# join and its fail-open behaviour need a real lineage transaction and are
+# tested through the hooks in scripts/test_access_note_stop.py.
+# ─────────────────────────────────────────────────────────────────
+echo ""
+echo "TEST access-note: a stale note file is never emitted"
+{
+  REPO=$(make_repo)
+  mkdir -p "$REPO/.living"
+  printf 'ACCESS NOTE: stale\n' > "$REPO/.mycelium/access-note.tmp"
+  run_hook "$REPO"
+  if [ "$HOOK_EXIT" -eq 0 ] && ! echo "$HOOK_OUTPUT" | grep -q 'ACCESS NOTE' \
+    && [ ! -e "$REPO/.mycelium/access-note.tmp" ]; then
+    pass "Stale access-note.tmp without lineage this Stop → not emitted, removed"
+  else
+    fail "Stale access-note.tmp was emitted" "exit=$HOOK_EXIT output='$HOOK_OUTPUT'"
   fi
   rm -rf "$REPO"
 }
