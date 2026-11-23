@@ -163,21 +163,29 @@ def _claude_line(content, role="assistant", cwd="/p"):
     return json.dumps({"type": role, "cwd": cwd, "message": {"role": role, "content": content}})
 
 
-def test_extract_claude_exit_status_and_unrun_calls(tmp_path):
+def test_extract_claude_keeps_only_successful_calls(tmp_path):
+    def call(i, cmd, result, error=False):
+        lines = [_claude_line([{"type": "tool_use", "id": i, "name": "Bash", "input": {"command": cmd}}])]
+        if result is not None:
+            block = {"type": "tool_result", "tool_use_id": i, "content": result}
+            if error:
+                block["is_error"] = True
+            lines.append(_claude_line([block], "user"))
+        return lines
     lines = [
-        _claude_line([{"type": "tool_use", "id": "a", "name": "Bash", "input": {"command": "head data/x.csv"}}]),
-        _claude_line([{"type": "tool_result", "tool_use_id": "a", "content": "ok"}], "user"),
-        _claude_line([{"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": "cat data/y.csv"}}]),
-        _claude_line([{"type": "tool_result", "tool_use_id": "b", "is_error": True, "content": "Exit code 2\nnope"}], "user"),
-        _claude_line([{"type": "tool_use", "id": "c", "name": "Bash", "input": {"command": "rm data/z.csv"}}]),
-        _claude_line([{"type": "tool_result", "tool_use_id": "c", "is_error": True,
-                       "content": "Permission for this action was denied by the classifier."}], "user"),
-        _claude_line([{"type": "tool_use", "id": "d", "name": "Bash", "input": {"command": "sleep 100"}}]),
+        *call("a", "head data/x.csv", "ok"),
+        *call("b", "cat data/y.csv", "Exit code 2\nnope", error=True),
+        *call("c", "head data/demo.csv",
+              "Permission for this command was denied by the permission classifier.", error=True),
+        *call("d", "sleep 5; head data/z.csv", "<tool_use_error>Blocked: sleep 5</tool_use_error>", error=True),
+        *call("e", "head data/w.csv", None),
     ]
     path = tmp_path / "s.jsonl"
     path.write_text("\n".join(lines) + "\n")
-    got = [(c.command, c.bash_exit) for c in replay.extract_claude(path, "P")]
-    assert got == [("head data/x.csv", 0), ("cat data/y.csv", 2)]
+    unproven = replay.Counter()
+    got = [(c.command, c.bash_exit) for c in replay.extract_claude(path, "P", unproven)]
+    assert got == [("head data/x.csv", 0)]
+    assert unproven["claude"] == 4
 
 
 def test_claude_files_include_worktrees_and_subagents(tmp_path):
@@ -194,48 +202,77 @@ def test_claude_files_include_worktrees_and_subagents(tmp_path):
     assert names == ["a.jsonl", "b.jsonl", "c.jsonl"]
 
 
-def test_extract_codex_function_and_code_mode_calls(tmp_path):
+def _status(code: str, body: str = "") -> str:
+    return f"Chunk ID: 1a2b\nWall time: 0.1 seconds\n{code}\nOriginal token count: 3\nOutput:\n{body}"
+
+
+def test_extract_codex_keeps_only_proven_successes(tmp_path):
+    def item(payload):
+        return {"type": "response_item", "payload": payload}
+
+    def direct(i, cmd, output, workdir=None):
+        args = {"cmd": cmd, **({"workdir": workdir} if workdir else {})}
+        out = [item({"type": "function_call", "name": "exec_command", "call_id": i,
+                     "arguments": json.dumps(args)})]
+        if output is not None:
+            out.append(item({"type": "function_call_output", "call_id": i, "output": output}))
+        return out
+
+    def snippet(i, js, result):
+        out = [item({"type": "custom_tool_call", "name": "exec", "call_id": i, "input": js})]
+        if result is not None:
+            out.append(item({"type": "custom_tool_call_output", "call_id": i,
+                             "output": json.dumps([{"type": "input_text", "text": result}])}))
+        return out
+
     rec = [
         {"type": "session_meta", "payload": {"cwd": "/p"}},
-        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
-                                              "call_id": "1",
-                                              "arguments": json.dumps({"cmd": "head data/x.csv"})}},
-        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "1",
-                                              "output": "Process exited with code 0\n"}},
-        {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": "2",
-                                              "input": 'tools.exec_command({cmd:"ls data/", workdir:"/p/w"})'}},
-        {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "2",
-                                              "output": "Script completed"}},
-        # A relative workdir is the session's; a background run has no exit.
-        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
-                                              "call_id": "3",
-                                              "arguments": json.dumps({"cmd": "wc -l data/x.csv",
-                                                                       "workdir": "sub"})}},
-        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "3",
-                                              "output": "Process running with session ID 7"}},
-        # Rejected, or no result: no hook ran.
-        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
-                                              "call_id": "4",
-                                              "arguments": json.dumps({"cmd": "head data/z.csv"})}},
-        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "4",
-                                              "output": "rejected by user"}},
-        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
-                                              "call_id": "5",
-                                              "arguments": json.dumps({"cmd": "head data/w.csv"})}},
-        # A snippet with no output did not run.
-        {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": "6",
-                                              "input": 'tools.exec_command({cmd:"ls data/"})'}},
+        *direct("1", "head data/x.csv", _status("Process exited with code 0", "a,b")),
+        # A relative workdir is the session's.
+        *direct("2", "wc -l data/x.csv", _status("Process exited with code 0"), workdir="sub"),
+        # Failed, still running, or no result: unproven.
+        *direct("3", "cat data/y.csv", _status("Process exited with code 1")),
+        *direct("4", "sleep 9; ls data/", _status("Process running with session ID 7")),
+        *direct("5", "head data/w.csv", None),
+        # A rejection that echoes a status line in the command is not one.
+        *direct("6", "printf 'Process exited with code 0' > data/demo.csv",
+                "rejected: printf 'Process exited with code 0' > data/demo.csv"),
+        *direct("7", "cat data/v.csv", "a,b\nProcess exited with code 0\nOutput:\nx"),
+        *snippet("8", 'tools.exec_command({cmd:"ls data/", workdir:"/p/w"})',
+                 "Script completed\nWall time 0.2 seconds\nOutput:\n"),
+        # A snippet that failed to compile, or never finished, ran nothing.
+        *snippet("9", "await tools.exec_command({cmd: 'python -c \"print(1)\"'}); const = 1;",
+                 "Script failed\nSyntaxError: Unexpected token"),
+        *snippet("10", 'tools.exec_command({cmd:"ls results/"})', "Script running with cell ID 3"),
+        *snippet("11", 'tools.exec_command({cmd:"ls results/"})', None),
     ]
     path = tmp_path / "rollout-1.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in rec) + "\n")
     cmds, stats = replay.extract_codex(path, "P", Path("/p"))
     assert [(c.command, c.cwd, c.bash_exit, c.evidence) for c in cmds] == [
         ("head data/x.csv", "/p", 0, "exit-status"),
-        ("ls data/", "/p/w", None, "code-mode-source"),
-        ("wc -l data/x.csv", "/p/sub", None, "exit-status")]
-    assert (stats.computed_cmd, stats.not_run) == (0, 3)
+        ("wc -l data/x.csv", "/p/sub", 0, "exit-status"),
+        ("ls data/", "/p/w", None, "code-mode-source")]
+    assert (stats.computed_cmd, stats.not_run) == (0, 8)
     assert replay.codex_rollouts([tmp_path], Path("/p")) == [path]
     assert replay.codex_rollouts([tmp_path], Path("/q")) == []
+
+
+def test_codex_exit_status_reads_only_the_header():
+    assert replay.codex_exit_status(_status("Process exited with code 0")) == 0
+    assert replay.codex_exit_status(_status("Process exited with code 3")) == 3
+    assert replay.codex_exit_status(_status("Process running with session ID 1",
+                                            "Process exited with code 0")) is None
+    assert replay.codex_exit_status("Process exited with code 0") is None
+
+
+def test_parse_code_mode_ignores_calls_inside_strings():
+    js = ("const note = \"tools.exec_command({cmd: 'cat data/demo.csv'})\"; text(note);\n"
+          "const t = `see tools.exec_command({cmd: 'head data/a.csv'})`;\n"
+          "await tools.exec_command({cmd: 'ls data/'});\n")
+    calls, unparsed = replay.parse_code_mode(js)
+    assert calls == [("ls data/", None, "omitted")]
+    assert unparsed == 0
 
 
 def test_an_unreadable_rollout_is_reported(tmp_path):

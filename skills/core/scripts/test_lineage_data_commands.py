@@ -168,7 +168,7 @@ def _output_tree(project: Path) -> None:
         ("for d in outputs/run*; do ls $d; done", "analysis/x", ["outputs/run*"]),
         ("ls x/output/*/log", "analysis", ["x/output/*/log"]),
         # A brace word is read from the directory in effect where it sits.
-        ("cd analysis/x && wc -l outputs/{a,b}.log", "", ["outputs/{a,b}.log"]),
+        ("cd analysis/x && wc -l outputs/{a,b}.log", "", ["outputs/", "outputs/{a,b}.log"]),
     ],
 )
 def test_analysis_output_is_judged_from_where_the_call_runs(project, command, subdir, named):
@@ -212,8 +212,13 @@ def test_relative_words_outside_analysis_output_stay_unnamed(project, command, s
     [
         ("wc -l analysis/x/tables/{first,second}.tsv",
          ["analysis/x/tables/{first,second}.tsv"]),
-        ("ls -lh 'tables/{a,b}_summary.csv'", ["tables/{a,b}_summary.csv"]),
-        ("cat {x,y}.vcf.gz", ["{x,y}.vcf.gz"]),
+        # Quoted braces do not expand: only the literal scan's piece.
+        ("ls -lh 'tables/{a,b}_summary.csv'", ["_summary.csv"]),
+        # The literal scan's own piece stays: brace words only add.
+        ("cat {x,y}.vcf.gz", [".vcf.gz", "{x,y}.vcf.gz"]),
+        # A heredoc body's unbalanced quote does not hide a brace word before it.
+        ("mkdir -p analysis/x/{scripts,outputs/figures} && cat > notes.md <<'EOF'\nit's\nEOF",
+         ["analysis/x/{scripts,outputs/figures}"]),
         # A parameter expansion's brace is not a brace group.
         ("head ${HOME}/data/x.csv", ["/data/x.csv"]),
     ],
@@ -246,6 +251,63 @@ def test_a_brace_word_naming_no_data_stays_unnamed(project, command):
 def test_brace_words_scan_linearly(project, command):
     event, seconds = _timed_event(command, project)
     assert seconds < SCAN_CPU_LIMIT_SECONDS
+
+
+def _main_literal_mentions(command: str, root: str | None) -> list[str]:
+    """The literal scan as `origin/main` (d0054d9) ran it, for comparison."""
+    seen: dict[str, None] = {}
+    for match in lineage_event._DATA_COMMAND_WORD_RX.finditer(command):
+        word = match.group(0).replace("'", "").replace('"', "")
+        if word in seen or not lineage_event._is_data_like_path(word, root):
+            continue
+        if len(seen) >= lineage_event.DATA_COMMAND_NAMED_PATH_LIMIT:
+            break
+        seen[word] = None
+    return list(seen)
+
+
+_ADVERSARIAL_MENTIONS = [
+    # A brace match across quotes, pipes and redirections (review of #159).
+    "printf '{,'|cat<data/x.csv|wc>'}'",
+    "echo '{a,' data/x.csv '}'",
+    "cat {data/a.csv,data/b.csv} > results/{x,y}.tsv",
+    "cd analysis/x && head outputs/log data/y.csv",
+    "cd && head data/x.csv; cd -; ls data/",
+    "awk '{print $1,$2}' data/x.csv",
+    "cat src/{a,b}.py data/x.csv",
+    "head ${HOME}/data/x.csv {x,y}.vcf.gz",
+    "ls " + " ".join(f"data/f{i}.csv" for i in range(80)),
+]
+
+
+@pytest.mark.parametrize("command", _ADVERSARIAL_MENTIONS)
+def test_the_added_readings_never_narrow_the_literal_scan(project, command):
+    _output_tree(project)
+    root = str(project)
+    head, _ = lineage_event._data_path_mentions(command, root, str(project / "analysis" / "x"))
+    main = _main_literal_mentions(command, root)
+    assert head[: len(main)] == main
+
+
+# Shapes from the P1 review of #159, each once seconds on the hook path:
+# a `cd` chain growing the tracked directory, a brace group with thousands
+# of empty alternatives after a long prefix, and a long comma run after an
+# unclosed `{`. The mention scan must stay well under the hook budget.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd x; : a/b; " * 5000,
+        "cd x; : a/b; " * 1200,  # under the size cap for the added readings
+        "echo " + "x/" * 512 + "{" + "," * 20000 + "}",
+        "echo " + ("x/" * 512 + "{" + "," * 300 + "} ") * 10,
+        "echo '{" + "1," * 40000 + "' > data/x.csv",
+    ],
+)
+def test_mention_scan_shapes_stay_fast(project, command):
+    _output_tree(project)
+    start = time.process_time()
+    lineage_event._data_path_mentions(command, str(project), str(project / "analysis" / "x"))
+    assert time.process_time() - start < 0.2
 
 
 def test_relative_resolution_stats_a_bounded_number_of_words(project):

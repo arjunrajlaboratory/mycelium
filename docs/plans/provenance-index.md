@@ -800,28 +800,43 @@ commands, and the remainder are logged skips with reasons.
 project and its worktrees (subagents included) and the Codex rollouts whose
 session cwd is inside it (`.jsonl` and `.jsonl.zst`; a rollout that cannot
 be read is counted, not skipped). Each Bash call is fed to
-`extract_data_lineage_event.py` exactly as `mycelium-data-tracker.sh` calls
-it on an owned transaction, and the outcome is read as the tracker reads it:
+`extract_data_lineage_event.py` as `mycelium-data-tracker.sh` calls it on an
+owned transaction, except for the observation summary (below), and the
+outcome is read as the tracker reads it:
 an appended record is an event, a nonzero exit or an unreadable script is a
 logged skip, and nothing at all is a silent miss.
 
-Only calls with evidence that they ran are replayed as executed:
+Only calls with positive evidence that they ran and succeeded are replayed
+as executed:
 
-- a Claude call with a tool result that is not a refusal (PostToolUse means
-  exit 0; a failure carries `Exit code N`);
-- a Codex direct call whose output reports `Process exited with code N` or a
-  running process (a rejected call, or one with no result, is dropped: 1 in
-  SNP-tree).
+- a Claude call with a non-error tool result (PostToolUse fires only for a
+  successful Bash call). A failure, a permission refusal, a hook block
+  (`Blocked:`), or a call with no result is left out (56 in SNP-tree, 19 in
+  AP1-learning);
+- a Codex direct call whose own status header (the lines from `Chunk ID:` to
+  `Output:`) says `Process exited with code 0`. A nonzero exit, a call still
+  running when its result came back, a rejection, or no result is left out
+  (360 in SNP-tree). Text in the output or an echoed command is never read
+  as a status.
 
-Codex code-mode calls are a separate population. AP1-learning ran almost
-entirely in code mode, where each tool call is a JavaScript snippet and its
-`tools.exec_command({cmd: ...})` calls are read from the source (comments
-excluded). The snippet ran, but the source does not say whether a given call
-inside it did (a branch not taken), and no call has its own exit status, so
-these replay with the status unknown. 176 AP1 calls compute their command in
-JavaScript and cannot be replayed at all. A relative Codex `workdir` is
-joined to the session cwd. A worktree that no longer exists is replayed from
-the matching directory of the main checkout (7 SNP-tree calls).
+Codex code-mode calls are a separate population, reported as unverified and
+kept out of the headline. AP1-learning ran almost entirely in code mode,
+where each tool call is a JavaScript snippet. Its `tools.exec_command({cmd:
+...})` call sites are found outside string literals and comments, and only
+in snippets whose result says `Script completed`. Snippets that failed
+(including compile errors), were still running, or had no result are left
+out (324 calls). Even so, the source does not say whether a call in a branch
+ran, and no call has its own exit status. 176 AP1 calls compute their
+command in JavaScript and cannot be replayed at all. A relative Codex
+`workdir` is joined to the session cwd.
+
+**The observation summary is omitted.** The live hook also passes the
+call's I/O observation summary (`--observation-json`), and a summary alone
+can make it write a `data_command` (for example an `unavailable`
+observation, or one that saw a file change). Transcripts do not record these
+summaries, so the replay omits them. The coverage below is the detector's
+coverage from the command text alone, a lower bound on what the live hook
+records.
 
 The replay is read-only on the projects: the detector reads files and runs
 `git rev-parse`, and its appends go to scratch files that are emptied after
@@ -847,31 +862,33 @@ path that does not start with a usual top-level directory). The rule is in
 one block at the top of the classifier and is tested with paired positives
 and negatives.
 
-**Result.** Same classifier throughout. "Before" is the detector at
-`origin/main` d0054d9; "after" is this change.
+**Result.** Same classifier and populations throughout. "Before" is the
+detector at `origin/main` d0054d9; "after" is this change.
 
-| | SNP-tree, executed | AP1-learning, executed | AP1-learning, code-mode source |
+| | SNP-tree, Claude | SNP-tree, Codex direct | AP1-learning, Claude |
 |---|---|---|---|
-| Calls replayed | 3,754 (1,353 Claude + 2,401 Codex) | 732 (Claude) | 8,616 (Codex) |
-| Data-touching | 1,576 | 326 | 4,429 |
-| Events, before | 1,451 (92.1%) | 322 (98.8%) | 4,411 (99.6%) |
-| Silent misses, before | 120 | 4 | 4 |
-| **Events, after** | **1,571 (99.7%)** | **326 (100%)** | **4,415 (99.7%)** |
-| … of which analysis events | 731 | 64 | 872 |
-| … of which `data_command` | 840 | 262 | 3,543 |
-| **Logged skips, after** | **5** | **0** | **14** |
+| Calls replayed | 1,299 | 2,042 | 713 |
+| Data-touching | 599 | 701 | 320 |
+| Events, before | 543 (90.7%), 54 silent | 644 (91.9%), 57 silent | 316 (98.8%), 4 silent |
+| **Events, after** | **597 (99.7%)** | **701 (100%)** | **320 (100%)** |
+| … of which analysis / `data_command` | 127 / 470 | 373 / 328 | 62 / 258 |
+| **Logged skips, after** | **2** | **0** | **0** |
 | **Silent misses, after** | **0** | **0** | **0** |
 
-Every population passes: at least 95% events, and every other data-touching
-command is a logged skip with a reason (all `script-unreadable`). By cause:
+Every executed population passes: at least 95% events, and every other
+data-touching command is a logged skip with a reason. Both of SNP-tree's
+skips are `script-unreadable`: project scripts that no longer exist.
 
-- SNP-tree's 5: project scripts that no longer exist.
-- AP1-learning's 14:
-  - 6 project scripts that no longer exist;
-  - 2 temporary scripts under `/tmp`;
-  - 6 Mycelium helpers named through a path the replay cannot resolve: an
-    old plugin-cache version, `$(cat .mycelium/plugin-root)`, or
-    `$plugin_root`.
+Secondary, unverified: **AP1-learning Codex code mode** has 8,292 call
+sites from completed snippets. 4,172 of them are data-touching:
+
+- before: 4,157 events (99.6%) and 4 silent misses;
+- after: 4,161 events (99.7%), 11 logged `script-unreadable` skips and no
+  silent misses.
+
+The 11 skips are 5 project scripts that no longer exist and 6 Mycelium
+helpers named through a path the replay cannot resolve (an old plugin-cache
+version, `$(cat .mycelium/plugin-root)`, or `$plugin_root`).
 
 **What an event is.** Most events are `data_command` records, not analysis
 events. A `data_command` lists the data-like paths the command names, as

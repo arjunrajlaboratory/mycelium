@@ -11,18 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A transcript replay for data lineage** (`tools/lineage_replay.py`). It
   feeds every Bash call in a project's Claude Code and Codex transcripts
-  through the lineage detector the way the PostToolUse hook does, and
-  counts events (analysis events and `data_command` records separately),
-  logged skips, and silent misses among data-touching commands, as decided
-  by its own reviewable rule. It reports counts only, never command text.
-  Calls with evidence that they ran are kept apart from Codex code-mode
-  calls read from source. Over the SNP-tree and AP1-learning transcripts,
-  99.7% of SNP-tree's data-touching commands now leave an event. In
-  AP1-learning that is 100% of Claude calls and 99.7% of Codex code-mode
-  calls. The rest leave logged skips, and no silent misses remain under
-  the rule (120, 4 and 4 before the fixes below). Most events are
-  `data_command` records, which name paths without a direction. This meets
-  item 1's acceptance criterion; numbers are in
+  through the lineage detector the way the PostToolUse hook does (without
+  the observation summary, which transcripts do not record). It counts
+  events (analysis events and `data_command` records separately), logged
+  skips, and silent misses among data-touching commands, as decided by its
+  own reviewable rule. It reports counts only, never command text.
+  - **Headline:** only calls with positive evidence of success are
+    replayed (a non-error Claude result, or exit 0 in a Codex call's own
+    status header). Codex code-mode calls read from source are reported
+    apart as unverified.
+  - **SNP-tree:** 99.7% of data-touching Claude calls and 100% of Codex
+    direct calls now leave an event.
+  - **AP1-learning:** 100% of data-touching Claude calls leave an event.
+  - The rest leave logged skips, and no silent misses remain under the rule
+    (54, 57 and 4 before the fixes below). Most events are `data_command`
+    records, which name paths without a direction.
+
+  This meets item 1's acceptance criterion; numbers are in
   `docs/plans/provenance-index.md`.
 
 - **A project-level lineage index** (`skills/core/scripts/lineage_index.py`).
@@ -119,7 +124,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     call's directory and each `cd` in command position before it
     (`ls outputs/` in `analysis/x`). This applies only when the resolved
     path, or a glob's directory, exists.
-  - A brace word (`tables/{a,b}.tsv`) is judged by its alternatives.
+  - A brace word inside one unquoted shell word (`tables/{a,b}.tsv`) is
+    judged by its alternatives.
+  - These readings only add mentions to the literal scan, run only on
+    commands up to 16 KB, and are bounded (tracked directory length,
+    distinct alternatives, total expansion work).
   - A stdin-fed interpreter is now labelled in three more cases: it has
     arguments (`python3 - "$F" <<'EOF'`), its only sign of stdin is an
     explicit `-`, or the call's only other run is a Mycelium helper.

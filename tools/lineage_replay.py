@@ -6,15 +6,23 @@ transcripts that touch data, how many would the PostToolUse recorder now
 leave an event for, how many a logged skip, and how many nothing at all.
 
 Every command is fed to ``skills/core/scripts/extract_data_lineage_event.py``
-exactly as ``mycelium-data-tracker.sh`` calls it on an owned transaction
-(``--cwd --ts --bash-cmd --append-to [--bash-exit]``), in-process, and the
-outcome is read the way the tracker reads it:
+as ``mycelium-data-tracker.sh`` calls it on an owned transaction
+(``--cwd --ts --bash-cmd --append-to --bash-exit 0``), in-process, and the
+outcome is read the way the tracker reads it. The live hook also passes the
+call's observation summary (``--observation-json``); transcripts do not
+record it, so the replay omits it, and coverage is measured without it (an
+`unavailable` observation alone would make the live hook write a record):
 
 * ``event``: the detector appended at least one record (an analysis event or
   a ``data_command``);
 * ``skip``: it exited nonzero (``extractor-failed``) or named a detected
   script it could not read (``script-unreadable``) and appended nothing;
 * ``none``: it appended nothing and asked for no skip.
+
+Only calls with positive evidence that they ran and succeeded are replayed:
+a Claude call with a non-error result, and a Codex direct call whose status
+header says `Process exited with code 0`. Codex code-mode calls, read from
+completed snippets' JavaScript, are reported apart as unverified.
 
 Whether a command touches data is decided by :func:`classify`, an
 independent rule written against the command text (see its docstring and
@@ -85,23 +93,10 @@ def _claude_files(projects_dir: Path, root: Path) -> list[Path]:
     return files
 
 
-_EXIT_RX = re.compile(r"^Exit code (-?\d+)")
-# A tool result that says the command never ran: no hook fired for it.
-_NOT_RUN_RX = re.compile(
-    r"^(Permission for this action was denied|The user doesn't want to proceed"
-    r"|Permission to use Bash|.*was blocked by a hook|Error: This command requires approval)",
-    re.S,
-)
-
-
-def _result_text(block: dict) -> str:
-    content = block.get("content")
-    if isinstance(content, list):
-        return "".join(c.get("text", "") for c in content if isinstance(c, dict))
-    return content if isinstance(content, str) else ""
-
-
-def extract_claude(path: Path, project: str) -> Iterator[Command]:
+def extract_claude(path: Path, project: str,
+                   unproven: Counter | None = None) -> Iterator[Command]:
+    """Bash calls with a non-error result. Each call left out (a failure, a
+    refusal, a hook block, or no result) is counted in ``unproven``."""
     uses: dict[str, tuple[str, str]] = {}
     results: dict[str, dict] = {}
     order: list[str] = []
@@ -128,18 +123,19 @@ def extract_claude(path: Path, project: str) -> Iterator[Command]:
     for call_id in order:
         result = results.get(call_id)
         if result is None:
+            if unproven is not None:
+                unproven["claude"] += 1
             continue  # interrupted before a result: no PostToolUse
         cmd, cwd = uses[call_id]
-        text = _result_text(result)
         if result.get("is_error"):
-            if _NOT_RUN_RX.match(text):
-                continue
-            m = _EXIT_RX.match(text)
-            # PostToolUseFailure: the tracker reads "Exit code N", else unknown.
-            bash_exit = int(m.group(1)) if m else None
-        else:
-            bash_exit = 0  # PostToolUse fires only for successful Bash calls
-        yield Command(project, "claude", cmd, cwd, bash_exit, call_id, subagent)
+            # A failure, a permission refusal, or a hook block (`Blocked:`):
+            # without positive evidence that the call ran and succeeded it
+            # stays out of the replay.
+            if unproven is not None:
+                unproven["claude"] += 1
+            continue
+        # PostToolUse fires only for successful Bash calls.
+        yield Command(project, "claude", cmd, cwd, 0, call_id, subagent)
 
 
 def _read_rollout(path: Path) -> list[bytes]:
@@ -192,7 +188,6 @@ def _js_string(text: str, i: int) -> tuple[str | None, int]:
     return None, len(text)
 
 
-_EXEC_CALL_RX = re.compile(r"exec_command\s*\(\s*\{")
 _IDENT_RX = re.compile(r"[A-Za-z_$][\w$]*")
 
 
@@ -244,6 +239,41 @@ def strip_js_comments(js: str) -> str:
     return "".join(out)
 
 
+def mask_js(js: str) -> str:
+    """``js`` with string-literal contents and comments blanked, same
+    length, so a call written inside a string or comment is not a call
+    site. A template literal is blanked whole, interpolations included."""
+    out = list(js)
+    i = 0
+    while i < len(js):
+        ch = js[i]
+        if ch in "\"'`":
+            _, end = _js_string(js, i)
+            for k in range(i + 1, max(i + 1, end - 1)):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = end
+        elif js.startswith("//", i):
+            end = js.find("\n", i)
+            end = len(js) if end < 0 else end
+            for k in range(i, end):
+                out[k] = " "
+            i = end
+        elif js.startswith("/*", i):
+            end = js.find("*/", i + 2)
+            end = len(js) if end < 0 else end + 2
+            for k in range(i, end):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = end
+        else:
+            i += 1
+    return "".join(out)
+
+
+_CALL_SITE_RX = re.compile(r"\btools\s*\.\s*exec_command\s*\(\s*\{")
+
+
 def parse_code_mode(js: str) -> tuple[list[tuple[str, str | None, str]], int]:
     """``tools.exec_command({cmd: ..., workdir: ...})`` calls in a Codex
     code-mode ``exec`` snippet, comments excluded. Returns (cmd, workdir,
@@ -254,7 +284,9 @@ def parse_code_mode(js: str) -> tuple[list[tuple[str, str | None, str]], int]:
     js = strip_js_comments(js)
     calls: list[tuple[str, str | None, str]] = []
     unparsed = 0
-    for m in _EXEC_CALL_RX.finditer(js):
+    # Call sites come from the masked text (outside strings and comments);
+    # their arguments are read from the source at the same offsets.
+    for m in _CALL_SITE_RX.finditer(mask_js(js)):
         pos = m.end()
         values: dict[str, str | None] = {}
         while pos < len(js):
@@ -300,8 +332,42 @@ def parse_code_mode(js: str) -> tuple[list[tuple[str, str | None, str]], int]:
     return calls, unparsed
 
 
-_CODEX_EXIT_RX = re.compile(r"Process exited with code (-?\d+)")
-_CODEX_RUNNING_RX = re.compile(r"Process running with session ID")
+_CODEX_EXIT_LINE_RX = re.compile(r"Process exited with code (-?\d+)")
+
+
+def codex_exit_status(output: str | None) -> int | None:
+    """The exit status in a direct Codex call's own status header (the
+    lines before `Output:`), or None. Text in the command's output or an
+    echoed command never counts."""
+    if not output:
+        return None
+    header, sep, _ = output.partition("\nOutput:")
+    lines = header.splitlines()
+    # The tool's header opens with its chunk id; anything else is not one.
+    if not sep or not lines or not re.fullmatch(r"Chunk ID: \w+", lines[0].strip()):
+        return None
+    for line in lines[1:]:
+        m = _CODEX_EXIT_LINE_RX.fullmatch(line.strip())
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def code_mode_completed(output: str | None) -> bool:
+    """Whether a code-mode snippet's result says the script completed (not
+    `Script failed`, a compile error, or a script still running)."""
+    if not output:
+        return False
+    text = output
+    try:
+        value = json.loads(output)
+    except ValueError:
+        value = None
+    if isinstance(value, list):
+        text = "".join(v.get("text", "") for v in value if isinstance(v, dict))
+    elif isinstance(value, dict) and isinstance(value.get("output"), str):
+        text = value["output"]
+    return text.startswith("Script completed")
 
 
 def _join_workdir(workdir: str | None, session_cwd: str) -> str:
@@ -364,20 +430,20 @@ def extract_codex(path: Path, project: str, root: Path) -> tuple[list[Command], 
     for call_id, cmd, workdir, state, code_mode in calls:
         bash_exit = None
         if code_mode:
-            # The snippet must have produced output at all; a call inside it
-            # has no result of its own.
-            if call_id.split("#", 1)[0] not in outputs:
+            # Only a snippet that completed; a call inside it still has no
+            # result of its own, so this population is unverified.
+            if not code_mode_completed(outputs.get(call_id.split("#", 1)[0])):
                 stats.not_run += 1
                 continue
             evidence = "code-mode-source"
         else:
-            output = outputs.get(call_id)
-            m = _CODEX_EXIT_RX.search(output or "")
-            if m:
-                bash_exit = int(m.group(1))
-            elif not (output and _CODEX_RUNNING_RX.search(output)):
-                stats.not_run += 1  # no result, or rejected: no hook ran
+            # Positive evidence of success only: exit 0 in the status
+            # header. A rejection, a failure, or a call still running when
+            # its result was returned is unproven and left out.
+            if codex_exit_status(outputs.get(call_id)) != 0:
+                stats.not_run += 1
                 continue
+            bash_exit = 0
             evidence = "exit-status"
         stats.computed_workdir += state == "computed"
         commands.append(Command(project, "codex", cmd, _join_workdir(workdir, session_cwd),
@@ -991,8 +1057,9 @@ def collect(name: str, root: Path, claude_dir: Path,
             codex_dirs: list[Path]) -> tuple[list[Command], dict]:
     commands: list[Command] = []
     files = _claude_files(claude_dir, root)
+    unproven: Counter = Counter()
     for f in files:
-        commands.extend(extract_claude(f, name))
+        commands.extend(extract_claude(f, name, unproven))
     unreadable: list[Path] = []
     rollouts = codex_rollouts(codex_dirs, root, unreadable)
     stats = CodexStats()
@@ -1014,14 +1081,21 @@ def collect(name: str, root: Path, claude_dir: Path,
             # unknown: counted for every project, never skipped silently.
             "codex_rollouts_unreadable": len(unreadable),
             "codex_calls_with_computed_cmd": stats.computed_cmd,
-            "codex_calls_not_run": stats.not_run,
+            # Calls left out for want of positive evidence that they ran
+            # and succeeded (an error result, a rejection, no result, a
+            # call still running, a snippet that failed or never finished).
+            "claude_calls_unproven": unproven["claude"],
+            "codex_calls_unproven": stats.not_run,
             "codex_calls_with_computed_workdir": stats.computed_workdir}
     return unique, meta
 
 
 POPULATIONS = {
-    # Calls with evidence that they executed: what the criterion is judged on.
+    # Calls with positive evidence that they ran and succeeded: what the
+    # criterion is judged on, in total and per host.
     "executed": ("hook-result", "exit-status"),
+    "executed-claude": ("hook-result",),
+    "executed-codex-direct": ("exit-status",),
     # Codex code-mode calls read from source: the snippet ran, the call may
     # not have (a branch not taken), and its exit status is unknown.
     "code-mode-source": ("code-mode-source",),

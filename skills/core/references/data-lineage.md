@@ -180,8 +180,10 @@ how many times the data was looked at:
   a glob, its directory) exists at hook time, and for at most 256 words a
   call. A word with no `/` is never resolved, since in `data/` a bare `ls`
   is a command.
-  A brace word (`registry/{samples,studies}.tsv`) is judged by its
-  alternatives.
+  A brace word inside one unquoted shell word
+  (`tables/{first,second}.tsv`) is judged by its alternatives. These
+  readings only add to the literal scan, and run only on commands up to
+  16 KB.
   Tooling and Mycelium state (`.living/`, `.mycelium/`, `.git/`, `.claude/`,
   `.codex/`, `node_modules/`, `package.json`, `requirements.txt`, …) and URLs
   are not data;
