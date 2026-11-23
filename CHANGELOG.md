@@ -186,8 +186,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - argument words that zsh or bash may expand (globs, `~`, a leading `=`,
     `$`, backslashes);
   - `__file__`-relative paths;
-  - opens inside `try` with handlers or `contextlib.suppress`;
-  - files that import `mock`.
+  - opens inside a `try` with handlers or a `with` other than plain `open`,
+    or in a function called from one;
+  - files that import `mock` or `builtins`.
+
+  Append modes (`a`, `a+`) are recorded as outputs only.
 
   The scan only adds to the existing result. The reader/writer scan and
   repository recovery run exactly as before, and the stdlib scan never feeds,

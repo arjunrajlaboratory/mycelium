@@ -5312,7 +5312,7 @@ _STDLIB_GUARDED_ATTRS = frozenset({
 })
 # Names whose use can rebind or mutate anything in the module unseen.
 _STDLIB_OPAQUE_BUILTINS = frozenset({
-    "__import__", "delattr", "eval", "exec", "globals", "locals", "setattr", "vars",
+    "__builtins__", "__import__", "delattr", "eval", "exec", "globals", "locals", "setattr", "vars",
 })
 # The whole scan is bounded: a source over the size cap is not parsed, every
 # AST node visited and every value evaluated costs a tick, and a wall-clock
@@ -5383,9 +5383,7 @@ def _open_mode_directions(mode: Any) -> tuple[str, ...]:
         return ()
     if "r" in kinds:
         return ("input", "output") if "+" in mode else ("input",)
-    if "a" in kinds and "+" in mode:
-        return ("input", "output")
-    return ("output",)
+    return ("output",)  # w, x, a, and a+: an append need not read
 
 
 def _is_literal(node: ast.AST) -> bool:
@@ -5455,10 +5453,14 @@ class _StdlibIO:
                 isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try)))
                 and node.handlers
             ) or (
-                isinstance(node, (ast.With, ast.AsyncWith)) and any(
+                # Any context manager but a plain open may swallow an
+                # exception (`suppress` under any alias, a custom guard).
+                isinstance(node, (ast.With, ast.AsyncWith)) and not all(
                     isinstance(item.context_expr, ast.Call)
-                    and (_call_name(item.context_expr.func) or "").rsplit(".", 1)[-1]
-                    == "suppress" for item in node.items)
+                    and (_call_name(item.context_expr.func) == "open"
+                         or (isinstance(item.context_expr.func, ast.Attribute)
+                             and item.context_expr.func.attr == "open"))
+                    for item in node.items)
             )
             body = set(map(id, getattr(node, "body", []) or [])) \
                 if guarded_body and node not in self.guarded else None
@@ -5475,6 +5477,7 @@ class _StdlibIO:
             and self.counts.get(node.name) == 1 and node.name not in self.mutated_names
         }
         self.reachable = self._reachable_functions()
+        self.guarded_functions = self._guarded_functions()
 
     def _tick(self) -> None:
         self.work += 1
@@ -5549,9 +5552,11 @@ class _StdlibIO:
                 else:
                     local, target = alias.asname or alias.name, None
                 self._bind(local, node)
-                if "mock" in (getattr(node, "module", None) or "").split(".") \
-                        + alias.name.split("."):
-                    self.opaque = True  # `patch("builtins.open", ...)` and friends
+                module_parts = (getattr(node, "module", None) or "").split(".")
+                if {"mock", "builtins"} & {*module_parts, *alias.name.split(".")}:
+                    # `patch("builtins.open", ...)`, `from builtins import
+                    # setattr as set_attr`: either can redirect `open`.
+                    self.opaque = True
                 if target is not None:
                     self.imports[local] = target
                     if target.rsplit(".", 1)[-1] in ("chdir", "fchdir"):
@@ -5627,6 +5632,25 @@ class _StdlibIO:
                     reachable.add(name)
                     pending.append(self.functions[name])
         return reachable
+
+    def _guarded_functions(self) -> set[str]:
+        """Module functions with any call site in guarded code, or in
+        another such function: an open in them may fail and be recovered
+        from by the caller."""
+        guarded: set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for scope, calls in self.calls_by_scope.items():
+                in_guarded = isinstance(scope, ast.FunctionDef) and scope.name in guarded
+                for call in calls:
+                    self._tick()
+                    name = call.func.id
+                    if name in self.functions and name not in guarded \
+                            and (in_guarded or call in self.guarded):
+                        guarded.add(name)
+                        changed = True
+        return guarded
 
     def _runs(self, node: ast.AST) -> bool:
         """Whether a node is in module code or a reachable function."""
@@ -5983,6 +6007,9 @@ class _StdlibIO:
                 continue
             found = self._sink(node)
             if found is None or node in self.guarded or not self._runs(node):
+                continue
+            scope = self._scope(node)
+            if isinstance(scope, ast.FunctionDef) and scope.name in self.guarded_functions:
                 continue
             path_node, mode_node, needs_path = found
             path = self.value(path_node) if path_node is not None else None
@@ -7605,6 +7632,9 @@ def _replay_safe_word(raw: str) -> bool:
     unquoted = list(_unquoted_chars(raw))
     if unquoted and unquoted[0] == (0, "="):
         return False
+    positions = {index for index, char in unquoted if char == "="}
+    if any(index + 1 in positions for index in positions):
+        return False  # `--in==cmd`: zsh's magicequalsubst expands `=cmd`
     return not any(char in _REPLAY_UNSAFE_UNQUOTED for _, char in unquoted)
 
 

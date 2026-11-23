@@ -5576,3 +5576,59 @@ def test_main_argparse_replay_needs_words_literal_in_zsh_and_bash(
     )
     [event] = _run_extractor(tmp_path, command)
     assert [Path(r["path"]).name for r in event["inputs"]] == expected
+
+
+# Final-round (Codex P1) reproductions (PR #155).
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("from contextlib import suppress as ignore\n"
+         "def read_optional():\n"
+         "    with open('optional.csv') as source:\n"
+         "        return source.read()\n"
+         "try:\n    read_optional()\nexcept FileNotFoundError:\n    pass\n"
+         "with ignore(FileExistsError):\n    open('report.csv', 'x').write('new')\n",
+         ([], [])),
+        ("def helper():\n    open('h.csv')\ndef outer():\n    helper()\n"
+         "try:\n    outer()\nexcept OSError:\n    pass\n", ([], [])),
+        ("import thing\nwith thing.guard():\n    open('g.csv')\n", ([], [])),
+        ("with open('a.csv') as a, open('b.csv', 'w') as b:\n    b.write(a.read())\n",
+         (["a.csv"], ["b.csv"])),
+        ("from pathlib import Path\nwith Path('p.csv').open() as f:\n    f.read()\n",
+         (["p.csv"], [])),
+        ("import csv\nwith open('rows.csv', 'a+', newline='') as out:\n"
+         "    csv.writer(out).writerow(['next', 1])\n", ([], ["rows.csv"])),
+        ("open('log.txt', 'a')\n", ([], ["log.txt"])),
+        ("import builtins\nfrom builtins import setattr as set_attr\n"
+         "original_open = builtins.open\n"
+         "def redirect(name, mode):\n    return original_open('actual.csv', mode)\n"
+         "set_attr(__builtins__, 'open', redirect)\nopen('declared.csv', 'w').write('r')\n",
+         ([], [])),
+        ("__builtins__.open = None\nopen('x.csv')\n", ([], [])),
+    ],
+    ids=["guarded-helper-and-alias", "guarded-transitive", "other-context-manager",
+         "plain-with-open", "path-open-with", "append-plus", "append",
+         "builtins-alias", "builtins-name"],
+)
+def test_stdlib_final_round_probe(source: str, expected) -> None:
+    assert lineage_event._stdlib_static_io(source, []) == expected
+
+
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("python3 run.py --input==cat", []),
+        ("python3 run.py --input='=cat'", ["=cat"]),
+        ("python3 run.py --input=x==y.csv", []),
+    ],
+)
+def test_main_argparse_declines_zsh_magic_equal_subst(
+    tmp_path: Path, command: str, expected: list[str]
+) -> None:
+    (tmp_path / "run.py").write_text(
+        "import argparse\np = argparse.ArgumentParser()\n"
+        "p.add_argument('--input', required=True)\na = p.parse_args()\n"
+        "open(a.input, 'rb').read(4)\n"
+    )
+    [event] = _run_extractor(tmp_path, command)
+    assert [Path(r["path"]).name for r in event["inputs"]] == expected
