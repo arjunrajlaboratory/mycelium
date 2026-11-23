@@ -175,6 +175,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - a scan over its work budget.
 
   A script that calls `chdir` now records no relative paths from either scan.
+  Paths with an absolute base are still recorded.
+
+  Files that only this scan inferred are hashed under a shared budget (128 MB
+  and 0.25 s per call). A file over the budget is recorded with
+  `sha256: null` and `hash_status: "skipped-budget"`.
   On Antigravity App, which installs no I/O observer, stdlib-only analyses
   had recorded `io_detection: "unresolved"` with no producer.
 

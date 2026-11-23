@@ -5328,3 +5328,73 @@ def test_oversized_script_real_chdir_still_drops_relative_paths(tmp_path: Path) 
     )
     _, inputs, _ = _stdlib_event(tmp_path, source)
     assert inputs == []
+
+
+
+def _run_extractor(cwd: Path, command: str) -> list[dict]:
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = cwd / "events.tmp"
+    target.unlink(missing_ok=True)
+    result = subprocess.run(
+        [sys.executable, str(extractor), "--cwd", str(cwd),
+         "--ts", "2026-11-23T12:00:00Z", "--bash-cmd", command,
+         "--bash-exit", "0", "--append-to", str(target)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return [json.loads(line) for line in target.read_text().splitlines()]
+
+
+def test_chdir_keeps_reader_paths_with_an_absolute_base(tmp_path: Path) -> None:
+    """Passes on main (repository recovery) and here (absolute base)."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "work").mkdir()
+    (tmp_path / "data" / "samples.csv").write_text("x\n1\n")
+    (tmp_path / "run.py").write_text(
+        "import os\nfrom pathlib import Path\nimport pandas as pd\n\n"
+        "os.chdir('work')\n"
+        f"pd.read_csv(Path({str(tmp_path / 'data')!r}) / 'samples.csv')\n"
+        "pd.read_csv('relative.csv')\n"
+    )
+    [event] = _run_extractor(tmp_path, "python3 run.py")
+    paths = [i["path"] for i in event["inputs"]]
+    assert str(tmp_path / "data" / "samples.csv") in paths
+    # Main also records `relative.csv`, resolved against the wrong
+    # directory; this branch drops it (asserted separately).
+
+
+def test_chdir_absolute_base_is_kept_and_relative_dropped(tmp_path: Path) -> None:
+    _, inputs, _ = _stdlib_event(
+        tmp_path,
+        "import os\nfrom pathlib import Path\nimport pandas as pd\n"
+        "os.chdir('work')\n"
+        "BASE = Path('/abs/data')\n"
+        "pd.read_csv(BASE / 'samples.csv')\n"
+        "pd.read_csv(os.path.join('/abs', 'other.csv'))\n"
+        "pd.read_csv(Path('rel') / 'x.csv')\n"
+        "pd.read_csv('relative.csv')\n",
+    )
+    assert inputs == ["/abs/data/samples.csv", "/abs/other.csv"]
+
+
+def test_stdlib_inferred_hashing_is_budgeted(tmp_path: Path) -> None:
+    import time
+
+    names = [f"shard-{i:03}.bin" for i in range(12)]
+    for name in names:
+        with open(tmp_path / name, "wb") as handle:
+            handle.truncate(64 * 1024**2)
+    (tmp_path / "run.py").write_text("".join(
+        f"with open({name!r}, 'rb') as f:\n    f.read(16)\n" for name in names))
+    start = time.perf_counter()
+    [event] = _run_extractor(tmp_path, "python3 run.py")
+    elapsed = time.perf_counter() - start
+    records = {Path(r["path"]).name: r for r in event["inputs"]}
+    assert sorted(records) == names
+    skipped = [r for r in records.values() if r.get("hash_status") == "skipped-budget"]
+    hashed = [r for r in records.values() if r.get("sha256")]
+    assert skipped and all(r["sha256"] is None for r in skipped)
+    assert all("size_bytes" in r for r in skipped)
+    assert len(hashed) + len(skipped) == len(names)
+    assert elapsed < 2.0

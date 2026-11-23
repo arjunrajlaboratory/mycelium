@@ -5424,6 +5424,9 @@ class _StdlibIO:
         self.blocks: dict[ast.AST, tuple[list, int]] = {}
         self.calls_by_scope: dict[ast.AST, list[ast.Call]] = {}
         self.argv_touched = False  # any `x.argv`: argparse may not see the command line
+        # The reader/writer scan's view of imports, for `_io_call_direction`.
+        self.io_aliases: dict[str, str] = {}
+        self.local_roots: set[str] = set()
         self.root_stores: list[ast.AST] = []
         self.counts: dict[str, int] = {}
         self.binders: dict[str, ast.AST] = {}
@@ -5468,6 +5471,8 @@ class _StdlibIO:
     def _bind(self, name: str, binder: ast.AST, weight: int = 1) -> None:
         self.counts[name] = self.counts.get(name, 0) + weight
         self.binders[name] = binder
+        if not isinstance(binder, (ast.Import, ast.ImportFrom)):
+            self.local_roots.add(name)
 
     def _index(self, node: ast.AST) -> None:
         if isinstance(node, ast.Name):
@@ -5523,9 +5528,11 @@ class _StdlibIO:
                 if isinstance(node, ast.Import):
                     local = alias.asname or alias.name.split(".", 1)[0]
                     target = alias.name if alias.asname else local
+                    self.io_aliases[local] = alias.name
                 elif node.module and node.level == 0:
                     local = alias.asname or alias.name
                     target = f"{node.module}.{alias.name}"
+                    self.io_aliases[local] = target
                 else:
                     local, target = alias.asname or alias.name, None
                 self._bind(local, node)
@@ -5959,6 +5966,11 @@ class _StdlibIO:
             ) or any(k.arg is None for k in node.keywords):
                 continue
             found = self._sink(node)
+            if found is None and self.chdir:
+                # The reader scan drops relative paths after a chdir; a
+                # path with an absolute base does not depend on the cwd.
+                self._absolute_reader_call(node, inputs, outputs)
+                continue
             if found is None or not self._runs(node):
                 continue
             path_node, mode_node, needs_path = found
@@ -5979,6 +5991,21 @@ class _StdlibIO:
             for direction in directions:
                 (inputs if direction == "input" else outputs).add(text)
         return sorted(inputs), sorted(outputs)
+
+    def _absolute_reader_call(self, node: ast.Call, inputs: set[str],
+                              outputs: set[str]) -> None:
+        direction = _io_call_direction(node, self.io_aliases, self.local_roots)
+        if direction is None or not self._runs(node):
+            return
+        expressions = list(node.args[:1]) + [
+            k.value for k in node.keywords if k.arg in _PATH_KEYWORDS]
+        if len(expressions) != 1:
+            return
+        path = self.value(expressions[0])
+        if path is None or not os.path.isabs(path.text) or "\0" in path.text \
+                or ".." in Path(path.text).parts:
+            return
+        (inputs if direction == "input" else outputs).add(path.text)
 
     def _keyword(self, node: ast.Call, name: str) -> ast.AST | None:
         for keyword in node.keywords:
@@ -6081,6 +6108,59 @@ def _stdlib_analysis(source: str, script_args: list[str] | None) -> _StdlibAnaly
     except (_OverBudget, RecursionError, MemoryError):
         return fallback
     return _StdlibAnalysis(inputs, outputs, resolver.chdir)
+
+
+class _HashBudget:
+    """One budget for hashing the files only the stdlib scan inferred, across
+    every event of a call: a total of bytes and a deadline. A file over it is
+    recorded with `sha256: null, hash_status: "skipped-budget"`, as a config
+    over the config budget is."""
+
+    def __init__(self, max_bytes: int = 128 * 1024**2, seconds: float = 0.25) -> None:
+        self.bytes_left = max_bytes
+        self.deadline = time.monotonic() + seconds
+
+    def take(self, size: int) -> bool:
+        if size > self.bytes_left or time.monotonic() >= self.deadline:
+            return False
+        self.bytes_left -= size
+        return True
+
+
+def _budgeted_file_record(path_str: str, cwd: Path, budget: _HashBudget) -> dict:
+    """`file_record`, with hashing under the shared budget."""
+    path = Path(path_str)
+    if not path.is_absolute():
+        path = cwd / path
+    rec: dict = {"path": str(path)}
+    try:
+        info = path.stat()
+    except (OSError, ValueError):
+        rec["_missing"] = True
+        return rec
+    rec["size_bytes"] = info.st_size
+    if not stat.S_ISREG(info.st_mode) or info.st_size > SIZE_LIMIT_BYTES:
+        rec["sha256"] = None
+        return rec
+    if not budget.take(info.st_size):
+        rec.update(sha256=None, hash_status="skipped-budget")
+        return rec
+    try:
+        with _open_regular(path) as handle:
+            if handle is None:
+                rec["sha256"] = None
+                return rec
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                if time.monotonic() >= budget.deadline:
+                    rec.update(sha256=None, hash_status="skipped-budget")
+                    return rec
+                digest.update(chunk)
+    except OSError:
+        rec["sha256"] = None
+        return rec
+    rec["sha256"] = digest.hexdigest()
+    return rec
 
 
 def _stdlib_static_io(
@@ -7191,6 +7271,7 @@ def build_event_for_detection(
     git_sha: str | None,
     *,
     script_args: list[str] | None = None,
+    hash_budget: _HashBudget | None = None,
 ) -> dict | None:
     """Build one NDJSON event dict for a single (script_path, inline) detection.
 
@@ -7308,8 +7389,11 @@ def build_event_for_detection(
             filters=filters,
             seeds=seeds,
         )
-    inputs, _ = _merge_recovered_paths(inputs, stdlib_inputs, cwd)
-    outputs, _ = _merge_recovered_paths(outputs, stdlib_outputs, cwd)
+    inputs, stdlib_added_inputs = _merge_recovered_paths(inputs, stdlib_inputs, cwd)
+    outputs, stdlib_added_outputs = _merge_recovered_paths(outputs, stdlib_outputs, cwd)
+    # Files only the stdlib scan inferred are hashed under a shared budget.
+    stdlib_only = set(stdlib_added_inputs) | set(stdlib_added_outputs)
+    budget = hash_budget if hash_budget is not None else _HashBudget()
     recovered_inputs, recovered_outputs = ([], []) if changes_directory else \
         _repository_literal_io(source, cwd, inputs, outputs)
     inputs, added_inputs = _merge_recovered_paths(inputs, recovered_inputs, cwd)
@@ -7337,7 +7421,8 @@ def build_event_for_detection(
         # Which inference produced the path: the reader/writer call scan,
         # or the repository recovery of a dynamic path. Never "observed":
         # observations live in the call's observation record.
-        record = file_record(path, cwd)
+        record = _budgeted_file_record(path, cwd, budget) if path in stdlib_only \
+            else file_record(path, cwd)
         record["source"] = "inferred-repository" if path in recovered else "inferred-static"
         return record
 
@@ -8621,6 +8706,7 @@ def main() -> int:
     events: list[dict] = []
     unreadable: list[str] = []
     budget = ConfigBudget()
+    hash_budget = _HashBudget()
     # Several runner stages in one call: the n-th runner detection is the
     # n-th runner word, but only when the counts agree (a runner name in an
     # echo would otherwise shift every stage).
@@ -8650,6 +8736,7 @@ def main() -> int:
         event = build_event_for_detection(
             (script_path, inline_source), args, effective_cwd, git_sha,
             script_args=literal_args[0] if literal_args else None,
+            hash_budget=hash_budget,
         )
         if event is not None:
             step = build_step(args.bash_cmd, invocation, inline_source,
