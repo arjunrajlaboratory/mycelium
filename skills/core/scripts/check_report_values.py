@@ -498,8 +498,10 @@ def _explain(index, rel: str, actual: str | None) -> dict[str, Any] | None:
 def _shared(write: dict[str, Any]) -> dict[str, Any]:
     """An observation that saw the change while other calls overlapped it:
     any of them may have made it, so none is named as the producer."""
-    candidates = [write.get("call")] + [c for c in write.get("overlapping") or []
-                                        if isinstance(c, str)]
+    # A background job beside the observing call comes first: the index
+    # lists it when one ran (`candidates`).
+    candidates = list(write.get("candidates") or []) or (
+        [write.get("call")] + [c for c in write.get("overlapping") or [] if isinstance(c, str)])
     return {"status": "producer-shared", "candidates": candidates,
             "verdict": _verdict(write), "attribution": write.get("attribution"),
             "detail": "the change was observed while other calls overlapped; any of the "

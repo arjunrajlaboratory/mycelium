@@ -1323,6 +1323,23 @@ def repo_6(tmp_path: Path) -> Path:
     return root
 
 
+def test_a_helper_reached_through_a_parent_pointer_is_mycelium_s_own(tmp_path: Path) -> None:
+    # Live run: from analysis/de/reports, `S=$(cat ../../../.mycelium/plugin-root)/
+    # skills/core/scripts; python $S/check_report_values.py` was skipped as unreadable.
+    plugin = HERE.parent.parent.parent
+    repo = tmp_path / "repo"
+    sub = repo / "analysis" / "de" / "reports"
+    sub.mkdir(parents=True)
+    (repo / ".mycelium").mkdir()
+    (repo / ".mycelium" / "plugin-root").write_text(str(plugin) + "\n")
+    command = ("S=$(cat ../../../.mycelium/plugin-root)/skills/core/scripts\n"
+               "python $S/check_report_values.py --manifest x")
+    path = ev._variable_script_path(command, command.index("$S/"),
+                                    "$S/check_report_values.py", sub)
+    assert path == (plugin / "skills" / "core" / "scripts" / "check_report_values.py").resolve()
+    assert ev._is_managed_utility_path(path)
+
+
 @pytest.mark.parametrize("assignment", [
     "R=$(cat .mycelium/plugin-root)/skills/core/scripts",
     'R="$(cat .mycelium/plugin-root)/skills/core/scripts"',

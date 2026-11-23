@@ -932,6 +932,17 @@ def launch(project: Path, call: str, task: str | None) -> None:
             task_id=task)
 
 
+def test_a_change_seen_beside_a_background_job_names_no_producer(project: Path) -> None:
+    # Live run: a background job wrote its output while the agent's
+    # foreground poll was running, and the index credited the poll.
+    launch(project, "job", "task-9")
+    bash(project, "poll", write_x(project, "B"))  # the job's write, seen by the poll
+    (write,) = [w for w in li.load(project, write=False).writes if w["path"] == "out/x"]
+    assert write["attribution"] == "uncertain"
+    assert write["candidates"][0] == "s1|claude:job"
+    assert write["candidates"][-1] == "s1|claude:poll"
+
+
 def test_a_later_background_job_is_unaccounted_but_identity_proves_the_file(
         project: Path) -> None:
     bash(project, "c1", write_x(project, "A"))

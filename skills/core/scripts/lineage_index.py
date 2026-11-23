@@ -67,7 +67,7 @@ if str(HERE) not in sys.path:
 
 import io_observer  # noqa: E402
 
-BUILDER_VERSION = 3  # 3: observations stored slim (no command text)
+BUILDER_VERSION = 4  # 4: slim overlaps keep their background flag
 INDEX_SCHEMA = "mycelium.lineage_index.v1"
 QUERY_SCHEMA = "mycelium.lineage_query.v1"
 DEFAULT_MAX_BYTES = 4 * 1024**3
@@ -436,8 +436,9 @@ def _slim_observation(record: dict[str, Any]) -> dict[str, Any]:
     slim = {key: record[key] for key in _OBSERVATION_FIELDS if key in record}
     overlapping = slim.get("overlapping")
     if isinstance(overlapping, list):
-        slim["overlapping"] = [{"call": o.get("call")} for o in overlapping
-                               if isinstance(o, dict)]
+        slim["overlapping"] = [{k: o.get(k) for k in ("call", "host", "session", "background")
+                                if k in o}
+                               for o in overlapping if isinstance(o, dict)]
     return slim
 
 
@@ -808,6 +809,20 @@ class Index:
                        if isinstance(o, dict)]
         if overlapping and attribution == "sole":
             attribution = "shared"
+        # A change seen while a background job ran beside the observing call
+        # is most likely the job's (a live run credited a job's output to the
+        # foreground poll that happened to see it). Nothing here can prove
+        # which one wrote it, so none is named: the job comes first among
+        # the candidates.
+        background_beside = [
+            _obs_key(o.get("session"), f"{o.get('host')}:{o.get('call')}")
+            for o in record.get("overlapping") or []
+            if isinstance(o, dict) and o.get("background")]
+        background_beside = [c for c in background_beside if c]
+        candidates = None
+        if background_beside:
+            attribution = "uncertain"
+            candidates = background_beside + [key]
         if status == "background":
             # A background job may keep writing after its launch snapshot;
             # its writes are unknown until the journal bounds its interval.
@@ -841,6 +856,7 @@ class Index:
                     "hash_origin": "observed" if isinstance(sha, str) else None,
                     "action": action, "change": kind, "evidence": "observed",
                     "attribution": attribution, "overlapping": overlapping,
+                    **({"candidates": candidates} if candidates else {}),
                     "incomplete": incomplete, **base,
                 })
 
@@ -1206,6 +1222,7 @@ def _write_summary(write: dict[str, Any], index: Index) -> dict[str, Any]:
         "hash_status": write.get("hash_status"), "hash_origin": write.get("hash_origin"),
         "evidence": write.get("evidence"), "attribution": write.get("attribution"),
         "overlapping": write.get("overlapping") or [],
+        **({"candidates": write["candidates"]} if write.get("candidates") else {}),
         "incomplete": bool(write.get("incomplete")), "source": write.get("source"),
         "tool": write.get("tool"), "tool_outcome": write.get("tool_outcome"),
         "events": [index.events.get(e, {"event_id": e}) for e in write.get("events") or []],

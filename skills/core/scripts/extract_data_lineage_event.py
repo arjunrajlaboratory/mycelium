@@ -526,10 +526,12 @@ def _is_managed_utility_path(resolved: Path) -> bool:
 # literal absolute path.
 _ROOT_ASSIGNMENT_RX = re.compile(
     r"""(?:^|[;&|\n(]|&&|\|\|)\s*([A-Za-z_][A-Za-z0-9_]*)="""
-    r"""(?:"\$\(cat \.mycelium/plugin-root\)(?P<suffix_q>/[A-Za-z0-9_./-]*)?\""""
+    # The pointer may be read from a parent of the working directory
+    # (`$(cat ../../.mycelium/plugin-root)` from inside an analysis folder).
+    r"""(?:"\$\(cat (?P<up_q>(?:\.\./)*)\.mycelium/plugin-root\)(?P<suffix_q>/[A-Za-z0-9_./-]*)?\""""
     r"""(?P<suffix_after>/[A-Za-z0-9_./-]*)?"""
-    r"""|\$\(cat \.mycelium/plugin-root\)(?P<suffix>/[A-Za-z0-9_./-]*)?"""
-    r"""|'?(/[^\s;&|$'"`]+)'?)(?=[\s;&|]|$)"""
+    r"""|\$\(cat (?P<up>(?:\.\./)*)\.mycelium/plugin-root\)(?P<suffix>/[A-Za-z0-9_./-]*)?"""
+    r"""|'?(?P<literal>/[^\s;&|$'"`]+)'?)(?=[\s;&|]|$)"""
 )
 
 
@@ -718,13 +720,16 @@ def _variable_script_path(command: str, offset: int, raw_path: str,
     if not modeled or modeled[-1].start() != last_any:
         return None
     assignment = modeled[-1]
-    literal = assignment.group(5)
+    literal = assignment.group("literal")
     suffix = "".join(assignment.group(g) or "" for g in ("suffix_q", "suffix_after", "suffix"))
+    up = assignment.group("up_q") or assignment.group("up") or ""
     if literal is not None:
         value = literal
     elif cwd is not None:
-        # The bounded, link-refusing pointer reader the accessor path uses.
-        pointer = _pointer_expansion_value(cwd, "cat")
+        # The bounded, link-refusing pointer reader the accessor path uses,
+        # in the directory the `cat` names (the cwd or a parent of it).
+        base = Path(os.path.normpath(os.path.join(str(cwd), up))) if up else cwd
+        pointer = _pointer_expansion_value(base, "cat")
         value = pointer + suffix if pointer else None
     else:
         value = None
