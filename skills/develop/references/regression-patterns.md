@@ -609,15 +609,16 @@ publish, using one shared cleanup-and-validation implementation. A preserved
 authored handoff contains every heading in one supported five-section schema
 exactly once, in that schema's order, with at least one nonblank body line per
 section after obsolete lifecycle prose is removed. A subheading is structure,
-not body: a section holding only `###` subsections is empty. Any absent, stale, empty,
-duplicated, misordered, or cleanup-emptied structure receives the deterministic
-complete fallback before accepted publication; the finalizer enforces the same
-contract before its first write.
+not body: a section holding only `###` subsections is empty. A fresh handoff
+that fails this check first gets one Stop block naming its problems (see
+pattern 52); an absent or stale handoff, or one still failing after that
+block, receives the deterministic complete fallback before accepted
+publication. The finalizer enforces the same contract before its first write.
 
 **Regression evidence:** Exercise canonical and legacy complete handoffs as
 preservation positives. Exercise an empty body, a body of subheadings only, reordered
 headings, a duplicate heading, and a section whose only body line is removed by
-lifecycle cleanup as negatives; require one ordered, nonempty canonical set in the accepted durable
+lifecycle cleanup as negatives; require one block, then one ordered, nonempty canonical set in the accepted durable
 handoff. Invoke finalization directly on the cleanup-emptied case and require
 the private source and shared destination to remain byte-identical.
 
@@ -1165,3 +1166,37 @@ than a pipe buffer, an existing destination handoff, a relative
 `MYCELIUM_STATE_DIR`, a malformed owner token (never taken), a move
 after recorded work in the main checkout (kept and still judged there), and
 an unrelated repository (never searched).
+
+## 52. A validator silently replaces what the agent was told to write
+
+**Failure:** The handoff instructions and the handoff validator drift apart.
+The instructions said "five-section handoff" with loose section names; the
+validator matches exact heading lines and strips Stop-status lines. An
+Antigravity App agent wrote a detailed handoff under numbered headings, and
+Stop replaced it with the generic fallback without telling the agent. Each
+wording fix exposed another case the agent could not see (a subheading-only
+section, a stripped "Stop pending" bullet).
+
+**Invariant:** Every instruction that asks for the handoff names the exact
+canonical headings in order, and a test checks them against
+`finalize_handoff.HANDOFF_SCHEMAS`. A fresh handoff that the validator would
+reject blocks Stop once per transaction, with a reason that names the missing,
+duplicated, misordered and empty sections and any stripped Stop-status line.
+The marker that spends that block holds the transaction's session ID. A retry
+that still fails, an absent or stale handoff, any validator error, and a host
+with no continuation left fall back without blocking. The check and the
+diagnosis share one normalisation (byte-order mark, trailing heading
+whitespace, headings inside a closed column-0 fence ignored). It is accepted
+in addition to the strict whole-line reading, never instead of it, so it can
+never reject a handoff the strict reading accepts. The block comes before any
+registry write. The handoff is read once after the registry wait, and
+publication uses exactly those bytes. Nothing after that read blocks on the
+handoff, and a write racing Stop is undefined. Each attempt to detect such
+races created a new one.
+
+**Regression evidence:** Run Stop on a real numbered-heading handoff, a
+subheading-only section and a section emptied by Stop-status cleanup: each
+blocks once, then falls back on retry. A handoff repaired after the block is
+preserved. A complete legacy-schema handoff is accepted without a block, a
+validator error fails open, and a marker from another transaction does not
+suppress the block.

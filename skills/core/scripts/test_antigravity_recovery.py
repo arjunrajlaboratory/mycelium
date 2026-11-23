@@ -424,7 +424,7 @@ class StopRace:
         local = threading.local()
         self.local = local
 
-        def hook(name, data, root, plugin):
+        def hook(name, data, root, plugin, **_kw):
             role = getattr(local, "role", "main")
             self.hooks.append((role, name))
             if role == "holder":
