@@ -23,20 +23,40 @@ on 2026-11-23 (`skills/core/scripts/access_note.py`):
 - **What counts as a table step.** A manifest action with a script file
   that did not fail, and an output the observer saw created or modified
   whose name ends in .csv, .tsv (optionally .gz), .parquet or .h5ad, outside
-  `.living/` and `.mycelium/`. Inline runs cannot be joined, and an
-  unobserved output is no evidence of a write, so neither counts.
-- **The join.** A record covers the action when its `computed_at` names the
-  action's script (relative to its `analysis/<ns>/`, or absolute) and its
-  `run.process_started_at` is no later than the action's `ts` plus two
-  seconds. Records carry no per-call id, so an older record from the same
-  script also covers it: the note errs toward silence. An unreadable
-  `access.json` makes the answer unknown and suppresses the note too.
-- **Advisory and off the hot path.** The lineage Stop phase runs the helper
-  only after a successful extraction whose manifest names a table, and
-  writes its one paragraph to `access-note.tmp` in the session state
-  directory. Stop appends it to the lineage messages and removes the file.
-  It never blocks Stop or changes the enforcement retry, and any failure
-  prints nothing.
+  `.living/`, `.mycelium/` and `.git/`. Inline runs cannot be joined, and an
+  unobserved output is no evidence of a write, so neither counts. Only the
+  last run of each script is judged, because `record_ids` replaces a record
+  of the same name. An output that several scripts of one observed call
+  declare is attributed to none of them: the observation marks it changed
+  on all, though only one may have written it.
+- **The join.** A record covers that run when its process started before
+  the run ended (two seconds' slack) and after the session started, and
+  when it names the script in `computed_at`, or sits in the script's own
+  `analysis/<ns>/outputs/access.json` (a helper module recorded it), or
+  started after the previous recorded call ended (R recording into another
+  namespace, or `computed_at: "R"`).
+- **Errs toward silence.** Files without the `mycelium.access.v1` marker are
+  skipped. No symlink is followed on the way to an access file (lstat
+  only), and nothing outside the repository is read; an unreadable or
+  linked file in the step's own analysis makes that step unknown. More than
+  100 candidate files is an incomplete scan, and past 4 MB per file, 16 MB
+  in all or 1.5 s, every step is unknown; a 3 s alarm ends the helper with
+  no output. Unknown never produces a note.
+- **Shown once, on acceptance only.** The lineage Stop phase runs the helper
+  (only when its manifest names a table and an observed write) into
+  `access-note.tmp`. Stop shows the note only when it accepts, and only in
+  `systemMessage`, never in a block reason. On Claude, `additionalContext`
+  on an accepted Stop makes Claude take another turn, so the note never goes
+  there and what Claude receives is unchanged; on Codex `systemMessage` is
+  the Stop channel and does not continue the turn. Stop then
+  records each named script and its content hash in
+  `access-note-seen.tsv`, so the same script at the same content is not
+  named again. The note is capped at 1500 bytes by the helper itself. The
+  phase that writes the note cannot fail, and any helper failure prints
+  nothing.
+- **Not gated on detected filters.** `filters_detected` is no longer
+  written (item 4), so the note cannot tell a filter from a summary. The
+  once-per-script-content rule keeps that from repeating.
 
 Records go to `analysis/<name>/outputs/access.json` (schema `access_fragment`
 in `skills/core/references/provenance-schema.json`). Each record's `run`

@@ -234,13 +234,13 @@ With these records, a reader such as Warrant can catch:
 
 ### The Stop-time access note
 
-When a step this turn ran a script that wrote a table (.csv, .tsv, .parquet or .h5ad, seen created or modified by the observer) and no `access.json` record names that script, Stop adds an advisory paragraph:
+When a script this session wrote a table (.csv, .tsv, .parquet or .h5ad, seen created or modified by the observer) and no `access.json` record covers it, the Stop that accepts the session shows an advisory line to the user (`systemMessage`; on Claude it is not added to the model's context, so it never makes Claude continue):
 
 ```text
-ACCESS NOTE: 1 step(s) this turn wrote a table but recorded no row or feature access: analysis/qc/scripts/filter.py -> analysis/qc/outputs/kept.csv. If a step filters, subsets or splits rows or features, call record_ids there ...
+ACCESS NOTE: 1 script(s) this session wrote a table and recorded no row or feature access: analysis/qc/scripts/filter.py -> analysis/qc/outputs/kept.csv. Where a script filters, subsets or splits rows or features, consider record_ids there ...
 ```
 
-A record covers the step when its `computed_at` names the step's script and its `run.process_started_at` is not after the step ended. The note is advice, not enforcement: it never blocks Stop, and a step that only reshapes or exports data needs no record. Records carry no per-call id, so a record left by an earlier run of the same script also silences it.
+A record covers the script's last run when its process started during the session and before that run ended, and it names the script, is in the script's own `analysis/<ns>/outputs/access.json`, or started after the previous call ended. The note is advice: it never appears in a block, never blocks Stop, and names a script at a given content only once. A script that only summarizes, plots or exports needs no record.
 
 Fingerprints show only whether two sets are *equal*. A train set `{a, b}` and test set `{b, c}` give different fingerprints, exactly as two disjoint sets do. Overlap detection needs a separate check that sees the ids, inside the analysis.
 

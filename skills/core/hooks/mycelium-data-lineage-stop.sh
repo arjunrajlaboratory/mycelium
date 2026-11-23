@@ -148,18 +148,29 @@ EXIT_CODE=$?
 set -e
 END=$(date +%s)
 
-# Advisory access note (item 7): a step that wrote a table but recorded no
-# record_ids access. Stop reads and removes the file; it never blocks on it.
-# Off the hot path: the helper starts only when the manifest names a table,
-# and any failure leaves no note.
-ACCESS_NOTE_FILE="$STATE_DIR/access-note.tmp"
-rm -f "$ACCESS_NOTE_FILE"
-if [[ "$EXIT_CODE" -eq 0 ]] \
-  && grep -Eqi '\.(csv|tsv|csv\.gz|tsv\.gz|parquet|h5ad)"' "$OUT_FILE" 2>/dev/null; then
+# Advisory access note (item 7): a script that wrote a table but recorded no
+# record_ids access. Stop shows it only when it accepts, and never blocks on
+# it. Nothing here may fail this phase: the function runs with its status
+# discarded, and the helper bounds its own time and fails open. It starts only
+# when the manifest names a table and an observed write.
+mycelium__write_access_note() {
+  local note_file="$STATE_DIR/access-note.tmp" since="" seen=()
+  rm -f "$note_file" 2>/dev/null || return 0
+  [[ "$EXIT_CODE" -eq 0 ]] || return 0
+  grep -Eqi '\.(csv|tsv|csv\.gz|tsv\.gz|parquet|h5ad)"' "$OUT_FILE" 2>/dev/null || return 0
+  grep -Eq '"observed_change": "(created|modified)"' "$OUT_FILE" 2>/dev/null || return 0
+  since=$(head -1 "$STATE_DIR/session-start-ts.tmp" 2>/dev/null) || since=""
+  [[ "$since" =~ ^[0-9]+$ ]] || since=""
+  if [[ -n "${MYCELIUM_SHARED_STATE_DIR:-}" && -d "$MYCELIUM_SHARED_STATE_DIR" ]]; then
+    seen=(--seen "$MYCELIUM_SHARED_STATE_DIR/access-note-seen.tsv")
+  fi
   python3 "${MYCELIUM_ACCESS_NOTE_HELPER:-$HERE/../scripts/access_note.py}" \
-    --manifest "$OUT_FILE" --repo-root "$REPO_ROOT" > "$ACCESS_NOTE_FILE" 2>/dev/null \
-    || rm -f "$ACCESS_NOTE_FILE"
-fi
+    --manifest "$OUT_FILE" --repo-root "$REPO_ROOT" ${since:+--since "$since"} \
+    ${seen[@]+"${seen[@]}"} > "$note_file" 2>/dev/null \
+    || rm -f "$note_file" 2>/dev/null
+  return 0
+}
+mycelium__write_access_note || true
 
 # Write structured status sentinel via Python (handles quoting safely).
 EVENTS_SIZE=$(mycelium_file_size "$EVENTS_FILE")

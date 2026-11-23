@@ -363,16 +363,60 @@ fi
 if [[ -n "$UNOWNED_GAP_MSG" ]]; then
   LINEAGE_GAP_MSG="${LINEAGE_GAP_MSG:+$LINEAGE_GAP_MSG }$UNOWNED_GAP_MSG"
 fi
-# Advisory only: the note rides along with the lineage messages and never
-# changes whether Stop blocks.
-if [[ -f "$ACCESS_NOTE_FILE" && ! -L "$ACCESS_NOTE_FILE" ]]; then
-  ACCESS_NOTE=$(head -c 4000 "$ACCESS_NOTE_FILE" 2>/dev/null || true)
-  if [[ "$ACCESS_NOTE" == "ACCESS NOTE: "* ]]; then
-    [[ -z "$LINEAGE_GAP_MSG" ]] || LINEAGE_GAP_MSG+=$'\n\n'
-    LINEAGE_GAP_MSG+="$ACCESS_NOTE"
+# The advisory access note (access_note.py): its first line is the note, the
+# rest are `key<TAB>script<TAB>sha` lines. It is shown only by an accepting
+# Stop (mycelium_emit_accepted_stop), never in a block reason, and its keys are
+# then remembered so the same script at the same content is not named again.
+ACCESS_NOTE=""
+ACCESS_NOTE_KEYS=""
+if [[ -f "$ACCESS_NOTE_FILE" && ! -L "$ACCESS_NOTE_FILE" ]] \
+  && (( $(mycelium_file_size "$ACCESS_NOTE_FILE" 2>/dev/null || echo 99999) < 65536 )); then
+  { IFS= read -r ACCESS_NOTE || true; } < "$ACCESS_NOTE_FILE" 2>/dev/null || ACCESS_NOTE=""
+  if [[ "$ACCESS_NOTE" == "ACCESS NOTE: "* ]] && (( ${#ACCESS_NOTE} <= 2000 )); then
+    ACCESS_NOTE_KEYS=$(grep $'^key\t' "$ACCESS_NOTE_FILE" 2>/dev/null | cut -f2-) || ACCESS_NOTE_KEYS=""
+  else
+    ACCESS_NOTE=""
   fi
 fi
 rm -f "$ACCESS_NOTE_FILE" 2>/dev/null || true
+# mycelium_emit_accepted_stop CONTEXT: the accepting Stop's output, with the
+# access note. On Claude the note goes only to `systemMessage`, shown to the
+# user: `additionalContext` on an accepted Stop makes Claude take another
+# turn, and advice must never do that, so CONTEXT is left exactly as it was
+# (and a Stop that would be silent stays silent to Claude). On Codex,
+# `systemMessage` is the only Stop channel and does not continue the turn,
+# so the note follows CONTEXT there. The note's keys are then remembered so
+# the same script at the same content is not named again. Never fails.
+mycelium_emit_accepted_stop() {
+  local context="$1" seen="" escaped=""
+  if [[ -z "$ACCESS_NOTE" ]]; then
+    [[ -z "$context" ]] || mycelium_emit_context "Stop" "$context"
+    return 0
+  fi
+  if [[ "$(mycelium_hook_host)" == codex ]]; then
+    [[ -z "$context" ]] || context+=$'\n\n'
+    mycelium_emit_context "Stop" "$context$ACCESS_NOTE" || return 0
+  elif [[ -n "$context" ]]; then
+    mycelium_emit_context "Stop" "$context" "$ACCESS_NOTE" || return 0
+  else
+    escaped=$(mycelium_json_dumps_stdin "$ACCESS_NOTE" 2>/dev/null) || return 0
+    [[ -n "$escaped" ]] || return 0
+    mycelium__fast_write "{\"systemMessage\": $escaped}"$'\n' || return 0
+  fi
+  if [[ -n "$ACCESS_NOTE_KEYS" && -n "${MYCELIUM_SHARED_STATE_DIR:-}" \
+    && -d "$MYCELIUM_SHARED_STATE_DIR" ]]; then
+    seen="$MYCELIUM_SHARED_STATE_DIR/access-note-seen.tsv"
+    if [[ ! -L "$seen" ]]; then
+      { printf '%s\n' "$ACCESS_NOTE_KEYS" >> "$seen"; } 2>/dev/null || true
+      # Keep the newest entries only.
+      if (( $(mycelium_file_size "$seen" 2>/dev/null || echo 0) > 524288 )); then
+        { tail -n 2000 "$seen" > "$seen.tmp.$$" && mv -f "$seen.tmp.$$" "$seen"; } \
+          2>/dev/null || rm -f "$seen.tmp.$$" 2>/dev/null || true
+      fi
+    fi
+  fi
+  return 0
+}
 # Post-tool events of this transaction that a hook could not record (its
 # session lock was unavailable). Take them now, under this Stop's locks. A
 # `work` record (a project edit, a proven analysis run) is work of unknown
@@ -1131,9 +1175,7 @@ if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
   rm -f "$STATE_DIR/living-reminder-baseline.json"
   mycelium_accept_lineage_session
   mycelium_cleanup_accepted_scoped_state
-  if [[ -n "$LINEAGE_GAP_MSG" ]]; then
-    mycelium_emit_context "Stop" "$LINEAGE_GAP_MSG"
-  fi
+  mycelium_emit_accepted_stop "$LINEAGE_GAP_MSG" || true
   exit 0
 fi
 
@@ -1193,7 +1235,7 @@ if [ "$LIVING_UPDATED" = true ]; then
 
   ENHANCE_MSG=".living/ updated. The accepted handoff was published to ${MYCELIUM_SHARED_STATE_DIR}/last-session.md, and the deterministic LOG_REGISTRY summary is in place."
   ENHANCE_MSG=$(mycelium_with_lineage_gap "$ENHANCE_MSG")
-  mycelium_emit_context "Stop" "$ENHANCE_MSG"
+  mycelium_emit_accepted_stop "$ENHANCE_MSG" || true
   mycelium_accept_lineage_session
   mycelium_cleanup_accepted_scoped_state
   exit 0
