@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -48,7 +49,7 @@ def _action(repo: Path, *, script: str | None = "analysis/qc/scripts/filter.py",
         records.append(record)
     return {"ts": ts, "script": str(repo / script) if script else None,
             "script_sha256": SHA, "inputs": [], "outputs": records, "bash_exit": 0,
-            "tool_outcome": "success", **extra}
+            "tool_outcome": "success", "observation_status": "no-known-overlap", **extra}
 
 
 def _manifest(tmp_path: Path, actions: list[dict], data_commands=()) -> Path:
@@ -347,3 +348,92 @@ def test_output_shared_by_two_scripts_in_one_call_is_not_attributed(tmp_path, re
 def test_unencodable_name_prints_nothing_rather_than_broken_text(tmp_path, repo):
     action = _action(repo, outputs=("analysis/qc/outputs/bad\udcff.csv",))
     assert _note(repo, _manifest(tmp_path, [action])) == ""
+
+
+def test_run_one_record_does_not_cover_an_unrecorded_run_two(tmp_path, repo):
+    # Run 1 recorded access; run 2 rewrote the table without recording.
+    _access(repo, [_record(started="2026-11-23T12:00:05Z")])
+    runs = [_action(repo, ts="2026-11-23T12:00:10Z"), _action(repo, ts="2026-11-23T12:05:10Z")]
+    assert "filter.py" in _note(repo, _manifest(tmp_path, runs))
+
+
+def test_earlier_script_in_the_same_analysis_does_not_cover_a_later_one(tmp_path, repo):
+    (repo / "analysis/qc/scripts/qc.py").write_text("")
+    _access(repo, [_record(computed_at="scripts/qc.py:L3", started="2026-11-23T11:59:58Z")])
+    earlier = _action(repo, script="analysis/qc/scripts/qc.py", ts="2026-11-23T12:00:03Z",
+                      outputs=())
+    assert "filter.py" in _note(repo, _manifest(tmp_path, [earlier, _action(repo)]))
+
+
+@pytest.mark.parametrize("status", ["overlap", "background", "unavailable", None])
+def test_a_call_not_observed_alone_is_never_named(tmp_path, repo, status):
+    action = _action(repo, observation_status=status)
+    assert _note(repo, _manifest(tmp_path, [action])) == ""
+
+
+def test_keys_name_only_the_scripts_the_note_shows(tmp_path, repo):
+    actions = []
+    for i in range(5):
+        (repo / "analysis" / "qc" / "scripts" / f"s{i}.py").write_text("")
+        actions.append(_action(repo, script=f"analysis/qc/scripts/s{i}.py",
+                               outputs=(f"analysis/qc/outputs/t{i}.csv",),
+                               ts=f"2026-11-23T12:00:1{i}Z"))
+    lines = an.note_lines(_manifest(tmp_path, actions), repo)
+    assert "(+2 more)" in lines[0]
+    assert [l.split("\t")[1] for l in lines[1:]] == [
+        f"analysis/qc/scripts/s{i}.py" for i in range(3)]
+
+
+def test_analysis_dirs_without_access_files_do_not_count_toward_the_cap(tmp_path, repo,
+                                                                        monkeypatch):
+    monkeypatch.setattr(an, "MAX_ACCESS_FILES", 3)
+    for i in range(10):
+        (repo / "analysis" / f"empty{i}").mkdir()
+    assert "filter.py" in _note(repo, _manifest(tmp_path, [_action(repo)]))
+    monkeypatch.setattr(an, "MAX_ANALYSIS_DIRS", 5)
+    assert _note(repo, _manifest(tmp_path, [_action(repo)])) == ""
+
+
+def test_fifo_access_file_is_unknown_and_never_blocks(tmp_path, repo):
+    os.mkfifo(repo / "analysis" / "qc" / "outputs" / "access.json")
+    assert _note(repo, _manifest(tmp_path, [_action(repo)])) == ""
+
+
+def test_remember_adds_keys_dedupes_and_keeps_the_newest(tmp_path, monkeypatch):
+    seen = tmp_path / "seen.tsv"
+    an.remember(seen, ["a.py\t1", "b.py\t2"])
+    an.remember(seen, ["a.py\t1", "c.py\t3"])
+    assert seen.read_text().splitlines() == ["b.py\t2", "a.py\t1", "c.py\t3"]
+    monkeypatch.setattr(an, "SEEN_KEEP", 2)
+    an.remember(seen, ["d.py\t4"])
+    assert seen.read_text().splitlines() == ["c.py\t3", "d.py\t4"]
+    assert not list(tmp_path.glob(".seen.tsv.*"))
+
+
+def test_remember_leaves_a_fifo_or_symlink_alone_without_blocking(tmp_path):
+    fifo = tmp_path / "fifo.tsv"
+    os.mkfifo(fifo)
+    an.remember(fifo, ["a.py\t1"])  # returns at once: never opened for writing
+    assert fifo.exists() and not fifo.is_file()
+    target = tmp_path / "target.tsv"
+    target.write_text("x\ty\n")
+    link = tmp_path / "link.tsv"
+    link.symlink_to(target)
+    an.remember(link, ["a.py\t1"])
+    assert link.is_symlink() and target.read_text() == "x\ty\n"
+
+
+def test_remember_never_follows_a_planted_temp_path(tmp_path):
+    seen = tmp_path / "seen.tsv"
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep\n")
+    (tmp_path / f".seen.tsv.{os.getpid()}.tmp").symlink_to(victim)
+    an.remember(seen, ["a.py\t1"])
+    assert victim.read_text() == "keep\n" and not seen.exists()
+
+
+def test_remember_command_line(tmp_path):
+    seen = tmp_path / "seen.tsv"
+    done = subprocess.run([sys.executable, str(HERE / "access_note.py"), "--remember",
+                           str(seen), "a.py\t1"], capture_output=True, text=True)
+    assert done.returncode == 0 and seen.read_text() == "a.py\t1\n"

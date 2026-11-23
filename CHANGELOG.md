@@ -93,8 +93,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   modified) and no `record_ids` record covers its last run, the accepting
   Stop shows an advisory `ACCESS NOTE` to the user in `systemMessage` (on
   Claude never in `additionalContext`, which would make Claude continue). A
-  record covers it by naming the script, by being in the script's own
-  analysis, or by starting inside the call's time window. The note never
+  record covers it when its process started inside that run's window, after
+  the previous call ended; a run the observer did not see alone is never
+  named. The note never
   appears in a block reason, names a script at a given content once, and
   stays under 1500 bytes. Its helper (`skills/core/scripts/access_note.py`)
   skips foreign `access.json` files, follows no symlinks, reads under file

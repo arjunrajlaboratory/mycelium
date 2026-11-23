@@ -61,7 +61,7 @@ def _run(host: str, name: str, repo: Path, payload: dict, env_extra=None):
     env["MYCELIUM_HOOK_HOST"] = host
     env.update(env_extra or {})
     return subprocess.run([str(HOOKS_DIR / name)], cwd=repo, input=json.dumps(payload),
-                          text=True, capture_output=True, env=env, check=False)
+                          text=True, capture_output=True, env=env, check=False, timeout=120)
 
 
 def _call(host: str, repo: Path, sid: str, call: str) -> None:
@@ -248,3 +248,15 @@ def test_directory_squatting_on_the_note_file_cannot_fail_stop(tmp_path, host):
     accepted = _accept(host, repo, "s1")
     assert "consolidation failed" not in accepted.stdout
     assert _out(accepted).get("decision") is None
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_fifo_at_the_seen_cache_cannot_stall_stop(tmp_path, host):
+    repo = _repo(tmp_path, records=False)
+    _turn(host, repo, "s1")
+    os.mkfifo(repo / ".mycelium" / "access-note-seen.tsv")
+    started = time.monotonic()
+    accepted = _accept(host, repo, "s1")
+    assert time.monotonic() - started < 60
+    assert _out(accepted).get("decision") is None
+    assert "ACCESS NOTE" in _out(accepted).get("systemMessage", "")

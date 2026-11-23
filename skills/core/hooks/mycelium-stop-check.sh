@@ -403,17 +403,17 @@ mycelium_emit_accepted_stop() {
     [[ -n "$escaped" ]] || return 0
     mycelium__fast_write "{\"systemMessage\": $escaped}"$'\n' || return 0
   fi
+  # The helper writes the cache: a regular file only, through an exclusively
+  # created temporary file, under its own deadline.
   if [[ -n "$ACCESS_NOTE_KEYS" && -n "${MYCELIUM_SHARED_STATE_DIR:-}" \
     && -d "$MYCELIUM_SHARED_STATE_DIR" ]]; then
-    seen="$MYCELIUM_SHARED_STATE_DIR/access-note-seen.tsv"
-    if [[ ! -L "$seen" ]]; then
-      { printf '%s\n' "$ACCESS_NOTE_KEYS" >> "$seen"; } 2>/dev/null || true
-      # Keep the newest entries only.
-      if (( $(mycelium_file_size "$seen" 2>/dev/null || echo 0) > 524288 )); then
-        { tail -n 2000 "$seen" > "$seen.tmp.$$" && mv -f "$seen.tmp.$$" "$seen"; } \
-          2>/dev/null || rm -f "$seen.tmp.$$" 2>/dev/null || true
-      fi
-    fi
+    local keys=()
+    while IFS= read -r seen; do
+      [[ -z "$seen" ]] || keys+=("$seen")
+    done <<< "$ACCESS_NOTE_KEYS"
+    python3 "${MYCELIUM_ACCESS_NOTE_HELPER:-$HERE/../scripts/access_note.py}" \
+      --remember "$MYCELIUM_SHARED_STATE_DIR/access-note-seen.tsv" \
+      ${keys[@]+"${keys[@]}"} >/dev/null 2>&1 || true
   fi
   return 0
 }
@@ -1235,9 +1235,9 @@ if [ "$LIVING_UPDATED" = true ]; then
 
   ENHANCE_MSG=".living/ updated. The accepted handoff was published to ${MYCELIUM_SHARED_STATE_DIR}/last-session.md, and the deterministic LOG_REGISTRY summary is in place."
   ENHANCE_MSG=$(mycelium_with_lineage_gap "$ENHANCE_MSG")
-  mycelium_emit_accepted_stop "$ENHANCE_MSG" || true
   mycelium_accept_lineage_session
   mycelium_cleanup_accepted_scoped_state
+  mycelium_emit_accepted_stop "$ENHANCE_MSG" || true
   exit 0
 fi
 

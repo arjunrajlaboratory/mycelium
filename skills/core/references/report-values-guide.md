@@ -240,7 +240,7 @@ When a script this session wrote a table (.csv, .tsv, .parquet or .h5ad, seen cr
 ACCESS NOTE: 1 script(s) this session wrote a table and recorded no row or feature access: analysis/qc/scripts/filter.py -> analysis/qc/outputs/kept.csv. Where a script filters, subsets or splits rows or features, consider record_ids there ...
 ```
 
-A record covers the script's last run when its process started during the session and before that run ended, and it names the script, is in the script's own `analysis/<ns>/outputs/access.json`, or started after the previous call ended. The note is advice: it never appears in a block, never blocks Stop, and names a script at a given content only once. A script that only summarizes, plots or exports needs no record.
+A record covers the script's last run when its process started inside that run's window: after the previous call ended (or the session started) and before the run ended. A run whose call overlapped another is never named. The note is advice: it never appears in a block, never blocks Stop, and names a script at a given content only once. A script that only summarizes, plots or exports needs no record.
 
 Fingerprints show only whether two sets are *equal*. A train set `{a, b}` and test set `{b, c}` give different fingerprints, exactly as two disjoint sets do. Overlap detection needs a separate check that sees the ids, inside the analysis.
 

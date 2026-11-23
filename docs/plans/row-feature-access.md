@@ -26,32 +26,36 @@ on 2026-11-23 (`skills/core/scripts/access_note.py`):
   `.living/`, `.mycelium/` and `.git/`. Inline runs cannot be joined, and an
   unobserved output is no evidence of a write, so neither counts. Only the
   last run of each script is judged, because `record_ids` replaces a record
-  of the same name. An output that several scripts of one observed call
+  of the same name. A run is named only when the observer saw its call
+  alone (`no-known-overlap`), and an output several scripts of one call
   declare is attributed to none of them: the observation marks it changed
   on all, though only one may have written it.
-- **The join.** A record covers that run when its process started before
-  the run ended (two seconds' slack) and after the session started, and
-  when it names the script in `computed_at`, or sits in the script's own
-  `analysis/<ns>/outputs/access.json` (a helper module recorded it), or
-  started after the previous recorded call ended (R recording into another
-  namespace, or `computed_at: "R"`).
+- **The join.** A record covers that run when its process started inside
+  the run's window: no later than the run ended (two seconds' slack) and no
+  earlier than the previous recorded call ended, or, with none, the session
+  started. Its file and call site do not matter, so a helper module, R
+  recording into another namespace and `computed_at: "R"` all count, while
+  an earlier run's record, or an earlier script's, does not.
 - **Errs toward silence.** Files without the `mycelium.access.v1` marker are
   skipped. No symlink is followed on the way to an access file (lstat
-  only), and nothing outside the repository is read; an unreadable or
+  only), nothing outside the repository is read, and each file is opened
+  once (`O_NOFOLLOW`, `O_NONBLOCK`) and read with a bound; an unreadable or
   linked file in the step's own analysis makes that step unknown. More than
-  100 candidate files is an incomplete scan, and past 4 MB per file, 16 MB
-  in all or 1.5 s, every step is unknown; a 3 s alarm ends the helper with
-  no output. Unknown never produces a note.
+  100 existing access files or 2000 analysis directories is an incomplete
+  scan, and past 4 MB per file, 16 MB in all or 1.5 s, every step is
+  unknown; a 3 s alarm ends the helper with no output. Unknown never
+  produces a note.
 - **Shown once, on acceptance only.** The lineage Stop phase runs the helper
   (only when its manifest names a table and an observed write) into
   `access-note.tmp`. Stop shows the note only when it accepts, and only in
   `systemMessage`, never in a block reason. On Claude, `additionalContext`
   on an accepted Stop makes Claude take another turn, so the note never goes
   there and what Claude receives is unchanged; on Codex `systemMessage` is
-  the Stop channel and does not continue the turn. Stop then
-  records each named script and its content hash in
-  `access-note-seen.tsv`, so the same script at the same content is not
-  named again. The note is capped at 1500 bytes by the helper itself. The
+  the Stop channel and does not continue the turn. After the transaction is
+  archived, Stop has the helper record each script the note names, with
+  its content hash, in `access-note-seen.tsv` (regular file only, through
+  an exclusively created temporary file), so the same script at the same
+  content is not named again. The helper caps the note at 1500 bytes. The
   phase that writes the note cannot fail, and any helper failure prints
   nothing.
 - **Not gated on detected filters.** `filters_detected` is no longer
