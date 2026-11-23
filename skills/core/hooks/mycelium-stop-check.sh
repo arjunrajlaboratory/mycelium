@@ -611,7 +611,8 @@ mycelium_cleanup_accepted_scoped_state() {
   # The one-time handoff explanation belongs to the accepted transaction, in a
   # flat (legacy) state directory as much as a scoped one. Never fatal: a
   # directory at this path must not fail an accepted Stop.
-  rm -f "$STATE_DIR/handoff-check-blocked.tmp" 2>/dev/null || true
+  rm -f "$STATE_DIR/handoff-check-blocked.tmp" "$STATE_DIR/.last-session.snapshot" \
+    "$STATE_DIR/.last-session.fallback" 2>/dev/null || true
   if [[ "${MYCELIUM_SESSION_SCOPED:-false}" != true \
     || "$STATE_DIR" == "$MYCELIUM_SHARED_STATE_DIR" ]]; then
     return 0
@@ -681,6 +682,57 @@ mycelium_block_once_for_incomplete_handoff() {
     "STOP BLOCKED — the session handoff ${handoff} would be replaced by a generic fallback: ${diagnosis}. Rewrite it with exactly these headings, once each, in this order: ${headings}. Give each section at least one line of prose or a bullet besides its subheadings (\`- None.\` when there is nothing to report). \`## Current state\` describes the project, not Stop status; Stop-status lines are removed before the check. Then end your turn again. This is asked once: if a second Stop still finds the handoff incomplete, it publishes the generic fallback." \
     || return 1
   return 0
+}
+
+# Copy the handoff once into a private snapshot that Stop judges and publishes.
+# Sets _HANDOFF_SNAPSHOT_STATE to regular, absent or other (a link or a
+# non-file: not ours to compare, replaced as before). Returns 1 only when the
+# file kept changing while it was copied.
+_HANDOFF_SNAPSHOT=""
+_HANDOFF_FALLBACK=""
+_HANDOFF_SNAPSHOT_STATE=absent
+mycelium_snapshot_handoff() {
+  local handoff="$1"
+  local attempt=0
+  _HANDOFF_SNAPSHOT="$STATE_DIR/.last-session.snapshot"
+  _HANDOFF_FALLBACK="$STATE_DIR/.last-session.fallback"
+  rm -f "$_HANDOFF_SNAPSHOT" "$_HANDOFF_FALLBACK" 2>/dev/null || true
+  if [[ -L "$handoff" ]]; then
+    # The fallback used to be moved over a link; publication now writes the
+    # destination, which must not be a link.
+    rm -f "$handoff" 2>/dev/null || true
+  fi
+  if [[ ! -e "$handoff" ]]; then
+    _HANDOFF_SNAPSHOT_STATE=absent
+    return 0
+  fi
+  if [[ ! -f "$handoff" ]]; then
+    _HANDOFF_SNAPSHOT_STATE=other
+    return 0
+  fi
+  while (( attempt < 3 )); do
+    attempt=$((attempt + 1))
+    if cp -p "$handoff" "$_HANDOFF_SNAPSHOT" 2>/dev/null \
+      && cmp -s "$handoff" "$_HANDOFF_SNAPSHOT"; then
+      _HANDOFF_SNAPSHOT_STATE=regular
+      return 0
+    fi
+  done
+  rm -f "$_HANDOFF_SNAPSHOT" 2>/dev/null || true
+  return 1
+}
+
+# Succeed when the handoff on disk is no longer what the snapshot read.
+mycelium_handoff_changed_since_snapshot() {
+  local handoff="$1"
+  case "$_HANDOFF_SNAPSHOT_STATE" in
+    absent) [[ -e "$handoff" || -L "$handoff" ]] ;;
+    regular)
+      [[ -L "$handoff" || ! -f "$handoff" ]] && return 0
+      ! cmp -s "$handoff" "$_HANDOFF_SNAPSHOT"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # Resolve this hook's mycelium-core dir once, in absolute form. Used to locate
@@ -906,7 +958,10 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
 
       # A handoff the agent wrote this transaction but that fails the check
       # gets one specific explanation before the fallback replaces it.
-      if [[ "$_SESSION_COMPLETE" != true && "$_SESSION_FRESH" == true ]] \
+      # Once a previous attempt ended the log (handoff-finalization-pending),
+      # the registry row is complete: fall back rather than block.
+      if [[ "$_SESSION_COMPLETE" != true && "$_SESSION_FRESH" == true \
+        && ! -e "$STATE_DIR/handoff-finalization-pending.tmp" ]] \
         && mycelium_block_once_for_incomplete_handoff \
           "$_SESSION_FILE" "$SESSION_ID"; then
         exit 0
@@ -965,6 +1020,34 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
         exit 0
       fi
 
+      # Read the handoff once, after the registry wait, and judge and publish
+      # exactly those bytes: a handoff the agent wrote while Stop waited is
+      # kept, and a write after this read is never overwritten (see the check
+      # before publication).
+      if ! mycelium_snapshot_handoff "$_SESSION_FILE"; then
+        mycelium_emit_stop_block \
+          "STOP BLOCKED — the session handoff ${_SESSION_FILE} changed while Stop was finalizing it. Active state was preserved; end your turn again so Stop publishes the current handoff."
+        exit 0
+      fi
+      _HANDOFF_SOURCE="$_HANDOFF_SNAPSHOT"
+      _SESSION_COMPLETE=false
+      _SESSION_FRESH=false
+      if [[ "$_HANDOFF_SNAPSHOT_STATE" == regular ]]; then
+        if [ -f "$FINALIZE_HANDOFF_SCRIPT" ] \
+          && python3 "$FINALIZE_HANDOFF_SCRIPT" \
+            --handoff "$_HANDOFF_SNAPSHOT" \
+            --check-complete \
+            >/dev/null 2>/dev/null; then
+          _SESSION_COMPLETE=true
+        fi
+        _SESSION_MTIME=$(mycelium_file_mtime "$_HANDOFF_SNAPSHOT" 2>/dev/null || echo "0")
+        if [[ "$START_TS" =~ ^[0-9]+$ \
+          && "$_SESSION_MTIME" =~ ^[0-9]+$ \
+          && "$_SESSION_MTIME" -ge "$START_TS" ]]; then
+          _SESSION_FRESH=true
+        fi
+      fi
+
       # Preserve a complete handoff authored during this session. If it is
       # absent, stale, or partial, publish a complete deterministic fallback
       # atomically instead of replacing a rich handoff with two headings.
@@ -1021,12 +1104,13 @@ LAST_SESSION_EOF
             "STOP BLOCKED — session handoff finalization failed. Active state was preserved for retry."
           exit 0
         fi
-        if ! mv -f "$_SESSION_TMP" "$_SESSION_FILE"; then
+        if ! mv -f "$_SESSION_TMP" "$_HANDOFF_FALLBACK"; then
           rm -f "$_SESSION_TMP"
           mycelium_emit_stop_block \
             "STOP BLOCKED — session handoff finalization failed. Active state was preserved for retry."
           exit 0
         fi
+        _HANDOFF_SOURCE="$_HANDOFF_FALLBACK"
       fi
 
       if [ ! -f "$FINALIZE_HANDOFF_SCRIPT" ]; then
@@ -1109,15 +1193,18 @@ LAST_SESSION_EOF
       # Only now is it truthful to publish an authoritative accepted state in
       # the rich handoff. If this atomic write fails, the pending sentinel keeps
       # SessionStart and Stop on the same retryable transaction.
-      _FINALIZE_HANDOFF_ARGS=(
-        --handoff "$_SESSION_FILE"
-        --accepted-at "$ENDED"
-      )
-      if [[ "$STATE_DIR" != "$MYCELIUM_SHARED_STATE_DIR" ]]; then
-        _FINALIZE_HANDOFF_ARGS+=(
-          --publish-to "$MYCELIUM_SHARED_STATE_DIR/last-session.md"
-        )
+      # Never publish over a handoff written after the snapshot: keep the retry
+      # state, and the next Stop judges the newer handoff.
+      if mycelium_handoff_changed_since_snapshot "$_SESSION_FILE"; then
+        mycelium_emit_stop_block \
+          "STOP BLOCKED — the session handoff ${_SESSION_FILE} changed while Stop was finalizing it. Active state was preserved; end your turn again so Stop publishes the current handoff."
+        exit 0
       fi
+      _FINALIZE_HANDOFF_ARGS=(
+        --handoff "$_HANDOFF_SOURCE"
+        --accepted-at "$ENDED"
+        --publish-to "$MYCELIUM_SHARED_STATE_DIR/last-session.md"
+      )
       if ! python3 "$FINALIZE_HANDOFF_SCRIPT" \
         "${_FINALIZE_HANDOFF_ARGS[@]}" \
         >/dev/null 2>"$LOG_DIR/.finalize_handoff.err"; then
@@ -1126,6 +1213,7 @@ LAST_SESSION_EOF
         exit 0
       fi
       rm -f "$LOG_DIR/.finalize_handoff.err"
+      rm -f "$_HANDOFF_SNAPSHOT" "$_HANDOFF_FALLBACK" 2>/dev/null || true
       # Keep the active marker and retry sentinel until the shared enforcement
       # and lineage phase below accepts and archives the whole transaction.
     fi

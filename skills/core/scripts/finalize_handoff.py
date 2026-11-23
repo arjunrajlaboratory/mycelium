@@ -44,9 +44,53 @@ _STALE_STOP_LINE = re.compile(
 _MARKDOWN_HEADING = re.compile(r"^ {0,3}#{1,6}(?:\s|$)")
 
 
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+def _outside_fences(lines: list[str]) -> list[bool]:
+    """Mark the lines that are not inside a fenced code block.
+
+    A fenced example of a handoff is text, not structure. As in CommonMark, a
+    fence closes on a line of at least as many of the same character with
+    nothing after it, and an unclosed fence runs to the end of the document.
+    """
+    outside: list[bool] = []
+    fence = ""
+    for line in lines:
+        match = _FENCE.match(line)
+        if not fence:
+            outside.append(not match)
+            if match and not (match.group(1)[0] == "`" and "`" in line[match.end():]):
+                fence = match.group(1)
+        else:
+            outside.append(False)
+            if (
+                match
+                and match.group(1)[0] == fence[0]
+                and len(match.group(1)) >= len(fence)
+                and not line[match.end():].strip()
+            ):
+                fence = ""
+    return outside
+
+
 def _is_heading(line: str, heading: str) -> bool:
     """Trailing whitespace on a heading line is invisible; it still counts."""
     return line.rstrip() == heading
+
+
+def _heading_positions(lines: list[str], heading: str) -> list[int]:
+    outside = _outside_fences(lines)
+    return [
+        index
+        for index, line in enumerate(lines)
+        if outside[index] and _is_heading(line, heading)
+    ]
+
+
+def _is_body(line: str, outside: bool) -> bool:
+    # A subheading is structure; inside a fence every nonblank line is text.
+    return bool(line.strip()) and (not outside or not _MARKDOWN_HEADING.match(line))
 
 
 def clean_handoff_body(content: str) -> str:
@@ -58,12 +102,11 @@ def clean_handoff_body(content: str) -> str:
 
 def handoff_has_complete_sections(content: str) -> bool:
     lines = content.splitlines()
+    outside = _outside_fences(lines)
     for headings in HANDOFF_SCHEMAS:
         positions: list[int] = []
         for heading in headings:
-            matches = [
-                index for index, line in enumerate(lines) if _is_heading(line, heading)
-            ]
+            matches = _heading_positions(lines, heading)
             if len(matches) != 1:
                 break
             positions.append(matches[0])
@@ -73,8 +116,7 @@ def handoff_has_complete_sections(content: str) -> bool:
             for index, start in enumerate(positions):
                 end = positions[index + 1] if index + 1 < len(positions) else len(lines)
                 if not any(
-                    line.strip() and not _MARKDOWN_HEADING.match(line)
-                    for line in lines[start + 1 : end]
+                    _is_body(lines[line], outside[line]) for line in range(start + 1, end)
                 ):
                     break
             else:
@@ -106,10 +148,9 @@ def describe_handoff_problems(content: str) -> list[str]:
         if _STALE_STOP_LINE.match(line)
     ]
     lines = clean_handoff_body(content).splitlines()
+    outside = _outside_fences(lines)
     positions = {
-        heading: [
-            index for index, line in enumerate(lines) if _is_heading(line, heading)
-        ]
+        heading: _heading_positions(lines, heading)
         for heading in headings
     }
     problems: list[str] = []
@@ -131,8 +172,7 @@ def describe_handoff_problems(content: str) -> list[str]:
         later = [position for position in starts if position > start]
         end = later[0] if later else len(lines)
         if not any(
-            line.strip() and not _MARKDOWN_HEADING.match(line)
-            for line in lines[start + 1 : end]
+            _is_body(lines[line], outside[line]) for line in range(start + 1, end)
         ):
             problems.append(f"`{heading}` has no prose or bullet")
     if stripped:

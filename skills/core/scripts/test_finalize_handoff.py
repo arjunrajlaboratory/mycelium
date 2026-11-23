@@ -399,3 +399,54 @@ def test_diagnose_names_an_empty_section_before_a_duplicate(tmp_path: Path) -> N
     assert result.returncode == 3
     assert "`## Next steps` appears 2 times" in result.stdout
     assert "`## Current state` has no prose or bullet" in result.stdout
+
+
+LEGACY_WITH_FENCED_EXAMPLE = (
+    "## Current State\n- Tests passed.\n\n"
+    "## What Was Done\n- Documented the handoff format:\n\n"
+    "{fence}markdown\n## Next Steps  \n- example bullet\n{fence}\n\n"
+    "## Key Decisions\n- Preserve the authored handoff.\n\n"
+    "## Next Steps\n- Continue review.\n\n"
+    "## Relevant Files\n- `.living/learnings.md`.\n"
+)
+
+
+def test_headings_inside_fenced_code_are_examples_not_sections(tmp_path: Path) -> None:
+    from finalize_handoff import handoff_is_complete_after_cleanup
+
+    canonical_example = _complete_handoff().replace(
+        "## Key decisions made\n- Preserve complete authored handoffs.\n",
+        "## Key decisions made\n- Preserve complete authored handoffs.\n\n"
+        "```\n## Current state\n```\n",
+    )
+    for content in (
+        LEGACY_WITH_FENCED_EXAMPLE.format(fence="```"),
+        LEGACY_WITH_FENCED_EXAMPLE.format(fence="~~~~"),
+        canonical_example,
+    ):
+        assert handoff_is_complete_after_cleanup(content)
+        result = _diagnose(tmp_path, content)
+        assert (result.returncode, result.stdout) == (0, "")
+
+
+def test_a_heading_inside_an_unclosed_fence_is_not_a_section() -> None:
+    from finalize_handoff import handoff_is_complete_after_cleanup
+
+    # An unclosed fence runs to the end of the document, as in CommonMark, so
+    # the sections after it are example text and the handoff is incomplete.
+    content = _complete_handoff().replace(
+        "## Current state", "```\n## Current state"
+    )
+
+    assert not handoff_is_complete_after_cleanup(content)
+
+
+def test_a_fenced_example_counts_as_section_body() -> None:
+    from finalize_handoff import handoff_is_complete_after_cleanup
+
+    content = _complete_handoff().replace(
+        "## Blockers & surprises\n- None.\n",
+        "## Blockers & surprises\n```\n## not a section\n```\n",
+    )
+
+    assert handoff_is_complete_after_cleanup(content)

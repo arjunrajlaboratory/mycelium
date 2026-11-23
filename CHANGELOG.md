@@ -181,7 +181,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Stop publishes the fallback at once. The one-time marker is cleared when
   Stop accepts or SessionStart replaces the transaction, and it moves with
   a session adopted into a worktree, so the move does not grant a second
-  explanation.
+  explanation. Headings inside fenced code examples no longer count as
+  sections. After waiting on the registry, Stop reads the handoff once and
+  publishes exactly those bytes, so a handoff written while Stop waited is
+  kept. A handoff written after that read is never overwritten: Stop keeps
+  its retry state and asks again. A failed late attempt no longer replaces
+  `last-session.md` with an unpublished fallback.
   `finalize_handoff.py --diagnose` reports the problems: exit 0 for a
   complete handoff, 3 with a one-line diagnosis, 1 on error. Existing projects pick up the new rule 10 the next time
   `init_repo.py` or migration refreshes their `MYCELIUM.md`.
