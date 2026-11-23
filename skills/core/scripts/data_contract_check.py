@@ -673,9 +673,10 @@ def check_paired_batch(check, columns, rows):
     except _Echelon.TooLarge:
         return [alert(
             "paired_batch", "the design is too large to check within the time advisory checks "
-            "allow, so batch against the {} contrast was not checked".format(check.get("within")),
+            "allow, so batch against the {} contrast was not checked".format(
+                _clip(check.get("within"))),
             False, observed="{} rows, batch columns: {}".format(
-                len(rows), ", ".join(as_list(check.get("batch")))))]
+                len(rows), ", ".join(_clip(b) for b in as_list(check.get("batch")))))]
 
 
 def _paired_batch(check, rows, budget):
@@ -706,6 +707,10 @@ def _paired_batch(check, rows, budget):
     group = check.get("group")
     if group == within:
         group = None
+    # Names and values as messages show them: clipped, so a pathological
+    # column name or label cannot make the report enormous.
+    unit_name, within_name = _clip(unit), _clip(within)
+    batch_names = ", ".join(_clip(b) for b in batches)
     scopes = check.get("batch_scopes") or {}
     unit_ids = [r[unit] for r in scoped(rows, unit, as_list(check.get("unit_scope")))]
     batch_ids = [[r[b] for r in scoped(rows, b, as_list(scopes.get(b)))] for b in batches]
@@ -730,7 +735,8 @@ def _paired_batch(check, rows, budget):
         if unknown:
             alerts.append(alert(
                 "paired_batch", "{} rows have no '{}' and their {} has no single one to fill it "
-                "from; they are modelled as an unknown group".format(unknown, group, unit), False,
+                "from; they are modelled as an unknown group".format(unknown, _clip(group), unit_name),
+                False,
                 observed="{} of {} rows".format(unknown, len(rows))))
         records = filled
     paired_rows = [r for r in records if not is_missing(r[0]) and not is_missing(r[2])]
@@ -739,7 +745,7 @@ def _paired_batch(check, rows, budget):
         alerts.append(alert(
             "paired_batch", "{} rows have a missing value in {}; a model adjusting for batch "
             "drops them (checked below for lost pairs)".format(len(paired_rows) - len(batched),
-                                                    ", ".join(batches)), False,
+                                                    batch_names), False,
             observed="{} of {} rows".format(len(paired_rows) - len(batched), len(paired_rows))))
     contrasts = []
     listed = distinct_levels(check.get("levels"))
@@ -794,7 +800,7 @@ def _paired_batch(check, rows, budget):
             confounded.append(contrast)
 
     def label(contrasts):
-        shown = "; ".join("{} vs {}".format(_side_label(group, (g, lvl)), ref)
+        shown = "; ".join("{} vs {}".format(_side_label(group, (g, lvl)), _clip(ref))
                           for g, lvl, ref in contrasts[:5])
         return shown + ("; and {} more".format(len(contrasts) - 5) if len(contrasts) > 5 else "")
 
@@ -803,7 +809,7 @@ def _paired_batch(check, rows, budget):
             "paired_batch",
             "missing {} values leave no {} with both sides of the {} contrast, so a model "
             "adjusting for batch has no pair to estimate it from".format(
-                ", ".join(batches), unit, within), False,
+                batch_names, unit_name, within_name), False,
             expected="pairs with batch values on both sides",
             observed="no complete pair: " + label(erased)))
     if confounded:
@@ -811,16 +817,16 @@ def _paired_batch(check, rows, budget):
         by_unit = defaultdict(set)
         for u, g, w, b in batched:
             if (g, w) in involved:
-                by_unit[u].add("{}@{}".format(w, "/".join(b)))
+                by_unit[u].add("{}@{}".format(_clip(w), _clip("/".join(b))))
         alerts.append(alert(
             "paired_batch",
             "within {}, the {} contrast cannot be separated from {}: the pairs are split "
-            "across batches in step with it".format(unit, within, ", ".join(batches)), False,
+            "across batches in step with it".format(unit_name, within_name, batch_names), False,
             expected="each {} contrast estimable within {} after adjusting for {}".format(
-                within, unit, ", ".join(batches)),
+                within_name, unit_name, batch_names),
             observed="not estimable: " + label(confounded),
-            evidence=["{}={}: {}".format(unit, u, ", ".join(sorted(v)))
-                      for u, v in sorted(by_unit.items())][:5]))
+            evidence=["{}={}: {}".format(unit_name, _clip(u), _clip(", ".join(sorted(v))))
+                      for u, v in sorted(by_unit.items())[:5]]))
     share = check.get("max_share")
     if share is None:
         return alerts
@@ -836,6 +842,7 @@ def _paired_batch(check, rows, budget):
     for u, g, w, b in batched:
         batch_sets[(g, w)][u].add(b)
     reported = set(confounded) | set(erased)
+    hits = []
     for contrast in contrasts:
         g, lvl, ref = contrast
         budget.spend()
@@ -851,22 +858,38 @@ def _paired_batch(check, rows, budget):
                 steps.update((lvl, t) for t in b)
         if not steps:
             continue
-        (level, batch), count = max(sorted(steps.items(), key=str), key=lambda item: item[1])
+        (level, batch), count = max(steps.items(), key=lambda item: item[1])
         if count / len(pairs) > share:
-            alerts.append(alert(
-                "paired_batch",
-                "within {}, the {} contrast {} vs {} rests mostly on pairs split across {} in "
-                "step with it".format(unit, within, _side_label(group, (g, lvl)), ref,
-                                      ", ".join(batches)), False,
-                expected="at most {} of {} with one side in the same batch and the other "
-                         "elsewhere".format(percent(share), unit),
-                observed="{} of {} units have {} in {} and the other side in another "
-                         "batch".format(count, len(pairs), level, "/".join(batch))))
+            hits.append((contrast, count, len(pairs), level, batch))
+    if hits:
+        # One warning per check: a count and at most five examples.
+        examples = ["{} vs {}: {} of {} units have {} in {} and the other side in another "
+                    "batch".format(_side_label(group, (g, lvl)), _clip(ref), count, n, _clip(level),
+                                   _clip("/".join(batch)))
+                    for (g, lvl, ref), count, n, level, batch in hits[:5]]
+        alerts.append(alert(
+            "paired_batch",
+            "within {}, {} {} contrast{} rest{} mostly on pairs split across {} in step with "
+            "{}".format(unit_name, len(hits), within_name, "s" if len(hits) > 1 else "",
+                        "" if len(hits) > 1 else "s", batch_names,
+                        "them" if len(hits) > 1 else "it"), False,
+            expected="at most {} of {} with one side in the same batch and the other "
+                     "elsewhere".format(percent(share), unit_name),
+            observed="; ".join(examples) +
+                     ("; and {} more".format(len(hits) - 5) if len(hits) > 5 else "")))
     return alerts
 
 
 def _side_label(group, side):
-    return "{}={}: {}".format(group, side[0], side[1]) if group else str(side[1])
+    if group:
+        return "{}={}: {}".format(_clip(group), _clip(side[0]), _clip(side[1]))
+    return _clip(side[1])
+
+
+def _clip(value, limit=120):
+    """A name or value as a message shows it: at most `limit` characters."""
+    text = str(value)
+    return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
 def check_unique(check, columns, rows):

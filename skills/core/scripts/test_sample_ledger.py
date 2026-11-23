@@ -1006,3 +1006,21 @@ def test_thousands_of_erased_contrasts_stay_within_the_budget(tmp_path: Path) ->
     assert time.perf_counter() - start < dcc.ADVISORY_SECONDS + 0.5
     assert not any(a["blocking"] for a in alerts)
     assert all(len(a["observed"]) < 100000 for a in alerts if "observed" in a)  # 5 listed, not 5,500
+
+
+def test_paired_batch_warnings_stay_bounded() -> None:
+    # Codex's shape: 130,000-character column names and one in-step contrast
+    # per group. One max_share warning per check, names clipped.
+    unit, visit = "unit_" + "é" * 130_000, "visit_" + "é" * 130_000
+    rows = []
+    for donor in range(200):
+        extra, followup = ("B", "C") if donor % 2 else ("C", "B")
+        for day in range(12):
+            for aliquot in range(2):
+                rows.append({unit: f"d{donor}", "group": f"g{donor // 2}", visit: f"v{day:02}",
+                             "run": followup if day else ("A", extra)[aliquot]})
+    alerts = dcc.check_paired_batch({"unit": unit, "within": visit, "group": "group",
+                                     "batch": ["run"], "max_share": 0.5}, [], rows)
+    in_step = [a for a in alerts if "in step" in a["message"]]
+    assert len(in_step) == 1
+    assert len(json.dumps(alerts)) < 20_000

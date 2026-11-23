@@ -183,7 +183,10 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   units. Eight donors with base in run 1 and week 4 in run 2, plus two with
   both visits in run 3, warn: the visit effect rests on two donors.
   Counterbalanced splits (half each way, a rotation through three runs) and
-  randomized runs spread both sides out and pass. Ledger contracts set
+  randomized runs spread both sides out and pass. The check reports this as
+  one warning per check, with the number of affected contrasts and at most
+  five examples; column names and values in its messages are shortened to
+  120 characters. Ledger contracts set
   `"max_share": 0.5`. It takes `unit_scope` and `batch_scopes` for local
   labels, and checks 1000 units with three visits and two batch columns in
   well under a second. All advisory checks in one run share one budget of
