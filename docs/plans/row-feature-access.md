@@ -17,9 +17,50 @@ Status: built, 2026-11-22, with these decisions (agreed with the user):
 5. **Recommended, not required.** The analyze skill and the report-values guide
    recommend `record_ids` at filter, subset and split steps.
 
-The Stop-time note for a table-writing step with no access record is **not
-built**. It needs a cross-reference between lineage events and
-`access.json`, and it is left for a later change.
+The Stop-time note for a table-writing step with no access record was built
+on 2026-11-23 (`skills/core/scripts/access_note.py`):
+
+- **What counts as a table step.** A manifest action with a script file
+  that did not fail, and an output the observer saw created or modified
+  whose name ends in .csv, .tsv (optionally .gz), .parquet or .h5ad, outside
+  `.living/`, `.mycelium/` and `.git/`. Inline runs cannot be joined, and an
+  unobserved output is no evidence of a write, so neither counts. Only the
+  last run of each script is judged, because `record_ids` replaces a record
+  of the same name. A run is named only when the observer saw its call
+  alone (`no-known-overlap`), and an output several scripts of one call
+  declare is attributed to none of them: the observation marks it changed
+  on all, though only one may have written it.
+- **The join.** A record covers that run when its process started inside
+  the run's window: no later than the run ended (two seconds' slack) and no
+  earlier than the previous recorded call ended, or, with none, the session
+  started. Its file and call site do not matter, so a helper module, R
+  recording into another namespace and `computed_at: "R"` all count, while
+  an earlier run's record, or an earlier script's, does not.
+- **Errs toward silence.** Files without the `mycelium.access.v1` marker are
+  skipped. No symlink is followed on the way to an access file (lstat
+  only), nothing outside the repository is read, and each file is opened
+  once (`O_NOFOLLOW`, `O_NONBLOCK`) and read with a bound; an unreadable or
+  linked file in the step's own analysis makes that step unknown. More than
+  100 existing access files or 2000 analysis directories is an incomplete
+  scan, and past 4 MB per file, 16 MB in all or 1.5 s, every step is
+  unknown; a 3 s alarm ends the helper with no output. Unknown never
+  produces a note.
+- **Shown once, on acceptance only.** The lineage Stop phase runs the helper
+  (only when its manifest names a table and an observed write) into
+  `access-note.tmp`. Stop shows the note only when it accepts, and only in
+  `systemMessage`, never in a block reason. On Claude, `additionalContext`
+  on an accepted Stop makes Claude take another turn, so the note never goes
+  there and what Claude receives is unchanged; on Codex `systemMessage` is
+  the Stop channel and does not continue the turn. After the transaction is
+  archived, Stop has the helper record each script the note names, with
+  its content hash, in `access-note-seen.tsv` (regular file only, through
+  an exclusively created temporary file), so the same script at the same
+  content is not named again. The helper caps the note at 1500 bytes. The
+  phase that writes the note cannot fail, and any helper failure prints
+  nothing.
+- **Not gated on detected filters.** `filters_detected` is no longer
+  written (item 4), so the note cannot tell a filter from a summary. The
+  once-per-script-content rule keeps that from repeating.
 
 Records go to `analysis/<name>/outputs/access.json` (schema `access_fragment`
 in `skills/core/references/provenance-schema.json`). Each record's `run`
@@ -137,7 +178,7 @@ such, and add the env-var path later only if needed.
    leaving them out until a concrete check needs one.
 5. **Enforcement.** Should the analyze skill require declarations for every
    filter step, or only recommend them? I propose recommending them, plus a
-   Stop-time note when a step that wrote a table recorded no access entries.
+   Stop-time note when a step that wrote a table recorded no access entries. (Built 2026-11-23; see the top of this file.)
 
 ## Cost
 
