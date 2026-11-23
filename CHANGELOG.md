@@ -158,6 +158,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MYCELIUM.md` template and the core skill's verification table give the
   current hook counts (seven Claude scripts, eight Codex command hooks).
 
+### Fixed
+
+- **An accepted Stop no longer gives Claude another turn.** On Claude Code,
+  `additionalContext` on a Stop hook continues the conversation. Mycelium
+  used it for the ".living/ updated" confirmation and for lineage-gap and
+  unrecorded-event notes, so every accepted Stop with an update made the
+  model reply again (confirmed in a live `claude -p` run). Those messages are
+  for the user, so an accepted Stop now emits only `systemMessage` on every
+  host, as Codex already did. Blocked Stops are unchanged.
+
 ## [0.9.7] - 2026-11-21
 
 ### Added

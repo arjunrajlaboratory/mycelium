@@ -75,12 +75,13 @@ if [[ "${PATSUB:-}" == on ]]; then shopt -s patsub_replacement 2>/dev/null || tr
 enc="$MYCELIUM__PC_ENC"
 for file in "$dir"/*.bin; do
   value=$(cat "$file"; printf x); value="${value%x}"
-  for kind in context stop stdin cell codex; do
+  for kind in context stop stdin cell codex claudestop; do
     for path in fast slow; do
       if [[ "$path" == slow ]]; then MYCELIUM__PC_ENC=""; else MYCELIUM__PC_ENC="$enc"; fi
       case "$kind" in
         context) out=$(MYCELIUM_HOOK_HOST=claude mycelium_emit_context PostToolUse "$value" "$value" 2>/dev/null; printf 'rc=%s' "$?") ;;
         codex) out=$(MYCELIUM_HOOK_HOST=codex mycelium_emit_context Stop "$value" 2>/dev/null; printf 'rc=%s' "$?") ;;
+        claudestop) out=$(MYCELIUM_HOOK_HOST=claude mycelium_emit_context Stop "$value" "$value" 2>/dev/null; printf 'rc=%s' "$?") ;;
         stop) out=$(mycelium_emit_stop_block "$value" 2>/dev/null; printf 'rc=%s' "$?") ;;
         stdin) out=$(mycelium_json_dumps_stdin "$value" 2>/dev/null; printf 'rc=%s' "$?") ;;
         cell)
@@ -146,7 +147,7 @@ def test_fast_encoders_match_the_interpreter(tmp_path, bash, environment):
     for line in result.stdout.splitlines():
         name, kind, path, out = line.split(b"\t")
         rows.setdefault((name, kind), {})[path] = out
-    assert len(rows) == len(ALL_SAMPLES) * 5
+    assert len(rows) == len(ALL_SAMPLES) * 6
     mismatches = [
         (name, kind, outs[b"fast"], outs[b"slow"])
         for (name, kind), outs in rows.items()
@@ -176,6 +177,7 @@ mycelium_payload_preload probe_payload get:cwd
 : > "$2"
 MYCELIUM_HOOK_HOST=claude mycelium_emit_context PostToolUse 'SESSION LOG UPDATE: ### HH:MM — title "quoted" \n done' >/dev/null
 MYCELIUM_HOOK_HOST=codex mycelium_emit_context Stop '.living/ updated.' >/dev/null
+MYCELIUM_HOOK_HOST=claude mycelium_emit_context Stop '.living/ updated.' 'ACCESS NOTE: 1 script(s) — x' >/dev/null
 mycelium_emit_stop_block 'STOP BLOCKED — 2 files changed (a.py, b.py)' >/dev/null
 mycelium_json_dumps_stdin 'main' >/dev/null
 printf 'my-project\n' | mycelium_registry_cell >/dev/null

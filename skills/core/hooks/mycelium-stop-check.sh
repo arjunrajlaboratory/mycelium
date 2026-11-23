@@ -380,29 +380,16 @@ if [[ -f "$ACCESS_NOTE_FILE" && ! -L "$ACCESS_NOTE_FILE" ]] \
 fi
 rm -f "$ACCESS_NOTE_FILE" 2>/dev/null || true
 # mycelium_emit_accepted_stop CONTEXT: the accepting Stop's output, with the
-# access note. On Claude the note goes only to `systemMessage`, shown to the
-# user: `additionalContext` on an accepted Stop makes Claude take another
-# turn, and advice must never do that, so CONTEXT is left exactly as it was
-# (and a Stop that would be silent stays silent to Claude). On Codex,
-# `systemMessage` is the only Stop channel and does not continue the turn,
-# so the note follows CONTEXT there. The note's keys are then remembered so
+# access note after CONTEXT. Both are information for the user, so they go
+# only to `systemMessage` (mycelium_emit_context, on every host): on Claude,
+# `additionalContext` on an accepted Stop makes the model take another turn.
+# A Stop with neither stays silent. The note's keys are then remembered so
 # the same script at the same content is not named again. Never fails.
 mycelium_emit_accepted_stop() {
-  local context="$1" seen="" escaped=""
-  if [[ -z "$ACCESS_NOTE" ]]; then
-    [[ -z "$context" ]] || mycelium_emit_context "Stop" "$context"
-    return 0
-  fi
-  if [[ "$(mycelium_hook_host)" == codex ]]; then
-    [[ -z "$context" ]] || context+=$'\n\n'
-    mycelium_emit_context "Stop" "$context$ACCESS_NOTE" || return 0
-  elif [[ -n "$context" ]]; then
-    mycelium_emit_context "Stop" "$context" "$ACCESS_NOTE" || return 0
-  else
-    escaped=$(mycelium_json_dumps_stdin "$ACCESS_NOTE" 2>/dev/null) || return 0
-    [[ -n "$escaped" ]] || return 0
-    mycelium__fast_write "{\"systemMessage\": $escaped}"$'\n' || return 0
-  fi
+  local context="$1" seen=""
+  [[ -n "$context$ACCESS_NOTE" ]] || return 0
+  mycelium_emit_context "Stop" "$context" "$ACCESS_NOTE" || return 0
+  [[ -n "$ACCESS_NOTE" ]] || return 0
   # The helper writes the cache: a regular file only, through an exclusively
   # created temporary file, under its own deadline.
   if [[ -n "$ACCESS_NOTE_KEYS" && -n "${MYCELIUM_SHARED_STATE_DIR:-}" \
