@@ -76,6 +76,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `pairing` blocks with fewer than two levels.
   - A ledger pairing may declare its expected levels. When the pairing
     licenses units across groups, it must cover every group present.
+  - New check kind `paired_batch`. A ledger with a pairing and batch columns
+    gets one per batch column, plus one for all of them together. It blocks
+    when the within-unit contrast (treated against control in each donor, or
+    visit within donor) cannot be separated from batch once the unit is in
+    the model: the pairs are split across batches in step with the within
+    factor, as when donor 1 runs treated in run 1 and control in run 2 and
+    donor 2 runs treated in run 2 and control in run 3. `batch_confounding`
+    only warns there, since run 2 holds both levels. When the within factor
+    is not the group, the within effect is checked in each group, so a
+    genotype-by-visit interaction confounded with batch also blocks.
 - **`skills/core/references/provenance-schema.json`**, one JSON Schema file
   for manifests (v1 and v2), events, data commands, skips, observations, index
   results, report fragments, numbers, findings and the ledger. Tests validate

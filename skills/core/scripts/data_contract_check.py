@@ -570,6 +570,97 @@ def check_estimability(check, columns, rows):
     return alerts
 
 
+def check_paired_batch(check, columns, rows):
+    """Whether the within-unit contrast of a paired design survives batch.
+
+    A paired analysis compares the `within` levels inside each `unit` (a
+    donor's treated and control samples), so the unit absorbs everything
+    between units and batch matters only inside them. The model is unit +
+    batch + within, with the within effect per `group` level when the group
+    is a separate between-unit factor (genotype, with visit within donors):
+    the group-by-within interaction is then checked too. A within effect is
+    lost when its indicator adds no rank beyond the unit and batch
+    indicators, as when every pair is split across batches in step with the
+    within factor. A contrast already lost without batch (no unit holds
+    both sides) is left to the pairing check.
+    """
+    unit = need(check, "unit")
+    within = need(check, "within")
+    batches = as_list(need(check, "batch"))
+    group = check.get("group")
+    if group == within:
+        group = None
+    rows = scoped(rows, unit, as_list(check.get("unit_scope")))
+    scopes = check.get("batch_scopes") or {}
+    for column in batches:
+        rows = scoped(rows, column, as_list(scopes.get(column)))
+    keys = [unit, within] + ([group] if group else [])
+    kept, alerts = drop_missing(rows, keys + batches, "paired_batch")
+
+    def side(r):
+        return (r[group] if group else None, r[within])
+
+    present = sorted({side(r) for r in having(rows, *keys)})
+    complete = {side(r) for r in kept}
+    lost = [s for s in present if s not in complete]
+    if lost:
+        alerts.append(alert(
+            "paired_batch",
+            "within levels with no row carrying every batch column ({}); their batch "
+            "confounding cannot be checked".format(", ".join(batches)), True,
+            expected="each level of {} with complete batch values".format(within),
+            observed=", ".join(_side_label(group, s) for s in lost)))
+        return alerts
+    cells = sorted({(r[unit],) + side(r) + tuple(r[b] for b in batches) for r in kept})
+    units = sorted({c[0] for c in cells})
+    batch_levels = [sorted({c[3 + i] for c in cells}) for i in range(len(batches))]
+    # Per group level, every within level but the first is one tested effect.
+    effects = []
+    for g in sorted({c[1] for c in cells}, key=str):
+        levels = sorted({c[2] for c in cells if c[1] == g})
+        effects += [(g, lvl, levels[0]) for lvl in levels[1:]]
+    if not effects:
+        return alerts
+
+    def design(with_batch, drop=None):
+        matrix = []
+        for cell in cells:
+            row = [1] + [1 if cell[0] == u else 0 for u in units[1:]]
+            row += [1 if (cell[1], cell[2]) == (g, lvl) else 0
+                    for g, lvl, _ in effects if (g, lvl) != drop]
+            if with_batch:
+                for i, values in enumerate(batch_levels):
+                    row += [1 if cell[3 + i] == v else 0 for v in values[1:]]
+            matrix.append(row)
+        return matrix
+
+    unbatched, batched = _rank(design(False)), _rank(design(True))
+    confounded = [e for e in effects
+                  if _rank(design(False, drop=e[:2])) < unbatched and
+                  _rank(design(True, drop=e[:2])) == batched]
+    if confounded:
+        involved = {(g, lvl) for g, lvl, _ in confounded} | {(g, ref) for g, _, ref in confounded}
+        by_unit = defaultdict(list)
+        for cell in cells:
+            if cell[1:3] in involved:
+                by_unit[cell[0]].append("{}@{}".format(cell[2], "/".join(cell[3:])))
+        alerts.append(alert(
+            "paired_batch",
+            "within {}, the {} contrast cannot be separated from {}: the pairs are split "
+            "across batches in step with it".format(unit, within, ", ".join(batches)), True,
+            expected="each {} contrast estimable within {} after adjusting for {}".format(
+                within, unit, ", ".join(batches)),
+            observed="not estimable: " + "; ".join(
+                "{} vs {}".format(_side_label(group, (g, lvl)), ref) for g, lvl, ref in confounded),
+            evidence=["{}={}: {}".format(unit, u, ", ".join(sorted(v)))
+                      for u, v in sorted(by_unit.items())][:5]))
+    return alerts
+
+
+def _side_label(group, side):
+    return "{}={}: {}".format(group, side[0], side[1]) if group else str(side[1])
+
+
 def check_unique(check, columns, rows):
     cols = need(check, "columns")
     alerts = []
@@ -824,6 +915,7 @@ KIND_KEYS = {
     "pairing": {"unit", "within", "levels", "unit_scope", "exact_levels", "min_levels"},
     "batch_confounding": {"batch", "contrast", "max_share", "batch_scope"},
     "batch_estimability": {"batch", "contrast", "batch_scopes"},
+    "paired_batch": {"unit", "within", "batch", "group", "unit_scope", "batch_scopes"},
     "unique": {"columns"},
     "nesting": {"levels", "local_labels"},
 }
@@ -913,16 +1005,23 @@ def validate_contract(contract):
             validate_count(where, check, "min_levels", 2)
         elif kind == "unique":
             validate_columns(where, check, "columns", required=True)
-        elif kind == "batch_estimability":
-            validate_columns(where, check, "batch", required=True)
+        elif kind in ("batch_estimability", "paired_batch"):
+            validate_columns(where, check, "batch", required=True,
+                             allow_single=kind == "paired_batch")
             scopes = check.get("batch_scopes", {})
             if not isinstance(scopes, dict) or not all(
                     isinstance(k, str) and isinstance(v, list) and all(isinstance(c, str) for c in v)
                     for k, v in scopes.items()):
                 fail(where, "'batch_scopes' must map batch columns to lists of columns")
-            if len(as_list(check.get("batch"))) < 2:
+            if kind == "paired_batch":
+                validate_column(where, check, "unit", required=True)
+                validate_column(where, check, "within", required=True)
+                validate_column(where, check, "group")
+                validate_columns(where, check, "unit_scope", allow_single=True)
+            elif len(as_list(check.get("batch"))) < 2:
                 fail(where, "'batch' needs at least two columns (one column is batch_confounding)")
-            validate_column(where, check, "contrast", required=True)
+            if kind == "batch_estimability":
+                validate_column(where, check, "contrast", required=True)
         elif kind == "nesting":
             validate_columns(where, check, "levels", required=True)
             if len(as_list(check.get("levels"))) < 2:
@@ -950,6 +1049,7 @@ CHECKS = {
     "unique": check_unique,
     "nesting": check_nesting,
     "batch_estimability": check_estimability,
+    "paired_batch": check_paired_batch,
 }
 
 
@@ -958,7 +1058,7 @@ def referenced_columns(check):
     cols = [check[k] for k in keys if k in check and isinstance(check[k], str)]
     cols += as_list(check.get("within")) + as_list(check.get("no_missing"))
     cols += as_list(check.get("unit_scope")) + as_list(check.get("batch_scope"))
-    if check.get("kind") == "batch_estimability":
+    if check.get("kind") in ("batch_estimability", "paired_batch"):
         cols += as_list(check.get("batch"))
         for scope in (check.get("batch_scopes") or {}).values():
             cols += as_list(scope)
@@ -1036,7 +1136,7 @@ def run_contract(contract, base_dir):
             rows_checked = len(rows)
             identity = [check[k] for k in ("column", "unit", "group", "batch", "contrast")
                         if k in check and isinstance(check[k], str)]
-            if kind == "batch_estimability":
+            if kind in ("batch_estimability", "paired_batch"):
                 identity += as_list(check.get("batch"))
             identity += as_list(check.get("within")) + as_list(check.get("unit_scope"))
             if kind in ("unique", "nesting"):
@@ -1177,6 +1277,21 @@ def ledger_contract(spec, spec_dir):
         if ancestors(pairing["unit"]):
             pair_check["unit_scope"] = ancestors(pairing["unit"])
         checks.append(pair_check)
+        # Batch against the within-unit contrast: one check per batch column,
+        # and all of them together, as for batch against the group above.
+        for columns in [[c] for c in batch] + ([batch] if len(batch) >= 2 else []):
+            paired = {"kind": "paired_batch", "unit": pairing["unit"],
+                      "within": pairing["within"], "batch": columns}
+            if pairing["within"] != group:
+                paired["group"] = group
+            if ancestors(pairing["unit"]):
+                paired["unit_scope"] = ancestors(pairing["unit"])
+            scopes = {column: ancestors(column) for column in columns if ancestors(column)}
+            if scopes:
+                paired["batch_scopes"] = scopes
+            if len(columns) >= 2:
+                paired["note"] = "for a paired analysis that adjusts for all of these batch terms"
+            checks.append(paired)
     return {"schema": SCHEMA, "table": table, "checks": checks,
             "note": "generated from the sample ledger spec; extend it in the analysis "
                     "contract (filters, the modeled table), never loosen it"}

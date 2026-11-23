@@ -36,7 +36,8 @@ A dataset with samples gets a **sample ledger**. `samples.tsv` has one row per s
 - that each level nests in the one above it;
 - at least two replication units per group;
 - each batch variable against the group;
-- any declared pairing.
+- any declared pairing, and with it each batch variable against the
+  within-unit contrast (pairs split across batches in step with it block).
 
 Analyses start their data contracts from it (`--emit-contract`).
 

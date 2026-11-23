@@ -439,3 +439,111 @@ def test_pairing_must_cover_every_group_it_licenses(tmp_path: Path) -> None:
     contract = dcc.ledger_contract(spec, str(tmp_path))
     summaries, alerts = dcc.run_contract(contract, str(tmp_path))
     assert any(a["kind"] == "pairing" and a["blocking"] for a in alerts)
+
+
+# Paired designs: the within-unit contrast against batch.
+
+def _paired(tmp_path: Path, design: list[tuple], within: str = "condition",
+            group: str = "condition", batch: tuple = ("run",)) -> tuple[list, list]:
+    """Run the ledger contract for (donor, condition, visit, run) samples."""
+    table = tmp_path / "samples.tsv"
+    lines = ["sample_id\tcondition\tdonor\tvisit\trun"]
+    lines += [f"s{i}\t{c}\t{d}\t{v}\t{r}" for i, (d, c, v, r) in enumerate(design)]
+    table.write_text("\n".join(lines) + "\n")
+    spec = {"schema": dcc.LEDGER_SCHEMA, "file": "samples.tsv", "sample_id": "sample_id",
+            "group": group, "unit_of_replication": "donor", "nesting": ["donor"],
+            "batch": list(batch), "pairing": {"unit": "donor", "within": within}}
+    contract = dcc.ledger_contract(spec, str(tmp_path))
+    return dcc.run_contract(contract, str(tmp_path))
+
+
+def _paired_status(summaries: list) -> list:
+    return [s["status"] for s in summaries if s["kind"] == "paired_batch"]
+
+
+def test_a_ledger_pairing_checks_each_batch_within_units(ledger: Path) -> None:
+    base = {**spec(ledger), "pairing": {"unit": "derivation", "within": "condition"}}
+    checks = dcc.ledger_contract(base, str(ledger))["checks"]
+    paired = [c for c in checks if c["kind"] == "paired_batch"]
+    assert [c["batch"] for c in paired] == [["prep_date"], ["sequencing_run"],
+                                            ["prep_date", "sequencing_run"]]
+    assert all(c["unit"] == "derivation" and c["within"] == "condition" for c in paired)
+    assert all("group" not in c for c in paired)  # within is the group itself
+    unpaired = dcc.ledger_contract(spec(ledger), str(ledger))["checks"]
+    assert not any(c["kind"] == "paired_batch" for c in unpaired)
+
+
+def test_pairs_split_across_batches_in_step_block(tmp_path: Path) -> None:
+    # d1: treated in r1, control in r2; d2: treated in r2, control in r3.
+    # r2 holds both conditions, so the per-column check only warns, yet every
+    # within-donor difference is also a batch difference.
+    design = [("d1", "treated", "v", "r1"), ("d1", "control", "v", "r2"),
+              ("d2", "treated", "v", "r2"), ("d2", "control", "v", "r3")]
+    summaries, alerts = _paired(tmp_path, design)
+    confounding = [s["status"] for s in summaries if s["kind"] == "batch_confounding"]
+    assert confounding == ["warn"]
+    assert _paired_status(summaries) == ["block"]
+    alert = next(a for a in alerts if a["kind"] == "paired_batch")
+    assert "treated" in alert["observed"] and any("d1" in e for e in alert["evidence"])
+
+
+def test_counterbalanced_or_unsplit_pairs_pass(tmp_path: Path) -> None:
+    swapped = [("d1", "treated", "v", "r1"), ("d1", "control", "v", "r2"),
+               ("d2", "treated", "v", "r2"), ("d2", "control", "v", "r1")]
+    assert _paired_status(_paired(tmp_path, swapped)[0]) == ["pass"]
+    together = [("d1", "treated", "v", "r1"), ("d1", "control", "v", "r1"),
+                ("d2", "treated", "v", "r2"), ("d2", "control", "v", "r2")]
+    assert _paired_status(_paired(tmp_path, together)[0]) == ["pass"]
+
+
+def test_a_within_factor_apart_from_the_group_is_checked(tmp_path: Path) -> None:
+    # Genotype between donors, visit within: every baseline in r1 and every
+    # week-4 sample in r2. Each run holds both genotypes, so batch against
+    # the group passes, but the visit effect is the run effect.
+    design = [(d, g, v, "r1" if v == "base" else "r2")
+              for d, g in (("d1", "WT"), ("d2", "WT"), ("d3", "KO"), ("d4", "KO"))
+              for v in ("base", "wk4")]
+    summaries, _ = _paired(tmp_path, design, within="visit")
+    assert [s["status"] for s in summaries if s["kind"] == "batch_confounding"] == ["pass"]
+    checks = dcc.ledger_contract({"schema": dcc.LEDGER_SCHEMA, "file": "samples.tsv",
+                                  "sample_id": "sample_id", "group": "condition",
+                                  "unit_of_replication": "donor", "nesting": ["donor"],
+                                  "batch": ["run"],
+                                  "pairing": {"unit": "donor", "within": "visit"}},
+                                 str(tmp_path))["checks"]
+    assert next(c for c in checks if c["kind"] == "paired_batch")["group"] == "condition"
+    assert _paired_status(summaries) == ["block"]
+
+
+def test_the_group_by_within_interaction_is_checked(tmp_path: Path) -> None:
+    # KO donors have both visits in one run, so the visit effect alone is
+    # estimable; WT donors have each visit in its own run, so the WT visit
+    # effect (and the genotype-by-visit interaction) is the run effect.
+    design = [(d, "WT", v, "r1" if v == "base" else "r2") for d in ("d1", "d2")
+              for v in ("base", "wk4")]
+    design += [(d, "KO", v, "r3") for d in ("d3", "d4") for v in ("base", "wk4")]
+    summaries, alerts = _paired(tmp_path, design, within="visit")
+    assert _paired_status(summaries) == ["block"]
+    alert = next(a for a in alerts if a["kind"] == "paired_batch")
+    assert "WT" in alert["observed"] and "KO" not in alert["observed"]
+
+
+def test_an_incomplete_pair_is_not_blamed_on_batch(tmp_path: Path) -> None:
+    # No donor has both conditions: the pairing check blocks; the batch
+    # check has no within-donor contrast to lose and stays quiet.
+    design = [("d1", "treated", "v", "r1"), ("d2", "control", "v", "r2"),
+              ("d3", "treated", "v", "r1"), ("d4", "control", "v", "r2")]
+    summaries, alerts = _paired(tmp_path, design)
+    assert any(a["kind"] == "pairing" and a["blocking"] for a in alerts)
+    assert _paired_status(summaries) == ["pass"]
+
+
+def test_local_labels_qualify_paired_batch_units_and_batches(ledger: Path) -> None:
+    base = {**spec(ledger), "local_labels": True, "batch": ["line", "prep_date"],
+            "nesting": ["site", "line", "derivation", "prep", "dish", "library"],
+            "pairing": {"unit": "prep", "within": "condition"}}
+    paired = [c for c in dcc.ledger_contract(base, str(ledger))["checks"]
+              if c["kind"] == "paired_batch"]
+    assert all(c["unit_scope"] == ["site", "line", "derivation"] for c in paired)
+    assert paired[0]["batch_scopes"] == {"line": ["site"]}
+    assert "batch_scopes" not in paired[1]

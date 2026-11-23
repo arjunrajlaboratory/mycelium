@@ -54,7 +54,8 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
     {"kind": "unit_of_replication", "unit": "participant", "group": "cohort", "within": ["visit"], "min_units_per_group": 3},
     {"kind": "pairing", "unit": "participant", "within": "visit", "levels": ["0", "28"]},
     {"kind": "batch_confounding", "batch": "batch", "contrast": "cohort", "max_share": 0.7},
-    {"kind": "batch_estimability", "batch": ["batch", "site"], "contrast": "cohort"}
+    {"kind": "batch_estimability", "batch": ["batch", "site"], "contrast": "cohort"},
+    {"kind": "paired_batch", "unit": "participant", "within": "visit", "group": "cohort", "batch": ["batch"]}
   ]
 }
 ```
@@ -131,6 +132,23 @@ tables that hold no samples (expression matrices, layers, Seurat objects).
   the pairing licenses units across groups.
 - `batch_estimability` takes `batch_scopes`, a map from batch column to the
   parent columns that qualify its local labels.
+- `paired_batch`: for a paired design, whether the contrast between the
+  `within` levels inside each `unit` survives the `batch` columns (one or
+  more, adjusted for together). The model is unit + batch + within, so batch
+  matters only inside units. It blocks when a within contrast that the pairs
+  do estimate becomes inestimable once batch is added: the pairs are split
+  across batches in step with the within factor. Donor 1 with treated in run
+  1 and control in run 2, and donor 2 with treated in run 2 and control in
+  run 3, blocks, although `batch_confounding` only warns (run 2 holds both
+  levels). Swapping the runs for donor 2, or running each pair in one run,
+  passes. With `group` (a between-unit factor other than `within`, such as
+  genotype with visit within donors), the within contrast is checked in each
+  group, so a genotype-by-visit interaction confounded with batch blocks even
+  when the visit effect alone is estimable from the other genotype. A
+  contrast no unit observes on both sides is left to `pairing`, and a within
+  level with no row carrying every batch column blocks, since it cannot be
+  checked. It takes `unit_scope` and `batch_scopes` for local labels. A batch
+  that coincides with the group itself is `batch_confounding`'s block.
 - `cohort`: the required `levels` of `column` are present; `min_rows` or exact
   `rows` holds; and the `no_missing` columns have no missing values. Rows with
   no `column` value are left out of the levels and counts, with a warning.
@@ -188,7 +206,10 @@ Ledger mode runs these checks:
 - `nesting` of the replication levels;
 - `unit_of_replication` with `rows: samples`;
 - one `batch_confounding` per crossed batch column against the group;
-- the declared `pairing`.
+- the declared `pairing`;
+- with a pairing, one `paired_batch` per batch column, and one for all of
+  them together when there are two or more, against the within-unit
+  contrast (per group when `within` is not the group).
 
 `--emit-contract` writes that contract so the analysis can extend it. Add
 filters, and point the replication, pairing and batch checks at the

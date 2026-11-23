@@ -477,6 +477,16 @@ class ContractValidationTest(unittest.TestCase):
                                          "group": "cohort", "units_may_span_groups": "false"}]),
                               "units_may_span_groups")
 
+    def test_paired_batch_is_validated(self):
+        paired = {"kind": "paired_batch", "unit": "donor", "within": "arm", "batch": ["run"]}
+        self.assertUsageError(contract([{k: v for k, v in paired.items() if k != "batch"}]),
+                              "needs 'batch'")
+        self.assertUsageError(contract([{k: v for k, v in paired.items() if k != "within"}]),
+                              "needs 'within'")
+        self.assertUsageError(contract([{**paired, "group": ["cohort"]}]), "'group' must be a column name")
+        self.assertUsageError(contract([{**paired, "batch_scopes": {"run": "site"}}]), "batch_scopes")
+        self.assertUsageError(contract([{**paired, "contrast": "arm"}]), "unknown key 'contrast'")
+
     def test_levels_need_a_column(self):
         self.assertUsageError(contract([{"kind": "cohort", "levels": ["A", "B"]}]), "'levels' needs 'column'")
 
@@ -794,6 +804,8 @@ class MissingKeyMatrixTest(unittest.TestCase):
     BATCH = {"kind": "batch_confounding", "batch": "batch", "contrast": "level"}
     BATCH_BASE = [["b1", "A"], ["b1", "B"], ["b2", "A"], ["b2", "B"]]
     COHORT = {"kind": "cohort", "column": "cohort", "levels": ["A", "B"], "rows": 4}
+    PAIRED = {"kind": "paired_batch", "unit": "donor", "within": "arm", "batch": ["run"]}
+    PAIRED_BASE = [["d1", "T", "r1"], ["d1", "C", "r1"], ["d2", "T", "r2"], ["d2", "C", "r2"]]
     COHORT_BASE = [["A"], ["A"], ["B"], ["B"]]
 
     CASES = [
@@ -812,6 +824,9 @@ class MissingKeyMatrixTest(unittest.TestCase):
         (BATCH, ["batch", "level"], BATCH_BASE, ["NA", "C"], 2, "level C has no batch"),
         (BATCH, ["batch", "level"], BATCH_BASE, ["b3", "NA"], 0, "nothing new"),
         (COHORT, ["cohort"], COHORT_BASE, None, 0, "base passes"),
+        (PAIRED, ["donor", "arm", "run"], PAIRED_BASE, None, 0, "base passes"),
+        (PAIRED, ["donor", "arm", "run"], PAIRED_BASE, ["d3", "X", "NA"], 2, "arm X has no batch"),
+        (PAIRED, ["donor", "arm", "run"], PAIRED_BASE, ["d1", "T", "NA"], 0, "nothing new"),
         (COHORT, ["cohort"], COHORT_BASE, ["NA"], 0, "an NA row is not a cohort row"),
     ]
 

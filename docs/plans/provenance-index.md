@@ -636,6 +636,12 @@ ledger table, and runs:
 - `batch_confounding`: one per batch column, with the group as contrast. This
   is the existing check, now reachable from ingest.
 - `pairing`, when declared.
+- `paired_batch` (added after #154), when a pairing and batch columns are
+  declared: one per batch column and one joint. It blocks when the
+  within-unit contrast cannot be separated from batch with the unit in the
+  model (unit + batch + within, per group when `within` is not the group).
+  Blocking, like `batch_estimability`, because an inestimable contrast is a
+  design fact no analysis choice recovers.
 
 `--emit-contract <path>` writes the generated contract with a `note` telling
 analyze step 6 to point the replication check at the modeled table (dropping
