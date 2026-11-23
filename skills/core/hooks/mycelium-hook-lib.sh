@@ -2325,14 +2325,6 @@ mycelium__json_escape_piece() {
   [[ "$piece" =~ $ascii_re ]]
 }
 
-# mycelium_emit_context EVENT CONTEXT [SYSTEM_MESSAGE]: the hook's output.
-# For Stop, on every host, the only output is `systemMessage` (CONTEXT, then
-# SYSTEM_MESSAGE, joined by a blank line): it is shown to the user and does
-# not continue the turn. On Claude, `hookSpecificOutput.additionalContext` on
-# a Stop makes the conversation continue so the model can act on it, which an
-# accepting Stop must never do; Codex has no other Stop channel; the
-# Antigravity adapter reads only an accepted Stop's decision. Anything the
-# agent must act on belongs in a block reason (mycelium_emit_stop_block).
 mycelium_emit_context() {
   local event="$1"
   local context="$2"
@@ -2341,18 +2333,9 @@ mycelium_emit_context() {
   local payload=""
   host=$(mycelium_hook_host)
 
-  if [[ "$event" == "Stop" ]]; then
-    if [[ -n "$context" && -n "$system_message" ]]; then
-      context+=$'\n\n'"$system_message"
-    elif [[ -z "$context" ]]; then
-      context="$system_message"
-    fi
-    system_message=""
-  fi
-
   # Same bytes as the interpreter below, built without one when exact.
-  if [[ "$event" == "Stop" ]]; then
-    if mycelium__json_literal argv "$context"; then
+  if [[ "$host" == "codex" && "$event" == "Stop" ]]; then
+    if mycelium__json_literal argv "${system_message:-$context}"; then
       mycelium__fast_write "{\"systemMessage\": $MYCELIUM__JSON}"$'\n' && return 0
     fi
   elif mycelium__json_literal argv "$event"; then
@@ -2372,8 +2355,8 @@ import json
 import sys
 
 host, event, context, system_message = sys.argv[1:]
-if event == "Stop":
-    payload = {"systemMessage": context}
+if host == "codex" and event == "Stop":
+    payload = {"systemMessage": system_message or context}
 else:
     payload = {
         "hookSpecificOutput": {
@@ -2385,68 +2368,4 @@ else:
         payload["systemMessage"] = system_message
 print(json.dumps(payload))
 PY
-}
-
-# Agent notes an accepted Stop could not deliver. An accepted Stop speaks
-# only to the user (mycelium_emit_context): anything there the agent also
-# needs, such as a lineage gap that leaves a command's provenance unknown, is
-# queued here and given to the agent once by the next SessionStart that is not
-# a reopen. One line per note, in the shared state directory, appended and
-# taken without following links. Both helpers fail open: a note is advice,
-# never a reason to fail a hook. Python starts only when there is a note.
-MYCELIUM__AGENT_NOTES_FILE="pending-agent-notes.txt"
-MYCELIUM__PY_AGENT_NOTES='
-import os, stat, sys
-
-mode, directory = sys.argv[1], sys.argv[2]
-path = os.path.join(directory, "pending-agent-notes.txt")
-LIMIT = 65536
-if not stat.S_ISDIR(os.lstat(directory).st_mode):
-    sys.exit(0)
-flags = os.O_NOFOLLOW | os.O_NONBLOCK
-if mode == "queue":
-    note = os.fsencode(sys.argv[3]).replace(b"\n", b" ").replace(b"\r", b" ")[:4000]
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | flags, 0o600)
-    try:
-        info = os.fstat(fd)
-        if stat.S_ISREG(info.st_mode) and info.st_size < LIMIT:
-            os.write(fd, note + b"\n")
-    finally:
-        os.close(fd)
-else:
-    # Rename first: of parallel SessionStarts exactly one takes the notes,
-    # and a note queued meanwhile waits for the next one.
-    taking = f"{path}.taking-{os.getpid()}"
-    try:
-        os.rename(path, taking)
-    except FileNotFoundError:
-        sys.exit(0)
-    data = b""
-    try:
-        fd = os.open(taking, os.O_RDONLY | flags)
-        try:
-            if stat.S_ISREG(os.fstat(fd).st_mode):
-                data = os.read(fd, LIMIT)
-        finally:
-            os.close(fd)
-    finally:
-        os.unlink(taking)
-    sys.stdout.buffer.write(data)
-'
-
-# mycelium_queue_agent_note NOTE: keep NOTE for the next SessionStart.
-mycelium_queue_agent_note() {
-  local dir="${MYCELIUM_SHARED_STATE_DIR:-}"
-  [[ -n "${1:-}" && -n "$dir" && -d "$dir" && ! -L "$dir" ]] || return 0
-  python3 -c "$MYCELIUM__PY_AGENT_NOTES" queue "$dir" "$1" >/dev/null 2>&1 || true
-}
-
-# mycelium_take_agent_notes: print the queued notes, one per line, and clear
-# them. Prints nothing when there are none.
-mycelium_take_agent_notes() {
-  local dir="${MYCELIUM_SHARED_STATE_DIR:-}"
-  [[ -n "$dir" && -d "$dir" && ! -L "$dir" ]] || return 0
-  [[ -e "$dir/$MYCELIUM__AGENT_NOTES_FILE" || -L "$dir/$MYCELIUM__AGENT_NOTES_FILE" ]] \
-    || return 0
-  python3 -c "$MYCELIUM__PY_AGENT_NOTES" take "$dir" 2>/dev/null || true
 }

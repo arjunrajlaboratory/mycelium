@@ -647,13 +647,6 @@ if [[ "$REOPEN" == true ]]; then
   exit 0
 fi
 
-# Notes an earlier accepted Stop showed only to the user (it cannot speak to
-# the agent without continuing the turn), given to the agent once.
-_AGENT_NOTES=$(mycelium_take_agent_notes) || _AGENT_NOTES=""
-if [[ -n "$_AGENT_NOTES" ]]; then
-  MESSAGES="${MESSAGES}FROM AN EARLIER ACCEPTED STOP (shown to the user, not yet to you): ${_AGENT_NOTES//$'\n'/ }\n\n"
-fi
-
 # Only run .living/ health checks on fresh session starts
 if [ "$SOURCE" != "startup" ]; then
   # Emit any accumulated messages (e.g. knowledge audit) and exit

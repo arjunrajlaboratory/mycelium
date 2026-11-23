@@ -75,9 +75,6 @@ mycelium_report_unowned_lineage_gaps() {
     fi
   fi
   if [[ -n "$gap" ]]; then
-    # For the user now, and for the agent at the next SessionStart: an
-    # accepted Stop cannot tell the agent without continuing the turn.
-    mycelium_queue_agent_note "$gap"
     mycelium_emit_context "Stop" "$gap"
   fi
 }
@@ -382,16 +379,37 @@ if [[ -f "$ACCESS_NOTE_FILE" && ! -L "$ACCESS_NOTE_FILE" ]] \
   fi
 fi
 rm -f "$ACCESS_NOTE_FILE" 2>/dev/null || true
-# mycelium_emit_accepted_stop CONTEXT: the accepting Stop's output, with the
-# access note after CONTEXT. Both are information for the user, so they go
-# only to `systemMessage` (mycelium_emit_context, on every host): on Claude,
-# `additionalContext` on an accepted Stop makes the model take another turn.
-# A Stop with neither stays silent. The note's keys are then remembered so
-# the same script at the same content is not named again. Never fails.
+# mycelium_emit_accepted_stop MESSAGE [GAP]: the accepting Stop's output.
+# MESSAGE (the routine ".living/ updated" confirmation) and the access note
+# are for the user, so they go to `systemMessage`. On Claude,
+# `additionalContext` on a Stop makes the model take another turn, which a
+# routine accept must never do. GAP, a lineage gap or unrecorded-events
+# warning, is for the agent: its provenance is unknown and it may need to say
+# so. GAP stays in `additionalContext` on Claude, as before, and so takes one
+# more turn on the rare Stop that has one. Codex has only `systemMessage`,
+# which never continues a turn, so it gets everything there. A Stop with none
+# of these stays silent. The note's keys are then remembered so the same
+# script at the same content is not named again. Never fails.
 mycelium_emit_accepted_stop() {
-  local context="$1" seen=""
-  [[ -n "$context$ACCESS_NOTE" ]] || return 0
-  mycelium_emit_context "Stop" "$context" "$ACCESS_NOTE" || return 0
+  local message="$1" gap="${2:-}" seen="" escaped="" user=""
+  user="$message"
+  if [[ -n "$ACCESS_NOTE" ]]; then
+    user="${user:+$user$'\n\n'}$ACCESS_NOTE"
+  fi
+  if [[ -n "$gap" ]]; then
+    if [[ "$(mycelium_hook_host)" == codex ]]; then
+      message="${message:+$message$'\n\n'}$gap"
+      mycelium_emit_context "Stop" "$message${ACCESS_NOTE:+$'\n\n'$ACCESS_NOTE}" || return 0
+    else
+      mycelium_emit_context "Stop" "$gap" "$user" || return 0
+    fi
+  elif [[ -n "$user" ]]; then
+    escaped=$(mycelium_json_dumps_stdin "$user" 2>/dev/null) || return 0
+    [[ -n "$escaped" ]] || return 0
+    mycelium__fast_write "{\"systemMessage\": $escaped}"$'\n' || return 0
+  else
+    return 0
+  fi
   [[ -n "$ACCESS_NOTE" ]] || return 0
   # The helper writes the cache: a regular file only, through an exclusively
   # created temporary file, under its own deadline.
@@ -1156,8 +1174,6 @@ if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
     mycelium_block_for_carried_baseline
     exit 0
   fi
-  # This Stop accepts: keep its gaps for the agent's next SessionStart.
-  mycelium_queue_agent_note "$LINEAGE_GAP_MSG"
   mycelium_consume_reported_unrecorded
   rm -f "$ACTIVE_LOG_FILE"
   rm -f "$ACTIVE_OWNER_FILE"
@@ -1167,7 +1183,7 @@ if [ ! -f "$REMINDER_FILE" ] && [ ! -f "$ACTIVITY_FILE" ]; then
   rm -f "$STATE_DIR/living-reminder-baseline.json"
   mycelium_accept_lineage_session
   mycelium_cleanup_accepted_scoped_state
-  mycelium_emit_accepted_stop "$LINEAGE_GAP_MSG" || true
+  mycelium_emit_accepted_stop "" "$LINEAGE_GAP_MSG" || true
   exit 0
 fi
 
@@ -1214,8 +1230,6 @@ if [ "$LIVING_UPDATED" = true ]; then
     mycelium_block_for_carried_baseline
     exit 0
   fi
-  # This Stop accepts: keep its gaps for the agent's next SessionStart.
-  mycelium_queue_agent_note "$LINEAGE_GAP_MSG"
   mycelium_consume_reported_unrecorded
   # Clean up reminder file — cycle complete
   rm -f "$REMINDER_FILE"
@@ -1228,10 +1242,9 @@ if [ "$LIVING_UPDATED" = true ]; then
   rm -f "$STATE_DIR/living-reminder-baseline.json"
 
   ENHANCE_MSG=".living/ updated. The accepted handoff was published to ${MYCELIUM_SHARED_STATE_DIR}/last-session.md, and the deterministic LOG_REGISTRY summary is in place."
-  ENHANCE_MSG=$(mycelium_with_lineage_gap "$ENHANCE_MSG")
   mycelium_accept_lineage_session
   mycelium_cleanup_accepted_scoped_state
-  mycelium_emit_accepted_stop "$ENHANCE_MSG" || true
+  mycelium_emit_accepted_stop "$ENHANCE_MSG" "$LINEAGE_GAP_MSG" || true
   exit 0
 fi
 
