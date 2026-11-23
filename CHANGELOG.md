@@ -157,8 +157,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `## 1. Accomplished` … `## 5. Next Steps`). Stop then rejected that
   handoff and published the generic fallback in its place. All three
   instructions now list `## What was worked on`, `## Key decisions made`,
-  `## Blockers & surprises`, `## Current state` and `## Next steps`, and
-  say that renaming, reordering or replacing them gets the fallback. Existing projects pick up the new rule 10 the next time
+  `## Blockers & surprises`, `## Current state` and `## Next steps` in
+  order, and say that a handoff matching no supported heading schema gets
+  the fallback (the older `## Current State` / `## What Was Done` schema is
+  still accepted). Existing projects pick up the new rule 10 the next time
   `init_repo.py` or migration refreshes their `MYCELIUM.md`.
 
 ## [0.9.7] - 2026-11-21

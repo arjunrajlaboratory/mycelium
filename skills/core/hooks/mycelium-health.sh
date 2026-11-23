@@ -108,7 +108,7 @@ if ! mycelium__state "$REPO_ROOT" "$INPUT" \
 fi
 
 if [[ "${MYCELIUM_SESSION_SCOPED:-false}" == true ]]; then
-  MESSAGES="${MESSAGES}SESSION HANDOFF PATH: Write the complete five-section handoff for this root task to ${STATE_DIR}/last-session.md, using exactly these headings in this order, each with content: \`## What was worked on\`, \`## Key decisions made\`, \`## Blockers & surprises\`, \`## Current state\`, \`## Next steps\`. Renaming, reordering or replacing these headings makes Stop publish a generic fallback instead. Accepted Stop will publish it to the shared resume pointer.\n\n"
+  MESSAGES="${MESSAGES}SESSION HANDOFF PATH: Write the complete five-section handoff for this root task to ${STATE_DIR}/last-session.md, using exactly these headings in this order, each with content: \`## What was worked on\`, \`## Key decisions made\`, \`## Blockers & surprises\`, \`## Current state\`, \`## Next steps\`. Use these headings; a handoff that does not match a supported heading schema is replaced by a generic fallback at Stop. Accepted Stop will publish it to the shared resume pointer.\n\n"
 fi
 
 # Clean up stale sentinels from a crashed previous session BEFORE the

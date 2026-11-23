@@ -239,6 +239,21 @@ def test_identified_start_exposes_exact_private_handoff_path(tmp_path):
     assert str(state / "last-session.md") in started.stdout
 
 
+# Both supported schemas stay valid, so the guidance may only say a handoff
+# that matches neither gets the fallback, never that these exact headings are
+# the only ones accepted.
+FALLBACK_RULE = (
+    "Use these headings; a handoff that does not match a supported heading "
+    "schema is replaced by a generic fallback at Stop."
+)
+
+
+def _named_headings(instruction):
+    import re
+
+    return re.findall(r"`(## [^`]+)`", instruction)
+
+
 def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
     # An Antigravity App agent that never read the core skill followed the
     # injected "five-section handoff" instruction with its own numbered
@@ -263,8 +278,8 @@ def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
     handoff_line = next(
         line for line in context.splitlines() if "SESSION HANDOFF PATH" in line
     )
-    for heading in headings:
-        assert f"`{heading}`" in handoff_line
+    assert _named_headings(handoff_line) == list(headings)
+    assert FALLBACK_RULE in handoff_line
 
     template = (
         Path(__file__).resolve().parent.parent / "templates" / "MYCELIUM.md.template"
@@ -273,8 +288,8 @@ def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
         line for line in template.splitlines()
         if line.startswith("10. **Session summary**:")
     )
-    for heading in headings:
-        assert f"`{heading}`" in summary_rule
+    assert _named_headings(summary_rule) == list(headings)
+    assert FALLBACK_RULE in summary_rule
 
     acted = _run_hook(
         "mycelium-post-action.sh",
@@ -290,8 +305,8 @@ def test_handoff_guidance_names_the_exact_required_headings(tmp_path):
     directive = json.loads(acted.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "MYCELIUM POST-ACTION PROTOCOL" in directive
     summary_step = directive[directive.index("10. SESSION SUMMARY:"):]
-    for heading in headings:
-        assert f"`{heading}`" in summary_step
+    assert _named_headings(summary_step) == list(headings)
+    assert FALLBACK_RULE in summary_step
     assert "### Locked decisions" in summary_step
     assert "### Dead ends — do not redo" in summary_step
 
