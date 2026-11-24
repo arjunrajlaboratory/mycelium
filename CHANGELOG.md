@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Scientific linters are on by default, with one question per repository.**
+  `skills/core/scripts/setup_linters.py` records whether a repository uses
+  `scilintr` (Python), `scitexlintr` (reports) and the CRAN `scilintr` (R) in
+  a committed `.living/linters.json`. `init` now asks the user, recommending
+  yes, and installs whatever is missing on yes (active virtualenv's pip, else
+  `pipx`, else `uv tool`, else this interpreter's pip; `--python` overrides).
+  Repositories initialized earlier are asked on first use by the analyze and
+  report skills. Once a user opts in, missing linters are installed without
+  asking again; upgrades still need their agreement, and a repository that
+  opted out skips the lint steps and says so. Existing repositories need no
+  migration.
+
 ### Fixed
 
 - **Static stdlib I/O reading resolves paths anchored on `__file__`.**

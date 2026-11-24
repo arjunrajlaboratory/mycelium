@@ -180,6 +180,14 @@ memory layer, canonical `MYCELIUM.md` guidance, and thin `CLAUDE.md` and
 `AGENTS.md` adapters. **Core convention packs** (`robust-analysis`,
 `report-generator`, and `idea-generator`) are installed automatically.
 
+Setup also asks whether the project should use Mycelium's scientific linters
+([`scilintr`](https://github.com/arjunrajlaboratory/scilintr) for Python and R
+analysis code, `scitexlintr` for reports) and recommends yes. On yes the agent
+installs whichever are missing. The answer is recorded in
+`.living/linters.json`; projects set up earlier are asked the first time an
+analysis or report runs. Change it later with
+`skills/core/scripts/setup_linters.py enable|disable`.
+
 **Codex hook approval:** if you did not approve the plugin hooks during
 installation, trust all eight Mycelium command hooks now with the four steps
 under "Approve after the first start" above, and confirm with `hooks/list`.
