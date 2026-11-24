@@ -3,7 +3,9 @@
 
 The model is deliberately not a routing input. Native USER_EXPLICIT transcript
 steps identify work cycles; invocationNum and fullyIdle do not identify turns.
-No PreToolUse handler is installed: observation must not grant permissions.
+PreToolUse is observation only (``pre_tool_use``): it always answers
+``{"decision": "allow"}``, which defers to the host's own approval policy, and
+only opens the I/O observer's interval for the call. It never grants permissions.
 
 The host profile comes from the package's hook command (``--host``; the IDE is
 the default). A package label alone is not host proof: every event must also
@@ -554,6 +556,18 @@ def target_root(payload, roots):
     return None
 
 
+def observer_turn_end(root, session_id):
+    """Close this work cycle's observer intervals that got no Post; best effort, never raises."""
+    try:
+        import io_observer
+        state_dir = observer_state_dir(root)
+        io_dir = state_dir / "io"
+        if io_dir.is_dir() and not io_dir.is_symlink():
+            io_observer.turn_end(state_dir, host=active_host(), session=session_id)
+    except Exception as exc:
+        print(f"Mycelium Antigravity: observer turn end: {one_line(exc, 300)}", file=sys.stderr)
+
+
 def dispatch(event, payload, plugin_root=PLUGIN, host=HOST):
     profile(host)
     token = _ACTIVE_HOST.set(host)
@@ -788,11 +802,32 @@ def _dispatch(event, payload, plugin_root, host):
                     hooks = ["mycelium-data-tracker.sh", "mycelium-post-action.sh"]
                     if value["root"] == root:
                         apply_hooks(hooks, dict(data, cwd=value["cwd"], tool_name="Bash",
+                                                tool_use_id=observer_call_id(int(step_key)),
                                                 tool_input={"command": command},
                                                 tool_response={"exit_code": value["exit_code"]}), int(step_key))
                     if value["root"] != root or all(f"{step_key}:{h}" in turn["actions"] for h in hooks):
                         pending.pop(step_key, None)
                         save()
+
+            def observe_edit(step_index, path):
+                """Close a successful edit's observer interval (opened by PreToolUse) with its
+                edit observation. At most once per step, and never a lifecycle failure: an
+                observation that cannot be made leaves the interval open until turn end."""
+                action = f"{step_index}:io-observer"
+                if action in turn["actions"]:
+                    return
+                turn["actions"][action] = "done"
+                save()
+                try:
+                    run_hook("mycelium-io-observer.sh", dict(
+                        data, hook_event_name="PostToolUse", tool_name="Write",
+                        tool_use_id=observer_call_id(step_index), tool_input={"file_path": path},
+                        # Callers pass only edits whose success the native record already
+                        # proved (a DONE step without error, or a typed App FileEdit).
+                        tool_response={"success": True, "exit_code": 0}), root, plugin_root)
+                except Exception as exc:
+                    print(f"Mycelium Antigravity: edit observation for step {step_index}: "
+                          f"{one_line(exc, 300)}", file=sys.stderr)
 
             def edit_target(found, step_index):
                 """Whether one verified native edit earns activity credit in this root."""
@@ -809,6 +844,7 @@ def _dispatch(event, payload, plugin_root, host):
                     apply_hooks([ACTIVITY_HOOK],
                                 dict(data, tool_name="Write", tool_input={"file_path": found["path"]},
                                      tool_response={"success": True}), step_index)
+                    observe_edit(step_index, found["path"])
 
             def recover_app_edits(scan):
                 """One shared-tracker batch for this root's verified, not yet recorded native edits.
@@ -886,6 +922,7 @@ def _dispatch(event, payload, plugin_root, host):
                     if not isinstance(exit_code, int) or isinstance(exit_code, bool):
                         exit_code = None
                     command_data = dict(data, cwd=command["cwd"], tool_name="Bash",
+                                        tool_use_id=observer_call_id(step_index),
                                         tool_input={"command": command["command"]},
                                         tool_response={"exit_code": exit_code})
                     hooks = ["mycelium-data-tracker.sh", "mycelium-post-action.sh"]
@@ -982,6 +1019,9 @@ def _dispatch(event, payload, plugin_root, host):
                     if relative.parts and relative.parts[0] not in {".agents", "_agents", ".agent", ".mycelium", ".living"}:
                         data.update(tool_name="Write", tool_input={"file_path": args["TargetFile"]}, tool_response={"success": True})
                         hooks = ["mycelium-activity-tracker.sh"]
+                        apply_hooks(hooks, data, boundary)
+                        hooks = []
+                        observe_edit(boundary, args["TargetFile"])
                 elif name == "view_file" and not payload.get("error"):
                     data.update(tool_name="Read", tool_input={"file_path": args["AbsolutePath"]}, tool_response={})
                     hooks = ["mycelium-read-tracker.sh"]
@@ -1046,6 +1086,12 @@ def _dispatch(event, payload, plugin_root, host):
                 elif app_stop_deadline is not None and app_stop_deadline <= time.monotonic():
                     result = {"decision": "block", "reason": "No time remains to start Mycelium finalization. Active state was preserved for retry."}
                 else:
+                    if FINAL_PENDING not in turn.get("unresolved_commands", {}).values():
+                        # Nothing of this work cycle is still running: close the observer
+                        # intervals of calls that got no Post (denied, failed, unrecorded), as
+                        # Claude's Stop does, so they stop marking later calls as overlapping. A
+                        # command still running at the final allowance keeps its interval open.
+                        observer_turn_end(root, session_id)
                     number = turn.get("stop_attempt", {}).get("number", 0) + 1
                     turn["stop_attempt"] = {"status": "running", "number": number}
                     save()
@@ -1088,7 +1134,215 @@ def _dispatch(event, payload, plugin_root, host):
     return {}
 
 
+# ---- PreToolUse: observation only ---------------------------------------------------------------
+#
+# Antigravity requires a `decision` from every PreToolUse hook; `allow` delegates to the next
+# hook or the host's default policy. This handler prints exactly PRE_ALLOW on every path and
+# nothing else: it never grants, denies, asks, or rewrites a call. Its only effect is the I/O
+# observer's pre-snapshot (run_command) or journal interval (edit tools), keyed so the matching
+# PostToolUse closes the same call. The packaged wrapper (mycelium-antigravity-pre.sh) discards
+# this process's output and prints the allow itself, so even a crash here cannot change it.
+
+PRE_ALLOW = '{"decision": "allow"}\n'
+# Soft deadline for the whole handler, from its start; the wrapper's watchdog kills the process
+# at about 2 s for anything this deadline cannot interrupt.
+PRE_TOOL_SECONDS = 1.5
+PRE_RESERVE_SECONDS = 0.15  # left after the walk for writing the snapshot
+PRE_LOCK_SECONDS = 0.5  # journal lock wait; the observer's default (2 s) exceeds the budget
+# Fault injection for live verification only: a word in this project file (or the environment)
+# makes the handler fail on purpose, to show approvals are unchanged when observation fails.
+PRE_FAULT_FILE = ".mycelium/antigravity-pre-fault"
+PRE_FAULT_ENV = "MYCELIUM_ANTIGRAVITY_PRE_FAULT"
+PRE_FAULTS = {"crash", "slow", "hang", "exit"}
+
+
+def observer_call_id(step):
+    """The I/O observer's call id for one native tool step; Pre and Post derive it alike."""
+    return f"ag-step-{step}"
+
+
+def observer_state_dir(root):
+    """The shared state directory the base hooks use for ROOT (<root>/.mycelium, physical)."""
+    override = os.environ.get("MYCELIUM_STATE_DIR")
+    if override and Path(root, override).resolve() != (Path(root) / ".mycelium").resolve():
+        raise RuntimeError("MYCELIUM_STATE_DIR is set to another directory")
+    directory = ensure_safe_project_directory(root, ".mycelium", create=False)
+    if not directory.is_dir():
+        raise RuntimeError("No Mycelium state directory")
+    return Path(os.path.realpath(directory))
+
+
+def _pre_fault(word, roots=()):
+    """Apply one injected fault (live verification), after recording that it fired."""
+    if word not in PRE_FAULTS:
+        return
+    for root in roots:
+        try:
+            import io_observer
+            state_dir = observer_state_dir(root)
+            io_observer.append_line(state_dir / "io" / "antigravity-pre-faults.ndjson",
+                                    {"fault": word, "pid": os.getpid(), "wall_ns": time.time_ns()},
+                                    io_root=state_dir / "io")
+        except Exception:
+            pass
+    if word == "crash":
+        raise RuntimeError("injected PreToolUse observer crash")
+    if word == "exit":
+        os._exit(3)
+    if word == "hang":
+        import signal
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM, signal.SIGTERM})
+    time.sleep(60)
+
+
+def _file_fault(roots):
+    for root in roots:
+        path = Path(root) / PRE_FAULT_FILE
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 64:
+                continue
+            word = path.read_text(errors="replace").strip()
+        except OSError:
+            continue
+        if word in PRE_FAULTS:
+            return word
+    return None
+
+
+def pre_tool_use(payload, host=HOST, *, deadline=None):
+    """Open the observer's interval for one native call; return [(root, session, call)] observed.
+
+    Never decides anything about the call. It refuses (observes nothing) on the same grounds as
+    PostToolUse: host proof, the exact native conversation, an opted-in root, a supported tool
+    shape, and an active work cycle (a late event never starts one). Read-only on native state.
+    """
+    profile(host)
+    token = _ACTIVE_HOST.set(host)
+    try:
+        return _pre_tool_use(payload, host, time.monotonic() + PRE_TOOL_SECONDS if deadline is None
+                             else deadline)
+    finally:
+        _ACTIVE_HOST.reset(token)
+
+
+def _pre_tool_use(payload, host, deadline):
+    import io_observer
+
+    if not isinstance(payload, dict):
+        return []
+    app = host == APP_HOST
+    call = payload.get("toolCall")
+    name = call.get("name") if isinstance(call, dict) else None
+    args = call.get("args") if isinstance(call, dict) else None
+    step = payload.get("stepIdx")
+    if name not in (APP_EDITS if app else EDITS) | {"run_command"} or not isinstance(args, dict) \
+            or not integer(step):
+        return []
+    cid = identity(payload)
+    transcript = native_transcript(payload, cid, host)
+    roots = roots_for(payload)
+    if not roots:
+        return []
+    fault = _file_fault(roots)
+    if fault:
+        _pre_fault(fault, roots)
+    command = None
+    if name == "run_command":
+        command = args.get("CommandLine")
+        if not isinstance(command, str) or not command or len(command) > 65536:
+            return []
+        if app:
+            # Where it ran is proven only afterwards, by the App's own step record.
+            if not app_store.command_args_supported(args):
+                return []
+            targets = list(roots)
+        else:
+            root = contained_root(args.get("Cwd"), roots)
+            targets = [root] if root and Path(args["Cwd"]).is_dir() else []
+    else:
+        raw = args.get("Path" if app else "TargetFile")
+        root = contained_root(raw, roots)
+        if root is None:
+            return []
+        relative = Path(raw).relative_to(root)
+        if not relative.parts or relative.parts[0] in PROTECTED:
+            return []
+        targets = [root]
+    records = transcript_records(transcript)
+    observed_turns = [r["step_index"] for r in records
+                      if r.get("source") == "USER_EXPLICIT" and r.get("type") == "USER_INPUT"]
+    call_id = observer_call_id(step)
+    observed = []
+    saved_lock_wait = io_observer.LOCK_WAIT_SECONDS
+    io_observer.LOCK_WAIT_SECONDS = min(saved_lock_wait, PRE_LOCK_SECONDS)
+    try:
+        for root in targets:
+            try:
+                directory = preflight(root, cid)
+                state = read_state(directory / "native-state.json", cid)
+                candidates = [n for n in observed_turns + [int(k) for k in state["turns"]] if n <= step]
+                if not candidates:
+                    continue
+                user_step = max(candidates)
+                turn = state["turns"].get(str(user_step))
+                if turn is None or turn["status"] != "active":
+                    continue  # late or unowned: never observed outside an active work cycle
+                session = f"{cid}-turn-{user_step}"
+                state_dir = observer_state_dir(root)
+                detached = command is not None and io_observer.starts_background_job(command)
+                seconds = max(0.01, min(io_observer.DEFAULT_WALK_SECONDS,
+                                        deadline - time.monotonic() - PRE_RESERVE_SECONDS))
+                try:
+                    io_observer.pre(state_dir, host=host, session=session, call_id=call_id,
+                                    tool="Bash" if command is not None else "Write",
+                                    repo_root=root, snapshot=command is not None,
+                                    background=detached, detached=detached, walk_seconds=seconds)
+                except io_observer.LockTimeout:
+                    pass  # the snapshot (if any) is still taken and records the journal gap
+                observed.append((root, session, call_id))
+            except Exception as error:
+                print(f"Mycelium Antigravity PreToolUse ({root}): {one_line(error, 300)}", file=sys.stderr)
+    finally:
+        io_observer.LOCK_WAIT_SECONDS = saved_lock_wait
+    return observed
+
+
+def pre_tool_main(args, host):
+    """Entry point for PreToolUse: always PRE_ALLOW on stdout and exit 0."""
+    import signal
+
+    def expire(_signum, _frame):
+        os.write(1, PRE_ALLOW.encode())
+        os._exit(0)
+
+    try:
+        signal.signal(signal.SIGALRM, expire)
+        signal.setitimer(signal.ITIMER_REAL, PRE_TOOL_SECONDS)
+    except (ValueError, OSError, AttributeError):
+        pass
+    try:
+        _pre_fault(os.environ.get(PRE_FAULT_ENV, ""))
+        if len(args) == 1 and args[0] == "PreToolUse":
+            raw = sys.stdin.read(1024 * 1024 + 1)
+            if len(raw) <= 1024 * 1024 and raw.strip():
+                pre_tool_use(json.loads(raw), host)
+    except Exception as error:
+        print(f"Mycelium Antigravity PreToolUse: {one_line(error, 300)}", file=sys.stderr)
+    finally:
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        except (ValueError, OSError, AttributeError):
+            pass
+    os.write(1, PRE_ALLOW.encode())
+    return 0
+
+
 def main():
+    if "PreToolUse" in sys.argv[1:]:
+        args, host = sys.argv[1:], HOST
+        if len(args) == 3 and args[0] == "--host" and args[1] in PROFILES:
+            host, args = args[1], args[2:]
+        return pre_tool_main(args, host)
     try:
         if len(sys.argv) in (4, 5) and sys.argv[1] == "--record-accepted-stop":
             # Existing IDE callers omit the host; the shared Stop hook names it.

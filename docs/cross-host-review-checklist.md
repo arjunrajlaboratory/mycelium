@@ -52,9 +52,16 @@ hook, filesystem, or lifecycle boundaries.
       registrations: SessionStart; the I/O observer on PreToolUse for Bash
       and for `apply_patch`; two Bash PostToolUse handlers; the activity
       tracker and the I/O observer on `apply_patch` PostToolUse; and Stop.
-- [ ] Every PreToolUse handler is observation only: it prints nothing,
-      emits no permission decision, exits 0 on every path, and writes only
-      under `.mycelium/io/` after the shared-state containment check.
+- [ ] Every PreToolUse handler is observation only: it exits 0 on every
+      path and writes only under `.mycelium/io/` after the shared-state
+      containment check. On Claude and Codex it prints nothing and emits no
+      permission decision. On Antigravity, which requires a decision, it
+      prints exactly `{"decision": "allow"}` (defer to the host's policy) on
+      every path, including a crash, a hang past its bound and a malformed
+      payload, and never `auto_approve`, `deny`, `ask`, `overwrite` or
+      `permissionOverrides`; the wrapper, not the Python helper, prints it.
+      A change to this handler needs a live App check that prompts, "Always
+      Allow" grants and denials are unchanged.
 - [ ] A Bash call's observation runs before session gating, so a lock
       timeout, a missing transaction, or a foreign owner never costs it; an
       observation that cannot be made says `unavailable` with a reason and

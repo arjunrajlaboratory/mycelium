@@ -1248,6 +1248,7 @@ def pre(
     snapshot: bool = False,
     background: bool = False,
     detached: bool = False,
+    walk_seconds: float = DEFAULT_WALK_SECONDS,
 ) -> None:
     """Open the call's interval; for Bash, snapshot the watched scope.
 
@@ -1276,7 +1277,7 @@ def pre(
             raise LockTimeout(journal_error)
         return
     taken_ns = time.time_ns()
-    snap = walk(repo_root)
+    snap = walk(repo_root, seconds=walk_seconds)
     write_snapshot(
         snapshot_path(state_dir, host, session, call_id),
         snap,

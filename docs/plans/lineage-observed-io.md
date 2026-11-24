@@ -214,7 +214,18 @@ change list.
   The cross-host checklist's "five Codex registrations" item and its test are
   updated. Changing `hooks.json` changes the trusted bundle hash: release
   notes say Codex users re-trust hooks.
-- Antigravity: no PreToolUse; observations `unavailable: host-has-no-pre-hook`.
+- Antigravity (IDE and App, `tools/antigravity.py` hooks.json): PreToolUse
+  `run_command` and the profile's edit tools → `mycelium-antigravity-pre.sh`,
+  which runs `antigravity_hooks.py PreToolUse` (observer `pre` under the
+  adapter's host proof, native conversation, opted-in root, and active work
+  cycle checks) and always prints `{"decision": "allow"}`, exit 0. Antigravity
+  requires a decision; `allow` defers to the host's own policy. The call id is
+  `ag-step-<stepIdx>`, the session `<conversation>-turn-<user step>`, matching
+  the adapter's Post (data tracker `tool_use_id`; the edit Post runs the
+  observer hook). Calls that get no Post are closed by `turn-end` before
+  Stop finalization, unless a command is still running at the final Stop
+  allowance. A package from before this observer has none: observations are
+  missing and the index reports `no-observations`.
 
 ## State safety
 

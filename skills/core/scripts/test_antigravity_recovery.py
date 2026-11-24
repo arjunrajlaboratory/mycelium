@@ -347,6 +347,8 @@ def test_valid_no_op_and_unresolved_capture_still_complete(cycle, kind):
         records.append(dict(step_index=3, source="MODEL", type="RUN_COMMAND", status="DONE", exit_code=0))
         write()
         post = dict(payload, stepIdx=3, error="", toolCall={"name": "run_command", "args": {"Cwd": str(repo), "CommandLine": "ls -la"}})
+        # The packaged PreToolUse observer snapshots first, so the Post sees that nothing changed.
+        assert ag.pre_tool_use(post)
     else:
         (repo / "dynamic.py").write_text('import pandas as pd\nname = "".join(["out", "put.csv"])\npd.DataFrame({"x": [2]}).to_csv(name, index=False)\n')
         post = run_command(cycle, 3, "python3 dynamic.py", "dynamic.py")
