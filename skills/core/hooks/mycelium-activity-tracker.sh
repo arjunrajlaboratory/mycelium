@@ -217,7 +217,7 @@ done
 # work. If the prior cycle was already documented, refresh it so subsequent
 # edits cannot be accepted using an older lifecycle update.
 SESSION_CHANGES_HELPER="${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"
-mycelium_refresh_work_cycle "$REPO_ROOT" "$SESSION_CHANGES_HELPER" || true
+mycelium_refresh_work_cycle "$REPO_ROOT" "$SESSION_CHANGES_HELPER" "$SESSION_CWD" || true
 
 if [[ "$BATCH" == 1 ]]; then
   printf '%s\n' "$BATCH_ACK"

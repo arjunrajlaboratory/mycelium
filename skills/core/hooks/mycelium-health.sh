@@ -632,6 +632,7 @@ LOG_EOF
     elif [ -f "$SESSION_CHANGES_SCRIPT" ]; then
       python3 "$SESSION_CHANGES_SCRIPT" snapshot \
         --repo-root "$REPO_ROOT" \
+        --session-dir "$CWD" \
         --output "$SESSION_BASELINE_FILE" >/dev/null 2>&1 \
         || rm -f "$SESSION_BASELINE_FILE"
     fi
