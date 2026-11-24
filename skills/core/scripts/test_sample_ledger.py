@@ -556,10 +556,29 @@ def test_local_labels_qualify_paired_batch_units_and_batches(ledger: Path) -> No
     assert "batch_scopes" not in paired[1]
 
 
-def test_a_thousand_paired_units_check_within_a_second() -> None:
+# Size tests measure the work the check charges to its budget, with the
+# wall clock out of the way, so they hold on a slow or loaded runner. The
+# work count is deterministic; a regression to dense or repeated elimination
+# multiplies it. A generous wall-clock bound only catches a hang.
+SANITY_SECONDS = 60
+
+
+def _work(check: dict, rows: list) -> tuple:
+    """Run the check with an unlimited clock: its alerts and the work it spent."""
+    import time
+
+    budget = dcc._AdvisoryBudget(seconds=1e9)
+    before = budget.ops
+    start = time.perf_counter()
+    alerts = dcc.check_paired_batch({**check, "_budget": budget}, [], rows)
+    assert time.perf_counter() - start < SANITY_SECONDS
+    assert not any("too large" in a["message"] for a in alerts)
+    return alerts, before - budget.ops
+
+
+def test_a_thousand_paired_units_check_within_the_budget() -> None:
     # One sparse exact elimination per design, units absorbed by differencing.
     import random
-    import time
 
     rng = random.Random(42)
     rows = [{"donor": f"d{i:04d}", "g": "AB"[i % 2], "visit": f"v{v}",
@@ -567,9 +586,9 @@ def test_a_thousand_paired_units_check_within_a_second() -> None:
             for i in range(1000) for v in range(3)]
     check = {"unit": "donor", "within": "visit", "group": "g", "batch": ["run", "date"],
              "max_share": 0.5}
-    start = time.perf_counter()
-    assert dcc.check_paired_batch(check, [], rows) == []
-    assert time.perf_counter() - start < 1
+    alerts, work = _work(check, rows)
+    assert alerts == []
+    assert work < dcc.PAIRED_BATCH_BUDGET // 4  # ~0.7M of 5M
 
 
 def test_pairs_mostly_split_in_step_warn(tmp_path: Path) -> None:
@@ -816,15 +835,7 @@ def test_a_recorded_question_mark_group_is_not_the_unknown_group() -> None:
                for a in alerts)
 
 
-def _timed(check: dict, rows: list) -> float:
-    import time
-
-    start = time.perf_counter()
-    dcc.check_paired_batch(check, [], rows)
-    return time.perf_counter() - start
-
-
-def test_long_batch_chains_check_quickly() -> None:
+def test_long_batch_chains_check_within_the_budget() -> None:
     rows = []
     for i in range(1000):
         for v in range(12):
@@ -836,15 +847,17 @@ def test_long_batch_chains_check_quickly() -> None:
                 r = 501 + (i - 500) // 4
             rows += [{"donor": f"d{i}", "cohort": str(i % 2), "visit": f"v{v}", "run": f"{r:04d}"}
                      for _ in range(2)]
-    assert _timed({"unit": "donor", "within": "visit", "group": "cohort", "batch": ["run"],
-                   "max_share": 0.5}, rows) < 2
+    _, work = _work({"unit": "donor", "within": "visit", "group": "cohort", "batch": ["run"],
+                     "max_share": 0.5}, rows)
+    assert work < dcc.PAIRED_BATCH_BUDGET // 4  # ~0.4M
 
 
-def test_many_groups_and_visits_check_quickly() -> None:
+def test_many_groups_and_visits_check_within_the_budget() -> None:
     rows = [{"plant": f"p{i}", "cultivar": str(i % 250), "week": f"w{w:02d}",
              "device": str((i // 250) % 2)} for i in range(1000) for w in range(26) for _ in range(2)]
-    assert _timed({"unit": "plant", "within": "week", "group": "cultivar", "batch": ["device"],
-                   "max_share": 0.5}, rows) < 2
+    _, work = _work({"unit": "plant", "within": "week", "group": "cultivar", "batch": ["device"],
+                     "max_share": 0.5}, rows)
+    assert work < dcc.PAIRED_BATCH_BUDGET // 4  # ~0.3M
 
 
 def test_a_design_past_the_budget_warns_that_it_was_not_checked(monkeypatch) -> None:
@@ -891,30 +904,49 @@ def test_budget_exhaustion_while_testing_contrasts_never_crashes(tmp_path: Path)
     assert not any(a["blocking"] for a in paired)
 
 
-def test_advisory_checks_share_one_time_budget(tmp_path: Path) -> None:
-    # 32 batch columns: 33 generated paired_batch checks. Together they may
-    # add about a second to the ledger run, not one budget each.
-    import time
-
+def _many_batch_columns(tmp_path: Path) -> dict:
+    """A paired ledger with 32 batch columns: 33 generated paired_batch checks."""
     batch = [f"run{j:02}" for j in range(32)]
     rows = [[f"s{u}-{v}-{k}", f"d{u}", str((u // 2) % 2), f"v{v:02}"] +
             [f"R{(u + v + j) % 2}" for j in range(32)]
-            for u in range(1000) for v in range(12) for k in range(2)]
-    header = ["sample_id", "donor", "group", "visit"] + batch
-    spec = {"schema": dcc.LEDGER_SCHEMA, "file": "samples.tsv", "sample_id": "sample_id",
-            "group": "group", "unit_of_replication": "donor", "batch": batch}
-    _write_ledger(tmp_path, header, rows)
+            for u in range(200) for v in range(12) for k in range(2)]
+    _write_ledger(tmp_path, ["sample_id", "donor", "group", "visit"] + batch, rows)
+    return dcc.ledger_contract({"schema": dcc.LEDGER_SCHEMA, "file": "samples.tsv",
+                                "sample_id": "sample_id", "group": "group",
+                                "unit_of_replication": "donor", "batch": batch,
+                                "pairing": {"unit": "donor", "within": "visit"}}, str(tmp_path))
 
-    def seconds(extra: dict) -> tuple:
-        contract = dcc.ledger_contract({**spec, **extra}, str(tmp_path))
-        start = time.perf_counter()
-        summaries, _ = dcc.run_contract(contract, str(tmp_path))
-        return time.perf_counter() - start, summaries
 
-    base, _ = seconds({})
-    paired, summaries = seconds({"pairing": {"unit": "donor", "within": "visit"}})
-    assert paired - base < dcc.ADVISORY_SECONDS + 1.0, (base, paired)
+def _advisory_outcomes(summaries: list, alerts: list) -> tuple:
+    paired = [s["check"] for s in summaries if s["kind"] == "paired_batch"]
+    skipped = {a["check"] for a in alerts if a["message"].startswith("skipped: ")}
+    too_large = {a["check"] for a in alerts if "too large" in a["message"]}
+    assert len(paired) == 33
     assert all(s["status"] != "block" for s in summaries if s["kind"] == "paired_batch")
+    return paired, skipped, too_large
+
+
+def test_advisory_checks_share_one_work_budget(tmp_path: Path, monkeypatch) -> None:
+    # Each check alone needs ~22k units (the joint one ~170k), ~0.9M in all.
+    # One shared 100k budget runs a few, the check that exhausts it reports
+    # "too large", and every later one is skipped: not a fresh budget each.
+    monkeypatch.setattr(dcc, "ADVISORY_SECONDS", 1e9)  # the clock never decides
+    monkeypatch.setattr(dcc, "PAIRED_BATCH_BUDGET", 100_000)
+    paired, skipped, too_large = _advisory_outcomes(
+        *dcc.run_contract(_many_batch_columns(tmp_path), str(tmp_path)))
+    ran = [c for c in paired if c not in skipped]
+    assert len(too_large) == 1 and too_large <= set(ran)
+    assert 1 < len(ran) < 10
+    assert skipped == set(paired[len(ran):])  # every check after the exhaustion
+
+
+def test_advisory_checks_share_one_clock(tmp_path: Path, monkeypatch) -> None:
+    # A spent clock (deadline already past) skips every advisory check before
+    # its row preparation; nothing is checked and nothing blocks.
+    monkeypatch.setattr(dcc, "ADVISORY_SECONDS", -1)
+    paired, skipped, _ = _advisory_outcomes(
+        *dcc.run_contract(_many_batch_columns(tmp_path), str(tmp_path)))
+    assert skipped == set(paired)
 
 
 MAIN_KINDS = {"schema", "cohort", "unit_of_replication", "pairing", "batch_confounding",
@@ -987,8 +1019,6 @@ def test_thousands_of_erased_contrasts_stay_within_the_budget(tmp_path: Path) ->
     # Codex's shape: 500 long group labels x 11 visits, every follow-up run
     # missing, so 5,500 contrasts are erased; the warning tier must not
     # rescan them, and its work is charged to the shared budget.
-    import time
-
     rows = []
     for u in range(1000):
         group = "g" * 8192 + f"{u // 2:04}"
@@ -1001,9 +1031,8 @@ def test_thousands_of_erased_contrasts_stay_within_the_budget(tmp_path: Path) ->
     contract = dcc.ledger_contract(json.loads(spec.read_text()), str(tmp_path))
     paired = [c for c in contract["checks"] if c["kind"] == "paired_batch"]
     table = dcc.read_table(contract["table"])[1]
-    start = time.perf_counter()
-    alerts = dcc.check_paired_batch(paired[0], [], table)
-    assert time.perf_counter() - start < dcc.ADVISORY_SECONDS + 0.5
+    alerts, work = _work(paired[0], table)
+    assert work < dcc.PAIRED_BATCH_BUDGET // 4  # ~0.1M, the warning tier included
     assert not any(a["blocking"] for a in alerts)
     assert all(len(a["observed"]) < 100000 for a in alerts if "observed" in a)  # 5 listed, not 5,500
 
