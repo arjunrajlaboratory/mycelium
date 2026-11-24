@@ -169,7 +169,6 @@ def test_unsupported_tools_and_foreign_roots_write_nothing(project):
     ag.dispatch("PreInvocation", payload)
     before = tree(repo / ".mycelium")
     for call in ({"name": "view_file", "args": {"AbsolutePath": str(repo / "analysis.py")}},
-                 {"name": "run_command", "args": {"CommandLine": "ls", "Cwd": "/"}},
                  {"name": "write_to_file", "args": {"TargetFile": str(repo / ".living/x.md")}},
                  {"name": "write_to_file", "args": {"TargetFile": "/elsewhere/x.md"}}):
         result, _ = run_wrapper(json.dumps(dict(payload, stepIdx=1, toolCall=call)), env={"HOME": str(home)})
@@ -368,13 +367,16 @@ def test_app_pre_and_post_produce_an_observed_sole_write(app_project):
     assert write["record"]["status"] == "current-in-record", write
 
 
-def test_app_bypass_or_daemon_command_takes_no_snapshot(app_project):
+def test_app_bypass_or_daemon_command_takes_no_snapshot_but_is_journaled_background(app_project):
     home, repo, payload, db, session = app_project
-    for extra in ({"BypassSandbox": True}, {"IsDaemon": True}):
-        call = app_command_call(5)
+    for step, extra in ((5, {"BypassSandbox": True}), (6, {"IsDaemon": True})):
+        call = app_command_call(step)
         call["toolCall"]["args"].update(extra)
         assert ag.pre_tool_use(dict(payload, **call), ag.APP_HOST) == []
-    assert not (repo / ".mycelium/io").exists()
+    assert not list((repo / ".mycelium/io").rglob("*.snap"))
+    pres = [r for r in io._read_lines(repo / ".mycelium/io/calls.ndjson") if r.get("ev") == "pre"]
+    assert [(r["call"], r["background"]) for r in pres] == [
+        (ag.observer_call_id(5), True), (ag.observer_call_id(6), True)]
 
 
 def test_app_edit_pre_and_post_record_a_successful_edit(app_project):
@@ -411,3 +413,74 @@ def test_installed_package_doctors_and_its_pre_command_answers_allow(tmp_path, p
         assert time.monotonic() - started < HARD_BOUND
     # Running the hook leaves the package byte-identical (no __pycache__ drift breaks doctor).
     assert installer.doctor(target, profile=profile)["ok"]
+
+
+# ---- A call the Pre does not snapshot but that can still run stays visible ---------------------
+
+def assert_not_sole(repo, path="out.csv"):
+    """The write happened while an unobserved call may have been running: never sole/current."""
+    write = index_status(repo, path)
+    assert not (write["attribution"] == "sole" and write["record"]["status"] == "current-in-record"), write
+    return write
+
+
+@pytest.mark.parametrize("extra", [{"IsDaemon": True}, {"BypassSandbox": True}, {"UnknownArg": 1}])
+def test_app_unobserved_command_writes_are_not_credited_to_the_next_call(app_project, extra):
+    # Review of #173: a daemon (or sandbox-bypassing) command left no interval, so its later
+    # write was credited, sole and current-in-record, to the next foreground call.
+    from test_antigravity_app_native import command_payload
+    home, repo, payload, db, session = app_project
+    daemon = app_command_call(5)
+    daemon["toolCall"]["args"].update(extra)
+    result, elapsed = run_wrapper(json.dumps(dict(payload, **daemon)), host=ag.APP_HOST, env={"HOME": str(home)})
+    assert (result.stdout, result.returncode) == (ALLOW, 0) and elapsed < HARD_BOUND
+    ag.dispatch("PostToolUse", dict(payload, error="", **daemon), host=ag.APP_HOST)
+    foreground = app_command_call(6, command="echo hi")
+    run_wrapper(json.dumps(dict(payload, **foreground)), host=ag.APP_HOST, env={"HOME": str(home)})
+    run_analysis(repo)  # the daemon writes out.csv while step 6 runs
+    db.put(6, command_payload(str(repo), step=6, command="echo hi"))
+    ag.dispatch("PostToolUse", dict(payload, error="", **foreground), host=ag.APP_HOST)
+    obs = io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session))[-1]
+    assert obs["observation_id"] == f"{ag.APP_HOST}:{ag.observer_call_id(6)}"
+    assert [o["call"] for o in obs["overlapping"]] == [ag.observer_call_id(5)], obs
+    assert_not_sole(repo)
+    # Turn end never claims a possibly still-running unobserved call has finished.
+    ag.dispatch("Stop", dict(payload, fullyIdle=True, terminationReason="NO_TOOL_CALL", error=""),
+                host=ag.APP_HOST)
+    assert "turn-ended" not in (repo / ".mycelium/io/calls.ndjson").read_text().split(
+        ag.observer_call_id(5))[-1].split("\n")[0]
+    assert_not_sole(repo)
+
+
+def test_ide_command_outside_the_project_writes_are_not_credited_to_the_next_call(project):
+    home, repo = project
+    transcript, payload = native(home, repo)
+    ag.dispatch("PreInvocation", payload)
+    outside = command_call(repo, 1, command=f"sleep 2; cd '{repo}' && python3 analysis.py")
+    outside["toolCall"]["args"]["Cwd"] = str(home)
+    result, elapsed = run_wrapper(json.dumps(dict(payload, **outside)), env={"HOME": str(home)})
+    assert (result.stdout, result.returncode) == (ALLOW, 0) and elapsed < HARD_BOUND
+    append(transcript, step_index=1, source="MODEL", type="RUN_COMMAND", status="RUNNING")
+    ag.dispatch("PostToolUse", dict(payload, error="", **outside))
+    run_wrapper(json.dumps(dict(payload, **command_call(repo, 2, command="echo hi"))), env={"HOME": str(home)})
+    run_analysis(repo)
+    append(transcript, step_index=2, source="MODEL", type="RUN_COMMAND", status="DONE", exit_code=0)
+    ag.dispatch("PostToolUse", dict(payload, error="", **command_call(repo, 2, command="echo hi")))
+    obs = io._read_lines(io.observations_path(repo / ".mycelium", ag.HOST, f"{CID}-turn-0"))[-1]
+    assert [o["call"] for o in obs["overlapping"]] == [ag.observer_call_id(1)], obs
+    assert_not_sole(repo)
+
+
+def test_command_after_its_work_cycle_ended_is_journaled_unobserved(project):
+    home, repo = project
+    transcript, payload = native(home, repo)
+    ag.dispatch("PreInvocation", payload)
+    state_path = next((repo / ".mycelium").rglob("native-state.json"))
+    state = json.loads(state_path.read_text())
+    state["turns"]["0"]["status"] = "accepted"
+    state_path.write_text(json.dumps(state))
+    assert ag.pre_tool_use(dict(payload, **command_call(repo, 1))) == []  # no snapshot
+    journal = io._read_lines(repo / ".mycelium/io/calls.ndjson")
+    (pre,) = [r for r in journal if r.get("ev") == "pre"]
+    assert pre["call"] == ag.observer_call_id(1) and pre["background"] is True
+    assert not list((repo / ".mycelium/io").rglob("*.snap"))

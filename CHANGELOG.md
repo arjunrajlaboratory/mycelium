@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     an active work cycle. A late event never observes. It writes no native
     state. Its call id is `ag-step-<stepIdx>` in the session
     `<conversation>-turn-<user step>`.
+  - A command the Pre cannot snapshot but that can still run (an App daemon,
+    sandbox bypass or unrecognised argument, an IDE `Cwd` outside the
+    project, or a command after its work cycle ended) is journaled as a
+    background call, so a later call running beside it is marked overlapping
+    instead of being credited with its writes.
   - Calls that never get a Post (a denied or failed call) are closed as
     `turn-ended` before Stop finalization. A command still running at the
     final Stop allowance keeps its interval open.

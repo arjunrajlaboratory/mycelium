@@ -1247,18 +1247,26 @@ def _pre_tool_use(payload, host, deadline):
     if fault:
         _pre_fault(fault, roots)
     command = None
+    # Roots where the call may write but will never be observed (no snapshot, and no Post that
+    # closes it): it is journaled there as a background call, so every call that runs beside
+    # it is marked overlapping instead of being credited with its writes. Turn end leaves a
+    # background interval open; only the journal's age bound closes it.
+    unobserved = []
     if name == "run_command":
         command = args.get("CommandLine")
         if not isinstance(command, str) or not command or len(command) > 65536:
-            return []
-        if app:
-            # Where it ran is proven only afterwards, by the App's own step record.
-            if not app_store.command_args_supported(args):
-                return []
-            targets = list(roots)
+            targets, unobserved = [], list(roots)
+        elif app:
+            # Where it ran is proven only afterwards, by the App's own step record. A daemon,
+            # sandbox bypass or unrecognised argument is never settled and may outlive the call.
+            targets, unobserved = ((list(roots), []) if app_store.command_args_supported(args)
+                                   else ([], list(roots)))
         else:
             root = contained_root(args.get("Cwd"), roots)
-            targets = [root] if root and Path(args["Cwd"]).is_dir() else []
+            # A command whose Cwd is outside every opted-in root is never credited, but it can
+            # still `cd` into one and write there.
+            targets, unobserved = (([root], []) if root and Path(args["Cwd"]).is_dir()
+                                   else ([], list(roots)))
     else:
         raw = args.get("Path" if app else "TargetFile")
         root = contained_root(raw, roots)
@@ -1276,7 +1284,7 @@ def _pre_tool_use(payload, host, deadline):
     saved_lock_wait = io_observer.LOCK_WAIT_SECONDS
     io_observer.LOCK_WAIT_SECONDS = min(saved_lock_wait, PRE_LOCK_SECONDS)
     try:
-        for root in targets:
+        for root in targets + unobserved:
             try:
                 directory = preflight(root, cid)
                 state = read_state(directory / "native-state.json", cid)
@@ -1285,10 +1293,21 @@ def _pre_tool_use(payload, host, deadline):
                     continue
                 user_step = max(candidates)
                 turn = state["turns"].get(str(user_step))
-                if turn is None or turn["status"] != "active":
-                    continue  # late or unowned: never observed outside an active work cycle
+                if turn is None:
+                    continue  # no work cycle was ever started: nothing to key the call to
                 session = f"{cid}-turn-{user_step}"
                 state_dir = observer_state_dir(root)
+                if root in unobserved or turn["status"] != "active":
+                    # Late or unowned (no Post will close it), or never observable: journal
+                    # it without a snapshot, as background, so it cannot hide behind others.
+                    if name == "run_command":
+                        try:
+                            io_observer.pre(state_dir, host=host, session=session, call_id=call_id,
+                                            tool="Bash", repo_root=root, snapshot=False,
+                                            background=True, detached=True)
+                        except io_observer.LockTimeout:
+                            pass  # its open marker still marks later calls as overlapping
+                    continue
                 detached = command is not None and io_observer.starts_background_job(command)
                 seconds = max(0.01, min(io_observer.DEFAULT_WALK_SECONDS,
                                         deadline - time.monotonic() - PRE_RESERVE_SECONDS))

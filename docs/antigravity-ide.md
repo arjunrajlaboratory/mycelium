@@ -244,7 +244,13 @@ the IDE; `write_file` and `edit_file` in the App). It observes a call only
 when the PostToolUse path would credit it: the same host-profile proof and
 exact native conversation directory, an opted-in Git root, a supported tool
 shape, and an active work cycle. A late event never starts one, and it never
-writes native state. In the IDE, a command is observed in the root that holds
+writes native state. A command it cannot snapshot but that can still run (an
+App daemon, sandbox bypass or unrecognised argument, an IDE `Cwd` outside the
+project, or a command arriving after its work cycle ended) is journaled
+without a snapshot as a background call in every opted-in root. Calls that run
+beside it are then marked overlapping, so none of them is credited with its
+writes. Turn end leaves such an interval open; only the journal's age bound
+closes it. In the IDE, a command is observed in the root that holds
 its `Cwd`. In the App, a command without `BypassSandbox` or `IsDaemon` is
 snapshotted in every opted-in root, because only the App's step record later
 proves where it ran. An edit is observed only outside `.living`, `.mycelium`

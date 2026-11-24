@@ -224,7 +224,9 @@ change list.
   the adapter's Post (data tracker `tool_use_id`; the edit Post runs the
   observer hook). Calls that get no Post are closed by `turn-end` before
   Stop finalization, unless a command is still running at the final Stop
-  allowance. A package from before this observer has none: observations are
+  allowance. A command the Pre cannot snapshot but that can still run (App
+  daemon/bypass/unknown argument, IDE `Cwd` outside the project, inactive
+  work cycle) is journaled as a background call with no snapshot. A package from before this observer has none: observations are
   missing and the index reports `no-observations`.
 
 ## State safety
