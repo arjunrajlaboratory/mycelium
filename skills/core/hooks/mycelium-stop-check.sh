@@ -25,9 +25,9 @@ HOST_SESSION_ID=$(mycelium_json_get_optional_string 'session_id' INPUT) || exit 
 # used twice: the repository root is resolved from it (below), and it is the
 # session's own folder for Stop's snapshots, which record a subproject's
 # .living/ from it because the Codex dispatcher runs this hook from the
-# repository root. A missing or unusable cwd (an empty payload) keeps
-# upstream's behaviour for the root and falls back to the hook's own directory
-# for the session folder.
+# repository root. A missing or unusable cwd (an empty payload) leaves the
+# root to mycelium_session_repo_root's own fallback (the hook's git toplevel)
+# and makes the hook's own directory the session folder.
 PAYLOAD_CWD=$(mycelium_json_get 'cwd' INPUT)
 SESSION_CWD="$PAYLOAD_CWD"
 if [[ -z "$SESSION_CWD" || ! -d "$SESSION_CWD" ]]; then
