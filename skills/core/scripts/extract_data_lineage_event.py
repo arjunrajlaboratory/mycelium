@@ -5297,6 +5297,22 @@ def _io_literal_filenames(source: str) -> tuple[set[str], set[str]]:
 class _StdPath(NamedTuple):
     text: str
     is_path: bool  # a pathlib.Path (has `.open`), not a str
+    # Derived from `__file__` by the path's ancestors alone (`.parent`,
+    # `.parents[n]`, `dirname`, `resolve()`): every ancestor of a certain
+    # script file is a real directory, so these steps are exact.
+    file: bool = False
+
+
+class _ScriptFile(NamedTuple):
+    """What `__file__` is in a script Python ran as `python word`.
+
+    ``path`` is the script's absolute path. ``absolute`` is whether the
+    command named it by an absolute word: only then is `__file__` itself
+    absolute on every Python (a relative word stays relative before 3.9),
+    so a relative word is used only through `os.path.abspath`/`realpath`
+    or `Path(...).resolve()`/`.absolute()` of `__file__` itself."""
+    path: str
+    absolute: bool
 
 
 _STDLIB_PATH_CONSTRUCTORS = frozenset({"pathlib.Path", "pathlib.PosixPath"})
@@ -5347,6 +5363,12 @@ _ARGPARSE_ACTIONS = frozenset({
     "append", "count", "extend", "help", "store", "store_const",
     "store_false", "store_true", "version",
 })
+# Every way to parse a command line: a wrapper is modelled only when its
+# `parse_args` is the module's one such call.
+_ARGPARSE_PARSE_METHODS = frozenset({
+    "parse_args", "parse_intermixed_args", "parse_known_args",
+    "parse_known_intermixed_args",
+})
 # Parser methods that neither add options nor change parsed values.
 _ARGPARSE_INERT_METHODS = frozenset({
     "error", "exit", "format_help", "format_usage", "print_help", "print_usage",
@@ -5396,6 +5418,10 @@ def _is_literal(node: ast.AST) -> bool:
     return True
 
 
+def _is_none_literal(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
 def _is_main_guard(node: ast.AST) -> bool:
     """`if __name__ == "__main__":`"""
     test = node.test if isinstance(node, ast.If) else None
@@ -5415,9 +5441,10 @@ class _StdlibIO:
     """The certain standard-library I/O of one Python source."""
 
     def __init__(self, tree: ast.Module, script_args: list[str] | None,
-                 deadline: float) -> None:
+                 deadline: float, script_file: _ScriptFile | None = None) -> None:
         self.tree = tree
         self.script_args = script_args
+        self.script_file = script_file
         self.deadline = deadline
         self.parents: dict[ast.AST, ast.AST] = {}
         # Each node's enclosing scope and each statement's (block, index),
@@ -5426,6 +5453,7 @@ class _StdlibIO:
         self.blocks: dict[ast.AST, tuple[list, int]] = {}
         self.calls_by_scope: dict[ast.AST, list[ast.Call]] = {}
         self.argv_touched = False  # any `x.argv`: argparse may not see the command line
+        self.parse_calls = 0  # `x.parse_args`, `x.parse_known_args`, ...
         # Nodes inside a `try` body with handlers or `with suppress(...)`:
         # an open there may fail and be recovered from.
         self.guarded: set[ast.AST] = set()
@@ -5509,6 +5537,8 @@ class _StdlibIO:
                 self.chdir = True
             if node.attr == "argv":
                 self.argv_touched = True
+            if node.attr in _ARGPARSE_PARSE_METHODS:
+                self.parse_calls += 1
             if node.attr == "mock":
                 self.opaque = True  # `unittest.mock.patch(...)`
             if node.attr in _STDLIB_NAMESPACE_ATTRS or node.attr in _STDLIB_OPAQUE_BUILTINS:
@@ -5534,6 +5564,8 @@ class _StdlibIO:
                         self.chdir = True
                     elif name.value == "argv":
                         self.argv_touched = True
+                    elif name.value in _ARGPARSE_PARSE_METHODS:
+                        self.parse_calls += 1
                     elif name.value in _STDLIB_NAMESPACE_ATTRS:
                         self.opaque = True
         elif isinstance(node, ast.arg):
@@ -5701,9 +5733,61 @@ class _StdlibIO:
             return self._bounded(str(Path(left.text, right.text)), True)
         if isinstance(node, ast.Call):
             return self._call_value(node)
+        if isinstance(node, ast.Attribute) and node.attr == "parent":
+            inner = self.value(node.value)
+            if inner is not None and inner.file and inner.is_path:
+                return _StdPath(str(Path(inner.text).parent), True, True)
+        if isinstance(node, ast.Subscript):
+            return self._parents_value(node)
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             return self._namespace_value(node.value.id, node.attr)
         return None
+
+    # -- `__file__` --
+
+    def _file_bound(self) -> bool:
+        """Whether `__file__` is the script's own path: certain, never
+        rebound, and (for a relative word, made absolute only when the
+        script asks) no chdir that could precede that."""
+        return self.script_file is not None and "__file__" not in self.counts \
+            and "__file__" not in self.stored_attrs \
+            and (self.script_file.absolute or not self.chdir)
+
+    def _file_operand(self, node: ast.AST) -> _StdPath | None:
+        """`__file__` or `Path(__file__)` itself, made absolute: the operand
+        of `abspath`/`realpath`/`resolve()`/`absolute()`. Every component of
+        a certain script path is real, so all four give the same path."""
+        if not self._file_bound():
+            return None
+        if isinstance(node, ast.Name) and node.id == "__file__":
+            return _StdPath(self.script_file.path, False, True)
+        if isinstance(node, ast.Call) and not node.keywords and len(node.args) == 1 \
+                and self.canonical(node.func) in _STDLIB_PATH_CONSTRUCTORS \
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == "__file__":
+            return _StdPath(self.script_file.path, True, True)
+        return None
+
+    def _file_value(self, node: ast.AST) -> _StdPath | None:
+        """A value derived from `__file__` by its ancestors alone."""
+        value = self._file_operand(node)
+        if value is None:
+            value = self.value(node)
+        return value if value is not None and value.file else None
+
+    def _parents_value(self, node: ast.Subscript) -> _StdPath | None:
+        """`<__file__ path>.parents[<literal non-negative int>]`."""
+        index = node.slice
+        if not (isinstance(node.value, ast.Attribute) and node.value.attr == "parents"
+                and isinstance(index, ast.Constant) and type(index.value) is int
+                and index.value >= 0):
+            return None
+        inner = self.value(node.value.value)
+        if inner is None or not inner.file or not inner.is_path:
+            return None
+        parents = Path(inner.text).parents
+        if index.value >= len(parents):
+            return None  # an IndexError when the script runs
+        return _StdPath(str(parents[index.value]), True, True)
 
     def _all(self, nodes: list[ast.AST]) -> list[str] | None:
         out = []
@@ -5719,14 +5803,30 @@ class _StdlibIO:
             return None
         name = self.canonical(node.func)
         if name in _STDLIB_PATH_CONSTRUCTORS:
+            if len(node.args) == 1:
+                inner = self.value(node.args[0])
+                if inner is not None and inner.file:
+                    return _StdPath(inner.text, True, True)
             parts = self._all(node.args)
             return None if parts is None else self._bounded(str(Path(*parts)), True)
+        if name in ("os.path.abspath", "os.path.realpath") and len(node.args) == 1:
+            inner = self._file_value(node.args[0])
+            return None if inner is None else _StdPath(inner.text, False, True)
+        if name == "os.path.dirname" and len(node.args) == 1:
+            inner = self.value(node.args[0])
+            return None if inner is None or not inner.file \
+                else _StdPath(os.path.dirname(inner.text), False, True)
+        if isinstance(node.func, ast.Attribute) and node.func.attr in ("resolve", "absolute") \
+                and not node.args:
+            inner = self._file_value(node.func.value)
+            return None if inner is None or not inner.is_path \
+                else _StdPath(inner.text, True, True)
         if name == "os.path.join" and node.args:
             parts = self._all(node.args)
             return None if parts is None else self._bounded(os.path.join(*parts), False)
         if name in ("str", "os.fspath") and len(node.args) == 1:
             inner = self.value(node.args[0])
-            return None if inner is None else _StdPath(inner.text, False)
+            return None if inner is None else _StdPath(inner.text, False, inner.file)
         if isinstance(node.func, ast.Attribute) and node.func.attr == "joinpath":
             base = self.value(node.func.value)
             parts = self._all(node.args) if base is not None and base.is_path else None
@@ -5739,7 +5839,10 @@ class _StdlibIO:
             return self.memo[name]
         self.memo[name] = None  # a cycle resolves to nothing
         result = None
-        if self.counts.get(name) == 1 and name not in self.stored_attrs:
+        if name == "__file__":
+            result = self._file_operand(ast.Name("__file__")) \
+                if self._file_bound() and self.script_file.absolute else None
+        elif self.counts.get(name) == 1 and name not in self.stored_attrs:
             binder = self.binders.get(name)
             if isinstance(binder, ast.Assign) and self.parents.get(binder) is self.tree \
                     and all(isinstance(t, ast.Name) for t in binder.targets):
@@ -5842,12 +5945,22 @@ class _StdlibIO:
                 and isinstance(args_stmt.targets[0], ast.Name)):
             return None
         parse_call = args_stmt.value
+        # The statement that ends the parser's setup: `args = parser.parse_args()`
+        # itself, or a wrapper's `return parser.parse_args(argv)`.
+        end_stmt: ast.AST = args_stmt
+        wrapped = isinstance(parse_call, ast.Call) and isinstance(parse_call.func, ast.Name)
+        if wrapped:
+            found = self._wrapped_parse_call(args_stmt, parse_call)
+            if found is None:
+                return None
+            parse_call, end_stmt = found
         if not (isinstance(parse_call, ast.Call) and isinstance(parse_call.func, ast.Attribute)
                 and parse_call.func.attr == "parse_args"
                 and isinstance(parse_call.func.value, ast.Name)):
             return None
-        if parse_call.keywords or len(parse_call.args) > 1 or not self._is_process_argv(
-                parse_call.args[0] if parse_call.args else None):
+        if parse_call.keywords or len(parse_call.args) > 1 or not (
+                wrapped or self._is_process_argv(
+                    parse_call.args[0] if parse_call.args else None)):
             return None
         if self._namespace_escapes(name) or self.argv_touched:
             return None
@@ -5874,8 +5987,10 @@ class _StdlibIO:
         start = self._position(parser_stmt)
         # `args = parser.parse_args()` follows in the same block, or in an
         # `if __name__ == "__main__":` that does.
-        if self._block_of(args_stmt) is block:
-            end = self._position(args_stmt)
+        if self._block_of(end_stmt) is block:
+            end = self._position(end_stmt)
+        elif wrapped:
+            return None
         else:
             guard = self.parents.get(args_stmt)
             if not (_is_main_guard(guard) and self._block_of(args_stmt) is guard.body
@@ -5971,6 +6086,109 @@ class _StdlibIO:
             elif isinstance(raw, str):
                 result[dest] = ("value", _StdPath(raw, type_is_path))
         return result
+
+    def _wrapped_parse_call(
+        self, args_stmt: ast.Assign, call: ast.Call
+    ) -> tuple[ast.Call, ast.Return] | None:
+        """`(parser.parse_args(argv), its return)` for `args = wrapper(argv)`
+        when the wrapper's `argv` is provably None, so argparse reads the
+        command line. The one modelled shape:
+
+            def parse_args(argv=None):
+                parser = argparse.ArgumentParser(...)
+                parser.add_argument(...)
+                return parser.parse_args(argv)
+
+            def main(argv=None):
+                args = parse_args(argv)     # or parse_args()
+
+            if __name__ == "__main__":
+                main()     # or sys.exit(main()), raise SystemExit(main())
+
+        Each `argv` is resolved in its own function, not by module-unique
+        name, and must be used only where shown. The wrapper has this one
+        call site, and its `parse_args` is the module's only parse call."""
+        wrapper = self.functions.get(call.func.id)
+        if wrapper is None or call.keywords or self.parse_calls != 1 \
+                or self._call_sites(wrapper.name) != [call]:
+            return None
+        param = self._none_default_parameter(wrapper)
+        last = wrapper.body[-1]
+        inner = last.value if isinstance(last, ast.Return) else None
+        if param is None or not isinstance(inner, ast.Call) or inner.keywords \
+                or len(inner.args) != 1 or not isinstance(inner.args[0], ast.Name) \
+                or inner.args[0].id != param.arg \
+                or not self._used_only_at(wrapper, param, inner.args[0]):
+            return None
+        if not call.args:
+            return inner, last
+        caller = self._scope(args_stmt)
+        if len(call.args) != 1 or not isinstance(call.args[0], ast.Name) \
+                or not isinstance(caller, ast.FunctionDef) \
+                or self.functions.get(caller.name) is not caller:
+            return None
+        outer = self._none_default_parameter(caller, call.args[0].id)
+        if outer is None or not self._used_only_at(caller, outer, call.args[0]):
+            return None
+        sites = self._call_sites(caller.name)
+        if not sites or len(sites) != 1 or sites[0].args or sites[0].keywords \
+                or not self._called_from_main_guard(sites[0]):
+            return None
+        return inner, last
+
+    def _none_default_parameter(
+        self, function: ast.FunctionDef, name: str | None = None
+    ) -> ast.arg | None:
+        """The function's parameter (its only one when ``name`` is None)
+        whose default is a literal None."""
+        spec = function.args
+        positional = [*spec.posonlyargs, *spec.args]
+        if name is None and (len(positional) != 1 or spec.vararg or spec.kwarg
+                             or spec.kwonlyargs):
+            return None
+        for index, arg in enumerate(positional):
+            if name is None or arg.arg == name:
+                offset = index - (len(positional) - len(spec.defaults))
+                default = spec.defaults[offset] if offset >= 0 else None
+                return arg if _is_none_literal(default) else None
+        for arg, default in zip(spec.kwonlyargs, spec.kw_defaults):
+            if arg.arg == name:
+                return arg if _is_none_literal(default) else None
+        return None
+
+    def _used_only_at(self, function: ast.FunctionDef, param: ast.arg,
+                      load: ast.Name) -> bool:
+        """Whether a parameter is never rebound, shadowed or used except at
+        ``load``, anywhere in its function (nested scopes included)."""
+        for node in ast.walk(function):
+            self._tick()
+            if isinstance(node, ast.Name) and node.id == param.arg and node is not load:
+                return False
+            if isinstance(node, ast.arg) and node.arg == param.arg and node is not param:
+                return False
+            if isinstance(node, (ast.Global, ast.Nonlocal)) and param.arg in node.names:
+                return False
+        return True
+
+    def _called_from_main_guard(self, call: ast.Call) -> bool:
+        """`main()`, `sys.exit(main())` or `raise SystemExit(main())` as a
+        statement of a module-level `if __name__ == "__main__":`."""
+        statement = self.parents.get(call)
+        if isinstance(statement, ast.Call):
+            outer = statement
+            name = self.canonical(outer.func)
+            if outer.keywords or len(outer.args) != 1 or outer.args[0] is not call:
+                return False
+            statement = self.parents.get(outer)
+            if not ((name == "sys.exit" and isinstance(statement, ast.Expr))
+                    or (name == "SystemExit" and isinstance(statement, ast.Raise)
+                        and statement.exc is outer and statement.cause is None)):
+                return False
+        elif not isinstance(statement, ast.Expr):
+            return False
+        guard = self.parents.get(statement)
+        return _is_main_guard(guard) and self.parents.get(guard) is self.tree \
+            and self._block_of(statement) is guard.body
 
     def _block_of(self, statement: ast.AST) -> list[ast.stmt] | None:
         entry = self.blocks.get(statement)
@@ -6091,7 +6309,8 @@ def _decoded_as_python_would(source: str) -> bool:
 
 
 def _stdlib_analysis(
-    source: str, script_args: list[str] | None, deadline: float | None = None
+    source: str, script_args: list[str] | None, deadline: float | None = None,
+    script_file: _ScriptFile | None = None,
 ) -> tuple[list[str], list[str]] | None:
     """Paths a Python source certainly opens through the standard library,
     or None when it cannot be analysed within the bounds (too large, not
@@ -6111,7 +6330,7 @@ def _stdlib_analysis(
     if time.monotonic() > deadline:
         return None
     try:
-        return _StdlibIO(tree, script_args, deadline).collect()
+        return _StdlibIO(tree, script_args, deadline, script_file).collect()
     except (_OverBudget, RecursionError, MemoryError):
         return None
 
@@ -6175,10 +6394,38 @@ def _budgeted_file_record(path_str: str, cwd: Path, budget: _HashBudget) -> dict
 
 
 def _stdlib_static_io(
-    source: str, script_args: list[str] | None
+    source: str, script_args: list[str] | None,
+    script_file: _ScriptFile | None = None,
 ) -> tuple[list[str], list[str]]:
     """Paths a Python source certainly opens through the standard library."""
-    return _stdlib_analysis(source, script_args) or ([], [])
+    return _stdlib_analysis(source, script_args, script_file=script_file) or ([], [])
+
+
+def _certain_script_file(
+    script_path: Path | None, script_word: str | None, cwd: Path | None
+) -> _ScriptFile | None:
+    """`__file__` for `python <script_word>` run in ``cwd``, or None unless
+    it is certain.
+
+    Python sets it to the word, made absolute (3.9+) by joining the physical
+    working directory without normalising. So the word must be spelled in
+    normal form (no `.`, `..` or doubled `/`), must name ``script_path``,
+    and no component of that path, the working directory's included, may be
+    a symlink: then `abspath`, `realpath` and `resolve()` all agree with it.
+    """
+    if not script_word or script_path is None or cwd is None:
+        return None
+    try:
+        if "\0" in script_word or os.path.normpath(script_word) != script_word:
+            return None
+        named = script_word if os.path.isabs(script_word) \
+            else os.path.join(str(cwd), script_word)
+        path = str(script_path)
+        if os.path.abspath(named) != path or os.path.realpath(path) != path:
+            return None
+    except (OSError, ValueError):
+        return None
+    return _ScriptFile(path, os.path.isabs(script_word))
 
 
 def _stdlib_additions(
@@ -6190,6 +6437,7 @@ def _stdlib_additions(
     inputs: list[str],
     outputs: list[str],
     hash_budget: _HashBudget | None,
+    script_file: _ScriptFile | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """File records the stdlib scan adds to what the reader/writer scan and
     repository recovery found. Additive only: it reads their result but never
@@ -6200,7 +6448,7 @@ def _stdlib_additions(
     if language != "python":
         return [], []
     deadline = time.monotonic() + _STDLIB_DEADLINE_SECONDS
-    found = _stdlib_analysis(source, script_args, deadline)
+    found = _stdlib_analysis(source, script_args, deadline, script_file)
     if not found or not (found[0] or found[1]):
         return [], []
     if len(found[0]) + len(found[1]) > _STDLIB_PATH_CAP:
@@ -7548,11 +7796,14 @@ def build_event_for_detection(
     *,
     script_args: list[str] | None = None,
     hash_budget: "_HashBudget | None" = None,
+    script_word: str | None = None,
 ) -> dict | None:
     """Build one NDJSON event dict for a single (script_path, inline) detection.
 
     ``script_args`` are the script's own arguments when every word is
-    literal, so argparse options can be resolved; None when unknown. The
+    literal, so argparse options can be resolved; None when unknown.
+    ``script_word`` is the word that named a script Python ran directly
+    (`python word`), which binds `__file__` when it is certain. The
     standard-library scan only ever adds records to what the reader/writer
     scan and repository recovery found (see `_stdlib_additions`).
 
@@ -7677,8 +7928,11 @@ def build_event_for_detection(
         source_language(script_path if isinstance(script_path, Path) else None)
         or getattr(inline_source, "language", None)
     )
+    script_file = _certain_script_file(
+        script_path if isinstance(script_path, Path) else None, script_word, cwd)
     extra_inputs, extra_outputs = _stdlib_additions(
-        source, language, script_args, cwd, args, inputs, outputs, hash_budget)
+        source, language, script_args, cwd, args, inputs, outputs, hash_budget,
+        script_file)
     if (extra_inputs or extra_outputs) and io_detection == "unresolved":
         io_detection = "static"
         lineage_warnings = [w for w in lineage_warnings
@@ -9064,6 +9318,8 @@ def main() -> int:
             (script_path, inline_source), args, effective_cwd, git_sha,
             script_args=literal_args[0] if literal_args else None,
             hash_budget=hash_budget,
+            script_word=invocation.get("script_word")
+            if invocation and invocation.get("kind") == "script" else None,
         )
         if event is not None:
             step = build_step(args.bash_cmd, invocation, inline_source,

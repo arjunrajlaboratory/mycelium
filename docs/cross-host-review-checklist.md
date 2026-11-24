@@ -401,6 +401,17 @@ hook, filesystem, or lifecycle boundaries.
       partially resolved concatenation, require an actual supported import for
       reader aliases, reject every locally rebound alias form, and fail
       unresolved at a fixed entry bound.
+- [ ] Static stdlib I/O binds `__file__` only to a certain script path: one
+      Python ran directly, named by a normal-form word, with no symlink in
+      any component (working directory included). A relative word is used
+      only through `abspath`/`realpath`/`resolve()`/`absolute()` of
+      `__file__` itself, and not at all with a `chdir` in the script.
+      Rebinding `__file__`, a non-literal `parents` index, or `resolve()`
+      after a joined component stays unresolved.
+- [ ] argparse replay through a `parse_args(argv=None)` wrapper requires a
+      provably None `argv`: one call site, None defaults, each `argv` used
+      only at its one pass-through, `main` called with no arguments from
+      the main guard, and a single parse call in the module.
 - [ ] Event append, extraction, manifest writing, and status-sentinel updates
       are locked or atomic as appropriate.
 - [ ] Concurrent events and Stop attempts do not lose, duplicate, or split a
