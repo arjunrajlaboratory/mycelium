@@ -495,3 +495,72 @@ def test_a_fenced_example_counts_as_section_body() -> None:
     )
 
     assert handoff_is_complete_after_cleanup(content)
+
+
+def test_a_lineage_gap_is_the_last_blockers_bullet_and_a_retry_replaces_it():
+    first = finalize(_complete_handoff(), "T1", transaction="2026-11-24-001",
+                     lineage_gap="LINEAGE GAP: 4\n(script-unreadable x4)")
+    blockers = first.split("## Blockers & surprises\n", 1)[1].split("\n## ", 1)[0]
+    assert blockers.strip().splitlines() == [
+        "- None.", "- Lineage gaps (2026-11-24-001): LINEAGE GAP: 4 (script-unreadable x4)"]
+    again = finalize(first, "T2", transaction="2026-11-24-001", lineage_gap="LINEAGE GAP: 5")
+    assert again.count("- Lineage gaps (2026-11-24-001)") == 1 and "LINEAGE GAP: 5" in again
+    # Another transaction's gap is added beside it, not over it.
+    other = finalize(again, "T3", transaction="2026-11-24-002", lineage_gap="LINEAGE GAP: 1")
+    assert other.count("- Lineage gaps (") == 2
+
+
+def test_a_legacy_handoff_gets_the_gap_in_its_status_block():
+    legacy = ("## Current State\n- a\n\n## What Was Done\n- b\n\n## Key Decisions\n- c\n\n"
+              "## Next Steps\n- d\n\n## Relevant Files\n- e\n")
+    out = finalize(legacy, "T", transaction="t1", lineage_gap="LINEAGE GAP: 1")
+    status = out.split("\n\n", 1)[0]
+    assert "Lineage gaps (t1): LINEAGE GAP: 1" in status
+    assert out.split("\n\n", 1)[1].strip() == legacy.strip()
+
+
+def test_the_owner_line_decides_what_a_later_transaction_keeps():
+    from finalize_handoff import keeps_for
+
+    authored = finalize(_complete_handoff(), "T", owner="claude:s1", transaction="t1")
+    assert "Handoff owner: claude:s1; transaction t1; source authored." in authored
+    assert keeps_for(authored, "claude:s1")
+    assert not keeps_for(authored, "claude:s2")
+    assert not keeps_for(authored, "codex:s1")
+    fallback = finalize(_complete_handoff(), "T", owner="claude:s1", transaction="t1",
+                        authored=False)
+    assert not keeps_for(fallback, "claude:s1")
+    assert not keeps_for(_complete_handoff(), "claude:s1")
+    # Two owner lines (a hand edit) prove nothing.
+    doubled = authored.replace("Handoff owner:", "Handoff owner: claude:s1; transaction t0; "
+                               "source authored.\nHandoff owner:", 1)
+    assert not keeps_for(doubled, "claude:s1")
+
+    kept = finalize(authored, "T2", owner="claude:s1", transaction="t2",
+                    follow_up="transaction t2 ended\nwithout a handoff")
+    assert "Handoff owner: claude:s1; transaction t1; source authored." in kept
+    assert "Follow-up activity: transaction t2 ended without a handoff" in kept
+    kept_again = finalize(kept, "T3", owner="claude:s1", transaction="t3", follow_up="t3")
+    assert kept_again.count("Follow-up activity:") == 1
+    assert kept_again.count(STATUS_BEGIN) == 1
+
+
+def test_unsafe_owner_tokens_are_refused(tmp_path):
+    handoff = tmp_path / "h.md"
+    handoff.write_text(_complete_handoff())
+    for bad in (["--owner", "claude:s 1"], ["--transaction", "t\n1"], ["--keeps-for", "a;b"]):
+        result = subprocess.run([sys.executable, str(SCRIPT), "--handoff", str(handoff),
+                                 "--accepted-at", "T", *bad], capture_output=True)
+        assert result.returncode == 1, bad
+
+
+def test_the_gap_bullet_goes_before_the_blockers_subheadings():
+    handoff = _complete_handoff().replace(
+        "## Blockers & surprises\n- None.\n",
+        "## Blockers & surprises\n- Confounded runs.\n\n### Dead ends — do not redo\n- None.\n")
+    out = finalize(handoff, "T", transaction="t1", lineage_gap="LINEAGE GAP: 4")
+    section = out.split("## Blockers & surprises\n", 1)[1].split("\n## ", 1)[0]
+    assert section.startswith("- Confounded runs.\n- Lineage gaps (t1): LINEAGE GAP: 4\n\n"
+                              "### Dead ends — do not redo\n- None."), section
+    again = finalize(out, "T2", transaction="t1", lineage_gap="LINEAGE GAP: 5")
+    assert again.count("- Lineage gaps (t1)") == 1

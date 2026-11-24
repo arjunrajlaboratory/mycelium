@@ -1200,3 +1200,35 @@ blocks once, then falls back on retry. A handoff repaired after the block is
 preserved. A complete legacy-schema handoff is accepted without a block, a
 validator error fails open, and a marker from another transaction does not
 suppress the block.
+
+## 53. Feedback that continues a turn becomes work that overwrites the turn's record
+
+**Failure:** An accepted Stop on Claude put a lineage-gap warning in
+`additionalContext`, which continues the conversation. The gap itself was
+noise: Mycelium's own `--help` helper calls, reached through
+`S=$P/skills/core/scripts` and an absolute pointer path the detector did not
+follow. The agent's extra turn ran one Bash command to inspect the gap,
+which opened a new transaction (pattern 44). That turn wrote no handoff, so
+its Stop published the generic fallback over the handoff accepted minutes
+earlier.
+
+**Invariant:** Nothing an accepted Stop emits may continue the turn:
+`systemMessage` only, on every host; what the agent must act on is a block.
+What the agent should still learn goes into the durable records the next
+session reads (the finalized log footer, the published handoff), written by
+the finalizers so a retry replaces rather than repeats it. A publication
+that only Stop generates never replaces one the agent wrote and Stop
+accepted earlier in the same host session; ownership is a machine line in
+the status block, and anything but exactly one matching line is not proof.
+Helper recognition follows only chains whose every link runs whenever the
+use does.
+
+**Regression evidence:** Drive the hooks through the whole chain: helpers
+through a two-step chain and an absolute pointer leave no skip; an accepted
+Stop with a real gap emits only `systemMessage` and writes the gap into the
+log and handoff; a follow-up transaction with no handoff keeps the accepted
+one with one follow-up line, a third keeps it with still one line. Require
+replacement for another host session, a published fallback, a removed or
+doubled owner line, and a follow-up that wrote its own handoff. Pair each
+chain spelling with conditional, piped, subshell, traversal, expansion,
+foreign-pointer and look-alike-tree neighbors.

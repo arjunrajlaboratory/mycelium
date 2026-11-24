@@ -522,17 +522,29 @@ def _is_managed_utility_path(resolved: Path) -> bool:
 
 
 # `P=$(cat .mycelium/plugin-root)`, optionally with a literal subdirectory
-# after it (`S="$(cat .mycelium/plugin-root)/skills/core/scripts"`), or a
-# literal absolute path.
+# after it (`S="$(cat .mycelium/plugin-root)/skills/core/scripts"`), a
+# literal absolute path, or a link in a chain from another such variable
+# (`S=$P/skills/core/scripts`, `S="${P}"/skills/core/scripts`).
+_ROOT_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
+_ROOT_SUFFIX = r"/[A-Za-z0-9_./-]*"
+# The pointer may be read from a parent of the working directory
+# (`$(cat ../../.mycelium/plugin-root)` from inside an analysis folder) or by
+# its absolute path; either must name the cwd or one of its ancestors.
+# `$PWD/` (bare or braced) is the working directory itself; the `cat`
+# operand may also be double-quoted.
+_ROOT_POINTER_DIR = r"(?:\.\./)*|/[A-Za-z0-9_./-]*/|\$PWD/|\$\{PWD\}/"
 _ROOT_ASSIGNMENT_RX = re.compile(
-    r"""(?:^|[;&|\n(]|&&|\|\|)\s*([A-Za-z_][A-Za-z0-9_]*)="""
-    # The pointer may be read from a parent of the working directory
-    # (`$(cat ../../.mycelium/plugin-root)` from inside an analysis folder).
-    r"""(?:"\$\(cat (?P<up_q>(?:\.\./)*)\.mycelium/plugin-root\)(?P<suffix_q>/[A-Za-z0-9_./-]*)?\""""
-    r"""(?P<suffix_after>/[A-Za-z0-9_./-]*)?"""
-    r"""|\$\(cat (?P<up>(?:\.\./)*)\.mycelium/plugin-root\)(?P<suffix>/[A-Za-z0-9_./-]*)?"""
+    rf"""(?:^|[;&|\n(]|&&|\|\|)\s*({_ROOT_NAME})="""
+    rf"""(?:"\$\(cat (?P<pq_q>"?)(?P<up_q>{_ROOT_POINTER_DIR})\.mycelium/plugin-root(?P=pq_q)\)(?P<suffix_q>{_ROOT_SUFFIX})?\""""
+    rf"""(?P<suffix_after>{_ROOT_SUFFIX})?"""
+    rf"""|\$\(cat (?P<pq>"?)(?P<up>{_ROOT_POINTER_DIR})\.mycelium/plugin-root(?P=pq)\)(?P<suffix>{_ROOT_SUFFIX})?"""
+    rf"""|"\$(?:\{{(?P<ref_qb>{_ROOT_NAME})\}}|(?P<ref_q>{_ROOT_NAME}))(?P<ref_suffix_q>{_ROOT_SUFFIX})?\""""
+    rf"""(?P<ref_suffix_after>{_ROOT_SUFFIX})?"""
+    rf"""|\$(?:\{{(?P<ref_b>{_ROOT_NAME})\}}|(?P<ref>{_ROOT_NAME}))(?P<ref_suffix>{_ROOT_SUFFIX})?"""
     r"""|'?(?P<literal>/[^\s;&|$'"`]+)'?)(?=[\s;&|]|$)"""
 )
+# A chain longer than this is not followed (and so stays reported).
+_ROOT_CHAIN_LIMIT = 4
 
 
 # An interpreter held in a variable: `PY=/x/venv/bin/python; $PY run.py`.
@@ -700,12 +712,28 @@ def _variable_script_path(command: str, offset: int, raw_path: str,
                           cwd: Path | None) -> Path | None:
     """`$P/skills/...` resolved through an assignment earlier in the same
     command: `P=$(cat .mycelium/plugin-root)` (read from the working
-    directory) or `P=/literal/path`. None for anything else; this is used
-    only to recognize Mycelium's own helpers, never to infer analysis I/O."""
+    directory, one of its parents, or by an absolute path naming one of
+    them), `P=/literal/path`, or a chain of plain links back to one of those
+    (`S=$P/skills/core/scripts`). None for anything else; this is used only
+    to recognize Mycelium's own helpers, never to infer analysis I/O."""
     match = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(/.*)", raw_path)
     if match is None:
         return None
     name, rest = match.groups()
+    value = _root_variable_value(command, offset, name, cwd, _ROOT_CHAIN_LIMIT)
+    if not value or "\0" in value:
+        return None
+    return Path(os.path.realpath(value + rest))
+
+
+def _root_variable_value(command: str, offset: int, name: str,
+                         cwd: Path | None, budget: int) -> str | None:
+    """The value ``name`` holds at ``offset``: its last assignment before
+    it, when that assignment is one ``_ROOT_ASSIGNMENT_RX`` models. A chain
+    link resolves its source variable at the link's own position, so a later
+    reassignment of the source does not change it, as in the shell."""
+    if budget <= 0:
+        return None
     prefix = command[:offset]
     # The value the interpreter receives is the *last* assignment before it:
     # any later one this resolver cannot model (`P=.`, `P=$OTHER`) voids it.
@@ -721,21 +749,62 @@ def _variable_script_path(command: str, offset: int, raw_path: str,
         return None
     assignment = modeled[-1]
     literal = assignment.group("literal")
-    suffix = "".join(assignment.group(g) or "" for g in ("suffix_q", "suffix_after", "suffix"))
-    up = assignment.group("up_q") or assignment.group("up") or ""
+    source = next((assignment.group(g) for g in ("ref_qb", "ref_q", "ref_b", "ref")
+                   if assignment.group(g)), None)
+    suffix = "".join(assignment.group(g) or "" for g in (
+        "suffix_q", "suffix_after", "suffix",
+        "ref_suffix_q", "ref_suffix_after", "ref_suffix"))
+    if "/../" in f"{suffix}/":
+        return None
     if literal is not None:
-        value = literal
-    elif cwd is not None:
+        return literal
+    if source is not None:
+        # A link must run whenever the use does: after `;`, a newline, or the
+        # start, or after `&&` directly behind the source's own modeled
+        # assignment (`P=$(cat …) && S=$P/…`). `false && S=…`, `x || S=…`,
+        # a pipeline or a subshell may leave S with whatever value the
+        # agent's shell already had.
+        lead = assignment.group(0)[: assignment.start(1) - assignment.start()].strip()
+        if lead in ("||", "|", "&", "("):
+            return None
+        if lead == "&&":
+            behind = command[: assignment.start()]
+            sources = [a for a in _ROOT_ASSIGNMENT_RX.finditer(behind)
+                       if a.group(1) == source]
+            if not sources or behind[sources[-1].end():].strip():
+                return None
+        base_value = _root_variable_value(command, assignment.start(1), source, cwd,
+                                          budget - 1)
+        return base_value + suffix if base_value else None
+    if cwd is None:
+        return None
+    up = assignment.group("up_q") or assignment.group("up") or ""
+    if up in ("$PWD/", "${PWD}/"):
+        # Unquoted, a working directory with blanks or glob characters would
+        # split or expand into other `cat` operands than the one modeled.
+        quoted = bool(assignment.group("pq_q") or assignment.group("pq"))
+        if not quoted and re.search(r"[\s*?\[]", str(cwd)):
+            return None
+        up = ""
+    if up.startswith("/"):
+        # An absolute pointer path must be this command's own: the pointer
+        # of the cwd or of an ancestor, never another repository's.
+        if "/../" in up or "/./" in up:
+            return None
+        base = Path(up.rstrip("/") or "/")
+        try:
+            real_base = os.path.realpath(base)
+            real_cwd = os.path.realpath(cwd)
+        except (OSError, ValueError):
+            return None
+        if os.path.commonpath([real_base, real_cwd]) != real_base:
+            return None
+    else:
         # The bounded, link-refusing pointer reader the accessor path uses,
         # in the directory the `cat` names (the cwd or a parent of it).
         base = Path(os.path.normpath(os.path.join(str(cwd), up))) if up else cwd
-        pointer = _pointer_expansion_value(base, "cat")
-        value = pointer + suffix if pointer else None
-    else:
-        value = None
-    if not value or "\0" in value or "/../" in f"{suffix}/":
-        return None
-    return Path(os.path.realpath(value + rest))
+    pointer = _pointer_expansion_value(base, "cat")
+    return pointer + suffix if pointer else None
 
 
 IGNORED_SCRIPT_BASENAMES = {"setup.py"}

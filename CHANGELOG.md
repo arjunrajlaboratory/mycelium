@@ -326,11 +326,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Mycelium used it for the ".living/ updated" confirmation, so every accepted
   Stop with an update made the model reply again (confirmed in a live
   `claude -p` run). That confirmation and the access note are for the user,
-  so they now go only to `systemMessage`. Provenance-gap warnings (lineage
-  gaps, detector failures, unrecorded events) are for the agent, which may
-  need to say its results' provenance is unknown. They stay in
-  `additionalContext` on Claude, as before, on the rare Stop that has one.
-  Codex output and blocked Stops are unchanged.
+  so they now go only to `systemMessage`. (Provenance-gap warnings first
+  stayed in `additionalContext`; see the next entry.) Codex output and
+  blocked Stops are unchanged.
+- **An accepted Stop never continues the conversation, and a later turn no
+  longer clobbers the accepted handoff.** A live `claude -p` run on main
+  showed three linked faults:
+  - *Helper noise.* The agent ran Mycelium's own helpers as
+    `P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; python3
+    $S/register_value.py --help`, reading the pointer by its absolute path.
+    The lineage detector did not follow the two-step chain or the absolute
+    pointer and logged four `script-unreadable` skips. It now follows a
+    chain of plain links (`S=$P/…`, `S="${P}"/…`, up to four) back to the
+    plugin-root pointer or a literal path. It accepts the pointer read by an
+    absolute path that names the command's working directory or one of its
+    ancestors, through `$PWD/` or `${PWD}/`, and with the `cat` operand in
+    double quotes. Links must run unconditionally (after `;`, a newline, or
+    `&&` right behind the source's own assignment); conditional, piped or
+    subshell links, traversal, other expansions, another repository's
+    pointer, and a pointer to an unverified tree are still reported. The
+    plugin-root environment variable is not followed: the hook cannot see
+    the value in the agent's shell.
+  - *Gap continuation.* Lineage-gap and unrecorded-event warnings at an
+    accepted Stop went to `additionalContext` on Claude, which gave the
+    agent another turn. Every accepted Stop now emits only `systemMessage`,
+    on every host. When the Stop finalizes a transaction, the gap is also
+    written as a `- Lineage gaps:` line in the finalized session log's end
+    footer and as a `- Lineage gaps (<session id>):` bullet in the
+    published handoff's `## Blockers & surprises`, before any subheading (in
+    the status block for the older heading schema). A retry replaces the line rather than
+    adding another.
+  - *Handoff clobbering.* The extra turn opened a new transaction, and its
+    Stop, with no handoff of its own, published the generic fallback over
+    the handoff accepted minutes earlier. The published handoff's status
+    block now has a `Handoff owner:` line (host, host session, transaction,
+    and whether the agent wrote it). A transaction that would publish the
+    fallback keeps a handoff the agent wrote and Stop accepted earlier in
+    the same host session, and adds one `Follow-up activity:` line naming
+    the later transaction's log and files. A later handoff of its own still
+    replaces it; another host session's handoff, a published fallback, and
+    a handoff without exactly one owner line are still replaced.
+
+  No new state files. Existing projects need no migration: a handoff
+  published before this change has no owner line, so the next fallback
+  replaces it as before.
 
 ## [0.9.7] - 2026-11-21
 

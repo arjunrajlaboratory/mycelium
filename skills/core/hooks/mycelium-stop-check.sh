@@ -380,30 +380,26 @@ if [[ -f "$ACCESS_NOTE_FILE" && ! -L "$ACCESS_NOTE_FILE" ]] \
 fi
 rm -f "$ACCESS_NOTE_FILE" 2>/dev/null || true
 # mycelium_emit_accepted_stop MESSAGE [GAP]: the accepting Stop's output.
-# MESSAGE (the routine ".living/ updated" confirmation) and the access note
-# are for the user, so they go to `systemMessage`. On Claude,
-# `additionalContext` on a Stop makes the model take another turn, which a
-# routine accept must never do. GAP, a lineage gap or unrecorded-events
-# warning, is for the agent: its provenance is unknown and it may need to say
-# so. GAP stays in `additionalContext` on Claude, as before, and so takes one
-# more turn on the rare Stop that has one. Codex has only `systemMessage`,
-# which never continues a turn, so it gets everything there. A Stop with none
-# of these stays silent. The note's keys are then remembered so the same
-# script at the same content is not named again. Never fails.
+# Everything an accepted Stop says goes to `systemMessage`, on every host:
+# MESSAGE (the routine ".living/ updated" confirmation), GAP (a lineage gap
+# or unrecorded-events warning) and the access note. On Claude,
+# `additionalContext` on a Stop makes the model take another turn; a live run
+# showed that turn opening a new transaction whose fallback handoff replaced
+# the one just accepted. A Stop that finalized a transaction has already
+# written GAP into its session log and published handoff, which the next
+# session reads. A Stop with none of these stays silent. The note's keys are
+# then remembered so the same script at the same content is not named again.
+# Never fails.
 mycelium_emit_accepted_stop() {
   local message="$1" gap="${2:-}" seen="" escaped="" user=""
   user="$message"
+  if [[ -n "$gap" ]]; then
+    user="${user:+$user$'\n\n'}$gap"
+  fi
   if [[ -n "$ACCESS_NOTE" ]]; then
     user="${user:+$user$'\n\n'}$ACCESS_NOTE"
   fi
-  if [[ -n "$gap" ]]; then
-    if [[ "$(mycelium_hook_host)" == codex ]]; then
-      message="${message:+$message$'\n\n'}$gap"
-      mycelium_emit_context "Stop" "$message${ACCESS_NOTE:+$'\n\n'$ACCESS_NOTE}" || return 0
-    else
-      mycelium_emit_context "Stop" "$gap" "$user" || return 0
-    fi
-  elif [[ -n "$user" ]]; then
+  if [[ -n "$user" ]]; then
     escaped=$(mycelium_json_dumps_stdin "$user" 2>/dev/null) || return 0
     [[ -n "$escaped" ]] || return 0
     mycelium__fast_write "{\"systemMessage\": $escaped}"$'\n' || return 0
@@ -1089,7 +1085,28 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
       # Preserve a complete handoff authored during this session. If it is
       # absent, stale, or partial, publish a complete deterministic fallback
       # atomically instead of replacing a rich handoff with two headings.
-      if [[ "$_SESSION_COMPLETE" != true || "$_SESSION_FRESH" != true ]]; then
+      # Unless the published handoff is one the agent wrote in an earlier
+      # transaction of this same host session: a later turn that wrote no
+      # handoff of its own (a follow-up question, a reaction to Stop output)
+      # keeps it, with a one-line follow-up note, rather than replacing it
+      # with the generic fallback (pattern 53).
+      _HANDOFF_OWNER=""
+      if [[ "$HOST_SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        _HANDOFF_OWNER="$(mycelium_hook_host):${HOST_SESSION_ID}"
+      fi
+      _HANDOFF_KIND=authored
+      _HANDOFF_FOLLOW_UP=""
+      _PUBLISHED_HANDOFF="$MYCELIUM_SHARED_STATE_DIR/last-session.md"
+      if [[ "$_SESSION_COMPLETE" != true || "$_SESSION_FRESH" != true ]] \
+        && [[ -n "$_HANDOFF_OWNER" && -f "$_PUBLISHED_HANDOFF" && ! -L "$_PUBLISHED_HANDOFF" ]] \
+        && python3 "$FINALIZE_HANDOFF_SCRIPT" --handoff "$_PUBLISHED_HANDOFF" \
+          --keeps-for "$_HANDOFF_OWNER" >/dev/null 2>&1 \
+        && cp "$_PUBLISHED_HANDOFF" "$_HANDOFF_FALLBACK" 2>/dev/null; then
+        _HANDOFF_SOURCE="$_HANDOFF_FALLBACK"
+        _HANDOFF_KIND=kept
+        _HANDOFF_FOLLOW_UP="transaction ${SESSION_ID} ($(basename "$LOG_PATH")) ended without a handoff of its own${SUMMARY:+ (${SUMMARY})}, so this handoff from an earlier transaction of the same session was kept."
+      elif [[ "$_SESSION_COMPLETE" != true || "$_SESSION_FRESH" != true ]]; then
+        _HANDOFF_KIND=fallback
         _WORK_LINES=""
         # Try recent commit messages first
         if [ -n "${START_TS:-}" ]; then
@@ -1208,6 +1225,7 @@ LAST_SESSION_EOF
             --duration-minutes "$DURATION_MIN" \
             --files-changed "$FILES_CHANGED" \
             --end-time "$END_TIME_SHORT" \
+            --lineage-gap "$LINEAGE_GAP_MSG" \
             >/dev/null 2>"$LOG_DIR/.finalize_session_log.err" \
           || _FINALIZE_LOG_STATUS=$?
       fi
@@ -1235,7 +1253,17 @@ LAST_SESSION_EOF
         --handoff "$_HANDOFF_SOURCE"
         --accepted-at "$ENDED"
         --publish-to "$MYCELIUM_SHARED_STATE_DIR/last-session.md"
+        --transaction "$SESSION_ID"
+        --lineage-gap "$LINEAGE_GAP_MSG"
       )
+      if [[ -n "$_HANDOFF_OWNER" ]]; then
+        _FINALIZE_HANDOFF_ARGS+=(--owner "$_HANDOFF_OWNER")
+      fi
+      if [[ "$_HANDOFF_KIND" == fallback ]]; then
+        _FINALIZE_HANDOFF_ARGS+=(--fallback)
+      elif [[ "$_HANDOFF_KIND" == kept ]]; then
+        _FINALIZE_HANDOFF_ARGS+=(--follow-up "$_HANDOFF_FOLLOW_UP")
+      fi
       if ! python3 "$FINALIZE_HANDOFF_SCRIPT" \
         "${_FINALIZE_HANDOFF_ARGS[@]}" \
         >/dev/null 2>"$LOG_DIR/.finalize_handoff.err"; then
