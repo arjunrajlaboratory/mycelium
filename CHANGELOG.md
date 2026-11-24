@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-24
+
 ### Added
 
 - **A transcript replay for data lineage** (`tools/lineage_replay.py`). It
@@ -49,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The index is a derived, per-checkout cache rebuilt incrementally on query.
   It never runs on the hook path.
+
 - **v2 lineage records.**
   - Every analysis event and data command gets an identity: `event_id`,
     `host`, `host_session_id`, `ts_ns` and `repo_root`.
@@ -62,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     interval closes.
 
   0.9.7 manifests and observations still load, as v1.
+
 - **Step settings.** Each event has a `step`: the matched stage's own argv,
   interpreter, script arguments, environment assignments, config files and
   literal seeds.
@@ -70,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     budget per call, and are proven against the Pre snapshot like inputs.
   - A call with more than 64 analysis stages records the first 64 and says
     so.
+
 - **Hash-linked report values.**
   - `register_value(..., source={"path", "locator"})` records the source
     file's repository-relative path, SHA-256 and locator.
@@ -82,6 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     entries.
   - The fix for a stale number is to rerun its analysis, never to refresh
     the hash.
+
 - **A standard sample ledger.** `samples.tsv` with a `samples.ledger.json`
   spec (templates in `skills/core/templates/`) names the sample id, group,
   replication nesting and crossed batch variables. The ingest skill writes it.
@@ -125,10 +131,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     batch columns a check uses, are spelling-checked, so `site1` and `site1 `
     no longer split a batch silently. This warns rather than blocks, so a
     contract that passed before still passes.
+
 - **`skills/core/references/provenance-schema.json`**, one JSON Schema file
   for manifests (v1 and v2), events, data commands, skips, observations, index
   results, report fragments, numbers, findings and the ledger. Tests validate
   real outputs against it, and CI requires the validator.
+
 - **Row and feature access records (item 7).** `record_ids(name, ids,
   axis=row|feature, role=read|used|written|excluded)` in `register_value.py`
   records which cells, samples or genes a step used or dropped. It stores a
@@ -137,6 +145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it shares the Python implementation through `register_value.py record-ids`.
   The analyze skill recommends it at filter, subset and split steps. Design and
   decisions: `docs/plans/row-feature-access.md`.
+
 - **Stop-time access note (item 7 follow-up).** When a script this session
   wrote a table (.csv, .tsv, .parquet or .h5ad, observed created or
   modified) and no `record_ids` record covers its last run, the accepting
@@ -150,6 +159,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skips foreign `access.json` files, follows no symlinks, reads under file
   count, byte and time budgets, and fails open; the phase that writes it
   cannot fail Stop.
+
 - **Multi-file report sources.** `register_value(..., source=[...])` links a
   number to several files, for example the table and the config that set its
   threshold. The number is stale when any of them changes. Live runs showed
@@ -177,6 +187,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Each of these cases used to leave a data-touching call with no record at
   all.
+
 - **Committed lineage manifests keep only allowlisted words**
   (`text_policy: "allowlist-v1"`). Six review rounds kept finding secrets
   that survived the denylist redaction, which can never cover every shell,
@@ -193,6 +204,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `filters_detected` is dropped from new manifests. Manifests without
   `text_policy` (0.9.7 and earlier) still load. Events recorded before an
   upgrade get the allowlist when they are consolidated into a new manifest.
+
 - **The allowlist is the only text policy.** The blocklist redaction
   (`redact_command` and friends, and `script_sha256_of: "sanitized"`
   digests) is deleted. Stores that outlive a session keep allowlisted text
@@ -309,6 +321,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bullet besides its `###` subheadings (`- None.` when there is nothing to
   report), since a section holding only a subheading counts as empty, and
   that `## Current state` describes the project, not Stop status.
+
 - **Stop now explains a handoff it would replace, once, instead of replacing
   it silently.** When the agent wrote a handoff during the session that
   fails the completeness check, Stop blocks with the handoff's path and its
@@ -335,6 +348,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `finalize_handoff.py --diagnose` reports the problems: exit 0 for a
   complete handoff, 3 with a one-line diagnosis, 1 on error. Existing projects pick up the new rule 10 the next time
   `init_repo.py` or migration refreshes their `MYCELIUM.md`.
+
 - **A routine accepted Stop no longer gives Claude another turn.** On
   Claude Code, `additionalContext` on a Stop hook continues the conversation.
   Mycelium used it for the ".living/ updated" confirmation, so every accepted
@@ -343,6 +357,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so they now go only to `systemMessage`. (Provenance-gap warnings first
   stayed in `additionalContext`; see the next entry.) Codex output and
   blocked Stops are unchanged.
+
 - **An accepted Stop never continues the conversation.** A live
   `claude -p` run on main showed the cost of the lineage-gap split above:
   - The agent ran Mycelium's helpers with `--help` through a variable chain.
@@ -362,6 +377,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adding another. Handoff publication and block decisions are unchanged.
   Helper chains still report their skips, which now only inform the user.
   No new state files, and existing projects need no migration.
+
+- **A Claude Code background launch no longer claims writes as done.**
+  Claude Code runs PostToolUse when a background job starts
+  (`run_in_background`, or a command moved to the background with a
+  `backgroundTaskId`). The data tracker passed exit 0 for it. A redirection
+  or `cp`/`mv` target that already existed was then recorded as the job's
+  output, with its old content, while the job was still waiting to run. This
+  affected 0.9.7 for data-extension paths too. The tracker now passes no exit
+  status for a launch, plus `--background-launch`. A launch records no
+  `outputs` at all, including a script's statically inferred outputs, which
+  0.9.7 also hashed at launch. Only the host's launch evidence counts; the
+  observer's `background` status alone does not (`python3 fit.py && nohup
+  true` keeps fit.py's output).
+
+- After `printf -v NAME`, `read`, `readarray`, `mapfile`, `getopts`, or
+  `let`, any of which can set `PATH`, a later `cp`/`mv` in the same `&&` list
+  no longer counts as proven; the setter's own redirections still do. 0.9.7
+  recorded a copy that a `PATH`-shadowed `cp` never made. The attached form
+  `printf -vPATH` is not recognized.
+
+- A data command's `step` no longer tokenizes a stage longer than 16 KB.
+  `shlex` built a 250 KB quoted argument one character at a time, taking
+  seconds on the hook path. Such a stage is recorded as `partial` with
+  `reason: "stage-too-long"`, and a named path over 1 KB is not matched
+  against a stage's words.
 
 ## [0.9.7] - 2026-11-21
 
@@ -392,28 +432,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A Claude Code background launch no longer claims writes as done.**
-  Claude Code runs PostToolUse when a background job starts
-  (`run_in_background`, or a command moved to the background with a
-  `backgroundTaskId`). The data tracker passed exit 0 for it. A redirection
-  or `cp`/`mv` target that already existed was then recorded as the job's
-  output, with its old content, while the job was still waiting to run. This
-  affected 0.9.7 for data-extension paths too. The tracker now passes no exit
-  status for a launch, plus `--background-launch`. A launch records no
-  `outputs` at all, including a script's statically inferred outputs, which
-  0.9.7 also hashed at launch. Only the host's launch evidence counts; the
-  observer's `background` status alone does not (`python3 fit.py && nohup
-  true` keeps fit.py's output).
-- After `printf -v NAME`, `read`, `readarray`, `mapfile`, `getopts`, or
-  `let`, any of which can set `PATH`, a later `cp`/`mv` in the same `&&` list
-  no longer counts as proven; the setter's own redirections still do. 0.9.7
-  recorded a copy that a `PATH`-shadowed `cp` never made. The attached form
-  `printf -vPATH` is not recognized.
-- A data command's `step` no longer tokenizes a stage longer than 16 KB.
-  `shlex` built a 250 KB quoted argument one character at a time, taking
-  seconds on the hook path. Such a stage is recorded as `partial` with
-  `reason: "stage-too-long"`, and a named path over 1 KB is not matched
-  against a stage's words.
 - A Claude Code session working in a linked git worktree (such as the
   desktop app's `.claude/worktrees/<name>/` side sessions) is now judged on
   that worktree. Stop and the Bash post-action hook took the repository root

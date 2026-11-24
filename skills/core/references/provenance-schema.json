@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/arjunrajlaboratory/mycelium/skills/core/references/provenance-schema.json",
   "title": "Mycelium provenance records",
-  "description": "The record formats Mycelium writes for provenance: data-lineage manifests (v1 from 0.9.7 and earlier, v2 from 0.9.8), their events, data commands, skips and observations; the lineage index's query results; hash-linked report values and their checker findings; row and feature access records; and the sample ledger spec. Readers (Warrant) validate against the $defs entry points. Every field not listed as required is optional on read; a missing field means unknown, never a pass. Records carry hashes, sizes, paths and counts, never data content.",
+  "description": "The record formats Mycelium writes for provenance: data-lineage manifests (v1 from 0.9.7 and earlier, v2 from 0.10.0), their events, data commands, skips and observations; the lineage index's query results; hash-linked report values and their checker findings; row and feature access records; and the sample ledger spec. Readers (Warrant) validate against the $defs entry points. Every field not listed as required is optional on read; a missing field means unknown, never a pass. Records carry hashes, sizes, paths and counts, never data content.",
   "$defs": {
     "sha256": {
       "type": "string",
