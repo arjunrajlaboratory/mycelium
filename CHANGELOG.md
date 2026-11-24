@@ -459,7 +459,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comparison uses the folder list stored in the baseline, never one re-derived
   at check time. The root-only `living_files` mapping is unchanged and the
   subfolder state is stored under new keys, so earlier runtimes read new
-  baselines exactly as before and a rollback stays safe.
+  baselines exactly as before and a rollback stays safe. Stop's own
+  snapshots (the baseline it carries into the next turn, its refresh after a
+  notes-only turn, and the work cycle it starts for unrecorded work) use the
+  same folder, so subfolder notes keep counting on later turns, and a turn
+  that only writes notes in the session's subfolder is not taken for project
+  work.
 - A post-tool hook that could not take its session's lock (a slow Stop,
   parallel subagent hooks, a loaded machine) no longer drops the edit, read,
   or analysis run silently. It still exits 0 so the tool call is never
