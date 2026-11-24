@@ -341,12 +341,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     plugin-root pointer or a literal path. It accepts the pointer read by an
     absolute path that names the command's working directory or one of its
     ancestors, through `$PWD/` or `${PWD}/`, and with the `cat` operand in
-    double quotes. Links must run unconditionally (after `;`, a newline, or
-    `&&` right behind the source's own assignment); conditional, piped or
-    subshell links, traversal, other expansions, another repository's
-    pointer, and a pointer to an unverified tree are still reported. The
-    plugin-root environment variable is not followed: the hook cannot see
-    the value in the agent's shell.
+    double quotes. A variable gets a value only from a plain, unconditional
+    statement (top level, after `;`, a newline or the start, not exported,
+    not a one-command prefix). Any reassignment the detector cannot model
+    voids the whole chain, and the skip is reported as before:
+    `export`/`declare`/`local`/`readonly`, `read`, `for … in`, `+=`, an
+    assignment after `&&`/`||` or inside `if`/`case`/loops/braces/functions.
+    So a vendored copy run as `S=$PWD/analysis/_lib` after the chain is
+    never passed off as the bundled helper. Also still reported: traversal,
+    other expansions, another repository's pointer, and a pointer to an
+    unverified tree. The plugin-root environment variable is not followed:
+    the hook cannot see the value in the agent's shell.
   - *Gap continuation.* Lineage-gap and unrecorded-event warnings at an
     accepted Stop went to `additionalContext` on Claude, which gave the
     agent another turn. Every accepted Stop now emits only `systemMessage`,
@@ -360,12 +365,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Stop, with no handoff of its own, published the generic fallback over
     the handoff accepted minutes earlier. The published handoff's status
     block now has a `Handoff owner:` line (host, host session, transaction,
-    and whether the agent wrote it). A transaction that would publish the
-    fallback keeps a handoff the agent wrote and Stop accepted earlier in
-    the same host session, and adds one `Follow-up activity:` line naming
-    the later transaction's log and files. A later handoff of its own still
-    replaces it; another host session's handoff, a published fallback, and
-    a handoff without exactly one owner line are still replaced.
+    whether the agent wrote it, and when it was first accepted). Stop keeps
+    that handoff, adding one `Follow-up activity (<id>):` line, only for a
+    genuine follow-up. That means all of these hold:
+    - the agent did not write or touch its handoff this transaction;
+    - no project file outside `.living/` and `.mycelium/` changed, no commit
+      was made, and no unrecorded or moved work was taken;
+    - the published handoff is this host session's own authored one, first
+      accepted within two hours and on the same day.
+
+    Otherwise Stop publishes the fallback exactly as before. That covers a
+    resumed session's new task with real work, a fresh but incomplete
+    handoff after its one block, a resume after the window, another host
+    session, and a published fallback. Follow-up lines are kept one per
+    later transaction, at most five.
 
   No new state files. Existing projects need no migration: a handoff
   published before this change has no owner line, so the next fallback

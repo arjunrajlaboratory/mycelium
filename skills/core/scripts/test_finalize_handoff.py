@@ -520,29 +520,58 @@ def test_a_legacy_handoff_gets_the_gap_in_its_status_block():
 
 
 def test_the_owner_line_decides_what_a_later_transaction_keeps():
+    from datetime import datetime, timedelta, timezone
+
     from finalize_handoff import keeps_for
 
-    authored = finalize(_complete_handoff(), "T", owner="claude:s1", transaction="t1")
-    assert "Handoff owner: claude:s1; transaction t1; source authored." in authored
-    assert keeps_for(authored, "claude:s1")
-    assert not keeps_for(authored, "claude:s2")
-    assert not keeps_for(authored, "codex:s1")
-    fallback = finalize(_complete_handoff(), "T", owner="claude:s1", transaction="t1",
+    at = "2026-11-24T10:00:00-0500"
+    soon = datetime(2026, 11, 24, 11, 0, tzinfo=timezone(timedelta(hours=-5)))
+    authored = finalize(_complete_handoff(), at, owner="claude:s1", transaction="t1")
+    assert f"Handoff owner: claude:s1; transaction t1; source authored; accepted {at}." in authored
+    assert keeps_for(authored, "claude:s1", soon)
+    assert not keeps_for(authored, "claude:s2", soon)
+    assert not keeps_for(authored, "codex:s1", soon)
+    # Outside the window, before the acceptance, or the next calendar day.
+    assert not keeps_for(authored, "claude:s1", soon + timedelta(hours=2))
+    assert not keeps_for(authored, "claude:s1", soon - timedelta(hours=2))
+    late = finalize(_complete_handoff(), "2026-11-24T23:30:00-0500", owner="claude:s1",
+                    transaction="t1")
+    assert not keeps_for(late, "claude:s1",
+                         datetime(2026, 11, 25, 0, 10, tzinfo=timezone(timedelta(hours=-5))))
+    fallback = finalize(_complete_handoff(), at, owner="claude:s1", transaction="t1",
                         authored=False)
-    assert not keeps_for(fallback, "claude:s1")
-    assert not keeps_for(_complete_handoff(), "claude:s1")
+    assert not keeps_for(fallback, "claude:s1", soon)
+    assert not keeps_for(_complete_handoff(), "claude:s1", soon)
     # Two owner lines (a hand edit) prove nothing.
-    doubled = authored.replace("Handoff owner:", "Handoff owner: claude:s1; transaction t0; "
-                               "source authored.\nHandoff owner:", 1)
-    assert not keeps_for(doubled, "claude:s1")
+    doubled = authored.replace("Handoff owner:", f"Handoff owner: claude:s1; transaction t0; "
+                               f"source authored; accepted {at}.\nHandoff owner:", 1)
+    assert not keeps_for(doubled, "claude:s1", soon)
 
-    kept = finalize(authored, "T2", owner="claude:s1", transaction="t2",
-                    follow_up="transaction t2 ended\nwithout a handoff")
-    assert "Handoff owner: claude:s1; transaction t1; source authored." in kept
-    assert "Follow-up activity: transaction t2 ended without a handoff" in kept
-    kept_again = finalize(kept, "T3", owner="claude:s1", transaction="t3", follow_up="t3")
-    assert kept_again.count("Follow-up activity:") == 1
-    assert kept_again.count(STATUS_BEGIN) == 1
+    kept = finalize(authored, "2026-11-24T10:30:00-0500", owner="claude:s1",
+                    transaction="t2", follow_up="t2 ended\nwithout a handoff")
+    assert f"source authored; accepted {at}." in kept  # the original acceptance
+    assert "Follow-up activity (t2): t2 ended without a handoff" in kept
+    retried = finalize(kept, "2026-11-24T10:31:00-0500", owner="claude:s1",
+                       transaction="t2", follow_up="t2 again")
+    assert retried.count("Follow-up activity") == 1 and "t2 again" in retried
+    chain = kept
+    for index in range(3, 10):
+        chain = finalize(chain, at, owner="claude:s1", transaction=f"t{index}",
+                         follow_up=f"t{index} ran")
+    lines = [line for line in chain.splitlines() if line.startswith("Follow-up activity")]
+    assert [line.split(")")[0] for line in lines] == [
+        f"Follow-up activity (t{i}" for i in range(5, 10)]
+    assert chain.count(STATUS_BEGIN) == 1
+
+
+def test_a_kept_legacy_handoff_keeps_its_status_block_gap():
+    legacy = ("## Current State\n- a\n\n## What Was Done\n- b\n\n## Key Decisions\n- c\n\n"
+              "## Next Steps\n- d\n\n## Relevant Files\n- e\n")
+    at = "2026-11-24T10:00:00-0500"
+    first = finalize(legacy, at, owner="claude:s1", transaction="t1", lineage_gap="GAP one")
+    kept = finalize(first, at, owner="claude:s1", transaction="t2", lineage_gap="GAP two",
+                    follow_up="t2 ran")
+    assert "Lineage gaps (t1): GAP one" in kept and "Lineage gaps (t2): GAP two" in kept
 
 
 def test_unsafe_owner_tokens_are_refused(tmp_path):

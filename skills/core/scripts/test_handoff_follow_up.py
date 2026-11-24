@@ -44,6 +44,10 @@ def _repo(tmp_path: Path) -> Path:
         (living / name).write_text(f"# {name}\n")
     (repo / ".mycelium").mkdir()
     (repo / ".mycelium" / "plugin-root").write_text(f"{PLUGIN}\n")
+    (repo / "data.csv").write_text("a\n1\n2\n")
+    subprocess.run(["git", "-C", str(repo), "add", "data.csv"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@example.invalid", "-c",
+                    "user.name=t", "commit", "-qm", "data"], check=True)
     return repo
 
 
@@ -121,6 +125,26 @@ def _accepted_turn(host: str, repo: Path, sid: str, name: str, *, handoff: bool)
     return out
 
 
+LOOK = "python3 -c \"print(sum(1 for _ in open('data.csv')))\""
+
+
+def _follow_up_turn(host: str, repo: Path, sid: str) -> dict:
+    """A genuine follow-up: a read-only look at the data, then (if Stop asks)
+    a note under .living/; no project file changes, no handoff."""
+    _bash(host, repo, sid, LOOK)
+    out = _stop(host, repo, sid)
+    if out.get("decision") == "block":
+        _reflect(repo)
+        out = _stop(host, repo, sid, retry=True)
+    assert out.get("decision") is None, out
+    return out
+
+
+def _logs(repo: Path) -> list[str]:
+    return sorted(p.name for p in (repo / ".living" / "log").glob("*.md")
+                  if p.name != "LOG_REGISTRY.md")
+
+
 def _skips(repo: Path) -> list[dict]:
     skipped = []
     for manifest in (repo / ".living" / "log" / "data-lineage").glob("*.json"):
@@ -147,23 +171,24 @@ def test_the_live_chain_ends_with_one_turn_and_the_accepted_handoff_kept(tmp_pat
     assert "Lineage gaps (" in accepted and "detector-failed x1" in accepted
 
     # 3. A follow-up turn opens a new transaction and writes no handoff.
-    second = _accepted_turn(host, repo, "live", "notes.py", handoff=False)
+    second = _follow_up_turn(host, repo, "live")
     assert "hookSpecificOutput" not in second, second
-    logs = sorted(p.name for p in (repo / ".living" / "log").glob("*.md")
-                  if p.name != "LOG_REGISTRY.md")
+    logs = _logs(repo)
     assert len(logs) == 2, logs
     kept = _published(repo)
     assert AUTHORED in kept, kept
     assert "SESSION RESUME" not in kept, kept
-    follow_up = [line for line in kept.splitlines() if line.startswith("Follow-up activity:")]
+    follow_up = [line for line in kept.splitlines() if line.startswith("Follow-up activity")]
     assert len(follow_up) == 1 and logs[1] in follow_up[0], kept
     assert "detector-failed x1" in kept  # the first transaction's gap survives
 
-    # A third such turn still keeps it, with one follow-up line.
-    _accepted_turn(host, repo, "live", "more.py", handoff=False)
+    # A third such turn still keeps it, and both follow-ups are named.
+    _follow_up_turn(host, repo, "live")
     again = _published(repo)
-    assert AUTHORED in again
-    assert sum(line.startswith("Follow-up activity:") for line in again.splitlines()) == 1
+    logs = _logs(repo)
+    assert AUTHORED in again and len(logs) == 3, logs
+    follow_up = [line for line in again.splitlines() if line.startswith("Follow-up activity")]
+    assert len(follow_up) == 2 and logs[1] in follow_up[0] and logs[2] in follow_up[1], again
 
 
 @pytest.mark.parametrize("host", HOSTS)
@@ -201,12 +226,11 @@ def test_a_published_fallback_is_not_kept(tmp_path, host):
     _start(host, repo, "s1")
     _accepted_turn(host, repo, "s1", "model.py", handoff=False)
     first = _published(repo)
-    assert "SESSION RESUME" in first and "source fallback." in first
-    _accepted_turn(host, repo, "s1", "notes.py", handoff=False)
+    assert "SESSION RESUME" in first and "source fallback;" in first
+    _follow_up_turn(host, repo, "s1")
 
     second = _published(repo)
-    assert "SESSION RESUME" in second and "Follow-up activity:" not in second
-    assert "notes.py" in second
+    assert "SESSION RESUME" in second and "Follow-up activity" not in second
 
 
 @pytest.mark.parametrize("host", HOSTS)
@@ -217,7 +241,7 @@ def test_a_hand_edited_published_handoff_without_an_owner_is_not_kept(tmp_path, 
     published = repo / ".mycelium" / "last-session.md"
     published.write_text("\n".join(line for line in published.read_text().splitlines()
                                    if not line.startswith("Handoff owner:")) + "\n")
-    _accepted_turn(host, repo, "s1", "notes.py", handoff=False)
+    _follow_up_turn(host, repo, "s1")
 
     assert "SESSION RESUME" in _published(repo)
 
@@ -227,8 +251,82 @@ def test_a_follow_up_without_a_handoff_keeps_the_accepted_one(tmp_path, host):
     repo = _repo(tmp_path)
     _start(host, repo, "s1")
     _accepted_turn(host, repo, "s1", "model.py", handoff=True)
-    _accepted_turn(host, repo, "s1", "notes.py", handoff=False)
+    _follow_up_turn(host, repo, "s1")
 
     published = _published(repo)
     assert AUTHORED in published and "SESSION RESUME" not in published
-    assert "notes.py" in published  # the follow-up note names its activity
+    assert _logs(repo)[1] in published  # the follow-up line names its log
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_new_work_in_the_same_session_publishes_the_fallback(tmp_path, host):
+    # PR #163 review: a resumed session's new root task with real work must
+    # not republish the old handoff with only a follow-up line.
+    repo = _repo(tmp_path)
+    _start(host, repo, "s1")
+    _accepted_turn(host, repo, "s1", "model.py", handoff=True)
+    _accepted_turn(host, repo, "s1", "notes.py", handoff=False)  # an uncommitted edit
+
+    published = _published(repo)
+    assert "SESSION RESUME" in published and AUTHORED not in published
+    assert "notes.py" in published
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_committed_work_in_the_same_session_publishes_the_fallback(tmp_path, host):
+    repo = _repo(tmp_path)
+    _start(host, repo, "s1")
+    _accepted_turn(host, repo, "s1", "model.py", handoff=True)
+    (repo / "x.py").write_text("x = 2\n")
+    commit = ("git add x.py && git -c user.email=t@example.invalid -c user.name=t "
+              "commit -qm 'Add x'")
+    subprocess.run(commit, shell=True, cwd=repo, check=True)
+    _bash(host, repo, "s1", commit)
+    _bash(host, repo, "s1", LOOK)
+    out = _stop(host, repo, "s1")
+    if out.get("decision") == "block":
+        _reflect(repo)
+        out = _stop(host, repo, "s1", retry=True)
+    assert out.get("decision") is None, out
+
+    published = _published(repo)
+    assert "SESSION RESUME" in published and AUTHORED not in published
+    assert "Add x" in published
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_a_fresh_partial_handoff_gets_the_fallback_after_its_one_block(tmp_path, host):
+    repo = _repo(tmp_path)
+    _start(host, repo, "s1")
+    _accepted_turn(host, repo, "s1", "model.py", handoff=True)
+    _bash(host, repo, "s1", LOOK)
+    partial = repo / ".mycelium" / "run" / host / "s1" / "last-session.md"
+    partial.write_text("## What was worked on\n- Looked at the data.\n")
+    _reflect(repo)
+    blocked = _stop(host, repo, "s1")
+    assert blocked.get("decision") == "block" and "generic fallback" in blocked["reason"]
+    assert _stop(host, repo, "s1", retry=True).get("decision") is None
+
+    published = _published(repo)
+    assert "SESSION RESUME" in published and AUTHORED not in published
+
+
+@pytest.mark.parametrize("host", HOSTS)
+@pytest.mark.parametrize("age", ["3 hours", "yesterday"])
+def test_a_follow_up_after_the_window_publishes_the_fallback(tmp_path, host, age):
+    from datetime import datetime, timedelta
+
+    repo = _repo(tmp_path)
+    _start(host, repo, "s1")
+    _accepted_turn(host, repo, "s1", "model.py", handoff=True)
+    published = repo / ".mycelium" / "last-session.md"
+    now = datetime.now().astimezone()
+    then = now - (timedelta(hours=3) if age == "3 hours" else timedelta(days=1))
+    text = published.read_text()
+    import re
+    text = re.sub(r"(Handoff owner: .*; accepted )[^.]+(\.)",
+                  lambda m: m.group(1) + then.strftime("%Y-%m-%dT%H:%M:%S%z") + m.group(2), text)
+    published.write_text(text)
+    _follow_up_turn(host, repo, "s1")
+
+    assert "SESSION RESUME" in _published(repo)

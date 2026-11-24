@@ -1216,19 +1216,27 @@ earlier.
 `systemMessage` only, on every host; what the agent must act on is a block.
 What the agent should still learn goes into the durable records the next
 session reads (the finalized log footer, the published handoff), written by
-the finalizers so a retry replaces rather than repeats it. A publication
-that only Stop generates never replaces one the agent wrote and Stop
-accepted earlier in the same host session; ownership is a machine line in
-the status block, and anything but exactly one matching line is not proof.
-Helper recognition follows only chains whose every link runs whenever the
-use does.
+the finalizers so a retry replaces rather than repeats it. A generated
+fallback replaces an authored handoff the same host session accepted
+shortly before only when the new transaction did real work: a host session
+ID survives `--resume`, multi-day desktop sessions and Codex resume, so it
+is not a task identity. Keep only for a genuine follow-up (no handoff
+touched, no project change, no commit, recent acceptance); ownership is a
+machine line in the status block, and anything but exactly one matching
+line is not proof. Helper recognition follows only plain, unconditional,
+top-level assignments, and any reassignment it cannot model voids the
+chain: a suppression gate must fail toward reporting.
 
 **Regression evidence:** Drive the hooks through the whole chain: helpers
 through a two-step chain and an absolute pointer leave no skip; an accepted
 Stop with a real gap emits only `systemMessage` and writes the gap into the
-log and handoff; a follow-up transaction with no handoff keeps the accepted
-one with one follow-up line, a third keeps it with still one line. Require
-replacement for another host session, a published fallback, a removed or
-doubled owner line, and a follow-up that wrote its own handoff. Pair each
+log and handoff; a read-only follow-up transaction with no handoff keeps the
+accepted one with a follow-up line per transaction. Require the fallback
+for a same-session task with edits or a commit, a fresh partial handoff, a
+resume past the window or the day boundary, another host session, a
+published fallback and a removed or doubled owner line, and replacement by
+a follow-up that wrote its own handoff. Run each `export`, `declare`,
+`read`, `for`, `+=`, conditional, compound, prefix and heredoc
+reassignment of a chain variable to a vendored copy and require the skip. Pair each
 chain spelling with conditional, piped, subshell, traversal, expansion,
 foreign-pointer and look-alike-tree neighbors.

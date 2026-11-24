@@ -533,18 +533,18 @@ _ROOT_SUFFIX = r"/[A-Za-z0-9_./-]*"
 # `$PWD/` (bare or braced) is the working directory itself; the `cat`
 # operand may also be double-quoted.
 _ROOT_POINTER_DIR = r"(?:\.\./)*|/[A-Za-z0-9_./-]*/|\$PWD/|\$\{PWD\}/"
-_ROOT_ASSIGNMENT_RX = re.compile(
-    rf"""(?:^|[;&|\n(]|&&|\|\|)\s*({_ROOT_NAME})="""
+# The value of a plain `NAME=` assignment at a command start, ended by `;`, a
+# newline, `&&` or the end: anything else after it (`NAME=x cmd`) makes it a
+# prefix scoped to one command.
+_ROOT_VALUE_RX = re.compile(
     rf"""(?:"\$\(cat (?P<pq_q>"?)(?P<up_q>{_ROOT_POINTER_DIR})\.mycelium/plugin-root(?P=pq_q)\)(?P<suffix_q>{_ROOT_SUFFIX})?\""""
     rf"""(?P<suffix_after>{_ROOT_SUFFIX})?"""
     rf"""|\$\(cat (?P<pq>"?)(?P<up>{_ROOT_POINTER_DIR})\.mycelium/plugin-root(?P=pq)\)(?P<suffix>{_ROOT_SUFFIX})?"""
     rf"""|"\$(?:\{{(?P<ref_qb>{_ROOT_NAME})\}}|(?P<ref_q>{_ROOT_NAME}))(?P<ref_suffix_q>{_ROOT_SUFFIX})?\""""
     rf"""(?P<ref_suffix_after>{_ROOT_SUFFIX})?"""
     rf"""|\$(?:\{{(?P<ref_b>{_ROOT_NAME})\}}|(?P<ref>{_ROOT_NAME}))(?P<ref_suffix>{_ROOT_SUFFIX})?"""
-    r"""|'?(?P<literal>/[^\s;&|$'"`]+)'?)(?=[\s;&|]|$)"""
+    r"""|'?(?P<literal>/[^\s;&|$'"`]+)'?)(?=[ \t]*(?:;|\n|&&|$))"""
 )
-# A chain longer than this is not followed (and so stays reported).
-_ROOT_CHAIN_LIMIT = 4
 
 
 # An interpreter held in a variable: `PY=/x/venv/bin/python; $PY run.py`.
@@ -720,38 +720,72 @@ def _variable_script_path(command: str, offset: int, raw_path: str,
     if match is None:
         return None
     name, rest = match.groups()
-    value = _root_variable_value(command, offset, name, cwd, _ROOT_CHAIN_LIMIT)
+    value = _root_values_at(command, offset, cwd).get(name)
     if not value or "\0" in value:
         return None
     return Path(os.path.realpath(value + rest))
 
 
-def _root_variable_value(command: str, offset: int, name: str,
-                         cwd: Path | None, budget: int) -> str | None:
-    """The value ``name`` holds at ``offset``: its last assignment before
-    it, when that assignment is one ``_ROOT_ASSIGNMENT_RX`` models. A chain
-    link resolves its source variable at the link's own position, so a later
-    reassignment of the source does not change it, as in the shell."""
-    if budget <= 0:
-        return None
-    prefix = command[:offset]
-    # The value the interpreter receives is the *last* assignment before it:
-    # any later one this resolver cannot model (`P=.`, `P=$OTHER`) voids it.
-    any_assignment = re.compile(
-        rf"(?:^|[;&|\n(]|&&|\|\|)\s*{re.escape(name)}=")
-    last_any = None
-    for found in any_assignment.finditer(prefix):
-        last_any = found.start()
-    if last_any is None:
-        return None
-    modeled = [a for a in _ROOT_ASSIGNMENT_RX.finditer(prefix) if a.group(1) == name]
-    if not modeled or modeled[-1].start() != last_any:
-        return None
-    assignment = modeled[-1]
-    literal = assignment.group("literal")
-    source = next((assignment.group(g) for g in ("ref_qb", "ref_q", "ref_b", "ref")
-                   if assignment.group(g)), None)
-    suffix = "".join(assignment.group(g) or "" for g in (
+def _root_values_at(command: str, offset: int, cwd: Path | None) -> dict[str, str | None]:
+    """The plugin-root values each variable provably holds at ``offset``.
+
+    One forward pass over the simple commands before it, in shell text only
+    (not quotes, comments or heredoc bodies). A variable gets a value only
+    from a plain, unconditional assignment statement: at the top level
+    (no subshell, `if`/`case`/loop/brace body or function), after `;`, a
+    newline or the start of the command, not `export`ed, and not a prefix
+    scoped to one command. A link (`S=$P/…`) takes its source's value at
+    that point, as the shell does. Any other mention of a name (`export`,
+    `declare`, `local`, `readonly`, `read`, `for … in`, `+=`, a conditional
+    or nested assignment) voids it, so a reassignment this cannot see never
+    lets a user script pass as Mycelium's own. When in doubt, nothing."""
+    if "=" not in command:
+        return {}
+    without_heredocs = _blank_heredoc_bodies(command)
+    masked = _unquoted_shell_text(without_heredocs)
+    visible = _strip_unquoted_shell_comments(without_heredocs)
+    if masked is None or visible is None:
+        return {}
+    starts = _shell_command_starts(command, masked, visible)
+    mentions = [(m.start(1), m.group(1)) for m in _VAR_MENTION_RX.finditer(masked)]
+    values: dict[str, str | None] = {}
+    consumed = -1
+    mention_index = 0
+
+    def apply_mentions(before: int) -> None:
+        nonlocal mention_index
+        while mention_index < len(mentions) and mentions[mention_index][0] < before:
+            position, mentioned = mentions[mention_index]
+            mention_index += 1
+            if position != consumed:
+                values[mentioned] = None
+
+    for start, boundary, depth, control in starts:
+        if start >= offset:
+            break
+        apply_mentions(start)
+        assignment = _VAR_ASSIGNMENT_AT_RX.match(command, start)
+        if assignment is None:
+            continue
+        name = assignment.group(1)
+        consumed = assignment.start(1)
+        value = None
+        if (boundary in ("^", ";", "\n") and depth == 0 and control == 0
+                and assignment.start(1) == start):
+            found = _ROOT_VALUE_RX.match(command, assignment.end())
+            if found is not None:
+                value = _root_assignment_value(found, values, cwd)
+        values[name] = value
+    apply_mentions(offset)
+    return values
+
+
+def _root_assignment_value(found: re.Match, values: dict[str, str | None],
+                           cwd: Path | None) -> str | None:
+    literal = found.group("literal")
+    source = next((found.group(g) for g in ("ref_qb", "ref_q", "ref_b", "ref")
+                   if found.group(g)), None)
+    suffix = "".join(found.group(g) or "" for g in (
         "suffix_q", "suffix_after", "suffix",
         "ref_suffix_q", "ref_suffix_after", "ref_suffix"))
     if "/../" in f"{suffix}/":
@@ -759,30 +793,15 @@ def _root_variable_value(command: str, offset: int, name: str,
     if literal is not None:
         return literal
     if source is not None:
-        # A link must run whenever the use does: after `;`, a newline, or the
-        # start, or after `&&` directly behind the source's own modeled
-        # assignment (`P=$(cat …) && S=$P/…`). `false && S=…`, `x || S=…`,
-        # a pipeline or a subshell may leave S with whatever value the
-        # agent's shell already had.
-        lead = assignment.group(0)[: assignment.start(1) - assignment.start()].strip()
-        if lead in ("||", "|", "&", "("):
-            return None
-        if lead == "&&":
-            behind = command[: assignment.start()]
-            sources = [a for a in _ROOT_ASSIGNMENT_RX.finditer(behind)
-                       if a.group(1) == source]
-            if not sources or behind[sources[-1].end():].strip():
-                return None
-        base_value = _root_variable_value(command, assignment.start(1), source, cwd,
-                                          budget - 1)
+        base_value = values.get(source)
         return base_value + suffix if base_value else None
     if cwd is None:
         return None
-    up = assignment.group("up_q") or assignment.group("up") or ""
+    up = found.group("up_q") or found.group("up") or ""
     if up in ("$PWD/", "${PWD}/"):
         # Unquoted, a working directory with blanks or glob characters would
         # split or expand into other `cat` operands than the one modeled.
-        quoted = bool(assignment.group("pq_q") or assignment.group("pq"))
+        quoted = bool(found.group("pq_q") or found.group("pq"))
         if not quoted and re.search(r"[\s*?\[]", str(cwd)):
             return None
         up = ""

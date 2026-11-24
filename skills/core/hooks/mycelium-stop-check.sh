@@ -1085,11 +1085,17 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
       # Preserve a complete handoff authored during this session. If it is
       # absent, stale, or partial, publish a complete deterministic fallback
       # atomically instead of replacing a rich handoff with two headings.
-      # Unless the published handoff is one the agent wrote in an earlier
-      # transaction of this same host session: a later turn that wrote no
-      # handoff of its own (a follow-up question, a reaction to Stop output)
-      # keeps it, with a one-line follow-up note, rather than replacing it
-      # with the generic fallback (pattern 53).
+      # One exception: a genuine follow-up turn of the same host session (a
+      # question, a look at the data, a reaction to Stop output) keeps the
+      # handoff the agent wrote and Stop accepted shortly before, with one
+      # follow-up line, rather than replacing it with the generic fallback
+      # (pattern 53). Genuine means all of: the agent did not write or touch
+      # its handoff this transaction; no project file outside .living/ and
+      # .mycelium/ changed, no commit was made, and no unrecorded or moved
+      # work was taken; and the published handoff is this host session's own
+      # authored one, accepted within two hours on the same day
+      # (finalize_handoff.py --keeps-for). Anything else publishes the
+      # fallback exactly as before.
       _HANDOFF_OWNER=""
       if [[ "$HOST_SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
         _HANDOFF_OWNER="$(mycelium_hook_host):${HOST_SESSION_ID}"
@@ -1097,14 +1103,31 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
       _HANDOFF_KIND=authored
       _HANDOFF_FOLLOW_UP=""
       _PUBLISHED_HANDOFF="$MYCELIUM_SHARED_STATE_DIR/last-session.md"
+      _FOLLOW_UP_ONLY=false
+      if [[ "$_SESSION_FRESH" != true && -n "$_HANDOFF_OWNER" && -z "$UNRECORDED_MSG" \
+        && "$START_TS" =~ ^[0-9]+$ && "$START_TS" -gt 0 ]]; then
+        _FOLLOW_UP_ONLY=true
+        while IFS= read -r _changed; do
+          case "$_changed" in
+            ""|.living/*|.mycelium/*) ;;
+            *) _FOLLOW_UP_ONLY=false; break ;;
+          esac
+        done <<< "$SESSION_CHANGED_FILES"
+        if [[ "$_FOLLOW_UP_ONLY" == true ]]; then
+          _COMMITS_SINCE=$(git -C "$REPO_ROOT" log --since="@${START_TS}" --format=%H 2>/dev/null) \
+            || _COMMITS_SINCE=unknown
+          [[ -z "$_COMMITS_SINCE" ]] || _FOLLOW_UP_ONLY=false
+        fi
+      fi
       if [[ "$_SESSION_COMPLETE" != true || "$_SESSION_FRESH" != true ]] \
-        && [[ -n "$_HANDOFF_OWNER" && -f "$_PUBLISHED_HANDOFF" && ! -L "$_PUBLISHED_HANDOFF" ]] \
+        && [[ "$_FOLLOW_UP_ONLY" == true \
+          && -f "$_PUBLISHED_HANDOFF" && ! -L "$_PUBLISHED_HANDOFF" ]] \
         && python3 "$FINALIZE_HANDOFF_SCRIPT" --handoff "$_PUBLISHED_HANDOFF" \
           --keeps-for "$_HANDOFF_OWNER" >/dev/null 2>&1 \
         && cp "$_PUBLISHED_HANDOFF" "$_HANDOFF_FALLBACK" 2>/dev/null; then
         _HANDOFF_SOURCE="$_HANDOFF_FALLBACK"
         _HANDOFF_KIND=kept
-        _HANDOFF_FOLLOW_UP="transaction ${SESSION_ID} ($(basename "$LOG_PATH")) ended without a handoff of its own${SUMMARY:+ (${SUMMARY})}, so this handoff from an earlier transaction of the same session was kept."
+        _HANDOFF_FOLLOW_UP="$(basename "$LOG_PATH") changed no project files and wrote no handoff of its own, so this handoff was kept."
       elif [[ "$_SESSION_COMPLETE" != true || "$_SESSION_FRESH" != true ]]; then
         _HANDOFF_KIND=fallback
         _WORK_LINES=""

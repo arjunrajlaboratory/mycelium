@@ -1499,8 +1499,8 @@ def test_an_absolute_pointer_outside_the_working_tree_stays_reported(tmp_path: P
 
 
 @pytest.mark.parametrize("command", [
-    "P=$(cat .mycelium/plugin-root) && S=$P/skills/core/scripts && python3 $S/lineage_index.py",
     "P=$(cat .mycelium/plugin-root)\nS=$P/skills/core/scripts\npython3 $S/lineage_index.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts && python3 $S/lineage_index.py",
     "P=$(cat .mycelium/plugin-root); R=$P/skills; S=$R/core/scripts; python3 $S/lineage_index.py",
 ])
 def test_unconditional_chain_links_are_followed(tmp_path: Path, command: str) -> None:
@@ -1513,6 +1513,7 @@ def test_unconditional_chain_links_are_followed(tmp_path: Path, command: str) ->
     "P=$(cat .mycelium/plugin-root); (S=$P/skills/core/scripts); python3 $S/lineage_index.py",
     "P=$(cat .mycelium/plugin-root); echo | S=$P/skills/core/scripts; python3 $S/lineage_index.py",
     "P=$(cat .mycelium/plugin-root); cd x && S=$P/skills/core/scripts; python3 $S/lineage_index.py",
+    "P=$(cat .mycelium/plugin-root) && S=$P/skills/core/scripts && python3 $S/lineage_index.py",
 ])
 def test_conditional_chain_links_stay_reported(tmp_path: Path, command: str) -> None:
     repo = _pointer_repo(tmp_path, HERE.parent.parent.parent)
@@ -1544,3 +1545,40 @@ def test_other_pointer_spellings_stay_reported(tmp_path: Path, reader: str) -> N
     repo = _pointer_repo(tmp_path, HERE.parent.parent.parent)
     command = f"P={reader}; S=$P/skills/core/scripts; python3 $S/lineage_index.py --help"
     assert "unreadable_script" in _extract(repo, command), command
+
+
+@pytest.mark.parametrize("command", [
+    # PR #163 review: the live agent vendored register_value.py into
+    # analysis/_lib; a reassignment the resolver cannot model must void the
+    # chain, never let the user's copy pass as Mycelium's own.
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; export S={lib}; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; declare S={lib}; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; local S={lib}; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; readonly S={lib}; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core; S+=/scripts; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; read S < d.txt; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; for S in {lib}; do python3 $S/register_value.py; done",
+    "P=$(cat .mycelium/plugin-root); S={lib}; if false; then S=$P/skills/core/scripts; fi; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S={lib}; case x in y) S=$P/skills/core/scripts;; esac; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S={lib}; while false; do S=$P/skills/core/scripts; done; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S={lib}; f() {{ S=$P/skills/core/scripts; }}; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S={lib}; [ -n x ] || {{\nS=$P/skills/core/scripts\n}}; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S={lib}; test -d no && S=$P/skills/core/scripts; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S={lib}\ncat > e.sh <<'EOF'\nS=$P/skills/core/scripts\nEOF\npython3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S={lib}; echo 'x; S=$P/skills/core/scripts'; python3 $S/register_value.py",
+    "P={lib}/../..; if false; then P=$(cat .mycelium/plugin-root); fi; python3 $P/skills/core/scripts/register_value.py",
+    "P={lib}/../..; false && P=$(cat .mycelium/plugin-root); python3 $P/skills/core/scripts/register_value.py",
+    "export P=$(cat .mycelium/plugin-root); python3 $P/skills/core/scripts/register_value.py",
+])
+def test_a_reassignment_the_resolver_cannot_model_voids_the_chain(
+        tmp_path: Path, command: str) -> None:
+    repo = _pointer_repo(tmp_path, HERE.parent.parent.parent)
+    lib = repo / "analysis" / "_lib"
+    lib.mkdir(parents=True)
+    (lib / "register_value.py").write_text("print('vendored')\n")
+    command = command.format(lib=lib)
+    use = command.rindex("$S/") if "$S/" in command else command.rindex("$P/")
+    raw = command[use:].split()[0].rstrip(";")
+    path = ev._variable_script_path(command, use, raw, repo)
+    assert path is None or not ev._is_managed_utility_path(path), (command, path)
