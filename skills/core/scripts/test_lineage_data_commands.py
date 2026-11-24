@@ -133,6 +133,322 @@ def test_a_command_naming_no_data_leaves_nothing(project, command):
     assert _event(command, project) is None
 
 
+# Replaying the SNP-tree transcripts, most silent misses named analysis output
+# as `analysis/<name>/output/` (that project's convention) or relatively, from
+# a working directory inside `analysis/`, so the word itself never showed
+# `analysis/`. Mentions are judged as written and, for a relative word, as
+# resolved against the call's directory and each `cd` in command position
+# before it, when the resolved path exists at hook time.
+
+
+def _output_tree(project: Path) -> None:
+    (project / ".git").mkdir()
+    for path in ("analysis/x/output/run1/log", "analysis/x/outputs/run1/log",
+                 "analysis/x/outputs/log", "analysis/x/outputs/a.log",
+                 "analysis/x/outputs/b.log"):
+        (project / path).parent.mkdir(parents=True, exist_ok=True)
+        (project / path).write_text("1\n")
+
+
+@pytest.mark.parametrize(
+    ("command", "subdir", "named"),
+    [
+        ("ls analysis/x/output/", "", ["analysis/x/output/"]),
+        ("wc -l analysis/x/output/run1/log", "", ["analysis/x/output/run1/log"]),
+        ("ls x/outputs/", "analysis", ["x/outputs/"]),
+        ("head outputs/run1/log", "analysis/x", ["outputs/run1/log"]),
+        ("ls raw/", "data", ["raw/"]),
+        ("cd analysis && ls x/output/run1", "", ["x/output/run1"]),
+        ("cd analysis; cd x; head outputs/log", "", ["outputs/log"]),
+        ("cd {root}/analysis/x; head outputs/log", "", ["outputs/log"]),
+        # `cd` as an argument moves nothing.
+        ("echo cd /elsewhere; head outputs/log", "analysis/x", ["outputs/log"]),
+        ("git log --format='cd /elsewhere' && head outputs/log", "analysis/x", ["outputs/log"]),
+        # A glob is judged by the directory it expands in, which exists.
+        ("for d in outputs/run*; do ls $d; done", "analysis/x", ["outputs/run*"]),
+        ("ls x/output/*/log", "analysis", ["x/output/*/log"]),
+        # A brace word is read from the directory in effect where it sits.
+        ("cd analysis/x && wc -l outputs/{a,b}.log", "", ["outputs/", "outputs/{a,b}.log"]),
+    ],
+)
+def test_analysis_output_is_judged_from_where_the_call_runs(project, command, subdir, named):
+    _output_tree(project)
+    event = _event(command.replace("{root}", str(project)), project / subdir if subdir else project)
+    assert event is not None
+    assert event["named_paths"] == named
+
+
+@pytest.mark.parametrize(
+    ("command", "subdir"),
+    [
+        ("ls output/", ""),  # not under analysis/
+        ("ls x/outputs/", ""),
+        ("cd analysis; ls x/scripts", ""),
+        ("ls ../../outputs/", "analysis/x"),  # resolves outside analysis/
+        ("cd /elsewhere/analysis/x; ls outputs/", ""),  # outside the project
+        ("cd -; ls outputs/", "analysis"),  # an unknown directory
+        ("cd $D; ls outputs/", "analysis"),
+        ("ls analysis/x/outputs_backup.md", ""),
+        ("head notes", "data"),  # a bare word is not a path
+        # Text that is not a file where the call runs: a program, a pathspec.
+        ("perl -pe 's/foo/bar/g' log", "analysis/x/outputs"),
+        ("git log -- src/main.py", "analysis/x/outputs"),
+        ("head outputs/missing.log", "analysis/x"),
+        ("ls outputs/nowhere/*.log", "analysis/x"),
+        # A bare `cd` goes home: later relative words are not read from here.
+        ("cd && head outputs/log", "analysis/x"),
+        ("cd\nhead outputs/log", "analysis/x"),
+        # A brace word after a `cd` elsewhere is not read from the call's cwd.
+        ("cd /elsewhere && wc -l outputs/{a,b}.log", "analysis/x"),
+    ],
+)
+def test_relative_words_outside_analysis_output_stay_unnamed(project, command, subdir):
+    _output_tree(project)
+    assert _event(command, project / subdir if subdir else project) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "named"),
+    [
+        ("wc -l analysis/x/tables/{first,second}.tsv",
+         ["analysis/x/tables/{first,second}.tsv"]),
+        # Quoted braces do not expand: only the literal scan's piece.
+        ("ls -lh 'tables/{a,b}_summary.csv'", ["_summary.csv"]),
+        # The literal scan's own piece stays: brace words only add.
+        ("cat {x,y}.vcf.gz", [".vcf.gz", "{x,y}.vcf.gz"]),
+        # A heredoc body's unbalanced quote does not hide a brace word before it.
+        ("mkdir -p analysis/x/{scripts,outputs/figures} && cat > notes.md <<'EOF'\nit's\nEOF",
+         ["analysis/x/{scripts,outputs/figures}"]),
+        # A parameter expansion's brace is not a brace group.
+        ("head ${HOME}/data/x.csv", ["/data/x.csv"]),
+    ],
+)
+def test_a_brace_expanded_data_word_is_named(project, command, named):
+    event = _event(command, project)
+    assert event is not None
+    assert event["named_paths"] == named
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["echo {a,b}", "ls src/{a,b}.py", "for f in {1,2}; do echo $f; done",
+     "awk '{print $1, $2}' README.md"],
+)
+def test_a_brace_word_naming_no_data_stays_unnamed(project, command):
+    assert _event(command, project) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls " + "{a," * 20000 + "b}" * 3 + " " + "x{" * 20000,
+        # An unclosed `{` before a long comma run (minified JSON in an echo)
+        # once retried the group at every comma: 8 s on 85 KB.
+        "echo '{" + "1," * 40000 + "' > data/x.csv",
+        "echo '" + "{\"k\":[" + "1," * 40000 + "]}' | head",
+    ],
+)
+def test_brace_words_scan_linearly(project, command):
+    event, seconds = _timed_event(command, project)
+    assert seconds < SCAN_CPU_LIMIT_SECONDS
+
+
+def _main_literal_mentions(command: str, root: str | None) -> list[str]:
+    """The literal scan as `origin/main` (d0054d9) ran it, for comparison."""
+    seen: dict[str, None] = {}
+    for match in lineage_event._DATA_COMMAND_WORD_RX.finditer(command):
+        word = match.group(0).replace("'", "").replace('"', "")
+        if word in seen or not lineage_event._is_data_like_path(word, root):
+            continue
+        if len(seen) >= lineage_event.DATA_COMMAND_NAMED_PATH_LIMIT:
+            break
+        seen[word] = None
+    return list(seen)
+
+
+_ADVERSARIAL_MENTIONS = [
+    # A brace match across quotes, pipes and redirections (review of #159).
+    "printf '{,'|cat<data/x.csv|wc>'}'",
+    "echo '{a,' data/x.csv '}'",
+    "cat {data/a.csv,data/b.csv} > results/{x,y}.tsv",
+    "cd analysis/x && head outputs/log data/y.csv",
+    "cd && head data/x.csv; cd -; ls data/",
+    "awk '{print $1,$2}' data/x.csv",
+    "cat src/{a,b}.py data/x.csv",
+    "head ${HOME}/data/x.csv {x,y}.vcf.gz",
+    "ls " + " ".join(f"data/f{i}.csv" for i in range(80)),
+]
+
+
+@pytest.mark.parametrize("command", _ADVERSARIAL_MENTIONS)
+def test_the_added_readings_never_narrow_the_literal_scan(project, command):
+    _output_tree(project)
+    root = str(project)
+    head, _ = lineage_event._data_path_mentions(command, root, str(project / "analysis" / "x"))
+    main = _main_literal_mentions(command, root)
+    assert head[: len(main)] == main
+
+
+# Shapes from the P1 review of #159, each once seconds on the hook path:
+# a `cd` chain growing the tracked directory, a brace group with thousands
+# of empty alternatives after a long prefix, and a long comma run after an
+# unclosed `{`. The mention scan must stay well under the hook budget.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd x; : a/b; " * 5000,
+        "cd x; : a/b; " * 1200,  # under the size cap for the added readings
+        "echo " + "x/" * 512 + "{" + "," * 20000 + "}",
+        "echo " + ("x/" * 512 + "{" + "," * 300 + "} ") * 10,
+        "echo '{" + "1," * 40000 + "' > data/x.csv",
+    ],
+)
+def test_mention_scan_shapes_stay_fast(project, command):
+    _output_tree(project)
+    start = time.process_time()
+    lineage_event._data_path_mentions(command, str(project), str(project / "analysis" / "x"))
+    assert time.process_time() - start < 0.2
+
+
+def _extract_cpu(project: Path, command: str, out: Path) -> float:
+    """CPU seconds for one extractor run through its entry point."""
+    argv = ["extract_data_lineage_event.py", "--cwd", str(project), "--ts", "T",
+            "--bash-cmd", command, "--bash-exit", "0", "--append-to", str(out)]
+    old = sys.argv
+    sys.argv = argv
+    try:
+        start = time.process_time()
+        assert lineage_event.main() == 0
+        return time.process_time() - start
+    finally:
+        sys.argv = old
+
+
+def test_a_long_stage_does_not_slow_step_construction(project):
+    # Review of #159: a 250 KB quoted argument went through shlex in
+    # data_command_step (3 s) once the stage named data. A command naming
+    # no data never builds a step, so it is the baseline.
+    _output_tree(project)
+    long_arg = "x" * 250_000
+    named = f"printf '%s' '{long_arg}' data/ >/dev/null"
+    unnamed = f"printf '%s' '{long_arg}' analysis/x/scripts/ >/dev/null"
+    baseline = _extract_cpu(project, unnamed, project / "a.ndjson")
+    elapsed = _extract_cpu(project, named, project / "b.ndjson")
+    assert not (project / "a.ndjson").exists() or not (project / "a.ndjson").read_text()
+    record = json.loads((project / "b.ndjson").read_text())
+    assert record["named_paths"] == ["data/"]
+    assert record["step"] == {"partial": True, "reason": "stage-too-long"}
+    assert elapsed < baseline * 1.5 + 0.2, (elapsed, baseline)
+
+
+def test_a_command_over_the_size_cap_gets_the_0_9_7_reading(project):
+    # Over DATA_RULES_SIZE_CAP none of the added rules run: `output/` is not
+    # analysis output, and relative and brace words are not resolved.
+    _output_tree(project)
+    pad = " #" + "x" * lineage_event.DATA_RULES_SIZE_CAP
+    for command in ("ls analysis/x/output/", "wc -l analysis/x/tables/{a,b}.tsv"):
+        assert _event(command, project) is not None
+        assert _event(command + pad, project) is None
+    assert _event("head outputs/log", project / "analysis" / "x") is not None
+    assert _event("head outputs/log" + pad, project / "analysis" / "x") is None
+    # 0.9.7's own rules still apply.
+    assert _event("head data/x.csv" + pad, project)["named_paths"] == ["data/x.csv"]
+
+
+@pytest.mark.parametrize("tail", ["analysis/x/output/", "data/"])
+def test_a_huge_command_costs_what_main_does(project, tail):
+    # Review of #159: 192 KB with one 114 KB path took 2.3 s against main's
+    # 0.5 s, as the step matched every short word against the long path.
+    # The same input with a path no rule names is main's path: no record.
+    _output_tree(project)
+
+    def command(path: str) -> str:
+        return (("true " + "ab " * 3000 + "; ") * 8 + "true " + "ab " * 2000
+                + f"; printf '%s' {path}" + "a" * 114000 + " >/dev/null")
+
+    baseline = _extract_cpu(project, command("analysis/x/scripts/"), project / "a.ndjson")
+    elapsed = _extract_cpu(project, command(tail), project / "b.ndjson")
+    assert elapsed < baseline * 1.5 + 0.2, (elapsed, baseline)
+
+
+@pytest.mark.parametrize("setter", [
+    "printf -v PATH %s ./fakebin",
+    "read PATH < data/x.csv",
+    "export PATH=./fakebin",
+    "declare PATH=./fakebin",
+    "PATH=./fakebin",
+])
+@pytest.mark.parametrize("pair", ["analysis/x/output/src analysis/x/output/dst",
+                                  "data/x.csv data/y.csv"])
+def test_a_path_change_ends_what_a_copy_proves(project, setter, pair):
+    # `cp` after PATH changes may be any program (`fakebin/cp -> true`):
+    # a zero exit no longer proves the copy read or wrote anything.
+    _output_tree(project)
+    for name in ("analysis/x/output/src", "analysis/x/output/dst", "data/y.csv"):
+        (project / name).write_text("1\n")
+    event = _event(f"{setter} && cp {pair}", project)
+    assert event is not None
+    # Nothing from the copy; a setter's own `< data/x.csv` still opened.
+    assert all(i["evidence"] == "redirection" for i in event["inputs"])
+    assert event["outputs"] == []
+
+
+def _run_extractor(project: Path, command: str, *flags: str) -> list[dict]:
+    out = project / "events.ndjson"
+    out.unlink(missing_ok=True)
+    old = sys.argv
+    sys.argv = ["x", "--cwd", str(project), "--ts", "T", "--bash-cmd", command,
+                "--append-to", str(out), *flags]
+    try:
+        assert lineage_event.main() == 0
+    finally:
+        sys.argv = old
+    return [json.loads(line) for line in out.read_text().splitlines()] if out.exists() else []
+
+
+def test_a_launch_records_no_output_at_all(project):
+    (project / "out.csv").write_text("old")
+    (project / "fit.py").write_text("import pandas as pd\npd.DataFrame().to_csv('out.csv')\n")
+    (record,) = _run_extractor(project, "python3 fit.py", "--background-launch")
+    assert record["outputs"] == []
+    assert "unconfirmed_outputs" not in record
+    assert "out.csv" not in json.dumps(record.get("lineage_warnings"))
+
+
+def test_a_foreground_stage_beside_nohup_keeps_its_output(project):
+    # Review of #159: the observer reports `background` for the whole call,
+    # but `python3 fit.py` ran to completion before `nohup true` (0.9.7
+    # records out.csv). Only the host's launch evidence withholds outputs.
+    (project / "fit.py").write_text("import pandas as pd\npd.DataFrame().to_csv('out.csv')\n")
+    (project / "out.csv").write_text("new")
+    (record,) = _run_extractor(
+        project, "python3 fit.py && nohup true", "--bash-exit", "0",
+        "--observation-json", '{"status": "background", "host_session_id": "s"}')
+    assert [o["path"] for o in record["outputs"]] == [str(project / "out.csv")]
+
+
+def test_a_variable_setter_keeps_its_own_redirections(project):
+    # Review of #159: 0.9.7 records both; the setter guard must only end
+    # what comes after the setter.
+    (project / "data" / "in.csv").write_text("1\n")
+    event = _event("read value < data/in.csv", project)
+    assert [i["path"] for i in event["inputs"]] == [str(project / "data" / "in.csv")]
+    (project / "data" / "empty.csv").write_text("")
+    event = _event("printf -v result %s hi > data/empty.csv", project)
+    assert [o["path"] for o in event["outputs"]] == [str(project / "data" / "empty.csv")]
+    # ...while a copy after it still claims nothing.
+    event = _event("read value < data/in.csv && cp data/in.csv data/y.csv", project)
+    assert [i["path"] for i in event["inputs"]] == [str(project / "data" / "in.csv")]
+    assert event["outputs"] == []
+
+
+def test_relative_resolution_stats_a_bounded_number_of_words(project):
+    _output_tree(project)
+    command = "ls " + " ".join(f"outputs/f{i}.log" for i in range(20000))
+    event, seconds = _timed_event(command, project / "analysis" / "x")
+    assert seconds < SCAN_CPU_LIMIT_SECONDS
+
+
 def test_named_paths_are_capped_and_marked_truncated(project):
     command = "ls " + " ".join(f"data/f{i}.csv" for i in range(200))
     event = _event(command, project)
@@ -918,6 +1234,25 @@ def test_a_wrapped_unproven_run_is_labelled(project, command, label):
     assert _has_label(event["analysis_candidates"], label), event
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 - <<'PY'\nprint(1)\nPY\n"
+        "python3 /opt/mycelium/skills/core/scripts/validate_structure.py --strict",
+        "python3 /opt/mycelium/skills/core/scripts/validate_structure.py .\n"
+        ".venv/bin/python - <<'PY'\nprint(1)\nPY",
+    ],
+)
+def test_a_helper_run_does_not_hide_a_stdin_fed_run_beside_it(project, command):
+    # Transcript replay: the helper was the only run the detector could see,
+    # it was dropped as Mycelium's own, and the heredoc run went unlabelled.
+    event = _event(command, project)
+    assert event is not None
+    labels = event["analysis_candidates"]
+    assert any(label.endswith("<<heredoc") for label in labels), labels
+    assert not any("validate_structure" in label for label in labels), labels
+
+
 def test_a_helper_named_in_an_argument_does_not_hide_the_run(project):
     command = (
         "for n in a; do Rscript fit.R --helper "
@@ -1245,6 +1580,53 @@ def test_stdin_fed_python_with_valued_options_is_labelled(project, command):
 
 def test_stdin_fed_python_printing_its_version_is_not_a_run(project):
     assert _event("printf x | xargs python3 -uV", project) is None
+
+
+# After `-` the interpreter reads no more options: the rest is the stdin
+# program's own argv. Transcript replay found these left silent.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 - \"$SHA\" <<'EOF'\nimport sys\nEOF",
+        "python3 -I - x.html <<'EOF'\nimport sys\nEOF",
+        "python3 - -c --version <<'EOF'\nimport sys\nEOF",
+        "Rscript - a b <<'RS'\nprint(1)\nRS",
+    ],
+)
+def test_stdin_fed_program_with_arguments_is_labelled(project, command):
+    event = _event(command, project)
+    assert event is not None
+    assert any(label.endswith("<<heredoc") for label in event["analysis_candidates"])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A substitution splits the segment before the heredoc operator.
+        "for u in a b; do python3 - ft/$(basename $u).txt <<'EOF'\nprint(1)\nEOF\ndone",
+        "cat fit.py | python3 - --flag",
+    ],
+)
+def test_an_explicit_dash_marks_a_stdin_fed_run(project, command):
+    event = _event(command, project)
+    assert event is not None
+    assert any(label.startswith("python3 -") for label in event["analysis_candidates"]), event
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3 -V - x <<'EOF'\nimport sys\nEOF",  # prints and exits first
+        "python3 x.py - <<'EOF'\nimport sys\nEOF",  # a script, not stdin
+        "python3 -c 'print(1)' - <<'EOF'\nEOF",
+    ],
+)
+def test_options_before_the_dash_still_decide(project, command):
+    event = _event(command, project)
+    labels = event["analysis_candidates"] if event else []
+    assert not any(label.endswith("<<heredoc") for label in labels)
 
 
 # ---------- Codex review round 13 ----------
