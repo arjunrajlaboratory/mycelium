@@ -46,7 +46,9 @@ def test_worktree_content_fingerprint_uses_current_snapshot_schema(
 
     baseline = build_snapshot(repo)
 
-    assert baseline["schema_version"] == SCHEMA_VERSION == 2
+    # Schema 3 bounds content reads; a small tree is still fully fingerprinted.
+    assert baseline["schema_version"] == SCHEMA_VERSION == 3
+    assert isinstance(baseline["snapshot_started_ns"], int)
     assert baseline["files"]["preexisting.txt"]["stat"]["content"]["sha256"]
 
 
