@@ -633,6 +633,13 @@ def _build_parser() -> argparse.ArgumentParser:
     living_parser = subparsers.add_parser("living-changed")
     living_parser.add_argument("--repo-root", type=Path, required=True)
     living_parser.add_argument("--baseline", type=Path, required=True)
+
+    # Prints the subproject notes roots a baseline recorded, one per line
+    # (none when absent or malformed), so a shell caller can tell a notes
+    # write on the session's path from project work.
+    roots_parser = subparsers.add_parser("nested-living-roots")
+    roots_parser.add_argument("--repo-root", type=Path, required=True)
+    roots_parser.add_argument("--baseline", type=Path, required=True)
     return parser
 
 
@@ -644,6 +651,14 @@ def main() -> int:
         return 0
     if args.command == "living-snapshot":
         write_living_snapshot(repo_root, args.output, args.session_dir)
+        return 0
+
+    if args.command == "nested-living-roots":
+        baseline = load_snapshot(args.baseline)
+        if baseline is not None:
+            for root in _baseline_nested_roots(baseline):
+                if "\n" not in root:
+                    print(root)
         return 0
 
     if args.command == "living-changed":

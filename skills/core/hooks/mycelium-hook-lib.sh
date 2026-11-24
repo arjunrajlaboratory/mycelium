@@ -1343,17 +1343,18 @@ mycelium_refresh_work_cycle() {
   if [[ "$should_refresh" != true ]]; then
     return 1
   fi
-  mycelium_start_work_cycle "$repo_root" "$helper" || true
+  mycelium_start_work_cycle "$repo_root" "$helper" "$session_dir" || true
   return 0
 }
 
-# mycelium_start_work_cycle REPO_ROOT HELPER: fingerprint .living/ now and
+# mycelium_start_work_cycle REPO_ROOT HELPER [SESSION_DIR]: fingerprint .living/ now and
 # stamp the reminder, so only a .living/ update made after this point can
 # satisfy Stop. The caller holds the session lock. Returns nonzero when the
 # fingerprint could not be taken (the reminder is still stamped).
 mycelium_start_work_cycle() {
   local repo_root="$1"
   local helper="$2"
+  local session_dir="${3:-}"
   local baseline_file="$STATE_DIR/living-reminder-baseline.json"
   local status=0
   if [[ -f "$helper" ]]; then
