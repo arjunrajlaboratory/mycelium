@@ -160,6 +160,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Static lineage now resolves standard-library I/O** in Python scripts
+  (`extract_data_lineage_event.py`). Previously only pandas-style readers and
+  writers were recognised. Now `open(...)` (mode gives the direction),
+  `Path.open/read_text/write_text/read_bytes/write_bytes`, and Mycelium's
+  `read_source` are resolved too, which covers `csv` readers and writers on
+  those handles.
+
+  The resolver is a small single-valued grammar, not an interpreter. A path
+  or mode resolves only from:
+  - a literal;
+  - a module-level name assigned once;
+  - `os.path.join`, `Path(...)` or `Path /` of those;
+  - a parameter of a function with exactly one call site;
+  - an `argparse` option replayed through the real `argparse` with the
+    command's literal arguments. The namespace must only ever be read as
+    `args.option`.
+
+  Only calls in module code or in functions reachable from it count. A call
+  on a branch that may not run is still recorded, as with the reader scan.
+  Everything else stays `unresolved`, including:
+  - values that differ across call sites;
+  - an escaping or mutated namespace;
+  - `sys.argv` touched anywhere;
+  - argument words that zsh or bash may expand (globs, `~`, a leading `=`,
+    `$`, backslashes);
+  - `__file__`-relative paths;
+  - opens inside a `try` with handlers or a `with` other than plain `open`,
+    or in a function called from one;
+  - files that import `mock` or `builtins`.
+
+  Plain `r` is an input and `w`, `x` and `a` are outputs. The update modes
+  (`r+`, `w+`, `a+`) stay unresolved, because the handle may only read, only
+  write, or both.
+
+  The scan only adds to the existing result. The reader/writer scan and
+  repository recovery run exactly as before, and the stdlib scan never feeds,
+  filters or suppresses them. It adds only paths that:
+  - are inside the repository;
+  - are not already recorded (compared by full path);
+  - are not relative paths in a script that calls `chdir`.
+
+  Parse, walks, resolution, stat and hashing share one 0.4 s deadline and a
+  work budget. Sources over 128 KB are not scanned. More than 64 paths, or
+  any bound exceeded, means nothing is added. Files are hashed within 128 MB;
+  over that, a file is recorded with `sha256: null` and
+  `hash_status: "skipped-budget"`.
+
+  On Antigravity App, which installs no I/O observer, stdlib-only analyses
+  had recorded `io_detection: "unresolved"` with no producer.
+
 - **The handoff instructions now name the exact five headings Stop accepts.**
   The `SESSION HANDOFF PATH` line that SessionStart injects and rule 10 of
   the `MYCELIUM.md` template asked only for a "five-section handoff", and
