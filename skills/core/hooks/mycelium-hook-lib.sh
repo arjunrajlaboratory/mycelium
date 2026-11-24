@@ -1223,6 +1223,17 @@ value = sys.stdin.read().replace("\r", " ").replace("\n", " ")
 print(html.escape(" ".join(value.split()), quote=True).replace("|", "&#124;"))
 '
 
+# Print the first N lines of stdin, then keep reading to the end of it.
+# Hooks run under `set -euo pipefail`, so a consumer that exits early, such
+# as `head -N`, makes a producer whose output outlasts the pipe buffer
+# (64 KiB on macOS) fail with EPIPE or die of SIGPIPE, and the whole hook
+# exits with it. For Stop that loses the block or stops finalization halfway,
+# and every retry fails again because the list that killed it only grows. Use
+# this, not `head`, for a prefix of any list that can be long.
+mycelium_first_lines() {
+  awk -v n="$1" 'NR <= n'
+}
+
 mycelium_registry_cell() {
   local value=""
   if IFS= read -r -d '' value; then

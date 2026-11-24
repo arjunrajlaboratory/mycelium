@@ -242,6 +242,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   This affected released versions and showed up as a rare failure of the
   `[dead]` lock-concurrency test under load.
 
+- **Stop no longer fails open when a session's changed-file list is long**
+  (`mycelium-stop-check.sh`). Stop built its short file lists (the block
+  reason, the registry summary, the fallback handoff and the session-end
+  triage) by piping the whole list into `head`. With more path text than a
+  pipe holds (64 KiB on macOS; every run failed from about 128 KiB), `head`
+  exited while `printf` or `sort` was still writing, and under `pipefail`
+  Stop exited 1 with no output. The host logged a hook error and the turn
+  ended: the block that was due was lost, or finalization stopped halfway.
+  Nothing reset the work cycle, so every later Stop in that session failed
+  the same way. A bulk copy, or a job that writes a few thousand outputs into
+  the repository, was enough to start it. The four readers now take their
+  prefix with `mycelium_first_lines`, which reads its input to the end
+  (regression pattern 53).
+
 - **Static lineage now resolves standard-library I/O** in Python scripts
   (`extract_data_lineage_event.py`). Previously only pandas-style readers and
   writers were recognised. Now `open(...)` (mode gives the direction),

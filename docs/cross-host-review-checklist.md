@@ -507,6 +507,11 @@ hook, filesystem, or lifecycle boundaries.
       registry-cell encoders) is byte-identical to it, exit status included,
       across bash 3.2 and 5.x, locales, `PYTHONIOENCODING`/`PYTHONUTF8`, and
       `patsub_replacement`, or falls back to the interpreter.
+- [ ] No hook takes a prefix of a list that can grow with the repository or the
+      session (changed files, activity, events, logs) with a consumer that
+      stops reading early (`head`, `sed Nq`, `grep -q`, `awk ... exit`).
+      Under `pipefail` the producer's EPIPE or SIGPIPE exits the hook; use
+      `mycelium_first_lines` or one reader of the whole input.
 - [ ] Shell fallbacks do not use `command || echo fallback` when the command can
       emit stdout before failing; captured values are single-line and encoded
       for their JSON, YAML, Markdown, or path destination.
@@ -660,6 +665,7 @@ exercise them.
 | Codex has skipped every Mycelium hook because an upgrade invalidated its approval | The root agent finds no `SESSION HANDOFF PATH:` line in its context and tells the user the hooks are probably not running and to re-trust the `mycelium@mycelium` hooks (from the desktop app on Codex 0.169.0); `hooks/list` confirms `trustStatus` `trusted` before an audit; migration delivers that check to existing projects, and renaming the SessionStart sentinel fails a test. |
 | A hook state check, lock attempt, or encoder moves out of its own interpreter | A differential test runs the moved code and the code it replaced on the same adversarial state and requires identical statuses, variables, output, and filesystem effects; launch counts per hook are pinned. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |
+| Stop runs with more than 128 KiB of changed-file or activity path text, with SIGPIPE inherited ignored and default | Stop exits 0 with no "Broken pipe": it blocks with the full count and 15 names, blocks again on retry, then finalizes after a `.living/` update with `ended:`, the counted registry summary and a published handoff. |
 
 ## Validation Gate
 

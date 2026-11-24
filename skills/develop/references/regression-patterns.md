@@ -1200,3 +1200,35 @@ blocks once, then falls back on retry. A handoff repaired after the block is
 preserved. A complete legacy-schema handoff is accepted without a block, a
 validator error fails open, and a marker from another transaction does not
 suppress the block.
+
+
+## 53. An early-exiting reader kills a hook under pipefail
+
+**Failure:** Stop shortened lists that grow with the repository (the changed
+files behind the block reason, the registry summary and the fallback
+handoff, and the activity list behind the session-end triage) with
+`producer | head -N`. Once the producer's output outlasts the pipe buffer
+(64 KiB on macOS), `head` exits first, `printf` fails with EPIPE (or the
+producer dies of SIGPIPE), `pipefail` fails the substitution, and `set -e`
+exits Stop 1 with no output. The host treats that as a non-blocking error.
+The crash came before the block and before the work cycle was closed, so it
+latched: one real session failed 33 Stops in a row with 409 KB of names,
+nearly all written by a bulk copy and a scoring job. Pattern 51 had
+already avoided the same reader for moved-checkout changes; the older sites
+kept it.
+
+**Invariant:** A hook never takes a prefix of a list that can grow with the
+repository or the session with a consumer that stops reading early (`head`,
+`sed Nq`, `grep -q`, `awk ... exit`). It uses `mycelium_first_lines N`,
+which reads to the end, or one reader of the whole input. A producer bounded
+by construction, or one whose failure is absorbed inside its own group
+(`{ git log ... || true; } | head`), is not a hazard, and the review records
+why.
+
+**Regression evidence:** Run the real hooks with more than 128 KiB of
+changed-file path text, written from the shell, with SIGPIPE inherited both
+ignored and default. Stop exits 0 and blocks with the full count and 15
+names, blocks again on a retry, then finalizes after a `.living/` update
+(`ended:`, the counted registry summary, a published fallback handoff with
+10 file lines). Repeat with more than 128 KiB of activity paths for the
+session-end triage. Reverting any one of the four readers fails its test.
