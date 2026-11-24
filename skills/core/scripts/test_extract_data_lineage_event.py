@@ -6160,3 +6160,85 @@ def test_main_resolves_the_antigravity_script(tmp_path: Path) -> None:
         "analysis/de/outputs/gene_ratios.csv"]
     assert [r["rel_path"] for r in event["outputs"]] == [
         "analysis/de/outputs/gene_ratios.csv"]
+
+
+# Review of #171: a wrapper whose body can return before its final
+# `return parser.parse_args(argv)` returns some other namespace.
+_WRAPPER_STD_BODY = (
+    "    parser = argparse.ArgumentParser()\n"
+    "    parser.add_argument('--out', default='d.csv')\n"
+    "    return parser.parse_args(argv)\n\n"
+)
+_WRAPPER_CONTROL_FLOW = {
+    "early_if_return": "    if True:\n        return argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY,
+    "return_between": (
+        "    parser = argparse.ArgumentParser()\n    parser.add_argument('--out', default='d.csv')\n"
+        "    if True:\n        return argparse.Namespace(out='x.csv')\n"
+        "    return parser.parse_args(argv)\n\n"),
+    "try_finally_return": (
+        "    parser = argparse.ArgumentParser()\n    parser.add_argument('--out', default='d.csv')\n"
+        "    try:\n        pass\n    finally:\n        return argparse.Namespace(out='x.csv')\n"
+        "    return parser.parse_args(argv)\n\n"),
+    "for_return": "    for _ in [1]:\n        return argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY,
+    "while_return": "    while True:\n        return argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY,
+    "with_return": "    with open('/dev/null') as fh:\n        return argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY,
+    "match_return": "    match 1:\n        case 1:\n            return argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY,
+    "raise_first": "    raise SystemExit(0)\n" + _WRAPPER_STD_BODY,
+    "nested_def_return": (
+        "    def inner():\n        return argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY),
+    "yield_generator": "    yield argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY,
+}
+
+
+@pytest.mark.parametrize("case", sorted(_WRAPPER_CONTROL_FLOW))
+def test_stdlib_argparse_wrapper_must_be_straight_line(case: str) -> None:
+    source = ("import argparse\n\ndef parse_args(argv=None):\n"
+              + _WRAPPER_CONTROL_FLOW[case] + _WRAPPER_MAIN + _WRAPPER_GUARD)
+    for script_args in ([], ["--out", "given.csv"]):
+        # Only the namespace's path is in question (`with_return` opens
+        # /dev/null, a real input main's scan records too).
+        assert lineage_event._stdlib_static_io(source, script_args)[1] == []
+
+
+def test_stdlib_argparse_wrapper_straight_line_with_docstring_and_assignments() -> None:
+    source = ("import argparse\n\ndef parse_args(argv=None):\n"
+              "    '''Parse the command line.'''\n    description = 'x'\n"
+              + _WRAPPER_STD_BODY.replace("ArgumentParser()", "ArgumentParser(description=description)")
+              + _WRAPPER_MAIN + _WRAPPER_GUARD)
+    assert lineage_event._stdlib_static_io(source, ["--out", "given.csv"]) == ([], ["given.csv"])
+
+
+# Review of #171: the new resolution must never cost main's own result.
+# Main's scan runs first, unchanged; the cap, work budget and deadline bound
+# only what the new resolution adds.
+_CAP_SOURCE = (
+    "from pathlib import Path\nHERE = Path(__file__).resolve().parent\n"
+    + "".join(f"with open('lit{i}.txt', 'w') as fh:\n    fh.write('x')\n" for i in range(60))
+    + "".join(f"with open(HERE / 'anch{i}.txt', 'w') as fh:\n    fh.write('x')\n" for i in range(10))
+)
+
+
+def test_file_anchored_paths_never_push_main_over_the_cap(tmp_path: Path) -> None:
+    root = Path(os.path.realpath(tmp_path))
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "run.py").write_text(_CAP_SOURCE)
+    event = _run_extractor_cli(root, "python3 run.py")
+    assert event["io_detection"] == "static"
+    assert sorted(r["rel_path"] for r in event["outputs"]) == sorted(
+        [f"lit{i}.txt" for i in range(60)] + [f"anch{i}.txt" for i in range(10)])
+
+
+def test_new_resolution_over_budget_keeps_mains_records(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def exhausted(self, node):
+        raise lineage_event._OverBudget
+    monkeypatch.setattr(lineage_event._StdlibIO, "_file_operand", exhausted)
+    script = tmp_path / "run.py"
+    script.write_text(_CAP_SOURCE)
+    args = argparse.Namespace(ts="2026-11-24T12:00:00Z", agent_id="", agent_type="",
+                              bash_cmd="python3 run.py", bash_exit=0, repo_root=str(tmp_path))
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123",
+                                      script_args=[], script_word="run.py")
+    assert event["io_detection"] == "static"
+    assert sorted(Path(r["path"]).name for r in event["outputs"]) == sorted(
+        f"lit{i}.txt" for i in range(60))

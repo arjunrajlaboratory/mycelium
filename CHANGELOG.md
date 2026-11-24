@@ -39,7 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing replay rules apply unchanged. Each `argv` is resolved in its own
   function and must not be used anywhere else there. Any other caller, a
   non-None default, a rebound or mutated `argv`, `sys.argv` touched, or a
-  second parse call anywhere declines.
+  second parse call anywhere declines. So does a wrapper body that is not
+  straight-line (anything before the final return other than assignments
+  and expression statements, or any `return`, `raise`, `yield` or nested
+  scope), because it could return another namespace first.
+- **Main's static result is never lost.** The scan main already runs goes
+  first, unchanged. `__file__` and wrapper resolution run in a second pass,
+  with their own path cap, work budget and deadline. That pass adds only
+  paths the first did not find. Over any of its bounds it adds nothing, and
+  main's records stand.
 
 ## [0.10.0] - 2026-11-24
 

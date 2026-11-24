@@ -5441,10 +5441,14 @@ class _StdlibIO:
     """The certain standard-library I/O of one Python source."""
 
     def __init__(self, tree: ast.Module, script_args: list[str] | None,
-                 deadline: float, script_file: _ScriptFile | None = None) -> None:
+                 deadline: float, script_file: _ScriptFile | None = None,
+                 extended: bool = False) -> None:
         self.tree = tree
         self.script_args = script_args
-        self.script_file = script_file
+        # `extended` turns on what main's scan does not resolve (`__file__`,
+        # the argparse wrapper); without it the scan is exactly main's.
+        self.extended = extended
+        self.script_file = script_file if extended else None
         self.deadline = deadline
         self.parents: dict[ast.AST, ast.AST] = {}
         # Each node's enclosing scope and each statement's (block, index),
@@ -5769,6 +5773,8 @@ class _StdlibIO:
 
     def _file_value(self, node: ast.AST) -> _StdPath | None:
         """A value derived from `__file__` by its ancestors alone."""
+        if self.script_file is None:
+            return None  # main's scan: no `__file__` resolution at all
         value = self._file_operand(node)
         if value is None:
             value = self.value(node)
@@ -5950,6 +5956,8 @@ class _StdlibIO:
         end_stmt: ast.AST = args_stmt
         wrapped = isinstance(parse_call, ast.Call) and isinstance(parse_call.func, ast.Name)
         if wrapped:
+            if not self.extended:
+                return None
             found = self._wrapped_parse_call(args_stmt, parse_call)
             if found is None:
                 return None
@@ -6114,6 +6122,8 @@ class _StdlibIO:
             return None
         param = self._none_default_parameter(wrapper)
         last = wrapper.body[-1]
+        if not self._straight_line(wrapper, last):
+            return None
         inner = last.value if isinstance(last, ast.Return) else None
         if param is None or not isinstance(inner, ast.Call) or inner.keywords \
                 or len(inner.args) != 1 or not isinstance(inner.args[0], ast.Name) \
@@ -6135,6 +6145,24 @@ class _StdlibIO:
                 or not self._called_from_main_guard(sites[0]):
             return None
         return inner, last
+
+    def _straight_line(self, function: ast.FunctionDef, last: ast.stmt) -> bool:
+        """Whether a function can only end at its last statement: before it,
+        only assignments and expression statements, and nowhere a return,
+        raise, yield, await or nested scope (no branch, loop, `with` or
+        `try` can return some other value first)."""
+        if not all(isinstance(statement, (ast.Assign, ast.AnnAssign, ast.Expr))
+                   for statement in function.body[:-1]):
+            return False
+        for node in ast.walk(function):
+            self._tick()
+            if node is function or node is last:
+                continue
+            if isinstance(node, (ast.Return, ast.Raise, ast.Yield, ast.YieldFrom,
+                                 ast.Await, ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.Lambda, ast.ClassDef)):
+                return False
+        return True
 
     def _none_default_parameter(
         self, function: ast.FunctionDef, name: str | None = None
@@ -6310,7 +6338,7 @@ def _decoded_as_python_would(source: str) -> bool:
 
 def _stdlib_analysis(
     source: str, script_args: list[str] | None, deadline: float | None = None,
-    script_file: _ScriptFile | None = None,
+    script_file: _ScriptFile | None = None, extended: bool = False,
 ) -> tuple[list[str], list[str]] | None:
     """Paths a Python source certainly opens through the standard library,
     or None when it cannot be analysed within the bounds (too large, not
@@ -6330,7 +6358,7 @@ def _stdlib_analysis(
     if time.monotonic() > deadline:
         return None
     try:
-        return _StdlibIO(tree, script_args, deadline, script_file).collect()
+        return _StdlibIO(tree, script_args, deadline, script_file, extended).collect()
     except (_OverBudget, RecursionError, MemoryError):
         return None
 
@@ -6398,7 +6426,8 @@ def _stdlib_static_io(
     script_file: _ScriptFile | None = None,
 ) -> tuple[list[str], list[str]]:
     """Paths a Python source certainly opens through the standard library."""
-    return _stdlib_analysis(source, script_args, script_file=script_file) or ([], [])
+    return _stdlib_analysis(
+        source, script_args, script_file=script_file, extended=True) or ([], [])
 
 
 def _certain_script_file(
@@ -6444,11 +6473,45 @@ def _stdlib_additions(
     changes it. Only paths inside the repository that are not already
     recorded (by full path identity) are added, at most `_STDLIB_PATH_CAP`;
     parse, walks, resolution, stat and hashing share one deadline, and over
-    any bound nothing is added."""
+    any bound nothing is added.
+
+    Main's scan runs first, unchanged. The resolution main's scan lacks
+    (`__file__`, the argparse wrapper) runs second, under its own cap, work
+    budget and deadline, and adds only paths the first did not find: over
+    any of its bounds it adds nothing, and main's records stand."""
     if language != "python":
         return [], []
+    budget = hash_budget or _HashBudget()
     deadline = time.monotonic() + _STDLIB_DEADLINE_SECONDS
-    found = _stdlib_analysis(source, script_args, deadline, script_file)
+    found = _stdlib_analysis(source, script_args, deadline)
+    added = _stdlib_records(found, cwd, args, inputs, outputs, budget, deadline)
+    if not ((script_file is not None and "__file__" in source) or "parse_args" in source):
+        return added  # the extended scan cannot resolve anything more
+    deadline = time.monotonic() + _STDLIB_DEADLINE_SECONDS
+    extended = _stdlib_analysis(source, script_args, deadline, script_file, extended=True)
+    if not extended:
+        return added
+    known = found or ([], [])
+    new = ([p for p in extended[0] if p not in known[0]],
+           [p for p in extended[1] if p not in known[1]])
+    more = _stdlib_records(
+        new, cwd, args,
+        [*inputs, *(record["path"] for record in added[0])],
+        [*outputs, *(record["path"] for record in added[1])],
+        budget, deadline)
+    return added[0] + more[0], added[1] + more[1]
+
+
+def _stdlib_records(
+    found: tuple[list[str], list[str]] | None,
+    cwd: Path,
+    args: argparse.Namespace,
+    inputs: list[str],
+    outputs: list[str],
+    budget: _HashBudget,
+    deadline: float,
+) -> tuple[list[dict], list[dict]]:
+    """Records for one scan's paths: all of them, or none over a bound."""
     if not found or not (found[0] or found[1]):
         return [], []
     if len(found[0]) + len(found[1]) > _STDLIB_PATH_CAP:
@@ -6467,7 +6530,7 @@ def _stdlib_additions(
             path = cwd / path
         return os.path.normpath(os.path.abspath(path))
 
-    budget = (hash_budget or _HashBudget()).until(deadline)
+    budget = budget.until(deadline)
     added: tuple[list[dict], list[dict]] = ([], [])
     for found_paths, existing, out in zip(found, (inputs, outputs), added):
         known = {identity(value) for value in existing}
