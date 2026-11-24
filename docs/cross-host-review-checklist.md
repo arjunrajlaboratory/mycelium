@@ -230,15 +230,15 @@ hook, filesystem, or lifecycle boundaries.
       `additionalContext`. On Claude, `hookSpecificOutput.additionalContext`
       on a Stop continues the conversation like a block. A provenance gap
       goes to `systemMessage` and, when the Stop finalizes a transaction,
-      into the finalized session log footer (`- Lineage gaps:`) and the
-      published handoff's `## Blockers & surprises` (the status block for the
-      older schema). Anything the agent must act on is a block reason.
-- [ ] Helper recognition through shell variables accepts only the strict
-      whole-command chain (`P=$(cat <pointer>)`, optionally `S=$P/<path>`,
-      each assigned once before its use, `;`/newline only). Any conditional
-      operator, `source`/`.`/`eval`/`cd`, compound, subshell, substitution,
-      declaration, `read`, loop, `+=` or prefix assignment falls back to the
-      previous resolver and keeps the skip.
+      into the finalized session log footer (`- Lineage gaps:`). Handoff
+      publication is unchanged. Anything the agent must act on is a block
+      reason.
+- [ ] Helper recognition through shell variables is an allowlist: every
+      statement of the command (`;`/newline separated) is `NAME=$(cat
+      <pointer>)`, `NAME=$ROOT/<literal>`, or `python3 $NAME/<literal>.py`
+      with literal arguments and no redirection, each name assigned once
+      before use. Anything else uses the previous resolver and keeps the
+      skip.
 - [ ] Stop preserves the authored content of a fresh, complete five-section
       handoff, where every required heading occurs exactly once in order and
       every section has a nonblank, non-heading body line after obsolete
@@ -599,7 +599,7 @@ exercise them.
 | Tool cwd uses a symlinked or nested path | Valid in-project changes are attributed to the canonical project root. |
 | A session works in a linked worktree while the host runs hooks in the main checkout, which holds another session's dirty work | Stop judges only the worktree's changes, accepts reflection in the worktree's `.living/`, and leaves the main checkout byte-identical; a missing `.mycelium/plugin-root` is seeded in the worktree. |
 | Bash creates or modifies a project file without `apply_patch` | Stop enforces the living-repository update requirement. |
-| An accepted Stop has a lineage gap, and the next turn of the same host session writes no handoff | The Stop emits only `systemMessage`; the gap is in the finalized log and published handoff; no further transaction starts. Mycelium helpers run through `S=$P/…` with an absolute pointer leave no skip; a conditional `&&` before the link, `source`, or `export S=…/analysis/_lib` keeps it. |
+| An accepted Stop has a lineage gap, and the next turn of the same host session writes no handoff | The Stop emits only `systemMessage`; the gap is in the finalized log footer; the published handoff is byte-identical to main's; no further transaction starts. Mycelium helpers run through `S=$P/…` with an absolute pointer leave no skip; a conditional `&&` before the link, `source`, `< f read -r S`, or any other statement keeps it. |
 | First Stop is blocked, more work occurs, then Stop succeeds | State remains active after the block, and the final log includes the later work. |
 | Multiple Stop hooks run concurrently | Exactly one finalization, registry row, lineage extraction, and cleanup occurs. |
 | Python runs as `python3 -u`, `python3 -W`, an absolute or venv interpreter, `/usr/bin/env python3`, or `python -m` | Execution reminders and lineage events are emitted according to policy. |

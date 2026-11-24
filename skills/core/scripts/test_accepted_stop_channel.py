@@ -10,8 +10,8 @@ the conversation continue so the model can act on it (the hooks reference,
   a gap continuation is harmful: the extra turn opened a new transaction
   whose fallback handoff replaced the one just accepted.
 - A gap found by a Stop that finalizes a transaction is also written into
-  the finalized session log and the published handoff, which the next
-  session reads, so the agent learns of it without a continuation.
+  the finalized session log's end footer, which the next session can read.
+  Handoff publication is unchanged.
 - Blocks keep `decision: "block"` and their reason.
 """
 
@@ -96,14 +96,13 @@ def _gap(host: str, out: dict, gap: str, user: str = "") -> None:
 
 
 def _durable_gap(repo: Path, gap: str) -> None:
-    """The finalized log and the published handoff both carry the gap."""
+    """The finalized log carries the gap; handoff publication is unchanged."""
     logs = [p for p in (repo / ".living" / "log").glob("*.md") if p.name != "LOG_REGISTRY.md"]
     assert len(logs) == 1, logs
     log = logs[0].read_text()
-    assert "Lineage gaps:" in log and gap in log, log
+    assert "- Lineage gaps: " in log and gap in log, log
     handoff = (repo / ".mycelium" / "last-session.md").read_text()
-    blockers = handoff.split("## Blockers & surprises", 1)[1].split("\n## ", 1)[0]
-    assert "Lineage gaps" in blockers and gap in blockers, handoff
+    assert gap not in handoff and "Lineage gaps" not in handoff, handoff
 
 
 @pytest.mark.parametrize("host", HOSTS)

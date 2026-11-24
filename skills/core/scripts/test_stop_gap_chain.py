@@ -96,12 +96,26 @@ def _reflect(repo: Path) -> None:
     learnings.write_text(learnings.read_text() + f"- learned {time.time_ns()}\n")
 
 
+def _authored_text() -> str:
+    return (f"## What was worked on\n{AUTHORED}\n\n## Key decisions made\n- None.\n\n"
+            "## Blockers & surprises\n- None.\n\n## Current state\n- Clean.\n\n"
+            "## Next steps\n- Add a permutation test.\n")
+
+
 def _write_handoff(repo: Path, host: str, sid: str) -> None:
     path = repo / ".mycelium" / "run" / host / sid / "last-session.md"
-    path.write_text(
-        f"## What was worked on\n{AUTHORED}\n\n## Key decisions made\n- None.\n\n"
-        "## Blockers & surprises\n- None.\n\n## Current state\n- Clean.\n\n"
-        "## Next steps\n- Add a permutation test.\n")
+    path.write_text(_authored_text())
+
+
+def _as_main_publishes(authored: str, published: str) -> str:
+    """What main's finalizer publishes for ``authored`` at the acceptance
+    time ``published`` records (finalize_handoff.py is main's, unchanged)."""
+    import sys
+    sys.path.insert(0, str(HERE))
+    from finalize_handoff import finalize
+
+    accepted = published.split("accepted by Stop at ", 1)[1].split(".\n", 1)[0]
+    return finalize(authored, accepted)
 
 
 def _park_skip(repo: Path, host: str, sid: str) -> None:
@@ -151,13 +165,11 @@ def test_the_live_chain_ends_with_one_accepted_stop(tmp_path, host):
     # 2. The gap is reported without continuing the conversation...
     assert set(first) == {"systemMessage"}, first
     assert "detector-failed x1" in first["systemMessage"], first
-    # ...and is in the records the next session reads.
+    # ...and is in the finalized session log.
     (log,) = _logs(repo)
     assert "- Lineage gaps: " in (repo / ".living" / "log" / log).read_text()
-    published = _published(repo)
-    assert AUTHORED in published
-    blockers = published.split("## Blockers & surprises", 1)[1].split("\n## ", 1)[0]
-    assert "- Lineage gaps (" in blockers and "detector-failed x1" in blockers
+    # Publication is main's, byte for byte: the authored handoff, finalized.
+    assert _published(repo) == _as_main_publishes(_authored_text(), _published(repo))
     # 3. Nothing is left to start another transaction.
     assert _stop(host, repo, "live") == {}
     assert len(_logs(repo)) == 1

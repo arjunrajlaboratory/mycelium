@@ -738,94 +738,87 @@ def _variable_script_path(command: str, offset: int, raw_path: str,
     return Path(os.path.realpath(value + rest))
 
 
-# A strict, whole-command form of the helper chain agents write to reach
-# Mycelium's own scripts (live run, 2026-11-24):
-#   P=$(cat /abs/repo/.mycelium/plugin-root); S=$P/skills/core/scripts; python3 $S/x.py
-# It is recognised only when nothing in the command could change, skip or
-# shadow either assignment: plain statements separated by `;` or newlines,
-# no conditional or pipe operator, no subshell, compound, substitution
-# (other than the pointer read), quoting beyond plain double quotes, heredoc,
-# `source`/`.`/`eval`/`cd`, or any declaration, `read`, loop, `+=` or prefix
-# assignment. Anything else falls back to _variable_script_path, unchanged
-# from before. A suppression gate fails toward reporting (pattern 53).
-_STRICT_POINTER = (
-    r"\$\(cat (?P<q>\"?)(?P<dir>(?:\.\./)*|\$PWD/|/[A-Za-z0-9_./-]*/)"
-    r"\.mycelium/plugin-root(?P=q)\)"
+# The helper chain agents write to reach Mycelium's own scripts (live run,
+# 2026-11-24):
+#   P=$(cat /abs/repo/.mycelium/plugin-root); S=$P/skills/core/scripts; python3 $S/x.py --help
+# It is recognised only when EVERY statement of the command, separated by
+# `;` or newlines, is exactly one of these (an allowlist, not a denylist):
+#   (a) NAME=$(cat <pointer>)              the plugin-root pointer read
+#   (b) NAME=$ROOT/<literal path>          one link from an (a) variable
+#   (c) python3 $NAME/<literal>.py [args]  literal args, no redirection
+# Any other statement, token or operator sends the whole command to
+# _variable_script_path, unchanged from before. Each name is assigned once,
+# before it is used. A suppression gate fails toward reporting (pattern 53).
+_ALLOW_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
+_ALLOW_LITERAL_PATH = r"/[A-Za-z0-9_./-]*"
+_ALLOW_POINTER_RX = re.compile(
+    rf"(?P<name>{_ALLOW_NAME})=(?P<dq>\"?)\$\(cat (?P<q>\"?)"
+    r"(?P<dir>(?:\.\./)*|\$PWD/|/[A-Za-z0-9_./-]*/)\.mycelium/plugin-root(?P=q)\)(?P=dq)"
 )
-_STRICT_POINTER_RX = re.compile(_STRICT_POINTER)
-_STRICT_POINTER_ASSIGNMENT_RX = re.compile(
-    rf"(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<dq>\"?){_STRICT_POINTER}(?P=dq)"
+_ALLOW_LINK_RX = re.compile(
+    rf"(?P<name>{_ALLOW_NAME})=(?P<dq>\"?)\$(?P<source>{_ALLOW_NAME})"
+    rf"(?P<suffix>{_ALLOW_LITERAL_PATH})(?P=dq)"
 )
-_STRICT_LINK_ASSIGNMENT_RX = re.compile(
-    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<dq>\"?)\$(?P<source>[A-Za-z_][A-Za-z0-9_]*)"
-    r"(?P<suffix>/[A-Za-z0-9_./-]*)(?P=dq)"
+_ALLOW_RUN_RX = re.compile(
+    rf"python3[ \t]+(?P<uq>\"?)\$(?P<name>{_ALLOW_NAME})(?P<rest>/[A-Za-z0-9_./-]+\.py)(?P=uq)"
+    r"(?:[ \t]+[A-Za-z0-9_./=:,+@%-]+)*"
 )
-_STRICT_PLACEHOLDER = "__MYCELIUM_POINTER__"
-_STRICT_FORBIDDEN_RX = re.compile(r"&&|\|\||[|&`'\\(){}#]|<<|\$\(|\+=")
-_STRICT_DENIED_WORDS = frozenset({
-    "source", ".", "eval", "cd", "pushd", "popd", "export", "declare", "local",
-    "readonly", "typeset", "read", "readarray", "mapfile", "for", "while", "until",
-    "if", "then", "else", "elif", "fi", "do", "done", "case", "esac", "select",
-    "function", "set", "unset", "alias", "exec", "builtin", "command", "let",
-    "getopts", "printf", "trap", "shopt", "enable", "hash", "coproc", "time",
-})
 
 
 def _strict_chain_script_path(command: str, offset: int, raw_path: str,
                               cwd: Path | None) -> Path | None:
-    """`$S/x.py` (or `$P/…`) resolved through the strict chain above, or
-    None. Only ever used to recognise Mycelium's own helpers."""
+    """The script a `python3 $S/x.py` run executes when the whole command is
+    the allowlisted helper chain above, or None. Only ever used to recognise
+    Mycelium's own helpers."""
     match = re.fullmatch(r"\$([A-Za-z_][A-Za-z0-9_]*)(/.*)", raw_path)
-    if match is None or cwd is None or "plugin-root" not in command:
+    if match is None or cwd is None or ";;" in command:
         return None
     used, rest = match.groups()
-    # Pointer reads are the one substitution allowed; take them out (same
-    # length, so offsets hold) before looking for anything else.
-    flat = _STRICT_POINTER_RX.sub(
-        lambda m: _STRICT_PLACEHOLDER.ljust(len(m.group(0)), "_"), command)
-    if _STRICT_FORBIDDEN_RX.search(flat):
-        return None
-    assignments: dict[str, list[tuple[int, re.Match]]] = {}
+    pointers: dict[str, tuple[int, re.Match]] = {}
+    links: dict[str, tuple[int, re.Match]] = {}
+    runs: list[tuple[int, int, re.Match]] = []
     position = 0
     for statement in re.split(r"[;\n]", command):
         start = position
         position += len(statement) + 1
-        stripped = statement.strip()
+        stripped = statement.strip(" \t")
         if not stripped:
             continue
-        first = stripped.split()[0]
-        if first in _STRICT_DENIED_WORDS:
+        lead = start + len(statement) - len(statement.lstrip(" \t"))
+        if (found := _ALLOW_POINTER_RX.fullmatch(stripped)) is not None:
+            table = pointers
+        elif (found := _ALLOW_LINK_RX.fullmatch(stripped)) is not None:
+            table = links
+        elif (found := _ALLOW_RUN_RX.fullmatch(stripped)) is not None:
+            runs.append((lead, lead + len(stripped), found))
+            continue
+        else:
             return None
-        if re.match(r"[A-Za-z_][A-Za-z0-9_]*=", first):
-            if len(stripped.split()) != 1 and not _STRICT_POINTER_ASSIGNMENT_RX.fullmatch(stripped):
-                return None  # a prefix assignment scoped to one command
-            name = first.split("=", 1)[0]
-            found = (_STRICT_POINTER_ASSIGNMENT_RX.fullmatch(stripped)
-                     or _STRICT_LINK_ASSIGNMENT_RX.fullmatch(stripped))
-            assignments.setdefault(name, []).append((start, found))
-    chain = [used]
-    entry = assignments.get(used)
-    if not entry or len(entry) != 1 or entry[0][1] is None or entry[0][0] >= offset:
+        name = found.group("name")
+        if name in pointers or name in links:
+            return None  # assigned twice
+        table[name] = (lead, found)
+    # The offset must be one of the allowlisted runs, of the variable asked.
+    run = next((r for r in runs if r[0] <= offset < r[1]), None)
+    if run is None or run[2].group("name") != used or run[2].group("rest") != rest:
         return None
+    # Every run uses a variable assigned before it.
+    for run_start, _, found in runs:
+        assigned = pointers.get(found.group("name")) or links.get(found.group("name"))
+        if assigned is None or assigned[0] >= run_start:
+            return None
+    for link_start, found in links.values():
+        root = pointers.get(found.group("source"))
+        if root is None or root[0] >= link_start:
+            return None
+        if "/../" in f"{found.group('suffix')}/":
+            return None
     suffix = ""
-    found = entry[0][1]
-    if "source" in found.groupdict():
-        root = found.group("source")
-        root_entry = assignments.get(root)
-        if (root == used or not root_entry or len(root_entry) != 1
-                or root_entry[0][1] is None or "source" in root_entry[0][1].groupdict()
-                or root_entry[0][0] >= entry[0][0]):
-            return None
-        suffix = found.group("suffix")
-        chain.append(root)
-        found = root_entry[0][1]
-    # A link name must not be mentioned anywhere else as a bare word
-    # (`getopts x S`, `S=…` hidden in an argument), nor assigned twice.
-    for name in chain:
-        if len(re.findall(rf"(?<![A-Za-z0-9_$]){name}=", command)) != 1:
-            return None
-    if "/../" in f"{suffix}/":
-        return None
+    if used in links:
+        suffix = links[used][1].group("suffix")
+        found = pointers[links[used][1].group("source")][1]
+    else:
+        found = pointers[used][1]
     directory = found.group("dir")
     if directory == "$PWD/":
         if not found.group("q") and not found.group("dq") and re.search(r"[\s*?\[]", str(cwd)):

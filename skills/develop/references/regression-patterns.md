@@ -1214,22 +1214,24 @@ earlier.
 
 **Invariant:** Nothing an accepted Stop emits may continue the turn:
 `systemMessage` only, on every host. What the agent must act on is a block.
-What the next session should still learn goes into the durable records it
-reads (the finalized log footer and the published handoff), written by the
-finalizers so a retry replaces rather than repeats it. Remove the trigger
+What the next session should still learn goes into a durable record (the
+finalized log footer), written by the finalizer so a retry replaces rather
+than repeats it. Remove the trigger
 rather than guard its consequence. Two rounds of "keep the earlier handoff"
 heuristics each produced new P1s, because a host session ID is not a task
 identity: it survives `--resume`, multi-day sessions, branch switches,
 Git-ignored outputs, retries and per-turn Antigravity IDs. A suppression gate
-such as helper recognition must fail toward reporting. It accepts one strict
-whole-command shape, and anything with control flow, `source`, `eval`, `cd`,
-declarations or reassignment keeps the previous behaviour.
+such as helper recognition must fail toward reporting. It must be an
+allowlist of whole statements, not a denylist of first words: a denylist
+missed `< f read -r S` (a statement that starts with a redirection).
 
 **Regression evidence:** Drive the hooks through the chain. Helpers run
 through a two-step chain and an absolute pointer leave no skip. An accepted
 Stop with a real gap emits only `systemMessage`, writes the gap into the log
-and handoff, and leaves nothing that starts another transaction. Pair the
+footer, publishes the handoff exactly as main does, and leaves nothing that
+starts another transaction. Pair the
 strict chain with `&&` before a newline, `source`, `.`, `eval`, `cd`,
-`export`, `declare`, `read`, `for`, `+=`, a prefix, a heredoc, a quoted
+`export`, `declare`, `read` (also after a leading redirection), `for`,
+`+=`, a prefix, a redirection, any other command, a heredoc, a quoted
 string, a second link, traversal, and a look-alike or foreign pointer. Each
 must keep the skip.

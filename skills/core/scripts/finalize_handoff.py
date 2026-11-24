@@ -201,70 +201,15 @@ def describe_handoff_problems(content: str) -> list[str]:
     return problems
 
 
-# A provenance gap the accepting Stop found is written into the handoff the
-# next session reads, because an accepted Stop must not continue the
-# conversation to say it (pattern 53).
-_SAFE_TOKEN = re.compile(r"^[A-Za-z0-9._-]+$")
-_BLOCKERS = HANDOFF_SCHEMAS[0][2]
-GAP_BULLET = "- Lineage gaps ({transaction}): {gap}"
-
-
-def _one_line(text: str) -> str:
-    return " ".join(text.split())
-
-
-def _with_gap_bullet(body: str, transaction: str, gap: str) -> str | None:
-    """``body`` with the gap as a bullet of its single canonical
-    `## Blockers & surprises` section, before any subheading, replacing an
-    earlier bullet for the same transaction (a retry). None when that section
-    is not unambiguous."""
-    lines = body.split("\n")
-    outside = _outside_fences(lines)
-    starts = _section_starts(lines, tolerant=True)
-    if len(starts[_BLOCKERS]) != 1:
-        return None
-    start = starts[_BLOCKERS][0]
-    later = sorted(
-        index for heading in HANDOFF_SCHEMAS[0] for index in starts[heading] if index > start
-    )
-    end = later[0] if later else len(lines)
-    prefix = GAP_BULLET.format(transaction=transaction, gap="")
-    kept = [
-        index for index in range(start + 1, end)
-        if not (outside[index] and lines[index].startswith(prefix))
-    ]
-    # The bullet belongs to the section's own body, before any subheading
-    # (`### Dead ends — do not redo`), which would otherwise claim it.
-    sub = next((position for position, index in enumerate(kept)
-                if outside[index] and _MARKDOWN_HEADING.match(lines[index])), len(kept))
-    head = [lines[index] for index in kept[:sub]]
-    tail = [lines[index] for index in kept[sub:]]
-    while head and not head[-1].strip():
-        head.pop()
-    head.append(GAP_BULLET.format(transaction=transaction, gap=gap))
-    if tail or later:
-        head.append("")
-    return "\n".join(lines[: start + 1] + head + tail + lines[end:])
-
-
-def finalize(
-    content: str, accepted_at: str, *, transaction: str = "", lineage_gap: str = ""
-) -> str:
+def finalize(content: str, accepted_at: str) -> str:
     body = clean_handoff_body(content)
     if not handoff_has_complete_sections(body):
         raise ValueError("handoff is incomplete after lifecycle cleanup")
-    lines = [f"Lifecycle status: accepted by Stop at {accepted_at}."]
-    gap = _one_line(lineage_gap)
-    if gap:
-        if not transaction:
-            raise ValueError("a lineage gap needs the transaction that found it")
-        with_gap = _with_gap_bullet(body, transaction, gap)
-        if with_gap is not None and handoff_has_complete_sections(with_gap):
-            body = with_gap
-        else:
-            # The older heading schema has no Blockers section.
-            lines.append(f"Lineage gaps ({transaction}): {gap}")
-    status_block = f"{STATUS_BEGIN}\n" + "\n".join(lines) + f"\n{STATUS_END}"
+    status_block = (
+        f"{STATUS_BEGIN}\n"
+        f"Lifecycle status: accepted by Stop at {accepted_at}.\n"
+        f"{STATUS_END}"
+    )
     return f"{status_block}\n\n{body}\n"
 
 
@@ -325,17 +270,12 @@ def main() -> int:
     parser.add_argument("--accepted-at")
     parser.add_argument("--publish-to", type=Path)
     parser.add_argument("--check-complete", action="store_true")
-    parser.add_argument("--transaction", default="", help="the accepting transaction")
-    parser.add_argument("--lineage-gap", default="",
-                        help="provenance gap the accepting Stop found")
     parser.add_argument(
         "--diagnose",
         action="store_true",
         help="exit 0 if complete, 3 with a one-line diagnosis if not, 1 on error",
     )
     args = parser.parse_args()
-    if args.transaction and not _SAFE_TOKEN.match(args.transaction):
-        return 1
     try:
         content, mode = read_regular(args.handoff)
         if args.diagnose:
@@ -365,12 +305,7 @@ def main() -> int:
             publish_destination = args.publish_to
             publish_mode = preflight_publication(publish_destination, mode)
 
-        finalized = finalize(
-            content,
-            args.accepted_at,
-            transaction=args.transaction,
-            lineage_gap=args.lineage_gap,
-        )
+        finalized = finalize(content, args.accepted_at)
         if publish_destination is not None and publish_mode is not None:
             atomic_write(publish_destination, finalized, publish_mode)
         else:

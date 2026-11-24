@@ -1437,7 +1437,7 @@ def _pointer_repo(tmp_path: Path, target: Path) -> Path:
     'P=$(cat "$PWD/.mycelium/plugin-root"); S=$P/skills/core/scripts; python3 "$S/lineage_index.py"',
     'P="$(cat $PWD/.mycelium/plugin-root)"\nS="$P/skills/core/scripts"\npython3 $S/lineage_index.py',
     "P=$(cat {pointer}); python3 $P/skills/core/scripts/lineage_index.py --help",
-    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; python3 $S/lineage_index.py --help > /dev/null",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; python3 $S/lineage_index.py query --path a/b.csv --json",
 ])
 def test_the_strict_helper_chain_is_mycelium_s_own(tmp_path: Path, command: str) -> None:
     repo = _pointer_repo(tmp_path, HERE.parent.parent.parent)
@@ -1481,6 +1481,19 @@ def test_an_ancestor_s_absolute_pointer_is_accepted_from_a_subdirectory(tmp_path
     "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts python3 $S/register_value.py",
     "P=$(cat .mycelium/plugin-root); S={lib}\ncat > e.sh <<'EOF'\nS=$P/skills/core/scripts\nEOF\npython3 $S/register_value.py",
     "P=$(cat .mycelium/plugin-root); S={lib}; echo 'x; S=$P/skills/core/scripts'; python3 $S/register_value.py",
+    # Codex review of #163 (628ac0a): a statement that starts with a redirection.
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; < d.txt read -r S; "
+    'python3 "$S/register_value.py"',
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; >x S={lib}; python3 $S/register_value.py",
+    # Allowlist: any statement but the three shapes, and any redirection.
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; echo hi; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; python3 $S/register_value.py > out.txt",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; python3 $S/register_value.py $X",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; python3 $S/register_value.py *.csv",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; mapfile -t S < d.txt; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; printf -v S %s {lib}; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts;; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; P=$(cat .mycelium/plugin-root); python3 $S/register_value.py",
     # Not the strict shape: another link, traversal, a used-before-set link.
     "P=$(cat .mycelium/plugin-root); R=$P/skills; S=$R/core/scripts; python3 $S/register_value.py",
     "P=$(cat .mycelium/plugin-root); S=$P/../x/skills/core/scripts; python3 $S/register_value.py",

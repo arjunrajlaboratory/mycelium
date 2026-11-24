@@ -343,35 +343,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Two changes fix it:
   - *No continuation.* Every accepted Stop now emits only `systemMessage`,
     on every host, including lineage-gap and unrecorded-event warnings.
-    When the Stop finalizes a transaction, the gap is also written into the
-    records the next session reads, and a retry replaces the line rather
-    than adding another:
-    - a `- Lineage gaps:` line in the finalized session log's end footer;
-    - a `- Lineage gaps (<session id>):` bullet in the published handoff's
-      `## Blockers & surprises`, before any subheading. Handoffs in the
-      older heading schema get it in the status block instead.
-
-    Handoff publication is otherwise unchanged. With no continuation, the
+    When the Stop finalizes a transaction, the gap is also written as a
+    `- Lineage gaps:` line in the finalized session log's end footer. A
+    retry replaces that line rather than adding another. Handoff
+    publication is byte-for-byte unchanged. With no continuation, the
     follow-up transaction that replaced the handoff no longer starts.
-  - *Strict helper chain.* A script is treated as Mycelium's own helper
-    through this chain only when the whole command has exactly this shape:
-    `P=$(cat <pointer>)`, optionally `S=$P/<literal path>`, then the use.
-    Each variable is assigned once, before its use. Statements may be
-    separated only by `;` or newlines. The pointer is
-    `.mycelium/plugin-root` read relative to the working directory (or a
-    parent), through `$PWD/`, or by an absolute path that names the working
-    directory or an ancestor. The command must not contain any of these:
-    - `&&`, `||`, a pipe, `&`;
-    - a subshell, braces, a backtick or another substitution;
-    - single quotes, a backslash, a heredoc or `#`;
-    - `+=`, a prefix assignment, or a second assignment of either variable;
-    - `source`, `.`, `eval`, `cd`, `export`, `declare`, `local`, `read`,
-      `for`/`while`/`if`/`case`, or another variable-setting builtin.
+  - *Allowlisted helper chain.* A script is treated as Mycelium's own helper
+    through a shell variable only when every statement of the Bash command,
+    separated by `;` or newlines, is one of exactly three shapes:
+    - `NAME=$(cat <pointer>)`;
+    - `NAME=$ROOT/<literal path>`, a single link from a pointer variable;
+    - `python3 $NAME/<literal>.py`, with literal arguments and no
+      redirection.
 
-    Anything else behaves exactly as before; the plugin-root target must
-    still verify as a real Mycelium tree. The plugin-root environment
-    variable is not followed: the hook cannot see its value in the agent's
-    shell.
+    Each variable is assigned once, before its use. The pointer is
+    `.mycelium/plugin-root`, read relative to the working directory (or a
+    parent), through `$PWD/`, or by an absolute path that names the working
+    directory or an ancestor. Any other statement, token or operator (a
+    redirection, `&&`, `source`, `read`, `export`, any other command) sends
+    the whole command to the previous resolver, unchanged. The plugin-root
+    target must still verify as a real Mycelium tree. The plugin-root
+    environment variable is not followed: the hook cannot see its value in
+    the agent's shell.
 
   No new state files, and existing projects need no migration.
 

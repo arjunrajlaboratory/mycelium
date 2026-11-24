@@ -1232,8 +1232,6 @@ LAST_SESSION_EOF
         --handoff "$_HANDOFF_SOURCE"
         --accepted-at "$ENDED"
         --publish-to "$MYCELIUM_SHARED_STATE_DIR/last-session.md"
-        --transaction "$SESSION_ID"
-        --lineage-gap "$LINEAGE_GAP_MSG"
       )
       if ! python3 "$FINALIZE_HANDOFF_SCRIPT" \
         "${_FINALIZE_HANDOFF_ARGS[@]}" \
