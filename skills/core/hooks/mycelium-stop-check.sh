@@ -533,7 +533,8 @@ if [[ -f "$MOVED_CHANGES_FILE" && ! -L "$MOVED_CHANGES_FILE" ]]; then
   _MOVED_NAMES=$(awk 'NF && ++n <= 15 { printf "%s%s", (n > 1 ? ", " : ""), $0 }' \
     "$MOVED_CHANGES_FILE" 2>/dev/null || true)
   if ! mycelium_start_work_cycle "$REPO_ROOT" \
-    "${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"; then
+    "${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}" \
+    "$SESSION_CWD"; then
     mycelium_emit_stop_block \
       "STOP BLOCKED — changes this session left in the checkout it moved from need a fresh .living/ fingerprint and reminder, and writing them failed. The evidence was preserved; repair ${STATE_DIR} if needed, then retry Stop." || true
     exit 0
