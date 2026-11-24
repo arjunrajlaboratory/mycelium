@@ -1223,15 +1223,18 @@ value = sys.stdin.read().replace("\r", " ").replace("\n", " ")
 print(html.escape(" ".join(value.split()), quote=True).replace("|", "&#124;"))
 '
 
-# Print the first N lines of stdin, then keep reading to the end of it.
-# Hooks run under `set -euo pipefail`, so a consumer that exits early, such
-# as `head -N`, makes a producer whose output outlasts the pipe buffer
-# (64 KiB on macOS) fail with EPIPE or die of SIGPIPE, and the whole hook
-# exits with it. For Stop that loses the block or stops finalization halfway,
-# and every retry fails again because the list that killed it only grows. Use
-# this, not `head`, for a prefix of any list that can be long.
-mycelium_first_lines() {
-  awk -v n="$1" 'NR <= n'
+# Print the file names (last path components) of the first N lines of stdin,
+# one per line, then keep reading stdin to the end. Hooks run under
+# `set -euo pipefail`, so every stage that builds a name list must survive
+# any list. `head -N` exits early, and a producer whose output outlasts the
+# pipe buffer (64 KiB on macOS) then fails with EPIPE or dies of SIGPIPE.
+# `xargs -I {}` fails on a line of 255 bytes or more or one with a quote,
+# and `basename` fails on a name that starts with "-" (fatal when it is the
+# last name read, otherwise the name is lost). Each fatal case exited Stop 1
+# with no output; Stop failed open, and every retry failed again because the
+# list only grows. One awk, reading everything, cannot fail.
+mycelium_first_names() {
+  awk -v n="${1:?}" 'NR <= n + 0 { sub(/\/+$/, ""); sub(/.*\//, ""); print }'
 }
 
 mycelium_registry_cell() {
