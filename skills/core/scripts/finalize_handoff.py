@@ -8,7 +8,6 @@ import os
 import re
 import stat
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 
 STATUS_BEGIN = "<!-- BEGIN MYCELIUM LIFECYCLE STATUS -->"
@@ -202,68 +201,23 @@ def describe_handoff_problems(content: str) -> list[str]:
     return problems
 
 
-# Machine lines in the status block. The owner line says which host session
-# and transaction published this handoff, and whether the agent wrote it or
-# Stop generated the fallback; a later transaction of the same host session
-# that has no handoff of its own keeps an authored one (pattern 53).
-_SAFE_TOKEN = re.compile(r"^[A-Za-z0-9._:-]+$")
-_OWNER_LINE = re.compile(
-    r"^Handoff owner: (?P<owner>[A-Za-z0-9._:-]+); transaction "
-    r"(?P<transaction>[A-Za-z0-9._-]+); source (?P<source>authored|fallback); "
-    r"accepted (?P<accepted>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})\.$",
-    re.MULTILINE,
-)
-_ACCEPTED_AT_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+# A provenance gap the accepting Stop found is written into the handoff the
+# next session reads, because an accepted Stop must not continue the
+# conversation to say it (pattern 53).
+_SAFE_TOKEN = re.compile(r"^[A-Za-z0-9._-]+$")
 _BLOCKERS = HANDOFF_SCHEMAS[0][2]
 GAP_BULLET = "- Lineage gaps ({transaction}): {gap}"
-# A later transaction keeps an authored handoff only while it is this recent
-# (and from the same calendar day): a resume hours or days later is a new
-# root task, whose work belongs in its own handoff or the fallback.
-KEEP_WINDOW_SECONDS = 2 * 60 * 60
-FOLLOW_UP_LIMIT = 5
-_FOLLOW_UP_LINE = re.compile(r"^Follow-up activity \((?P<transaction>[A-Za-z0-9._-]+)\): .*$")
-_STATUS_GAP_LINE = re.compile(r"^Lineage gaps \([A-Za-z0-9._-]+\): .*$")
 
 
 def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
-def _status_lines(content: str) -> list[str]:
-    block = _STATUS_BLOCK.search(content.removeprefix("\ufeff"))
-    return block.group(0).splitlines() if block else []
-
-
-def published_owner(content: str) -> dict[str, str] | None:
-    """The owner line of the handoff's status block, if it has exactly one."""
-    found = [m for line in _status_lines(content) if (m := _OWNER_LINE.match(line))]
-    return found[0].groupdict() if len(found) == 1 else None
-
-
-def keeps_for(content: str, owner: str, now: datetime | None = None) -> bool:
-    """Whether a published handoff is one a later transaction of ``owner``
-    with no handoff of its own keeps: the agent wrote it, Stop accepted it for
-    the same host session within the last two hours on the same day, and it
-    is still complete. The caller decides whether the later transaction is
-    a genuine follow-up (no handoff written, no project change or commit)."""
-    found = published_owner(content)
-    if found is None or found["owner"] != owner or found["source"] != "authored":
-        return False
-    try:
-        accepted = datetime.strptime(found["accepted"], _ACCEPTED_AT_FORMAT)
-    except ValueError:
-        return False
-    now = (now or datetime.now(timezone.utc)).astimezone(accepted.tzinfo)
-    age = (now - accepted).total_seconds()
-    if not 0 <= age <= KEEP_WINDOW_SECONDS or now.date() != accepted.date():
-        return False
-    return handoff_is_complete_after_cleanup(content)
-
-
 def _with_gap_bullet(body: str, transaction: str, gap: str) -> str | None:
-    """``body`` with the gap as the last bullet of its single canonical
-    `## Blockers & surprises` section, replacing an earlier bullet for the
-    same transaction (a retry). None when that section is not unambiguous."""
+    """``body`` with the gap as a bullet of its single canonical
+    `## Blockers & surprises` section, before any subheading, replacing an
+    earlier bullet for the same transaction (a retry). None when that section
+    is not unambiguous."""
     lines = body.split("\n")
     outside = _outside_fences(lines)
     starts = _section_starts(lines, tolerant=True)
@@ -294,23 +248,13 @@ def _with_gap_bullet(body: str, transaction: str, gap: str) -> str | None:
 
 
 def finalize(
-    content: str,
-    accepted_at: str,
-    *,
-    owner: str = "",
-    transaction: str = "",
-    authored: bool = True,
-    lineage_gap: str = "",
-    follow_up: str = "",
+    content: str, accepted_at: str, *, transaction: str = "", lineage_gap: str = ""
 ) -> str:
-    previous = published_owner(content) if follow_up else None
-    previous_status = _status_lines(content) if previous is not None else []
     body = clean_handoff_body(content)
     if not handoff_has_complete_sections(body):
         raise ValueError("handoff is incomplete after lifecycle cleanup")
     lines = [f"Lifecycle status: accepted by Stop at {accepted_at}."]
     gap = _one_line(lineage_gap)
-    gap_lines = [line for line in previous_status if _STATUS_GAP_LINE.match(line)]
     if gap:
         if not transaction:
             raise ValueError("a lineage gap needs the transaction that found it")
@@ -318,37 +262,8 @@ def finalize(
         if with_gap is not None and handoff_has_complete_sections(with_gap):
             body = with_gap
         else:
-            prefix = f"Lineage gaps ({transaction}): "
-            gap_lines = [line for line in gap_lines if not line.startswith(prefix)]
-            gap_lines.append(prefix + gap)
-    lines += gap_lines
-    if owner:
-        source = "authored" if authored else "fallback"
-        owner_transaction, owner_accepted = transaction, accepted_at
-        if previous is not None:
-            # A kept handoff stays the earlier transaction's authored one,
-            # accepted when that transaction was.
-            owner_transaction, source = previous["transaction"], previous["source"]
-            owner_accepted = previous["accepted"]
-        if owner_transaction:
-            lines.append(
-                f"Handoff owner: {owner}; transaction {owner_transaction}; "
-                f"source {source}; accepted {owner_accepted}."
-            )
-    if previous is not None and _one_line(follow_up):
-        if not transaction:
-            raise ValueError("follow-up activity needs its transaction")
-        # One line per later transaction (a retry replaces its own), newest
-        # last, at most FOLLOW_UP_LIMIT.
-        follow = [
-            line for line in previous_status
-            if (m := _FOLLOW_UP_LINE.match(line)) and m.group("transaction") != transaction
-        ]
-        follow.append(f"Follow-up activity ({transaction}): {_one_line(follow_up)}")
-        dropped = len(follow) - FOLLOW_UP_LIMIT
-        if dropped > 0:
-            follow = follow[dropped:]
-        lines += follow
+            # The older heading schema has no Blockers section.
+            lines.append(f"Lineage gaps ({transaction}): {gap}")
     status_block = f"{STATUS_BEGIN}\n" + "\n".join(lines) + f"\n{STATUS_END}"
     return f"{status_block}\n\n{body}\n"
 
@@ -410,31 +325,19 @@ def main() -> int:
     parser.add_argument("--accepted-at")
     parser.add_argument("--publish-to", type=Path)
     parser.add_argument("--check-complete", action="store_true")
-    parser.add_argument("--owner", default="", help="HOST:SESSION that accepted it")
     parser.add_argument("--transaction", default="", help="the accepting transaction")
-    parser.add_argument("--fallback", action="store_true",
-                        help="the handoff is Stop's generated fallback")
-    parser.add_argument("--lineage-gap", default="")
-    parser.add_argument("--follow-up", default="",
-                        help="one line on a later transaction that kept this handoff")
-    parser.add_argument(
-        "--keeps-for",
-        metavar="OWNER",
-        help="exit 0 if this published handoff is kept by OWNER's next transaction",
-    )
+    parser.add_argument("--lineage-gap", default="",
+                        help="provenance gap the accepting Stop found")
     parser.add_argument(
         "--diagnose",
         action="store_true",
         help="exit 0 if complete, 3 with a one-line diagnosis if not, 1 on error",
     )
     args = parser.parse_args()
-    for token in (args.owner, args.transaction, args.keeps_for or ""):
-        if token and not _SAFE_TOKEN.match(token):
-            return 1
+    if args.transaction and not _SAFE_TOKEN.match(args.transaction):
+        return 1
     try:
         content, mode = read_regular(args.handoff)
-        if args.keeps_for is not None:
-            return 0 if keeps_for(content, args.keeps_for) else 1
         if args.diagnose:
             if (
                 args.check_complete
@@ -465,11 +368,8 @@ def main() -> int:
         finalized = finalize(
             content,
             args.accepted_at,
-            owner=args.owner,
             transaction=args.transaction,
-            authored=not args.fallback,
             lineage_gap=args.lineage_gap,
-            follow_up=args.follow_up,
         )
         if publish_destination is not None and publish_mode is not None:
             atomic_write(publish_destination, finalized, publish_mode)

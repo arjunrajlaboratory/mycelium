@@ -522,28 +522,16 @@ def _is_managed_utility_path(resolved: Path) -> bool:
 
 
 # `P=$(cat .mycelium/plugin-root)`, optionally with a literal subdirectory
-# after it (`S="$(cat .mycelium/plugin-root)/skills/core/scripts"`), a
-# literal absolute path, or a link in a chain from another such variable
-# (`S=$P/skills/core/scripts`, `S="${P}"/skills/core/scripts`).
-_ROOT_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
-_ROOT_SUFFIX = r"/[A-Za-z0-9_./-]*"
-# The pointer may be read from a parent of the working directory
-# (`$(cat ../../.mycelium/plugin-root)` from inside an analysis folder) or by
-# its absolute path; either must name the cwd or one of its ancestors.
-# `$PWD/` (bare or braced) is the working directory itself; the `cat`
-# operand may also be double-quoted.
-_ROOT_POINTER_DIR = r"(?:\.\./)*|/[A-Za-z0-9_./-]*/|\$PWD/|\$\{PWD\}/"
-# The value of a plain `NAME=` assignment at a command start, ended by `;`, a
-# newline, `&&` or the end: anything else after it (`NAME=x cmd`) makes it a
-# prefix scoped to one command.
-_ROOT_VALUE_RX = re.compile(
-    rf"""(?:"\$\(cat (?P<pq_q>"?)(?P<up_q>{_ROOT_POINTER_DIR})\.mycelium/plugin-root(?P=pq_q)\)(?P<suffix_q>{_ROOT_SUFFIX})?\""""
-    rf"""(?P<suffix_after>{_ROOT_SUFFIX})?"""
-    rf"""|\$\(cat (?P<pq>"?)(?P<up>{_ROOT_POINTER_DIR})\.mycelium/plugin-root(?P=pq)\)(?P<suffix>{_ROOT_SUFFIX})?"""
-    rf"""|"\$(?:\{{(?P<ref_qb>{_ROOT_NAME})\}}|(?P<ref_q>{_ROOT_NAME}))(?P<ref_suffix_q>{_ROOT_SUFFIX})?\""""
-    rf"""(?P<ref_suffix_after>{_ROOT_SUFFIX})?"""
-    rf"""|\$(?:\{{(?P<ref_b>{_ROOT_NAME})\}}|(?P<ref>{_ROOT_NAME}))(?P<ref_suffix>{_ROOT_SUFFIX})?"""
-    r"""|'?(?P<literal>/[^\s;&|$'"`]+)'?)(?=[ \t]*(?:;|\n|&&|$))"""
+# after it (`S="$(cat .mycelium/plugin-root)/skills/core/scripts"`), or a
+# literal absolute path.
+_ROOT_ASSIGNMENT_RX = re.compile(
+    r"""(?:^|[;&|\n(]|&&|\|\|)\s*([A-Za-z_][A-Za-z0-9_]*)="""
+    # The pointer may be read from a parent of the working directory
+    # (`$(cat ../../.mycelium/plugin-root)` from inside an analysis folder).
+    r"""(?:"\$\(cat (?P<up_q>(?:\.\./)*)\.mycelium/plugin-root\)(?P<suffix_q>/[A-Za-z0-9_./-]*)?\""""
+    r"""(?P<suffix_after>/[A-Za-z0-9_./-]*)?"""
+    r"""|\$\(cat (?P<up>(?:\.\./)*)\.mycelium/plugin-root\)(?P<suffix>/[A-Za-z0-9_./-]*)?"""
+    r"""|'?(?P<literal>/[^\s;&|$'"`]+)'?)(?=[\s;&|]|$)"""
 )
 
 
@@ -712,118 +700,154 @@ def _variable_script_path(command: str, offset: int, raw_path: str,
                           cwd: Path | None) -> Path | None:
     """`$P/skills/...` resolved through an assignment earlier in the same
     command: `P=$(cat .mycelium/plugin-root)` (read from the working
-    directory, one of its parents, or by an absolute path naming one of
-    them), `P=/literal/path`, or a chain of plain links back to one of those
-    (`S=$P/skills/core/scripts`). None for anything else; this is used only
-    to recognize Mycelium's own helpers, never to infer analysis I/O."""
+    directory) or `P=/literal/path`. None for anything else; this is used
+    only to recognize Mycelium's own helpers, never to infer analysis I/O."""
     match = re.fullmatch(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(/.*)", raw_path)
     if match is None:
         return None
     name, rest = match.groups()
-    value = _root_values_at(command, offset, cwd).get(name)
-    if not value or "\0" in value:
+    prefix = command[:offset]
+    # The value the interpreter receives is the *last* assignment before it:
+    # any later one this resolver cannot model (`P=.`, `P=$OTHER`) voids it.
+    any_assignment = re.compile(
+        rf"(?:^|[;&|\n(]|&&|\|\|)\s*{re.escape(name)}=")
+    last_any = None
+    for found in any_assignment.finditer(prefix):
+        last_any = found.start()
+    if last_any is None:
+        return None
+    modeled = [a for a in _ROOT_ASSIGNMENT_RX.finditer(prefix) if a.group(1) == name]
+    if not modeled or modeled[-1].start() != last_any:
+        return None
+    assignment = modeled[-1]
+    literal = assignment.group("literal")
+    suffix = "".join(assignment.group(g) or "" for g in ("suffix_q", "suffix_after", "suffix"))
+    up = assignment.group("up_q") or assignment.group("up") or ""
+    if literal is not None:
+        value = literal
+    elif cwd is not None:
+        # The bounded, link-refusing pointer reader the accessor path uses,
+        # in the directory the `cat` names (the cwd or a parent of it).
+        base = Path(os.path.normpath(os.path.join(str(cwd), up))) if up else cwd
+        pointer = _pointer_expansion_value(base, "cat")
+        value = pointer + suffix if pointer else None
+    else:
+        value = None
+    if not value or "\0" in value or "/../" in f"{suffix}/":
         return None
     return Path(os.path.realpath(value + rest))
 
 
-def _root_values_at(command: str, offset: int, cwd: Path | None) -> dict[str, str | None]:
-    """The plugin-root values each variable provably holds at ``offset``.
+# A strict, whole-command form of the helper chain agents write to reach
+# Mycelium's own scripts (live run, 2026-11-24):
+#   P=$(cat /abs/repo/.mycelium/plugin-root); S=$P/skills/core/scripts; python3 $S/x.py
+# It is recognised only when nothing in the command could change, skip or
+# shadow either assignment: plain statements separated by `;` or newlines,
+# no conditional or pipe operator, no subshell, compound, substitution
+# (other than the pointer read), quoting beyond plain double quotes, heredoc,
+# `source`/`.`/`eval`/`cd`, or any declaration, `read`, loop, `+=` or prefix
+# assignment. Anything else falls back to _variable_script_path, unchanged
+# from before. A suppression gate fails toward reporting (pattern 53).
+_STRICT_POINTER = (
+    r"\$\(cat (?P<q>\"?)(?P<dir>(?:\.\./)*|\$PWD/|/[A-Za-z0-9_./-]*/)"
+    r"\.mycelium/plugin-root(?P=q)\)"
+)
+_STRICT_POINTER_RX = re.compile(_STRICT_POINTER)
+_STRICT_POINTER_ASSIGNMENT_RX = re.compile(
+    rf"(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<dq>\"?){_STRICT_POINTER}(?P=dq)"
+)
+_STRICT_LINK_ASSIGNMENT_RX = re.compile(
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?P<dq>\"?)\$(?P<source>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?P<suffix>/[A-Za-z0-9_./-]*)(?P=dq)"
+)
+_STRICT_PLACEHOLDER = "__MYCELIUM_POINTER__"
+_STRICT_FORBIDDEN_RX = re.compile(r"&&|\|\||[|&`'\\(){}#]|<<|\$\(|\+=")
+_STRICT_DENIED_WORDS = frozenset({
+    "source", ".", "eval", "cd", "pushd", "popd", "export", "declare", "local",
+    "readonly", "typeset", "read", "readarray", "mapfile", "for", "while", "until",
+    "if", "then", "else", "elif", "fi", "do", "done", "case", "esac", "select",
+    "function", "set", "unset", "alias", "exec", "builtin", "command", "let",
+    "getopts", "printf", "trap", "shopt", "enable", "hash", "coproc", "time",
+})
 
-    One forward pass over the simple commands before it, in shell text only
-    (not quotes, comments or heredoc bodies). A variable gets a value only
-    from a plain, unconditional assignment statement: at the top level
-    (no subshell, `if`/`case`/loop/brace body or function), after `;`, a
-    newline or the start of the command, not `export`ed, and not a prefix
-    scoped to one command. A link (`S=$P/…`) takes its source's value at
-    that point, as the shell does. Any other mention of a name (`export`,
-    `declare`, `local`, `readonly`, `read`, `for … in`, `+=`, a conditional
-    or nested assignment) voids it, so a reassignment this cannot see never
-    lets a user script pass as Mycelium's own. When in doubt, nothing."""
-    if "=" not in command:
-        return {}
-    without_heredocs = _blank_heredoc_bodies(command)
-    masked = _unquoted_shell_text(without_heredocs)
-    visible = _strip_unquoted_shell_comments(without_heredocs)
-    if masked is None or visible is None:
-        return {}
-    starts = _shell_command_starts(command, masked, visible)
-    mentions = [(m.start(1), m.group(1)) for m in _VAR_MENTION_RX.finditer(masked)]
-    values: dict[str, str | None] = {}
-    consumed = -1
-    mention_index = 0
 
-    def apply_mentions(before: int) -> None:
-        nonlocal mention_index
-        while mention_index < len(mentions) and mentions[mention_index][0] < before:
-            position, mentioned = mentions[mention_index]
-            mention_index += 1
-            if position != consumed:
-                values[mentioned] = None
-
-    for start, boundary, depth, control in starts:
-        if start >= offset:
-            break
-        apply_mentions(start)
-        assignment = _VAR_ASSIGNMENT_AT_RX.match(command, start)
-        if assignment is None:
+def _strict_chain_script_path(command: str, offset: int, raw_path: str,
+                              cwd: Path | None) -> Path | None:
+    """`$S/x.py` (or `$P/…`) resolved through the strict chain above, or
+    None. Only ever used to recognise Mycelium's own helpers."""
+    match = re.fullmatch(r"\$([A-Za-z_][A-Za-z0-9_]*)(/.*)", raw_path)
+    if match is None or cwd is None or "plugin-root" not in command:
+        return None
+    used, rest = match.groups()
+    # Pointer reads are the one substitution allowed; take them out (same
+    # length, so offsets hold) before looking for anything else.
+    flat = _STRICT_POINTER_RX.sub(
+        lambda m: _STRICT_PLACEHOLDER.ljust(len(m.group(0)), "_"), command)
+    if _STRICT_FORBIDDEN_RX.search(flat):
+        return None
+    assignments: dict[str, list[tuple[int, re.Match]]] = {}
+    position = 0
+    for statement in re.split(r"[;\n]", command):
+        start = position
+        position += len(statement) + 1
+        stripped = statement.strip()
+        if not stripped:
             continue
-        name = assignment.group(1)
-        consumed = assignment.start(1)
-        value = None
-        if (boundary in ("^", ";", "\n") and depth == 0 and control == 0
-                and assignment.start(1) == start):
-            found = _ROOT_VALUE_RX.match(command, assignment.end())
-            if found is not None:
-                value = _root_assignment_value(found, values, cwd)
-        values[name] = value
-    apply_mentions(offset)
-    return values
-
-
-def _root_assignment_value(found: re.Match, values: dict[str, str | None],
-                           cwd: Path | None) -> str | None:
-    literal = found.group("literal")
-    source = next((found.group(g) for g in ("ref_qb", "ref_q", "ref_b", "ref")
-                   if found.group(g)), None)
-    suffix = "".join(found.group(g) or "" for g in (
-        "suffix_q", "suffix_after", "suffix",
-        "ref_suffix_q", "ref_suffix_after", "ref_suffix"))
+        first = stripped.split()[0]
+        if first in _STRICT_DENIED_WORDS:
+            return None
+        if re.match(r"[A-Za-z_][A-Za-z0-9_]*=", first):
+            if len(stripped.split()) != 1 and not _STRICT_POINTER_ASSIGNMENT_RX.fullmatch(stripped):
+                return None  # a prefix assignment scoped to one command
+            name = first.split("=", 1)[0]
+            found = (_STRICT_POINTER_ASSIGNMENT_RX.fullmatch(stripped)
+                     or _STRICT_LINK_ASSIGNMENT_RX.fullmatch(stripped))
+            assignments.setdefault(name, []).append((start, found))
+    chain = [used]
+    entry = assignments.get(used)
+    if not entry or len(entry) != 1 or entry[0][1] is None or entry[0][0] >= offset:
+        return None
+    suffix = ""
+    found = entry[0][1]
+    if "source" in found.groupdict():
+        root = found.group("source")
+        root_entry = assignments.get(root)
+        if (root == used or not root_entry or len(root_entry) != 1
+                or root_entry[0][1] is None or "source" in root_entry[0][1].groupdict()
+                or root_entry[0][0] >= entry[0][0]):
+            return None
+        suffix = found.group("suffix")
+        chain.append(root)
+        found = root_entry[0][1]
+    # A link name must not be mentioned anywhere else as a bare word
+    # (`getopts x S`, `S=…` hidden in an argument), nor assigned twice.
+    for name in chain:
+        if len(re.findall(rf"(?<![A-Za-z0-9_$]){name}=", command)) != 1:
+            return None
     if "/../" in f"{suffix}/":
         return None
-    if literal is not None:
-        return literal
-    if source is not None:
-        base_value = values.get(source)
-        return base_value + suffix if base_value else None
-    if cwd is None:
-        return None
-    up = found.group("up_q") or found.group("up") or ""
-    if up in ("$PWD/", "${PWD}/"):
-        # Unquoted, a working directory with blanks or glob characters would
-        # split or expand into other `cat` operands than the one modeled.
-        quoted = bool(found.group("pq_q") or found.group("pq"))
-        if not quoted and re.search(r"[\s*?\[]", str(cwd)):
+    directory = found.group("dir")
+    if directory == "$PWD/":
+        if not found.group("q") and not found.group("dq") and re.search(r"[\s*?\[]", str(cwd)):
             return None
-        up = ""
-    if up.startswith("/"):
-        # An absolute pointer path must be this command's own: the pointer
-        # of the cwd or of an ancestor, never another repository's.
-        if "/../" in up or "/./" in up:
+        directory = ""
+    if directory.startswith("/"):
+        if "/../" in directory or "/./" in directory:
             return None
-        base = Path(up.rstrip("/") or "/")
         try:
-            real_base = os.path.realpath(base)
+            real_base = os.path.realpath(directory.rstrip("/") or "/")
             real_cwd = os.path.realpath(cwd)
         except (OSError, ValueError):
             return None
         if os.path.commonpath([real_base, real_cwd]) != real_base:
             return None
+        base = Path(directory.rstrip("/") or "/")
     else:
-        # The bounded, link-refusing pointer reader the accessor path uses,
-        # in the directory the `cat` names (the cwd or a parent of it).
-        base = Path(os.path.normpath(os.path.join(str(cwd), up))) if up else cwd
+        base = Path(os.path.normpath(os.path.join(str(cwd), directory))) if directory else cwd
     pointer = _pointer_expansion_value(base, "cat")
-    return pointer + suffix if pointer else None
+    if not pointer or "\0" in pointer:
+        return None
+    return Path(os.path.realpath(pointer + suffix + rest))
 
 
 IGNORED_SCRIPT_BASENAMES = {"setup.py"}
@@ -4615,8 +4639,11 @@ def _detect_scripts_with_cwd(
                 continue
             if "$" in raw_path:
                 # `P=$(cat .mycelium/plugin-root); python3 $P/skills/core/...`
-                # runs a bundled helper: managed, not an unreadable script.
-                via_variable = _variable_script_path(bash_cmd, m.start(), raw_path, effective_cwd)
+                # (or the strict two-step chain) runs a bundled helper:
+                # managed, not an unreadable script.
+                via_variable = (
+                    _strict_chain_script_path(bash_cmd, m.start(), raw_path, effective_cwd)
+                    or _variable_script_path(bash_cmd, m.start(), raw_path, effective_cwd))
                 if via_variable is not None and _is_managed_utility_path(via_variable):
                     continue
             # The accessor dereferences a pointer relative to the effective

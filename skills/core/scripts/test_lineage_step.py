@@ -1427,59 +1427,84 @@ def _pointer_repo(tmp_path: Path, target: Path) -> Path:
     return repo
 
 
-@pytest.mark.parametrize("chain", [
-    "S=$P/skills/core/scripts",
-    'S="$P/skills/core/scripts"',
-    "S=${P}/skills/core/scripts",
-    'S="${P}"/skills/core/scripts',
-    'S="$P"/skills/core/scripts',
+@pytest.mark.parametrize("command", [
+    # Live run (2026-11-24): the two-step chain with the pointer read by its
+    # absolute path left a script-unreadable skip per helper, and the LINEAGE
+    # GAP at an accepted Stop cost a turn.
+    "P=$(cat {pointer}); S=$P/skills/core/scripts; python3 $S/data_contract_check.py --help; "
+    "python3 $S/register_value.py --help; python3 $S/lineage_index.py --help",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; python3 $S/lineage_index.py --help",
+    'P=$(cat "$PWD/.mycelium/plugin-root"); S=$P/skills/core/scripts; python3 "$S/lineage_index.py"',
+    'P="$(cat $PWD/.mycelium/plugin-root)"\nS="$P/skills/core/scripts"\npython3 $S/lineage_index.py',
+    "P=$(cat {pointer}); python3 $P/skills/core/scripts/lineage_index.py --help",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; python3 $S/lineage_index.py --help > /dev/null",
 ])
-def test_a_helper_reached_through_a_variable_chain_is_mycelium_s_own(
-        tmp_path: Path, chain: str) -> None:
-    # Live run (2026-11-24): `P=$(cat .mycelium/plugin-root); S=$P/skills/core/
-    # scripts; python3 $S/data_contract_check.py --help` left a script-unreadable
-    # skip per helper, and the LINEAGE GAP at an accepted Stop cost a turn.
+def test_the_strict_helper_chain_is_mycelium_s_own(tmp_path: Path, command: str) -> None:
     repo = _pointer_repo(tmp_path, HERE.parent.parent.parent)
-    for helper in ("data_contract_check.py", "register_value.py"):
-        command = f"P=$(cat .mycelium/plugin-root); {chain}; python3 $S/{helper} --help"
-        assert _extract(repo, command) == "", command
+    command = command.format(pointer=repo / ".mycelium" / "plugin-root")
+    assert _extract(repo, command) == "", command
 
 
-def test_the_live_two_step_chain_with_an_absolute_pointer_is_mycelium_s_own(
-        tmp_path: Path) -> None:
-    # The live agent read the pointer by its absolute path.
+def test_an_ancestor_s_absolute_pointer_is_accepted_from_a_subdirectory(tmp_path: Path) -> None:
     repo = _pointer_repo(tmp_path, HERE.parent.parent.parent)
-    pointer = repo / ".mycelium" / "plugin-root"
-    command = (f"P=$(cat {pointer}); S=$P/skills/core/scripts; "
-               "python3 $S/data_contract_check.py --help; python3 $S/register_value.py --help; "
-               "python3 $S/check_report_values.py --help; python3 $S/lineage_index.py --help")
-    assert _extract(repo, command) == ""
-    # From a subdirectory, an absolute pointer of an ancestor is the same file.
     sub = repo / "analysis" / "de"
     sub.mkdir(parents=True)
+    command = (f"P=$(cat {repo / '.mycelium' / 'plugin-root'}); S=$P/skills/core/scripts; "
+               "python3 $S/lineage_index.py --help")
     assert _extract(sub, command) == ""
 
 
 @pytest.mark.parametrize("command", [
-    # The chain's root is not the pointer.
-    "P=$(cat .mycelium/plugin-root); S=$Q/skills/core/scripts; python3 $S/lineage_index.py",
-    "S=$P/skills/core/scripts; python3 $S/lineage_index.py",
-    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; S=$HOME/x; python3 $S/lineage_index.py",
-    "P=$(cat .mycelium/plugin-root); P=$HOME; S=$P/skills/core/scripts; python3 $S/lineage_index.py",
-    # Traversal out of the managed tree, or an unmodeled expansion.
-    "P=$(cat .mycelium/plugin-root); S=$P/../x/skills/core/scripts; python3 $S/lineage_index.py",
-    "P=$(cat .mycelium/plugin-root); S=$P$X/skills/core/scripts; python3 $S/lineage_index.py",
-    "P=$(cat .mycelium/plugin-root); S=${P/a/b}/skills/core/scripts; python3 $S/lineage_index.py",
-    "P=$(cat .mycelium/plugin-root); S='$P/skills/core/scripts'; python3 $S/lineage_index.py",
-    # A conditional or piped chain link.
-    "P=$(cat .mycelium/plugin-root); false && S=$P/skills/core/scripts; python3 $S/lineage_index.py",
+    # Codex review of #163: a conditional before a newline skips the link.
+    'S="$PWD/analysis/_lib"; P=$(cat .mycelium/plugin-root); test -d missing &&\n'
+    'S=$P/skills/core/scripts; python3 "$S/register_value.py"',
+    # Codex review of #163: `source` can redefine S after the chain.
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; source analysis/env.sh; "
+    'python3 "$S/register_value.py"',
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; . analysis/env.sh; "
+    "python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; eval \"$X\"; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; cd analysis; python3 $S/register_value.py",
+    # #163 review: reassignments the chain cannot see.
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; export S={lib}; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; declare S={lib}; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; local S={lib}; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core; S+=/scripts; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; read S < d.txt; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; S={lib}; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; for S in {lib}; do python3 $S/register_value.py; done",
+    "P=$(cat .mycelium/plugin-root); S={lib}; if false; then S=$P/skills/core/scripts; fi; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S={lib}; f() {{ S=$P/skills/core/scripts; }}; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S={lib}; test -d no && S=$P/skills/core/scripts; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S={lib}; true || S=$P/skills/core/scripts; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); (S=$P/skills/core/scripts); python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S={lib}\ncat > e.sh <<'EOF'\nS=$P/skills/core/scripts\nEOF\npython3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S={lib}; echo 'x; S=$P/skills/core/scripts'; python3 $S/register_value.py",
+    # Not the strict shape: another link, traversal, a used-before-set link.
+    "P=$(cat .mycelium/plugin-root); R=$P/skills; S=$R/core/scripts; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P/../x/skills/core/scripts; python3 $S/register_value.py",
+    "S=$P/skills/core/scripts; P=$(cat .mycelium/plugin-root); python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$Q/skills/core/scripts; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S=$P$X/skills/core/scripts; python3 $S/register_value.py",
+    "P=$(cat .mycelium/plugin-root); S='$P/skills/core/scripts'; python3 $S/register_value.py",
 ])
-def test_a_chain_not_rooted_in_the_pointer_stays_reported(tmp_path: Path, command: str) -> None:
+def test_anything_but_the_strict_chain_keeps_main_s_behaviour(
+        tmp_path: Path, command: str) -> None:
     repo = _pointer_repo(tmp_path, HERE.parent.parent.parent)
-    assert "unreadable_script" in _extract(repo, command), command
+    lib = repo / "analysis" / "_lib"
+    lib.mkdir(parents=True)
+    (lib / "register_value.py").write_text("print('vendored')\n")
+    command = command.format(lib=lib)
+    use = command.rindex("$S/") if "$S/" in command else command.rindex("$P/")
+    word = command[use:].split()[0].rstrip(";").strip('"')
+    assert ev._strict_chain_script_path(command, use, word, repo) is None, command
+    # And the whole detector does what main does: no helper suppression.
+    path = ev._variable_script_path(command, use, word, repo)
+    assert path is None or not ev._is_managed_utility_path(path), command
 
 
-def test_a_chain_rooted_in_a_pointer_to_a_look_alike_tree_stays_reported(tmp_path: Path) -> None:
+def test_the_strict_chain_rejects_a_pointer_to_a_look_alike_tree(tmp_path: Path) -> None:
     fake = tmp_path / "fake"
     (fake / "skills" / "core" / "scripts").mkdir(parents=True)
     (fake / "skills" / "core" / "scripts" / "lineage_index.py").write_text("print(1)\n")
@@ -1488,97 +1513,10 @@ def test_a_chain_rooted_in_a_pointer_to_a_look_alike_tree_stays_reported(tmp_pat
     assert "lineage_index.py" in _extract(repo, command)
 
 
-def test_an_absolute_pointer_outside_the_working_tree_stays_reported(tmp_path: Path) -> None:
-    # Another repository's pointer: not the one this command's cwd owns.
+def test_another_repository_s_absolute_pointer_is_not_accepted(tmp_path: Path) -> None:
     other = _pointer_repo(tmp_path / "o", HERE.parent.parent.parent)
     repo = tmp_path / "mine"
     repo.mkdir()
-    command = (f"P=$(cat {other / '.mycelium' / 'plugin-root'}); "
-               "python3 $P/skills/core/scripts/lineage_index.py")
+    command = (f"P=$(cat {other / '.mycelium' / 'plugin-root'}); S=$P/skills/core/scripts; "
+               "python3 $S/lineage_index.py")
     assert "unreadable_script" in _extract(repo, command)
-
-
-@pytest.mark.parametrize("command", [
-    "P=$(cat .mycelium/plugin-root)\nS=$P/skills/core/scripts\npython3 $S/lineage_index.py",
-    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts && python3 $S/lineage_index.py",
-    "P=$(cat .mycelium/plugin-root); R=$P/skills; S=$R/core/scripts; python3 $S/lineage_index.py",
-])
-def test_unconditional_chain_links_are_followed(tmp_path: Path, command: str) -> None:
-    repo = _pointer_repo(tmp_path, HERE.parent.parent.parent)
-    assert _extract(repo, command) == "", command
-
-
-@pytest.mark.parametrize("command", [
-    "P=$(cat .mycelium/plugin-root); true || S=$P/skills/core/scripts; python3 $S/lineage_index.py",
-    "P=$(cat .mycelium/plugin-root); (S=$P/skills/core/scripts); python3 $S/lineage_index.py",
-    "P=$(cat .mycelium/plugin-root); echo | S=$P/skills/core/scripts; python3 $S/lineage_index.py",
-    "P=$(cat .mycelium/plugin-root); cd x && S=$P/skills/core/scripts; python3 $S/lineage_index.py",
-    "P=$(cat .mycelium/plugin-root) && S=$P/skills/core/scripts && python3 $S/lineage_index.py",
-])
-def test_conditional_chain_links_stay_reported(tmp_path: Path, command: str) -> None:
-    repo = _pointer_repo(tmp_path, HERE.parent.parent.parent)
-    assert "unreadable_script" in _extract(repo, command), command
-
-
-@pytest.mark.parametrize("reader", [
-    '$(cat "$PWD/.mycelium/plugin-root")',
-    "$(cat $PWD/.mycelium/plugin-root)",
-    '$(cat "${PWD}/.mycelium/plugin-root")',
-    '$(cat ".mycelium/plugin-root")',
-    '"$(cat "$PWD/.mycelium/plugin-root")"',
-])
-def test_the_pointer_read_through_pwd_or_quoted_is_mycelium_s_own(
-        tmp_path: Path, reader: str) -> None:
-    # Live run (2026-11-24, this branch): `P=$(cat "$PWD/.mycelium/plugin-root");
-    # S=$P/skills/core/scripts; python3 $S/x.py --help` still left four skips.
-    repo = _pointer_repo(tmp_path, HERE.parent.parent.parent)
-    command = f"P={reader}; S=$P/skills/core/scripts; python3 $S/lineage_index.py --help"
-    assert _extract(repo, command) == "", command
-
-
-@pytest.mark.parametrize("reader", [
-    "$(cat '$PWD/.mycelium/plugin-root')",      # literal `$PWD` directory
-    '$(cat "$HOME/.mycelium/plugin-root")',     # another directory's pointer
-    '$(cat "$PWD/../.mycelium/plugin-root"x)',  # not a whole word
-])
-def test_other_pointer_spellings_stay_reported(tmp_path: Path, reader: str) -> None:
-    repo = _pointer_repo(tmp_path, HERE.parent.parent.parent)
-    command = f"P={reader}; S=$P/skills/core/scripts; python3 $S/lineage_index.py --help"
-    assert "unreadable_script" in _extract(repo, command), command
-
-
-@pytest.mark.parametrize("command", [
-    # PR #163 review: the live agent vendored register_value.py into
-    # analysis/_lib; a reassignment the resolver cannot model must void the
-    # chain, never let the user's copy pass as Mycelium's own.
-    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; export S={lib}; python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; declare S={lib}; python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; local S={lib}; python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; readonly S={lib}; python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S=$P/skills/core; S+=/scripts; python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; read S < d.txt; python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; for S in {lib}; do python3 $S/register_value.py; done",
-    "P=$(cat .mycelium/plugin-root); S={lib}; if false; then S=$P/skills/core/scripts; fi; python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S={lib}; case x in y) S=$P/skills/core/scripts;; esac; python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S={lib}; while false; do S=$P/skills/core/scripts; done; python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S={lib}; f() {{ S=$P/skills/core/scripts; }}; python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S={lib}; [ -n x ] || {{\nS=$P/skills/core/scripts\n}}; python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S={lib}; test -d no && S=$P/skills/core/scripts; python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts python3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S={lib}\ncat > e.sh <<'EOF'\nS=$P/skills/core/scripts\nEOF\npython3 $S/register_value.py",
-    "P=$(cat .mycelium/plugin-root); S={lib}; echo 'x; S=$P/skills/core/scripts'; python3 $S/register_value.py",
-    "P={lib}/../..; if false; then P=$(cat .mycelium/plugin-root); fi; python3 $P/skills/core/scripts/register_value.py",
-    "P={lib}/../..; false && P=$(cat .mycelium/plugin-root); python3 $P/skills/core/scripts/register_value.py",
-    "export P=$(cat .mycelium/plugin-root); python3 $P/skills/core/scripts/register_value.py",
-])
-def test_a_reassignment_the_resolver_cannot_model_voids_the_chain(
-        tmp_path: Path, command: str) -> None:
-    repo = _pointer_repo(tmp_path, HERE.parent.parent.parent)
-    lib = repo / "analysis" / "_lib"
-    lib.mkdir(parents=True)
-    (lib / "register_value.py").write_text("print('vendored')\n")
-    command = command.format(lib=lib)
-    use = command.rindex("$S/") if "$S/" in command else command.rindex("$P/")
-    raw = command[use:].split()[0].rstrip(";")
-    path = ev._variable_script_path(command, use, raw, repo)
-    assert path is None or not ev._is_managed_utility_path(path), (command, path)

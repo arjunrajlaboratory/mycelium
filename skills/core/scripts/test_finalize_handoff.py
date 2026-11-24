@@ -519,68 +519,15 @@ def test_a_legacy_handoff_gets_the_gap_in_its_status_block():
     assert out.split("\n\n", 1)[1].strip() == legacy.strip()
 
 
-def test_the_owner_line_decides_what_a_later_transaction_keeps():
-    from datetime import datetime, timedelta, timezone
-
-    from finalize_handoff import keeps_for
-
-    at = "2026-11-24T10:00:00-0500"
-    soon = datetime(2026, 11, 24, 11, 0, tzinfo=timezone(timedelta(hours=-5)))
-    authored = finalize(_complete_handoff(), at, owner="claude:s1", transaction="t1")
-    assert f"Handoff owner: claude:s1; transaction t1; source authored; accepted {at}." in authored
-    assert keeps_for(authored, "claude:s1", soon)
-    assert not keeps_for(authored, "claude:s2", soon)
-    assert not keeps_for(authored, "codex:s1", soon)
-    # Outside the window, before the acceptance, or the next calendar day.
-    assert not keeps_for(authored, "claude:s1", soon + timedelta(hours=2))
-    assert not keeps_for(authored, "claude:s1", soon - timedelta(hours=2))
-    late = finalize(_complete_handoff(), "2026-11-24T23:30:00-0500", owner="claude:s1",
-                    transaction="t1")
-    assert not keeps_for(late, "claude:s1",
-                         datetime(2026, 11, 25, 0, 10, tzinfo=timezone(timedelta(hours=-5))))
-    fallback = finalize(_complete_handoff(), at, owner="claude:s1", transaction="t1",
-                        authored=False)
-    assert not keeps_for(fallback, "claude:s1", soon)
-    assert not keeps_for(_complete_handoff(), "claude:s1", soon)
-    # Two owner lines (a hand edit) prove nothing.
-    doubled = authored.replace("Handoff owner:", f"Handoff owner: claude:s1; transaction t0; "
-                               f"source authored; accepted {at}.\nHandoff owner:", 1)
-    assert not keeps_for(doubled, "claude:s1", soon)
-
-    kept = finalize(authored, "2026-11-24T10:30:00-0500", owner="claude:s1",
-                    transaction="t2", follow_up="t2 ended\nwithout a handoff")
-    assert f"source authored; accepted {at}." in kept  # the original acceptance
-    assert "Follow-up activity (t2): t2 ended without a handoff" in kept
-    retried = finalize(kept, "2026-11-24T10:31:00-0500", owner="claude:s1",
-                       transaction="t2", follow_up="t2 again")
-    assert retried.count("Follow-up activity") == 1 and "t2 again" in retried
-    chain = kept
-    for index in range(3, 10):
-        chain = finalize(chain, at, owner="claude:s1", transaction=f"t{index}",
-                         follow_up=f"t{index} ran")
-    lines = [line for line in chain.splitlines() if line.startswith("Follow-up activity")]
-    assert [line.split(")")[0] for line in lines] == [
-        f"Follow-up activity (t{i}" for i in range(5, 10)]
-    assert chain.count(STATUS_BEGIN) == 1
-
-
-def test_a_kept_legacy_handoff_keeps_its_status_block_gap():
-    legacy = ("## Current State\n- a\n\n## What Was Done\n- b\n\n## Key Decisions\n- c\n\n"
-              "## Next Steps\n- d\n\n## Relevant Files\n- e\n")
-    at = "2026-11-24T10:00:00-0500"
-    first = finalize(legacy, at, owner="claude:s1", transaction="t1", lineage_gap="GAP one")
-    kept = finalize(first, at, owner="claude:s1", transaction="t2", lineage_gap="GAP two",
-                    follow_up="t2 ran")
-    assert "Lineage gaps (t1): GAP one" in kept and "Lineage gaps (t2): GAP two" in kept
-
-
-def test_unsafe_owner_tokens_are_refused(tmp_path):
+def test_an_unsafe_transaction_token_is_refused(tmp_path):
     handoff = tmp_path / "h.md"
     handoff.write_text(_complete_handoff())
-    for bad in (["--owner", "claude:s 1"], ["--transaction", "t\n1"], ["--keeps-for", "a;b"]):
+    for bad in ("t 1", "t\n1", "a;b"):
         result = subprocess.run([sys.executable, str(SCRIPT), "--handoff", str(handoff),
-                                 "--accepted-at", "T", *bad], capture_output=True)
+                                 "--accepted-at", "T", "--transaction", bad,
+                                 "--lineage-gap", "g"], capture_output=True)
         assert result.returncode == 1, bad
+    assert handoff.read_text() == _complete_handoff()
 
 
 def test_the_gap_bullet_goes_before_the_blockers_subheadings():

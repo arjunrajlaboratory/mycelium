@@ -1213,30 +1213,23 @@ its Stop published the generic fallback over the handoff accepted minutes
 earlier.
 
 **Invariant:** Nothing an accepted Stop emits may continue the turn:
-`systemMessage` only, on every host; what the agent must act on is a block.
-What the agent should still learn goes into the durable records the next
-session reads (the finalized log footer, the published handoff), written by
-the finalizers so a retry replaces rather than repeats it. A generated
-fallback replaces an authored handoff the same host session accepted
-shortly before only when the new transaction did real work: a host session
-ID survives `--resume`, multi-day desktop sessions and Codex resume, so it
-is not a task identity. Keep only for a genuine follow-up (no handoff
-touched, no project change, no commit, recent acceptance); ownership is a
-machine line in the status block, and anything but exactly one matching
-line is not proof. Helper recognition follows only plain, unconditional,
-top-level assignments, and any reassignment it cannot model voids the
-chain: a suppression gate must fail toward reporting.
+`systemMessage` only, on every host. What the agent must act on is a block.
+What the next session should still learn goes into the durable records it
+reads (the finalized log footer and the published handoff), written by the
+finalizers so a retry replaces rather than repeats it. Remove the trigger
+rather than guard its consequence. Two rounds of "keep the earlier handoff"
+heuristics each produced new P1s, because a host session ID is not a task
+identity: it survives `--resume`, multi-day sessions, branch switches,
+Git-ignored outputs, retries and per-turn Antigravity IDs. A suppression gate
+such as helper recognition must fail toward reporting. It accepts one strict
+whole-command shape, and anything with control flow, `source`, `eval`, `cd`,
+declarations or reassignment keeps the previous behaviour.
 
-**Regression evidence:** Drive the hooks through the whole chain: helpers
-through a two-step chain and an absolute pointer leave no skip; an accepted
-Stop with a real gap emits only `systemMessage` and writes the gap into the
-log and handoff; a read-only follow-up transaction with no handoff keeps the
-accepted one with a follow-up line per transaction. Require the fallback
-for a same-session task with edits or a commit, a fresh partial handoff, a
-resume past the window or the day boundary, another host session, a
-published fallback and a removed or doubled owner line, and replacement by
-a follow-up that wrote its own handoff. Run each `export`, `declare`,
-`read`, `for`, `+=`, conditional, compound, prefix and heredoc
-reassignment of a chain variable to a vendored copy and require the skip. Pair each
-chain spelling with conditional, piped, subshell, traversal, expansion,
-foreign-pointer and look-alike-tree neighbors.
+**Regression evidence:** Drive the hooks through the chain. Helpers run
+through a two-step chain and an absolute pointer leave no skip. An accepted
+Stop with a real gap emits only `systemMessage`, writes the gap into the log
+and handoff, and leaves nothing that starts another transaction. Pair the
+strict chain with `&&` before a newline, `source`, `.`, `eval`, `cd`,
+`export`, `declare`, `read`, `for`, `+=`, a prefix, a heredoc, a quoted
+string, a second link, traversal, and a look-alike or foreign pointer. Each
+must keep the skip.

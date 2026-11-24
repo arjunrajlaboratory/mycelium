@@ -329,60 +329,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so they now go only to `systemMessage`. (Provenance-gap warnings first
   stayed in `additionalContext`; see the next entry.) Codex output and
   blocked Stops are unchanged.
-- **An accepted Stop never continues the conversation, and a later turn no
-  longer clobbers the accepted handoff.** A live `claude -p` run on main
-  showed three linked faults:
-  - *Helper noise.* The agent ran Mycelium's own helpers as
-    `P=$(cat .mycelium/plugin-root); S=$P/skills/core/scripts; python3
-    $S/register_value.py --help`, reading the pointer by its absolute path.
-    The lineage detector did not follow the two-step chain or the absolute
-    pointer and logged four `script-unreadable` skips. It now follows a
-    chain of plain links (`S=$P/…`, `S="${P}"/…`, up to four) back to the
-    plugin-root pointer or a literal path. It accepts the pointer read by an
-    absolute path that names the command's working directory or one of its
-    ancestors, through `$PWD/` or `${PWD}/`, and with the `cat` operand in
-    double quotes. A variable gets a value only from a plain, unconditional
-    statement (top level, after `;`, a newline or the start, not exported,
-    not a one-command prefix). Any reassignment the detector cannot model
-    voids the whole chain, and the skip is reported as before:
-    `export`/`declare`/`local`/`readonly`, `read`, `for … in`, `+=`, an
-    assignment after `&&`/`||` or inside `if`/`case`/loops/braces/functions.
-    So a vendored copy run as `S=$PWD/analysis/_lib` after the chain is
-    never passed off as the bundled helper. Also still reported: traversal,
-    other expansions, another repository's pointer, and a pointer to an
-    unverified tree. The plugin-root environment variable is not followed:
-    the hook cannot see the value in the agent's shell.
-  - *Gap continuation.* Lineage-gap and unrecorded-event warnings at an
-    accepted Stop went to `additionalContext` on Claude, which gave the
-    agent another turn. Every accepted Stop now emits only `systemMessage`,
-    on every host. When the Stop finalizes a transaction, the gap is also
-    written as a `- Lineage gaps:` line in the finalized session log's end
-    footer and as a `- Lineage gaps (<session id>):` bullet in the
-    published handoff's `## Blockers & surprises`, before any subheading (in
-    the status block for the older heading schema). A retry replaces the line rather than
-    adding another.
-  - *Handoff clobbering.* The extra turn opened a new transaction, and its
-    Stop, with no handoff of its own, published the generic fallback over
-    the handoff accepted minutes earlier. The published handoff's status
-    block now has a `Handoff owner:` line (host, host session, transaction,
-    whether the agent wrote it, and when it was first accepted). Stop keeps
-    that handoff, adding one `Follow-up activity (<id>):` line, only for a
-    genuine follow-up. That means all of these hold:
-    - the agent did not write or touch its handoff this transaction;
-    - no project file outside `.living/` and `.mycelium/` changed, no commit
-      was made, and no unrecorded or moved work was taken;
-    - the published handoff is this host session's own authored one, first
-      accepted within two hours and on the same day.
+- **An accepted Stop never continues the conversation, and Mycelium's own
+  helpers reached through a variable chain are no longer lineage gaps.** A
+  live `claude -p` run on main showed a chain of faults:
+  - The agent ran the helpers as `P=$(cat <abs>/.mycelium/plugin-root);
+    S=$P/skills/core/scripts; python3 $S/register_value.py --help`, and the
+    detector logged four `script-unreadable` skips.
+  - The accepted Stop handed that LINEAGE GAP to the agent through
+    `additionalContext`, which on Claude continues the conversation.
+  - The extra turn opened a new transaction, whose Stop published the
+    generic fallback over the handoff accepted minutes earlier.
 
-    Otherwise Stop publishes the fallback exactly as before. That covers a
-    resumed session's new task with real work, a fresh but incomplete
-    handoff after its one block, a resume after the window, another host
-    session, and a published fallback. Follow-up lines are kept one per
-    later transaction, at most five.
+  Two changes fix it:
+  - *No continuation.* Every accepted Stop now emits only `systemMessage`,
+    on every host, including lineage-gap and unrecorded-event warnings.
+    When the Stop finalizes a transaction, the gap is also written into the
+    records the next session reads, and a retry replaces the line rather
+    than adding another:
+    - a `- Lineage gaps:` line in the finalized session log's end footer;
+    - a `- Lineage gaps (<session id>):` bullet in the published handoff's
+      `## Blockers & surprises`, before any subheading. Handoffs in the
+      older heading schema get it in the status block instead.
 
-  No new state files. Existing projects need no migration: a handoff
-  published before this change has no owner line, so the next fallback
-  replaces it as before.
+    Handoff publication is otherwise unchanged. With no continuation, the
+    follow-up transaction that replaced the handoff no longer starts.
+  - *Strict helper chain.* A script is treated as Mycelium's own helper
+    through this chain only when the whole command has exactly this shape:
+    `P=$(cat <pointer>)`, optionally `S=$P/<literal path>`, then the use.
+    Each variable is assigned once, before its use. Statements may be
+    separated only by `;` or newlines. The pointer is
+    `.mycelium/plugin-root` read relative to the working directory (or a
+    parent), through `$PWD/`, or by an absolute path that names the working
+    directory or an ancestor. The command must not contain any of these:
+    - `&&`, `||`, a pipe, `&`;
+    - a subshell, braces, a backtick or another substitution;
+    - single quotes, a backslash, a heredoc or `#`;
+    - `+=`, a prefix assignment, or a second assignment of either variable;
+    - `source`, `.`, `eval`, `cd`, `export`, `declare`, `local`, `read`,
+      `for`/`while`/`if`/`case`, or another variable-setting builtin.
+
+    Anything else behaves exactly as before; the plugin-root target must
+    still verify as a real Mycelium tree. The plugin-root environment
+    variable is not followed: the hook cannot see its value in the agent's
+    shell.
+
+  No new state files, and existing projects need no migration.
 
 ## [0.9.7] - 2026-11-21
 
