@@ -228,6 +228,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A dead lock owner can no longer strand the Stop or session lock for
+  five minutes** (`mycelium-hook-lib.sh`). When two hooks both found the
+  lock held by a dead process, one could take its reap claim inside the lock
+  while the other was halfway through removing it. The first reaper's final
+  `rmdir` then failed, the second withdrew because the owner record had
+  vanished, and the lock was left empty with a fresh timestamp. Every
+  waiter took that for a new owner about to write its record, waited out
+  the 300 s age guard, and the hook gave up with exit 3. The reaper now
+  renames the dead lock, with its claim still inside, to a private
+  tombstone in one atomic `rename(2)` and removes it there, so the lock path
+  is always either the dead lock under claim, free, or a successor's lock.
+  This affected released versions and showed up as a rare failure of the
+  `[dead]` lock-concurrency test under load.
+
 - **Static lineage now resolves standard-library I/O** in Python scripts
   (`extract_data_lineage_event.py`). Previously only pandas-style readers and
   writers were recognised. Now `open(...)` (mode gives the direction),
