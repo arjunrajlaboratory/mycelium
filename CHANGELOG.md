@@ -340,11 +340,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Mycelium used it for the ".living/ updated" confirmation, so every accepted
   Stop with an update made the model reply again (confirmed in a live
   `claude -p` run). That confirmation and the access note are for the user,
-  so they now go only to `systemMessage`. Provenance-gap warnings (lineage
-  gaps, detector failures, unrecorded events) are for the agent, which may
-  need to say its results' provenance is unknown. They stay in
-  `additionalContext` on Claude, as before, on the rare Stop that has one.
-  Codex output and blocked Stops are unchanged.
+  so they now go only to `systemMessage`. (Provenance-gap warnings first
+  stayed in `additionalContext`; see the next entry.) Codex output and
+  blocked Stops are unchanged.
+- **An accepted Stop never continues the conversation.** A live
+  `claude -p` run on main showed the cost of the lineage-gap split above:
+  - The agent ran Mycelium's helpers with `--help` through a variable chain.
+    The detector logged them as `script-unreadable` skips.
+  - The accepted Stop sent that LINEAGE GAP through `additionalContext`,
+    which on Claude continues the conversation.
+  - The extra turn ran a Bash command, which opened a new transaction. That
+    transaction's Stop had no handoff of its own, so it published the
+    generic fallback over the handoff accepted minutes earlier.
+
+  Every accepted Stop now emits only `systemMessage`, on every host. That
+  covers lineage-gap and unrecorded-event warnings as well as the routine
+  messages. Its parts are one line apart, because Claude Code shows each
+  line as its own "Stop says:" line. When the Stop finalizes a transaction,
+  the gap is also written as a `- Lineage gaps:` line in the finalized
+  session log's end footer, and a retry replaces that line rather than
+  adding another. Handoff publication and block decisions are unchanged.
+  Helper chains still report their skips, which now only inform the user.
+  No new state files, and existing projects need no migration.
 
 ## [0.9.7] - 2026-11-21
 

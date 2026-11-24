@@ -1200,3 +1200,33 @@ blocks once, then falls back on retry. A handoff repaired after the block is
 preserved. A complete legacy-schema handoff is accepted without a block, a
 validator error fails open, and a marker from another transaction does not
 suppress the block.
+
+## 53. Feedback that continues a turn becomes work that overwrites the turn's record
+
+**Failure:** An accepted Stop on Claude put a lineage-gap warning in
+`additionalContext`, which continues the conversation. The gap came from
+Mycelium's own `--help` helper calls, reached through a variable chain. The
+agent's extra turn ran one Bash command to inspect the gap, which opened a
+new transaction (pattern 44). That turn wrote no handoff, so its Stop
+published the generic fallback over the handoff accepted minutes earlier.
+
+**Invariant:** Nothing an accepted Stop emits may continue the turn:
+`systemMessage` only, on every host. What the agent must act on is a block.
+What the next session should still learn goes into a durable record (the
+finalized log footer), written by the finalizer so a retry replaces rather
+than repeats it. Remove the trigger rather than guard its consequence.
+Three rounds of guards were tried and dropped, each producing new P1s:
+- "keep the earlier handoff": a host session ID is not a task identity;
+  it survives `--resume`, multi-day sessions, branch switches, Git-ignored
+  outputs, retries and per-turn Antigravity IDs;
+- a gap bullet in the published handoff;
+- recognizing helper chains, which needs bash word splitting, `IFS` and
+  every reassignment form to be airtight, and went quadratic.
+
+Once the warning no longer continues the turn, a noisy skip costs only a
+user-facing line.
+
+**Regression evidence:** Replay the live helper chain through the hooks. The
+accepted Stop emits only `systemMessage`, with no empty line. It records the
+gap in the log footer, publishes the handoff byte-for-byte as main does, and
+leaves nothing that starts another transaction.

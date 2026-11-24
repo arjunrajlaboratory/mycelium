@@ -1,15 +1,17 @@
-"""A routine accepted Stop never hands the agent another turn.
+"""An accepted Stop never hands the agent another turn.
 
 On Claude Code, `hookSpecificOutput.additionalContext` on a Stop hook makes
 the conversation continue so the model can act on it (the hooks reference,
 "Stop decision control"), with the same loop guard as `decision: "block"`.
 
-- Routine accepted-Stop output (the ".living/ updated" confirmation, the
-  access note) is for the user: `systemMessage` only, on every host.
-- A provenance gap (lineage gap, detector failure, unrecorded events) is for
-  the agent, which may need to say its results' provenance is unknown. On
-  Claude it stays in `additionalContext`, as before; such Stops are rare.
-  Codex has only `systemMessage`, which never continues a turn.
+- Accepted-Stop output is `systemMessage` only, on every host: the ".living/
+  updated" confirmation, the access note, and provenance gaps (lineage gap,
+  detector failure, unrecorded events) alike. A live run (2026-11-24) showed
+  a gap continuation is harmful: the extra turn opened a new transaction
+  whose fallback handoff replaced the one just accepted.
+- A gap found by a Stop that finalizes a transaction is also written into
+  the finalized session log's end footer, which the next session can read.
+  Handoff publication is unchanged.
 - Blocks keep `decision: "block"` and their reason.
 """
 
@@ -87,20 +89,22 @@ def _routine(out: dict, expected: str) -> None:
 
 
 def _gap(host: str, out: dict, gap: str, user: str = "") -> None:
-    """Accepted; on Claude the gap reaches the agent, and only the gap."""
+    """Accepted; the gap is shown to the user and nothing continues the turn."""
     assert out.get("decision") is None, out
-    if host == "codex":
-        assert set(out) == {"systemMessage"}, out
-        assert gap in out["systemMessage"] and user in out["systemMessage"], out
-        return
-    context = out["hookSpecificOutput"]["additionalContext"]
-    assert out["hookSpecificOutput"]["hookEventName"] == "Stop", out
-    assert gap in context, out
-    assert ".living/ updated" not in context, out
-    if user:
-        assert user in out["systemMessage"] and gap not in out["systemMessage"], out
-    else:
-        assert "systemMessage" not in out, out
+    assert set(out) == {"systemMessage"}, out
+    assert gap in out["systemMessage"] and user in out["systemMessage"], out
+    # Claude shows each line as "Stop says: <line>": no empty ones (live run).
+    assert "" not in out["systemMessage"].split("\n"), out
+
+
+def _durable_gap(repo: Path, gap: str) -> None:
+    """The finalized log carries the gap; handoff publication is unchanged."""
+    logs = [p for p in (repo / ".living" / "log").glob("*.md") if p.name != "LOG_REGISTRY.md"]
+    assert len(logs) == 1, logs
+    log = logs[0].read_text()
+    assert "- Lineage gaps: " in log and gap in log, log
+    handoff = (repo / ".mycelium" / "last-session.md").read_text()
+    assert gap not in handoff and "Lineage gaps" not in handoff, handoff
 
 
 @pytest.mark.parametrize("host", HOSTS)
@@ -116,7 +120,7 @@ def test_living_updated_accept_without_a_gap_is_only_a_user_message(tmp_path, ho
 
 
 @pytest.mark.parametrize("host", HOSTS)
-def test_living_updated_accept_with_a_gap_gives_the_gap_to_the_agent(tmp_path, host):
+def test_living_updated_accept_with_a_gap_records_it_without_a_continuation(tmp_path, host):
     repo = _repo(tmp_path)
     _park_skip(repo, host, "s2")
     _start(host, repo, "s2")
@@ -128,19 +132,21 @@ def test_living_updated_accept_with_a_gap_gives_the_gap_to_the_agent(tmp_path, h
     accepted = _stop(host, repo, "s2", retry=True)
 
     _gap(host, accepted, "detector-failed x1", ".living/ updated.")
+    _durable_gap(repo, "detector-failed x1")
 
 
 @pytest.mark.parametrize("host", HOSTS)
-def test_no_work_accept_with_a_gap_gives_the_gap_to_the_agent(tmp_path, host):
+def test_no_work_accept_with_a_gap_records_it_without_a_continuation(tmp_path, host):
     repo = _repo(tmp_path)
     _park_skip(repo, host, "s3")
     _start(host, repo, "s3")
 
     _gap(host, _stop(host, repo, "s3"), "detector-failed x1")
+    _durable_gap(repo, "detector-failed x1")
 
 
 @pytest.mark.parametrize("host", HOSTS)
-def test_gap_reported_without_a_transaction_goes_to_the_agent(tmp_path, host):
+def test_gap_reported_without_a_transaction_is_only_a_user_message(tmp_path, host):
     repo = _repo(tmp_path)
     _start(host, repo, "s4")
     assert _stop(host, repo, "s4") == {}

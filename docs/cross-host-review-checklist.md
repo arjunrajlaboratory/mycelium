@@ -226,11 +226,14 @@ hook, filesystem, or lifecycle boundaries.
       archives active state.
 - [ ] Stop continuation messages identify the unmet requirement precisely and
       do not enter an infinite retry loop.
-- [ ] A routine accepted Stop emits only `systemMessage`, on every host. On
-      Claude, `hookSpecificOutput.additionalContext` on a Stop continues the
-      conversation like a block, so it carries only what the agent must
-      act on: a provenance gap. Anything else the agent must act on is a
-      block reason.
+- [ ] An accepted Stop emits only `systemMessage`, on every host, and never
+      `additionalContext`. On Claude, `hookSpecificOutput.additionalContext`
+      on a Stop continues the conversation like a block. A provenance gap
+      goes to `systemMessage` (parts one line apart, no blank line: Claude
+      shows each line as "Stop says:") and, when the Stop finalizes a
+      transaction, into the finalized session log footer (`- Lineage
+      gaps:`). Handoff publication is unchanged. Anything the agent must act
+      on is a block reason.
 - [ ] Stop preserves the authored content of a fresh, complete five-section
       handoff, where every required heading occurs exactly once in order and
       every section has a nonblank, non-heading body line after obsolete
@@ -591,6 +594,7 @@ exercise them.
 | Tool cwd uses a symlinked or nested path | Valid in-project changes are attributed to the canonical project root. |
 | A session works in a linked worktree while the host runs hooks in the main checkout, which holds another session's dirty work | Stop judges only the worktree's changes, accepts reflection in the worktree's `.living/`, and leaves the main checkout byte-identical; a missing `.mycelium/plugin-root` is seeded in the worktree. |
 | Bash creates or modifies a project file without `apply_patch` | Stop enforces the living-repository update requirement. |
+| An accepted Stop on Claude has a lineage gap (e.g. from helper `--help` calls) | The Stop emits only `systemMessage`, with no empty line; the gap is in the finalized log footer; the published handoff is exactly what Stop publishes without a gap; no further turn or transaction starts. |
 | First Stop is blocked, more work occurs, then Stop succeeds | State remains active after the block, and the final log includes the later work. |
 | Multiple Stop hooks run concurrently | Exactly one finalization, registry row, lineage extraction, and cleanup occurs. |
 | Python runs as `python3 -u`, `python3 -W`, an absolute or venv interpreter, `/usr/bin/env python3`, or `python -m` | Execution reminders and lineage events are emitted according to policy. |
