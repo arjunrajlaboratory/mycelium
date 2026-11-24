@@ -37,6 +37,16 @@ class FrontmatterError(ValueError):
 _END_FOOTER_HEADING_RE = re.compile(
     r"^### \d{2}:\d{2} — Session ended \(\d+m, (?P<files>\d+) files\)$"
 )
+# A provenance gap Stop found (lineage skips, unrecorded events) is one line
+# directly under the end-footer heading: the next session reads the log, and
+# an accepted Stop must not continue the conversation to say it (pattern 53).
+LINEAGE_GAP_PREFIX = "- Lineage gaps: "
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
 def _strip_machine_footers(body: str) -> str:
     """Remove every machine-emitted end-footer block outside code fences."""
     lines = body.split("\n")
@@ -68,6 +78,8 @@ def _strip_machine_footers(body: str) -> str:
         # that shape is authored content and stays.
         generated_files = int(heading.group("files"))
         index += 1
+        if index < len(lines) and lines[index].startswith(LINEAGE_GAP_PREFIX):
+            index += 1
         if generated_files > 0:
             if index < len(lines) and lines[index].startswith("- Modified:"):
                 index += 1
@@ -107,6 +119,7 @@ def _completed_log(
     files_changed: int,
     end_time: str,
     changed_paths: list[str],
+    lineage_gap: str = "",
 ) -> str:
     if not original.startswith("---\n"):
         raise FrontmatterError("session log is missing opening YAML frontmatter")
@@ -139,6 +152,8 @@ def _completed_log(
         f"\n### {end_time} — Session ended "
         f"({duration_minutes}m, {files_changed} files)\n"
     )
+    if _one_line(lineage_gap):
+        footer += f"{LINEAGE_GAP_PREFIX}{_one_line(lineage_gap)}\n"
     if changed_paths:
         names = [Path(path).name for path in changed_paths[:3]]
         summary = ", ".join(names)
@@ -158,6 +173,7 @@ def finalize_session_log(
     files_changed: int,
     end_time: str,
     changed_paths: list[str],
+    lineage_gap: str = "",
 ) -> None:
     metadata = log_path.lstat()
     if not stat.S_ISREG(metadata.st_mode):
@@ -180,6 +196,7 @@ def finalize_session_log(
         files_changed=files_changed,
         end_time=end_time,
         changed_paths=changed_paths,
+        lineage_gap=lineage_gap,
     )
 
     temporary_fd, temporary_name = tempfile.mkstemp(
@@ -206,6 +223,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--duration-minutes", type=int, required=True)
     parser.add_argument("--files-changed", type=int, required=True)
     parser.add_argument("--end-time", required=True)
+    parser.add_argument("--lineage-gap", default="",
+                        help="provenance gap Stop found, recorded in the footer")
     return parser.parse_args(argv)
 
 
@@ -222,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
             files_changed=args.files_changed,
             end_time=args.end_time,
             changed_paths=changed_paths,
+            lineage_gap=args.lineage_gap,
         )
     except FrontmatterError as error:
         # One line, no traceback: Stop quotes it verbatim in its block reason.

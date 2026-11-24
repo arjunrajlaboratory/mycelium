@@ -240,6 +240,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A dead lock owner can no longer strand the Stop or session lock for
+  five minutes** (`mycelium-hook-lib.sh`). When two hooks both found the
+  lock held by a dead process, one could take its reap claim inside the lock
+  while the other was halfway through removing it. The first reaper's final
+  `rmdir` then failed, the second withdrew because the owner record had
+  vanished, and the lock was left empty with a fresh timestamp. Every
+  waiter took that for a new owner about to write its record, waited out
+  the 300 s age guard, and the hook gave up with exit 3. The reaper now
+  renames the dead lock, with its claim still inside, to a private
+  tombstone in one atomic `rename(2)` and removes it there, so the lock path
+  is always either the dead lock under claim, free, or a successor's lock.
+  This affected released versions and showed up as a rare failure of the
+  `[dead]` lock-concurrency test under load.
+
 - **Static lineage now resolves standard-library I/O** in Python scripts
   (`extract_data_lineage_event.py`). Previously only pandas-style readers and
   writers were recognised. Now `open(...)` (mode gives the direction),
@@ -340,11 +354,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Mycelium used it for the ".living/ updated" confirmation, so every accepted
   Stop with an update made the model reply again (confirmed in a live
   `claude -p` run). That confirmation and the access note are for the user,
-  so they now go only to `systemMessage`. Provenance-gap warnings (lineage
-  gaps, detector failures, unrecorded events) are for the agent, which may
-  need to say its results' provenance is unknown. They stay in
-  `additionalContext` on Claude, as before, on the rare Stop that has one.
-  Codex output and blocked Stops are unchanged.
+  so they now go only to `systemMessage`. (Provenance-gap warnings first
+  stayed in `additionalContext`; see the next entry.) Codex output and
+  blocked Stops are unchanged.
+- **An accepted Stop never continues the conversation.** A live
+  `claude -p` run on main showed the cost of the lineage-gap split above:
+  - The agent ran Mycelium's helpers with `--help` through a variable chain.
+    The detector logged them as `script-unreadable` skips.
+  - The accepted Stop sent that LINEAGE GAP through `additionalContext`,
+    which on Claude continues the conversation.
+  - The extra turn ran a Bash command, which opened a new transaction. That
+    transaction's Stop had no handoff of its own, so it published the
+    generic fallback over the handoff accepted minutes earlier.
+
+  Every accepted Stop now emits only `systemMessage`, on every host. That
+  covers lineage-gap and unrecorded-event warnings as well as the routine
+  messages. Its parts are one line apart, because Claude Code shows each
+  line as its own "Stop says:" line. When the Stop finalizes a transaction,
+  the gap is also written as a `- Lineage gaps:` line in the finalized
+  session log's end footer, and a retry replaces that line rather than
+  adding another. Handoff publication and block decisions are unchanged.
+  Helper chains still report their skips, which now only inform the user.
+  No new state files, and existing projects need no migration.
 
 - **A Claude Code background launch no longer claims writes as done.**
   Claude Code runs PostToolUse when a background job starts
