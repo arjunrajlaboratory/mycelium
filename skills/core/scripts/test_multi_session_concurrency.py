@@ -13,7 +13,7 @@ import time
 import pytest
 
 from test_codex_compatibility import HOOKS_DIR, _repo, _run_claude_hook, _run_hook
-from test_hook_state_port import _lock_wait_signal, _wait_for
+from test_hook_state_port import _lock_wait_signal, _wait_for as _wait_for_signal
 
 pytestmark = pytest.mark.platform
 
@@ -133,15 +133,7 @@ def test_distinct_roots_get_distinct_logs_when_mkdir_is_not_exclusive(tmp_path):
     assert len(_session_logs(repo)) == 2
 
 
-@pytest.mark.parametrize("initial_owner", [
-    "none",
-    pytest.param("dead", marks=pytest.mark.skip(reason=(
-        "Known bug, to be fixed in a separate PR: a reap race in "
-        "mycelium_acquire_directory_lock (mycelium-hook-lib.sh, reap branch) can "
-        "leave the lock directory ownerless with a fresh mtime, so both contenders "
-        "wait out the 300 s staleness and exit 3 after 600 attempts. Only on "
-        "filesystems where mkdir is not exclusive."))),
-])
+@pytest.mark.parametrize("initial_owner", ["none", "dead"])
 def test_directory_lock_excludes_contenders_when_mkdir_is_not_exclusive(
     tmp_path, initial_owner
 ):
@@ -627,7 +619,7 @@ def test_waiting_post_tool_revalidates_after_transaction_is_accepted(tmp_path):
     process.stdin.close()
     # Its validation before the lock has passed once it polls the held lock;
     # only then does modelling the accepted Stop test the revalidation.
-    _wait_for(waiting, process, "the session-lock wait (PostToolUse bypassed the lock)")
+    _wait_for_signal(waiting, process, "the session-lock wait (PostToolUse bypassed the lock)")
 
     # Model the accepted Stop critical section while PostToolUse is queued.
     accepted_log = Path(
