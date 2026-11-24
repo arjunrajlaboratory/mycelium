@@ -29,6 +29,21 @@ def _far_future(seconds: float = 30.0) -> float:
     return time.monotonic() + seconds
 
 
+class _WallClock:
+    """Stands in for the observer's ``time`` module with a wall clock the
+    test sets, so "how long ago was this written" is decided by the test and
+    not by how loaded the machine is. Everything else is the real module."""
+
+    def __init__(self, now_ns: int) -> None:
+        self.now_ns = now_ns
+
+    def time_ns(self) -> int:
+        return self.now_ns
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
+
+
 # ---------- walk ----------
 
 
@@ -189,11 +204,18 @@ def test_symlinked_snapshot_is_not_read(tmp_path: Path) -> None:
 # ---------- stable hashing ----------
 
 
-def test_stable_hash_hashes_and_caches_a_settled_file(tmp_path: Path) -> None:
+def test_stable_hash_hashes_and_caches_a_settled_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = tmp_path / "a.csv"
     path.write_bytes(b"abc")
+    written = os.lstat(path)
+    write_ns = max(written.st_mtime_ns, written.st_ctime_ns)
     # Hashed in the same timestamp tick as the write: correct, but racy, so
-    # the result is not cached.
+    # the result is not cached. The clock is pinned to the write instant: a
+    # real clock read on a loaded machine can already be past the window.
+    clock = _WallClock(write_ns)
+    monkeypatch.setattr(io, "time", clock)
     racy_cache: dict[str, str] = {}
     result, ident = io.stable_hash(
         path, None, deadline=_far_future(), cache={}, new_cache=racy_cache
@@ -201,7 +223,7 @@ def test_stable_hash_hashes_and_caches_a_settled_file(tmp_path: Path) -> None:
     assert result.status == "hashed"
     assert result.sha256 == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     assert racy_cache == {}
-    time.sleep(0.05)
+    clock.now_ns = write_ns + 1_000_000_000  # well past the fine-grained window
     settled_cache: dict[str, str] = {}
     again, _ = io.stable_hash(
         path, ident, deadline=_far_future(), cache={}, new_cache=settled_cache
@@ -394,9 +416,23 @@ def test_scope_checks_are_not_quadratic() -> None:
     unwatched = [{"path": f"ex{i}/sub", "why": "scope-exclude"} for i in range(3000)]
     prefixes = io.unwatched_prefixes(unwatched)
     paths = [f"keep{i}/a/b/file.csv" for i in range(3000)]
-    started = time.perf_counter()
-    statuses = [io.watch_status(p, prefixes) for p in paths]
-    assert time.perf_counter() - started < 0.2
+    lookups = {"contains": 0, "iterated": 0}
+
+    class CountingPrefixes(frozenset):
+        def __contains__(self, item: object) -> bool:
+            lookups["contains"] += 1
+            return frozenset.__contains__(self, item)
+
+        def __iter__(self):
+            lookups["iterated"] += 1
+            return frozenset.__iter__(self)
+
+    counted = CountingPrefixes(prefixes)
+    statuses = [io.watch_status(p, counted) for p in paths]
+    # Counted, not timed: each path costs one set lookup per ancestor (its
+    # depth, 4 here) and never a scan of the 3000 unwatched entries.
+    assert lookups["iterated"] == 0
+    assert lookups["contains"] <= 4 * len(paths)
     assert set(statuses) == {"watched"}
     assert io.watch_status("ex7/sub/f.csv", prefixes) == "unwatched"
     assert io.watch_status("ex7/subway.csv", unwatched) == "watched"

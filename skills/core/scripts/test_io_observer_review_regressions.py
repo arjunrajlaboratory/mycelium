@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -153,14 +154,34 @@ def test_watched_output_not_written_is_unchanged(tmp_path: Path) -> None:
 # ---------- R4: one huge file never blows the hash budget ----------
 
 
-def test_huge_file_is_pending_without_being_read(tmp_path: Path) -> None:
+def test_huge_file_is_pending_without_being_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     big = tmp_path / "huge.bam"
     with open(big, "wb") as handle:
         handle.truncate(40 * 1024**3)  # sparse 40 GiB
+    # Counted, not timed: a file the budget cannot finish is never opened
+    # or read at all, however fast the read would have been abandoned.
+    touched: list[str] = []
+    real_open, real_read = os.open, os.read
+
+    def counting_open(path, *args, **kwargs):
+        if os.fspath(path) == os.fspath(big):
+            touched.append("open")
+        return real_open(path, *args, **kwargs)
+
+    def counting_read(fd, n):
+        touched.append("read")
+        return real_read(fd, n)
+
+    monkeypatch.setattr(io.os, "open", counting_open)
+    monkeypatch.setattr(io.os, "read", counting_read)
     started = time.monotonic()
     result, ident = io.stable_hash(big, None, deadline=time.monotonic() + 0.5,
                                    cache={}, new_cache={})
-    assert time.monotonic() - started < 2
+    monkeypatch.undo()
+    assert touched == []
+    assert time.monotonic() - started < 60  # sanity only
     assert result.status == "pending"
     state = io._state(ident, result)
     assert state["identity"]["size"] == 40 * 1024**3
@@ -428,9 +449,22 @@ def test_turn_end_does_not_hang_on_a_fifo_marker(tmp_path: Path) -> None:
     marker_dir = state / "io" / "open" / "claude" / "s1"
     marker_dir.mkdir(parents=True)
     os.mkfifo(marker_dir / "fifo-call")
-    started = time.monotonic()
-    io.turn_end(state, host="claude", session="s1")
-    assert time.monotonic() - started < 5
+    # A blocking open of a FIFO with no writer never returns, so the bug is a
+    # hang, not slowness: run it on a thread and give it a generous deadline.
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            io.turn_end(state, host="claude", session="s1")
+        except BaseException as exc:  # surfaced below
+            errors.append(exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    assert done.wait(60), "turn_end blocked on a FIFO marker"
+    assert errors == []
 
 
 def test_retargeted_parent_directory_symlink_is_never_proven(tmp_path: Path) -> None:

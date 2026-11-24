@@ -295,7 +295,7 @@ def test_many_distinct_stages_are_capped(repo: Path) -> None:
     command = " && ".join(f"python fit.py --run {i}" for i in range(200))
     started = time.monotonic()
     events = run(repo, command)
-    assert time.monotonic() - started < 30
+    assert time.monotonic() - started < 60  # a hang guard, not a speed test
     import extract_data_lineage_event as ev
 
     assert len(events) == ev.MAX_EVENTS_PER_CALL
@@ -1189,13 +1189,20 @@ def test_a_void_affects_only_later_uses() -> None:
 
 
 def test_expansion_is_linear_in_the_number_of_stages() -> None:
-    stages = 6000
-    command = f"PY={PY}; " + "; ".join(["$PY s.py"] * stages)
-    started = time.perf_counter()
-    expanded = ev._expand_interpreter_variables(command)
-    elapsed = time.perf_counter() - started
-    assert expanded.count(f"{PY} s.py") == stages
-    assert elapsed < 0.5, elapsed
+    # Scaling, not wall time (a 0.5 s bound is flaky on loaded CI): CPU at
+    # 6000 stages against 3000, best of two, must grow about linearly.
+    def cpu(stages: int) -> float:
+        command = f"PY={PY}; " + "; ".join(["$PY s.py"] * stages)
+        started = time.process_time()
+        expanded = ev._expand_interpreter_variables(command)
+        seconds = time.process_time() - started
+        assert expanded.count(f"{PY} s.py") == stages
+        return seconds
+
+    small = min(cpu(3000) for _ in range(2))
+    large = min(cpu(6000) for _ in range(2))
+    assert large < 60
+    assert large < max(small * 3.2, 0.5), (small, large)
 
 
 def _steps(command: str, cwd: Path) -> list[dict]:

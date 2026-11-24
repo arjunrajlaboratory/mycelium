@@ -43,6 +43,32 @@ def _call(state: Path, root: Path, call: str, action, *, background_pre: bool = 
                    repo_root=root, **post_kw)
 
 
+class _Clock:
+    """Stands in for the observer's ``time`` module. ``time_ns`` is a wall
+    clock the test pins; ``monotonic`` advances only through ``sleep``, so a
+    wait is measured in simulated time, not in how loaded the machine is."""
+
+    def __init__(self, now_ns: int | None = None, *, sleep_limit: float = 60.0) -> None:
+        self.now_ns = now_ns
+        self.slept = 0.0
+        self.sleep_limit = sleep_limit
+        self._base = time.monotonic()
+
+    def time_ns(self) -> int:
+        return time.time_ns() if self.now_ns is None else self.now_ns
+
+    def monotonic(self) -> float:
+        return self._base + self.slept
+
+    def sleep(self, seconds: float) -> None:
+        self.slept += seconds
+        if self.slept > self.sleep_limit:
+            raise AssertionError(f"waited {self.slept:.2f}s of simulated time")
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
+
+
 def _paths(entries: list[dict]) -> list[str]:
     return [e["path"] for e in entries]
 
@@ -148,11 +174,18 @@ def test_input_rewritten_during_the_call_is_not_proven(tmp_path: Path) -> None:
     assert proof["reason"] == "changed-during-call"
 
 
-def test_input_written_just_before_pre_is_racy_not_proven(tmp_path: Path) -> None:
+def test_input_written_just_before_pre_is_racy_not_proven(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root, state = _repo(tmp_path), _state(tmp_path)
     src = root / "data" / "raw" / "fresh.csv"
     src.write_text("just now\n")
-    obs = _call(state, root, "c1", lambda: time.sleep(0.05), inputs=[str(src)])
+    written = os.lstat(src)
+    # Pre's snapshot is taken in the write's own tick. A real clock read on a
+    # loaded machine can already be past the 10 ms window, so the observer's
+    # wall clock is pinned to the write instant.
+    monkeypatch.setattr(io, "time", _Clock(max(written.st_mtime_ns, written.st_ctime_ns)))
+    obs = _call(state, root, "c1", lambda: None, inputs=[str(src)])
     (proof,) = obs["input_proofs"]
     assert proof["pre_run_proven"] is False
     assert proof["reason"] == "racy-timestamp"
@@ -234,12 +267,18 @@ def test_journal_lock_timeout_is_recorded_not_waited_out(
     io.pre(state, host="claude", session="s1", call_id="c1", tool="Bash", repo_root=root,
            snapshot=True)
     monkeypatch.setattr(io, "LOCK_WAIT_SECONDS", 0.05)
+    # Simulated time: the observer's sleeps advance its monotonic clock, so
+    # the wait is measured exactly and a wait that never gives up fails at
+    # the sleep limit instead of hanging.
+    clock = _Clock(sleep_limit=5.0)
+    monkeypatch.setattr(io, "time", clock)
     with open(f"{io.journal_path(state)}.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        started = time.monotonic()
         obs = io.post(state, host="claude", session="s1", call_id="c1", tool="Bash",
                       repo_root=root)
-        assert time.monotonic() - started < 2
+    # Gave up once the configured 0.05 s had passed (plus one 5 ms poll),
+    # not after the 2 s default or never.
+    assert 0.05 <= clock.slept <= 0.05 + 0.01
     assert obs["status"] == "unavailable" and obs["reason"] == "lock-timeout"
 
 

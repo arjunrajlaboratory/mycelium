@@ -81,13 +81,14 @@ def _stop(host, repo, sid):
     return result
 
 
-def _bash(host, repo, sid, command, hook):
+def _bash(host, repo, sid, command, hook, extra_env=None):
     return _run(
         host, hook, repo,
         {"cwd": str(repo), "session_id": sid, "tool_name": "Bash",
          "hook_event_name": "PostToolUse",
          "tool_input": {"command": command},
          "tool_response": {"exit_code": 0}},
+        extra_env=extra_env,
     )
 
 
@@ -100,6 +101,31 @@ def _events(repo: Path, host: str, sid: str) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def _unrecorded(repo: Path, host: str, sid: str) -> list[dict]:
+    path = _run_dir(repo, host, sid) / "mycelium-unrecorded-events.tmp"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def _unowned_skips(repo: Path, host: str, sid: str) -> list[dict]:
+    return [
+        record for record in _unowned(repo)
+        if record.get("kind") == "skip"
+        and record.get("host") == host
+        and record.get("host_session_id") == sid
+    ]
+
+
+# Hooks poll a busy lock MYCELIUM_*_LOCK_MAX_ATTEMPTS times (default 600, at
+# least 50 ms each) before dropping their event with evidence. Tests that run
+# many hooks against one session raise both so a loaded runner rarely drops.
+_PATIENT_LOCKS = {
+    "MYCELIUM_SESSION_LOCK_MAX_ATTEMPTS": "6000",
+    "MYCELIUM_STOP_LOCK_MAX_ATTEMPTS": "6000",
+}
 
 
 def _blocked(stop: subprocess.CompletedProcess) -> bool:
@@ -224,6 +250,14 @@ def test_project_edit_after_an_idle_turn_reopens(tmp_path, host):
 
 @pytest.mark.parametrize("host", HOSTS)
 def test_parallel_hooks_reopen_exactly_one_transaction(tmp_path, host):
+    """Parallel work hooks after an accepted turn reopen one transaction.
+
+    Every analysis command lands in that transaction's event stream once,
+    or its hook leaves the evidence it is designed to leave when a lock
+    stays busy past its wait: a line in the transaction's unrecorded-events
+    file, or an unowned "no-transaction" skip for this session. Both lock
+    waits are raised so a loaded runner rarely drops an event at all.
+    """
     repo = _repo(tmp_path)
     sid = "parallel-session"
     _accept_idle_turn(host, repo, sid)
@@ -231,7 +265,8 @@ def test_parallel_hooks_reopen_exactly_one_transaction(tmp_path, host):
 
     with ThreadPoolExecutor(len(hooks)) as pool:
         results = list(pool.map(
-            lambda hook: _bash(host, repo, sid, "python3 analysis.py", hook),
+            lambda hook: _bash(host, repo, sid, "python3 analysis.py", hook,
+                               extra_env=_PATIENT_LOCKS),
             hooks,
         ))
 
@@ -240,7 +275,22 @@ def test_parallel_hooks_reopen_exactly_one_transaction(tmp_path, host):
     assert len(logs) == 1
     marker = _run_dir(repo, host, sid) / "active-session-log.tmp"
     assert Path(marker.read_text().splitlines()[0]) == logs[0]
-    assert len(_events(repo, host, sid)) == 4
+    events = _events(repo, host, sid)
+    unrecorded = _unrecorded(repo, host, sid)
+    unowned = _unowned_skips(repo, host, sid)
+    evidence = {
+        "events": events, "unrecorded": unrecorded, "unowned": unowned,
+        "stderr": [r.stderr for r in results if r.stderr],
+    }
+    assert events, evidence
+    data_unrecorded = [
+        line for line in unrecorded if line["hook"] == "mycelium-data-tracker.sh"
+    ]
+    assert all(line["kind"] == "lineage" for line in data_unrecorded), evidence
+    assert all(
+        skip.get("skip_reason") == "no-transaction" for skip in unowned
+    ), evidence
+    assert len(events) + len(data_unrecorded) + len(unowned) == 4, evidence
 
 
 @pytest.mark.parametrize("host", HOSTS)

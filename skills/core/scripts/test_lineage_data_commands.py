@@ -37,14 +37,18 @@ pytestmark = pytest.mark.platform
 EXTRACTOR = Path(__file__).parent / "extract_data_lineage_event.py"
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 HOSTS = ["claude", "codex"]
-# Linear-scan tests time this process's CPU, not the wall clock. CI runs the
-# suite on every core at once (pytest -n auto), and on shared macOS runners a
-# linear scan took 5-8 s of wall time while waiting for a core, against about
-# 0.25 s of CPU. Oversubscribing a machine 4x multiplied wall time by about 6
-# and CPU time by about 1.3, so the bound below keeps its old strictness.
-SCAN_CPU_LIMIT_SECONDS = 5.0
+# Linear-scan tests assert how the scan SCALES, not how long it takes: CPU
+# seconds at size n against size n/2, measured in this process, best of two.
+# Linear growth is about 2x and the quadratic regressions these tests were
+# written for were 4x or far worse (58 s on 5,000 words). An absolute CPU
+# bound (5 s) still failed on loaded CI runners at 5.3-12.7 s, so the only
+# absolute bound left is a generous sanity limit. Below the floor a scan is
+# too fast to judge, and a quadratic one at these sizes is never that fast.
+SCALING_RATIO_LIMIT = 3.2
+SCALING_FLOOR_SECONDS = 0.5
+SANITY_CPU_SECONDS = 60.0
 # Wall-clock bound for calls that must return rather than block (FIFOs).
-HANG_LIMIT_SECONDS = 30.0
+HANG_LIMIT_SECONDS = 60.0
 
 
 def _event(command: str, cwd: Path, bash_exit: int | None = 0) -> dict | None:
@@ -241,18 +245,17 @@ def test_a_brace_word_naming_no_data_stays_unnamed(project, command):
 
 
 @pytest.mark.parametrize(
-    "command",
+    ("build", "n"),
     [
-        "ls " + "{a," * 20000 + "b}" * 3 + " " + "x{" * 20000,
+        (lambda n: "ls " + "{a," * n + "b}" * 3 + " " + "x{" * n, 20000),
         # An unclosed `{` before a long comma run (minified JSON in an echo)
         # once retried the group at every comma: 8 s on 85 KB.
-        "echo '{" + "1," * 40000 + "' > data/x.csv",
-        "echo '" + "{\"k\":[" + "1," * 40000 + "]}' | head",
+        (lambda n: "echo '{" + "1," * n + "' > data/x.csv", 40000),
+        (lambda n: "echo '" + "{\"k\":[" + "1," * n + "]}' | head", 40000),
     ],
 )
-def test_brace_words_scan_linearly(project, command):
-    event, seconds = _timed_event(command, project)
-    assert seconds < SCAN_CPU_LIMIT_SECONDS
+def test_brace_words_scan_linearly(project, build, n):
+    _assert_scans_linearly(build, n, project)
 
 
 def _main_literal_mentions(command: str, root: str | None) -> list[str]:
@@ -446,9 +449,9 @@ def test_a_variable_setter_keeps_its_own_redirections(project):
 
 def test_relative_resolution_stats_a_bounded_number_of_words(project):
     _output_tree(project)
-    command = "ls " + " ".join(f"outputs/f{i}.log" for i in range(20000))
-    event, seconds = _timed_event(command, project / "analysis" / "x")
-    assert seconds < SCAN_CPU_LIMIT_SECONDS
+    _assert_scans_linearly(
+        lambda n: "ls " + " ".join(f"outputs/f{i}.log" for i in range(n)), 20000,
+        project / "analysis" / "x")
 
 
 def test_named_paths_are_capped_and_marked_truncated(project):
@@ -768,26 +771,36 @@ def _timed_event(command: str, cwd: Path, bash_exit: int | None = 0):
     return event, time.process_time() - started
 
 
+def _assert_scans_linearly(build, n: int, cwd: Path):
+    """Scan ``build(n)`` and ``build(n // 2)``; require roughly linear growth
+    in CPU time (see SCALING_RATIO_LIMIT). Returns the event for ``build(n)``."""
+    event, _ = _timed_event(build(n), cwd)
+    small = min(_timed_event(build(n // 2), cwd)[1] for _ in range(2))
+    large = min(_timed_event(build(n), cwd)[1] for _ in range(2))
+    assert large < SANITY_CPU_SECONDS, large
+    assert large < max(small * SCALING_RATIO_LIMIT, SCALING_FLOOR_SECONDS), (small, large)
+    return event
+
+
 @pytest.mark.parametrize(
-    "command",
+    ("build", "n"),
     [
-        "head " + "x" * 400_000 + ".csv",
-        "echo " + " ".join(['"a"'] * 20_000) + " data/x.csv",
-        " && ".join(["sort data/x.csv > data/o.csv"] * 3000),
-        " && ".join(["cd data"] * 3000) + " && head x.csv",
-        "cp " + " ".join(f"data/f{i}.csv" for i in range(20_000)) + " data/",
-        "R -f a.R --args " + " ".join(['"$x"'] * 5000) + " data/x.csv",
-        "\n".join(["R -q -e 'read.csv(\"data/x.csv\")'"] * 800),
-        "python3 - <<'PY'\n" + "print('data/x.csv')\n" * 20_000 + "PY",
-        "for f in a; do " + "Rscript s.R; " * 5000 + "done",
-        "a/" * 100_000 + "data/x.csv",
-        ";" * 200_000 + " head data/x.csv",
+        (lambda n: "head " + "x" * n + ".csv", 400_000),
+        (lambda n: "echo " + " ".join(['"a"'] * n) + " data/x.csv", 20_000),
+        (lambda n: " && ".join(["sort data/x.csv > data/o.csv"] * n), 3000),
+        (lambda n: " && ".join(["cd data"] * n) + " && head x.csv", 3000),
+        (lambda n: "cp " + " ".join(f"data/f{i}.csv" for i in range(n)) + " data/", 20_000),
+        (lambda n: "R -f a.R --args " + " ".join(['"$x"'] * n) + " data/x.csv", 5000),
+        (lambda n: "\n".join(["R -q -e 'read.csv(\"data/x.csv\")'"] * n), 800),
+        (lambda n: "python3 - <<'PY'\n" + "print('data/x.csv')\n" * n + "PY", 20_000),
+        (lambda n: "for f in a; do " + "Rscript s.R; " * n + "done", 5000),
+        (lambda n: "a/" * n + "data/x.csv", 100_000),
+        (lambda n: ";" * n + " head data/x.csv", 200_000),
     ],
 )
-def test_long_commands_scan_in_linear_time(project, command):
-    event, seconds = _timed_event(command, project)
+def test_long_commands_scan_in_linear_time(project, build, n):
+    event = _assert_scans_linearly(build, n, project)
     assert event is not None
-    assert seconds < SCAN_CPU_LIMIT_SECONDS
 
 
 def test_doubling_a_command_roughly_doubles_the_scan(project):
@@ -1071,11 +1084,12 @@ def test_data_commands_stay_parked_when_their_manifest_cannot_be_written(
 def test_a_fifo_target_is_recorded_without_being_opened(project):
     fifo = project / "data" / "stream.csv"
     os.mkfifo(fifo)
-    event, seconds = _timed_event("wc -l < data/stream.csv", project)
+    started = time.monotonic()
+    event = _event("wc -l < data/stream.csv", project)
+    assert time.monotonic() - started < HANG_LIMIT_SECONDS  # returned, did not block
     [record] = event["inputs"]
     assert record["path"] == str(fifo)
     assert record.get("sha256") is None
-    assert seconds < SCAN_CPU_LIMIT_SECONDS
     stream = project / "events.tmp"
     stream.write_text(json.dumps(dict(event, ts="T")) + "\n")
     started = time.monotonic()
@@ -1127,17 +1141,18 @@ def test_a_quoted_interpreter_word_is_still_labelled(project):
 
 
 @pytest.mark.parametrize(
-    "command",
+    ("build", "n"),
     [
-        "printf %s '" + "a" * 800_000 + "' > data/input.csv",
-        "for f in a; do " + " ".join(f"./s{i}.sh;" for i in range(32_000)) + " done",
-        "echo " + "/outputs" * 100_000 + "/x",
-        "for f in a; do " + " ".join(f"xargs ./s{i}.sh;" for i in range(32_000)) + " done",
+        (lambda n: "printf %s '" + "a" * n + "' > data/input.csv", 800_000),
+        (lambda n: "for f in a; do " + " ".join(f"./s{i}.sh;" for i in range(n)) + " done",
+         32_000),
+        (lambda n: "echo " + "/outputs" * n + "/x", 100_000),
+        (lambda n: "for f in a; do " + " ".join(f"xargs ./s{i}.sh;" for i in range(n))
+         + " done", 32_000),
     ],
 )
-def test_round_one_long_commands_scan_in_linear_time(project, command):
-    _event_value, seconds = _timed_event(command, project)
-    assert seconds < SCAN_CPU_LIMIT_SECONDS
+def test_round_one_long_commands_scan_in_linear_time(project, build, n):
+    _assert_scans_linearly(build, n, project)
 
 
 def test_a_long_command_still_gets_labels_past_the_detection_bound(project):
@@ -1313,10 +1328,10 @@ def test_round_three_unproven_runs_are_labelled(project, command, label):
 
 
 def test_many_leading_assignments_scan_linearly(project):
-    command = " ".join(f"V{i}=1" for i in range(32_000)) + " sort data/x.csv > data/o.csv"
-    event, seconds = _timed_event(command, project)
+    event = _assert_scans_linearly(
+        lambda n: " ".join(f"V{i}=1" for i in range(n)) + " sort data/x.csv > data/o.csv",
+        32_000, project)
     assert event["outputs"]
-    assert seconds < SCAN_CPU_LIMIT_SECONDS
 
 
 # ---------- Codex review round 4 ----------
@@ -1561,10 +1576,10 @@ def test_a_shell_script_after_many_options_is_labelled(project):
 
 
 def test_many_distinct_segments_stay_bounded(project):
-    command = "for f in a; do " + " ".join(f"python3 s{i}.py;" for i in range(3000)) + " done"
-    event, seconds = _timed_event(command, project)
+    event = _assert_scans_linearly(
+        lambda n: "for f in a; do " + " ".join(f"python3 s{i}.py;" for i in range(n)) + " done",
+        3000, project)
     assert event is not None
-    assert seconds < SCAN_CPU_LIMIT_SECONDS
 
 
 # ---------- Codex review round 12 ----------

@@ -4317,9 +4317,17 @@ def test_backslash_runs_do_not_backtrack_exponentially() -> None:
     40 backslashes took hours to reject."""
     import time
 
-    started = time.process_time()
-    assert not is_analysis("R " + "\\" * 40 + "x")
-    assert time.process_time() - started < 2
+    # Exponential, not merely slow: 20 backslashes against 40 must cost about
+    # the same (2^20 times more before the fix), measured as CPU.
+    def cpu(count: int) -> float:
+        started = time.process_time()
+        assert not is_analysis("R " + "\\" * count + "x")
+        return time.process_time() - started
+
+    small = min(cpu(20) for _ in range(2))
+    large = min(cpu(40) for _ in range(2))
+    assert large < 60
+    assert large < max(small * 3.2, 0.5), (small, large)
 
 
 def test_quoted_suffix_on_args_is_not_the_boundary(tmp_path: Path) -> None:
@@ -5042,6 +5050,40 @@ def test_stdlib_review_probe(case: str) -> None:
     assert lineage_event._stdlib_static_io(source, script_args) == expected
 
 
+# The stdlib scan's bounds are asserted on its deterministic work counter,
+# not the wall clock: a tight time limit (1.5 s, once 0.5 s) failed on loaded
+# CI runners. With the scan's deadline switched off, each pathological input
+# must still stop at `_STDLIB_WORK_LIMIT` ticks; the only time bound left is a
+# generous sanity limit.
+STDLIB_SANITY_SECONDS = 60.0
+
+
+@pytest.fixture
+def stdlib_ticks(monkeypatch):
+    """Disable the scan's wall-clock deadline and count its work ticks."""
+    monkeypatch.setattr(lineage_event, "_STDLIB_DEADLINE_SECONDS", 1e9)
+    counter = {"ticks": 0, "max": 0}
+    original = lineage_event._StdlibIO._tick
+
+    def tick(self):
+        counter["ticks"] += 1
+        return original(self)
+
+    monkeypatch.setattr(lineage_event._StdlibIO, "_tick", tick)
+    return counter
+
+
+def _bounded_scan(stdlib_ticks, source, script_args):
+    import time
+
+    stdlib_ticks["ticks"] = 0
+    start = time.perf_counter()
+    result = lineage_event._stdlib_static_io(source, script_args)
+    assert time.perf_counter() - start < STDLIB_SANITY_SECONDS
+    assert stdlib_ticks["ticks"] <= lineage_event._STDLIB_WORK_LIMIT + 1
+    return result
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -5057,12 +5099,8 @@ def test_stdlib_review_probe(case: str) -> None:
     ],
     ids=["call-sites", "doubling", "join-chain", "div-chain", "many-sinks"],
 )
-def test_stdlib_pathological_script_is_bounded(source: str) -> None:
-    import time
-
-    start = time.perf_counter()
-    lineage_event._stdlib_static_io(source, [])
-    assert time.perf_counter() - start < 1.5
+def test_stdlib_pathological_script_is_bounded(stdlib_ticks, source: str) -> None:
+    _bounded_scan(stdlib_ticks, source, [])
 
 
 @pytest.mark.parametrize(
@@ -5164,13 +5202,8 @@ def _argparse_options_source(count: int) -> str:
     ids=["deep-open", "deep-read-text", "deep-reach", "huge-flat", "many-sinks",
          "argparse-5k-by-5k", "argparse-20k", "argparse-many-args"],
 )
-def test_stdlib_scan_work_is_bounded_globally(source: str, script_args) -> None:
-    import time
-
-    start = time.perf_counter()
-    lineage_event._stdlib_static_io(source, script_args)
-    # The scan's own deadline is 0.4 s; the ceiling is generous for slow CI.
-    assert time.perf_counter() - start < 1.5
+def test_stdlib_scan_work_is_bounded_globally(stdlib_ticks, source: str, script_args) -> None:
+    _bounded_scan(stdlib_ticks, source, script_args)
 
 
 def test_argparse_replay_still_resolves_a_realistic_parser() -> None:
@@ -5268,9 +5301,7 @@ def test_stdlib_review_probe_round_3(case: str) -> None:
     assert lineage_event._stdlib_static_io(source, script_args) == expected
 
 
-def test_argparse_backtracking_layout_is_declined_quickly() -> None:
-    import time
-
+def test_argparse_backtracking_layout_is_declined_quickly(stdlib_ticks) -> None:
     source = (
         "import argparse\np = argparse.ArgumentParser()\np.add_argument('--output')\n"
         + "".join(f"p.add_argument('{n}', nargs='*')\n"
@@ -5278,9 +5309,7 @@ def test_argparse_backtracking_layout_is_declined_quickly() -> None:
         + "p.add_argument('columns', nargs=101)\na = p.parse_args()\nopen(a.output, 'w')\n"
     )
     args = ["sample"] * 100 + ["--output", "report.txt"] + ["col"] * 101
-    start = time.perf_counter()
-    assert lineage_event._stdlib_static_io(source, args) == ([], [])
-    assert time.perf_counter() - start < 1.5
+    assert _bounded_scan(stdlib_ticks, source, args) == ([], [])
 
 
 def test_main_argparse_declines_carriage_return_in_shell_word(tmp_path: Path) -> None:
@@ -5346,8 +5375,14 @@ def test_chdir_keeps_reader_paths_with_an_absolute_base(tmp_path: Path) -> None:
     # directory; this branch drops it (asserted separately).
 
 
-def test_stdlib_inferred_hashing_is_budgeted(tmp_path: Path) -> None:
+def test_stdlib_inferred_hashing_is_budgeted(tmp_path: Path, monkeypatch) -> None:
     import time
+
+    # The byte budget (128 MiB of 768 MiB here) decides what is skipped, not
+    # the clock: switch the deadlines off so a slow runner cannot change it.
+    monkeypatch.setattr(lineage_event, "_STDLIB_DEADLINE_SECONDS", 1e9)
+    monkeypatch.setattr(lineage_event._HashBudget.__init__, "__defaults__",
+                        (128 * 1024**2, 1e9))
 
     names = [f"shard-{i:03}.bin" for i in range(12)]
     for name in names:
@@ -5365,7 +5400,8 @@ def test_stdlib_inferred_hashing_is_budgeted(tmp_path: Path) -> None:
     assert skipped and all(r["sha256"] is None for r in skipped)
     assert all("size_bytes" in r for r in skipped)
     assert len(hashed) + len(skipped) == len(names)
-    assert elapsed < 2.0
+    assert 0 < len(hashed) <= 2  # 64 MiB each against the 128 MiB budget
+    assert elapsed < STDLIB_SANITY_SECONDS
 
 
 
@@ -5522,19 +5558,41 @@ def test_stdlib_additions_stay_inside_the_repository(tmp_path: Path) -> None:
     assert outputs == [str(repo / "inside.csv")]
 
 
-def test_stdlib_framing_of_many_outside_paths_is_bounded(tmp_path: Path) -> None:
+def test_stdlib_framing_of_many_outside_paths_is_bounded(
+        tmp_path: Path, monkeypatch, stdlib_ticks) -> None:
+    import collections
+    import os
     import time
 
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    out = tmp_path / "shared/pipeline/published/country/routine/archive/sequencing/experiment"
-    out.mkdir(parents=True)
-    source = f"BASE = {str(out) + '/'!r}\n" + "".join(
-        f"open(BASE + '{i:05}.csv', 'w').close()\n" for i in range(4000))
-    start = time.perf_counter()
-    _, _, outputs = _stdlib_event(repo, source)
-    assert outputs == []
-    assert time.perf_counter() - start < 1.5
+    # Deterministic: the filesystem calls made for N outside paths do not grow
+    # with N (once one stat/realpath per path), and the scan stays in budget.
+    calls: collections.Counter = collections.Counter()
+    for module, name in ((os.path, "realpath"), (os.path, "commonpath"),
+                         (os.path, "exists"), (os, "stat"), (os, "lstat")):
+        original = getattr(module, name)
+
+        def counted(*args, _original=original, _name=name, **kwargs):
+            calls[_name] += 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, counted)
+
+    def framed(count: int) -> collections.Counter:
+        repo = tmp_path / f"repo{count}"
+        repo.mkdir()
+        out = tmp_path / "shared/pipeline/published/country/routine/archive/sequencing/experiment"
+        out.mkdir(parents=True, exist_ok=True)
+        source = f"BASE = {str(out) + '/'!r}\n" + "".join(
+            f"open(BASE + '{i:05}.csv', 'w').close()\n" for i in range(count))
+        calls.clear()
+        start = time.perf_counter()
+        _, _, outputs = _stdlib_event(repo, source)
+        assert outputs == []
+        assert time.perf_counter() - start < STDLIB_SANITY_SECONDS
+        assert stdlib_ticks["ticks"] <= lineage_event._STDLIB_WORK_LIMIT + 1
+        return collections.Counter(calls)
+
+    assert framed(4000) == framed(8000)
 
 
 @pytest.mark.parametrize(
