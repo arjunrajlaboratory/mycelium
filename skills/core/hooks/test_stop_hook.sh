@@ -66,6 +66,16 @@ run_hook() {
   run_hook_with_input "$1" '{}'
 }
 
+# An accepted Stop's output: one `systemMessage` for the user and nothing
+# else. On Claude, `additionalContext` on a Stop continues the conversation.
+accepted_message() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+out = json.load(sys.stdin)
+sys.exit(0 if set(out) == {"systemMessage"} and out["systemMessage"] else 1)
+' 2>/dev/null
+}
+
 # ─────────────────────────────────────────────────────────────────
 # Helpers for timestamp manipulation
 # ─────────────────────────────────────────────────────────────────
@@ -187,10 +197,10 @@ echo "TEST 3: Work done, only learnings.md updated → should PASS"
 
   run_hook "$REPO"
 
-  if [ "$HOOK_EXIT" -eq 0 ] && echo "$HOOK_OUTPUT" | grep -q '"additionalContext"'; then
-    pass "learnings.md updated → exit 0, additionalContext emitted"
+  if [ "$HOOK_EXIT" -eq 0 ] && accepted_message "$HOOK_OUTPUT"; then
+    pass "learnings.md updated → exit 0, systemMessage only"
   else
-    fail "learnings.md updated → expected exit 0 + additionalContext" \
+    fail "learnings.md updated → expected exit 0 + systemMessage only" \
       "exit=$HOOK_EXIT output='$(echo "$HOOK_OUTPUT" | head -c 200)'"
   fi
   rm -rf "$REPO"
@@ -217,10 +227,10 @@ echo "TEST 4: Work done, only decisions.md updated → should PASS"
 
   run_hook "$REPO"
 
-  if [ "$HOOK_EXIT" -eq 0 ] && echo "$HOOK_OUTPUT" | grep -q '"additionalContext"'; then
-    pass "decisions.md updated → exit 0, additionalContext emitted"
+  if [ "$HOOK_EXIT" -eq 0 ] && accepted_message "$HOOK_OUTPUT"; then
+    pass "decisions.md updated → exit 0, systemMessage only"
   else
-    fail "decisions.md updated → expected exit 0 + additionalContext" \
+    fail "decisions.md updated → expected exit 0 + systemMessage only" \
       "exit=$HOOK_EXIT output='$(echo "$HOOK_OUTPUT" | head -c 200)'"
   fi
   rm -rf "$REPO"
@@ -247,10 +257,10 @@ echo "TEST 5: Work done, only conventions.md updated → should PASS"
 
   run_hook "$REPO"
 
-  if [ "$HOOK_EXIT" -eq 0 ] && echo "$HOOK_OUTPUT" | grep -q '"additionalContext"'; then
-    pass "conventions.md updated → exit 0, additionalContext emitted"
+  if [ "$HOOK_EXIT" -eq 0 ] && accepted_message "$HOOK_OUTPUT"; then
+    pass "conventions.md updated → exit 0, systemMessage only"
   else
-    fail "conventions.md updated → expected exit 0 + additionalContext" \
+    fail "conventions.md updated → expected exit 0 + systemMessage only" \
       "exit=$HOOK_EXIT output='$(echo "$HOOK_OUTPUT" | head -c 200)'"
   fi
   rm -rf "$REPO"
@@ -279,10 +289,10 @@ echo "TEST 6: Work done, only findings/ dir updated → should PASS"
 
   run_hook "$REPO"
 
-  if [ "$HOOK_EXIT" -eq 0 ] && echo "$HOOK_OUTPUT" | grep -q '"additionalContext"'; then
-    pass "findings/ dir updated → exit 0, additionalContext emitted"
+  if [ "$HOOK_EXIT" -eq 0 ] && accepted_message "$HOOK_OUTPUT"; then
+    pass "findings/ dir updated → exit 0, systemMessage only"
   else
-    fail "findings/ dir updated → expected exit 0 + additionalContext" \
+    fail "findings/ dir updated → expected exit 0 + systemMessage only" \
       "exit=$HOOK_EXIT output='$(echo "$HOOK_OUTPUT" | head -c 200)'"
   fi
   rm -rf "$REPO"
@@ -409,10 +419,10 @@ echo "TEST 10: learnings.md + findings/ both updated → should PASS"
 
   run_hook "$REPO"
 
-  if [ "$HOOK_EXIT" -eq 0 ] && echo "$HOOK_OUTPUT" | grep -q '"additionalContext"'; then
-    pass "learnings + findings both updated → exit 0, additionalContext"
+  if [ "$HOOK_EXIT" -eq 0 ] && accepted_message "$HOOK_OUTPUT"; then
+    pass "learnings + findings both updated → exit 0, systemMessage only"
   else
-    fail "learnings + findings both updated → expected exit 0 + additionalContext" \
+    fail "learnings + findings both updated → expected exit 0 + systemMessage only" \
       "exit=$HOOK_EXIT output='$(echo "$HOOK_OUTPUT" | head -c 200)'"
   fi
   rm -rf "$REPO"
@@ -438,9 +448,9 @@ echo "TEST 11: Activity file only (no reminded.tmp) → work detected"
   run_hook "$REPO"
 
   # With WORK_TS=0 and files touched now, the mtime check will see them as updated
-  # Expected: passes with additionalContext
-  if [ "$HOOK_EXIT" -eq 0 ] && echo "$HOOK_OUTPUT" | grep -q '"additionalContext"'; then
-    pass "Activity file only → work detected, .living updated, additionalContext emitted"
+  # Expected: passes with a systemMessage
+  if [ "$HOOK_EXIT" -eq 0 ] && accepted_message "$HOOK_OUTPUT"; then
+    pass "Activity file only → work detected, .living updated, systemMessage only"
   elif [ "$HOOK_EXIT" -eq 0 ] && [ -z "$HOOK_OUTPUT" ]; then
     # If neither reminded.tmp nor activity check triggers → also acceptable silent pass
     pass "Activity file only → exit 0 (hook passed)"
@@ -565,10 +575,10 @@ echo "TEST 14: Activity file only, .living not updated → should BLOCK"
 }
 
 # ─────────────────────────────────────────────────────────────────
-# TEST 15: additionalContext contains LOG_REGISTRY instruction
+# TEST 15: accepted message contains LOG_REGISTRY instruction
 # ─────────────────────────────────────────────────────────────────
 echo ""
-echo "TEST 15: additionalContext contains LOG_REGISTRY instruction"
+echo "TEST 15: accepted message contains LOG_REGISTRY instruction"
 {
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
@@ -599,9 +609,9 @@ LOG_EOF
   run_hook "$REPO"
 
   if [ "$HOOK_EXIT" -eq 0 ] && echo "$HOOK_OUTPUT" | grep -q "LOG_REGISTRY"; then
-    pass "additionalContext contains LOG_REGISTRY instruction"
+    pass "accepted message contains LOG_REGISTRY instruction"
   else
-    fail "additionalContext missing LOG_REGISTRY instruction" \
+    fail "accepted message missing LOG_REGISTRY instruction" \
       "exit=$HOOK_EXIT output='$(echo "$HOOK_OUTPUT" | head -c 400)'"
   fi
   rm -rf "$REPO"
