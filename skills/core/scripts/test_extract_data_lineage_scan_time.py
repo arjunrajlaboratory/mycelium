@@ -40,8 +40,12 @@ def _timed(function, *args):
 
 def _assert_linear(function, build, n: int, *args) -> None:
     """CPU for ``function(build(n), *args)`` grows about linearly from n/2."""
-    small = min(_timed(function, build(n // 2), *args)[1] for _ in range(2))
-    large = min(_timed(function, build(n), *args)[1] for _ in range(2))
+    small_input, large_input = build(n // 2), build(n)
+    smalls, larges = [], []
+    for _ in range(3):  # interleaved, so a load spike cannot hit one side only
+        smalls.append(_timed(function, small_input, *args)[1])
+        larges.append(_timed(function, large_input, *args)[1])
+    small, large = min(smalls), min(larges)
     assert large < SANITY_CPU_SECONDS, large
     assert large < max(small * SCALING_RATIO_LIMIT, SCALING_FLOOR_SECONDS), (small, large)
 

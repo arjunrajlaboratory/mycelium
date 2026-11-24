@@ -706,6 +706,9 @@ def test_a_held_lock_falls_back_and_revalidates_after_acquiring(tmp_path):
         )
         hook.stdin.write(json.dumps(event).encode())
         hook.stdin.close()
+        # communicate() below must not touch the closed pipe (Python 3.11
+        # flushes it: "flush of closed file").
+        hook.stdin = None
         # Mutate only once the event is polling the held lock: earlier, it
         # would see no transaction before the lock and never exercise the
         # revalidation this test is about.

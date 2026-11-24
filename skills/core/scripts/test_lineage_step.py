@@ -1190,7 +1190,7 @@ def test_a_void_affects_only_later_uses() -> None:
 
 def test_expansion_is_linear_in_the_number_of_stages() -> None:
     # Scaling, not wall time (a 0.5 s bound is flaky on loaded CI): CPU at
-    # 6000 stages against 3000, best of two, must grow about linearly.
+    # 6000 stages against 3000, interleaved best of three, must grow about linearly.
     def cpu(stages: int) -> float:
         command = f"PY={PY}; " + "; ".join(["$PY s.py"] * stages)
         started = time.process_time()
@@ -1199,8 +1199,9 @@ def test_expansion_is_linear_in_the_number_of_stages() -> None:
         assert expanded.count(f"{PY} s.py") == stages
         return seconds
 
-    small = min(cpu(3000) for _ in range(2))
-    large = min(cpu(6000) for _ in range(2))
+    pairs = [(cpu(3000), cpu(6000)) for _ in range(3)]  # interleaved against load spikes
+    small = min(pair[0] for pair in pairs)
+    large = min(pair[1] for pair in pairs)
     assert large < 60
     assert large < max(small * 3.2, 0.5), (small, large)
 

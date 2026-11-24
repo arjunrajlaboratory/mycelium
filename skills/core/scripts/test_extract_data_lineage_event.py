@@ -4324,8 +4324,9 @@ def test_backslash_runs_do_not_backtrack_exponentially() -> None:
         assert not is_analysis("R " + "\\" * count + "x")
         return time.process_time() - started
 
-    small = min(cpu(20) for _ in range(2))
-    large = min(cpu(40) for _ in range(2))
+    pairs = [(cpu(20), cpu(40)) for _ in range(3)]  # interleaved against load spikes
+    small = min(pair[0] for pair in pairs)
+    large = min(pair[1] for pair in pairs)
     assert large < 60
     assert large < max(small * 3.2, 0.5), (small, large)
 

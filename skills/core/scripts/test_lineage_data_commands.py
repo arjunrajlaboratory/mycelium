@@ -38,7 +38,8 @@ EXTRACTOR = Path(__file__).parent / "extract_data_lineage_event.py"
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 HOSTS = ["claude", "codex"]
 # Linear-scan tests assert how the scan SCALES, not how long it takes: CPU
-# seconds at size n against size n/2, measured in this process, best of two.
+# seconds at size n against size n/2, measured in this process, interleaved,
+# best of three.
 # Linear growth is about 2x and the quadratic regressions these tests were
 # written for were 4x or far worse (58 s on 5,000 words). An absolute CPU
 # bound (5 s) still failed on loaded CI runners at 5.3-12.7 s, so the only
@@ -775,8 +776,12 @@ def _assert_scans_linearly(build, n: int, cwd: Path):
     """Scan ``build(n)`` and ``build(n // 2)``; require roughly linear growth
     in CPU time (see SCALING_RATIO_LIMIT). Returns the event for ``build(n)``."""
     event, _ = _timed_event(build(n), cwd)
-    small = min(_timed_event(build(n // 2), cwd)[1] for _ in range(2))
-    large = min(_timed_event(build(n), cwd)[1] for _ in range(2))
+    small_command, large_command = build(n // 2), build(n)
+    smalls, larges = [], []
+    for _ in range(3):  # interleaved, so a load spike cannot hit one side only
+        smalls.append(_timed_event(small_command, cwd)[1])
+        larges.append(_timed_event(large_command, cwd)[1])
+    small, large = min(smalls), min(larges)
     assert large < SANITY_CPU_SECONDS, large
     assert large < max(small * SCALING_RATIO_LIMIT, SCALING_FLOOR_SECONDS), (small, large)
     return event

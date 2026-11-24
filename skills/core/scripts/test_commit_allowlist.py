@@ -858,7 +858,7 @@ def test_extractor_end_to_end_never_commits_the_secret_prefix(cdrepo: Path) -> N
 
 def test_sql_placeholders_do_not_stall_the_allowlist() -> None:
     # Scaling, not wall time (a 1 s bound is flaky on loaded CI): CPU at 24k
-    # placeholders against 12k, best of two, must grow about linearly.
+    # placeholders against 12k, interleaved best of three, must grow about linearly.
     def cpu(groups: int) -> float:
         sql = "INSERT INTO t VALUES " + ",".join(["(?,?,?)"] * groups)
         command = f"python3 -c \"c.execute('{sql}')\""
@@ -866,8 +866,9 @@ def test_sql_placeholders_do_not_stall_the_allowlist() -> None:
         lr.commit_safe_command(command, set())
         return time.process_time() - started
 
-    small = min(cpu(12000) for _ in range(2))
-    large = min(cpu(24000) for _ in range(2))
+    pairs = [(cpu(12000), cpu(24000)) for _ in range(3)]  # interleaved against load spikes
+    small = min(pair[0] for pair in pairs)
+    large = min(pair[1] for pair in pairs)
     assert large < 60
     assert large < max(small * 3.2, 0.5), (small, large)
 
