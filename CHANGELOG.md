@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A transcript replay for data lineage** (`tools/lineage_replay.py`). It
+  feeds every Bash call in a project's Claude Code and Codex transcripts
+  through the lineage detector the way the PostToolUse hook does (without
+  the observation summary, which transcripts do not record). It counts
+  events (analysis events and `data_command` records separately), logged
+  skips, and silent misses among data-touching commands, as decided by its
+  own reviewable rule. It reports counts only, never command text.
+  - **Headline:** only calls with positive evidence of success are
+    replayed (a non-error Claude result, or exit 0 in a Codex call's own
+    status header). Codex code-mode calls read from source are reported
+    apart as unverified.
+  - **SNP-tree:** 99.7% of data-touching Claude calls and 100% of Codex
+    direct calls now leave an event.
+  - **AP1-learning:** 100% of data-touching Claude calls leave an event.
+  - The rest leave logged skips, and no silent misses remain under the rule
+    (54, 57 and 4 before the fixes below). Most events are `data_command`
+    records, which name paths without a direction.
+
+  This meets item 1's acceptance criterion; numbers are in
+  `docs/plans/provenance-index.md`.
+
 - **A project-level lineage index** (`skills/core/scripts/lineage_index.py`).
   It answers three questions across sessions: which events read a content
   hash, which call produced it, and whether that write is still current.
@@ -137,6 +158,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Data commands recognize more of what touches data.**
+  - A path under `analysis/<name>/output/` (as well as `outputs/`) counts
+    as data.
+  - A relative path is also judged from where the call reads it: the
+    call's directory and each `cd` in command position before it
+    (`ls outputs/` in `analysis/x`). This applies only when the resolved
+    path, or a glob's directory, exists.
+  - A brace word inside one unquoted shell word (`tables/{a,b}.tsv`) is
+    judged by its alternatives.
+  - These readings only add mentions to the literal scan, and are bounded
+    (tracked directory length, distinct alternatives, total expansion
+    work). A command over 16 KB gets 0.9.7's rules exactly, `output/`
+    included.
+  - A stdin-fed interpreter is now labelled in three more cases: it has
+    arguments (`python3 - "$F" <<'EOF'`), its only sign of stdin is an
+    explicit `-`, or the call's only other run is a Mycelium helper.
+
+  Each of these cases used to leave a data-touching call with no record at
+  all.
 - **Committed lineage manifests keep only allowlisted words**
   (`text_policy: "allowlist-v1"`). Six review rounds kept finding secrets
   that survived the denylist redaction, which can never cover every shell,
@@ -321,6 +361,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Claude Code background launch no longer claims writes as done.**
+  Claude Code runs PostToolUse when a background job starts
+  (`run_in_background`, or a command moved to the background with a
+  `backgroundTaskId`). The data tracker passed exit 0 for it. A redirection
+  or `cp`/`mv` target that already existed was then recorded as the job's
+  output, with its old content, while the job was still waiting to run. This
+  affected 0.9.7 for data-extension paths too. The tracker now passes no exit
+  status for a launch, plus `--background-launch`. A launch records no
+  `outputs` at all, including a script's statically inferred outputs, which
+  0.9.7 also hashed at launch. Only the host's launch evidence counts; the
+  observer's `background` status alone does not (`python3 fit.py && nohup
+  true` keeps fit.py's output).
+- After `printf -v NAME`, `read`, `readarray`, `mapfile`, `getopts`, or
+  `let`, any of which can set `PATH`, a later `cp`/`mv` in the same `&&` list
+  no longer counts as proven; the setter's own redirections still do. 0.9.7
+  recorded a copy that a `PATH`-shadowed `cp` never made. The attached form
+  `printf -vPATH` is not recognized.
+- A data command's `step` no longer tokenizes a stage longer than 16 KB.
+  `shlex` built a 250 KB quoted argument one character at a time, taking
+  seconds on the hook path. Such a stage is recorded as `partial` with
+  `reason: "stage-too-long"`, and a named path over 1 KB is not matched
+  against a stage's words.
 - A Claude Code session working in a linked git worktree (such as the
   desktop app's `.claude/worktrees/<name>/` side sessions) is now judged on
   that worktree. Stop and the Bash post-action hook took the repository root

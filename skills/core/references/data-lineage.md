@@ -172,7 +172,19 @@ how many times the data was looked at:
 - shell operations on data (`head`, `zcat`, `awk`, `cut`, `sort`, `cp`, `mv`,
   `samtools`, …) whose text names a data-like path: a file with a data
   extension (the scan list plus compressed and common genomics, tree, and
-  image formats), a path under `data/`, or a path under `analysis/**/outputs`.
+  image formats), a path under `data/`, or a path under `analysis/**/outputs`
+  (or `analysis/**/output`, which older projects use, for a command up to
+  16 KB; a longer command gets 0.9.7's rules exactly). A relative word is
+  also judged as resolved against the call's directory and each `cd` in
+  command position before it whose operand is a literal path
+  (`ls outputs/` run in `analysis/x`), but only when the resolved path (for
+  a glob, its directory) exists at hook time, and for at most 256 words a
+  call. A word with no `/` is never resolved, since in `data/` a bare `ls`
+  is a command.
+  A brace word inside one unquoted shell word
+  (`tables/{first,second}.tsv`) is judged by its alternatives. These
+  readings only add to the literal scan, and run only on commands up to
+  16 KB.
   Tooling and Mycelium state (`.living/`, `.mycelium/`, `.git/`, `.claude/`,
   `.codex/`, `node_modules/`, `package.json`, `requirements.txt`, …) and URLs
   are not data;
@@ -186,7 +198,9 @@ how many times the data was looked at:
   tooling modules (`python -m pytest`), and Mycelium's own helpers are
   excluded exactly as there. Labels are the resolved script path or
   `<interpreter> (inline)`; an interpreter reading its program from stdin
-  (heredoc, `xargs python3`) is labelled by name. Quoted text
+  (heredoc, `xargs python3`, an explicit `-` operand whatever follows it)
+  is labelled by name, also when the call's only other run is a Mycelium
+  helper. Quoted text
   (`echo "python a.py"`) and heredoc bodies (a README written with
   `cat <<EOF`) are not runs. Labels are hints, never claims.
 
@@ -232,11 +246,21 @@ of literal simple commands, so every command in it ran and succeeded:
 
 Pipes, `;`, `||`, backgrounding, subshells, substitutions, `$` expansions,
 globs, braces, tilde, heredocs, and an unknown exit status claim nothing. A
+Claude Code background launch (`run_in_background`, or a result carrying a
+`backgroundTaskId`) fires PostToolUse when the job starts, so the tracker
+passes no exit status and `--background-launch` for it. A launch records no
+`outputs` at all, from any source; the observer's `background` status alone
+does not withhold them, since a foreground stage before a `nohup` finished.
+After `printf -v NAME`, `read`, `readarray`, `mapfile`, `getopts`, or `let`
+(any of which can set `PATH`), nothing later in the list is claimed, as after
+`export` or a `PATH=` assignment; the setter's own redirections still are.
+The attached form `printf -vPATH` is not recognized. A
 command's own operands (`head data/x.csv`) are never inputs: that would need
 each tool's grammar. Files are hashed at hook time; a FIFO, device, or
 directory is recorded without being opened, and every open is non-blocking
-with a regular-file check on the descriptor. Long commands stay linear: the
-words are read by a one-pass tokenizer, and the label pass falls back to a
+with a regular-file check on the descriptor. Long commands stay linear: a
+record's `step` is not tokenized from a stage over 16 KB (it is `partial`
+with `reason: "stage-too-long"`), the words are read by a one-pass tokenizer, and the label pass falls back to a
 command-position scan beyond 64 KB.
 
 A call with a proven analysis run gets its analysis events and no data
