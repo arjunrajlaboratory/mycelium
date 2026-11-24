@@ -570,6 +570,328 @@ def check_estimability(check, columns, rows):
     return alerts
 
 
+class _Echelon:
+    """An exact row echelon form over the rationals, sparse and fraction-free.
+
+    Rows are {column: integer}. Each added row is reduced against the pivots
+    in the order they were made, so membership of a vector in the row space
+    is one reduction: it is in the row space when nothing is left.
+    """
+
+    def __init__(self, prefer=None, budget=None):
+        self.prefer = prefer or (lambda column: 0)
+        self.pivots, self.order = {}, {}
+        self.budget = budget  # an _AdvisoryBudget, or None for no limit
+
+    class TooLarge(Exception):
+        pass
+
+    def reduce(self, row):
+        import heapq
+        from math import gcd
+
+        row = {k: v for k, v in row.items() if v}
+        heap = [(self.order[k], k) for k in row if k in self.pivots]
+        heapq.heapify(heap)
+        while heap:
+            _, column = heapq.heappop(heap)
+            a = row.get(column)
+            if not a:
+                continue
+            pivot = self.pivots[column]
+            if self.budget is not None:
+                self.budget.spend(len(pivot) + len(row))
+            b = pivot[column]
+            out = {k: v * b for k, v in row.items()}
+            for k, v in pivot.items():
+                value = out.get(k, 0) - a * v
+                if value:
+                    if k not in out and k in self.pivots:
+                        heapq.heappush(heap, (self.order[k], k))
+                    out[k] = value
+                else:
+                    out.pop(k, None)
+            common = 0
+            for v in out.values():
+                common = gcd(common, v)
+                if common == 1:
+                    break
+            row = {k: v // common for k, v in out.items()} if common > 1 else out
+        return row
+
+    def add(self, row):
+        row = self.reduce(row)
+        if row:
+            column = min(row, key=self.prefer)
+            if row[column] < 0:
+                row = {k: -v for k, v in row.items()}
+            self.order[column] = len(self.order)
+            self.pivots[column] = row
+
+    def spans(self, row):
+        return not self.reduce(row)
+
+
+# Entry operations one paired_batch check may spend on elimination (about a
+# second); past it the check reports that it did not run.
+PAIRED_BATCH_BUDGET = 5000000
+# Seconds all advisory checks in one run may take together, row preparation
+# included; checks reached after it runs out are skipped with a warning.
+ADVISORY_SECONDS = 1.0
+
+
+class _AdvisoryBudget:
+    """Work and wall-clock shared by the advisory checks of one run."""
+
+    def __init__(self, ops=None, seconds=None):
+        import time
+
+        self.clock = time.monotonic
+        self.ops = PAIRED_BATCH_BUDGET if ops is None else ops
+        self.deadline = self.clock() + (ADVISORY_SECONDS if seconds is None else seconds)
+        self.calls = 0
+
+    def spend(self, n=1):
+        self.ops -= n
+        self.calls += 1
+        if self.ops < 0 or (self.calls % 256 == 0 and self.clock() > self.deadline):
+            raise _Echelon.TooLarge()
+
+    def exhausted(self):
+        return self.ops < 0 or self.clock() > self.deadline
+
+UNKNOWN_GROUP = object()  # a row whose group is unknown: its own nuisance cells
+
+
+def check_paired_batch(check, columns, rows):
+    """See _paired_batch. Advisory: running out of budget anywhere (row
+    preparation, elimination, contrast tests) discards partial results and
+    reports that the check did not run; it never raises."""
+    budget = check.get("_budget") or _AdvisoryBudget()
+    try:
+        return _paired_batch(check, rows, budget)
+    except _Echelon.TooLarge:
+        return [alert(
+            "paired_batch", "the design is too large to check within the time advisory checks "
+            "allow, so batch against the {} contrast was not checked".format(
+                _clip(check.get("within"))),
+            False, observed="{} rows, batch columns: {}".format(
+                len(rows), ", ".join(_clip(b) for b in as_list(check.get("batch")))))]
+
+
+def _paired_batch(check, rows, budget):
+    """Whether the within-unit contrasts of a paired design survive batch.
+
+    One design for the whole check: rows with a known unit and `within`
+    value; a cell parameter for every observed (group, within) pair, every
+    within level included whether `levels` declares it or not (a level
+    outside the contrast can still identify a batch); the unit absorbed by
+    differencing each unit's cells against its first; and one indicator per
+    batch level. Cell parameters carry the group main effect and the
+    group-by-within interaction, so a group that varies inside a unit (a
+    donor's control and knockout lines) is modelled. A missing group is
+    filled from the unit when the unit has one group, else the row keeps
+    its own nuisance cells. Batch identities are scoped apart from the raw
+    within value, so a column that is both keeps its levels.
+
+    Contrasts: each `levels` level (default: every level) against the first
+    one observed, within each group. A contrast blocks when it is estimable
+    from the pairs before rows missing a batch are dropped but not after
+    (missing values erased it), or estimable after the drop without batch
+    but not with it (confounded). A contrast the pairs never estimate is
+    left to the pairing check.
+    """
+    unit = need(check, "unit")
+    within = need(check, "within")
+    batches = as_list(need(check, "batch"))
+    group = check.get("group")
+    if group == within:
+        group = None
+    # Names and values as messages show them: clipped, so a pathological
+    # column name or label cannot make the report enormous.
+    unit_name, within_name = _clip(unit), _clip(within)
+    batch_names = ", ".join(_clip(b) for b in batches)
+    scopes = check.get("batch_scopes") or {}
+    unit_ids = [r[unit] for r in scoped(rows, unit, as_list(check.get("unit_scope")))]
+    batch_ids = [[r[b] for r in scoped(rows, b, as_list(scopes.get(b)))] for b in batches]
+    # One record per row: (unit, group, within, batch identities), with the
+    # raw within value whatever the batch scoping did to its column.
+    budget.spend(len(rows) * (2 + len(batches)))
+    records = [(unit_ids[i], r[group] if group else None, r[within],
+                tuple(ids[i] for ids in batch_ids)) for i, r in enumerate(rows)]
+    alerts = []
+    if group:
+        known = defaultdict(set)
+        for u, g, _, _ in records:
+            if not is_missing(u) and not is_missing(g):
+                known[u].add(g)
+        filled = []
+        for u, g, w, b in records:
+            if is_missing(g):
+                g = next(iter(known[u])) if len(known.get(u, ())) == 1 else UNKNOWN_GROUP
+            filled.append((u, g, w, b))
+        unknown = sum(1 for u, g, w, _ in filled if g is UNKNOWN_GROUP and
+                      not is_missing(u) and not is_missing(w))
+        if unknown:
+            alerts.append(alert(
+                "paired_batch", "{} rows have no '{}' and their {} has no single one to fill it "
+                "from; they are modelled as an unknown group".format(unknown, _clip(group), unit_name),
+                False,
+                observed="{} of {} rows".format(unknown, len(rows))))
+        records = filled
+    paired_rows = [r for r in records if not is_missing(r[0]) and not is_missing(r[2])]
+    batched = [r for r in paired_rows if not any(is_missing(b) for b in r[3])]
+    if len(batched) < len(paired_rows):
+        alerts.append(alert(
+            "paired_batch", "{} rows have a missing value in {}; a model adjusting for batch "
+            "drops them (checked below for lost pairs)".format(len(paired_rows) - len(batched),
+                                                    batch_names), False,
+            observed="{} of {} rows".format(len(paired_rows) - len(batched), len(paired_rows))))
+    contrasts = []
+    listed = distinct_levels(check.get("levels"))
+    observed = defaultdict(set)
+    for _, g, w, _ in paired_rows:
+        observed[g].add(w)
+    for g in sorted((g for g in observed if g is not UNKNOWN_GROUP), key=str):
+        levels = [lvl for lvl in (listed or sorted(observed[g])) if lvl in observed[g]]
+        contrasts += [(g, lvl, levels[0]) for lvl in levels[1:]]
+    if not contrasts:
+        return alerts
+
+    def key(g):
+        # Tagged, so a recorded label (even "?") never meets the unknown group.
+        return ("unknown",) if g is UNKNOWN_GROUP else ("label", g)
+
+    def echelon(records, with_batch):
+        # Batch columns pivot first; ties go to the first key in the row.
+        ech = _Echelon(prefer=lambda column: 0 if column[0] == "b" else 1, budget=budget)
+        first, seen = {}, set()
+        # Repeated samples of one cell (aliquots, images) add nothing; the
+        # rest keep the table's order.
+        for u, g, w, b in dict.fromkeys((u, key(g), w, b if with_batch else ())
+                                        for u, g, w, b in records):
+            vector = {("c", g, w): 1}
+            vector.update((("b", i, v), 1) for i, v in enumerate(b))
+            if u not in first:
+                first[u] = vector
+                continue
+            difference = dict(vector)
+            for k, v in first[u].items():
+                difference[k] = difference.get(k, 0) - v
+            signature = frozenset((k, v) for k, v in difference.items() if v)
+            if signature and signature not in seen:
+                seen.add(signature)
+                ech.add(difference)
+        return ech
+
+    def vector(contrast):
+        g, lvl, ref = contrast
+        return {("c", key(g), lvl): 1, ("c", key(g), ref): -1}
+
+    before, after = echelon(paired_rows, False), echelon(batched, False)
+    adjusted = echelon(batched, True)
+    erased, confounded = [], []
+    for contrast in contrasts:
+        if not before.spans(vector(contrast)):
+            continue  # no pair estimates it: the pairing check's to report
+        if not after.spans(vector(contrast)):
+            erased.append(contrast)
+        elif not adjusted.spans(vector(contrast)):
+            confounded.append(contrast)
+
+    def label(contrasts):
+        shown = "; ".join("{} vs {}".format(_side_label(group, (g, lvl)), _clip(ref))
+                          for g, lvl, ref in contrasts[:5])
+        return shown + ("; and {} more".format(len(contrasts) - 5) if len(contrasts) > 5 else "")
+
+    if erased:
+        alerts.append(alert(
+            "paired_batch",
+            "missing {} values leave no {} with both sides of the {} contrast, so a model "
+            "adjusting for batch has no pair to estimate it from".format(
+                batch_names, unit_name, within_name), False,
+            expected="pairs with batch values on both sides",
+            observed="no complete pair: " + label(erased)))
+    if confounded:
+        involved = {(g, lvl) for g, lvl, _ in confounded} | {(g, ref) for g, _, ref in confounded}
+        by_unit = defaultdict(set)
+        for u, g, w, b in batched:
+            if (g, w) in involved:
+                by_unit[u].add("{}@{}".format(_clip(w), _clip("/".join(b))))
+        alerts.append(alert(
+            "paired_batch",
+            "within {}, the {} contrast cannot be separated from {}: the pairs are split "
+            "across batches in step with it".format(unit_name, within_name, batch_names), False,
+            expected="each {} contrast estimable within {} after adjusting for {}".format(
+                within_name, unit_name, batch_names),
+            observed="not estimable: " + label(confounded),
+            evidence=["{}={}: {}".format(unit_name, _clip(u), _clip(", ".join(sorted(v))))
+                      for u, v in sorted(by_unit.items())[:5]]))
+    share = check.get("max_share")
+    if share is None:
+        return alerts
+    # Estimable is not the same as well supported: eight donors with base in
+    # run 1 and week 4 in run 2, and two with both visits in run 3, leave the
+    # visit effect resting on two donors. Among the units split across
+    # batches, the most common batch on one side is the step; it warns when
+    # that one batch carries one side for more than `max_share` of the
+    # paired units. Counterbalanced splits (half each way, or a rotation
+    # through three runs) and randomized runs spread both sides out.
+    budget.spend(len(batched))
+    batch_sets = defaultdict(lambda: defaultdict(set))  # (group, within) -> unit -> batches
+    for u, g, w, b in batched:
+        batch_sets[(g, w)][u].add(b)
+    reported = set(confounded) | set(erased)
+    hits = []
+    for contrast in contrasts:
+        g, lvl, ref = contrast
+        budget.spend()
+        if contrast in reported:
+            continue
+        on_ref, on_lvl = batch_sets.get((g, ref), {}), batch_sets.get((g, lvl), {})
+        budget.spend(len(on_ref))
+        pairs = [(on_ref[u], on_lvl[u]) for u in on_ref if u in on_lvl]
+        steps = Counter()
+        for a, b in pairs:
+            if not a & b:
+                steps.update((ref, t) for t in a)
+                steps.update((lvl, t) for t in b)
+        if not steps:
+            continue
+        (level, batch), count = max(steps.items(), key=lambda item: item[1])
+        if count / len(pairs) > share:
+            hits.append((contrast, count, len(pairs), level, batch))
+    if hits:
+        # One warning per check: a count and at most five examples.
+        examples = ["{} vs {}: {} of {} units have {} in {} and the other side in another "
+                    "batch".format(_side_label(group, (g, lvl)), _clip(ref), count, n, _clip(level),
+                                   _clip("/".join(batch)))
+                    for (g, lvl, ref), count, n, level, batch in hits[:5]]
+        alerts.append(alert(
+            "paired_batch",
+            "within {}, {} {} contrast{} rest{} mostly on pairs split across {} in step with "
+            "{}".format(unit_name, len(hits), within_name, "s" if len(hits) > 1 else "",
+                        "" if len(hits) > 1 else "s", batch_names,
+                        "them" if len(hits) > 1 else "it"), False,
+            expected="at most {} of {} with one side in the same batch and the other "
+                     "elsewhere".format(percent(share), unit_name),
+            observed="; ".join(examples) +
+                     ("; and {} more".format(len(hits) - 5) if len(hits) > 5 else "")))
+    return alerts
+
+
+def _side_label(group, side):
+    if group:
+        return "{}={}: {}".format(_clip(group), _clip(side[0]), _clip(side[1]))
+    return _clip(side[1])
+
+
+def _clip(value, limit=120):
+    """A name or value as a message shows it: at most `limit` characters."""
+    text = str(value)
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
 def check_unique(check, columns, rows):
     cols = need(check, "columns")
     alerts = []
@@ -824,6 +1146,8 @@ KIND_KEYS = {
     "pairing": {"unit", "within", "levels", "unit_scope", "exact_levels", "min_levels"},
     "batch_confounding": {"batch", "contrast", "max_share", "batch_scope"},
     "batch_estimability": {"batch", "contrast", "batch_scopes"},
+    "paired_batch": {"unit", "within", "batch", "group", "unit_scope", "batch_scopes", "max_share",
+                     "levels"},
     "unique": {"columns"},
     "nesting": {"levels", "local_labels"},
 }
@@ -848,7 +1172,7 @@ def reject_duplicate_keys(pairs):
     return seen
 
 
-def validate_contract(contract):
+def validate_contract(contract, public=False):
     """Contract syntax the checks rely on; a bad value is a usage error, never a pass.
 
     Every type a check dereferences is constrained here, before any table is
@@ -870,8 +1194,10 @@ def validate_contract(contract):
         if not isinstance(check, dict):
             fail(where, "must be an object")
         kind = check.get("kind")
-        if kind not in CHECKS:
-            raise ContractError("unknown check kind at {}: {}".format(where, json.dumps(kind)))
+        if kind not in CHECKS or (public and kind in INTERNAL_KINDS):
+            raise ContractError("unknown check kind at {}: {}{}".format(
+                where, json.dumps(kind), " (generated by --ledger only in this release)"
+                if kind in INTERNAL_KINDS else ""))
         where = "{} ({})".format(where, kind)
         reject_unknown(where, check, CHECK_KEYS | KIND_KEYS[kind])
         if "table" in check and (not isinstance(check["table"], str) or not check["table"]):
@@ -913,16 +1239,25 @@ def validate_contract(contract):
             validate_count(where, check, "min_levels", 2)
         elif kind == "unique":
             validate_columns(where, check, "columns", required=True)
-        elif kind == "batch_estimability":
-            validate_columns(where, check, "batch", required=True)
+        elif kind in ("batch_estimability", "paired_batch"):
+            validate_columns(where, check, "batch", required=True,
+                             allow_single=kind == "paired_batch")
             scopes = check.get("batch_scopes", {})
             if not isinstance(scopes, dict) or not all(
                     isinstance(k, str) and isinstance(v, list) and all(isinstance(c, str) for c in v)
                     for k, v in scopes.items()):
                 fail(where, "'batch_scopes' must map batch columns to lists of columns")
-            if len(as_list(check.get("batch"))) < 2:
+            if kind == "paired_batch":
+                validate_share(where, check)
+                validate_levels(where, check)
+                validate_column(where, check, "unit", required=True)
+                validate_column(where, check, "within", required=True)
+                validate_column(where, check, "group")
+                validate_columns(where, check, "unit_scope", allow_single=True)
+            elif len(as_list(check.get("batch"))) < 2:
                 fail(where, "'batch' needs at least two columns (one column is batch_confounding)")
-            validate_column(where, check, "contrast", required=True)
+            if kind == "batch_estimability":
+                validate_column(where, check, "contrast", required=True)
         elif kind == "nesting":
             validate_columns(where, check, "levels", required=True)
             if len(as_list(check.get("levels"))) < 2:
@@ -934,11 +1269,15 @@ def validate_contract(contract):
             validate_column(where, check, "batch", required=True)
             validate_column(where, check, "contrast", required=True)
             validate_columns(where, check, "batch_scope", allow_single=True)
-            if "max_share" in check:
-                share = check["max_share"]
-                if isinstance(share, bool) or not isinstance(share, (int, float)) or not 0 < share <= 1:
-                    fail(where, "max_share must be a number above 0 and at most 1, as a "
-                                         "share (0.7 for 70%): {}".format(json.dumps(share)))
+            validate_share(where, check)
+
+
+def validate_share(where, check):
+    if "max_share" in check:
+        share = check["max_share"]
+        if isinstance(share, bool) or not isinstance(share, (int, float)) or not 0 < share <= 1:
+            fail(where, "max_share must be a number above 0 and at most 1, as a "
+                        "share (0.7 for 70%): {}".format(json.dumps(share)))
 
 
 CHECKS = {
@@ -950,6 +1289,7 @@ CHECKS = {
     "unique": check_unique,
     "nesting": check_nesting,
     "batch_estimability": check_estimability,
+    "paired_batch": check_paired_batch,
 }
 
 
@@ -958,7 +1298,7 @@ def referenced_columns(check):
     cols = [check[k] for k in keys if k in check and isinstance(check[k], str)]
     cols += as_list(check.get("within")) + as_list(check.get("no_missing"))
     cols += as_list(check.get("unit_scope")) + as_list(check.get("batch_scope"))
-    if check.get("kind") == "batch_estimability":
+    if check.get("kind") in ("batch_estimability", "paired_batch"):
         cols += as_list(check.get("batch"))
         for scope in (check.get("batch_scopes") or {}).values():
             cols += as_list(scope)
@@ -972,6 +1312,22 @@ def filter_columns(filters):
 
 
 RELAXATIONS = ("units_may_span_groups",)
+# Kinds that warn and never block in this release, until proven on real
+# ledgers: paired_batch.
+ADVISORY_KINDS = ("paired_batch",)
+# Kinds only ledger mode generates: a hand-written --contract may not use
+# them, so v1 contracts stay portable across checker versions.
+INTERNAL_KINDS = ("paired_batch",)
+
+
+def advisory(alerts):
+    """The same findings as warnings: reported, never blocking."""
+    out = []
+    for a in alerts:
+        if a["blocking"]:
+            a = dict(a, blocking=False, severity="warning")
+        out.append(a)
+    return out
 
 
 def run_contract(contract, base_dir):
@@ -992,9 +1348,21 @@ def run_contract(contract, base_dir):
     wanted = defaultdict(set)  # an .h5ad's obs is read only for the columns the contract names
     for _, _, _, _, _, path, named in plan:
         wanted[path].update(named)
+    budget = None  # shared by the advisory checks, started at the first one
     for index, check, kind, table, filters, path, named in plan:
         label = "checks[{}] {}".format(index, check.get("label", kind))
         found = []
+        if kind in ADVISORY_KINDS:
+            budget = budget or _AdvisoryBudget()
+            if budget.exhausted():
+                skipped = alert(kind, "skipped: the time this run allows advisory checks is used "
+                                      "up", False)
+                skipped.update(check=label, table=table, rows_checked=0)
+                summaries.append({"check": label, "kind": kind, "table": table, "rows_checked": 0,
+                                  "status": "warn", "relaxations": []})
+                alerts.append(skipped)
+                continue
+            check = dict(check, _budget=budget)
         if not os.path.isfile(path):
             found.append(alert("schema", "the table the plan names does not exist", True,
                                observed="not found: " + table))
@@ -1036,12 +1404,21 @@ def run_contract(contract, base_dir):
             rows_checked = len(rows)
             identity = [check[k] for k in ("column", "unit", "group", "batch", "contrast")
                         if k in check and isinstance(check[k], str)]
-            if kind == "batch_estimability":
+            if kind in ("batch_estimability", "paired_batch"):
                 identity += as_list(check.get("batch"))
             identity += as_list(check.get("within")) + as_list(check.get("unit_scope"))
             if kind in ("unique", "nesting"):
                 identity += as_list(check.get("columns")) + as_list(check.get("levels"))
             found.extend(spelling_variants(rows, sorted(set(identity)), kind))
+            # Parents that qualify a local batch label (of the batch columns
+            # this check uses) are part of its identity. Checked from this
+            # release, so a variant spelling warns rather than blocking a
+            # contract that passed before.
+            parents = as_list(check.get("batch_scope"))
+            scopes = check.get("batch_scopes") or {}
+            for column in as_list(check.get("batch")):
+                parents += as_list(scopes.get(column))
+            found.extend(advisory(spelling_variants(rows, sorted(set(parents) - set(identity)), kind)))
             if not rows:
                 found.append(alert(kind, "no rows left after filters; the check would pass vacuously", True,
                                    expected=">= 1 row",
@@ -1049,6 +1426,9 @@ def run_contract(contract, base_dir):
                                    evidence=[json.dumps(f, sort_keys=True) for f in filters]))
             if rows:
                 found.extend(CHECKS[kind](check, columns, rows))
+            if kind in ADVISORY_KINDS:
+                found = [a for a in found if a["kind"] != kind] + \
+                    advisory([a for a in found if a["kind"] == kind])
         for record in found:
             record["check"] = label
             record["table"] = table
@@ -1177,6 +1557,25 @@ def ledger_contract(spec, spec_dir):
         if ancestors(pairing["unit"]):
             pair_check["unit_scope"] = ancestors(pairing["unit"])
         checks.append(pair_check)
+        # Batch against the within-unit contrast: one check per batch column,
+        # and all of them together, as for batch against the group above.
+        for columns in [[c] for c in batch] + ([batch] if len(batch) >= 2 else []):
+            # Blocking stays exact; max_share warns when most pairs are
+            # split in step with the contrast, so it rests on a few units.
+            paired = {"kind": "paired_batch", "unit": pairing["unit"],
+                      "within": pairing["within"], "batch": columns, "max_share": 0.5}
+            if pairing["within"] != group:
+                paired["group"] = group
+            if ancestors(pairing["unit"]):
+                paired["unit_scope"] = ancestors(pairing["unit"])
+            scopes = {column: ancestors(column) for column in columns if ancestors(column)}
+            if scopes:
+                paired["batch_scopes"] = scopes
+            if pairing.get("levels"):
+                paired["levels"] = distinct_levels(pairing["levels"])
+            if len(columns) >= 2:
+                paired["note"] = "for a paired analysis that adjusts for all of these batch terms"
+            checks.append(paired)
     return {"schema": SCHEMA, "table": table, "checks": checks,
             "note": "generated from the sample ledger spec; extend it in the analysis "
                     "contract (filters, the modeled table), never loosen it"}
@@ -1343,6 +1742,13 @@ def main(argv=None):
             contract["table"] = table
             if args.emit_contract:
                 emitted = dict(contract)
+                # Advisory kinds run in ledger mode but stay out of the v1
+                # export, so readers that predate them can replay it.
+                emitted["checks"] = [c for c in contract["checks"]
+                                     if c["kind"] not in ADVISORY_KINDS]
+                if len(emitted["checks"]) < len(contract["checks"]):
+                    emitted["note"] = contract["note"] + "; advisory paired_batch checks ran " \
+                        "in ledger mode and are left out of this contract"
                 root = os.path.realpath(args.root)
                 if table.startswith(root.rstrip(os.sep) + os.sep):
                     # Relative to --root, so the contract replays against the
@@ -1356,10 +1762,11 @@ def main(argv=None):
                     raise ContractError(
                         "--emit-contract {} already exists; nothing was written. Pass "
                         "--overwrite to replace it, or choose a new path".format(args.emit_contract))
-                validate_contract(emitted)
+                validate_contract(emitted, public=True)
         else:
             with open(args.contract, encoding="utf-8") as handle:
                 contract = json.load(handle, object_pairs_hook=reject_duplicate_keys)
+            validate_contract(contract, public=True)
         # The checks run before anything is published.
         summaries, alerts = run_contract(contract, args.root)
         if emitted is not None:
