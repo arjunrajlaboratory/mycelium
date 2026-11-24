@@ -17,6 +17,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.platform
+
 HOOKS_DIR = Path(__file__).resolve().parents[1] / "hooks"
 STATE_MODULE = "mycelium_hook_state.py"
 

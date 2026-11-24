@@ -20,6 +20,8 @@ from test_antigravity_app import APP_ROOT, CID, USER, app, doubles, home, native
 from test_antigravity_app_native import (OTHER_CID, Store, command_payload, edit_args, edit_event, edit_payload,
                                          native, replace_args, state_of)  # noqa: F401
 
+pytestmark = pytest.mark.platform
+
 ACTIVITY = "mycelium-activity-tracker.sh"
 
 

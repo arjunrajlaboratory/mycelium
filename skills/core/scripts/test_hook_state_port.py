@@ -24,6 +24,8 @@ from typing import Callable
 
 import pytest
 
+pytestmark = pytest.mark.platform
+
 SCRIPTS = Path(__file__).resolve().parent
 HOOKS_DIR = SCRIPTS.parent / "hooks"
 LIB = HOOKS_DIR / "mycelium-hook-lib.sh"

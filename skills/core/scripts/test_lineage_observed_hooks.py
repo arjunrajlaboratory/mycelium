@@ -21,6 +21,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 import io_observer as io  # noqa: E402
 
+pytestmark = pytest.mark.platform
+
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 HOSTS = ["claude", "codex"]
 FIXTURE = json.loads(

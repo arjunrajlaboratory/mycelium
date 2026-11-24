@@ -26,6 +26,8 @@ if str(KNOWLEDGE_MAP_DIR) not in sys.path:
 from concept_labeler import llm_label
 from propose_model import ClusterSummary
 
+pytestmark = pytest.mark.platform
+
 
 def _repo(tmp_path: Path, living: bool = True) -> Path:
     repo = tmp_path / "repo"

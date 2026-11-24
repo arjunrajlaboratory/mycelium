@@ -10,6 +10,8 @@ import pytest
 
 import mycelium_locks as locks
 
+pytestmark = pytest.mark.platform
+
 
 def test_atomic_replace_failure_preserves_original_bytes_and_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

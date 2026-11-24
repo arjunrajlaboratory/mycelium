@@ -14,6 +14,8 @@ import pytest
 
 from test_codex_compatibility import HOOKS_DIR, _repo, _run_claude_hook, _run_hook
 
+pytestmark = pytest.mark.platform
+
 
 def _non_exclusive_mkdir_path(tmp_path: Path) -> str:
     """Return a PATH whose `mkdir` reproduces uutils coreutils 0.10.0.

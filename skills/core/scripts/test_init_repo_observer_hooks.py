@@ -9,6 +9,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import init_repo as ir  # noqa: E402
+import pytest  # noqa: E402
+
+pytestmark = pytest.mark.platform
 
 
 def _placements(settings: dict) -> list[tuple[str, str, str]]:

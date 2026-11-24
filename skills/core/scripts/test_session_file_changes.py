@@ -8,6 +8,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from session_file_changes import SCHEMA_VERSION, build_snapshot, collect_changes
+import pytest
+
+pytestmark = pytest.mark.platform
 
 
 def _git(repo: Path, *args: str) -> None:

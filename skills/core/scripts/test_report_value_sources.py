@@ -26,6 +26,8 @@ import test_lineage_index as tli  # noqa: E402
 import sync_html_report as shr  # noqa: E402
 import io_observer as io  # noqa: E402
 
+pytestmark = pytest.mark.platform
+
 TABLE = "metric,count\npassing,812\nfailing,40\n"
 
 

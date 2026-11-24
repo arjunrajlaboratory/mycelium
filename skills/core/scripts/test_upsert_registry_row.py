@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.platform
+
 SCRIPT = Path(__file__).parent / "upsert_registry_row.py"
 
 HEADER = (

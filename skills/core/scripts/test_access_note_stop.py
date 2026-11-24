@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.platform
+
 HERE = Path(__file__).resolve().parent
 HOOKS_DIR = HERE.parent / "hooks"
 HOSTS = ["claude", "codex"]

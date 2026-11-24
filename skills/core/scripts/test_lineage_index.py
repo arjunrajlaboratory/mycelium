@@ -25,6 +25,8 @@ import extract_data_lineage as stop  # noqa: E402
 import io_observer as io  # noqa: E402
 import lineage_index as li  # noqa: E402
 
+pytestmark = pytest.mark.platform
+
 JID = "j" * 32
 
 

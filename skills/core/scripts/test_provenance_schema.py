@@ -31,7 +31,10 @@ except ImportError:  # pragma: no cover - CI requires it
     jsonschema = None
     if os.environ.get("MYCELIUM_REQUIRE_JSONSCHEMA") == "1":
         raise
-pytestmark = pytest.mark.skipif(jsonschema is None, reason="jsonschema is not installed")
+pytestmark = [
+    pytest.mark.platform,
+    pytest.mark.skipif(jsonschema is None, reason="jsonschema is not installed"),
+]
 
 ENTRY_POINTS = {
     "manifest_v1", "manifest_v2", "analysis_event", "data_command", "skip", "observation",

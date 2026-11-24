@@ -21,6 +21,8 @@ import antigravity_hooks as ag
 from test_antigravity_app import (APP_ROOT, CID, IDE_ROOT, USER, app, doubles, home,  # noqa: F401
                                   native_payload, post, stop, write_transcript)
 
+pytestmark = pytest.mark.platform
+
 COMMAND = "python3 analysis.py"
 DATA_HOOKS = ["mycelium-data-tracker.sh", "mycelium-post-action.sh"]
 OTHER_CID = "0d6c3f8e-2a41-4b7e-8f19-3c5a7e9b1d20"  # synthetic

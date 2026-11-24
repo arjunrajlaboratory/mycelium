@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.platform
+
 LIB = Path(__file__).resolve().parents[1] / "hooks" / "mycelium-hook-lib.sh"
 
 SAMPLES: list[bytes] = [
