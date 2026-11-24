@@ -167,6 +167,125 @@ def test_directory_lock_excludes_contenders_when_mkdir_is_not_exclusive(
     assert not lock.exists()
 
 
+def _wait_for(condition, what: str, timeout: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, f"timed out waiting for {what}"
+        time.sleep(0.01)
+
+
+def test_late_reap_claim_cannot_strand_a_half_reaped_lock(tmp_path):
+    """A second reaper's late claim must not leave an ownerless lock behind.
+
+    Both contenders see the same dead owner. A reaps it; B takes its own reap
+    claim only after A has committed to the reap. Before the fix, A had then
+    already removed the owner record and its claim but not the directory, so
+    B's claim landed inside the half-reaped lock: A's rmdir failed, B's
+    revalidation saw the owner vanish and withdrew, and both waited out the
+    300 s staleness guard on an ownerless, freshly modified lock. The
+    interleaving is driven by the library's pause seam, not by timing.
+    """
+    state = tmp_path / ".mycelium"
+    state.mkdir()
+    lock = state / "mycelium-stop.lock"
+    lock.mkdir()
+    (lock / "owner").write_text(f"999999999 {int(time.time())}\n")
+    pauses = tmp_path / "pauses"
+    pauses.mkdir()
+    events = tmp_path / "events.log"
+    hook_lib = HOOKS_DIR / "mycelium-hook-lib.sh"
+    command = (
+        f'source "{hook_lib}"\n'
+        f'mycelium_acquire_stop_lock "{state}" || exit 3\n'
+        f'printf "enter %s\\n" "$1" >> "{events}"\n'
+        "sleep 0.4\n"
+        f'printf "exit %s\\n" "$1" >> "{events}"\n'
+        "mycelium_release_stop_lock\n"
+    )
+
+    def reached(tag: str, step: str) -> bool:
+        return (pauses / f"{tag}.{step}.reached").exists()
+
+    def hold(tag: str, step: str) -> Path:
+        return pauses / f"{tag}.{step}.hold"
+
+    for tag, step in (
+        ("a", "reap-before-claim"),
+        ("a", "reap-committed"),
+        ("b", "reap-before-claim"),
+        ("b", "reap-claimed"),
+    ):
+        hold(tag, step).touch()
+
+    def launch(tag: str) -> subprocess.Popen:
+        env = {
+            **os.environ,
+            "MYCELIUM_STOP_LOCK_MAX_ATTEMPTS": "100",
+            "MYCELIUM_TEST_LOCK_PAUSE_DIR": str(pauses),
+            "MYCELIUM_TEST_LOCK_PAUSE_TAG": tag,
+        }
+        return subprocess.Popen(
+            ["bash", "-c", command, "contender", tag],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    contenders = {tag: launch(tag) for tag in ("a", "b")}
+    try:
+        # Both have read the dead owner record and are about to claim.
+        _wait_for(
+            lambda: reached("a", "reap-before-claim")
+            and reached("b", "reap-before-claim"),
+            "both contenders to observe the dead owner",
+        )
+        hold("a", "reap-before-claim").unlink()
+        _wait_for(lambda: reached("a", "reap-committed"), "A to commit its reap")
+        # B claims now, inside A's reap.
+        hold("b", "reap-before-claim").unlink()
+        _wait_for(
+            lambda: reached("b", "reap-claimed")
+            or (events.exists() and "enter b" in events.read_text()),
+            "B to take a reap claim or the lock",
+        )
+        hold("a", "reap-committed").unlink()
+        if reached("b", "reap-claimed"):
+            # B's claim sits in the lock while A finishes; let B revalidate
+            # only once A has either acquired or given up.
+            _wait_for(
+                lambda: contenders["a"].poll() is not None
+                or (events.exists() and "enter a" in events.read_text()),
+                "A to acquire or give up",
+            )
+        hold("b", "reap-claimed").unlink(missing_ok=True)
+        outcomes = {
+            tag: process.communicate(timeout=60)
+            for tag, process in contenders.items()
+        }
+    finally:
+        for path in pauses.glob("*.hold"):
+            path.unlink()
+        for process in contenders.values():
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+    assert [contenders[tag].returncode for tag in ("a", "b")] == [0, 0], outcomes
+    lines = events.read_text().splitlines()
+    first = lines[0].split()[1]
+    second = "b" if first == "a" else "a"
+    assert lines == [
+        f"enter {first}",
+        f"exit {first}",
+        f"enter {second}",
+        f"exit {second}",
+    ]
+    assert not lock.exists()
+    # The reap leaves nothing behind in the state directory.
+    assert sorted(path.name for path in state.iterdir()) == []
+
+
 def test_repeated_start_for_same_root_reuses_one_transaction(tmp_path):
     repo = _repo(tmp_path)
     payload = {"cwd": str(repo), "source": "startup", "session_id": "same-root"}
