@@ -6,6 +6,8 @@ import subprocess
 
 import pytest
 
+pytestmark = pytest.mark.platform
+
 SPEC = importlib.util.spec_from_file_location(
     "antigravity_hooks", Path(__file__).with_name("antigravity_hooks.py")
 )

@@ -24,6 +24,8 @@ sys.path.insert(0, str(HERE))
 import extract_data_lineage as stop  # noqa: E402
 import io_observer as io  # noqa: E402
 
+pytestmark = pytest.mark.platform
+
 EXTRACTOR = HERE / "extract_data_lineage_event.py"
 
 

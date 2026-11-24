@@ -24,6 +24,8 @@ from test_antigravity_app_edit_recovery import (ACTIVITY, activity, actions, dou
 from test_antigravity_app_native import (Store, command_payload, edit_args, edit_event, edit_payload, native,  # noqa: F401
                                          state_of)
 
+pytestmark = pytest.mark.platform
+
 CANARY = "CONTENT-CANARY-7f3a"
 
 

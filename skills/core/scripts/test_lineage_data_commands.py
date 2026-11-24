@@ -32,6 +32,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 import extract_data_lineage as consolidator  # noqa: E402
 import extract_data_lineage_event as lineage_event  # noqa: E402
 
+pytestmark = pytest.mark.platform
+
 EXTRACTOR = Path(__file__).parent / "extract_data_lineage_event.py"
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 HOSTS = ["claude", "codex"]

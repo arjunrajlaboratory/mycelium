@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.platform
+
 HOOKS_DIR = Path(__file__).resolve().parents[1] / "hooks"
 LIB = HOOKS_DIR / "mycelium-hook-lib.sh"
 

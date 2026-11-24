@@ -23,6 +23,8 @@ import extract_data_lineage as stop  # noqa: E402
 import extract_data_lineage_event as lineage_event  # noqa: E402
 import io_observer as io  # noqa: E402
 
+pytestmark = pytest.mark.platform
+
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 EXTRACTOR = Path(__file__).resolve().parent / "extract_data_lineage_event.py"
 

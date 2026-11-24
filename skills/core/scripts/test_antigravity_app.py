@@ -18,6 +18,8 @@ import pytest
 
 import antigravity_hooks as ag
 
+pytestmark = pytest.mark.platform
+
 HOOKS = ag.PLUGIN / "skills/core/hooks"
 CID = "5f0c2b1e-7d4a-4c3e-9a51-2b8e6f0d4c17"  # synthetic, not a native identifier
 APP_ROOT = (".gemini", "antigravity", "brain")

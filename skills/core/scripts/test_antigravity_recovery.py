@@ -12,6 +12,8 @@ import pytest
 
 import antigravity_hooks as ag
 
+pytestmark = pytest.mark.platform
+
 
 @pytest.fixture
 def cycle(tmp_path, monkeypatch):

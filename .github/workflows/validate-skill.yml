@@ -2,10 +2,11 @@ name: Validate Skills and Conventions
 
 # CI platform baseline (issue #66): the full validation runs on ubuntu-latest
 # (required check "validate"); the platform-sensitive subset — lifecycle shell
-# suites, Python compatibility tests, and the fresh-init smoke — also runs on
-# macos-latest ("validate-macos") because Mycelium supports both hosts on
-# macOS and Linux, and BSD/GNU differences in date, stat, sed, mktemp, and
-# shell behavior have produced real regressions. Baseline: Python 3.11,
+# suites, the Python tests marked `platform`, tools/, and the fresh-init
+# smoke — also runs on macos-latest ("validate-macos", two shards) because
+# Mycelium supports both hosts on macOS and Linux, and BSD/GNU differences
+# in date, stat, sed, mktemp, and shell behavior have produced real
+# regressions. Baseline: Python 3.11,
 # Bash >= 4 (Homebrew bash on the macOS runners; verified by the suites'
 # own version checks), BSD userland on macOS, and on Linux the image's default
 # coreutils: uutils (Rust) since ubuntu-latest moved to 26.04, GNU before.
@@ -24,7 +25,7 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     # Fail a hung run instead of waiting for GitHub's 6-hour default.
-    # Recent green runs take at most ~7 min (Linux) and ~12 min (macOS).
+    # Recent green runs take at most ~7 min (Linux).
     timeout-minutes: 30
 
     steps:
@@ -161,9 +162,17 @@ jobs:
 
   validate-macos:
     # Platform-sensitive subset only; metadata validation and Markdown lint
-    # are platform-neutral and stay in the Ubuntu job (issue #66).
+    # are platform-neutral and stay in the Ubuntu job (issue #66). The
+    # `platform` tests are still ~90% of the suite's run time (they are the
+    # hook and Bash-differential tests), so they are split across two
+    # runners by a stable hash of each test id (`--shard K/N` in
+    # skills/core/scripts/conftest.py); together the shards run every one.
     runs-on: macos-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
 
     steps:
       - name: Checkout repository
@@ -208,13 +217,18 @@ jobs:
           test -f hooks/hooks.json
           test -x hooks/mycelium-codex-dispatch.sh
 
-      - name: Run Python compatibility tests (macOS)
+      - name: Run platform-sensitive Python tests (macOS, shard ${{ matrix.shard }}/2)
         run: |
-          # Each test uses its own temporary repository, so the hook-heavy
-          # suite runs across all cores.
-          pytest -q -n auto --dist worksteal skills/core/scripts --ignore=skills/core/scripts/knowledge_map
+          # Only tests marked `platform` (skills/core/scripts/conftest.py):
+          # modules that run Bash or the hook scripts, file locks, and
+          # symlink/path-spelling tests. Pure-logic tests run on Linux only;
+          # test_platform_marker.py (Linux job) fails if a module that spawns
+          # a shell or hook is left unmarked.
+          pytest -q -n auto --dist worksteal -m platform --shard ${{ matrix.shard }}/2 \
+            skills/core/scripts --ignore=skills/core/scripts/knowledge_map
 
       - name: Test Antigravity package lifecycle (macOS)
+        if: matrix.shard == 2
         run: |
           # All of tools/, as on Linux and in the release gate: the integrity
           # tests walk real directory trees, whose limits (such as PATH_MAX)
@@ -222,6 +236,7 @@ jobs:
           pytest -q tools
 
       - name: Run hook compatibility tests (macOS)
+        if: matrix.shard == 1
         run: |
           bash skills/core/hooks/test_stop_hook.sh
           bash skills/core/hooks/test_hooks_stress.sh
