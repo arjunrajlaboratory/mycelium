@@ -253,10 +253,11 @@ def test_parallel_hooks_reopen_exactly_one_transaction(tmp_path, host):
     """Parallel work hooks after an accepted turn reopen one transaction.
 
     Every analysis command lands in that transaction's event stream once,
-    or its hook leaves the evidence it is designed to leave when a lock
-    stays busy past its wait: a line in the transaction's unrecorded-events
-    file, or an unowned "no-transaction" skip for this session. Both lock
-    waits are raised so a loaded runner rarely drops an event at all.
+    or (if the session lock stays busy past its wait) leaves a line in the
+    transaction's unrecorded-events file. Both lock waits are raised so a
+    loaded runner rarely drops an event at all. A "no-transaction" skip is
+    never accepted: it is exactly what a refused reopen records (#138), and
+    with the stop-lock wait raised to minutes a reopen cannot time out.
     """
     repo = _repo(tmp_path)
     sid = "parallel-session"
@@ -287,10 +288,8 @@ def test_parallel_hooks_reopen_exactly_one_transaction(tmp_path, host):
         line for line in unrecorded if line["hook"] == "mycelium-data-tracker.sh"
     ]
     assert all(line["kind"] == "lineage" for line in data_unrecorded), evidence
-    assert all(
-        skip.get("skip_reason") == "no-transaction" for skip in unowned
-    ), evidence
-    assert len(events) + len(data_unrecorded) + len(unowned) == 4, evidence
+    assert unowned == [], evidence
+    assert len(events) + len(data_unrecorded) == 4, evidence
 
 
 @pytest.mark.parametrize("host", HOSTS)

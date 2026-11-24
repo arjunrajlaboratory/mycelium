@@ -940,7 +940,9 @@ def test_parallel_subagent_events_are_serialized_into_parent_transaction(tmp_pat
     recorded = (parent_state / "mycelium-session-activity.tmp").read_text().splitlines()
     assert len(recorded) == len(set(recorded)), recorded
     assert sorted(recorded) == sorted(set(child_paths) - dropped)
-    assert recorded, "every event was dropped; the lock wait is not serializing"
+    # With the wait raised to minutes, a drop is a freak event: accept at most
+    # one, so a hook that stops waiting (19 of 24 dropped at 2 attempts) fails.
+    assert len(dropped) <= 1, sorted(dropped)
     unrecorded = parent_state / "mycelium-unrecorded-events.tmp"
     lines = (
         [json.loads(line) for line in unrecorded.read_text().splitlines() if line]

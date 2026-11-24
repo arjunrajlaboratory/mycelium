@@ -211,10 +211,11 @@ def test_stable_hash_hashes_and_caches_a_settled_file(
     path.write_bytes(b"abc")
     written = os.lstat(path)
     write_ns = max(written.st_mtime_ns, written.st_ctime_ns)
-    # Hashed in the same timestamp tick as the write: correct, but racy, so
-    # the result is not cached. The clock is pinned to the write instant: a
+    # Hashed inside the 10 ms racy window after the write: correct, but racy,
+    # so the result is not cached. The clock is pinned 9 ms after the write
+    # (inside the window, not at its edge, so a shrunken window fails): a
     # real clock read on a loaded machine can already be past the window.
-    clock = _WallClock(write_ns)
+    clock = _WallClock(write_ns + 9_000_000)
     monkeypatch.setattr(io, "time", clock)
     racy_cache: dict[str, str] = {}
     result, ident = io.stable_hash(

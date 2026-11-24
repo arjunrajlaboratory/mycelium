@@ -5051,57 +5051,67 @@ def test_stdlib_review_probe(case: str) -> None:
     assert lineage_event._stdlib_static_io(source, script_args) == expected
 
 
-# The stdlib scan's bounds are asserted on its deterministic work counter,
-# not the wall clock: a tight time limit (1.5 s, once 0.5 s) failed on loaded
-# CI runners. With the scan's deadline switched off, each pathological input
-# must still stop at `_STDLIB_WORK_LIMIT` ticks; the only time bound left is a
-# generous sanity limit.
+# The stdlib scan's bounds are asserted on how its CPU cost SCALES, with its
+# wall-clock deadline switched off so the deadline cannot hide the growth: a
+# tight wall-clock limit (1.5 s, once 0.5 s) failed on loaded CI runners. CPU
+# at size n against n/2, interleaved, best of three, must grow at most about
+# linearly (a quadratic or worse regression is 4x or far more); below the
+# floor a scan is too fast to judge. The only absolute bound is a sanity limit.
 STDLIB_SANITY_SECONDS = 60.0
+STDLIB_SCALING_RATIO = 3.2
+STDLIB_SCALING_FLOOR = 0.5
 
 
 @pytest.fixture
-def stdlib_ticks(monkeypatch):
-    """Disable the scan's wall-clock deadline and count its work ticks."""
+def stdlib_no_deadline(monkeypatch):
+    """Switch off the scan's wall-clock deadline (its work limit stays)."""
     monkeypatch.setattr(lineage_event, "_STDLIB_DEADLINE_SECONDS", 1e9)
-    counter = {"ticks": 0, "max": 0}
-    original = lineage_event._StdlibIO._tick
-
-    def tick(self):
-        counter["ticks"] += 1
-        return original(self)
-
-    monkeypatch.setattr(lineage_event._StdlibIO, "_tick", tick)
-    return counter
 
 
-def _bounded_scan(stdlib_ticks, source, script_args):
+def _assert_scan_scales(build, n: int):
+    """``build(size) -> (source, script_args)``; returns the result at n."""
     import time
 
-    stdlib_ticks["ticks"] = 0
-    start = time.perf_counter()
-    result = lineage_event._stdlib_static_io(source, script_args)
-    assert time.perf_counter() - start < STDLIB_SANITY_SECONDS
-    assert stdlib_ticks["ticks"] <= lineage_event._STDLIB_WORK_LIMIT + 1
+    def cpu(case):
+        started = time.process_time()
+        result = lineage_event._stdlib_static_io(*case)
+        return result, time.process_time() - started
+
+    small_case, large_case = build(n // 2), build(n)
+    smalls, larges, result = [], [], None
+    for _ in range(3):  # interleaved, so a load spike cannot hit one side only
+        smalls.append(cpu(small_case)[1])
+        result, seconds = cpu(large_case)
+        larges.append(seconds)
+    small, large = min(smalls), min(larges)
+    assert large < STDLIB_SANITY_SECONDS, large
+    assert large < max(small * STDLIB_SCALING_RATIO, STDLIB_SCALING_FLOOR), (small, large)
     return result
 
 
+def _chain(prefix: str, step: str):
+    """A source whose path doubles at each of ``levels`` assignments."""
+    def build(levels: int):
+        return (prefix + "".join(step.format(i=i, j=i - 1) for i in range(1, levels))
+                + f'open(a{levels - 1},"w")\n', [])
+    return build
+
+
 @pytest.mark.parametrize(
-    "source",
+    ("build", "n"),
     [
-        'def f(p):\n    open(p+p+p+p,"w")\n' + "".join(f'f("p{i}")\n' for i in range(300)),
-        'a0="x"\n' + "".join(f"a{i}=a{i-1}+a{i-1}\n" for i in range(1, 40)) + 'open(a39,"w")\n',
-        'import os\na0="x"\n'
-        + "".join(f"a{i}=os.path.join(a{i-1},a{i-1})\n" for i in range(1, 40))
-        + 'open(a39,"w")\n',
-        'from pathlib import Path\na0=Path("x")\n'
-        + "".join(f"a{i}=a{i-1}/a{i-1}\n" for i in range(1, 40))
-        + 'open(a39,"w")\n',
-        "".join(f"x{i}='a'\nopen(x{i} + x{i} + x{i}, 'w')\n" for i in range(3000)),
+        (lambda n: ('def f(p):\n    open(p+p+p+p,"w")\n'
+                    + "".join(f'f("p{i}")\n' for i in range(n)), []), 300),
+        (_chain('a0="x"\n', "a{i}=a{j}+a{j}\n"), 40),
+        (_chain('import os\na0="x"\n', "a{i}=os.path.join(a{j},a{j})\n"), 40),
+        (_chain('from pathlib import Path\na0=Path("x")\n', "a{i}=a{j}/a{j}\n"), 40),
+        (lambda n: ("".join(f"x{i}='a'\nopen(x{i} + x{i} + x{i}, 'w')\n" for i in range(n)), []),
+         3000),
     ],
     ids=["call-sites", "doubling", "join-chain", "div-chain", "many-sinks"],
 )
-def test_stdlib_pathological_script_is_bounded(stdlib_ticks, source: str) -> None:
-    _bounded_scan(stdlib_ticks, source, [])
+def test_stdlib_pathological_script_is_bounded(stdlib_no_deadline, build, n) -> None:
+    _assert_scan_scales(build, n)
 
 
 @pytest.mark.parametrize(
@@ -5187,24 +5197,26 @@ def _argparse_options_source(count: int) -> str:
 
 
 @pytest.mark.parametrize(
-    "source,script_args",
+    ("build", "n"),
     [
-        ("x = " + "open(p)+" * 3000 + "+".join(["0"] * 8000) + "\n", []),
-        ("x = " + "q.read_text()+" * 3000 + "+".join(["0"] * 8000) + "\n", []),
-        ("".join(f"def f{i}():\n    pass\n" for i in range(2000))
-         + "x = " + "+".join(f"f{i}()" for i in range(2000)) + "+"
-         + "+".join(["0"] * 10000) + "\n", []),
-        ("x=1\n" * 1_000_000, []),
-        ("open(p)\n" * 30_000, []),
-        (_argparse_options_source(5000), ["--opt"] * 5000),
-        (_argparse_options_source(20000), [x for i in range(2000) for x in (f"--opt{i}", "v")]),
-        (_argparse_options_source(250), ["--opt"] * 5000),
+        (lambda n: ("x = " + "open(p)+" * n + "+".join(["0"] * (n * 8 // 3)) + "\n", []), 3000),
+        (lambda n: ("x = " + "q.read_text()+" * n + "+".join(["0"] * (n * 8 // 3)) + "\n", []),
+         3000),
+        (lambda n: ("".join(f"def f{i}():\n    pass\n" for i in range(n))
+                    + "x = " + "+".join(f"f{i}()" for i in range(n)) + "+"
+                    + "+".join(["0"] * (n * 5)) + "\n", []), 2000),
+        (lambda n: ("x=1\n" * n, []), 1_000_000),
+        (lambda n: ("open(p)\n" * n, []), 30_000),
+        (lambda n: (_argparse_options_source(n), ["--opt"] * n), 5000),
+        (lambda n: (_argparse_options_source(n),
+                    [x for i in range(n // 10) for x in (f"--opt{i}", "v")]), 20000),
+        (lambda n: (_argparse_options_source(250), ["--opt"] * n), 5000),
     ],
     ids=["deep-open", "deep-read-text", "deep-reach", "huge-flat", "many-sinks",
          "argparse-5k-by-5k", "argparse-20k", "argparse-many-args"],
 )
-def test_stdlib_scan_work_is_bounded_globally(stdlib_ticks, source: str, script_args) -> None:
-    _bounded_scan(stdlib_ticks, source, script_args)
+def test_stdlib_scan_work_is_bounded_globally(stdlib_no_deadline, build, n) -> None:
+    _assert_scan_scales(build, n)
 
 
 def test_argparse_replay_still_resolves_a_realistic_parser() -> None:
@@ -5302,15 +5314,18 @@ def test_stdlib_review_probe_round_3(case: str) -> None:
     assert lineage_event._stdlib_static_io(source, script_args) == expected
 
 
-def test_argparse_backtracking_layout_is_declined_quickly(stdlib_ticks) -> None:
+def test_argparse_backtracking_layout_is_declined_quickly(stdlib_no_deadline) -> None:
     source = (
         "import argparse\np = argparse.ArgumentParser()\np.add_argument('--output')\n"
         + "".join(f"p.add_argument('{n}', nargs='*')\n"
                   for n in ("samples", "controls", "weights", "labels"))
         + "p.add_argument('columns', nargs=101)\na = p.parse_args()\nopen(a.output, 'w')\n"
     )
-    args = ["sample"] * 100 + ["--output", "report.txt"] + ["col"] * 101
-    assert _bounded_scan(stdlib_ticks, source, args) == ([], [])
+
+    def build(samples: int):
+        return source, ["sample"] * samples + ["--output", "report.txt"] + ["col"] * 101
+
+    assert _assert_scan_scales(build, 100) == ([], [])
 
 
 def test_main_argparse_declines_carriage_return_in_shell_word(tmp_path: Path) -> None:
@@ -5560,13 +5575,14 @@ def test_stdlib_additions_stay_inside_the_repository(tmp_path: Path) -> None:
 
 
 def test_stdlib_framing_of_many_outside_paths_is_bounded(
-        tmp_path: Path, monkeypatch, stdlib_ticks) -> None:
+        tmp_path: Path, monkeypatch, stdlib_no_deadline) -> None:
     import collections
+    import itertools
     import os
     import time
 
-    # Deterministic: the filesystem calls made for N outside paths do not grow
-    # with N (once one stat/realpath per path), and the scan stays in budget.
+    # The filesystem calls made for N outside paths do not grow with N (once
+    # one stat/realpath per path), and CPU grows at most about linearly.
     calls: collections.Counter = collections.Counter()
     for module, name in ((os.path, "realpath"), (os.path, "commonpath"),
                          (os.path, "exists"), (os, "stat"), (os, "lstat")):
@@ -5578,22 +5594,28 @@ def test_stdlib_framing_of_many_outside_paths_is_bounded(
 
         monkeypatch.setattr(module, name, counted)
 
-    def framed(count: int) -> collections.Counter:
-        repo = tmp_path / f"repo{count}"
+    out = tmp_path / "shared/pipeline/published/country/routine/archive/sequencing/experiment"
+    out.mkdir(parents=True)
+    serial = itertools.count()
+
+    def framed(count: int):
+        repo = tmp_path / f"repo{next(serial)}"
         repo.mkdir()
-        out = tmp_path / "shared/pipeline/published/country/routine/archive/sequencing/experiment"
-        out.mkdir(parents=True, exist_ok=True)
         source = f"BASE = {str(out) + '/'!r}\n" + "".join(
             f"open(BASE + '{i:05}.csv', 'w').close()\n" for i in range(count))
         calls.clear()
-        start = time.perf_counter()
+        started = time.process_time()
         _, _, outputs = _stdlib_event(repo, source)
+        seconds = time.process_time() - started
         assert outputs == []
-        assert time.perf_counter() - start < STDLIB_SANITY_SECONDS
-        assert stdlib_ticks["ticks"] <= lineage_event._STDLIB_WORK_LIMIT + 1
-        return collections.Counter(calls)
+        return collections.Counter(calls), seconds
 
-    assert framed(4000) == framed(8000)
+    runs = [(framed(4000), framed(8000)) for _ in range(3)]  # interleaved
+    assert all(small[0] == large[0] for small, large in runs)
+    small = min(pair[0][1] for pair in runs)
+    large = min(pair[1][1] for pair in runs)
+    assert large < STDLIB_SANITY_SECONDS, large
+    assert large < max(small * STDLIB_SCALING_RATIO, STDLIB_SCALING_FLOOR), (small, large)
 
 
 @pytest.mark.parametrize(

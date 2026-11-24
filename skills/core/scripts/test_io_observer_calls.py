@@ -181,10 +181,12 @@ def test_input_written_just_before_pre_is_racy_not_proven(
     src = root / "data" / "raw" / "fresh.csv"
     src.write_text("just now\n")
     written = os.lstat(src)
-    # Pre's snapshot is taken in the write's own tick. A real clock read on a
-    # loaded machine can already be past the 10 ms window, so the observer's
-    # wall clock is pinned to the write instant.
-    monkeypatch.setattr(io, "time", _Clock(max(written.st_mtime_ns, written.st_ctime_ns)))
+    # Pre's snapshot is taken 9 ms after the write: inside the 10 ms racy
+    # window, not at its edge, so a shrunken window fails. A real clock read
+    # on a loaded machine can already be past the window, so the observer's
+    # wall clock is pinned.
+    monkeypatch.setattr(
+        io, "time", _Clock(max(written.st_mtime_ns, written.st_ctime_ns) + 9_000_000))
     obs = _call(state, root, "c1", lambda: None, inputs=[str(src)])
     (proof,) = obs["input_proofs"]
     assert proof["pre_run_proven"] is False

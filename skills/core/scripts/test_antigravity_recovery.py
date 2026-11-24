@@ -418,7 +418,7 @@ class StopRace:
         self.after = after  # optional holder-side callback after each real hook
         self.holder_in_lock = threading.Event()
         self.follower_waiting = threading.Event()
-        self.follower_lock_timeouts = []  # the `timeout` each follower acquisition passed
+        self.follower_lock_timeouts = []  # effective timeout of each follower acquisition
         self.release = threading.Event()
         self.hooks = []  # (thread role, hook) for every real hook dispatch
         self.block_stop_check = block_stop_check
@@ -446,8 +446,11 @@ class StopRace:
         @contextlib.contextmanager
         def lock(root, name, *args, **kwargs):
             if getattr(local, "role", "main") == "follower":
+                # What durable_lock will actually wait: an explicit timeout, or
+                # the policy read from the environment at this moment.
+                explicit = kwargs.get("timeout", args[0] if args else None)
                 self.follower_lock_timeouts.append(
-                    kwargs.get("timeout", args[0] if args else None))
+                    explicit if explicit is not None else mycelium_locks._timeout_seconds())
                 self.follower_waiting.set()
             with real_lock(root, name, *args, **kwargs) as path:
                 yield path
@@ -581,11 +584,11 @@ def test_configured_short_lock_deadline_fails_closed_without_follower_effects(cy
     holder, follower = race.race(between=while_holder_unresolved)
     kind, error, elapsed = seen["result"]
     assert kind == "error" and isinstance(error, mycelium_locks.LockError), seen["result"]
-    # The configured 1 s policy governs, not a longer adapter override: the
-    # adapter passes no timeout of its own, so the environment decides.
-    # (A wall-clock `elapsed < 4` bound here was tight on loaded runners.)
-    assert race.follower_lock_timeouts and set(race.follower_lock_timeouts) == {None}
-    assert mycelium_locks._timeout_seconds() == 1.0
+    # The configured 1 s policy governs, not a longer adapter override (an
+    # explicit timeout or an environment changed around the acquisition):
+    # the effective wait of every follower acquisition is 1 s. (A wall-clock
+    # `elapsed < 4` bound here was tight on loaded runners.)
+    assert race.follower_lock_timeouts and set(race.follower_lock_timeouts) == {1.0}
     assert elapsed < 30, "far past the 1 s policy: a longer wait governed"
     assert seen["held"] and not seen["receipt"], "no acceptance may be invented while the holder is unresolved"
     during = json.loads(seen["state"])["turns"]["0"]
