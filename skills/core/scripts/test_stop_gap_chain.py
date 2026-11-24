@@ -7,11 +7,12 @@ Stop handed that LINEAGE GAP to the agent through `additionalContext`, the
 agent took one more turn to inspect it, and that turn's Stop published the
 generic fallback over the handoff accepted minutes earlier.
 
-Tested here through the real hooks: the helper chain records no skip, and an
-accepted Stop with a gap emits no `additionalContext`, records the gap in
-the session log and published handoff, and opens no further transaction.
-Publication itself is unchanged: a later transaction with no handoff of its
-own still publishes the generic fallback, as on main.
+Replayed here through the real hooks with the same helper command, whose
+skips are the gap: the accepted Stop emits only `systemMessage`, records the
+gap in the session log's end footer, publishes the authored handoff exactly
+as main does, and leaves nothing that opens another transaction. Publication
+itself is unchanged: a later transaction with no handoff of its own still
+publishes the generic fallback, as on main.
 """
 
 from __future__ import annotations
@@ -118,13 +119,6 @@ def _as_main_publishes(authored: str, published: str) -> str:
     return finalize(authored, accepted)
 
 
-def _park_skip(repo: Path, host: str, sid: str) -> None:
-    shared = repo / ".mycelium" / "lineage-skips-unowned.ndjson"
-    shared.write_text(json.dumps(
-        {"ts": "T", "kind": "skip", "skip_id": "k1", "skip_reason": "detector-failed",
-         "host": host, "host_session_id": sid}) + "\n")
-
-
 def _published(repo: Path) -> str:
     return (repo / ".mycelium" / "last-session.md").read_text()
 
@@ -155,16 +149,16 @@ def _skips(repo: Path) -> list[dict]:
 @pytest.mark.parametrize("host", HOSTS)
 def test_the_live_chain_ends_with_one_accepted_stop(tmp_path, host):
     repo = _repo(tmp_path)
-    _park_skip(repo, host, "live")  # a real gap, so the accepted Stop has one to report
     _start(host, repo, "live")
     _bash(host, repo, "live", HELPERS)
     first = _accepted_turn(host, repo, "live", "model.py", handoff=True)
 
-    # 1. Mycelium's own helpers through the variable chain are not data commands.
-    assert [s.get("skip_reason") for s in _skips(repo)] == ["detector-failed"]
+    # 1. The helper chain's skips are the gap, as in the live run.
+    assert [s.get("skip_reason") for s in _skips(repo)] == ["script-unreadable"] * 2
     # 2. The gap is reported without continuing the conversation...
     assert set(first) == {"systemMessage"}, first
-    assert "detector-failed x1" in first["systemMessage"], first
+    assert "script-unreadable x2" in first["systemMessage"], first
+    assert "" not in first["systemMessage"].split("\n"), first
     # ...and is in the finalized session log.
     (log,) = _logs(repo)
     assert "- Lineage gaps: " in (repo / ".living" / "log" / log).read_text()

@@ -392,12 +392,15 @@ rm -f "$ACCESS_NOTE_FILE" 2>/dev/null || true
 # Never fails.
 mycelium_emit_accepted_stop() {
   local message="$1" gap="${2:-}" seen="" escaped="" user=""
+  # One line per part: Claude Code shows each line of a Stop's
+  # `systemMessage` as its own "Stop says:" line, so a blank separator line
+  # would show as an empty one.
   user="$message"
   if [[ -n "$gap" ]]; then
-    user="${user:+$user$'\n\n'}$gap"
+    user="${user:+$user$'\n'}$gap"
   fi
   if [[ -n "$ACCESS_NOTE" ]]; then
-    user="${user:+$user$'\n\n'}$ACCESS_NOTE"
+    user="${user:+$user$'\n'}$ACCESS_NOTE"
   fi
   if [[ -n "$user" ]]; then
     escaped=$(mycelium_json_dumps_stdin "$user" 2>/dev/null) || return 0

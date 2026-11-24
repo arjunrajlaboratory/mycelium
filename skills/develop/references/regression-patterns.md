@@ -1204,34 +1204,29 @@ suppress the block.
 ## 53. Feedback that continues a turn becomes work that overwrites the turn's record
 
 **Failure:** An accepted Stop on Claude put a lineage-gap warning in
-`additionalContext`, which continues the conversation. The gap itself was
-noise: Mycelium's own `--help` helper calls, reached through
-`S=$P/skills/core/scripts` and an absolute pointer path the detector did not
-follow. The agent's extra turn ran one Bash command to inspect the gap,
-which opened a new transaction (pattern 44). That turn wrote no handoff, so
-its Stop published the generic fallback over the handoff accepted minutes
-earlier.
+`additionalContext`, which continues the conversation. The gap came from
+Mycelium's own `--help` helper calls, reached through a variable chain. The
+agent's extra turn ran one Bash command to inspect the gap, which opened a
+new transaction (pattern 44). That turn wrote no handoff, so its Stop
+published the generic fallback over the handoff accepted minutes earlier.
 
 **Invariant:** Nothing an accepted Stop emits may continue the turn:
 `systemMessage` only, on every host. What the agent must act on is a block.
 What the next session should still learn goes into a durable record (the
 finalized log footer), written by the finalizer so a retry replaces rather
-than repeats it. Remove the trigger
-rather than guard its consequence. Two rounds of "keep the earlier handoff"
-heuristics each produced new P1s, because a host session ID is not a task
-identity: it survives `--resume`, multi-day sessions, branch switches,
-Git-ignored outputs, retries and per-turn Antigravity IDs. A suppression gate
-such as helper recognition must fail toward reporting. It must be an
-allowlist of whole statements, not a denylist of first words: a denylist
-missed `< f read -r S` (a statement that starts with a redirection).
+than repeats it. Remove the trigger rather than guard its consequence.
+Three rounds of guards were tried and dropped, each producing new P1s:
+- "keep the earlier handoff": a host session ID is not a task identity;
+  it survives `--resume`, multi-day sessions, branch switches, Git-ignored
+  outputs, retries and per-turn Antigravity IDs;
+- a gap bullet in the published handoff;
+- recognizing helper chains, which needs bash word splitting, `IFS` and
+  every reassignment form to be airtight, and went quadratic.
 
-**Regression evidence:** Drive the hooks through the chain. Helpers run
-through a two-step chain and an absolute pointer leave no skip. An accepted
-Stop with a real gap emits only `systemMessage`, writes the gap into the log
-footer, publishes the handoff exactly as main does, and leaves nothing that
-starts another transaction. Pair the
-strict chain with `&&` before a newline, `source`, `.`, `eval`, `cd`,
-`export`, `declare`, `read` (also after a leading redirection), `for`,
-`+=`, a prefix, a redirection, any other command, a heredoc, a quoted
-string, a second link, traversal, and a look-alike or foreign pointer. Each
-must keep the skip.
+Once the warning no longer continues the turn, a noisy skip costs only a
+user-facing line.
+
+**Regression evidence:** Replay the live helper chain through the hooks. The
+accepted Stop emits only `systemMessage`, with no empty line. It records the
+gap in the log footer, publishes the handoff byte-for-byte as main does, and
+leaves nothing that starts another transaction.

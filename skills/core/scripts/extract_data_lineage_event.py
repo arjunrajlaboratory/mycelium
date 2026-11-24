@@ -738,111 +738,6 @@ def _variable_script_path(command: str, offset: int, raw_path: str,
     return Path(os.path.realpath(value + rest))
 
 
-# The helper chain agents write to reach Mycelium's own scripts (live run,
-# 2026-11-24):
-#   P=$(cat /abs/repo/.mycelium/plugin-root); S=$P/skills/core/scripts; python3 $S/x.py --help
-# It is recognised only when EVERY statement of the command, separated by
-# `;` or newlines, is exactly one of these (an allowlist, not a denylist):
-#   (a) NAME=$(cat <pointer>)              the plugin-root pointer read
-#   (b) NAME=$ROOT/<literal path>          one link from an (a) variable
-#   (c) python3 $NAME/<literal>.py [args]  literal args, no redirection
-# Any other statement, token or operator sends the whole command to
-# _variable_script_path, unchanged from before. Each name is assigned once,
-# before it is used. A suppression gate fails toward reporting (pattern 53).
-_ALLOW_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
-_ALLOW_LITERAL_PATH = r"/[A-Za-z0-9_./-]*"
-_ALLOW_POINTER_RX = re.compile(
-    rf"(?P<name>{_ALLOW_NAME})=(?P<dq>\"?)\$\(cat (?P<q>\"?)"
-    r"(?P<dir>(?:\.\./)*|\$PWD/|/[A-Za-z0-9_./-]*/)\.mycelium/plugin-root(?P=q)\)(?P=dq)"
-)
-_ALLOW_LINK_RX = re.compile(
-    rf"(?P<name>{_ALLOW_NAME})=(?P<dq>\"?)\$(?P<source>{_ALLOW_NAME})"
-    rf"(?P<suffix>{_ALLOW_LITERAL_PATH})(?P=dq)"
-)
-_ALLOW_RUN_RX = re.compile(
-    rf"python3[ \t]+(?P<uq>\"?)\$(?P<name>{_ALLOW_NAME})(?P<rest>/[A-Za-z0-9_./-]+\.py)(?P=uq)"
-    r"(?:[ \t]+[A-Za-z0-9_./=:,+@%-]+)*"
-)
-
-
-def _strict_chain_script_path(command: str, offset: int, raw_path: str,
-                              cwd: Path | None) -> Path | None:
-    """The script a `python3 $S/x.py` run executes when the whole command is
-    the allowlisted helper chain above, or None. Only ever used to recognise
-    Mycelium's own helpers."""
-    match = re.fullmatch(r"\$([A-Za-z_][A-Za-z0-9_]*)(/.*)", raw_path)
-    if match is None or cwd is None or ";;" in command:
-        return None
-    used, rest = match.groups()
-    pointers: dict[str, tuple[int, re.Match]] = {}
-    links: dict[str, tuple[int, re.Match]] = {}
-    runs: list[tuple[int, int, re.Match]] = []
-    position = 0
-    for statement in re.split(r"[;\n]", command):
-        start = position
-        position += len(statement) + 1
-        stripped = statement.strip(" \t")
-        if not stripped:
-            continue
-        lead = start + len(statement) - len(statement.lstrip(" \t"))
-        if (found := _ALLOW_POINTER_RX.fullmatch(stripped)) is not None:
-            table = pointers
-        elif (found := _ALLOW_LINK_RX.fullmatch(stripped)) is not None:
-            table = links
-        elif (found := _ALLOW_RUN_RX.fullmatch(stripped)) is not None:
-            runs.append((lead, lead + len(stripped), found))
-            continue
-        else:
-            return None
-        name = found.group("name")
-        if name in pointers or name in links:
-            return None  # assigned twice
-        table[name] = (lead, found)
-    # The offset must be one of the allowlisted runs, of the variable asked.
-    run = next((r for r in runs if r[0] <= offset < r[1]), None)
-    if run is None or run[2].group("name") != used or run[2].group("rest") != rest:
-        return None
-    # Every run uses a variable assigned before it.
-    for run_start, _, found in runs:
-        assigned = pointers.get(found.group("name")) or links.get(found.group("name"))
-        if assigned is None or assigned[0] >= run_start:
-            return None
-    for link_start, found in links.values():
-        root = pointers.get(found.group("source"))
-        if root is None or root[0] >= link_start:
-            return None
-        if "/../" in f"{found.group('suffix')}/":
-            return None
-    suffix = ""
-    if used in links:
-        suffix = links[used][1].group("suffix")
-        found = pointers[links[used][1].group("source")][1]
-    else:
-        found = pointers[used][1]
-    directory = found.group("dir")
-    if directory == "$PWD/":
-        if not found.group("q") and not found.group("dq") and re.search(r"[\s*?\[]", str(cwd)):
-            return None
-        directory = ""
-    if directory.startswith("/"):
-        if "/../" in directory or "/./" in directory:
-            return None
-        try:
-            real_base = os.path.realpath(directory.rstrip("/") or "/")
-            real_cwd = os.path.realpath(cwd)
-        except (OSError, ValueError):
-            return None
-        if os.path.commonpath([real_base, real_cwd]) != real_base:
-            return None
-        base = Path(directory.rstrip("/") or "/")
-    else:
-        base = Path(os.path.normpath(os.path.join(str(cwd), directory))) if directory else cwd
-    pointer = _pointer_expansion_value(base, "cat")
-    if not pointer or "\0" in pointer:
-        return None
-    return Path(os.path.realpath(pointer + suffix + rest))
-
-
 IGNORED_SCRIPT_BASENAMES = {"setup.py"}
 ANALYSIS_PATTERNS = (
     RX_PYTHON_C,
@@ -4632,11 +4527,8 @@ def _detect_scripts_with_cwd(
                 continue
             if "$" in raw_path:
                 # `P=$(cat .mycelium/plugin-root); python3 $P/skills/core/...`
-                # (or the strict two-step chain) runs a bundled helper:
-                # managed, not an unreadable script.
-                via_variable = (
-                    _strict_chain_script_path(bash_cmd, m.start(), raw_path, effective_cwd)
-                    or _variable_script_path(bash_cmd, m.start(), raw_path, effective_cwd))
+                # runs a bundled helper: managed, not an unreadable script.
+                via_variable = _variable_script_path(bash_cmd, m.start(), raw_path, effective_cwd)
                 if via_variable is not None and _is_managed_utility_path(via_variable):
                     continue
             # The accessor dereferences a pointer relative to the effective

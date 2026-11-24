@@ -93,6 +93,8 @@ def _gap(host: str, out: dict, gap: str, user: str = "") -> None:
     assert out.get("decision") is None, out
     assert set(out) == {"systemMessage"}, out
     assert gap in out["systemMessage"] and user in out["systemMessage"], out
+    # Claude shows each line as "Stop says: <line>": no empty ones (live run).
+    assert "" not in out["systemMessage"].split("\n"), out
 
 
 def _durable_gap(repo: Path, gap: str) -> None:
