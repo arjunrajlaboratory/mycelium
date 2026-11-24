@@ -321,6 +321,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `finalize_handoff.py --diagnose` reports the problems: exit 0 for a
   complete handoff, 3 with a one-line diagnosis, 1 on error. Existing projects pick up the new rule 10 the next time
   `init_repo.py` or migration refreshes their `MYCELIUM.md`.
+- **A routine accepted Stop no longer gives Claude another turn.** On
+  Claude Code, `additionalContext` on a Stop hook continues the conversation.
+  Mycelium used it for the ".living/ updated" confirmation, so every accepted
+  Stop with an update made the model reply again (confirmed in a live
+  `claude -p` run). That confirmation and the access note are for the user,
+  so they now go only to `systemMessage`. Provenance-gap warnings (lineage
+  gaps, detector failures, unrecorded events) are for the agent, which may
+  need to say its results' provenance is unknown. They stay in
+  `additionalContext` on Claude, as before, on the rare Stop that has one.
+  Codex output and blocked Stops are unchanged.
 
 ## [0.9.7] - 2026-11-21
 

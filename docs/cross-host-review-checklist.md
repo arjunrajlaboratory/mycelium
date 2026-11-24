@@ -226,6 +226,11 @@ hook, filesystem, or lifecycle boundaries.
       archives active state.
 - [ ] Stop continuation messages identify the unmet requirement precisely and
       do not enter an infinite retry loop.
+- [ ] A routine accepted Stop emits only `systemMessage`, on every host. On
+      Claude, `hookSpecificOutput.additionalContext` on a Stop continues the
+      conversation like a block, so it carries only what the agent must
+      act on: a provenance gap. Anything else the agent must act on is a
+      block reason.
 - [ ] Stop preserves the authored content of a fresh, complete five-section
       handoff, where every required heading occurs exactly once in order and
       every section has a nonblank, non-heading body line after obsolete

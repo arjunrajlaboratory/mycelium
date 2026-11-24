@@ -140,12 +140,11 @@ def test_note_appears_only_when_stop_accepts(tmp_path, host):
     text = _text(accepted)
     assert "ACCESS NOTE: 1 script(s) this session" in text
     assert "analysis/qc/scripts/filter.py -> analysis/qc/outputs/kept.csv" in text
-    # Only `systemMessage` carries it. On Claude, `additionalContext` on an
-    # accepted Stop would make Claude take another turn on advice alone.
+    # Only `systemMessage` carries it, on every host. On Claude,
+    # `additionalContext` on an accepted Stop would make Claude take another
+    # turn on advice alone.
     assert "ACCESS NOTE" in _out(accepted)["systemMessage"]
-    if host == "claude":
-        context = _out(accepted).get("hookSpecificOutput", {}).get("additionalContext", "")
-        assert "ACCESS NOTE" not in context
+    assert set(_out(accepted)) == {"systemMessage"}
     assert not list((repo / ".mycelium").rglob("access-note.tmp"))
 
 
@@ -202,7 +201,7 @@ def test_note_never_changes_the_stop_decision(tmp_path, host):
 
 @pytest.mark.parametrize("host", HOSTS)
 def test_silent_accepting_stop_gets_only_a_user_message(tmp_path, host):
-    """A Stop that would say nothing to the model still says nothing to it."""
+    """A Stop with only the note says nothing to the model."""
     repo = _repo(tmp_path, records=False)
     _turn(host, repo, "s1")
     _accept(host, repo, "s1")
@@ -216,9 +215,7 @@ def test_silent_accepting_stop_gets_only_a_user_message(tmp_path, host):
         stop = _accept(host, repo, "s1")
     out = _out(stop)
     assert "ACCESS NOTE" in out.get("systemMessage", "")
-    if host == "claude":
-        assert "ACCESS NOTE" not in out.get("hookSpecificOutput", {}).get(
-            "additionalContext", "")
+    assert set(out) == {"systemMessage"}
 
 
 @pytest.mark.parametrize("host", HOSTS)
