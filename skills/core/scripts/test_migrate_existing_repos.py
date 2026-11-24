@@ -16,6 +16,8 @@ import generate_index as gi  # noqa: E402
 import validate_structure as vs  # noqa: E402
 import migrate_existing_repos as mig  # noqa: E402
 
+pytestmark = pytest.mark.platform
+
 
 @pytest.fixture()
 def fake_repo(tmp_path: Path) -> Path:

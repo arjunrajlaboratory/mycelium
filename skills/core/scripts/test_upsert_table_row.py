@@ -8,6 +8,9 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import pytest
+
+pytestmark = pytest.mark.platform
 
 
 SCRIPT = Path(__file__).parent / "upsert_table_row.py"

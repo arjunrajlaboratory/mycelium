@@ -224,11 +224,11 @@ jobs:
           # symlink/path-spelling tests. Pure-logic tests run on Linux only;
           # test_platform_marker.py (Linux job) fails if a module that spawns
           # a shell or hook is left unmarked.
-          pytest -q -n auto --dist worksteal -m platform --shard ${{ matrix.shard }}/2 \
+          pytest -q -n auto --dist worksteal --durations=15 -m platform --shard ${{ matrix.shard }}/2 \
             skills/core/scripts --ignore=skills/core/scripts/knowledge_map
 
       - name: Test Antigravity package lifecycle (macOS)
-        if: matrix.shard == 2
+        if: matrix.shard == 1
         run: |
           # All of tools/, as on Linux and in the release gate: the integrity
           # tests walk real directory trees, whose limits (such as PATH_MAX)
@@ -236,7 +236,7 @@ jobs:
           pytest -q tools
 
       - name: Run hook compatibility tests (macOS)
-        if: matrix.shard == 1
+        if: matrix.shard == 2
         run: |
           bash skills/core/hooks/test_stop_hook.sh
           bash skills/core/hooks/test_hooks_stress.sh

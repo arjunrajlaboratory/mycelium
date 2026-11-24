@@ -25,6 +25,8 @@ import extract_data_lineage as stop  # noqa: E402
 import io_observer as io  # noqa: E402
 import extract_data_lineage_event as ev  # noqa: E402
 
+pytestmark = pytest.mark.platform
+
 EXTRACTOR = HERE / "extract_data_lineage_event.py"
 
 
