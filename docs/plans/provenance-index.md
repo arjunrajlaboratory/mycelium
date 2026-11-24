@@ -636,6 +636,14 @@ ledger table, and runs:
 - `batch_confounding`: one per batch column, with the group as contrast. This
   is the existing check, now reachable from ingest.
 - `pairing`, when declared.
+- `paired_batch` (added after #154; advisory, warn-only, until proven on
+  real ledgers), when a pairing and batch columns are declared: one per
+  batch column and one joint. It warns when a
+  within-unit contrast the pairs estimate is lost to batch, in one exact
+  design: unit (absorbed) + every observed group-by-within cell + batch.
+  Blocking was the intent (an inestimable contrast is a design fact no
+  analysis choice recovers), but it ships warn-only first: review found
+  model-specification edge cases in both directions.
 
 `--emit-contract <path>` writes the generated contract with a `note` telling
 analyze step 6 to point the replication check at the modeled table (dropping
