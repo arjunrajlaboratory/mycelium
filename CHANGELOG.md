@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Static stdlib I/O reading resolves paths anchored on `__file__`.**
+  Agent-written analysis scripts build every path from the script's own
+  location (`Path(__file__).resolve().parents[2] / "data" / ...`). In the
+  2026-11-24 live runs this left every run without a runtime observer
+  recording `io_detection: unresolved`.
+  - `__file__` is now bound to the script's path when Python ran it
+    directly (`python path/run.py`) and that path is certain. The word must
+    be in normal form (no `.`, `..` or doubled `/`), must name the detected
+    script, and no component of the path, working directory included, may
+    be a symlink. Otherwise nothing changes.
+  - Supported: `Path(__file__)`, `.resolve()`, `.absolute()`, `.parent`,
+    `.parents[<literal int>]`, and `os.path.abspath`/`realpath`/`dirname`
+    (nested), through module constants, `/`, `os.path.join` and argparse
+    defaults.
+  - A relative script word is used only through `abspath`, `realpath`,
+    `resolve()` or `absolute()` of `__file__` itself, since Python before 3.9
+    leaves it relative. With a relative word, a `chdir` anywhere in the
+    script leaves `__file__` unbound.
+  - `__file__` rebound anywhere, a non-literal or negative `parents` index,
+    and `resolve()` after a joined component all stay unresolved. Every
+    existing rule of the scan still applies: additive only, the shared work
+    budget and deadline, and repository containment.
+- **argparse replay models the `parse_args(argv=None)` wrapper.** This is a
+  module function returning `parser.parse_args(argv)`, called once as
+  `args = parse_args(argv)` (or `parse_args()`) from `main(argv=None)`. The
+  main guard calls `main` with no arguments: `main()`, `sys.exit(main())`
+  or `raise SystemExit(main())`. `argv` is then provably None, and the
+  existing replay rules apply unchanged. Each `argv` is resolved in its own
+  function and must not be used anywhere else there. Any other caller, a
+  non-None default, a rebound or mutated `argv`, `sys.argv` touched, or a
+  second parse call anywhere declines. So does a wrapper body that is not
+  straight-line (anything before the final return other than assignments
+  and expression statements, or any `return`, `raise`, `yield` or nested
+  scope), because it could return another namespace first.
+- **Main's static result is never lost.** The scan main already runs goes
+  first, unchanged. `__file__` and wrapper resolution run in a second pass,
+  with their own path cap, work budget and deadline. That pass adds only
+  paths the first did not find. Over any of its bounds it adds nothing, and
+  main's records stand.
+
 ## [0.10.0] - 2026-11-24
 
 ### Added

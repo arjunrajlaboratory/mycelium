@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -5719,3 +5720,525 @@ def test_main_argparse_declines_zsh_magic_equal_subst(
     )
     [event] = _run_extractor(tmp_path, command)
     assert [Path(r["path"]).name for r in event["inputs"]] == expected
+
+
+# --- `__file__`-anchored paths ---------------------------------------------
+#
+# Agent-written analysis scripts anchor every path on the script's own
+# location (`Path(__file__).resolve().parents[2] / "data" / ...`). `__file__`
+# is bound only when the script path is certain; every other rule of the
+# stdlib scan still applies.
+
+_FILE = lineage_event._ScriptFile("/r/analysis/de/run.py", absolute=False)
+_FILE_ABS = lineage_event._ScriptFile("/r/analysis/de/run.py", absolute=True)
+
+_FILE_ANCHORED_CASES = {
+    # (source, script_args, script_file, expected)
+    "resolve_parents": (
+        "from pathlib import Path\n"
+        "REPO_ROOT = Path(__file__).resolve().parents[2]\n"
+        "ANALYSIS_DIR = Path(__file__).resolve().parent\n"
+        "COUNTS = REPO_ROOT / 'data' / 'raw' / 'expr' / 'counts.tsv'\n"
+        "OUT = ANALYSIS_DIR / 'outputs' / 'gene_ratios.csv'\n"
+        "with COUNTS.open('r', encoding='utf-8') as h:\n    pass\n"
+        "with OUT.open('w') as h:\n    pass\n",
+        [], _FILE,
+        (["/r/data/raw/expr/counts.tsv"], ["/r/analysis/de/outputs/gene_ratios.csv"])),
+    "here_repo": (
+        "from pathlib import Path\n"
+        "HERE = Path(__file__).resolve().parent\n"
+        "REPO = HERE.parents[1]\n"
+        "SAMPLES = REPO / 'data' / 'metadata' / 'expr' / 'samples.tsv'\n"
+        "OUT = HERE / 'outputs' / 'sample_counts.csv'\n"
+        "def main():\n    with SAMPLES.open(newline='') as fh:\n        pass\n"
+        "    OUT.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    with OUT.open('w', newline='') as fh:\n        pass\n"
+        "if __name__ == '__main__':\n    main()\n",
+        [], _FILE,
+        (["/r/data/metadata/expr/samples.tsv"], ["/r/analysis/de/outputs/sample_counts.csv"])),
+    "argparse_default": (
+        "import argparse\nfrom pathlib import Path\n"
+        "REPO_ROOT = Path(__file__).resolve().parents[2]\n"
+        "DEFAULT_COUNTS = REPO_ROOT / 'data' / 'counts.tsv'\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('--counts', type=Path, default=DEFAULT_COUNTS)\n"
+        "p.add_argument('--config', required=True)\n"
+        "a = p.parse_args()\n"
+        "with a.counts.open('r') as h:\n    pass\n"
+        "open(a.config)\n",
+        ["--config", "analysis/de/params.yaml"], _FILE,
+        (["/r/data/counts.tsv", "analysis/de/params.yaml"], [])),
+    "os_path_nested": (
+        "import os\n"
+        "HERE = os.path.dirname(os.path.abspath(__file__))\n"
+        "ROOT = os.path.dirname(os.path.dirname(HERE))\n"
+        "open(os.path.join(ROOT, 'data', 'a.csv'))\n"
+        "open(os.path.join(HERE, 'out.csv'), 'w')\n",
+        [], _FILE, (["/r/data/a.csv"], ["/r/analysis/de/out.csv"])),
+    "realpath_absolute": (
+        "import os\nfrom pathlib import Path\n"
+        "A = os.path.realpath(__file__)\nB = Path(__file__).absolute().parent\n"
+        "open(os.path.dirname(A) + '/x.csv')\nopen(B / 'y.csv', 'w')\n",
+        [], _FILE, (["/r/analysis/de/x.csv"], ["/r/analysis/de/y.csv"])),
+    "absolute_word_bare": (
+        "import os\nfrom pathlib import Path\n"
+        "open(Path(__file__).parent / 'a.csv')\n"
+        "open(os.path.join(os.path.dirname(__file__), 'b.csv'), 'w')\n",
+        [], _FILE_ABS, (["/r/analysis/de/a.csv"], ["/r/analysis/de/b.csv"])),
+    "chdir_absolute_kept": (
+        "import os\nfrom pathlib import Path\n"
+        "OUT = Path(__file__).resolve().parent / 'out.csv'\n"
+        "os.chdir('/tmp')\nopen(OUT, 'w')\nopen('rel.csv', 'w')\n",
+        [], _FILE_ABS, ([], ["/r/analysis/de/out.csv"])),
+    # -- negatives --
+    "no_script_file": (
+        "from pathlib import Path\nopen(Path(__file__).resolve().parent / 'a.csv')\n",
+        [], None, ([], [])),
+    "file_reassigned": (
+        "from pathlib import Path\n__file__ = '/elsewhere/x.py'\n"
+        "open(Path(__file__).resolve().parent / 'a.csv')\n",
+        [], _FILE, ([], [])),
+    "file_param": (
+        "from pathlib import Path\ndef f(__file__):\n    pass\n"
+        "open(Path(__file__).resolve().parent / 'a.csv')\n",
+        [], _FILE, ([], [])),
+    "file_deleted": (
+        "from pathlib import Path\nA = Path(__file__).resolve().parent\ndel __file__\n"
+        "open(A / 'a.csv')\n",
+        [], _FILE, ([], [])),
+    "parents_nonliteral": (
+        "from pathlib import Path\nN = 2\n"
+        "open(Path(__file__).resolve().parents[N] / 'a.csv')\n",
+        [], _FILE, ([], [])),
+    "parents_negative": (
+        "from pathlib import Path\nopen(Path(__file__).resolve().parents[-1] / 'a.csv')\n",
+        [], _FILE, ([], [])),
+    "parents_bool": (
+        "from pathlib import Path\nopen(Path(__file__).resolve().parents[True] / 'a.csv')\n",
+        [], _FILE, ([], [])),
+    "parents_out_of_range": (
+        "from pathlib import Path\nopen(Path(__file__).resolve().parents[9] / 'a.csv')\n",
+        [], _FILE, ([], [])),
+    "relative_word_unresolved_parent": (
+        # Before Python 3.9 `__file__` is the relative word itself.
+        "import os\nfrom pathlib import Path\n"
+        "open(Path(__file__).parent / 'a.csv')\n"
+        "open(os.path.join(os.path.dirname(__file__), 'b.csv'))\n",
+        [], _FILE, ([], [])),
+    "relative_word_with_chdir": (
+        "import os\nfrom pathlib import Path\n"
+        "os.chdir('/tmp')\nOUT = Path(__file__).resolve().parent / 'out.csv'\n"
+        "open(OUT, 'w')\n",
+        [], _FILE, ([], [])),
+    "resolve_after_join": (
+        # A joined component may be a symlink: `resolve()` follows it.
+        "from pathlib import Path\n"
+        "open((Path(__file__).resolve().parent / 'link' / 'a.csv').resolve())\n",
+        [], _FILE, ([], [])),
+    "resolve_strict_keyword": (
+        "from pathlib import Path\nopen(Path(__file__).resolve(strict=True).parent / 'a.csv')\n",
+        [], _FILE, ([], [])),
+    "parent_on_literal": (
+        "from pathlib import Path\nopen(Path('data/x.csv').parent / 'a.csv')\n",
+        [], _FILE, ([], [])),
+    "resolve_on_literal": (
+        "from pathlib import Path\nopen(Path('data').resolve() / 'a.csv')\n",
+        [], _FILE, ([], [])),
+    "parent_on_str": (
+        "import os\nopen(os.path.abspath(__file__).parent / 'a.csv')\n",
+        [], _FILE, ([], [])),
+    "opaque_still_opaque": (
+        "from pathlib import Path\nexec('x=1')\n"
+        "open(Path(__file__).resolve().parent / 'a.csv')\n",
+        [], _FILE, ([], [])),
+    "dotdot_join": (
+        "from pathlib import Path\nopen(Path(__file__).resolve().parent / '..' / 'a.csv')\n",
+        [], _FILE, ([], [])),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_FILE_ANCHORED_CASES))
+def test_stdlib_file_anchored_paths(case: str) -> None:
+    source, script_args, script_file, expected = _FILE_ANCHORED_CASES[case]
+    assert lineage_event._stdlib_static_io(source, script_args, script_file) == expected
+
+
+def test_certain_script_file(tmp_path: Path) -> None:
+    root = Path(os.path.realpath(tmp_path))
+    (root / "a" / "b").mkdir(parents=True)
+    script = root / "a" / "b" / "run.py"
+    script.write_text("")
+    certain = lineage_event._certain_script_file
+    assert certain(script, "a/b/run.py", root) == lineage_event._ScriptFile(str(script), False)
+    assert certain(script, str(script), root) == lineage_event._ScriptFile(str(script), True)
+    assert certain(script, "run.py", root / "a" / "b") == lineage_event._ScriptFile(str(script), False)
+    # Not certain: no word (a runner, an inline body), a word Python would
+    # spell differently in `__file__`, or a word that names another path.
+    assert certain(script, None, root) is None
+    assert certain(script, "./a/b/run.py", root) is None
+    assert certain(script, "a/x/../b/run.py", root) is None
+    assert certain(script, "a//b/run.py", root) is None
+    assert certain(script, "other.py", root) is None
+    assert certain(script, "a/b/run.py", None) is None
+    # A symlink anywhere in the path: the script, a directory, the cwd.
+    (root / "link.py").symlink_to(script)
+    assert certain(root / "link.py", "link.py", root) is None
+    (root / "alias").symlink_to(root / "a")
+    assert certain(root / "alias" / "b" / "run.py", "alias/b/run.py", root) is None
+    assert certain(root / "alias" / "b" / "run.py", "run.py", root / "alias" / "b") is None
+
+
+def _file_anchored_repo(root: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    for rel, text in {
+        "data/raw/expr/counts.tsv": "gene\ts1\ng1\t5\n",
+        "data/metadata/expr/samples.ledger.json": "{}\n",
+        "data/metadata/expr/samples.tsv": "sample\tarm\ns1\tdrug\n",
+        "analysis/de/params.yaml": "ratio_threshold: 1.5\n",
+    }.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+
+
+# Minimized from the 2026-11-24 live runs (Claude twice, Antigravity once).
+_FILE_ANCHORED_SCRIPTS = {
+    "claude-de": (
+        "analysis/de/run.py", "python3 analysis/de/run.py --config analysis/de/params.yaml",
+        "import argparse\nimport sys\nfrom pathlib import Path\n\n"
+        "HERE = Path(__file__).resolve().parent\nROOT = HERE.parents[1]\n"
+        "sys.path.insert(0, str(ROOT / 'analysis' / '_lib'))\n"
+        "COUNTS = ROOT / 'data/raw/expr/counts.tsv'\n"
+        "LEDGER = ROOT / 'data/metadata/expr/samples.tsv'\n"
+        "OUT = HERE / 'outputs' / 'gene_ratios.csv'\n\n"
+        "def main() -> int:\n"
+        "    ap = argparse.ArgumentParser()\n"
+        "    ap.add_argument('--config', required=True)\n"
+        "    args = ap.parse_args()\n"
+        "    with open(args.config) as fh:\n        fh.read()\n"
+        "    with open(LEDGER, newline='') as fh:\n        fh.read()\n"
+        "    with open(COUNTS, newline='') as fh:\n        fh.read()\n"
+        "    OUT.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    with open(OUT, 'w', newline='') as fh:\n        fh.write('x\\n')\n"
+        "    return 0\n\n"
+        "if __name__ == '__main__':\n    raise SystemExit(main())\n",
+        ["analysis/de/params.yaml", "data/metadata/expr/samples.tsv",
+         "data/raw/expr/counts.tsv"],
+        ["analysis/de/outputs/gene_ratios.csv"]),
+    "claude-summary": (
+        "analysis/summary/run.py", "python3 analysis/summary/run.py",
+        "import csv\nfrom pathlib import Path\n\n"
+        "HERE = Path(__file__).resolve().parent\nREPO = HERE.parents[1]\n"
+        "SAMPLES = REPO / 'data' / 'metadata' / 'expr' / 'samples.tsv'\n"
+        "OUT = HERE / 'outputs' / 'sample_counts.csv'\n\n"
+        "def main() -> None:\n"
+        "    with SAMPLES.open(newline='') as fh:\n        list(csv.reader(fh))\n"
+        "    OUT.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    with OUT.open('w', newline='') as fh:\n        fh.write('x\\n')\n\n"
+        "if __name__ == '__main__':\n    main()\n",
+        ["data/metadata/expr/samples.tsv"], ["analysis/summary/outputs/sample_counts.csv"]),
+    "argparse-defaults": (
+        # The Antigravity script's constants and argparse defaults, in the
+        # `args = parser.parse_args()` form the replay models.
+        "analysis/de/run.py", "python3 analysis/de/run.py --config analysis/de/params.yaml",
+        "import argparse\nfrom pathlib import Path\n\n"
+        "REPO_ROOT = Path(__file__).resolve().parents[2]\n"
+        "ANALYSIS_DIR = Path(__file__).resolve().parent\n"
+        "DEFAULT_COUNTS = REPO_ROOT / 'data' / 'raw' / 'expr' / 'counts.tsv'\n"
+        "DEFAULT_LEDGER = REPO_ROOT / 'data' / 'metadata' / 'expr' / 'samples.ledger.json'\n"
+        "DEFAULT_OUTPUT = ANALYSIS_DIR / 'outputs' / 'gene_ratios.csv'\n\n"
+        "def run(counts_path, ledger_spec_path, config_path, output_csv):\n"
+        "    config_path.read_text(encoding='utf-8')\n"
+        "    ledger_spec_path.read_text(encoding='utf-8')\n"
+        "    with counts_path.open('r', encoding='utf-8', newline='') as handle:\n"
+        "        handle.read()\n"
+        "    output_csv.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    with output_csv.open('w', encoding='utf-8', newline='') as handle:\n"
+        "        handle.write('x\\n')\n\n"
+        "def main() -> int:\n"
+        "    parser = argparse.ArgumentParser(description='Ratios.')\n"
+        "    parser.add_argument('--config', required=True, type=Path, help='YAML config.')\n"
+        "    parser.add_argument('--counts', type=Path, default=DEFAULT_COUNTS,\n"
+        "                        help=f'Counts (default: {DEFAULT_COUNTS}).')\n"
+        "    parser.add_argument('--ledger', type=Path, default=DEFAULT_LEDGER)\n"
+        "    parser.add_argument('--output', type=Path, default=DEFAULT_OUTPUT)\n"
+        "    args = parser.parse_args()\n"
+        "    run(counts_path=args.counts, ledger_spec_path=args.ledger,\n"
+        "        config_path=args.config, output_csv=args.output)\n"
+        "    return 0\n\n"
+        "if __name__ == '__main__':\n    raise SystemExit(main())\n",
+        ["analysis/de/params.yaml", "data/metadata/expr/samples.ledger.json",
+         "data/raw/expr/counts.tsv"],
+        ["analysis/de/outputs/gene_ratios.csv"]),
+}
+
+
+def _run_extractor_cli(root: Path, command: str, cwd: Path | None = None) -> dict:
+    target = root / "events.tmp"
+    target.unlink(missing_ok=True)
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).parent / "extract_data_lineage_event.py"),
+         "--cwd", str(cwd or root), "--ts", "2026-11-24T12:00:00Z",
+         "--bash-cmd", command, "--bash-exit", "0", "--append-to", str(target),
+         "--repo-root", str(root)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    [event] = [json.loads(line) for line in target.read_text().splitlines()]
+    return event
+
+
+@pytest.mark.parametrize("name", sorted(_FILE_ANCHORED_SCRIPTS))
+def test_main_resolves_file_anchored_scripts(tmp_path: Path, name: str) -> None:
+    rel, command, source, expected_in, expected_out = _FILE_ANCHORED_SCRIPTS[name]
+    root = Path(os.path.realpath(tmp_path))
+    _file_anchored_repo(root)
+    (root / rel).parent.mkdir(parents=True, exist_ok=True)
+    (root / rel).write_text(source)
+    event = _run_extractor_cli(root, command)
+    assert event["io_detection"] == "static"
+    assert sorted(r["rel_path"] for r in event["inputs"]) == expected_in
+    assert sorted(r["rel_path"] for r in event["outputs"]) == expected_out
+    assert {r["source"] for r in event["inputs"] + event["outputs"]} == {"inferred-static"}
+
+
+def test_main_leaves_file_anchored_paths_unresolved_when_script_is_uncertain(
+        tmp_path: Path) -> None:
+    rel, _, source, _, _ = _FILE_ANCHORED_SCRIPTS["claude-summary"]
+    root = Path(os.path.realpath(tmp_path))
+    _file_anchored_repo(root)
+    (root / rel).parent.mkdir(parents=True)
+    (root / rel).write_text(source)
+    # A symlinked script: `resolve()` follows the link to another directory.
+    (root / "linked.py").symlink_to(root / rel)
+    # A symlinked working directory.
+    (root / "alias").symlink_to(root / "analysis")
+    for command, cwd in (
+        ("python3 linked.py", root),
+        ("python3 ./analysis/summary/run.py", root),
+        ("python3 summary/run.py", root / "alias"),
+    ):
+        event = _run_extractor_cli(root, command, cwd)
+        assert event["io_detection"] == "unresolved", command
+        assert event["inputs"] == [] and event["outputs"] == [], command
+
+
+# --- argparse through a `parse_args(argv=None)` wrapper ---------------------
+#
+# The common agent layout: a wrapper returning `parser.parse_args(argv)`,
+# called once as `args = parse_args(argv)` from `main(argv=None)`, which
+# the main guard calls with no arguments. `argv` is then provably None.
+
+_WRAPPER_PARSER = (
+    "import argparse\nimport sys\n\n"
+    "def parse_args(argv=None):\n"
+    "    parser = argparse.ArgumentParser(description='x')\n"
+    "    parser.add_argument('--out', default='d.csv')\n"
+    "    return parser.parse_args(argv)\n\n"
+)
+_WRAPPER_MAIN = (
+    "def main(argv=None):\n"
+    "    args = parse_args(argv)\n"
+    "    open(args.out, 'w')\n"
+    "    return 0\n\n"
+)
+_WRAPPER_GUARD = "if __name__ == '__main__':\n    raise SystemExit(main())\n"
+
+_WRAPPER_CASES = {
+    # (source, script_args, expected outputs)
+    "raise_system_exit": (_WRAPPER_PARSER + _WRAPPER_MAIN + _WRAPPER_GUARD,
+                          ["--out", "given.csv"], ["given.csv"]),
+    "default": (_WRAPPER_PARSER + _WRAPPER_MAIN + _WRAPPER_GUARD, [], ["d.csv"]),
+    "sys_exit": (_WRAPPER_PARSER + _WRAPPER_MAIN
+                 + "if __name__ == '__main__':\n    sys.exit(main())\n", [], ["d.csv"]),
+    "bare_call": (_WRAPPER_PARSER + _WRAPPER_MAIN
+                  + "if __name__ == '__main__':\n    main()\n", [], ["d.csv"]),
+    "no_argument": (_WRAPPER_PARSER
+                    + "def main():\n    args = parse_args()\n    open(args.out, 'w')\n\n"
+                    + "if __name__ == '__main__':\n    main()\n", [], ["d.csv"]),
+    "kwonly_argv": (_WRAPPER_PARSER
+                    + "def main(*, argv=None):\n    args = parse_args(argv)\n"
+                    "    open(args.out, 'w')\n\n" + _WRAPPER_GUARD, [], ["d.csv"]),
+    # -- declines --
+    "second_caller": (_WRAPPER_PARSER + _WRAPPER_MAIN + _WRAPPER_GUARD
+                      + "def other():\n    return parse_args(['--out', 'x.csv'])\n",
+                      [], []),
+    "wrapper_default_not_none": (
+        _WRAPPER_PARSER.replace("argv=None", "argv=['--out', 'x.csv']")
+        + _WRAPPER_MAIN + _WRAPPER_GUARD, [], []),
+    "main_default_not_none": (
+        _WRAPPER_PARSER + _WRAPPER_MAIN.replace("argv=None", "argv=()")
+        + _WRAPPER_GUARD, [], []),
+    "main_no_default": (
+        _WRAPPER_PARSER + _WRAPPER_MAIN.replace("argv=None", "argv")
+        + "if __name__ == '__main__':\n    main(None)\n", [], []),
+    "main_called_with_argument": (
+        _WRAPPER_PARSER + _WRAPPER_MAIN
+        + "if __name__ == '__main__':\n    main(['--out', 'x.csv'])\n", [], []),
+    "main_called_twice": (
+        _WRAPPER_PARSER + _WRAPPER_MAIN + _WRAPPER_GUARD + "main()\n", [], []),
+    "main_called_outside_guard": (_WRAPPER_PARSER + _WRAPPER_MAIN + "main()\n", [], []),
+    "main_called_in_expression": (
+        _WRAPPER_PARSER + _WRAPPER_MAIN
+        + "if __name__ == '__main__':\n    print(main())\n", [], []),
+    "argv_reassigned": (
+        _WRAPPER_PARSER
+        + _WRAPPER_MAIN.replace("    args = parse_args(argv)\n",
+                                "    argv = ['--out', 'x.csv']\n    args = parse_args(argv)\n")
+        + _WRAPPER_GUARD, [], []),
+    "argv_mutated": (
+        _WRAPPER_PARSER
+        + _WRAPPER_MAIN.replace("    args = parse_args(argv)\n",
+                                "    argv = argv or []\n    argv.append('--out=x.csv')\n"
+                                "    args = parse_args(argv)\n")
+        + _WRAPPER_GUARD, [], []),
+    "wrapper_argv_reassigned": (
+        _WRAPPER_PARSER.replace("    return parser.parse_args(argv)\n",
+                                "    argv = ['--out', 'x.csv']\n"
+                                "    return parser.parse_args(argv)\n")
+        + _WRAPPER_MAIN + _WRAPPER_GUARD, [], []),
+    "argv_shadowed_nested": (
+        _WRAPPER_PARSER
+        + _WRAPPER_MAIN.replace("    args = parse_args(argv)\n",
+                                "    f = lambda argv: argv\n    args = parse_args(argv)\n")
+        + _WRAPPER_GUARD, [], []),
+    "sys_argv_touched": (
+        _WRAPPER_PARSER + _WRAPPER_MAIN
+        + "if __name__ == '__main__':\n    sys.argv.append('--out=x.csv')\n"
+        "    raise SystemExit(main())\n", [], []),
+    "second_parse_args": (
+        _WRAPPER_PARSER.replace("    return parser.parse_args(argv)\n",
+                                "    parser.parse_args(argv)\n"
+                                "    return parser.parse_args(argv)\n")
+        + _WRAPPER_MAIN + _WRAPPER_GUARD, [], []),
+    "parse_known_args_elsewhere": (
+        _WRAPPER_PARSER + _WRAPPER_MAIN + _WRAPPER_GUARD
+        + "def other(p):\n    return p.parse_known_args()\n", [], []),
+    "wrapper_returns_known_args": (
+        _WRAPPER_PARSER.replace("parser.parse_args(argv)", "parser.parse_known_args(argv)[0]")
+        + _WRAPPER_MAIN + _WRAPPER_GUARD, [], []),
+    "wrapper_extra_parameter": (
+        _WRAPPER_PARSER.replace("def parse_args(argv=None)", "def parse_args(argv=None, x=1)")
+        + _WRAPPER_MAIN + _WRAPPER_GUARD, [], []),
+    "wrapper_passes_other_name": (
+        _WRAPPER_PARSER.replace("    return parser.parse_args(argv)\n",
+                                "    v = None\n    return parser.parse_args(v)\n")
+        + _WRAPPER_MAIN + _WRAPPER_GUARD, [], []),
+    "wrapper_keyword_call": (
+        _WRAPPER_PARSER + _WRAPPER_MAIN.replace("parse_args(argv)", "parse_args(argv=argv)")
+        + _WRAPPER_GUARD, [], []),
+    "wrapper_decorated": (
+        _WRAPPER_PARSER.replace("def parse_args", "@staticmethod\ndef parse_args")
+        + _WRAPPER_MAIN + _WRAPPER_GUARD, [], []),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_WRAPPER_CASES))
+def test_stdlib_argparse_wrapper(case: str) -> None:
+    source, script_args, expected = _WRAPPER_CASES[case]
+    assert lineage_event._stdlib_static_io(source, script_args) == ([], expected)
+
+
+def test_main_resolves_the_antigravity_script(tmp_path: Path) -> None:
+    """The 2026-11-24 Antigravity run's script, unmodified: `__file__`
+    anchored argparse defaults through a `parse_args(argv)` wrapper.
+
+    Known limits, which stay unresolved: the config is read through a
+    loader-returned `read_source`, and counts and ledger pass through
+    parameters named alike in two functions (`run_analysis` and
+    `load_counts`/`load_ledger`), which the module-unique name rule
+    declines."""
+    root = Path(os.path.realpath(tmp_path))
+    _file_anchored_repo(root)
+    script = root / "analysis" / "de" / "run.py"
+    script.write_text((Path(__file__).parent / "testdata"
+                       / "antigravity-0.10.0-de-run.py").read_text())
+    event = _run_extractor_cli(
+        root, "python3 analysis/de/run.py --config analysis/de/params.yaml")
+    assert event["io_detection"] == "static"
+    # The script re-reads the table it wrote, so the output is also an input.
+    assert sorted(r["rel_path"] for r in event["inputs"]) == [
+        "analysis/de/outputs/gene_ratios.csv"]
+    assert [r["rel_path"] for r in event["outputs"]] == [
+        "analysis/de/outputs/gene_ratios.csv"]
+
+
+# Review of #171: a wrapper whose body can return before its final
+# `return parser.parse_args(argv)` returns some other namespace.
+_WRAPPER_STD_BODY = (
+    "    parser = argparse.ArgumentParser()\n"
+    "    parser.add_argument('--out', default='d.csv')\n"
+    "    return parser.parse_args(argv)\n\n"
+)
+_WRAPPER_CONTROL_FLOW = {
+    "early_if_return": "    if True:\n        return argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY,
+    "return_between": (
+        "    parser = argparse.ArgumentParser()\n    parser.add_argument('--out', default='d.csv')\n"
+        "    if True:\n        return argparse.Namespace(out='x.csv')\n"
+        "    return parser.parse_args(argv)\n\n"),
+    "try_finally_return": (
+        "    parser = argparse.ArgumentParser()\n    parser.add_argument('--out', default='d.csv')\n"
+        "    try:\n        pass\n    finally:\n        return argparse.Namespace(out='x.csv')\n"
+        "    return parser.parse_args(argv)\n\n"),
+    "for_return": "    for _ in [1]:\n        return argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY,
+    "while_return": "    while True:\n        return argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY,
+    "with_return": "    with open('/dev/null') as fh:\n        return argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY,
+    "match_return": "    match 1:\n        case 1:\n            return argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY,
+    "raise_first": "    raise SystemExit(0)\n" + _WRAPPER_STD_BODY,
+    "nested_def_return": (
+        "    def inner():\n        return argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY),
+    "yield_generator": "    yield argparse.Namespace(out='x.csv')\n" + _WRAPPER_STD_BODY,
+}
+
+
+@pytest.mark.parametrize("case", sorted(_WRAPPER_CONTROL_FLOW))
+def test_stdlib_argparse_wrapper_must_be_straight_line(case: str) -> None:
+    source = ("import argparse\n\ndef parse_args(argv=None):\n"
+              + _WRAPPER_CONTROL_FLOW[case] + _WRAPPER_MAIN + _WRAPPER_GUARD)
+    for script_args in ([], ["--out", "given.csv"]):
+        # Only the namespace's path is in question (`with_return` opens
+        # /dev/null, a real input main's scan records too).
+        assert lineage_event._stdlib_static_io(source, script_args)[1] == []
+
+
+def test_stdlib_argparse_wrapper_straight_line_with_docstring_and_assignments() -> None:
+    source = ("import argparse\n\ndef parse_args(argv=None):\n"
+              "    '''Parse the command line.'''\n    description = 'x'\n"
+              + _WRAPPER_STD_BODY.replace("ArgumentParser()", "ArgumentParser(description=description)")
+              + _WRAPPER_MAIN + _WRAPPER_GUARD)
+    assert lineage_event._stdlib_static_io(source, ["--out", "given.csv"]) == ([], ["given.csv"])
+
+
+# Review of #171: the new resolution must never cost main's own result.
+# Main's scan runs first, unchanged; the cap, work budget and deadline bound
+# only what the new resolution adds.
+_CAP_SOURCE = (
+    "from pathlib import Path\nHERE = Path(__file__).resolve().parent\n"
+    + "".join(f"with open('lit{i}.txt', 'w') as fh:\n    fh.write('x')\n" for i in range(60))
+    + "".join(f"with open(HERE / 'anch{i}.txt', 'w') as fh:\n    fh.write('x')\n" for i in range(10))
+)
+
+
+def test_file_anchored_paths_never_push_main_over_the_cap(tmp_path: Path) -> None:
+    root = Path(os.path.realpath(tmp_path))
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "run.py").write_text(_CAP_SOURCE)
+    event = _run_extractor_cli(root, "python3 run.py")
+    assert event["io_detection"] == "static"
+    assert sorted(r["rel_path"] for r in event["outputs"]) == sorted(
+        [f"lit{i}.txt" for i in range(60)] + [f"anch{i}.txt" for i in range(10)])
+
+
+def test_new_resolution_over_budget_keeps_mains_records(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def exhausted(self, node):
+        raise lineage_event._OverBudget
+    monkeypatch.setattr(lineage_event._StdlibIO, "_file_operand", exhausted)
+    script = tmp_path / "run.py"
+    script.write_text(_CAP_SOURCE)
+    args = argparse.Namespace(ts="2026-11-24T12:00:00Z", agent_id="", agent_type="",
+                              bash_cmd="python3 run.py", bash_exit=0, repo_root=str(tmp_path))
+    event = build_event_for_detection((script, None), args, tmp_path, "abc123",
+                                      script_args=[], script_word="run.py")
+    assert event["io_detection"] == "static"
+    assert sorted(Path(r["path"]).name for r in event["outputs"]) == sorted(
+        f"lit{i}.txt" for i in range(60))
