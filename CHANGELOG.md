@@ -464,7 +464,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notes-only turn, and the work cycle it starts for unrecorded work) use the
   same folder, so subfolder notes keep counting on later turns, and a turn
   that only writes notes in the session's subfolder is not taken for project
-  work.
+  work. So does the work cycle a moved session's Stop starts for changes left
+  in the checkout it moved from (#149): notes recorded in the subfolder after
+  a move into a linked worktree still satisfy Stop.
 - A post-tool hook that could not take its session's lock (a slow Stop,
   parallel subagent hooks, a loaded machine) no longer drops the edit, read,
   or analysis run silently. It still exits 0 so the tool call is never
