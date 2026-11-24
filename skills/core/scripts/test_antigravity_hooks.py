@@ -33,7 +33,7 @@ def native(tmp_path, monkeypatch):
                "invocationNum": 0, "initialNumSteps": 1, "modelName": "gemini-3.8-flash-high"}
     calls = []
 
-    def hook(name, data, root, plugin):
+    def hook(name, data, root, plugin, **_kw):
         calls.append((name, data))
         if name == "mycelium-health.sh":
             return {"hookSpecificOutput": {"additionalContext": "NATIVE-START"}}
@@ -166,7 +166,7 @@ def test_active_legacy_preview_is_retained_as_uncertain(native):
 def test_stop_retry_is_bounded_and_does_not_reset_transaction(native, monkeypatch):
     repo, transcript, p, calls = native
     original = ag.run_hook
-    def blocked(name, data, root, plugin):
+    def blocked(name, data, root, plugin, **_kw):
         if name == "mycelium-stop-check.sh":
             return {"decision": "block", "reason": "Update the living layer"}
         return original(name, data, root, plugin)
@@ -266,7 +266,7 @@ def test_concurrent_duplicate_start_has_one_core_transaction(native):
 def test_post_action_context_is_acknowledged_before_the_negative_neighbor(native, monkeypatch):
     repo, transcript, p, calls = native
     original = ag.run_hook
-    def hook(name, data, root, plugin):
+    def hook(name, data, root, plugin, **_kw):
         result = original(name, data, root, plugin)
         if name == "mycelium-post-action.sh" and data["tool_input"]["command"] == "python3 analysis.py":
             return {"hookSpecificOutput": {"additionalContext": "POST-ACTION-MARKER"}}

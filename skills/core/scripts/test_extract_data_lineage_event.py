@@ -4681,3 +4681,960 @@ def test_quoted_heredoc_delimiter_is_not_expanded(tmp_path: Path) -> None:
         (tmp_path / name).write_text("print(1)\n")
     command = 'R -f first.R <<"${EOF:-$DEFAULT}" --file=second.R\nx\n${EOF:-$DEFAULT}'
     assert detect_scripts(command, tmp_path) == [(tmp_path / "second.R", None)]
+
+
+# ---------- standard-library static I/O ----------
+
+
+def _stdlib_event(tmp_path: Path, source: str, script_args: list[str] | None = []):
+    script = tmp_path / "run.py"
+    script.write_text(source)
+    args = argparse.Namespace(
+        ts="2026-11-23T12:00:00Z",
+        agent_id="",
+        agent_type="",
+        bash_cmd="python run.py",
+        bash_exit=0,
+        repo_root=str(tmp_path),
+    )
+    event = build_event_for_detection(
+        (script, None), args, tmp_path, "abc123", script_args=script_args
+    )
+    assert event is not None
+    return (
+        event,
+        sorted(item["path"] for item in event["inputs"]),
+        sorted(item["path"] for item in event["outputs"]),
+    )
+
+
+def test_stdlib_open_and_pathlib_literals_are_resolved(tmp_path: Path) -> None:
+    event, inputs, outputs = _stdlib_event(
+        tmp_path,
+        "import csv, os\n"
+        "from pathlib import Path\n"
+        "DATA = Path('data') / 'raw'\n"
+        "COUNTS = os.path.join('data', 'counts.tsv')\n"
+        "with open(COUNTS) as handle:\n"
+        "    rows = list(csv.DictReader(handle, delimiter='\\t'))\n"
+        "meta = list(csv.reader(open(DATA / 'meta.csv', newline='')))\n"
+        "cfg = Path('params.yaml').read_text()\n"
+        "blob = (DATA / 'blob.bin').read_bytes()\n"
+        "with open('out/table.csv', 'w', newline='') as out:\n"
+        "    csv.writer(out).writerow(['a'])\n"
+        "Path('out/notes.txt').write_text('done')\n"
+        "with DATA.joinpath('log.txt').open(mode='a') as log:\n"
+        "    log.write('x')\n"
+        "with open('state.json', 'r+') as state:\n"
+        "    state.read()\n",
+    )
+    assert event["io_detection"] == "static"
+    assert inputs == sorted(
+        str(tmp_path / p)
+        for p in ("data/counts.tsv", "data/raw/meta.csv", "params.yaml",
+                  "data/raw/blob.bin")
+    )
+    assert outputs == sorted(
+        str(tmp_path / p)
+        for p in ("out/table.csv", "out/notes.txt", "data/raw/log.txt")
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # A run-time value: the command line, the environment, input().
+        "import sys\nopen(sys.argv[1])\n",
+        "import os\nopen(os.environ['IN'])\n",
+        # A name bound more than once may hold either value.
+        "p = 'a.csv'\nif x:\n    p = 'b.csv'\nopen(p)\n",
+        "p = 'a.csv'\np += '.bak'\nopen(p)\n",
+        # `open` rebound to something else.
+        "from gzip import open\nopen('a.csv')\n",
+        "def open(p):\n    return p\nopen('a.csv')\n",
+        # A str has no `.open`/`.read_text`: the call fails, nothing is read.
+        "'a.csv'.read_text()\n",
+        "P = 'a.csv'\nP.open()\n",
+        # Unmodelled path pieces: f-strings, __file__, resolve(), a call.
+        "name = 'a'\nopen(f'{name}.csv')\n",
+        "from pathlib import Path\n(Path(__file__).parent / 'a.csv').read_text()\n",
+        "from pathlib import Path\nPath('a.csv').resolve().read_text()\n",
+        "open(helper('a.csv'))\n",
+        # A dynamic mode.
+        "open('a.csv', mode)\n",
+        # A parameter whose function is passed around, so its callers are unknown.
+        "def load(p):\n    return open(p).read()\nload('a.csv')\nmap(load, names)\n",
+        # A parameter with a star-args call site.
+        "def load(p):\n    return open(p).read()\nload(*names)\n",
+        # Code that can rebind any name unseen.
+        "from helpers import *\nopen('a.csv')\n",
+        "exec(code)\nopen('a.csv')\n",
+    ],
+)
+def test_stdlib_io_that_is_not_statically_certain_stays_unresolved(
+    tmp_path: Path, source: str
+) -> None:
+    event, inputs, outputs = _stdlib_event(tmp_path, source)
+    assert (inputs, outputs) == ([], [])
+    assert event["io_detection"] == "unresolved"
+
+
+def test_stdlib_parameter_resolves_from_its_single_call_site(tmp_path: Path) -> None:
+    _, inputs, outputs = _stdlib_event(
+        tmp_path,
+        "from pathlib import Path\n"
+        "def load(path, mode='r'):\n"
+        "    with open(path, mode) as handle:\n"
+        "        return handle.read()\n"
+        "def save(text, dest=Path('out') / 'x.txt'):\n"
+        "    dest.write_text(text)\n"
+        "def main():\n"
+        "    save(load(path=Path('b.csv')))\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+    )
+    assert inputs == [str(tmp_path / "b.csv")]
+    assert outputs == [str(tmp_path / "out/x.txt")]
+
+
+def test_stdlib_parameter_with_one_unknown_call_site_stays_unresolved(
+    tmp_path: Path,
+) -> None:
+    event, inputs, _ = _stdlib_event(
+        tmp_path,
+        "import sys\n"
+        "def load(path):\n"
+        "    return open(path).read()\n"
+        "load('a.csv')\n"
+        "load(sys.argv[1])\n",
+    )
+    assert inputs == []
+    assert event["io_detection"] == "unresolved"
+
+
+_ARGPARSE_SCRIPT = (
+    "import argparse\n"
+    "import csv\n"
+    "from pathlib import Path\n"
+    "from register_value import read_source\n"
+    "\n"
+    "def load_config(config_path: Path):\n"
+    "    text, source = read_source(config_path, {'key': 't'}, mode='r')\n"
+    "    return text\n"
+    "\n"
+    "def load_counts(counts_path: Path):\n"
+    "    with counts_path.open(newline='') as handle:\n"
+    "        return list(csv.DictReader(handle, delimiter='\\t'))\n"
+    "\n"
+    "def load_samples(samples_path: Path):\n"
+    "    text, source = read_source(samples_path, {'column': 'id'}, mode='r')\n"
+    "    return text\n"
+    "\n"
+    "def main(argv=None):\n"
+    "    parser = argparse.ArgumentParser(description='demo')\n"
+    "    parser.add_argument('--config', type=Path, required=True, help='cfg')\n"
+    "    parser.add_argument('--counts', type=Path,\n"
+    "                        default=Path('data/raw/counts.tsv'))\n"
+    "    parser.add_argument('--samples', type=Path,\n"
+    "                        default=Path('data/meta/samples.tsv'))\n"
+    "    parser.add_argument('--output', type=Path,\n"
+    "                        default=Path('analysis/de/outputs/gene_means.csv'))\n"
+    "    parser.add_argument('--threshold', type=float, default=2.0)\n"
+    "    args = parser.parse_args(argv)\n"
+    "    load_config(args.config)\n"
+    "    load_counts(args.counts)\n"
+    "    load_samples(args.samples)\n"
+    "    args.output.parent.mkdir(parents=True, exist_ok=True)\n"
+    "    with args.output.open('w', encoding='utf-8', newline='') as handle:\n"
+    "        csv.writer(handle).writerow(['gene'])\n"
+    "    return 0\n"
+    "\n"
+    "if __name__ == '__main__':\n"
+    "    raise SystemExit(main())\n"
+)
+
+
+@pytest.mark.parametrize(
+    "script_args,expected_inputs,expected_outputs",
+    [
+        (
+            ["--config", "analysis/de/params.yaml"],
+            ["analysis/de/params.yaml", "data/meta/samples.tsv", "data/raw/counts.tsv"],
+            ["analysis/de/outputs/gene_means.csv"],
+        ),
+        (
+            # `=` spelling, an argparse abbreviation, and a non-path option.
+            ["--config=p.yaml", "--coun", "other.tsv", "--threshold", "3"],
+            ["data/meta/samples.tsv", "other.tsv", "p.yaml"],
+            ["analysis/de/outputs/gene_means.csv"],
+        ),
+    ],
+)
+def test_stdlib_argparse_values_come_from_the_command_line_or_defaults(
+    tmp_path: Path, script_args, expected_inputs, expected_outputs
+) -> None:
+    event, inputs, outputs = _stdlib_event(tmp_path, _ARGPARSE_SCRIPT, script_args)
+    assert event["io_detection"] == "static"
+    assert inputs == sorted(str(tmp_path / p) for p in expected_inputs)
+    assert outputs == sorted(str(tmp_path / p) for p in expected_outputs)
+
+
+@pytest.mark.parametrize(
+    "script_args",
+    [
+        None,  # the argv is unknown (an expansion, an unparsed command)
+        ["--help"],  # argparse prints help and exits: no I/O
+        ["--output", "o.csv"],  # --config is required: argparse exits
+        ["--config", "p.yaml", "--bogus"],  # an unknown option: argparse exits
+    ],
+)
+def test_stdlib_argparse_values_unknown_or_exiting_stay_unresolved(
+    tmp_path: Path, script_args
+) -> None:
+    event, inputs, outputs = _stdlib_event(tmp_path, _ARGPARSE_SCRIPT, script_args)
+    assert (inputs, outputs) == ([], [])
+    assert event["io_detection"] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        # Anything that changes argparse beyond the modelled calls.
+        ("    args = parser.parse_args(argv)\n",
+         "    parser.set_defaults(counts=Path('x.tsv'))\n"
+         "    args = parser.parse_args(argv)\n"),
+        ("    args = parser.parse_args(argv)\n",
+         "    args = parser.parse_args(['--config', 'c.yaml'] + extra)\n"),
+        ("    parser = argparse.ArgumentParser(description='demo')\n",
+         "    parser = argparse.ArgumentParser(fromfile_prefix_chars='@')\n"),
+        ("    raise SystemExit(main())\n", "    raise SystemExit(main(sys.argv))\n"),
+        ("    args = parser.parse_args(argv)\n",
+         "    args = parser.parse_args(argv)\n    args.counts = Path('y.tsv')\n"),
+    ],
+)
+def test_stdlib_argparse_unmodelled_parsers_stay_unresolved(
+    tmp_path: Path, mutation
+) -> None:
+    old, new = mutation
+    assert old in _ARGPARSE_SCRIPT
+    source = _ARGPARSE_SCRIPT.replace(old, new)
+    _, inputs, outputs = _stdlib_event(tmp_path, source, ["--config", "p.yaml"])
+    assert (inputs, outputs) == ([], [])
+
+
+def test_main_resolves_stdlib_argparse_script_from_command_line(tmp_path: Path) -> None:
+    analysis = tmp_path / "analysis" / "de"
+    analysis.mkdir(parents=True)
+    (analysis / "run.py").write_text(_ARGPARSE_SCRIPT)
+    (analysis / "params.yaml").write_text("t: 2\n")
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+
+    def run(command: str) -> dict:
+        target.unlink(missing_ok=True)
+        result = subprocess.run(
+            [sys.executable, str(extractor), "--cwd", str(tmp_path),
+             "--ts", "2026-11-23T12:00:00Z", "--bash-cmd", command,
+             "--bash-exit", "0", "--append-to", str(target), "--repo-root", str(tmp_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        [event] = [json.loads(line) for line in target.read_text().splitlines()]
+        return event
+
+    event = run("python3 analysis/de/run.py --config analysis/de/params.yaml")
+    assert event["io_detection"] == "static"
+    assert sorted(i["path"] for i in event["inputs"]) == sorted(
+        str(tmp_path / p) for p in
+        ("analysis/de/params.yaml", "data/meta/samples.tsv", "data/raw/counts.tsv"))
+    assert [o["path"] for o in event["outputs"]] == [
+        str(tmp_path / "analysis/de/outputs/gene_means.csv")]
+    assert {i["source"] for i in event["inputs"]} == {"inferred-static"}
+
+    # A shell expansion in the script's argv: its value is unknown.
+    event = run('python3 analysis/de/run.py --config "$CFG"')
+    assert event["inputs"] == [] and event["outputs"] == []
+    assert event["io_detection"] == "unresolved"
+
+
+def test_stdlib_argparse_positional_argument_is_resolved(tmp_path: Path) -> None:
+    _, inputs, outputs = _stdlib_event(
+        tmp_path,
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('table')\n"
+        "parser.add_argument('-o', '--out', default='result.txt')\n"
+        "args = parser.parse_args()\n"
+        "rows = open(args.table).read()\n"
+        "open(args.out, 'w').write(rows)\n",
+        ["data/t.csv"],
+    )
+    assert inputs == [str(tmp_path / "data/t.csv")]
+    assert outputs == [str(tmp_path / "result.txt")]
+
+
+
+# Review probes (PR #155): each case names its source, the script's literal
+# arguments, and the (inputs, outputs) the narrowed grammar must record. A
+# wrong path is worse than none, so most stay unresolved.
+_STDLIB_REVIEW_CASES = {
+    "chdir": ('import os\nos.chdir("sub")\nopen("x.csv","w")\nopen("/abs/y.csv","w")\n', [],
+              ([], ["/abs/y.csv"])),
+    "uncalled_fn": ('def never():\n    open("debug.csv","w")\nopen("in.csv")\n', [],
+                    (["in.csv"], [])),
+    "dict_update": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="out.csv")\nargs=p.parse_args()\nargs.__dict__.update({"out":"other.csv"})\nopen(args.out,"w")\n', [], ([], [])),
+    "vars_update": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="out.csv")\nargs=p.parse_args()\nvars(args).update({"out":"other.csv"})\nopen(args.out,"w")\n', [], ([], [])),
+    "mode_kw": ('open("a.csv", mode="a")\nopen(file="b.csv", mode="r+")\nm="x"\nopen("c.csv", m)\n', [],
+                ([], ["a.csv", "c.csv"])),
+    "mode_var_reassigned": ('import sys\nm="r"\nif len(sys.argv)>1:\n    m="w"\nopen("c.csv", m)\n', [], ([], [])),
+    "cond_path": ('import sys\nif sys.argv[1:]:\n    out="a.csv"\nelse:\n    out="b.csv"\nopen(out,"w")\n', [], ([], [])),
+    "argv_override": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nopen(a.out,"w")\n', ["--out", "given.csv"], ([], ["given.csv"])),
+    "argv_abbrev": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--output", default="d.csv")\na=p.parse_args()\nopen(a.output,"w")\n', ["--out=given.csv"], ([], ["given.csv"])),
+    "argv_none": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nopen(a.out,"w")\n', None, ([], [])),
+    "getattr_ns": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nopen(getattr(a,"out"),"w")\n', [], ([], [])),
+    "alias_mut": ('import argparse,os\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nb=a\nb.out="x.csv"\nopen(a.out,"w")\n', [], ([], [])),
+    "obj_setattr": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nobject.__setattr__(a, "out", "z.csv")\nopen(a.out,"w")\n', [], ([], [])),
+    "escape_helper": ('import argparse\nfrom cfg import merge\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nmerge(a)\nopen(a.out,"w")\n', [], ([], [])),
+    "fromfile": ('import argparse\np=argparse.ArgumentParser(fromfile_prefix_chars="@")\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nopen(a.out,"w")\n', [], ([], [])),
+    "envvar_dflt_via_name": ('import argparse,os\nD=os.environ.get("O","d.csv")\np=argparse.ArgumentParser()\np.add_argument("--out", default=D)\na=p.parse_args()\nopen(a.out,"w")\n', [], ([], [])),
+    "path_open_str": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\na.out.open("w")\n', [], ([], [])),
+    "param_dead_branch": ('import sys\ndef save(p):\n    open(p,"w")\nif "--dry" in sys.argv:\n    save("dry.csv")\nelse:\n    save("real.csv")\n', [], ([], [])),
+    "class_attr": ('class C:\n    out="c.csv"\nopen(C.out,"w")\n', [], ([], [])),
+    "module_attr_store": ('import sys\nOUT="a.csv"\nsys.modules[__name__].OUT="b.csv"\nopen(OUT,"w")\n', [], ([], [])),
+    "fstring": ('x="a"\nopen(f"{x}.csv","w")\n', [], ([], [])),
+    "gzip": ('import gzip\ngzip.open("a.gz","wt")\n', [], ([], [])),
+    "walrus_after": ('p="a.csv"\nopen(p,"w")\n[(p:=1)]\n', [], ([], [])),
+    "with_as_rebind": ('p="a.csv"\nwith open("b.csv") as p:\n    pass\nopen(p)\n', [], (["b.csv"], [])),
+    "exec_string": ('exec("x=1")\nopen("a.csv")\n', [], ([], [])),
+    "Path_mode_kw": ('from pathlib import Path\nPath("a.txt").open(mode="a")\nPath("b.txt").open("x")\n', [], ([], ["a.txt", "b.txt"])),
+    "open_modes": ('open("a.csv","rU")\nopen("b.csv","rt")\nopen("c.csv","wb+")\n', [], (["b.csv"], [])),
+    "path_join_abs": ('import os\nopen(os.path.join("data","/etc/hosts"))\n', [], (["/etc/hosts"], [])),
+    "star_kwargs": ('kw={"mode":"w"}\nopen("a.csv", **kw)\n', [], ([], [])),
+    "default_param": ('def save(p="def.csv"):\n    open(p,"w")\nsave()\nsave(p="x.csv")\n', [], ([], [])),
+    "str_dot_open": ('import os\np=os.path.join("a","b")\np.open("w")\n', [], ([], [])),
+    "nargs_q_const": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", nargs="?", const="c.csv", default="d.csv")\na=p.parse_args()\nopen(a.out,"w")\n', ["--out"], ([], [])),
+    "positional": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("inp")\np.add_argument("out")\na=p.parse_args()\nopen(a.inp)\nopen(a.out,"w")\n', ["i.csv", "o.csv"], (["i.csv"], ["o.csv"])),
+    "dash_dash": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\np.add_argument("rest", nargs="*")\na=p.parse_args()\nopen(a.out,"w")\n', ["--", "--out", "x.csv"], ([], ["d.csv"])),
+    "main_never_called": ('import argparse\ndef main():\n    p=argparse.ArgumentParser()\n    p.add_argument("--out", default="d.csv")\n    a=p.parse_args()\n    open(a.out,"w")\nif __name__=="__main__":\n    pass\n', [], ([], [])),
+    "Path_write_on_str": ('p="a.txt"\np.write_text("x")\n', [], ([], [])),
+    "type_path_default": ('import argparse\nfrom pathlib import Path\np=argparse.ArgumentParser()\np.add_argument("--out", type=Path, default="d.csv")\na=p.parse_args()\na.out.open("w")\n', [], ([], ["d.csv"])),
+    "type_int_string_default": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--n", type=int, default="01")\na=p.parse_args()\nopen(str(a.n) + ".txt","w")\n', [], ([], [])),
+    "duplicate_dest": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\np.add_argument("--o2", dest="out", default="e.csv")\na=p.parse_args()\nopen(a.out,"w")\n', [], ([], [])),
+    "sys_argv_mutated": ('import argparse, sys\nsys.argv.append("--out=x.csv")\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\na=p.parse_args()\nopen(a.out,"w")\n', [], ([], [])),
+    "func_attr_store": ('def f(p):\n    open(p,"w")\nf.__defaults__ = ("x",)\nf("a.csv")\n', [], ([], [])),
+    "func_defaults_rebind": ('def f(p="a.csv"):\n    open(p,"w")\nf.__defaults__ = ("x.csv",)\nf()\n', [], ([], [])),
+    "if_main_args": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="d.csv")\nif __name__=="__main__":\n    a=p.parse_args()\n    open(a.out,"w")\n', ["--out", "g.csv"], ([], ["g.csv"])),
+    "mode_param": ('def f(p, mode):\n    open(p, mode)\nf("a.csv","w")\nf("b.csv","r")\n', [], ([], [])),
+    "cross_join": ('import os\ndef f(d, name):\n    open(os.path.join(d, name), "w")\nf("a", "x.csv")\nf("b", "y.csv")\n', [], ([], [])),
+    "cross_path_mode": ('def save(p, m):\n    open(p, m)\nsave("raw.csv", "r")\nsave("clean.csv", "w")\n', [], ([], [])),
+    "single_call_site": ('import os\ndef save(d, name, m):\n    open(os.path.join(d, name), m)\nsave("out", "x.csv", "w")\n', [], ([], ["out/x.csv"])),
+    "io_open_rebound": ('import io\nio.open = other\nio.open("a.csv")\n', [], ([], [])),
+    "custom_opener": ('open("a.csv", "w", opener=my_opener)\n', [], ([], [])),
+    "pure_path": ('from pathlib import PurePath\nPurePath("a.csv").read_text()\n', [], ([], [])),
+    "tilde_literal": ('open("~sample.csv")\n', [], (["~sample.csv"], [])),
+    "dotdot": ('open("link/../data.csv")\n', [], ([], [])),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_STDLIB_REVIEW_CASES))
+def test_stdlib_review_probe(case: str) -> None:
+    source, script_args, expected = _STDLIB_REVIEW_CASES[case]
+    assert lineage_event._stdlib_static_io(source, script_args) == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'def f(p):\n    open(p+p+p+p,"w")\n' + "".join(f'f("p{i}")\n' for i in range(300)),
+        'a0="x"\n' + "".join(f"a{i}=a{i-1}+a{i-1}\n" for i in range(1, 40)) + 'open(a39,"w")\n',
+        'import os\na0="x"\n'
+        + "".join(f"a{i}=os.path.join(a{i-1},a{i-1})\n" for i in range(1, 40))
+        + 'open(a39,"w")\n',
+        'from pathlib import Path\na0=Path("x")\n'
+        + "".join(f"a{i}=a{i-1}/a{i-1}\n" for i in range(1, 40))
+        + 'open(a39,"w")\n',
+        "".join(f"x{i}='a'\nopen(x{i} + x{i} + x{i}, 'w')\n" for i in range(3000)),
+    ],
+    ids=["call-sites", "doubling", "join-chain", "div-chain", "many-sinks"],
+)
+def test_stdlib_pathological_script_is_bounded(source: str) -> None:
+    import time
+
+    start = time.perf_counter()
+    lineage_event._stdlib_static_io(source, [])
+    assert time.perf_counter() - start < 1.5
+
+
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("python3 run.py --out a.csv > log.txt 2>&1", ["a.csv"]),
+        ("timeout 50 python3 run.py --out t.csv", ["t.csv"]),
+        ("python3 run.py --out a.csv # --out z.csv", ["a.csv"]),
+        ("python3 run.py --out={a,b}.csv", []),
+        ("python3 run.py --out a.csv {x,y}", []),
+        ("python3 run.py --out a\\ b.csv", []),
+        ('python3 run.py --out "sample\\$1.txt"', []),
+        ("python3 run.py --out=$'a\\x2ecsv'", []),
+        ("python3 run.py --out `echo q`.csv", []),
+        ("python3 run.py --out a.csv >(cat)", []),
+    ],
+)
+def test_main_stdlib_argparse_needs_exactly_decoded_words(
+    tmp_path: Path, command: str, expected: list[str]
+) -> None:
+    (tmp_path / "run.py").write_text(
+        "import argparse\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('--out', default='default.csv')\n"
+        "p.add_argument('rest', nargs='*')\n"
+        "a = p.parse_args()\n"
+        "open(a.out, 'w').write('x')\n"
+    )
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+    result = subprocess.run(
+        [sys.executable, str(extractor), "--cwd", str(tmp_path),
+         "--ts", "2026-11-23T12:00:00Z", "--bash-cmd", command,
+         "--bash-exit", "0", "--append-to", str(target), "--repo-root", str(tmp_path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    events = [json.loads(line) for line in target.read_text().splitlines()]
+    assert len(events) == 1
+    assert [Path(o["path"]).name for o in events[0]["outputs"]] == expected
+
+
+
+# Round-2 review probes (PR #155).
+_STDLIB_REVIEW_CASES_2 = {
+    "builtins_exec": ('import builtins\nOUT="a.csv"\nbuiltins.exec("OUT=\'b.csv\'")\nopen(OUT,"w")\n', [], ([], [])),
+    "main_dict_sub": ('import sys\nOUT="a.csv"\nsys.modules[__name__].__dict__["OUT"]="b.csv"\nopen(OUT,"w")\n', [], ([], [])),
+    "getframe_globals": ('import sys\nOUT="a.csv"\nsys._getframe().f_globals["OUT"]="b.csv"\nopen(OUT,"w")\n', [], ([], [])),
+    "getattr_chdir": ('import os\ngetattr(os, "ch"+"dir")("sub")\nopen("x.csv","w")\n', [], ([], [])),
+    "getattr_chdir_literal": ('import os\ngetattr(os, "chdir")("sub")\nopen("x.csv","w")\n', [], ([], [])),
+    "chdir_alias": ('from os import chdir as cd\ncd("sub")\nopen("x.csv","w")\n', [], ([], [])),
+    "contextlib_chdir": ('import contextlib\nwith contextlib.chdir("sub"):\n    open("x.csv","w")\n', [], ([], [])),
+    "builtins_dict_open": ('import builtins, io\nbuiltins.__dict__["open"]=lambda p,m="r": io.open("z"+p,m)\nopen("x.csv","w")\n', [], ([], [])),
+    "argparse_patch": ('import argparse\nargparse.ArgumentParser.parse_args=lambda self, a=None: argparse.Namespace(out="b.csv")\np=argparse.ArgumentParser()\np.add_argument("--out", default="a.csv")\nns=p.parse_args()\nopen(ns.out,"w")\n', [], ([], [])),
+    "ns_dict_sub": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="a.csv")\nns=p.parse_args()\nns.__dict__["out"]="b.csv"\nopen(ns.out,"w")\n', [], ([], [])),
+    "action_dest_patch": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", default="a.csv")\np.add_argument("--x", dest="out", action="store_const", const="b.csv")\nns=p.parse_args()\nopen(ns.out,"w")\n', ["--x"], ([], [])),
+    "prefix_chars_plus": ('import argparse\np=argparse.ArgumentParser(prefix_chars="+")\np.add_argument("+o", default="a.csv")\nns=p.parse_args()\nopen(ns.o,"w")\n', ["+o", "b.csv"], ([], ["b.csv"])),
+    "required_missing": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out", required=True)\nns=p.parse_args()\nopen(ns.out,"w")\n', [], ([], [])),
+    "path_dotdot_join": ('import os\nopen(os.path.join("a","..","b.csv"))\n', [], ([], [])),
+    "dest_from_flag_dash": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--out-file", default="a.csv")\nns=p.parse_args()\nopen(ns.out_file,"w")\n', ["--out-file", "g.csv"], ([], ["g.csv"])),
+    "ann_default_type": ('import argparse\nfrom pathlib import Path\np=argparse.ArgumentParser()\np.add_argument("--o", type=Path, default=Path("d"))\nns=p.parse_args()\n(ns.o / "x.csv").write_text("")\n', [], ([], ["d/x.csv"])),
+    "str_div": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--o", default="d")\nns=p.parse_args()\nopen(ns.o / "x.csv","w")\n', [], ([], [])),
+    "int_type_given": ('import argparse\np=argparse.ArgumentParser()\np.add_argument("--n", type=int)\np.add_argument("--o", default="d.csv")\nns=p.parse_args()\nopen(ns.o,"w")\n', ["--n", "x"], ([], [])),
+    "sys_alias_argv": ('import argparse, sys\ns = sys\ns.argv[:] = ["x", "--out", "b.csv"]\np=argparse.ArgumentParser()\np.add_argument("--out", default="a.csv")\nns=p.parse_args()\nopen(ns.out,"w")\n', [], ([], [])),
+    "module_attr_patch": ('import io\nio.DEFAULT = 1\nopen("a.csv")\n', [], ([], [])),
+    "chdir_in_comment": ('# no need for chdir here\nx = "chdir"\nopen("a.csv")\n', [], (["a.csv"], [])),
+    "environ_store_is_fine": ('import os\nos.environ["OMP_NUM_THREADS"] = "1"\nopen("a.csv")\n', [], (["a.csv"], [])),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_STDLIB_REVIEW_CASES_2))
+def test_stdlib_review_probe_round_2(case: str) -> None:
+    source, script_args, expected = _STDLIB_REVIEW_CASES_2[case]
+    assert lineage_event._stdlib_static_io(source, script_args) == expected
+
+
+def _argparse_options_source(count: int) -> str:
+    return (
+        "import argparse\np=argparse.ArgumentParser()\n"
+        + "".join(f'p.add_argument("--opt{i}", default="d{i}")\n' for i in range(count))
+        + 'ns=p.parse_args()\nopen(ns.opt1,"w")\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "source,script_args",
+    [
+        ("x = " + "open(p)+" * 3000 + "+".join(["0"] * 8000) + "\n", []),
+        ("x = " + "q.read_text()+" * 3000 + "+".join(["0"] * 8000) + "\n", []),
+        ("".join(f"def f{i}():\n    pass\n" for i in range(2000))
+         + "x = " + "+".join(f"f{i}()" for i in range(2000)) + "+"
+         + "+".join(["0"] * 10000) + "\n", []),
+        ("x=1\n" * 1_000_000, []),
+        ("open(p)\n" * 30_000, []),
+        (_argparse_options_source(5000), ["--opt"] * 5000),
+        (_argparse_options_source(20000), [x for i in range(2000) for x in (f"--opt{i}", "v")]),
+        (_argparse_options_source(250), ["--opt"] * 5000),
+    ],
+    ids=["deep-open", "deep-read-text", "deep-reach", "huge-flat", "many-sinks",
+         "argparse-5k-by-5k", "argparse-20k", "argparse-many-args"],
+)
+def test_stdlib_scan_work_is_bounded_globally(source: str, script_args) -> None:
+    import time
+
+    start = time.perf_counter()
+    lineage_event._stdlib_static_io(source, script_args)
+    # The scan's own deadline is 0.4 s; the ceiling is generous for slow CI.
+    assert time.perf_counter() - start < 1.5
+
+
+def test_argparse_replay_still_resolves_a_realistic_parser() -> None:
+    assert lineage_event._stdlib_static_io(
+        _argparse_options_source(200), ["--opt1", "given.csv"]
+    ) == ([], ["given.csv"])
+
+
+def test_chdir_mentioned_only_in_text_keeps_relative_reader_paths(tmp_path: Path) -> None:
+    _, inputs, _ = _stdlib_event(
+        tmp_path,
+        "import pandas as pd\n# the shell wrapper does the chdir\n"
+        "pd.read_csv('a.csv')\nprint('no chdir needed')\n",
+    )
+    assert inputs == [str(tmp_path / "a.csv")]
+
+
+def test_unstattable_inferred_path_does_not_drop_the_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_exists = Path.exists
+
+    def exists(self, *args, **kwargs):
+        if self.name.startswith("toolong"):
+            raise OSError(63, "File name too long")
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    _, inputs, outputs = _stdlib_event(
+        tmp_path, "open('toolong.csv')\nopen('ok.csv', 'w')\n"
+    )
+    assert inputs == [str(tmp_path / "toolong.csv")]
+    assert outputs == [str(tmp_path / "ok.csv")]
+
+
+
+# Round-3 (Codex P1) reproductions (PR #155).
+_STDLIB_REVIEW_CASES_3 = {
+    "repeated_import_hides_hazards": (
+        "import argparse, os, sys\n"
+        "def prepare():\n"
+        "    import os, sys\n"
+        "    os.chdir('work')\n"
+        "    sys.argv.extend(['--input', os.path.abspath('actual.csv')])\n"
+        "prepare()\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--input', default='/dev/null')\n"
+        "args = parser.parse_args()\n"
+        "with open(args.input) as src:\n"
+        "    open('report.csv', 'w').write(src.read())\n",
+        [], ([], []),
+    ),
+    "argv_method_any_receiver": (
+        "import argparse\nimport sys as s2\ndef f():\n    import sys as s2\n"
+        "    s2.argv.append('--out=b.csv')\nf()\n"
+        "p = argparse.ArgumentParser()\np.add_argument('--out', default='/abs/a.csv')\n"
+        "a = p.parse_args()\nopen(a.out, 'w')\n",
+        [], ([], []),
+    ),
+    "chdir_any_receiver": ("helper.chdir('x')\nopen('a.csv')\nopen('/abs/b.csv')\n", [],
+                           (["/abs/b.csv"], [])),
+    "positional_opener": (
+        "import os\n"
+        "directory = os.open('data', os.O_RDONLY)\n"
+        "def in_data(path, flags):\n"
+        "    return os.open(path, flags, dir_fd=directory)\n"
+        "with open('sample.csv', 'r', -1, None, None, None, True, in_data) as src:\n"
+        "    print(src.read())\n",
+        [], ([], []),
+    ),
+    "open_third_positional": ("open('a.csv', 'r', -1)\n", [], ([], [])),
+    "open_literal_keywords": (
+        "open('a.csv', 'r', encoding='utf-8', newline='', errors='strict', buffering=-1)\n",
+        [], (["a.csv"], []),
+    ),
+    "open_dynamic_encoding": ("open('a.csv', encoding=enc)\n", [], ([], [])),
+    "path_open_extra_positional": (
+        "from pathlib import Path\nPath('a.csv').open('r', -1, None, None, None)\n",
+        [], ([], []),
+    ),
+    "encoding_cookie": ("# coding: latin-1\nopen('café.csv', 'w')\n", [], ([], [])),
+    "replacement_char": ("open('caf�.csv', 'w')\n", [], ([], [])),
+    "variable_positionals": (
+        "import argparse\np = argparse.ArgumentParser()\np.add_argument('--output')\n"
+        "p.add_argument('samples', nargs='*')\np.add_argument('columns', nargs=3)\n"
+        "a = p.parse_args()\nopen(a.output, 'w')\n",
+        ["s", "--output", "r.txt", "c", "c", "c"], ([], []),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_STDLIB_REVIEW_CASES_3))
+def test_stdlib_review_probe_round_3(case: str) -> None:
+    source, script_args, expected = _STDLIB_REVIEW_CASES_3[case]
+    assert lineage_event._stdlib_static_io(source, script_args) == expected
+
+
+def test_argparse_backtracking_layout_is_declined_quickly() -> None:
+    import time
+
+    source = (
+        "import argparse\np = argparse.ArgumentParser()\np.add_argument('--output')\n"
+        + "".join(f"p.add_argument('{n}', nargs='*')\n"
+                  for n in ("samples", "controls", "weights", "labels"))
+        + "p.add_argument('columns', nargs=101)\na = p.parse_args()\nopen(a.output, 'w')\n"
+    )
+    args = ["sample"] * 100 + ["--output", "report.txt"] + ["col"] * 101
+    start = time.perf_counter()
+    assert lineage_event._stdlib_static_io(source, args) == ([], [])
+    assert time.perf_counter() - start < 1.5
+
+
+def test_main_argparse_declines_carriage_return_in_shell_word(tmp_path: Path) -> None:
+    (tmp_path / "run.py").write_text(
+        "import argparse\np = argparse.ArgumentParser()\np.add_argument('--out')\n"
+        "p.add_argument('--label')\na = p.parse_args()\nopen(a.out, 'w').write('x')\n"
+    )
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = tmp_path / "events.tmp"
+    result = subprocess.run(
+        [sys.executable, str(extractor), "--cwd", str(tmp_path),
+         "--ts", "2026-11-23T12:00:00Z",
+         "--bash-cmd", "python3 run.py --out=out.csv\r --label report",
+         "--bash-exit", "0", "--append-to", str(target), "--repo-root", str(tmp_path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    [event] = [json.loads(line) for line in target.read_text().splitlines()]
+    assert event["outputs"] == []
+
+
+def test_oversized_script_chdir_in_comment_keeps_reader_paths(tmp_path: Path) -> None:
+    source = (
+        "# Previous versions used os.chdir elsewhere.\n"
+        "import pandas as pd\npd.read_csv('samples.csv')\n"
+        "CALIBRATION = (\n" + "    0.123456789,\n" * 17_000 + ")\n"
+    )
+    assert len(source) > lineage_event._STDLIB_SOURCE_LIMIT
+    _, inputs, _ = _stdlib_event(tmp_path, source)
+    assert inputs == [str(tmp_path / "samples.csv")]
+
+
+def _run_extractor(cwd: Path, command: str) -> list[dict]:
+    extractor = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    target = cwd / "events.tmp"
+    target.unlink(missing_ok=True)
+    result = subprocess.run(
+        [sys.executable, str(extractor), "--cwd", str(cwd),
+         "--ts", "2026-11-23T12:00:00Z", "--bash-cmd", command,
+         "--bash-exit", "0", "--append-to", str(target), "--repo-root", str(cwd)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return [json.loads(line) for line in target.read_text().splitlines()]
+
+
+def test_chdir_keeps_reader_paths_with_an_absolute_base(tmp_path: Path) -> None:
+    """Passes on main (repository recovery) and here (absolute base)."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "work").mkdir()
+    (tmp_path / "data" / "samples.csv").write_text("x\n1\n")
+    (tmp_path / "run.py").write_text(
+        "import os\nfrom pathlib import Path\nimport pandas as pd\n\n"
+        "os.chdir('work')\n"
+        f"pd.read_csv(Path({str(tmp_path / 'data')!r}) / 'samples.csv')\n"
+        "pd.read_csv('relative.csv')\n"
+    )
+    [event] = _run_extractor(tmp_path, "python3 run.py")
+    paths = [i["path"] for i in event["inputs"]]
+    assert str(tmp_path / "data" / "samples.csv") in paths
+    # Main also records `relative.csv`, resolved against the wrong
+    # directory; this branch drops it (asserted separately).
+
+
+def test_stdlib_inferred_hashing_is_budgeted(tmp_path: Path) -> None:
+    import time
+
+    names = [f"shard-{i:03}.bin" for i in range(12)]
+    for name in names:
+        with open(tmp_path / name, "wb") as handle:
+            handle.truncate(64 * 1024**2)
+    (tmp_path / "run.py").write_text("".join(
+        f"with open({name!r}, 'rb') as f:\n    f.read(16)\n" for name in names))
+    start = time.perf_counter()
+    [event] = _run_extractor(tmp_path, "python3 run.py")
+    elapsed = time.perf_counter() - start
+    records = {Path(r["path"]).name: r for r in event["inputs"]}
+    assert sorted(records) == names
+    skipped = [r for r in records.values() if r.get("hash_status") == "skipped-budget"]
+    hashed = [r for r in records.values() if r.get("sha256")]
+    assert skipped and all(r["sha256"] is None for r in skipped)
+    assert all("size_bytes" in r for r in skipped)
+    assert len(hashed) + len(skipped) == len(names)
+    assert elapsed < 2.0
+
+
+
+def test_stdlib_relative_paths_after_chdir_are_not_added(tmp_path: Path) -> None:
+    """The reader scan's own result is main's (chdir does not filter it);
+    the stdlib scan adds no relative path after a chdir."""
+    _, inputs, outputs = _stdlib_event(
+        tmp_path,
+        "import os\nimport pandas as pd\nos.chdir('sub')\n"
+        "pd.read_csv('a.csv')\nopen('b.csv')\nopen('c.csv', 'w')\n",
+    )
+    assert inputs == [str(tmp_path / "a.csv")]
+    assert outputs == []
+
+
+# Regressions in main's detection found in review: HEAD must record at
+# least what main records on each.
+def _symlink_basename_repro(root: Path) -> str:
+    raw = root.parent / f"{root.name}-raw.csv"
+    raw.write_text("x\n1\n")
+    (root / "samples.csv").symlink_to(raw)
+    (root / "data").mkdir()
+    (root / "data" / "samples.csv").write_text("x\n2\n")
+    return ("from pathlib import Path\nimport pandas as pd\n"
+            "with open('samples.csv') as raw:\n    print(raw.read())\n"
+            "print(pd.read_csv(Path('data') / 'samples.csv'))\n")
+
+
+def _chdir_options_repro(root: Path) -> str:
+    (root / "work").mkdir()
+    (root / "samples.csv").write_text("x\n1\n")
+    return ("import os\nfrom pathlib import Path\nimport pandas as pd\n"
+            "options = {'usecols': ['x']}\nos.chdir('work')\n"
+            f"print(pd.read_csv(Path({str(root)!r}) / 'samples.csv', **options))\n")
+
+
+def _chdir_absolute_repro(root: Path) -> str:
+    (root / "data").mkdir()
+    (root / "work").mkdir()
+    (root / "data" / "samples.csv").write_text("x\n1\n")
+    return ("import os\nfrom pathlib import Path\nimport pandas as pd\n\n"
+            "os.chdir('work')\n"
+            f"pd.read_csv(Path({str(root / 'data')!r}) / 'samples.csv')\n"
+            "pd.read_csv('relative.csv')\n")
+
+
+def _chdir_comment_repro(root: Path) -> str:
+    (root / "samples.csv").write_text("x\n1\n")
+    return ("# Previous versions used os.chdir elsewhere.\n"
+            "import pandas as pd\npd.read_csv('samples.csv')\n"
+            "CALIBRATION = (\n" + "    0.123456789,\n" * 17_000 + ")\n")
+
+
+_MAIN_REGRESSION_REPROS = {
+    "symlink-basename": _symlink_basename_repro,
+    "chdir-options": _chdir_options_repro,
+    "chdir-absolute": _chdir_absolute_repro,
+    "chdir-comment": _chdir_comment_repro,
+}
+
+
+def _repro_event(root: Path, make) -> dict:
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "run.py").write_text(make(root))
+    args = argparse.Namespace(
+        ts="2026-11-23T12:00:00Z", agent_id="", agent_type="",
+        bash_cmd="python run.py", bash_exit=0, repo_root=str(root),
+    )
+    event = build_event_for_detection((root / "run.py", None), args, root, "abc123")
+    assert event is not None
+    return event
+
+
+@pytest.mark.parametrize("name", sorted(_MAIN_REGRESSION_REPROS))
+def test_stdlib_scan_only_adds_to_the_reader_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Runs in CI: the result with the stdlib scan contains, record for
+    record, the result without it."""
+    make = _MAIN_REGRESSION_REPROS[name]
+    full = _repro_event(tmp_path / "full", make) if (tmp_path / "full").mkdir() is None else None
+    monkeypatch.setattr(lineage_event, "_stdlib_additions", lambda *a, **k: ([], []))
+    (tmp_path / "base").mkdir()
+    base = _repro_event(tmp_path / "base", make)
+
+    def paths(event: dict, key: str, root: Path) -> set[str]:
+        return {r["path"].replace(str(root), "$ROOT") for r in event[key]}
+
+    for key in ("inputs", "outputs"):
+        assert paths(base, key, tmp_path / "base") <= paths(full, key, tmp_path / "full")
+
+
+def _main_extractor(tmp_path: Path) -> Path | None:
+    repo = Path(__file__).resolve().parents[3]
+    probe = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q",
+                            "origin/main"], capture_output=True, text=True)
+    if probe.returncode != 0:
+        return None
+    archive = subprocess.run(["git", "-C", str(repo), "archive", "origin/main",
+                              "skills/core/scripts"], capture_output=True)
+    if archive.returncode != 0:
+        return None
+    dest = tmp_path / "main-src"
+    dest.mkdir()
+    subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, check=True)
+    return dest / "skills" / "core" / "scripts" / "extract_data_lineage_event.py"
+
+
+@pytest.mark.parametrize("name", sorted(_MAIN_REGRESSION_REPROS))
+def test_head_records_at_least_what_main_records(tmp_path: Path, name: str) -> None:
+    """main's own extractor (origin/main) against HEAD's, on each review
+    reproduction. Skipped where origin/main is not fetched (shallow CI)."""
+    main = _main_extractor(tmp_path)
+    if main is None:
+        pytest.skip("origin/main is not available")
+    head = (Path(__file__).parent / "extract_data_lineage_event.py").resolve()
+    results = {}
+    for label, extractor in (("main", main), ("head", head)):
+        root = tmp_path / label
+        root.mkdir()
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        (root / "run.py").write_text(_MAIN_REGRESSION_REPROS[name](root))
+        target = root / "events.tmp"
+        result = subprocess.run(
+            [sys.executable, str(extractor), "--cwd", str(root),
+             "--ts", "2026-11-23T12:00:00Z", "--bash-cmd", "python3 run.py",
+             "--bash-exit", "0", "--append-to", str(target), "--repo-root", str(root)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        [event] = [json.loads(line) for line in target.read_text().splitlines()]
+        results[label] = {key: {r["path"].replace(str(root), "$ROOT") for r in event[key]}
+                          for key in ("inputs", "outputs")}
+    for key in ("inputs", "outputs"):
+        assert results["main"][key] <= results["head"][key]
+
+
+def test_stdlib_additions_are_capped_all_or_nothing(tmp_path: Path) -> None:
+    source = "".join(f"open('f{i}.csv')\n" for i in range(lineage_event._STDLIB_PATH_CAP + 1))
+    event, inputs, _ = _stdlib_event(tmp_path, source)
+    assert inputs == []
+    source = "".join(f"open('f{i}.csv')\n" for i in range(lineage_event._STDLIB_PATH_CAP))
+    _, inputs, _ = _stdlib_event(tmp_path, source)
+    assert len(inputs) == lineage_event._STDLIB_PATH_CAP
+
+
+def test_stdlib_additions_stay_inside_the_repository(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _, inputs, outputs = _stdlib_event(
+        repo, f"open({str(tmp_path / 'outside.csv')!r})\nopen('../up.csv')\n"
+              "open('inside.csv', 'w')\n")
+    assert inputs == []
+    assert outputs == [str(repo / "inside.csv")]
+
+
+def test_stdlib_framing_of_many_outside_paths_is_bounded(tmp_path: Path) -> None:
+    import time
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = tmp_path / "shared/pipeline/published/country/routine/archive/sequencing/experiment"
+    out.mkdir(parents=True)
+    source = f"BASE = {str(out) + '/'!r}\n" + "".join(
+        f"open(BASE + '{i:05}.csv', 'w').close()\n" for i in range(4000))
+    start = time.perf_counter()
+    _, _, outputs = _stdlib_event(repo, source)
+    assert outputs == []
+    assert time.perf_counter() - start < 1.5
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from unittest.mock import mock_open, patch\n"
+        "with patch('builtins.open', mock_open(read_data='m')):\n"
+        "    print(open('test.csv').read())\n",
+        "import unittest.mock\nunittest.mock.patch('builtins.open')\nopen('test.csv')\n",
+        "try:\n    with open('report.csv', 'x') as out:\n        out.write('n')\n"
+        "except FileExistsError:\n    pass\n",
+        "import contextlib\nwith contextlib.suppress(FileExistsError):\n"
+        "    open('report.csv', 'x')\n",
+    ],
+    ids=["mock-patch", "unittest-mock", "try-exclusive", "suppress"],
+)
+def test_stdlib_patched_or_recoverable_opens_are_not_added(source: str) -> None:
+    assert lineage_event._stdlib_static_io(source, []) == ([], [])
+
+
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("python3 run.py --input =python3", []),
+        ("python3 run.py --input '=python3'", ["=python3"]),
+        ("python3 run.py --input a^b.csv", []),
+        ("python3 run.py --input a#b.csv", []),
+        ("python3 run.py --input 'a#b.csv'", ["a#b.csv"]),
+        ("python3 run.py --input=data.csv", ["data.csv"]),
+    ],
+)
+def test_main_argparse_replay_needs_words_literal_in_zsh_and_bash(
+    tmp_path: Path, command: str, expected: list[str]
+) -> None:
+    (tmp_path / "run.py").write_text(
+        "import argparse\np = argparse.ArgumentParser()\n"
+        "p.add_argument('--input', required=True)\na = p.parse_args()\n"
+        "open(a.input, 'rb').read(4)\n"
+    )
+    [event] = _run_extractor(tmp_path, command)
+    assert [Path(r["path"]).name for r in event["inputs"]] == expected
+
+
+# Final-round (Codex P1) reproductions (PR #155).
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("from contextlib import suppress as ignore\n"
+         "def read_optional():\n"
+         "    with open('optional.csv') as source:\n"
+         "        return source.read()\n"
+         "try:\n    read_optional()\nexcept FileNotFoundError:\n    pass\n"
+         "with ignore(FileExistsError):\n    open('report.csv', 'x').write('new')\n",
+         ([], [])),
+        ("def helper():\n    open('h.csv')\ndef outer():\n    helper()\n"
+         "try:\n    outer()\nexcept OSError:\n    pass\n", ([], [])),
+        ("import thing\nwith thing.guard():\n    open('g.csv')\n", ([], [])),
+        ("with open('a.csv') as a, open('b.csv', 'w') as b:\n    b.write(a.read())\n",
+         (["a.csv"], ["b.csv"])),
+        ("from pathlib import Path\nwith Path('p.csv').open() as f:\n    f.read()\n",
+         (["p.csv"], [])),
+        ("import csv\nwith open('rows.csv', 'a+', newline='') as out:\n"
+         "    csv.writer(out).writerow(['next', 1])\n", ([], [])),
+        # An update handle may only read (`seek(0)` then `read()`), only
+        # write, or both: its direction is unknown.
+        ("with open('rows.csv', 'a+') as f:\n    f.seek(0)\n    print(f.read())\n",
+         ([], [])),
+        ("open('s.json', 'r+')\nopen('t.json', 'w+')\nopen('u.bin', 'rb+')\n", ([], [])),
+        ("open('log.txt', 'a')\n", ([], ["log.txt"])),
+        ("import builtins\nfrom builtins import setattr as set_attr\n"
+         "original_open = builtins.open\n"
+         "def redirect(name, mode):\n    return original_open('actual.csv', mode)\n"
+         "set_attr(__builtins__, 'open', redirect)\nopen('declared.csv', 'w').write('r')\n",
+         ([], [])),
+        ("__builtins__.open = None\nopen('x.csv')\n", ([], [])),
+    ],
+    ids=["guarded-helper-and-alias", "guarded-transitive", "other-context-manager",
+         "plain-with-open", "path-open-with", "append-plus", "append-plus-read-only",
+         "update-modes", "append",
+         "builtins-alias", "builtins-name"],
+)
+def test_stdlib_final_round_probe(source: str, expected) -> None:
+    assert lineage_event._stdlib_static_io(source, []) == expected
+
+
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("python3 run.py --input==cat", []),
+        ("python3 run.py --input='=cat'", ["=cat"]),
+        ("python3 run.py --input=x==y.csv", []),
+    ],
+)
+def test_main_argparse_declines_zsh_magic_equal_subst(
+    tmp_path: Path, command: str, expected: list[str]
+) -> None:
+    (tmp_path / "run.py").write_text(
+        "import argparse\np = argparse.ArgumentParser()\n"
+        "p.add_argument('--input', required=True)\na = p.parse_args()\n"
+        "open(a.input, 'rb').read(4)\n"
+    )
+    [event] = _run_extractor(tmp_path, command)
+    assert [Path(r["path"]).name for r in event["inputs"]] == expected

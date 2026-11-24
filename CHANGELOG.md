@@ -116,6 +116,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it shares the Python implementation through `register_value.py record-ids`.
   The analyze skill recommends it at filter, subset and split steps. Design and
   decisions: `docs/plans/row-feature-access.md`.
+- **Stop-time access note (item 7 follow-up).** When a script this session
+  wrote a table (.csv, .tsv, .parquet or .h5ad, observed created or
+  modified) and no `record_ids` record covers its last run, the accepting
+  Stop shows an advisory `ACCESS NOTE` to the user in `systemMessage` (on
+  Claude never in `additionalContext`, which would make Claude continue). A
+  record covers it when its process started inside that run's window, after
+  the previous call ended; a run the observer did not see alone is never
+  named. The note never
+  appears in a block reason, names a script at a given content once, and
+  stays under 1500 bytes. Its helper (`skills/core/scripts/access_note.py`)
+  skips foreign `access.json` files, follows no symlinks, reads under file
+  count, byte and time budgets, and fails open; the phase that writes it
+  cannot fail Stop.
 - **Multi-file report sources.** `register_value(..., source=[...])` links a
   number to several files, for example the table and the config that set its
   threshold. The number is stale when any of them changes. Live runs showed
@@ -172,6 +185,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scripts, adding the missing `mycelium-io-observer.sh` row, and the
   `MYCELIUM.md` template and the core skill's verification table give the
   current hook counts (seven Claude scripts, eight Codex command hooks).
+
+### Fixed
+
+- **Static lineage now resolves standard-library I/O** in Python scripts
+  (`extract_data_lineage_event.py`). Previously only pandas-style readers and
+  writers were recognised. Now `open(...)` (mode gives the direction),
+  `Path.open/read_text/write_text/read_bytes/write_bytes`, and Mycelium's
+  `read_source` are resolved too, which covers `csv` readers and writers on
+  those handles.
+
+  The resolver is a small single-valued grammar, not an interpreter. A path
+  or mode resolves only from:
+  - a literal;
+  - a module-level name assigned once;
+  - `os.path.join`, `Path(...)` or `Path /` of those;
+  - a parameter of a function with exactly one call site;
+  - an `argparse` option replayed through the real `argparse` with the
+    command's literal arguments. The namespace must only ever be read as
+    `args.option`.
+
+  Only calls in module code or in functions reachable from it count. A call
+  on a branch that may not run is still recorded, as with the reader scan.
+  Everything else stays `unresolved`, including:
+  - values that differ across call sites;
+  - an escaping or mutated namespace;
+  - `sys.argv` touched anywhere;
+  - argument words that zsh or bash may expand (globs, `~`, a leading `=`,
+    `$`, backslashes);
+  - `__file__`-relative paths;
+  - opens inside a `try` with handlers or a `with` other than plain `open`,
+    or in a function called from one;
+  - files that import `mock` or `builtins`.
+
+  Plain `r` is an input and `w`, `x` and `a` are outputs. The update modes
+  (`r+`, `w+`, `a+`) stay unresolved, because the handle may only read, only
+  write, or both.
+
+  The scan only adds to the existing result. The reader/writer scan and
+  repository recovery run exactly as before, and the stdlib scan never feeds,
+  filters or suppresses them. It adds only paths that:
+  - are inside the repository;
+  - are not already recorded (compared by full path);
+  - are not relative paths in a script that calls `chdir`.
+
+  Parse, walks, resolution, stat and hashing share one 0.4 s deadline and a
+  work budget. Sources over 128 KB are not scanned. More than 64 paths, or
+  any bound exceeded, means nothing is added. Files are hashed within 128 MB;
+  over that, a file is recorded with `sha256: null` and
+  `hash_status: "skipped-budget"`.
+
+  On Antigravity App, which installs no I/O observer, stdlib-only analyses
+  had recorded `io_detection: "unresolved"` with no producer.
+
+- **The handoff instructions now name the exact five headings Stop accepts.**
+  The `SESSION HANDOFF PATH` line that SessionStart injects and rule 10 of
+  the `MYCELIUM.md` template asked only for a "five-section handoff", and
+  step 10 of the post-action protocol gave loose names ("What worked on",
+  "Key decisions", "Blockers") that the validator's whole-line match
+  rejects. An agent that had not read the core skill could write five
+  sections under its own headings (an Antigravity App run used
+  `## 1. Accomplished` … `## 5. Next Steps`). Stop then rejected that
+  handoff and published the generic fallback in its place. All three
+  instructions now list `## What was worked on`, `## Key decisions made`,
+  `## Blockers & surprises`, `## Current state` and `## Next steps` in
+  order, and say that a handoff matching no supported heading schema gets
+  the fallback (the older `## Current State` / `## What Was Done` schema is
+  still accepted). They also say each section needs a line of prose or a
+  bullet besides its `###` subheadings (`- None.` when there is nothing to
+  report), since a section holding only a subheading counts as empty, and
+  that `## Current state` describes the project, not Stop status.
+- **Stop now explains a handoff it would replace, once, instead of replacing
+  it silently.** When the agent wrote a handoff during the session that
+  fails the completeness check, Stop blocks with the handoff's path and its
+  problems: missing, duplicated or out-of-order headings, sections with no
+  prose or bullet, and Stop-status lines that cleanup removes. The block
+  happens once per session transaction. If the retry still fails, or the
+  handoff is missing or stale, Stop publishes the generic fallback as
+  before. If the check itself errors, Stop also falls back without
+  blocking. Complete handoffs, including the older `## Current State` /
+  `## What Was Done` schema, are accepted without a block. A leading
+  byte-order mark or trailing whitespace on a heading line no longer makes
+  a heading count as missing. The check runs before the registry row is
+  written, so a blocked attempt never reads as complete. On the Antigravity
+  adapter's last allowed Stop, where a block could not reach the agent,
+  Stop publishes the fallback at once. The one-time marker is cleared when
+  Stop accepts or SessionStart replaces the transaction, and it moves with
+  a session adopted into a worktree, so the move does not grant a second
+  explanation. A heading inside a closed fenced code block that starts at
+  column 0 is an example, not a section. Any handoff the previous check
+  accepted is still accepted. After waiting on the registry, Stop reads the
+  handoff once and publishes exactly those bytes (or the fallback), so a
+  handoff written while Stop waited is kept. A failed late attempt no longer
+  replaces `last-session.md` with an unpublished fallback.
+  `finalize_handoff.py --diagnose` reports the problems: exit 0 for a
+  complete handoff, 3 with a one-line diagnosis, 1 on error. Existing projects pick up the new rule 10 the next time
+  `init_repo.py` or migration refreshes their `MYCELIUM.md`.
 
 ## [0.9.7] - 2026-11-21
 

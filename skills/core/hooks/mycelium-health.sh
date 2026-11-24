@@ -108,7 +108,7 @@ if ! mycelium__state "$REPO_ROOT" "$INPUT" \
 fi
 
 if [[ "${MYCELIUM_SESSION_SCOPED:-false}" == true ]]; then
-  MESSAGES="${MESSAGES}SESSION HANDOFF PATH: Write the complete five-section handoff for this root task to ${STATE_DIR}/last-session.md. Accepted Stop will publish it to the shared resume pointer.\n\n"
+  MESSAGES="${MESSAGES}SESSION HANDOFF PATH: Write the complete five-section handoff for this root task to ${STATE_DIR}/last-session.md, using exactly these headings in this order, each with content: \`## What was worked on\`, \`## Key decisions made\`, \`## Blockers & surprises\`, \`## Current state\`, \`## Next steps\`. Each section needs at least one line of prose or a bullet besides its subheadings; write \`- None.\` when there is nothing to report. \`## Current state\` describes the project, not Stop status. Use these headings; a handoff that does not match a supported heading schema is replaced by a generic fallback at Stop. Accepted Stop will publish it to the shared resume pointer.\n\n"
 fi
 
 # Clean up stale sentinels from a crashed previous session BEFORE the
@@ -276,6 +276,7 @@ if [ -f "$ACTIVE_LOG_FILE" ]; then
     rm -f "$ACTIVE_OWNER_FILE"
     rm -f "$STATE_DIR/session-start-ts.tmp"
     rm -f "$STATE_DIR/handoff-finalization-pending.tmp"
+    rm -f "$STATE_DIR/handoff-check-blocked.tmp" 2>/dev/null || true
     rm -f "$STATE_DIR/data-lineage-session-id.tmp"
     rm -f "$STATE_DIR/mycelium-reminded.tmp"
     rm -f "$STATE_DIR/mycelium-session-activity.tmp"
@@ -301,6 +302,13 @@ if [[ "$SOURCE" != "startup" && "${MYCELIUM_SESSION_SCOPED:-false}" == true ]] \
     || (( CARRIED_START_TS > NOW_TS )); then
     CARRIED_START_TS=""
   fi
+fi
+
+# With no transaction here, a one-time handoff-explanation marker is left over
+# from one that ended without an accepted Stop. Clear it before a move below
+# can carry the moved transaction's marker in.
+if [ ! -f "$ACTIVE_LOG_FILE" ]; then
+  rm -f "$STATE_DIR/handoff-check-blocked.tmp" 2>/dev/null || true
 fi
 
 # A session that moved here from a sibling checkout of this repository (a
