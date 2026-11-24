@@ -357,6 +357,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so they now go only to `systemMessage`. (Provenance-gap warnings first
   stayed in `additionalContext`; see the next entry.) Codex output and
   blocked Stops are unchanged.
+
 - **An accepted Stop never continues the conversation.** A live
   `claude -p` run on main showed the cost of the lineage-gap split above:
   - The agent ran Mycelium's helpers with `--help` through a variable chain.

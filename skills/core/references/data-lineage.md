@@ -298,7 +298,7 @@ not enter `summary.unique_inputs`/`unique_outputs`.
 ## Event schema (NDJSON, one line per detected script)
 
 The authoritative field definitions for every record below, for v1 (0.9.7
-and earlier) and v2 (0.9.8 onward), are in
+and earlier) and v2 (0.10.0 onward), are in
 [`provenance-schema.json`](provenance-schema.json) (JSON Schema 2020-12).
 That file is what Warrant and other readers validate against. This section
 describes the fields; where the two differ, the schema file wins.
@@ -331,7 +331,7 @@ describes the fields; where the two differ, the schema file wins.
 }
 ```
 
-### v2 identity and frame (0.9.8)
+### v2 identity and frame (0.10.0)
 
 - **`event_id`, `host`, `host_session_id`, `ts_ns`.** Every analysis event
   and data command now has an identity. `ts_ns` orders records within a

@@ -10,7 +10,7 @@ Answers, across sessions, for one checkout:
 Sources, deduplicated by event and observation identity:
 
 - every lineage manifest in ``.living/log/data-lineage/*.json`` (v1 from
-  0.9.7 and earlier, v2 from 0.9.8): events, data commands, skips, and the
+  0.9.7 and earlier, v2 from 0.10.0): events, data commands, skips, and the
   observations each manifest joined. Manifests are project history: their
   repository-relative paths hold across clones and worktrees.
 - every observation store in ``<state>/io/obs/**/*.ndjson`` of this
