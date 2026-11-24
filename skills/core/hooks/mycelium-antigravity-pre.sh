@@ -19,15 +19,15 @@
 #   bash skills/core/hooks/mycelium-antigravity-pre.sh <python> [--host HOST]
 # Input: the native PreToolUse payload on stdin.
 
-# Watchdog: about 1.8 s of 50 ms polls (each `sleep` also costs a fork), so
-# the whole hook ends in about 2 s even when the helper is stuck in a system
-# call that its own deadline cannot interrupt.
-MYCELIUM__PRE_POLLS=36
+# Watchdog: one timed sleep (a poll loop drifts with fork cost on a loaded
+# machine), so the whole hook ends in about 2 s even when the helper is stuck
+# in a system call that its own deadline cannot interrupt.
+MYCELIUM__PRE_HARD_SECONDS=1.8
 
 mycelium__pre_observe() {
   local python="${1:-}"
   shift
-  local here script pid dog n
+  local here script pid dog
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || return 0
   script="$here/../scripts/antigravity_hooks.py"
   [[ -n "$python" && -f "$script" ]] || return 0
@@ -37,12 +37,12 @@ mycelium__pre_observe() {
   pid=$!
   exec 3<&-
   (
-    n=0
-    while (( n < MYCELIUM__PRE_POLLS )); do
-      sleep 0.05
-      kill -0 "$pid" 2>/dev/null || exit 0
-      n=$((n + 1))
-    done
+    # Cancelled with TERM when the helper exits first: the trap ends the
+    # sleep too, so no stray process outlives the hook.
+    sleep "$MYCELIUM__PRE_HARD_SECONDS" &
+    nap=$!
+    trap 'kill "$nap" 2>/dev/null; exit 0' TERM
+    wait "$nap"
     kill -KILL "$pid" 2>/dev/null
   ) </dev/null >/dev/null 2>&1 &
   dog=$!
