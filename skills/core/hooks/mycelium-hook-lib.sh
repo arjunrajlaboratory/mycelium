@@ -1398,6 +1398,21 @@ mycelium_mkdir_exclusive() {
   python3 -I -S -c 'import os, sys; os.mkdir(sys.argv[1])' "$1" 2>/dev/null
 }
 
+# Test seam for the reap interleavings: a no-op unless the test sets
+# MYCELIUM_TEST_LOCK_PAUSE_DIR. It then marks the named step as reached for
+# this contender (MYCELIUM_TEST_LOCK_PAUSE_TAG) and waits, for at most 30 s,
+# while the test holds that step.
+mycelium_lock_test_pause() {
+  local dir="${MYCELIUM_TEST_LOCK_PAUSE_DIR:-}"
+  local tag="${MYCELIUM_TEST_LOCK_PAUSE_TAG:-}"
+  local waited=0
+  [[ -n "$dir" && -n "$tag" ]] || return 0
+  : > "$dir/$tag.$1.reached"
+  while [[ -e "$dir/$tag.$1.hold" ]] && (( waited++ < 3000 )); do
+    sleep 0.01
+  done
+}
+
 mycelium_acquire_directory_lock() {
   local state_dir="$1"
   local lock_name="$2"
@@ -1415,6 +1430,7 @@ mycelium_acquire_directory_lock() {
   local lock_inode_after=""
   local reap_claim=""
   local reap_allowed=false
+  local tombstone=""
   local owner_is_live=false
   local owner_is_dead=false
 
@@ -1469,8 +1485,10 @@ mycelium_acquire_directory_lock() {
         && (( lock_mtime > 0 && now_ts - lock_mtime > 300 )); }; then
       reap_claim="$lock_dir/$MYCELIUM_LOCK_REAP_CLAIM"
       reap_allowed=false
+      mycelium_lock_test_pause reap-before-claim
       if [[ -n "$lock_inode_before" ]] \
         && mycelium_mkdir_exclusive "$reap_claim"; then
+        mycelium_lock_test_pause reap-claimed
         lock_inode_after=$(mycelium_file_inode "$lock_dir" 2>/dev/null || true)
         current_owner_record=""
         if [[ -f "$lock_dir/owner" && ! -L "$lock_dir/owner" ]]; then
@@ -1490,15 +1508,29 @@ mycelium_acquire_directory_lock() {
             fi
           fi
         fi
-        if [[ "$reap_allowed" == true ]]; then
-          rm -f "$lock_dir/owner"
-          rmdir "$reap_claim" 2>/dev/null || true
-          if rmdir "$lock_dir" 2>/dev/null; then
+        # Retire the reaped generation by renaming it, with this claim still
+        # inside, into a private tombstone, and only then clean it up. While
+        # the claim is held no other claim can exist, and after the rename
+        # the lock path is either absent or a successor's lock, so a late
+        # reaper can never claim inside a half-reaped lock. Dismantling it in
+        # place let one do so: the reaper's final rmdir failed and the late
+        # reaper, seeing the owner record vanish, withdrew, stranding an
+        # ownerless, freshly modified lock for the 300 s age guard. The
+        # tombstone sits beside the lock, on the same filesystem, where
+        # rename(2) is atomic; os.rename is the bare system call. A rename that reports failure but happened (an NFS retry)
+        # still counts. If it did not happen, withdraw the claim and retry.
+        if [[ "$reap_allowed" == true ]] \
+          && tombstone=$(mktemp -d "$state_dir/.$lock_name.reaped.XXXXXX" 2>/dev/null); then
+          python3 -I -S -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' \
+            "$lock_dir" "$tombstone/lock" 2>/dev/null || true
+          if [[ -d "$tombstone/lock" && ! -L "$tombstone/lock" ]]; then
+            mycelium_lock_test_pause reap-committed
+            rm -rf "$tombstone"
             continue
           fi
-        else
-          rmdir "$reap_claim" 2>/dev/null || true
+          rmdir "$tombstone" 2>/dev/null || true
         fi
+        rmdir "$reap_claim" 2>/dev/null || true
       fi
     fi
     if (( attempts >= max_attempts )); then
