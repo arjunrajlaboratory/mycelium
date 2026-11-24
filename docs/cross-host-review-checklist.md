@@ -378,6 +378,16 @@ hook, filesystem, or lifecycle boundaries.
       otherwise fall back to the process directory; an unrelated enclosing
       project gains no state. A session in a linked worktree is judged on, and
       writes into, that worktree.
+- [ ] A Stop check for an updated `.living/` accepts the notes folder of the
+      project the session works in, not only the repository root's: folders
+      on the path from the session's folder up to the root count, folders
+      elsewhere in the tree and symlinked `.living` folders do not. The
+      session's folder comes from the host-reported payload `cwd`, not only the
+      hook process's directory, because a dispatcher may run hooks from the
+      repository root. The folder list is recorded in the baseline and compared
+      as recorded. Fields that
+      earlier runtimes compare exactly (`living_files`) keep their meaning, so
+      new state goes under new keys.
 
 ## 7. Data Lineage Integrity
 
@@ -614,6 +624,7 @@ exercise them.
 | A script's direct reader/writer literals are already resolved | Repository fallback is not invoked; dynamic discovery has a fixed fail-safe entry bound. |
 | Active-log marker points outside `.living/log` | PostToolUse omits the unsafe log directive; Stop still enforces outstanding work and never reveals or follows the path. |
 | A dirty or untracked file is rewritten with the same size and restored mtime | Session accounting detects the content change. |
+| A Claude Code or Codex session (Codex through its dispatcher, which runs hooks from the repository root) started in a subfolder of a multi-project repository updates that subfolder's `.living/learnings.md`; a second session updates only another project's `.living/`; an earlier runtime reads the new baseline | The first Stop accepts; the second blocks; the earlier runtime's verdicts are unchanged (root-only). |
 | `true && python failed.py` exits nonzero, or Python is a pipeline component | The provably executed analysis is recorded; an unknown failed AND prefix remains omitted. |
 | Shell operators and Python text occur only after an unquoted `#` comment marker | No reminder or lineage event is created; quoted and escaped hashes remain valid arguments. |
 | Registry summary contains `|`, or the registry/lineage helper fails | Table cells remain valid; helper failure blocks Stop and preserves retry state without duplicate finalization. |

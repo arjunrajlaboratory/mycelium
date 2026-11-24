@@ -17,8 +17,8 @@ import json
 import os
 import subprocess
 import tempfile
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterable
 
 SCHEMA_VERSION = 2
 LIVING_FILES = ("learnings.md", "decisions.md", "conventions.md")
@@ -235,16 +235,20 @@ def _content_fingerprint(path: Path) -> dict[str, Any] | None:
     }
 
 
-def read_living_state(repo_root: Path) -> dict[str, dict[str, Any]]:
-    """Fingerprint lifecycle artifacts whose content satisfies Stop."""
-    living_dir = repo_root / ".living"
+def _living_candidates(living_dir: Path) -> list[Path]:
+    """Return the reflection artifacts one ``.living/`` directory can hold."""
     candidates = [living_dir / name for name in LIVING_FILES]
     findings_dir = living_dir / "findings"
     if findings_dir.is_dir() and not findings_dir.is_symlink():
         candidates.extend(path for path in findings_dir.rglob("*") if not path.is_dir())
     elif findings_dir.exists() or findings_dir.is_symlink():
         candidates.append(findings_dir)
+    return candidates
 
+
+def _fingerprint_candidates(
+    repo_root: Path, candidates: Iterable[Path]
+) -> dict[str, dict[str, Any]]:
     state: dict[str, dict[str, Any]] = {}
     for path in candidates:
         fingerprint = _content_fingerprint(path)
@@ -253,7 +257,134 @@ def read_living_state(repo_root: Path) -> dict[str, dict[str, Any]]:
     return state
 
 
-def build_snapshot(repo_root: Path) -> dict[str, Any]:
+def read_living_state(repo_root: Path) -> dict[str, dict[str, Any]]:
+    """Fingerprint lifecycle artifacts whose content satisfies Stop.
+
+    Only the repository root's ``.living/`` is read here; earlier runtimes
+    compare this mapping exactly, so it must keep meaning the root alone.
+    Subfolder notes are recorded separately (see ``discover_nested_living_roots``).
+    """
+    return _fingerprint_candidates(repo_root, _living_candidates(repo_root / ".living"))
+
+
+def _session_anchors(session_dirs: Iterable[str] = ()) -> list[str]:
+    """Folders that identify where this session works.
+
+    ``session_dirs`` is the working directory the host reported in the hook
+    payload (hooks pass it with ``--session-dir``); it is the only anchor on
+    hosts whose dispatcher changes to the repository root before running a
+    hook (Codex). The hook process's own working directory and Claude Code's
+    ``CLAUDE_PROJECT_DIR`` are added as well. All of them describe where the
+    session runs, not which files it touches.
+    """
+    anchors: list[str] = [d for d in session_dirs if d]
+    try:
+        anchors.append(os.getcwd())
+    except OSError:
+        pass
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir:
+        anchors.append(project_dir)
+    return anchors
+
+
+def discover_nested_living_roots(
+    repo_root: Path,
+    anchors: Iterable[str] | None = None,
+    session_dirs: Iterable[str] = (),
+) -> list[str]:
+    """Return subfolders on the session's path that keep their own ``.living/``.
+
+    One repository can hold several projects, each with its own notes folder
+    (``<repo>/<project>/.living/``). A session started inside such a project
+    records its reflection there, so those folders count for Stop alongside
+    the root. Only folders between a session anchor and the repository root
+    are considered: notes folders elsewhere in the tree (another project, or a
+    copied fixture) do not. Anchors outside the repository, or inside a nested
+    repository below it, contribute nothing; a symlinked ``.living`` is ignored.
+    Paths are compared after resolving symlinks on both sides.
+    """
+    if anchors is None:
+        anchors = _session_anchors(session_dirs)
+    try:
+        root = repo_root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return []
+    found: set[str] = set()
+    for anchor in anchors:
+        try:
+            current = Path(anchor).resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if current != root and root not in current.parents:
+            continue
+        chain: list[str] = []
+        while current != root:
+            if os.path.lexists(current / ".git"):
+                chain = []  # the anchor belongs to a nested repository
+                break
+            living = current / ".living"
+            if living.is_dir() and not living.is_symlink():
+                chain.append(current.relative_to(root).as_posix())
+            current = current.parent
+        found.update(chain)
+    return sorted(found)
+
+
+def read_nested_living_state(
+    repo_root: Path, roots: Iterable[str]
+) -> dict[str, dict[str, Any]]:
+    """Fingerprint the ``.living/`` artifacts of the given subfolders."""
+    candidates: list[Path] = []
+    try:
+        root = repo_root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return {}
+    for relative in roots:
+        base = repo_root / relative
+        living = base / ".living"
+        try:
+            # A subfolder replaced by a link (or removed) contributes nothing,
+            # so its earlier files read as removed rather than followed.
+            if base.resolve(strict=True) != root / relative:
+                continue
+        except (OSError, RuntimeError):
+            continue
+        if living.is_symlink() or not living.is_dir():
+            continue
+        candidates.extend(_living_candidates(living))
+    return _fingerprint_candidates(repo_root, candidates)
+
+
+def _nested_living_baseline(
+    repo_root: Path, session_dirs: Iterable[str] = ()
+) -> dict[str, Any]:
+    roots = discover_nested_living_roots(repo_root, session_dirs=session_dirs)
+    return {
+        "nested_living_roots": roots,
+        "nested_living_files": read_nested_living_state(repo_root, roots),
+    }
+
+
+def _baseline_nested_roots(baseline: dict[str, Any]) -> list[str]:
+    """Validated subfolder list from a baseline; empty when absent or malformed."""
+    raw = baseline.get("nested_living_roots")
+    if not isinstance(raw, list):
+        return []
+    roots: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item or "\x00" in item:
+            return []
+        path = PurePosixPath(item)
+        if path.is_absolute() or path.as_posix() != item:
+            return []
+        if any(part in ("", ".", "..") for part in path.parts):
+            return []
+        roots.append(item)
+    return roots
+
+
+def build_snapshot(repo_root: Path, session_dirs: Iterable[str] = ()) -> dict[str, Any]:
     reflog = _head_reflog(repo_root)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -261,6 +392,7 @@ def build_snapshot(repo_root: Path) -> dict[str, Any]:
         "head_reflog_entries": len(reflog) if reflog is not None else None,
         "files": read_worktree_state(repo_root),
         "living_files": read_living_state(repo_root),
+        **_nested_living_baseline(repo_root, session_dirs),
     }
 
 
@@ -281,11 +413,15 @@ def _write_payload(output: Path, payload: dict[str, Any]) -> None:
             pass
 
 
-def write_snapshot(repo_root: Path, output: Path) -> None:
-    _write_payload(output, build_snapshot(repo_root))
+def write_snapshot(
+    repo_root: Path, output: Path, session_dirs: Iterable[str] = ()
+) -> None:
+    _write_payload(output, build_snapshot(repo_root, session_dirs))
 
 
-def write_living_snapshot(repo_root: Path, output: Path) -> None:
+def write_living_snapshot(
+    repo_root: Path, output: Path, session_dirs: Iterable[str] = ()
+) -> None:
     """Write the minimal baseline needed for lifecycle-content comparison."""
     _write_payload(
         output,
@@ -293,6 +429,7 @@ def write_living_snapshot(repo_root: Path, output: Path) -> None:
             "schema_version": SCHEMA_VERSION,
             "files": {},
             "living_files": read_living_state(repo_root),
+            **_nested_living_baseline(repo_root, session_dirs),
         },
     )
 
@@ -317,7 +454,17 @@ def living_changed(repo_root: Path, baseline: dict[str, Any] | None) -> bool | N
     """Return lifecycle-content change state, or None for an old baseline."""
     if baseline is None or not isinstance(baseline.get("living_files"), dict):
         return None
-    return read_living_state(repo_root) != baseline["living_files"]
+    if read_living_state(repo_root) != baseline["living_files"]:
+        return True
+    # Subfolder notes are compared over the folder list the baseline recorded,
+    # never one re-derived now, so a session that moves between folders cannot
+    # turn a folder's absence into a change. Baselines from earlier runtimes
+    # carry no list and keep their root-only meaning.
+    roots = _baseline_nested_roots(baseline)
+    nested = baseline.get("nested_living_files")
+    if not roots or not isinstance(nested, dict):
+        return False
+    return read_nested_living_state(repo_root, roots) != nested
 
 
 def _normalize_repo_path(repo_root: Path, raw_path: str) -> str | None:
@@ -460,13 +607,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    snapshot_parser = subparsers.add_parser("snapshot")
-    snapshot_parser.add_argument("--repo-root", type=Path, required=True)
-    snapshot_parser.add_argument("--output", type=Path, required=True)
-
-    living_snapshot_parser = subparsers.add_parser("living-snapshot")
-    living_snapshot_parser.add_argument("--repo-root", type=Path, required=True)
-    living_snapshot_parser.add_argument("--output", type=Path, required=True)
+    for name in ("snapshot", "living-snapshot"):
+        baseline_parser = subparsers.add_parser(name)
+        baseline_parser.add_argument("--repo-root", type=Path, required=True)
+        baseline_parser.add_argument("--output", type=Path, required=True)
+        baseline_parser.add_argument(
+            "--session-dir",
+            action="append",
+            default=[],
+            help=(
+                "working directory the host reported for the session (repeatable); "
+                "locates a subproject's own .living/ when the hook runs from the "
+                "repository root"
+            ),
+        )
 
     collect_parser = subparsers.add_parser("collect")
     collect_parser.add_argument("--repo-root", type=Path, required=True)
@@ -486,10 +640,10 @@ def main() -> int:
     args = _build_parser().parse_args()
     repo_root = args.repo_root.resolve()
     if args.command == "snapshot":
-        write_snapshot(repo_root, args.output)
+        write_snapshot(repo_root, args.output, args.session_dir)
         return 0
     if args.command == "living-snapshot":
-        write_living_snapshot(repo_root, args.output)
+        write_living_snapshot(repo_root, args.output, args.session_dir)
         return 0
 
     if args.command == "living-changed":

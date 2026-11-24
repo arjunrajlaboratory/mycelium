@@ -459,6 +459,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries any reflection still owed rather than erasing it. A reservation
   that already recorded work is left for its own checkout's Stop. Existing
   projects need no migration.
+- **Stop accepts notes recorded in the session's own project subfolder.** One
+  repository can hold several projects, each with its own `.living/` (for
+  example `<repo>/<project>/.living/`). A session started in such a project
+  recorded its learnings and decisions there, and Stop kept blocking ("files
+  changed … but .living/ not updated"), because only the repository root's
+  `.living/` counted; the agent had to copy the entry into the root's notes to
+  finish. Baselines now also record the `.living/` folders on the path from
+  the session's folder up to the repository root, and an update to any of them
+  satisfies Stop. The session's folder is the working directory the host
+  reports in the hook payload (passed to `session_file_changes.py` as
+  `--session-dir`, because the Codex dispatcher runs hooks from the repository
+  root), plus the hook's own working directory and Claude Code's
+  `CLAUDE_PROJECT_DIR`. Notes folders elsewhere in the tree, symlinked
+  `.living` folders and folders inside a nested repository do not count. The
+  comparison uses the folder list stored in the baseline, never one re-derived
+  at check time. The root-only `living_files` mapping is unchanged and the
+  subfolder state is stored under new keys, so earlier runtimes read new
+  baselines exactly as before and a rollback stays safe.
 - A post-tool hook that could not take its session's lock (a slow Stop,
   parallel subagent hooks, a loaded machine) no longer drops the edit, read,
   or analysis run silently. It still exits 0 so the tool call is never

@@ -4929,3 +4929,67 @@ def test_post_action_registry_command_is_shell_safe_for_hostile_paths(tmp_path):
     registry = (repo / ".living" / "log" / "LOG_REGISTRY.md").read_text()
     rows = [line for line in registry.splitlines() if log_path.name in line]
     assert len(rows) == 1 and "| Fitted the model. |" in rows[0], registry
+
+
+def _codex_dispatch(hook: str, cwd: Path, payload: dict) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    return subprocess.run(
+        [str(PLUGIN_HOOKS_DIR / "mycelium-codex-dispatch.sh"), hook],
+        cwd=cwd,
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env={**env, "PLUGIN_ROOT": str(PLUGIN_ROOT)},
+        check=False,
+    )
+
+
+def _stop_blocked(result: subprocess.CompletedProcess) -> bool:
+    out = result.stdout.strip()
+    return bool(out) and json.loads(out).get("decision") == "block"
+
+
+@pytest.mark.parametrize("notes_folder, blocked", [("sub", False), ("other", True)])
+def test_codex_session_in_a_subproject_records_its_own_living_folder(
+    tmp_path, notes_folder, blocked
+):
+    # The Codex dispatcher changes to the repository root before running a
+    # hook and Codex exports no CLAUDE_PROJECT_DIR, so the payload's cwd is
+    # the only record of where the session runs. SessionStart must pass it on
+    # so that Stop accepts notes kept in that subproject's own .living/, and
+    # still blocks when only another project's notes changed.
+    repo = _repo(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "T"], check=True)
+    sub = repo / "sub"
+    for folder in (sub, repo / "other"):
+        (folder / ".living").mkdir(parents=True)
+        (folder / ".living" / "learnings.md").write_text("# learnings\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "init"], check=True)
+    session_id = f"codex-subproject-{notes_folder}"
+
+    result = _codex_dispatch(
+        "mycelium-health.sh",
+        sub,
+        {"session_id": session_id, "cwd": str(sub), "source": "startup",
+         "hook_event_name": "SessionStart"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    baseline = json.loads((_host_state(repo, session_id) / "session-file-baseline.json").read_text())
+    assert baseline["nested_living_roots"] == ["sub"]
+    assert "sub/.living/learnings.md" in baseline["nested_living_files"]
+
+    (sub / "work.py").write_text("print(1)\n")
+    notes = repo / notes_folder / ".living" / "learnings.md"
+    notes.write_text(notes.read_text() + "\n### a lesson\n")
+    stop = _codex_dispatch(
+        "mycelium-stop-check.sh",
+        sub,
+        {"session_id": session_id, "cwd": str(sub), "stop_hook_active": False,
+         "hook_event_name": "Stop"},
+    )
+
+    assert stop.returncode == 0, stop.stderr
+    assert _stop_blocked(stop) is blocked, stop.stdout

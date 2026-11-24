@@ -926,6 +926,99 @@ echo "TEST access-note: a stale note file is never emitted"
 }
 
 # ─────────────────────────────────────────────────────────────────
+# TESTS 22-24: a session working in a subfolder that keeps its own .living/
+# ─────────────────────────────────────────────────────────────────
+# One git repository can hold several projects, each with its own notes folder
+# (<repo>/<project>/.living/). A session started in such a subfolder records
+# its reflection there; Stop must accept that, but only for notes folders on
+# the path from the session's folder up to the repository root.
+nested_session_repo() {
+  local repo
+  repo=$(make_repo)
+  init_log_registry "$repo"
+  mkdir -p "$repo/.living/findings" "$repo/sub/.living" "$repo/other/.living"
+  for f in learnings.md decisions.md conventions.md; do
+    touch_very_old "$repo/.living/$f"
+    printf '# %s\n' "$f" > "$repo/sub/.living/$f"
+    printf '# %s\n' "$f" > "$repo/other/.living/$f"
+  done
+  touch_very_old "$repo/.living/findings"
+  git -C "$repo" add sub other >/dev/null
+  git -C "$repo" commit -q -m "projects"
+  local log_path="$repo/.living/log/2026-01-01-001-test.md"
+  cat > "$log_path" <<LOG_EOF
+---
+session_id: 2026-01-01-001
+project: test
+branch: main
+started: $(date '+%Y-%m-%dT%H:%M:%S%z')
+ended:
+duration_minutes:
+files_changed:
+---
+LOG_EOF
+  local start_ts
+  start_ts=$(date +%s)
+  echo "$start_ts" > "$repo/.mycelium/session-start-ts.tmp"
+  printf '%s\n%s\n' "$log_path" "$start_ts" > "$repo/.mycelium/active-session-log.tmp"
+  # SessionStart runs in the session's folder.
+  (cd "$repo/sub" && env -u CLAUDE_PROJECT_DIR python3 "$HERE/../scripts/session_file_changes.py" snapshot \
+    --repo-root "$repo" \
+    --output "$repo/.mycelium/session-file-baseline.json")
+  printf 'print(1)\n' > "$repo/sub/work.py"
+  echo "$repo"
+}
+
+echo ""
+echo "TEST 22: Session in a subfolder updates that subfolder's .living/ → should PASS"
+{
+  REPO=$(nested_session_repo)
+  printf '\n### [2026-01-01] a lesson\n' >> "$REPO/sub/.living/learnings.md"
+  HOOK_OUTPUT=$(cd "$REPO/sub" && printf '{}\n' | env -u CLAUDE_PROJECT_DIR bash "$HOOK_PATH" 2>/dev/null)
+  HOOK_EXIT=$?
+  if [ "$HOOK_EXIT" -eq 0 ] \
+    && ! echo "$HOOK_OUTPUT" | grep -q '"decision": "block"' \
+    && grep -q '^ended: .' "$REPO/.living/log/2026-01-01-001-test.md"; then
+    pass "Subfolder session that updated its own .living/ is accepted and finalised"
+  else
+    fail "Subfolder session that updated its own .living/ was not accepted" \
+      "exit=$HOOK_EXIT output='$(echo "$HOOK_OUTPUT" | head -c 300)'"
+  fi
+  rm -rf "$REPO"
+}
+
+echo ""
+echo "TEST 23: Session in a subfolder updates no notes → should BLOCK"
+{
+  REPO=$(nested_session_repo)
+  HOOK_OUTPUT=$(cd "$REPO/sub" && printf '{}\n' | env -u CLAUDE_PROJECT_DIR bash "$HOOK_PATH" 2>/dev/null)
+  HOOK_EXIT=$?
+  if echo "$HOOK_OUTPUT" | grep -q '"decision": "block"'; then
+    pass "Subfolder session with no notes update still blocks"
+  else
+    fail "Subfolder session with no notes update was accepted" \
+      "exit=$HOOK_EXIT output='$(echo "$HOOK_OUTPUT" | head -c 300)'"
+  fi
+  rm -rf "$REPO"
+}
+
+echo ""
+echo "TEST 24: Session in a subfolder updates a notes folder off its path → should BLOCK"
+{
+  REPO=$(nested_session_repo)
+  printf '\n### [2026-01-01] a lesson\n' >> "$REPO/other/.living/learnings.md"
+  HOOK_OUTPUT=$(cd "$REPO/sub" && printf '{}\n' | env -u CLAUDE_PROJECT_DIR bash "$HOOK_PATH" 2>/dev/null)
+  HOOK_EXIT=$?
+  if echo "$HOOK_OUTPUT" | grep -q '"decision": "block"'; then
+    pass "A notes folder outside the session's path does not satisfy Stop"
+  else
+    fail "A notes folder outside the session's path satisfied Stop" \
+      "exit=$HOOK_EXIT output='$(echo "$HOOK_OUTPUT" | head -c 300)'"
+  fi
+  rm -rf "$REPO"
+}
+
+# ─────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────
 echo ""

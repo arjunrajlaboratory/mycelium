@@ -1322,6 +1322,9 @@ PY
 mycelium_refresh_work_cycle() {
   local repo_root="$1"
   local helper="$2"
+  # The working directory the host reported for this session; it locates a
+  # subproject's own .living/ when the hook itself runs from the repo root.
+  local session_dir="${3:-}"
   local reminder_file="$STATE_DIR/mycelium-reminded.tmp"
   local baseline_file="$STATE_DIR/living-reminder-baseline.json"
   local reminder_ts=0
@@ -1356,6 +1359,7 @@ mycelium_start_work_cycle() {
   if [[ -f "$helper" ]]; then
     python3 "$helper" living-snapshot \
       --repo-root "$repo_root" \
+      ${session_dir:+--session-dir "$session_dir"} \
       --output "$baseline_file" >/dev/null 2>&1 \
       || { rm -f "$baseline_file"; status=1; }
   else
