@@ -67,7 +67,7 @@ if str(HERE) not in sys.path:
 
 import io_observer  # noqa: E402
 
-BUILDER_VERSION = 4  # 4: slim overlaps keep their background flag
+BUILDER_VERSION = 5  # 4: slim overlaps keep their background flag; 5: edits keep single_path
 INDEX_SCHEMA = "mycelium.lineage_index.v1"
 QUERY_SCHEMA = "mycelium.lineage_query.v1"
 DEFAULT_MAX_BYTES = 4 * 1024**3
@@ -429,7 +429,7 @@ def _store_contribution(path: Path, name: str) -> dict[str, Any]:
 # index must never copy it into a new file.
 _OBSERVATION_FIELDS = ("kind", "version", "observation_id", "host", "host_session_id",
                        "agent_id", "tool", "status", "reason", "outcome", "observed_at",
-                       "repo_root", "journal", "overlapping", "scope", "changes")
+                       "repo_root", "journal", "overlapping", "scope", "changes", "single_path")
 
 
 def _slim_observation(record: dict[str, Any]) -> dict[str, Any]:
@@ -991,6 +991,11 @@ class Index:
                 kind = "foreign-call" if call in self._foreign_calls else "no-observation"
                 out.append({"kind": kind, "call": call})
                 continue
+            if self._single_path_elsewhere(observed["record"], path):
+                # A verified single-path edit changed only its own path, so it
+                # accounts for this one whenever it ran (its Pre may have been
+                # missed, leaving its start unknown). Never for its own path.
+                continue
             write_end = journal.get("post_seq")
             overlaps = not (isinstance(write_end, int)
                             and isinstance(interval.get("pre_seq"), int)
@@ -1025,6 +1030,26 @@ class Index:
             if problem:
                 out.append({"kind": problem, "call": call})
         return out
+
+    def _single_path_elsewhere(self, record: dict[str, Any], path: str) -> bool:
+        """Whether ``record`` is a successful single-path edit (an adapter's
+        verified App write_file/edit_file) of this checkout whose one target
+        is provably not ``path``: not the same name under any case or Unicode
+        folding, and neither an ancestor nor a descendant of it."""
+        changes = record.get("changes")
+        if (record.get("single_path") is not True or record.get("status") != "edit"
+                or record.get("outcome") != "success" or not isinstance(changes, dict)
+                or changes.get("deleted") or changes.get("refused")):
+            return False
+        edited = changes.get("edited")
+        if not (isinstance(edited, list) and len(edited) == 1 and isinstance(edited[0], dict)):
+            return False
+        target = edited[0].get("path")
+        if not isinstance(target, str) or not target or os.path.isabs(target) \
+                or ".." in target.split("/"):
+            return False
+        mine, other = _fold(target), _fold(path)
+        return not (mine == other or other.startswith(mine + "/") or mine.startswith(other + "/"))
 
     def _observation_gap_at(self, record: dict[str, Any], path: str,
                             interval: dict[str, Any]) -> str | None:
