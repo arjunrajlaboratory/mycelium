@@ -2007,7 +2007,9 @@ def hook(state_dir: Path, repo_root: Path, host: str, raw: str) -> int:
                     # recorded, but never credited to this call as its own.
                     edit_result = "unknown"
         response = payload.get("tool_response")
-        expected = response.get(EXPECTED_SHA256_KEY) if isinstance(response, dict) else None
+        # Only the Antigravity App adapter sets it; a native response never can.
+        expected = (response.get(EXPECTED_SHA256_KEY)
+                    if host == "antigravity-app" and isinstance(response, dict) else None)
         post(state_dir, host=host, session=session, call_id=call_id, tool=tool, agent=agent,
              repo_root=repo_root if edited is not None else None, edited=edited,
              outcome=edit_result,

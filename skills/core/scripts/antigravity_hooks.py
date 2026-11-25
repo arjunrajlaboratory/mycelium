@@ -986,6 +986,9 @@ def _dispatch(event, payload, plugin_root, host):
                         return  # the rest close as turn-ended, never as a guessed edit
                     if file_sha256(path) != found["content_sha256"]:
                         continue  # not provably this step's bytes any more
+                    spare = app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
+                    if spare < APP_RECOVERY_OBSERVE_MIN_SECONDS:
+                        return  # hashing used the allowance; finalization keeps its reserve
                     # The observer re-checks the digest on the bytes it publishes: a
                     # rewrite in between leaves the path written but without a hash.
                     observe_edit(step, path, timeout=min(APP_RECOVERY_ACTION_SECONDS, spare),

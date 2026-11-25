@@ -678,7 +678,17 @@ def _recovered_write(app_project, content_on_disk):
 def test_stop_recovery_digest_check_never_blocks_on_a_fifo(app_project):
     """Codex review P2: the digest check runs in the Stop process; a FIFO swapped in
     for the written file must not block it on open."""
-    observations, elapsed = _recovered_write(app_project, lambda t: os.mkfifo(t))
+    import signal
+
+    def hung(*_):
+        raise TimeoutError("Stop blocked on the FIFO")
+    previous = signal.signal(signal.SIGALRM, hung)
+    signal.setitimer(signal.ITIMER_REAL, 30)  # a regression fails here instead of hanging the worker
+    try:
+        observations, elapsed = _recovered_write(app_project, lambda t: os.mkfifo(t))
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
     assert observations == [] and elapsed < 20, elapsed
 
 
@@ -699,3 +709,41 @@ def test_observer_publishes_the_hash_when_it_matches_the_expected_digest(app_pro
     (obs,), _ = _recovered_write(app_project, lambda t: t.write_text("synthetic content"))
     (written,) = obs["changes"]["edited"]
     assert written["after"]["sha256"] == hashlib.sha256(b"synthetic content").hexdigest()
+
+
+def test_expected_digest_is_honoured_only_on_the_antigravity_app_host(tmp_path):
+    """Codex review P3: a native (Claude) edit response carrying the adapter's key
+    must not change what the shared observer records."""
+    import hashlib
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "f.txt").write_text("real bytes")
+    (repo / ".mycelium/io").mkdir(parents=True)
+    for host in ("claude", "antigravity-app"):
+        payload = {"hook_event_name": "PostToolUse", "session_id": f"s-{host}", "tool_name": "Write",
+                   "tool_use_id": "t1", "cwd": str(repo), "tool_input": {"file_path": str(repo / "f.txt")},
+                   "tool_response": {"success": True, "exit_code": 0, "mycelium_expected_sha256": "0" * 64}}
+        io.hook(repo / ".mycelium", repo, host, json.dumps(dict(payload, hook_event_name="PreToolUse")))
+        io.hook(repo / ".mycelium", repo, host, json.dumps(payload))
+    real = hashlib.sha256(b"real bytes").hexdigest()
+    hashes = {}
+    for host in ("claude", "antigravity-app"):
+        for obs in io._read_lines(io.observations_path(repo / ".mycelium", host, f"s-{host}")):
+            hashes[host] = obs["changes"]["edited"][0]["after"]["sha256"]
+    assert hashes == {"claude": real, "antigravity-app": None}, hashes
+
+
+def test_slow_digest_check_leaves_finalization_its_reserve(app_project, monkeypatch):
+    """Codex review P2: the observer's allowance is recomputed after the digest
+    check; a check that used the spare time skips the optional observation."""
+    clock = [1000.0]
+    monkeypatch.setattr(ag.time, "monotonic", lambda: clock[0])
+    original = ag.file_sha256
+
+    def slow(path, **kwargs):
+        clock[0] += ag.APP_STOP_BUDGET_SECONDS - ag.APP_FINALIZE_RESERVE_SECONDS
+        return original(path, **kwargs)
+    monkeypatch.setattr(ag, "file_sha256", slow)
+    observations, _ = _recovered_write(app_project, lambda t: t.write_text("synthetic content"))
+    assert observations == []
