@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Scientific linters are recommended by default, with one question per
+  repository.** `init` asks whether to use `scilintr` (Python and R analysis
+  code) and `scitexlintr` (reports), recommends yes, and installs them on yes.
+  `skills/core/scripts/setup_linters.py` records the answer in a committed
+  `.living/linters.json`. Repositories initialized earlier are asked on first
+  use by the analyze and report skills. An analysis in a repository that opted
+  out skips linting and says so; the report-generator pack still needs
+  `scitexlintr`, so the report skill offers to enable it or use the fallback.
+  Upgrades still need the user's agreement.
 - **Antigravity (IDE and App) now observes I/O the way Claude Code and Codex
   do.** The 0.10.0 live run showed that static script reading, the only
   lineage Antigravity had, covers almost nothing in real agent scripts. The
@@ -78,6 +87,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Antigravity App Stop-time edit observations: five follow-ups from the
+  PreToolUse observer.** None of these made a false lineage claim; each lost
+  proof or delayed finalization.
+  - Recovered edit activity is saved as acknowledged before the optional
+    edit observations run, so a Stop killed during them no longer leaves the
+    steps `running` and the turn held as uncertain.
+  - The Stop-time digest check reads at most its byte limit, even from a file
+    that grows after its size check, and gives up early enough to leave
+    finalization its reserve and one observation its minimum.
+  - A Stop advances `observer_ended_through` (which suppresses later edit
+    observations of that work cycle) only after the observer confirmed its
+    turn end. After a journal lock timeout, a later valid edit callback still
+    closes its open interval.
+  - A verified App `write_file` or `edit_file` changes only its one named
+    path, so its edit observation (marked `single_path` by the App adapter
+    only) now accounts for every provably disjoint path even when its
+    PreToolUse never ran and its interval's start is unknown. Unrelated
+    writes keep `current-in-record` instead of `coverage-unproven`. It never
+    vouches for its own path, a case or Unicode alias of it, an ancestor, or
+    a descendant, and the mark is withheld unless the target is, when
+    observed, a regular file with no other hard link (an edit through a
+    since-removed directory alias, or of a hard-linked file, may have changed
+    another path). An edit Post that arrives after its interval already
+    expired records its paths with no hash and no `single_path` mark. The lineage index cache is rebuilt once (builder version 5).
+  - On a case-insensitive volume, an edit whose target no longer exists at
+    observation time (for example an App edit named `OUT.CSV` whose
+    `out.csv` was deleted before Stop) makes every spelling of the name
+    uncertain, as a deletion already did.
+
+- **Wrong or lost paths in static script reading.** Found by a Codex
+  review of the `__file__` change below:
+  - A script that assigns `__file__` itself (a notebook-cell habit) lost the
+    input it had recorded before. The name now resolves as any module
+    constant does when the script rebinds it, unless the script reads it
+    before that assignment.
+  - A `type=Path` option with string `choices` is declined: argparse
+    converts before checking the choices, so it rejects every value.
+  - A `type=Path` argparse value or string default kept its raw text, so
+    `--run-dir analysis/` with `str(args.run_dir) + ".json"` recorded
+    `analysis/.json`. The text is now normalised as `Path()` does, and
+    `analysis.json` is recorded.
+  - `env -C` (or another wrapper's directory) through a symlink followed by
+    `..` was collapsed as text, but the kernel follows the symlink first,
+    so a script's `__file__` and relative paths were bound to the wrong
+    directory. Such a directory is now declined unless both readings agree
+    and every component exists. A glob word, or a second `env -C`, is
+    declined too.
 - **Stop no longer fails open on a long changed-file list or an unusual file
   name** (`mycelium-stop-check.sh`). Stop built its short file lists (the
   block reason, the registry summary, the fallback handoff and the

@@ -3027,7 +3027,20 @@ def _resolve_wrapper_directory(value: str, cwd: Path) -> Path | None:
         return None
     if not target.is_absolute():
         target = cwd / target
-    target = Path(os.path.abspath(target))
+    lexical = Path(os.path.abspath(target))
+    # chdir follows each symlink before a later `..`; abspath collapses `..`
+    # textually. When the two disagree the real directory is not the lexical
+    # one, so decline rather than guess. Every component must exist (chdir
+    # fails on a missing one) and a glob word is not the directory used.
+    if ".." in target.parts:
+        if any(c in value for c in "*?["):
+            return None
+        try:
+            if os.path.realpath(target, strict=True) != os.path.realpath(lexical, strict=True):
+                return None
+        except (OSError, ValueError):
+            return None
+    target = lexical
     if not target.is_dir() or not os.access(target, os.X_OK):
         return None
     return target
@@ -3062,10 +3075,18 @@ def _consume_execution_wrapper(
     if wrapper == "env":
         value_options = {"-u", "--unset"}
         flag_options = {"-i", "-0", "--ignore-environment", "--null"}
+        chdirs = 0
         while index < len(tokens):
             token = tokens[index]
             if token in {"--help", "--version"}:
                 return None
+            if token in {"-C", "--chdir"} or token.startswith("--chdir=") or (
+                token.startswith("-C") and token != "-C"
+            ):
+                chdirs += 1
+                if chdirs > 1:
+                    # Which base a second -C resolves against is not portable.
+                    return None
             if token in {"-S", "--split-string"} or token.startswith(
                 ("-S", "--split-string=")
             ):
@@ -5757,6 +5778,17 @@ class _StdlibIO:
             and "__file__" not in self.stored_attrs \
             and (self.script_file.absolute or not self.chdir)
 
+    def _file_read_before_binding(self) -> bool:
+        """Whether `__file__` is read anywhere at or before its first
+        assignment's line (or the binding is not a plain statement)."""
+        binder = self.binders.get("__file__")
+        line = getattr(binder, "lineno", None)
+        if line is None:
+            return True
+        return any(isinstance(n, ast.Name) and n.id == "__file__"
+                   and isinstance(n.ctx, ast.Load) and n.lineno <= line
+                   for n in ast.walk(self.tree))
+
     def _file_operand(self, node: ast.AST) -> _StdPath | None:
         """`__file__` or `Path(__file__)` itself, made absolute: the operand
         of `abspath`/`realpath`/`resolve()`/`absolute()`. Every component of
@@ -5845,9 +5877,15 @@ class _StdlibIO:
             return self.memo[name]
         self.memo[name] = None  # a cycle resolves to nothing
         result = None
-        if name == "__file__":
+        if name == "__file__" and self._file_bound():
             result = self._file_operand(ast.Name("__file__")) \
-                if self._file_bound() and self.script_file.absolute else None
+                if self.script_file.absolute else None
+        # A script that assigns `__file__` itself (or a scan with no certain
+        # script) resolves the name as any module constant, as before, but
+        # only when every read follows the assignment: a read before it is
+        # the predefined `__file__`, not the later value.
+        elif name == "__file__" and self._file_read_before_binding():
+            result = None
         elif self.counts.get(name) == 1 and name not in self.stored_attrs:
             binder = self.binders.get(name)
             if isinstance(binder, ast.Assign) and self.parents.get(binder) is self.tree \
@@ -6060,6 +6098,10 @@ class _StdlibIO:
                     default_node = keyword.value
                 else:
                     options[keyword.arg] = ast.literal_eval(keyword.value)
+            if type_kind == "path" and "choices" in options:
+                # argparse checks choices after `type=Path`, so string choices
+                # reject every value; the replay (no converter) would not.
+                return None
             action_name = options.get("action", "store")
             if action_name not in _ARGPARSE_ACTIONS:
                 return None
@@ -6092,7 +6134,9 @@ class _StdlibIO:
             if raw is marker:
                 result[dest] = ("default", default_node, type_is_path)
             elif isinstance(raw, str):
-                result[dest] = ("value", _StdPath(raw, type_is_path))
+                # argparse applies `type=Path`, which normalises the text.
+                result[dest] = ("value", _StdPath(str(Path(raw)) if type_is_path else raw,
+                                                  type_is_path))
         return result
 
     def _wrapped_parse_call(
@@ -6237,7 +6281,10 @@ class _StdlibIO:
         default = self.value(entry[1])
         if default is None:
             return None
-        # argparse converts a string default with the option's `type`.
+        # argparse converts a string default with the option's `type`;
+        # `Path()` normalises the text (`analysis/` -> `analysis`).
+        if entry[2] and not default.is_path:
+            return _StdPath(str(Path(default.text)), True)
         return _StdPath(default.text, default.is_path or entry[2])
 
     # -- sinks --
