@@ -799,11 +799,14 @@ outside that:
   not who wrote it.
 - Edits made outside the agent. A disk query finds them, but the record cannot
   say who made them.
-- Hosts with no observer. The Antigravity adapters install no `PreToolUse`
-  hook, because a pre-hook there would sit on the approval path. Their runs
-  still reach the manifest, but no call is observed. With no observation
-  store at all, a query answers `no-recorded-write` with the reason
-  `no-observations`: the absence of a write proves nothing.
+- Calls with no observer. An Antigravity package older than this observer
+  installs no `PreToolUse` hook; its runs still reach the manifest, but no call
+  is observed. (Current Antigravity packages observe `run_command` and the
+  edit tools through an observation-only `PreToolUse` that always answers
+  `allow`; an App command whose working directory or exit the App's own step
+  record cannot prove is still unobserved.) With no observation store at all,
+  a query answers `no-recorded-write` with the reason `no-observations`: the
+  absence of a write proves nothing.
 
 **Readers.** Readers are listed with their `hash_origin`, proven first. A
 hook cannot see reads, so every read stays inferred.

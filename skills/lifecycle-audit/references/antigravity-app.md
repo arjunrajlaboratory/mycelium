@@ -56,3 +56,29 @@ one `app_bindings` entry per credited command, matching lineage events and
 exit codes, and the negative controls. Record the exact App version: the step
 store shape is pinned to App 2.31.0, and a different version needs a fresh
 native verification before any support claim.
+
+## PreToolUse observer: approvals unchanged, writes observed
+
+The package registers an observation-only `PreToolUse` hook for `run_command`
+and the edit tools (see `docs/antigravity-ide.md`). The host's documentation
+does not say what a failed, slow or silent hook does to approvals, so every
+new App version, and every change to `mycelium-antigravity-pre.sh` or
+`antigravity_hooks.pre_tool_use`, needs a live check by a person driving the App:
+
+- A command that normally prompts still prompts, with the same choices.
+- A command allowed with "Always Allow" before still runs without a prompt.
+- A deny setting still denies.
+- An edit behaves as before.
+- With `crash`, then `hang`, in `<project>/.mycelium/antigravity-pre-fault`,
+  a prompting command still prompts and is not auto-approved. Delete the file
+  afterwards.
+
+If any of these differs from the same App without the package, the hook is
+changing approvals. Treat that as a release blocker, not an observation gap.
+
+For the lineage side, require the run's synchronous command to leave an
+observation `antigravity-app:ag-step-<step>` with status `no-known-overlap`
+in `.mycelium/io/obs/antigravity-app/<conversation>-turn-<step>.ndjson`,
+and `lineage_index.py query --path <output> --json` to report
+`current-in-record` with `attribution: sole`. Check also that no
+`.mycelium/io/open/` marker remains after the accepted Stop.

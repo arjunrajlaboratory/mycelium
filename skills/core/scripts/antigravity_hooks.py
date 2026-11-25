@@ -3,7 +3,9 @@
 
 The model is deliberately not a routing input. Native USER_EXPLICIT transcript
 steps identify work cycles; invocationNum and fullyIdle do not identify turns.
-No PreToolUse handler is installed: observation must not grant permissions.
+PreToolUse is observation only (``pre_tool_use``): it always answers
+``{"decision": "allow"}``, which defers to the host's own approval policy, and
+only opens the I/O observer's interval for the call. It never grants permissions.
 
 The host profile comes from the package's hook command (``--host``; the IDE is
 the default). A package label alone is not host proof: every event must also
@@ -19,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -108,6 +111,7 @@ APP_FINALIZE_RESERVE_SECONDS = 20
 APP_RECOVERY_ACTION_SECONDS = 12  # the shared per-hook default
 # A recovery batch starts only with at least this much real tracker allowance.
 APP_RECOVERY_BATCH_MIN_SECONDS = 5
+APP_RECOVERY_OBSERVE_MIN_SECONDS = 1  # one edit observation (a few hashes, no walk)
 ACTIVITY_HOOK = "mycelium-activity-tracker.sh"
 # Set only by this adapter, only for its Stop-recovery batch. The shared tracker
 # chooses batch mode from this flag plus the App host, never from payload text.
@@ -132,6 +136,27 @@ EDITS = {"write_to_file", "replace_file_content", "multi_replace_file_content"}
 # App edit tools with captured typed native evidence (successful built-in edits).
 APP_EDITS = set(app_store.EDIT_TOOLS)
 PROTECTED = {".agents", "_agents", ".agent", ".mycelium", ".living"}
+
+
+def file_sha256(path, limit=app_store.MAX_SCAN_BYTES):
+    """SHA-256 of a regular file read without following a final link, or None."""
+    try:
+        # Nonblocking, so a FIFO swapped in for the file cannot hold Stop on open.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return None
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1 << 20):
+            digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
 
 
 def tracker_ignores(relative):
@@ -267,7 +292,7 @@ def hook_environment(host, plugin, *, batch=False):
     return env
 
 
-def run_hook(name, data, root, plugin, *, timeout=12, batch=False, last_stop=False):
+def run_hook(name, data, root, plugin, *, timeout=12, batch=False, last_stop=False, kill_group=False):
     host = active_host()
     env = hook_environment(host, plugin, batch=batch)
     # On the last allowed Stop a block cannot reach the agent, so the shared
@@ -285,8 +310,25 @@ def run_hook(name, data, root, plugin, *, timeout=12, batch=False, last_stop=Fal
     script = plugin / "skills/core/hooks" / name
     marker = root / ".mycelium/run" / host / data["session_id"] / "active-session-log.tmp"
     had_marker = marker.is_file()
-    result = subprocess.run(["bash", str(script)], input=json.dumps(data), text=True,
-                            capture_output=True, cwd=root, env=env, timeout=timeout)
+    if kill_group:
+        # Its own process group, killed whole on timeout: a child left running
+        # (the observer's Python) must not write after the adapter moved on.
+        process = subprocess.Popen(["bash", str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, cwd=root, env=env,
+                                   start_new_session=True)
+        try:
+            stdout, stderr = process.communicate(json.dumps(data), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            process.communicate()
+            raise
+        result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+    else:
+        result = subprocess.run(["bash", str(script)], input=json.dumps(data), text=True,
+                                capture_output=True, cwd=root, env=env, timeout=timeout)
     if result.returncode:
         raise RuntimeError(f"{name} failed ({result.returncode}): {result.stderr[-1000:]}")
     decoded = json.loads(result.stdout) if result.stdout.strip() else {}
@@ -554,6 +596,18 @@ def target_root(payload, roots):
     return None
 
 
+def observer_turn_end(root, session_id):
+    """Close this work cycle's observer intervals that got no Post; best effort, never raises."""
+    try:
+        import io_observer
+        state_dir = observer_state_dir(root)
+        io_dir = state_dir / "io"
+        if io_dir.is_dir() and not io_dir.is_symlink():
+            io_observer.turn_end(state_dir, host=active_host(), session=session_id)
+    except Exception as exc:
+        print(f"Mycelium Antigravity: observer turn end: {one_line(exc, 300)}", file=sys.stderr)
+
+
 def dispatch(event, payload, plugin_root=PLUGIN, host=HOST):
     profile(host)
     token = _ACTIVE_HOST.set(host)
@@ -788,11 +842,40 @@ def _dispatch(event, payload, plugin_root, host):
                     hooks = ["mycelium-data-tracker.sh", "mycelium-post-action.sh"]
                     if value["root"] == root:
                         apply_hooks(hooks, dict(data, cwd=value["cwd"], tool_name="Bash",
+                                                tool_use_id=observer_call_id(int(step_key)),
                                                 tool_input={"command": command},
                                                 tool_response={"exit_code": value["exit_code"]}), int(step_key))
                     if value["root"] != root or all(f"{step_key}:{h}" in turn["actions"] for h in hooks):
                         pending.pop(step_key, None)
                         save()
+
+            def observe_edit(step_index, path, timeout=12, expected_sha256=None, bytes_unknown=False):
+                """Close a successful edit's observer interval (opened by PreToolUse) with its
+                edit observation. At most once per step, and never a lifecycle failure: an
+                observation that cannot be made leaves the interval open until turn end."""
+                action = f"{step_index}:io-observer"
+                if action in turn["actions"]:
+                    return
+                if step_index <= turn.get("observer_ended_through", -1):
+                    # An earlier Stop already closed this call's interval as turn-ended;
+                    # an edit observation now would credit it with whatever later calls
+                    # wrote to the file, with no overlap recorded after that expiry.
+                    return
+                turn["actions"][action] = "done"
+                save()
+                try:
+                    run_hook("mycelium-io-observer.sh", dict(
+                        data, hook_event_name="PostToolUse", tool_name="Write",
+                        tool_use_id=observer_call_id(step_index), tool_input={"file_path": path},
+                        # Callers pass only edits whose success the native record already
+                        # proved (a DONE step without error, or a typed App FileEdit).
+                        tool_response=dict({"success": True, "exit_code": 0}, **(
+                            {"mycelium_expected_sha256": expected_sha256} if expected_sha256 else {}), **(
+                            {"mycelium_bytes_unknown": True} if bytes_unknown else {}))),
+                        root, plugin_root, timeout=timeout, kill_group=True)
+                except Exception as exc:
+                    print(f"Mycelium Antigravity: edit observation for step {step_index}: "
+                          f"{one_line(exc, 300)}", file=sys.stderr)
 
             def edit_target(found, step_index):
                 """Whether one verified native edit earns activity credit in this root."""
@@ -809,6 +892,7 @@ def _dispatch(event, payload, plugin_root, host):
                     apply_hooks([ACTIVITY_HOOK],
                                 dict(data, tool_name="Write", tool_input={"file_path": found["path"]},
                                      tool_response={"success": True}), step_index)
+                    observe_edit(step_index, found["path"])
 
             def recover_app_edits(scan):
                 """One shared-tracker batch for this root's verified, not yet recorded native edits.
@@ -872,6 +956,46 @@ def _dispatch(event, payload, plugin_root, host):
                     turn["actions"][f"{step}:{ACTIVITY_HOOK}"] = "done"
                 return ("truncated" if capped else scan["status"]), scan.get("reason", ""), steps, rejected
 
+            def observe_recovered_edits(scan):
+                """Edit observations for verified edits that only Stop recovery credited.
+
+                The App can deliver an edit's PostToolUse while its step row is still
+                running, so the callback credits nothing and recovery credits it at Stop.
+                Its PreToolUse interval must still close with an edit observation: an
+                expired interval leaves every other write of the turn coverage-unproven.
+                The App's write_file and edit_file change only their one verified,
+                canonical Path, so the observation vouches for every other path. Its own
+                bytes are observed at Stop, when the file may hold a later call's bytes:
+                only a `write_file` whose file still holds exactly its Content is hashed
+                (the observer re-checks that digest); any other edit is recorded as a
+                write of the path with its bytes unknown. Only edits with recorded
+                activity (or that the tracker ignores, which the callback observes too)
+                qualify. Optional work: it runs only in the Stop's last root, so no later
+                root's required recovery waits on it, and only within the budget left
+                before finalization.
+                """
+                if root != roots[-1]:
+                    return
+                for found in scan["edits"]:
+                    step, path = found["step"], found["path"]
+                    if not edit_target(found, step) or f"{step}:io-observer" in turn["actions"]:
+                        continue
+                    if any(c in path for c in "\0\r\n"):
+                        continue
+                    credited = turn["actions"].get(f"{step}:{ACTIVITY_HOOK}") == "done"
+                    if not credited and not tracker_ignores(Path(path).relative_to(root).as_posix()):
+                        continue
+                    spare = app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
+                    if spare < APP_RECOVERY_OBSERVE_MIN_SECONDS:
+                        return  # the rest close as turn-ended, never as a guessed edit
+                    digest = found.get("content_sha256")
+                    proven = bool(digest) and file_sha256(path) == digest
+                    spare = app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
+                    if spare < APP_RECOVERY_OBSERVE_MIN_SECONDS:
+                        return  # hashing used the allowance; finalization keeps its reserve
+                    observe_edit(step, path, timeout=min(APP_RECOVERY_ACTION_SECONDS, spare),
+                                 expected_sha256=digest if proven else None, bytes_unknown=not proven)
+
             def complete_commands():
                 for step_key, command in list(turn["pending_commands"].items()):
                     step_index = int(step_key)
@@ -886,6 +1010,7 @@ def _dispatch(event, payload, plugin_root, host):
                     if not isinstance(exit_code, int) or isinstance(exit_code, bool):
                         exit_code = None
                     command_data = dict(data, cwd=command["cwd"], tool_name="Bash",
+                                        tool_use_id=observer_call_id(step_index),
                                         tool_input={"command": command["command"]},
                                         tool_response={"exit_code": exit_code})
                     hooks = ["mycelium-data-tracker.sh", "mycelium-post-action.sh"]
@@ -982,6 +1107,9 @@ def _dispatch(event, payload, plugin_root, host):
                     if relative.parts and relative.parts[0] not in {".agents", "_agents", ".agent", ".mycelium", ".living"}:
                         data.update(tool_name="Write", tool_input={"file_path": args["TargetFile"]}, tool_response={"success": True})
                         hooks = ["mycelium-activity-tracker.sh"]
+                        apply_hooks(hooks, data, boundary)
+                        hooks = []
+                        observe_edit(boundary, args["TargetFile"])
                 elif name == "view_file" and not payload.get("error"):
                     data.update(tool_name="Read", tool_input={"file_path": args["AbsolutePath"]}, tool_response={})
                     hooks = ["mycelium-read-tracker.sh"]
@@ -999,6 +1127,7 @@ def _dispatch(event, payload, plugin_root, host):
                     # for this explicit-user turn only, before shared finalization.
                     scan = app_recovery(user_step, boundary)
                     status, reason, credited, extra = recover_app_edits(scan)
+                    observe_recovered_edits(scan)
                     rejected = dict(list({**scan["rejected"], **extra}.items())[:64])
                     turn["edit_recovery"] = {"status": status, "after": user_step, "through": boundary,
                                              "credited": credited, "rejected": rejected, "reason": reason}
@@ -1046,6 +1175,13 @@ def _dispatch(event, payload, plugin_root, host):
                 elif app_stop_deadline is not None and app_stop_deadline <= time.monotonic():
                     result = {"decision": "block", "reason": "No time remains to start Mycelium finalization. Active state was preserved for retry."}
                 else:
+                    if FINAL_PENDING not in turn.get("unresolved_commands", {}).values():
+                        # Nothing of this work cycle is still running: close the observer
+                        # intervals of calls that got no Post (denied, failed, unrecorded), as
+                        # Claude's Stop does, so they stop marking later calls as overlapping. A
+                        # command still running at the final allowance keeps its interval open.
+                        observer_turn_end(root, session_id)
+                        turn["observer_ended_through"] = max(boundary, turn.get("observer_ended_through", -1))
                     number = turn.get("stop_attempt", {}).get("number", 0) + 1
                     turn["stop_attempt"] = {"status": "running", "number": number}
                     save()
@@ -1088,7 +1224,234 @@ def _dispatch(event, payload, plugin_root, host):
     return {}
 
 
+# ---- PreToolUse: observation only ---------------------------------------------------------------
+#
+# Antigravity requires a `decision` from every PreToolUse hook; `allow` delegates to the next
+# hook or the host's default policy. This handler prints exactly PRE_ALLOW on every path and
+# nothing else: it never grants, denies, asks, or rewrites a call. Its only effect is the I/O
+# observer's pre-snapshot (run_command) or journal interval (edit tools), keyed so the matching
+# PostToolUse closes the same call. The packaged wrapper (mycelium-antigravity-pre.sh) discards
+# this process's output and prints the allow itself, so even a crash here cannot change it.
+
+PRE_ALLOW = '{"decision": "allow"}\n'
+# Soft deadline for the whole handler, from its start; the wrapper's watchdog kills the process
+# at about 2 s for anything this deadline cannot interrupt.
+PRE_TOOL_SECONDS = 1.5
+PRE_RESERVE_SECONDS = 0.15  # left after the walk for writing the snapshot
+PRE_LOCK_SECONDS = 0.5  # journal lock wait; the observer's default (2 s) exceeds the budget
+# Fault injection for live verification only: a word in this project file (or the environment)
+# makes the handler fail on purpose, to show approvals are unchanged when observation fails.
+PRE_FAULT_FILE = ".mycelium/antigravity-pre-fault"
+PRE_FAULT_ENV = "MYCELIUM_ANTIGRAVITY_PRE_FAULT"
+PRE_FAULTS = {"crash", "slow", "hang", "exit"}
+
+
+def observer_call_id(step):
+    """The I/O observer's call id for one native tool step; Pre and Post derive it alike."""
+    return f"ag-step-{step}"
+
+
+def observer_state_dir(root):
+    """The shared state directory the base hooks use for ROOT (<root>/.mycelium, physical)."""
+    override = os.environ.get("MYCELIUM_STATE_DIR")
+    if override and Path(root, override).resolve() != (Path(root) / ".mycelium").resolve():
+        raise RuntimeError("MYCELIUM_STATE_DIR is set to another directory")
+    directory = ensure_safe_project_directory(root, ".mycelium", create=False)
+    if not directory.is_dir():
+        raise RuntimeError("No Mycelium state directory")
+    return Path(os.path.realpath(directory))
+
+
+def _pre_fault(word, roots=()):
+    """Apply one injected fault (live verification), after recording that it fired."""
+    if word not in PRE_FAULTS:
+        return
+    for root in roots:
+        try:
+            import io_observer
+            state_dir = observer_state_dir(root)
+            io_observer.append_line(state_dir / "io" / "antigravity-pre-faults.ndjson",
+                                    {"fault": word, "pid": os.getpid(), "wall_ns": time.time_ns()},
+                                    io_root=state_dir / "io")
+        except Exception:
+            pass
+    if word == "crash":
+        raise RuntimeError("injected PreToolUse observer crash")
+    if word == "exit":
+        os._exit(3)
+    if word == "hang":
+        import signal
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM, signal.SIGTERM})
+    time.sleep(60)
+
+
+def _file_fault(roots):
+    for root in roots:
+        path = Path(root) / PRE_FAULT_FILE
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 64:
+                continue
+            word = path.read_text(errors="replace").strip()
+        except OSError:
+            continue
+        if word in PRE_FAULTS:
+            return word
+    return None
+
+
+def pre_tool_use(payload, host=HOST, *, deadline=None):
+    """Open the observer's interval for one native call; return [(root, session, call)] observed.
+
+    Never decides anything about the call. It refuses (observes nothing) on the same grounds as
+    PostToolUse: host proof, the exact native conversation, an opted-in root, a supported tool
+    shape, and an active work cycle (a late event never starts one). Read-only on native state.
+    """
+    profile(host)
+    token = _ACTIVE_HOST.set(host)
+    try:
+        return _pre_tool_use(payload, host, time.monotonic() + PRE_TOOL_SECONDS if deadline is None
+                             else deadline)
+    finally:
+        _ACTIVE_HOST.reset(token)
+
+
+def _pre_tool_use(payload, host, deadline):
+    import io_observer
+
+    if not isinstance(payload, dict):
+        return []
+    app = host == APP_HOST
+    call = payload.get("toolCall")
+    name = call.get("name") if isinstance(call, dict) else None
+    args = call.get("args") if isinstance(call, dict) else None
+    step = payload.get("stepIdx")
+    if name not in (APP_EDITS if app else EDITS) | {"run_command"} or not isinstance(args, dict) \
+            or not integer(step):
+        return []
+    cid = identity(payload)
+    transcript = native_transcript(payload, cid, host)
+    roots = roots_for(payload)
+    if not roots:
+        return []
+    fault = _file_fault(roots)
+    if fault:
+        _pre_fault(fault, roots)
+    command = None
+    # Roots where the call may write but will never be observed (no snapshot, and no Post that
+    # closes it): it is journaled there as a background call, so every call that runs beside
+    # it is marked overlapping instead of being credited with its writes. Turn end leaves a
+    # background interval open; only the journal's age bound closes it.
+    unobserved = []
+    if name == "run_command":
+        command = args.get("CommandLine")
+        if not isinstance(command, str) or not command or len(command) > 65536:
+            targets, unobserved = [], list(roots)
+        elif app:
+            # Where it ran is proven only afterwards, by the App's own step record. A daemon,
+            # sandbox bypass or unrecognised argument is never settled and may outlive the call.
+            targets, unobserved = ((list(roots), []) if app_store.command_args_supported(args)
+                                   else ([], list(roots)))
+        else:
+            root = contained_root(args.get("Cwd"), roots)
+            # A command whose Cwd is outside every opted-in root is never credited, but it can
+            # still `cd` into one and write there.
+            targets, unobserved = (([root], []) if root and Path(args["Cwd"]).is_dir()
+                                   else ([], list(roots)))
+    else:
+        raw = args.get("Path" if app else "TargetFile")
+        root = contained_root(raw, roots)
+        if root is None:
+            return []
+        relative = Path(raw).relative_to(root)
+        if not relative.parts or relative.parts[0] in PROTECTED:
+            return []
+        targets = [root]
+    records = transcript_records(transcript)
+    observed_turns = [r["step_index"] for r in records
+                      if r.get("source") == "USER_EXPLICIT" and r.get("type") == "USER_INPUT"]
+    call_id = observer_call_id(step)
+    observed = []
+    saved_lock_wait = io_observer.LOCK_WAIT_SECONDS
+    io_observer.LOCK_WAIT_SECONDS = min(saved_lock_wait, PRE_LOCK_SECONDS)
+    try:
+        for root in targets + unobserved:
+            try:
+                directory = preflight(root, cid)
+                state = read_state(directory / "native-state.json", cid)
+                candidates = [n for n in observed_turns + [int(k) for k in state["turns"]] if n <= step]
+                if not candidates:
+                    continue
+                user_step = max(candidates)
+                turn = state["turns"].get(str(user_step))
+                if turn is None:
+                    continue  # no work cycle was ever started: nothing to key the call to
+                session = f"{cid}-turn-{user_step}"
+                state_dir = observer_state_dir(root)
+                if root in unobserved or turn["status"] != "active":
+                    # Late or unowned (no Post will close it), or never observable: journal
+                    # it without a snapshot, as background, so it cannot hide behind others.
+                    if name == "run_command":
+                        try:
+                            io_observer.pre(state_dir, host=host, session=session, call_id=call_id,
+                                            tool="Bash", repo_root=root, snapshot=False,
+                                            background=True, detached=True)
+                        except io_observer.LockTimeout:
+                            pass  # its open marker still marks later calls as overlapping
+                    continue
+                detached = command is not None and io_observer.starts_background_job(command)
+                seconds = max(0.01, min(io_observer.DEFAULT_WALK_SECONDS,
+                                        deadline - time.monotonic() - PRE_RESERVE_SECONDS))
+                try:
+                    io_observer.pre(state_dir, host=host, session=session, call_id=call_id,
+                                    tool="Bash" if command is not None else "Write",
+                                    repo_root=root, snapshot=command is not None,
+                                    background=detached, detached=detached, walk_seconds=seconds)
+                except io_observer.LockTimeout:
+                    pass  # the snapshot (if any) is still taken and records the journal gap
+                observed.append((root, session, call_id))
+            except Exception as error:
+                print(f"Mycelium Antigravity PreToolUse ({root}): {one_line(error, 300)}", file=sys.stderr)
+    finally:
+        io_observer.LOCK_WAIT_SECONDS = saved_lock_wait
+    return observed
+
+
+def pre_tool_main(args, host):
+    """Entry point for PreToolUse: always PRE_ALLOW on stdout and exit 0."""
+    import signal
+
+    def expire(_signum, _frame):
+        os.write(1, PRE_ALLOW.encode())
+        os._exit(0)
+
+    try:
+        signal.signal(signal.SIGALRM, expire)
+        signal.setitimer(signal.ITIMER_REAL, PRE_TOOL_SECONDS)
+    except (ValueError, OSError, AttributeError):
+        pass
+    try:
+        _pre_fault(os.environ.get(PRE_FAULT_ENV, ""))
+        if len(args) == 1 and args[0] == "PreToolUse":
+            raw = sys.stdin.read(1024 * 1024 + 1)
+            if len(raw) <= 1024 * 1024 and raw.strip():
+                pre_tool_use(json.loads(raw), host)
+    except Exception as error:
+        print(f"Mycelium Antigravity PreToolUse: {one_line(error, 300)}", file=sys.stderr)
+    finally:
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        except (ValueError, OSError, AttributeError):
+            pass
+    os.write(1, PRE_ALLOW.encode())
+    return 0
+
+
 def main():
+    if "PreToolUse" in sys.argv[1:]:
+        args, host = sys.argv[1:], HOST
+        if len(args) == 3 and args[0] == "--host" and args[1] in PROFILES:
+            host, args = args[1], args[2:]
+        return pre_tool_main(args, host)
     try:
         if len(sys.argv) in (4, 5) and sys.argv[1] == "--record-accepted-stop":
             # Existing IDE callers omit the host; the shared Stop hook names it.

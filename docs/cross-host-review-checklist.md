@@ -52,9 +52,16 @@ hook, filesystem, or lifecycle boundaries.
       registrations: SessionStart; the I/O observer on PreToolUse for Bash
       and for `apply_patch`; two Bash PostToolUse handlers; the activity
       tracker and the I/O observer on `apply_patch` PostToolUse; and Stop.
-- [ ] Every PreToolUse handler is observation only: it prints nothing,
-      emits no permission decision, exits 0 on every path, and writes only
-      under `.mycelium/io/` after the shared-state containment check.
+- [ ] Every PreToolUse handler is observation only: it exits 0 on every
+      path and writes only under `.mycelium/io/` after the shared-state
+      containment check. On Claude and Codex it prints nothing and emits no
+      permission decision. On Antigravity, which requires a decision, it
+      prints exactly `{"decision": "allow"}` (defer to the host's policy) on
+      every path, including a crash, a hang past its bound and a malformed
+      payload, and never `auto_approve`, `deny`, `ask`, `overwrite` or
+      `permissionOverrides`; the wrapper, not the Python helper, prints it.
+      A change to this handler needs a live App check that prompts, "Always
+      Allow" grants and denials are unchanged.
 - [ ] A Bash call's observation runs before session gating, so a lock
       timeout, a missing transaction, or a foreign owner never costs it; an
       observation that cannot be made says `unavailable` with a reason and
@@ -594,6 +601,9 @@ exercise them.
 | An owned Antigravity hook loses its executable bit | Doctor and ordinary install fail; explicit permission repair retains the old package and restores a working hook. |
 | Only the Antigravity package generator, guidance or source permission mode changes | The development source digest changes; a different selected Python path alone does not change source identity. |
 | An async native command overwrites an existing output after its first hook | No output snapshot is finalized while RUNNING; matching terminal evidence produces one action with the final observed hash, while unavailable completion remains unresolved. |
+| The Antigravity PreToolUse helper crashes, prints another decision, exits silently, cannot start, or hangs with SIGALRM blocked | The packaged wrapper still prints exactly `{"decision": "allow"}` and exits 0 within about 2 s; a live App run shows prompts, "Always Allow" grants and denials unchanged. |
+| An Antigravity PreToolUse arrives for a foreign native root, an unsupported tool or a protected edit path | Nothing under `.mycelium/io` is written; the answer is still `allow`. |
+| An Antigravity command the Pre cannot observe still runs (App `IsDaemon`/`BypassSandbox`/unknown argument, IDE `Cwd` outside the project, or an inactive work cycle) and writes while a later foreground call runs | It is journaled without a snapshot as a background call, which turn end leaves open; the later call is marked overlapping, and the index never gives its write `current-in-record` with sole attribution. |
 | A Stop result is lost after the real finalizer completes | The adapter reconciles an identity-bound acceptance receipt without dispatching again; a missing or mismatched receipt retains an uncertain outcome. |
 | A native host's SQLite store is read while its writer is live, and after it exits | Every App file (database, `-wal`, `-shm`) is byte- and mtime-identical afterwards and no file is created: reads go through a private snapshot, because a `mode=ro` WAL reader still writes `-shm`. |
 | A Claude or Codex edit mentions an adapter-only field name, or reaches the Antigravity package through the shared plugin-root pointer | Host-specific modes are chosen from adapter-set environment, never payload text or a package marker that overrides an explicit host. |
