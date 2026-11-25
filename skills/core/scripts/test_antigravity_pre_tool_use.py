@@ -654,7 +654,7 @@ def test_stop_recovery_observes_unprovable_bytes_as_unknown_and_still_proves_oth
     assert "expire" not in events, events
     # 2. The earlier command's write elsewhere keeps its positive proof.
     write = index_status(repo, "out.csv")
-    assert (write["attribution"], write["record"]["status"]) == ("sole", "current-in-record"), write
+    assert (write["attribution"], write["record"]["status"]) == ("sole", "current-in-record"), (write["record"], edit.get("single_path"))
     # 3. The edited path itself is never current-in-record.
     answer = li.query_path(li.load(repo, write=False), "MANIFEST.md")
     statuses = [w["record"]["status"] for w in answer["writes"]]
@@ -773,3 +773,281 @@ def test_slow_digest_check_leaves_finalization_its_reserve(app_project, monkeypa
     monkeypatch.setattr(ag, "file_sha256", slow)
     observations, _ = _recovered_write(app_project, lambda t: t.write_text("synthetic content"))
     assert observations == []
+
+
+# ---- PR #173 follow-ups ------------------------------------------------------------------------
+
+class _Killed(BaseException):
+    """The adapter killed mid-Stop: escapes every `except Exception`."""
+
+
+def _stop(payload):
+    return dict(payload, fullyIdle=True, terminationReason="NO_TOOL_CALL", error="", executionNum=0)
+
+
+def _native_state(repo):
+    return json.loads(next((repo / ".mycelium" / ag.APP_HOST).glob("*/native-state.json")).read_text())
+
+
+def _running_edit(app_project, *, pre=True, name="write_file", path="notes.txt"):
+    """A verified App edit (step 7) whose callback arrives while its row is still
+    running, so only Stop recovery credits it."""
+    from test_antigravity_app_native import edit_args, edit_payload, replace_args
+    from antigravity_app_store import EDIT_EDIT
+    home, repo, payload, db, session = app_project
+    target = repo / path
+    args = replace_args(str(target)) if name == "edit_file" else edit_args(str(target))
+    row = dict(name=name, args=args, **({"kind": EDIT_EDIT} if name == "edit_file" else {}))
+    call = {"stepIdx": 7, "toolCall": {"name": name, "args": args}}
+    if pre:
+        run_wrapper(json.dumps(dict(payload, **call)), host=ag.APP_HOST, env={"HOME": str(home)})
+    db.put(7, edit_payload(str(target), step=7, **row), status=2)
+    ag.dispatch("PostToolUse", dict(payload, error="", **call), host=ag.APP_HOST)
+    target.write_text("synthetic content" if name == "write_file" else "new text\n")
+    db.put(7, edit_payload(str(target), step=7, **row))
+    append(Path(payload["transcriptPath"]), step_index=7, source="MODEL", type="GENERIC", status="DONE")
+    return target
+
+
+def test_recovery_acknowledgement_is_durable_before_the_optional_observation(app_project, monkeypatch):
+    """Follow-up 1: the batch's `done` must reach disk before the optional digest
+    check; a kill during that check must not leave the steps `running`."""
+    home, repo, payload, db, session = app_project
+    _running_edit(app_project)
+
+    def killed(*_a, **_k):
+        raise _Killed()
+    monkeypatch.setattr(ag, "file_sha256", killed)
+    with pytest.raises(_Killed):
+        ag.dispatch("Stop", _stop(payload), host=ag.APP_HOST)
+    assert _native_state(repo)["turns"]["0"]["actions"].get(f"7:{ag.ACTIVITY_HOOK}") == "done"
+
+
+def test_digest_probe_bounds_the_bytes_it_reads(tmp_path, monkeypatch):
+    """Follow-up 2: a file that keeps growing past its stat size is never read past the limit."""
+    import signal
+    target = tmp_path / "growing"
+    target.write_bytes(b"x" * 10)
+    real_read, reads = os.read, []
+
+    def endless(fd, size):
+        reads.append(size)
+        return b"y" * min(size, 1 << 16)  # the file keeps growing
+    previous = signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError("unbounded read")))
+    signal.setitimer(signal.ITIMER_REAL, 10)
+    try:
+        monkeypatch.setattr(ag.os, "read", endless)
+        result = ag.file_sha256(str(target), limit=1 << 20)
+    finally:
+        monkeypatch.setattr(ag.os, "read", real_read)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    assert result is None
+    assert sum(min(s, 1 << 16) for s in reads) <= (1 << 20) + (1 << 16)
+
+
+def test_digest_probe_stops_at_its_deadline(tmp_path, monkeypatch):
+    """Follow-up 2: a slow read gives up at the deadline instead of eating the reserve."""
+    target = tmp_path / "slow"
+    target.write_bytes(b"x" * (4 << 20))
+    clock = [100.0]
+    monkeypatch.setattr(ag.time, "monotonic", lambda: clock[0])
+    real_read = os.read
+
+    def slow(fd, size):
+        clock[0] += 1.0
+        return real_read(fd, min(size, 1 << 16))
+    monkeypatch.setattr(ag.os, "read", slow)
+    try:
+        assert ag.file_sha256(str(target), deadline=103.0) is None
+        assert clock[0] <= 105.0
+    finally:
+        monkeypatch.setattr(ag.os, "read", real_read)
+    assert ag.file_sha256(str(target), deadline=float("inf")) is not None
+
+
+def test_stop_recovery_digest_probe_is_given_a_deadline_inside_the_budget(app_project, monkeypatch):
+    home, repo, payload, db, session = app_project
+    _running_edit(app_project)
+    seen = []
+    original = ag.file_sha256
+
+    def spy(path, **kwargs):
+        seen.append((kwargs.get("deadline"), ag.time.monotonic()))
+        return original(path, **kwargs)
+    monkeypatch.setattr(ag, "file_sha256", spy)
+    ag.dispatch("Stop", _stop(payload), host=ag.APP_HOST)
+    (deadline, now), = seen
+    assert deadline is not None
+    # Never past the point where finalization's reserve and one observation begin.
+    assert deadline - now <= ag.APP_STOP_BUDGET_SECONDS - ag.APP_FINALIZE_RESERVE_SECONDS \
+        - ag.APP_RECOVERY_OBSERVE_MIN_SECONDS
+
+
+def test_failed_turn_end_does_not_suppress_a_later_edit_observation(app_project, monkeypatch):
+    """Follow-up 3: Stop 1 credits the edit, has no time to observe it, and its
+    turn end fails on the journal lock, so the interval stays open. Stop 2 must
+    still close it with the edit observation."""
+    home, repo, payload, db, session = app_project
+    _running_edit(app_project)
+
+    def lock_timeout(*_a, **_k):
+        raise io.LockTimeout("lock busy")
+    with monkeypatch.context() as patch:
+        patch.setattr(ag, "APP_RECOVERY_OBSERVE_MIN_SECONDS", ag.APP_STOP_BUDGET_SECONDS)
+        patch.setattr(io, "turn_end", lock_timeout)
+        ag.dispatch("Stop", _stop(payload), host=ag.APP_HOST)
+    events = [r["ev"] for r in io._read_lines(repo / ".mycelium/io/calls.ndjson")
+              if r.get("call") == ag.observer_call_id(7)]
+    assert "expire" not in events, events
+    assert "observer_ended_through" not in _native_state(repo)["turns"]["0"]
+    ag.dispatch("Stop", dict(_stop(payload), executionNum=1), host=ag.APP_HOST)
+    observations = io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session))
+    assert [o["observation_id"] for o in observations] == [f"{ag.APP_HOST}:{ag.observer_call_id(7)}"]
+
+
+def test_confirmed_turn_end_still_suppresses_a_later_edit_observation(app_project, monkeypatch):
+    home, repo, payload, db, session = app_project
+    _running_edit(app_project)
+    with monkeypatch.context() as patch:
+        patch.setattr(ag, "APP_RECOVERY_OBSERVE_MIN_SECONDS", ag.APP_STOP_BUDGET_SECONDS)
+        ag.dispatch("Stop", _stop(payload), host=ag.APP_HOST)
+    assert _native_state(repo)["turns"]["0"]["observer_ended_through"] >= 7
+
+
+def _command_write(app_project):
+    from test_antigravity_app_native import command_payload
+    home, repo, payload, db, session = app_project
+    command = app_command_call(5)
+    run_wrapper(json.dumps(dict(payload, **command)), host=ag.APP_HOST, env={"HOME": str(home)})
+    run_analysis(repo)
+    db.put(5, command_payload(str(repo), step=5, command="python3 analysis.py"))
+    ag.dispatch("PostToolUse", dict(payload, error="", **command), host=ag.APP_HOST)
+
+
+@pytest.mark.parametrize("name", ["write_file", "edit_file"])
+def test_edit_with_a_missed_pre_still_vouches_for_other_paths(app_project, name):
+    """Follow-up 4: the edit's PreToolUse never ran, so its interval's start is
+    unknown. A verified single-path App edit still accounts for every other path."""
+    home, repo, payload, db, session = app_project
+    _command_write(app_project)
+    if name == "edit_file":
+        (repo / "notes.txt").write_text("old text\n")
+    _running_edit(app_project, pre=False, name=name)
+    ag.dispatch("Stop", _stop(payload), host=ag.APP_HOST)
+    observations = io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session))
+    (edit,) = [o for o in observations if o["observation_id"] == f"{ag.APP_HOST}:{ag.observer_call_id(7)}"]
+    assert edit["journal"]["pre_seq"] == 0, edit  # the start really is unknown
+    write = index_status(repo, "out.csv")
+    assert (write["attribution"], write["record"]["status"]) == ("sole", "current-in-record"), (write["record"], edit.get("single_path"))
+
+
+@pytest.mark.parametrize("spelling", ["out.csv", "OUT.CSV"])
+def test_edit_with_a_missed_pre_never_vouches_for_its_own_path(app_project, spelling):
+    """Follow-up 4, negative: the same edit, at the earlier write's own path (or a
+    case alias of it), proves nothing about that path."""
+    home, repo, payload, db, session = app_project
+    _command_write(app_project)
+    if spelling != "out.csv" and not io._case_insensitive(os.path.realpath(repo)):
+        pytest.skip("case alias needs a case-insensitive volume")
+    _running_edit(app_project, pre=False, path=spelling)
+    ag.dispatch("Stop", _stop(payload), host=ag.APP_HOST)
+    answer = li.query_path(li.load(repo, write=False), "out.csv")
+    statuses = [w["record"]["status"] for w in answer["writes"]]
+    assert statuses and "current-in-record" not in statuses, answer
+
+
+def test_unknown_bytes_edit_of_a_vanished_case_alias_is_uncertain_under_every_spelling(tmp_path):
+    """Follow-up 5: on a case-insensitive volume, an App edit named `OUT.CSV` whose
+    file (`out.csv`) is gone by Stop records only `OUT.CSV`. Every spelling of the
+    name must become uncertain, as for a deletion."""
+    root = tmp_path / "Repo"
+    root.mkdir()
+    real = os.path.realpath(root)
+    if not io._case_insensitive(real):
+        pytest.skip("needs a case-insensitive volume")
+    for bytes_unknown in (True, False):
+        written, deleted, refused = io._edit_changes(
+            root, [(str(root / "OUT.CSV"), "written")], bytes_unknown=bytes_unknown)
+        assert [w["path"] for w in written] == ["OUT.CSV"]
+        assert any(r.get("casefold") and r.get("path") == "OUT.CSV" for r in refused), refused
+        record = {"status": "edit", "outcome": "success",
+                  "changes": {"edited": written, "deleted": deleted, "refused": refused}}
+        assert li.Index._observation_gap_at(None, record, "out.csv", {}) == "path-uncertain"
+
+
+@pytest.mark.parametrize("target,path,vouches", [
+    ("notes.txt", "out.csv", True),
+    ("sub/notes.txt", "sub/out.csv", True),
+    ("out.csv", "out.csv", False),          # never its own path
+    ("OUT.CSV", "out.csv", False),          # nor a case alias of it
+    ("Café.txt", "Café.txt", False),  # nor a Unicode-normalization alias
+    ("sub", "sub/out.csv", False),          # nor anything beneath it
+    ("sub/out.csv", "sub", False),          # nor an ancestor of it
+    ("/abs/out.csv", "x.csv", False),
+    ("../x.csv", "y.csv", False),
+])
+def test_single_path_edit_vouches_only_for_provably_disjoint_paths(target, path, vouches):
+    record = {"single_path": True, "status": "edit", "outcome": "success",
+              "changes": {"edited": [{"path": target, "after": {"sha256": None}}], "deleted": [], "refused": []}}
+    assert li.Index._single_path_elsewhere(None, record, path) is vouches
+
+
+@pytest.mark.parametrize("change", [
+    {"single_path": None}, {"status": "no-known-overlap"}, {"outcome": "unknown"},
+    {"changes": {"edited": [{"path": "a"}, {"path": "b"}], "deleted": [], "refused": []}},
+    {"changes": {"edited": [{"path": "a"}], "deleted": [{"path": "c"}], "refused": []}},
+    {"changes": {"edited": [{"path": "a"}], "deleted": [], "refused": [{"path": "a", "reason": "x"}]}},
+])
+def test_only_a_clean_single_path_edit_record_vouches(change):
+    record = dict({"single_path": True, "status": "edit", "outcome": "success",
+                   "changes": {"edited": [{"path": "a"}], "deleted": [], "refused": []}}, **change)
+    assert li.Index._single_path_elsewhere(None, record, "out.csv") is False
+
+
+def test_single_path_mark_is_honoured_only_on_the_antigravity_app_host(tmp_path):
+    """Only the App adapter may assert a single-path edit; a native response
+    carrying the key changes nothing."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "f.txt").write_text("real bytes")
+    (repo / ".mycelium/io").mkdir(parents=True)
+    marks = {}
+    for host in ("claude", "codex", "antigravity", "antigravity-app"):
+        payload = {"hook_event_name": "PostToolUse", "session_id": f"s-{host}", "tool_name": "Write",
+                   "tool_use_id": "t1", "cwd": str(repo), "tool_input": {"file_path": str(repo / "f.txt")},
+                   "tool_response": {"success": True, "exit_code": 0, "mycelium_single_path_edit": True}}
+        io.hook(repo / ".mycelium", repo, host, json.dumps(dict(payload, hook_event_name="PreToolUse")))
+        io.hook(repo / ".mycelium", repo, host, json.dumps(payload))
+        (obs,) = io._read_lines(io.observations_path(repo / ".mycelium", host, f"s-{host}"))
+        marks[host] = obs.get("single_path")
+    assert marks == {"claude": None, "codex": None, "antigravity": None, "antigravity-app": True}, marks
+
+
+def test_ide_edits_are_not_marked_single_path(project):
+    """The IDE adapter's edit observations keep the ordinary overlap rule."""
+    home, repo = project
+    transcript, payload = native(home, repo)
+    ag.dispatch("PreInvocation", payload)
+    target = repo / "notes.txt"
+    call = {"stepIdx": 1, "toolCall": {"name": "write_to_file", "args": {"TargetFile": str(target)}}}
+    run_wrapper(json.dumps(dict(payload, **call)), env={"HOME": str(home)})
+    target.write_text("x")
+    append(transcript, step_index=1, source="MODEL", type="CODE_ACTION", status="DONE")
+    ag.dispatch("PostToolUse", dict(payload, error="", **call))
+    (obs,) = io._read_lines(io.observations_path(repo / ".mycelium", ag.HOST, f"{CID}-turn-0"))
+    assert obs["status"] == "edit" and "single_path" not in obs, obs
+
+
+def test_direct_app_edit_callback_is_marked_single_path(app_project):
+    from test_antigravity_app_native import edit_args, edit_payload
+    home, repo, payload, db, session = app_project
+    target = repo / "notes.txt"
+    call = {"stepIdx": 7, "toolCall": {"name": "write_file", "args": edit_args(str(target))}}
+    run_wrapper(json.dumps(dict(payload, **call)), host=ag.APP_HOST, env={"HOME": str(home)})
+    target.write_text("synthetic content")
+    db.put(7, edit_payload(str(target), step=7))
+    ag.dispatch("PostToolUse", dict(payload, error="", **call), host=ag.APP_HOST)
+    (obs,) = io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session))
+    assert obs.get("single_path") is True, obs

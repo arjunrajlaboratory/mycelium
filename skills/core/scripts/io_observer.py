@@ -1588,6 +1588,7 @@ def post(
     task_id: str | None = None,
     expected_sha256: str | None = None,
     bytes_unknown: bool = False,
+    single_path: bool = False,
 ) -> dict[str, Any] | None:
     """Close the call's interval and, for Bash, build its observation.
 
@@ -1639,7 +1640,7 @@ def post(
                              tool=tool, agent=agent, repo_root=repo_root,
                              edit_changes=edit_changes, intervals=intervals,
                              journal_meta=journal_meta, journal_error=journal_error,
-                             outcome=outcome,
+                             outcome=outcome, single_path=single_path,
                              unjournaled=filter_unjournaled(markers, intervals))
     if repo_root is None:
         return None
@@ -2016,7 +2017,8 @@ def hook(state_dir: Path, repo_root: Path, host: str, raw: str) -> int:
              repo_root=repo_root if edited is not None else None, edited=edited,
              outcome=edit_result,
              expected_sha256=expected if isinstance(expected, str) and _SHA256_RX.fullmatch(expected) else None,
-             bytes_unknown=adapter.get(BYTES_UNKNOWN_KEY) is True)
+             bytes_unknown=adapter.get(BYTES_UNKNOWN_KEY) is True,
+             single_path=adapter.get(SINGLE_PATH_KEY) is True)
     return 0
 
 
@@ -2028,6 +2030,10 @@ EXPECTED_SHA256_KEY = "mycelium_expected_sha256"
 # to it (an App edit_file, or a write_file whose file no longer holds its
 # Content, observed at Stop): the target is recorded as written, never hashed.
 BYTES_UNKNOWN_KEY = "mycelium_bytes_unknown"
+# Set by the same adapter for a verified App write_file or edit_file: the tool
+# changes only its one named, canonical Path. Such an edit accounts for every
+# other path even when its interval's start is unknown (its Pre never ran).
+SINGLE_PATH_KEY = "mycelium_single_path_edit"
 _SHA256_RX = re.compile(r"[0-9a-f]{64}")
 
 
@@ -2284,10 +2290,15 @@ def _edit_changes(
                     refused.append({"path": rel, "reason": "deleted-spelling-unknown",
                                     "casefold": True})
             continue
+        path = Path(root_real) / rel
+        if not os.path.lexists(path) and _case_insensitive(root_real):
+            # The target is gone, so its listed spelling (the one its other
+            # writes were recorded under) is unknown: as for a deletion, every
+            # spelling of the name becomes uncertain.
+            refused.append({"path": rel, "reason": "written-spelling-unknown", "casefold": True})
         if bytes_unknown:
             written.append({"path": rel, "after": {"sha256": None, "hash_status": "unavailable"}})
             continue
-        path = Path(root_real) / rel
         try:
             ident = identity_of(os.lstat(path))
         except OSError:
@@ -2453,10 +2464,16 @@ def _publish_edit(
     journal_error: str | None,
     outcome: str = "success",
     unjournaled: list[dict[str, Any]] | None = None,
+    single_path: bool = False,
 ) -> dict[str, Any]:
     """Record the files an edit tool wrote, by path, with their hashes after
     the edit. No snapshot is involved: the tool names its own targets, so
-    an edit is a write of known paths, not a whole-repository gap."""
+    an edit is a write of known paths, not a whole-repository gap.
+
+    With ``single_path`` (an adapter's assertion that the tool can change only
+    the one path it names), a successful edit with exactly one written target
+    and nothing deleted or refused is marked `single_path`: the index may then
+    let it account for every other path whatever its interval."""
     written, deleted, refused = edit_changes
     own_key = interval_key(host, session, call_id)
     own = intervals.get(own_key)
@@ -2493,6 +2510,8 @@ def _publish_edit(
         ),
         "repo_root": os.path.realpath(repo_root),
     }
+    if single_path and outcome == "success" and len(written) == 1 and not deleted and not refused:
+        observation["single_path"] = True
     with contextlib.suppress(OSError):
         append_line(observations_path(state_dir, host, session), observation,
                     io_root=state_dir / "io")

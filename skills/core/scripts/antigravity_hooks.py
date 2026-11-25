@@ -138,8 +138,13 @@ APP_EDITS = set(app_store.EDIT_TOOLS)
 PROTECTED = {".agents", "_agents", ".agent", ".mycelium", ".living"}
 
 
-def file_sha256(path, limit=app_store.MAX_SCAN_BYTES):
-    """SHA-256 of a regular file read without following a final link, or None."""
+def file_sha256(path, limit=app_store.MAX_SCAN_BYTES, deadline=None):
+    """SHA-256 of a regular file read without following a final link, or None.
+
+    Bounded twice: never more than ``limit`` bytes are read, even from a file that
+    grows after its size was checked, and the read gives up (None) once
+    ``time.monotonic()`` passes ``deadline``.
+    """
     try:
         # Nonblocking, so a FIFO swapped in for the file cannot hold Stop on open.
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -149,10 +154,17 @@ def file_sha256(path, limit=app_store.MAX_SCAN_BYTES):
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
             return None
-        digest = hashlib.sha256()
-        while chunk := os.read(descriptor, 1 << 20):
+        digest, total = hashlib.sha256(), 0
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+            chunk = os.read(descriptor, min(1 << 20, limit + 1 - total))
+            if not chunk:
+                return digest.hexdigest()
+            total += len(chunk)
+            if total > limit:
+                return None  # grew past the bound after the size check
             digest.update(chunk)
-        return digest.hexdigest()
     except OSError:
         return None
     finally:
@@ -597,15 +609,26 @@ def target_root(payload, roots):
 
 
 def observer_turn_end(root, session_id):
-    """Close this work cycle's observer intervals that got no Post; best effort, never raises."""
+    """Close this work cycle's observer intervals that got no Post; best effort, never raises.
+
+    Returns True only when closure is confirmed: the observer's turn end completed, or
+    there is no observer state, so no interval is open. False (a lock timeout, an
+    unsafe directory, any error) means intervals may still be open.
+    """
     try:
         import io_observer
         state_dir = observer_state_dir(root)
         io_dir = state_dir / "io"
-        if io_dir.is_dir() and not io_dir.is_symlink():
+        if io_dir.is_symlink():
+            return False
+        if io_dir.is_dir():
             io_observer.turn_end(state_dir, host=active_host(), session=session_id)
+        elif os.path.lexists(io_dir):
+            return False
+        return True
     except Exception as exc:
         print(f"Mycelium Antigravity: observer turn end: {one_line(exc, 300)}", file=sys.stderr)
+        return False
 
 
 def dispatch(event, payload, plugin_root=PLUGIN, host=HOST):
@@ -849,7 +872,8 @@ def _dispatch(event, payload, plugin_root, host):
                         pending.pop(step_key, None)
                         save()
 
-            def observe_edit(step_index, path, timeout=12, expected_sha256=None, bytes_unknown=False):
+            def observe_edit(step_index, path, timeout=12, expected_sha256=None, bytes_unknown=False,
+                             single_path=False):
                 """Close a successful edit's observer interval (opened by PreToolUse) with its
                 edit observation. At most once per step, and never a lifecycle failure: an
                 observation that cannot be made leaves the interval open until turn end."""
@@ -871,7 +895,9 @@ def _dispatch(event, payload, plugin_root, host):
                         # proved (a DONE step without error, or a typed App FileEdit).
                         tool_response=dict({"success": True, "exit_code": 0}, **(
                             {"mycelium_expected_sha256": expected_sha256} if expected_sha256 else {}), **(
-                            {"mycelium_bytes_unknown": True} if bytes_unknown else {}))),
+                            {"mycelium_bytes_unknown": True} if bytes_unknown else {}), **(
+                            # A verified App write_file/edit_file changes only its one Path.
+                            {"mycelium_single_path_edit": True} if single_path else {}))),
                         root, plugin_root, timeout=timeout, kill_group=True)
                 except Exception as exc:
                     print(f"Mycelium Antigravity: edit observation for step {step_index}: "
@@ -892,7 +918,7 @@ def _dispatch(event, payload, plugin_root, host):
                     apply_hooks([ACTIVITY_HOOK],
                                 dict(data, tool_name="Write", tool_input={"file_path": found["path"]},
                                      tool_response={"success": True}), step_index)
-                    observe_edit(step_index, found["path"])
+                    observe_edit(step_index, found["path"], single_path=True)
 
             def recover_app_edits(scan):
                 """One shared-tracker batch for this root's verified, not yet recorded native edits.
@@ -954,6 +980,9 @@ def _dispatch(event, payload, plugin_root, host):
                     return scan["status"], scan.get("reason", ""), [], rejected
                 for step in steps:
                     turn["actions"][f"{step}:{ACTIVITY_HOOK}"] = "done"
+                # Durable before any optional work: a kill during the edit observations
+                # must not leave these acknowledged steps `running` (held as uncertain).
+                save()
                 return ("truncated" if capped else scan["status"]), scan.get("reason", ""), steps, rejected
 
             def observe_recovered_edits(scan):
@@ -989,12 +1018,16 @@ def _dispatch(event, payload, plugin_root, host):
                     if spare < APP_RECOVERY_OBSERVE_MIN_SECONDS:
                         return  # the rest close as turn-ended, never as a guessed edit
                     digest = found.get("content_sha256")
-                    proven = bool(digest) and file_sha256(path) == digest
+                    # The probe ends early enough to leave one observation its minimum.
+                    probe_deadline = (app_stop_deadline - APP_FINALIZE_RESERVE_SECONDS
+                                      - APP_RECOVERY_OBSERVE_MIN_SECONDS)
+                    proven = bool(digest) and file_sha256(path, deadline=probe_deadline) == digest
                     spare = app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
                     if spare < APP_RECOVERY_OBSERVE_MIN_SECONDS:
                         return  # hashing used the allowance; finalization keeps its reserve
                     observe_edit(step, path, timeout=min(APP_RECOVERY_ACTION_SECONDS, spare),
-                                 expected_sha256=digest if proven else None, bytes_unknown=not proven)
+                                 expected_sha256=digest if proven else None, bytes_unknown=not proven,
+                                 single_path=True)
 
             def complete_commands():
                 for step_key, command in list(turn["pending_commands"].items()):
@@ -1180,8 +1213,11 @@ def _dispatch(event, payload, plugin_root, host):
                         # intervals of calls that got no Post (denied, failed, unrecorded), as
                         # Claude's Stop does, so they stop marking later calls as overlapping. A
                         # command still running at the final allowance keeps its interval open.
-                        observer_turn_end(root, session_id)
-                        turn["observer_ended_through"] = max(boundary, turn.get("observer_ended_through", -1))
+                        if observer_turn_end(root, session_id):
+                            # Only a confirmed closure suppresses later edit observations: after
+                            # a failed one, those intervals are still open and a valid callback
+                            # must still close them.
+                            turn["observer_ended_through"] = max(boundary, turn.get("observer_ended_through", -1))
                     number = turn.get("stop_attempt", {}).get("number", 0) + 1
                     turn["stop_attempt"] = {"status": "running", "number": number}
                     save()

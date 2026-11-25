@@ -78,6 +78,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Antigravity App Stop-time edit observations: five follow-ups from the
+  PreToolUse observer.** None of these made a false lineage claim; each lost
+  proof or delayed finalization.
+  - Recovered edit activity is saved as acknowledged before the optional
+    edit observations run, so a Stop killed during them no longer leaves the
+    steps `running` and the turn held as uncertain.
+  - The Stop-time digest check reads at most its byte limit, even from a file
+    that grows after its size check, and gives up early enough to leave
+    finalization its reserve and one observation its minimum.
+  - A Stop advances `observer_ended_through` (which suppresses later edit
+    observations of that work cycle) only after the observer confirmed its
+    turn end. After a journal lock timeout, a later valid edit callback still
+    closes its open interval.
+  - A verified App `write_file` or `edit_file` changes only its one named
+    path, so its edit observation (marked `single_path` by the App adapter
+    only) now accounts for every provably disjoint path even when its
+    PreToolUse never ran and its interval's start is unknown. Unrelated
+    writes keep `current-in-record` instead of `coverage-unproven`. It never
+    vouches for its own path, a case or Unicode alias of it, an ancestor, or
+    a descendant. The lineage index cache is rebuilt once (builder version 5).
+  - On a case-insensitive volume, an edit whose target no longer exists at
+    observation time (for example an App edit named `OUT.CSV` whose
+    `out.csv` was deleted before Stop) makes every spelling of the name
+    uncertain, as a deletion already did.
+
 - **Static stdlib I/O reading resolves paths anchored on `__file__`.**
   Agent-written analysis scripts build every path from the script's own
   location (`Path(__file__).resolve().parents[2] / "data" / ...`). In the
