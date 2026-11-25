@@ -906,6 +906,7 @@ mycelium_reopen_post_tool_transaction() {
   local shared=""
   local marker=""
   local sid_json=""
+  local session_cwd=""
   local cwd_json=""
   sid=$(mycelium_json_get_optional_string 'session_id' input) || return 1
   mycelium_valid_session_id "$sid" || return 1
@@ -917,7 +918,17 @@ mycelium_reopen_post_tool_transaction() {
     fi
   fi
   sid_json=$(mycelium_json_dumps_stdin "$sid") || return 1
-  cwd_json=$(mycelium_json_dumps_stdin "$repo_root") || return 1
+  # SessionStart uses cwd for both the checkout and the notes folders. Preserve
+  # the reported folder only when it resolves to the checkout already chosen
+  # by the calling hook. A nested repository must not redirect the reopen.
+  session_cwd=$(mycelium_json_get_optional_string 'cwd' input) || session_cwd=""
+  if [[ "$session_cwd" != "$repo_root" ]]; then
+    if [[ -z "$session_cwd" || ! -d "$session_cwd" \
+      || "$(git -C "$session_cwd" rev-parse --show-toplevel 2>/dev/null)" != "$repo_root" ]]; then
+      session_cwd="$repo_root"
+    fi
+  fi
+  cwd_json=$(mycelium_json_dumps_stdin "$session_cwd") || return 1
   printf '{"session_id": %s, "cwd": %s, "hook_event_name": "SessionStart", "source": "reopen"}' \
     "$sid_json" "$cwd_json" \
     | "$MYCELIUM__HOOKS_DIR/mycelium-health.sh" >/dev/null 2>&1

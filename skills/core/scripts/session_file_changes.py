@@ -464,7 +464,10 @@ def living_changed(repo_root: Path, baseline: dict[str, Any] | None) -> bool | N
     nested = baseline.get("nested_living_files")
     if not roots or not isinstance(nested, dict):
         return False
-    return read_nested_living_state(repo_root, roots) != nested
+    # A disappeared or rejected folder has no current evidence of reflection.
+    # Require a new or changed artifact in a folder we can still inspect.
+    current = read_nested_living_state(repo_root, roots)
+    return any(fingerprint != nested.get(path) for path, fingerprint in current.items())
 
 
 def _normalize_repo_path(repo_root: Path, raw_path: str) -> str | None:

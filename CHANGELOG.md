@@ -376,8 +376,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root), plus the hook's own working directory and Claude Code's
   `CLAUDE_PROJECT_DIR`. Notes folders elsewhere in the tree, symlinked
   `.living` folders and folders inside a nested repository do not count. The
-  comparison uses the folder list stored in the baseline, never one re-derived
-  at check time. The root-only `living_files` mapping is unchanged and the
+  comparison uses the folder list stored in the baseline and requires a
+  new or changed subproject artifact. Removing the folder or replacing it
+  with a symlink leaves reflection outstanding. The root-only
+  `living_files` mapping is unchanged and the
   subfolder state is stored under new keys, so earlier runtimes read new
   baselines exactly as before and a rollback stays safe. Stop's own
   snapshots (the baseline it carries into the next turn, its refresh after a
@@ -386,7 +388,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that only writes notes in the session's subfolder is not taken for project
   work. So does the work cycle a moved session's Stop starts for changes left
   in the checkout it moved from (#149): notes recorded in the subfolder after
-  a move into a linked worktree still satisfy Stop.
+  a move into a linked worktree still satisfy Stop, including after an idle
+  move that reopened the session from the dispatcher.
 
 ## [0.9.7] - 2026-11-21
 

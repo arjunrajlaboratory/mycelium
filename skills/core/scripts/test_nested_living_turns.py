@@ -183,3 +183,30 @@ def test_unrecorded_work_is_satisfied_by_subproject_notes(tmp_path, host, in_fol
     _note(session.folder / ".living", "triaged")
 
     assert not _blocked(session.stop())
+
+
+@pytest.mark.parametrize("host,in_folder", HOSTS)
+@pytest.mark.parametrize("replacement", ["missing", "symlink"])
+def test_unavailable_subproject_notes_do_not_satisfy_stop(
+    tmp_path, host, in_folder, replacement
+):
+    session = Session(_repo(tmp_path), host, in_folder, "sub-session")
+    session.start()
+    session.edit()
+    assert _blocked(session.stop())
+
+    living = session.folder / ".living"
+    original = session.folder / "saved-living"
+    living.rename(original)
+    if replacement == "symlink":
+        living.symlink_to(session.repo / "other" / ".living", target_is_directory=True)
+
+    retry = session.stop()
+    assert _blocked(retry), retry.stdout
+    assert (session.run_dir / "active-session-log.tmp").is_file()
+
+    if replacement == "symlink":
+        living.unlink()
+    original.rename(living)
+    _note(living, "reflection recorded")
+    assert not _blocked(session.stop())

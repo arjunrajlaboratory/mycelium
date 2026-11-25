@@ -384,8 +384,10 @@ hook, filesystem, or lifecycle boundaries.
       elsewhere in the tree and symlinked `.living` folders do not. The
       session's folder comes from the host-reported payload `cwd`, not only the
       hook process's directory, because a dispatcher may run hooks from the
-      repository root. The folder list is recorded in the baseline and compared
-      as recorded. Fields that
+      repository root. Reopening a transaction preserves that folder when it
+      belongs to the selected checkout. The folder list is recorded in the
+      baseline and compared as recorded. A missing or symlinked notes folder
+      supplies no update. Fields that
       earlier runtimes compare exactly (`living_files`) keep their meaning, so
       new state goes under new keys.
 

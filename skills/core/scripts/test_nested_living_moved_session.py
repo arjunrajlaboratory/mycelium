@@ -120,3 +120,25 @@ def test_moved_session_root_notes_still_satisfy_stop(tmp_path, host, in_folder):
     _note(sub.parent / ".living")
     second = _stop(host, proc_cwd, base, active=True)
     assert not _blocked(second), second.stdout
+
+
+@pytest.mark.parametrize("host,in_folder", HOSTS)
+def test_notes_only_after_an_idle_move_are_accepted(tmp_path, host, in_folder):
+    main, worktree = _checkouts(tmp_path)
+    start_cwd = main / "sub" if in_folder else main
+    start = _run(host, "mycelium-health.sh", start_cwd,
+                 {"cwd": str(main / "sub"), "session_id": SID,
+                  "source": "startup", "hook_event_name": "SessionStart"})
+    assert start.returncode == 0, start.stderr
+
+    sub = worktree / "sub"
+    proc_cwd = sub if in_folder else worktree
+    payload = {"cwd": str(sub), "session_id": SID}
+    idle = _stop(host, proc_cwd, payload, active=False)
+    assert not _blocked(idle), idle.stdout
+
+    _note(sub / ".living")
+    stop = _stop(host, proc_cwd, payload, active=False)
+    assert not _blocked(stop), stop.stdout
+    assert not (worktree / ".mycelium" / "run" / host / SID
+                / "active-session-log.tmp").exists()
