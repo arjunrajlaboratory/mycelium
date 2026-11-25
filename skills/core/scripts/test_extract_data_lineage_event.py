@@ -6022,6 +6022,136 @@ def test_main_leaves_file_anchored_paths_unresolved_when_script_is_uncertain(
         assert event["inputs"] == [] and event["outputs"] == [], command
 
 
+def test_explicitly_assigned_file_keeps_its_ordinary_resolution(tmp_path: Path) -> None:
+    # A script that sets `__file__` itself (a notebook-cell habit) is not
+    # bound to the script's path; the name resolves as any module constant
+    # does, exactly as before `__file__` support. Never fewer paths.
+    root = Path(os.path.realpath(tmp_path))
+    _file_anchored_repo(root)
+    (root / "analysis").mkdir(exist_ok=True)
+    (root / "analysis/run.py").write_text(
+        "import hashlib\nfrom pathlib import Path\n\n"
+        "__file__ = 'analysis/run.py'\n"
+        "print(hashlib.sha256(Path(__file__).read_bytes()).hexdigest())\n")
+    event = _run_extractor_cli(root, "python3 analysis/run.py")
+    assert sorted(r["rel_path"] for r in event["inputs"]) == ["analysis/run.py"]
+    assert event["outputs"] == []
+
+
+_PATH_TYPED_TRAILING_SLASH = {
+    # argparse applies `type=Path` to a given value and to a string default;
+    # `Path()` normalises the text (`analysis/` -> `analysis`).
+    "value_plain": (
+        "import argparse, json\nfrom pathlib import Path\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('--run-dir', type=Path, required=True)\n"
+        "args = p.parse_args()\n"
+        "with open(str(args.run_dir) + '.json', 'w') as f:\n    json.dump({}, f)\n",
+        "python3 analysis/run.py --run-dir analysis/"),
+    "value_wrapper": (
+        "import argparse, json\nfrom pathlib import Path\n\n"
+        "def parse_args(argv=None):\n"
+        "    parser = argparse.ArgumentParser()\n"
+        "    parser.add_argument('--run-dir', type=Path, required=True)\n"
+        "    return parser.parse_args(argv)\n\n"
+        "def main():\n    args = parse_args()\n"
+        "    with open(str(args.run_dir) + '.json', 'w') as f:\n        json.dump({}, f)\n\n"
+        "if __name__ == '__main__':\n    main()\n",
+        "python3 analysis/run.py --run-dir analysis/"),
+    "string_default": (
+        "import argparse, json\nfrom pathlib import Path\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('--run-dir', type=Path, default='analysis/')\n"
+        "args = p.parse_args()\n"
+        "with open(str(args.run_dir) + '.json', 'w') as f:\n    json.dump({}, f)\n",
+        "python3 analysis/run.py"),
+}
+
+
+def test_file_read_before_its_reassignment_is_not_the_later_value(tmp_path: Path) -> None:
+    root = Path(os.path.realpath(tmp_path))
+    _file_anchored_repo(root)
+    (root / "analysis").mkdir(exist_ok=True)
+    (root / "analysis/run.py").write_text(
+        "from pathlib import Path\n\n"
+        "source = Path(__file__).read_bytes()\n"
+        "__file__ = 'analysis/notebook_entry.py'\n"
+        "print(len(source))\n")
+    event = _run_extractor_cli(root, "python3 analysis/run.py")
+    assert "analysis/notebook_entry.py" not in [r["rel_path"] for r in event["inputs"]]
+
+
+def test_path_typed_option_with_string_choices_is_declined(tmp_path: Path) -> None:
+    # argparse converts to Path before checking string choices, so it exits.
+    root = Path(os.path.realpath(tmp_path))
+    _file_anchored_repo(root)
+    (root / "analysis").mkdir(exist_ok=True)
+    (root / "analysis/run.py").write_text(
+        "import argparse\nfrom pathlib import Path\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--input', type=Path, default='data/train.csv',\n"
+        "                    choices=['data/train.csv', 'data/test.csv'])\n"
+        "args = parser.parse_args()\n"
+        "print(args.input.read_text())\n")
+    event = _run_extractor_cli(root, "python3 analysis/run.py --input data/test.csv")
+    assert "data/test.csv" not in [r["rel_path"] for r in event["inputs"]]
+
+
+@pytest.mark.parametrize("command", [
+    "env -C runs/2026-*/.. python3 run.py",   # a glob the shell expands
+    "env -C runs/missing/.. python3 run.py",  # chdir fails; nothing runs
+    "env -C runs/old/cache -C .. python3 run.py",  # a second -C
+])
+def test_wrapper_directories_that_are_not_certain_are_declined(tmp_path: Path, command: str) -> None:
+    root = Path(os.path.realpath(tmp_path))
+    _file_anchored_repo(root)
+    source = "from pathlib import Path\nprint(Path('counts.csv').read_text())\n"
+    for rel in ("runs/run.py", "runs/counts.csv", "archive/run.py", "archive/counts.csv",
+                "runs/old/run.py", "runs/old/counts.csv"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(source if rel.endswith(".py") else "x\n")
+    (root / "archive/2026-11-25").mkdir()
+    (root / "runs/old/cache").mkdir()
+    (root / "runs/2026-11-25").symlink_to("../archive/2026-11-25")
+    event = _run_extractor_cli(root, command)
+    recorded = [r["rel_path"] for r in event["inputs"] + event["outputs"]]
+    assert not any(p.endswith("counts.csv") for p in recorded), recorded
+
+
+@pytest.mark.parametrize("name", sorted(_PATH_TYPED_TRAILING_SLASH))
+def test_path_typed_argparse_values_are_normalised_like_path(tmp_path: Path, name: str) -> None:
+    source, command = _PATH_TYPED_TRAILING_SLASH[name]
+    root = Path(os.path.realpath(tmp_path))
+    _file_anchored_repo(root)
+    (root / "analysis").mkdir(exist_ok=True)
+    (root / "analysis/run.py").write_text(source)
+    event = _run_extractor_cli(root, command)
+    outputs = sorted(r["rel_path"] for r in event["outputs"])
+    assert outputs == ["analysis.json"], outputs
+
+
+def test_wrapper_directory_through_a_symlink_and_dotdot_is_not_guessed(tmp_path: Path) -> None:
+    # `env -C analysis/latest/..` where `latest` is a symlink: the kernel
+    # follows `latest` before `..`, so the real directory is `archive`, not
+    # the lexical `analysis`. The extractor must not record either guess.
+    root = Path(os.path.realpath(tmp_path))
+    _file_anchored_repo(root)
+    source = "from pathlib import Path\n\n" \
+             "(Path(__file__).resolve().parent / 'summary.json').write_text('{}')\n"
+    for rel in ("analysis/run.py", "archive/run.py"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(source)
+    (root / "archive/2026-11-25").mkdir()
+    (root / "analysis/latest").symlink_to("../archive/2026-11-25")
+    event = _run_extractor_cli(root, "env -C analysis/latest/.. python3 run.py")
+    assert "analysis/summary.json" not in [r["rel_path"] for r in event["outputs"]]
+    # The same layout without a symlink still resolves.
+    (root / "plain/sub").mkdir(parents=True)
+    (root / "plain/run.py").write_text(source)
+    event = _run_extractor_cli(root, "env -C plain/sub/.. python3 run.py")
+    assert [r["rel_path"] for r in event["outputs"]] == ["plain/summary.json"]
+
+
 # --- argparse through a `parse_args(argv=None)` wrapper ---------------------
 #
 # The common agent layout: a wrapper returning `parser.parse_args(argv)`,

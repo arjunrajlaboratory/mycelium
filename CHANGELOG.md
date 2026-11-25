@@ -116,6 +116,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `out.csv` was deleted before Stop) makes every spelling of the name
     uncertain, as a deletion already did.
 
+- **Wrong or lost paths in static script reading.** Found by a Codex
+  review of the `__file__` change below:
+  - A script that assigns `__file__` itself (a notebook-cell habit) lost the
+    input it had recorded before. The name now resolves as any module
+    constant does when the script rebinds it, unless the script reads it
+    before that assignment.
+  - A `type=Path` option with string `choices` is declined: argparse
+    converts before checking the choices, so it rejects every value.
+  - A `type=Path` argparse value or string default kept its raw text, so
+    `--run-dir analysis/` with `str(args.run_dir) + ".json"` recorded
+    `analysis/.json`. The text is now normalised as `Path()` does, and
+    `analysis.json` is recorded.
+  - `env -C` (or another wrapper's directory) through a symlink followed by
+    `..` was collapsed as text, but the kernel follows the symlink first,
+    so a script's `__file__` and relative paths were bound to the wrong
+    directory. Such a directory is now declined unless both readings agree
+    and every component exists. A glob word, or a second `env -C`, is
+    declined too.
 - **Static stdlib I/O reading resolves paths anchored on `__file__`.**
   Agent-written analysis scripts build every path from the script's own
   location (`Path(__file__).resolve().parents[2] / "data" / ...`). In the
