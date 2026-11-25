@@ -1274,4 +1274,5 @@ quote, a name starting with `-` and a path of 255 bytes or more. Block once
 on the Codex host too, and run a lone `-only.py` edit through block and
 finalize. Include a Git commit with invalid UTF-8 in a basename and in a
 parent directory under a UTF-8 locale. Check that Stop still blocks and
-shows the valid basename and the escaped invalid byte.
+shows the valid basename and the escaped invalid byte, then accepts after
+reflection and preserves the escaped full paths in the finalized log.

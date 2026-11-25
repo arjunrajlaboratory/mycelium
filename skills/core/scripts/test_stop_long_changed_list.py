@@ -273,3 +273,14 @@ def test_stop_displays_git_paths_with_non_utf8_bytes(tmp_path, monkeypatch):
     assert "good.py" in reason
     assert r"bad\xffname.py" in reason
     assert "café.py" in reason
+
+    with (root / ".living" / "learnings.md").open("a") as handle:
+        handle.write("\n- Recorded the imported paths.\n")
+    accepted = _stop(root, active=True, restore_signals=True)
+    assert not _blocked(accepted), accepted.stdout
+    _finalized(root)
+    (log,) = (path for path in (root / ".living" / "log").glob("*.md")
+              if path.name != "LOG_REGISTRY.md")
+    text = log.read_text()
+    assert r"nonutf\xffparent/good.py" in text
+    assert r"nonutf/bad\xffname.py" in text

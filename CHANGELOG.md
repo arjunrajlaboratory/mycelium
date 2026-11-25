@@ -94,6 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thousand outputs into the repository, was enough to start it. The four
   readers now use `mycelium_first_names`, which drains the input, extracts
   basenames as bytes, and escapes invalid UTF-8 before displaying them.
+  The session log escapes those bytes in full paths as well.
 
 - **Static stdlib I/O reading resolves paths anchored on `__file__`.**
   Agent-written analysis scripts build every path from the script's own

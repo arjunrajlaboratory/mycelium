@@ -232,7 +232,10 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     if args.duration_minutes < 0 or args.files_changed < 0:
         raise ValueError("duration and file count must be non-negative")
-    changed_paths = [line for line in sys.stdin.read().splitlines() if line]
+    # Stop passes raw Git path bytes. Keep the Markdown valid UTF-8 even
+    # when a changed path contains bytes the filesystem cannot display.
+    path_text = sys.stdin.buffer.read().decode("utf-8", "backslashreplace")
+    changed_paths = [line for line in path_text.splitlines() if line]
     try:
         finalize_session_log(
             args.log_path,
