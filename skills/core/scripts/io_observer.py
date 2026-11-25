@@ -1248,6 +1248,7 @@ def pre(
     snapshot: bool = False,
     background: bool = False,
     detached: bool = False,
+    walk_seconds: float = DEFAULT_WALK_SECONDS,
 ) -> None:
     """Open the call's interval; for Bash, snapshot the watched scope.
 
@@ -1276,7 +1277,7 @@ def pre(
             raise LockTimeout(journal_error)
         return
     taken_ns = time.time_ns()
-    snap = walk(repo_root)
+    snap = walk(repo_root, seconds=walk_seconds)
     write_snapshot(
         snapshot_path(state_dir, host, session, call_id),
         snap,
@@ -1585,6 +1586,8 @@ def post(
     change_cap: int = DEFAULT_CHANGE_CAP,
     edited: list[tuple[str, str]] | None = None,
     task_id: str | None = None,
+    expected_sha256: str | None = None,
+    bytes_unknown: bool = False,
 ) -> dict[str, Any] | None:
     """Close the call's interval and, for Bash, build its observation.
 
@@ -1600,7 +1603,8 @@ def post(
     # closes, a later call may rewrite them, and those bytes must not be
     # claimed as this edit's. A later call that overlaps the hashing shows
     # up as overlap, not as a false ordering.
-    edit_changes = (_edit_changes(repo_root, edited)
+    edit_changes = (_edit_changes(repo_root, edited, expected_sha256=expected_sha256,
+                                  bytes_unknown=bytes_unknown)
                     if edited is not None and repo_root is not None else None)
     loaded = (read_snapshot(snap_file)
               if repo_root is not None and edited is None else None)
@@ -2004,10 +2008,27 @@ def hook(state_dir: Path, repo_root: Path, host: str, raw: str) -> int:
                     # Not shown to have succeeded: the targets' hashes are
                     # recorded, but never credited to this call as its own.
                     edit_result = "unknown"
+        response = payload.get("tool_response")
+        # Only the Antigravity App adapter sets these; a native response never can.
+        adapter = response if host == "antigravity-app" and isinstance(response, dict) else {}
+        expected = adapter.get(EXPECTED_SHA256_KEY)
         post(state_dir, host=host, session=session, call_id=call_id, tool=tool, agent=agent,
              repo_root=repo_root if edited is not None else None, edited=edited,
-             outcome=edit_result)
+             outcome=edit_result,
+             expected_sha256=expected if isinstance(expected, str) and _SHA256_RX.fullmatch(expected) else None,
+             bytes_unknown=adapter.get(BYTES_UNKNOWN_KEY) is True)
     return 0
+
+
+# Set only by an adapter whose edit evidence names the exact bytes written (an
+# Antigravity App write_file observed after the fact, at Stop): a written target
+# whose hash differs is recorded without one, never with another writer's bytes.
+EXPECTED_SHA256_KEY = "mycelium_expected_sha256"
+# Set by the same adapter when the edit is verified but its bytes cannot be tied
+# to it (an App edit_file, or a write_file whose file no longer holds its
+# Content, observed at Stop): the target is recorded as written, never hashed.
+BYTES_UNKNOWN_KEY = "mycelium_bytes_unknown"
+_SHA256_RX = re.compile(r"[0-9a-f]{64}")
 
 
 def edit_outcome(response: Any) -> str:
@@ -2208,11 +2229,16 @@ def _edit_referent(raw: str, root_real: str) -> dict[str, Any]:
 
 
 def _edit_changes(
-    repo_root: Path, edited: list[tuple[str, str]]
+    repo_root: Path, edited: list[tuple[str, str]], *, expected_sha256: str | None = None,
+    bytes_unknown: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """(written, deleted, refused) entries for an edit call's targets, each
     written entry with the post-edit hash of the file when it is stable and
-    within the budget, else a null hash with its status."""
+    within the budget, else a null hash with its status. With
+    `expected_sha256`, a written target whose hash is not exactly that (or
+    cannot be taken) keeps its path but no hash: the bytes on disk are not
+    provably this call's. With `bytes_unknown`, written targets are never
+    hashed: the path is recorded as written with no hash."""
     root_real = os.path.realpath(repo_root)
     deadline = time.monotonic() + EDIT_HASH_SECONDS
     written: list[dict[str, Any]] = []
@@ -2258,6 +2284,9 @@ def _edit_changes(
                     refused.append({"path": rel, "reason": "deleted-spelling-unknown",
                                     "casefold": True})
             continue
+        if bytes_unknown:
+            written.append({"path": rel, "after": {"sha256": None, "hash_status": "unavailable"}})
+            continue
         path = Path(root_real) / rel
         try:
             ident = identity_of(os.lstat(path))
@@ -2268,6 +2297,9 @@ def _edit_changes(
             result = HashResult(None, "pending")
         else:
             result, _ = stable_hash(path, ident, deadline=deadline, cache={}, new_cache={})
+        if expected_sha256 is not None and result.sha256 != expected_sha256:
+            written.append({"path": rel, "after": {"sha256": None, "hash_status": "unavailable"}})
+            continue
         after: dict[str, Any] = {"sha256": result.sha256, "size_bytes": ident.size,
                                  "hash_status": result.status}
         if result.sha256 is not None:

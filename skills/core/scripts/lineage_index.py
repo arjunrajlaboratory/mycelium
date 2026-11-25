@@ -1296,8 +1296,9 @@ def query_hash(index: Index, sha256: str, *, disk: bool = True,
 
 
 def _no_write_record(index: Index) -> dict[str, Any]:
-    """With no observation store at all (a host that installs no observer,
-    such as Antigravity), the absence of a write proves nothing."""
+    """With no observation store at all (a host package that installs no
+    observer, such as an Antigravity package from before its PreToolUse
+    observer), the absence of a write proves nothing."""
     if any(s.startswith("store:") for s in index.sources):
         return {"status": "no-recorded-write"}
     return {"status": "no-recorded-write", "reasons": ["no-observations"]}

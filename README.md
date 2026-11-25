@@ -329,7 +329,7 @@ Every directory has a descriptive manifest — a registry of its contents with s
 
 ## Hooks — Automated Enforcement
 
-Mycelium ships eight hook scripts and registers the supported subset for each host:
+Mycelium ships nine hook scripts and registers the supported subset for each host:
 
 | Hook | Event | Purpose |
 |------|-------|---------|
@@ -340,6 +340,7 @@ Mycelium ships eight hook scripts and registers the supported subset for each ho
 | `mycelium-stop-check.sh` | Stop | Serializes data-lineage consolidation, auto-finalizes session logs, blocks session end if `.living/` wasn't updated after significant work, reminds about session summary |
 | `mycelium-io-observer.sh` | PreToolUse (shell, file edits); PostToolUse (file edits; Claude also PostToolUseFailure) | Before each shell call, takes a stat snapshot of the watched repository scope; the shell PostToolUse (and, on Claude, PostToolUseFailure) diffs it to record which files were created, modified, or deleted during the call, for data lineage. These are changes observed while the call ran, not proof that it caused them; overlapping hooked calls are flagged. File-edit calls are only journaled (start and end), so overlapping calls can be flagged; they get no snapshot. Silent; never blocks a tool call. |
 | `mycelium-data-tracker.sh` | PostToolUse (shell; Claude also PostToolUseFailure) | Captures analysis data-lineage events, joining each with the file observation for that call |
+| `mycelium-antigravity-pre.sh` | PreToolUse (Antigravity IDE and App: `run_command`, file edits) | Runs the I/O observer's pre-snapshot through the Antigravity adapter, then always prints `{"decision": "allow"}` (which defers to the host's own approval policy) and exits 0, even if the observer crashes or hangs (a watchdog ends it in about 2 s). Never approves, denies or rewrites a call. |
 | `mycelium-data-lineage-stop.sh` | Internal Stop phase | Consolidates session data-lineage events synchronously inside `mycelium-stop-check.sh`; it is not registered as a sibling command hook |
 
 Each identified Claude Code or Codex root receives a private runtime directory

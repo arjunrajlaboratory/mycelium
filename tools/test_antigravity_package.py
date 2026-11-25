@@ -164,8 +164,11 @@ def test_native_package_contains_all_base_skills_and_no_personal_coordination(tm
     assert not (target / "mcp_config.json").exists()
     assert (target / "network/conventions/robust-analysis/CONVENTION_PACK.yaml").exists()
     hooks = json.loads((target / "hooks.json").read_text())["mycelium"]
-    assert "PreToolUse" not in hooks
-    assert set(hooks) == {"enabled", "PreInvocation", "PostToolUse", "PostInvocation", "Stop"}
+    assert set(hooks) == {"enabled", "PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop"}
+    # PreToolUse is observation only: the packaged wrapper, which always answers allow.
+    (pre,) = hooks["PreToolUse"]
+    assert pre["matcher"] == "run_command|write_to_file|replace_file_content|multi_replace_file_content"
+    assert "skills/core/hooks/mycelium-antigravity-pre.sh" in pre["hooks"][0]["command"]
     assert (target / "skills/core/templates/MYCELIUM.md.template").is_file()
     assert (target / "todo/TODO_ITEM_TEMPLATE.md").is_file()
     before = (target / ".mycelium-install.json").read_bytes()

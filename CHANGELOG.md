@@ -16,7 +16,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.living/linters.json`. Repositories initialized earlier are asked on first
   use by the analyze and report skills. An analysis in a repository that opted
   out skips linting and says so; the report-generator pack still needs
-  `scitexlintr`, so the report skill offers to enable it or use the fallback. Upgrades still need the user's agreement.
+  `scitexlintr`, so the report skill offers to enable it or use the fallback.
+  Upgrades still need the user's agreement.
+- **Antigravity (IDE and App) now observes I/O the way Claude Code and Codex
+  do.** The 0.10.0 live run showed that static script reading, the only
+  lineage Antigravity had, covers almost nothing in real agent scripts. The
+  index honestly answered `no-recorded-write` / `no-observations`. Both
+  Antigravity packages now register a `PreToolUse` hook for `run_command` and
+  their edit tools. It takes the existing I/O observer's pre-snapshot (or
+  opens the edit's journal interval), and the adapter's PostToolUse closes
+  the same call: the data tracker for commands, including `RUNNING` IDE
+  commands and App commands settled from the App's step record, and an edit
+  observation for verified edits. A synchronous command's output can now
+  reach `current-in-record` with sole attribution.
+  - **It never influences approvals.** Antigravity requires a `decision`;
+    the hook always answers exactly `{"decision": "allow"}`, which defers to
+    the next hook or the host's default policy, and exits 0. The shell
+    wrapper `mycelium-antigravity-pre.sh` prints that itself, whatever the
+    Python helper does (crash, wrong output, missing interpreter), and a
+    watchdog kills a helper still running after about 1.8 s. It never sends
+    `auto_approve`, `deny`, `ask`, `overwrite` or `permissionOverrides`.
+  - The helper applies the PostToolUse path's own rules before observing:
+    host-profile proof, the exact native conversation directory, an opted-in
+    root, a supported tool shape (no App `BypassSandbox` or `IsDaemon`), and
+    an active work cycle. A late event never observes. It writes no native
+    state. Its call id is `ag-step-<stepIdx>` in the session
+    `<conversation>-turn-<user step>`.
+  - A command the Pre cannot snapshot but that can still run (an App daemon,
+    sandbox bypass or unrecognised argument, an IDE `Cwd` outside the
+    project, or a command after its work cycle ended) is journaled as a
+    background call, so a later call running beside it is marked overlapping
+    instead of being credited with its writes.
+  - An App edit whose callback arrived while its step was still running is
+    credited by Stop-time recovery. Recovery now also records that edit's
+    observation, so its interval no longer expires and leaves every other
+    write of the turn `coverage-unproven`. The App's `write_file` and
+    `edit_file` change only their one verified path, so the observation
+    vouches for every other path. The edited path is hashed only for a
+    `write_file` whose file still holds exactly its `Content`. The observer
+    checks that digest again on the bytes it hashes. Otherwise (an
+    `edit_file`, or a file changed since) the path is recorded as written
+    with its bytes unknown (`write-hash-unknown`), never with bytes observed
+    at Stop. An interval an earlier Stop already closed is not observed.
+    These observations are optional work. They run only in the Stop's last
+    root, so no root's recovery waits on them, and within the remaining
+    budget. A timed-out observer's process group is killed, so it cannot
+    write afterwards.
+  - Calls that never get a Post (a denied or failed call) are closed as
+    `turn-ended` before Stop finalization. A command still running at the
+    final Stop allowance keeps its interval open.
+  - `<project>/.mycelium/antigravity-pre-fault` (`crash`, `exit`, `slow`,
+    `hang`) or `MYCELIUM_ANTIGRAVITY_PRE_FAULT` makes the helper fail on
+    purpose, for the live check that approvals are unchanged.
+  - Upgrade: reinstall the package with `tools/antigravity.py install`
+    (add `--profile app --destination …` for the App), then start a new
+    conversation. No project migration is needed. Older packages keep working
+    without observations.
+  - The host's documentation does not say how Antigravity treats a failed,
+    slow or silent hook. The approval-preservation check in the App audit
+    profile must pass on each App version.
+
+- **Maintainer runbook and agent instruction files.**
+  - `docs/maintainer-runbook.md` collects the operational knowledge behind
+    developing, live-testing, reviewing, merging and releasing Mycelium.
+  - Root `AGENTS.md` (imported by `CLAUDE.md`) points agents at it and at the
+    `develop` skill.
+  - The release gate's next steps now tag the gated commit explicitly
+    (`git tag -a ... <sha>`) and include the GitHub release step. A bare
+    `git tag` tags whatever the local checkout is on.
 
 ### Fixed
 

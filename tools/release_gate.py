@@ -363,8 +363,14 @@ def render_summary(report: GateReport) -> str:
         "## Next steps",
         "",
         f"1. Verify `claude plugin tag --dry-run` resolves `{report.tag}`.",
-        f"2. After merge: `git tag {report.tag} && "
+        # Name the gated commit: a bare `git tag` tags whatever the local
+        # checkout happens to be on.
+        f"2. After merge, from this clean clone: `git tag -a {report.tag} "
+        f"-m \"Mycelium {report.version}\" {report.commit} && "
         f"git push origin {report.tag}`.",
+        f"3. Publish the GitHub release: `gh release create {report.tag} "
+        f"--verify-tag --latest --title \"mycelium {report.version}\" "
+        f"--notes-file <notes>`.",
     ]
     return "\n".join(lines) + "\n"
 
