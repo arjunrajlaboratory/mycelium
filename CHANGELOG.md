@@ -14,8 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code) and `scitexlintr` (reports), recommends yes, and installs them on yes.
   `skills/core/scripts/setup_linters.py` records the answer in a committed
   `.living/linters.json`. Repositories initialized earlier are asked on first
-  use by the analyze and report skills; a repository that opted out skips the
-  lint steps and says so. Upgrades still need the user's agreement.
+  use by the analyze and report skills. An analysis in a repository that opted
+  out skips linting and says so; the report-generator pack still needs
+  `scitexlintr`, so the report skill offers to enable it or use the fallback. Upgrades still need the user's agreement.
 
 ### Fixed
 
