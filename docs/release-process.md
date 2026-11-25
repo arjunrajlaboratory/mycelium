@@ -52,7 +52,8 @@ or release notes.
 
 ## Tagging
 
-The summary's next steps restate the canonical sequence:
+The summary's next steps restate the canonical sequence, filled in with the
+gated commit and version:
 
 1. Before merge: verify `claude plugin tag --dry-run` resolves
    `mycelium--vX.Y.Z`.

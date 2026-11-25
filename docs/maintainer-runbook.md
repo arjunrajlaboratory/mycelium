@@ -41,9 +41,10 @@ These recipes are for development checks. The release lifecycle audit
 
 ### Claude Code
 
-- **Hooks without installing.** The Claude plugin registers no hooks itself:
-  `init_repo.py` writes `.claude/settings.local.json` hooks pointing at the
-  hooks directory next to the `init_repo.py` that ran. So running the candidate
+- **Hooks without installing.** The plugin's `hooks/hooks.json` is Codex-only
+  (each command runs only when `PLUGIN_ROOT` is set). Claude's hooks come from
+  `init_repo.py`, which writes `.claude/settings.local.json` hooks pointing at
+  the hooks directory next to the `init_repo.py` that ran. So running the candidate
   worktree's `init_repo.py` into a scratch git repository makes `claude -p`
   there exercise the candidate hooks, with no version bump or install.
 - **Skills without installing.** Skills come from the plugin, not the project.
@@ -70,26 +71,19 @@ These recipes are for development checks. The release lifecycle audit
 
 ### Codex
 
-- **Install a candidate from a clean clone**, never a working checkout (a path
-  marketplace copies dirty files). Bump the clone's `.codex-plugin/plugin.json` to
-  a fresh `+codex.<timestamp>` and run `codex plugin add mycelium@mycelium -c
-  'marketplaces.mycelium.source="<clone>"'`; the override is per invocation.
-  Restore the normal install afterwards.
+- **Installing a candidate, approving its hooks, and checking trust:** follow
+  the Codex audit recipe in `skills/develop/SKILL.md`, the single source for it:
+  a `git archive` export with a fresh `+codex.<timestamp>`, a temporary
+  marketplace switch, hashes before and after each app launch, approval of only
+  the `mycelium@mycelium` hooks in the desktop app, and the `codex app-server`
+  `hooks/list` check. Never install from a working checkout: a local
+  marketplace source copies uncommitted files.
 - **Hook trust is a content hash** over every file in the installed bundle
   (`.git` included). Any change, including running `git status` inside the bundle
   (it rewrites `.git/index`), makes hooks `modified`, and they are then
-  **silently skipped**. Never run git inside an installed bundle.
-- **Check trust read-only** with `codex app-server`: JSON-RPC `initialize`, then
-  `hooks/list {cwds:[...]}` reports each hook's `trustStatus`. Do not edit trust
-  records by hand, and never use `--dangerously-bypass-hook-trust` in an audit.
-- **Approve trust in the desktop app**: Settings → Hooks → "Trust all" (open the
-  test folder as a project first), or the composer's "Review hooks" chip. The
-  terminal `/hooks` screen has written incomplete trust records that look active
-  but do not dispatch.
-- After any install or marketplace upgrade, Codex re-syncs the bundle on the
-  first app start (adding `.codex-marketplace-install.json`), which voids trust
-  given earlier. Order: install, start the app once, trust, relaunch, confirm
-  with `hooks/list`.
+  **silently skipped**. Never run git inside an installed bundle, never edit
+  trust records by hand, and never use `--dangerously-bypass-hook-trust` in an
+  audit.
 - `codex exec -C <dir>` appends a `[projects."<dir>"] trust_level` block to
   `~/.codex/config.toml`. Back the file up first and remove the block afterwards.
 - Initialize the test project from the **installed** bundle's `init_repo.py`,
