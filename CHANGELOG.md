@@ -39,12 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     background call, so a later call running beside it is marked overlapping
     instead of being credited with its writes.
   - An App edit whose callback arrived while its step was still running is
-    credited by Stop-time recovery, and that recovery now also records its
-    edit observation (at most once per step, and only with time to spare, so
-    another root's recovery is never deferred). The observation is made at
-    Stop, so it overlaps every call after the edit. A failed or unverified
-    edit gets none, and neither does an edit whose interval an earlier Stop
-    already closed as `turn-ended`.
+    credited by Stop-time recovery. Recovery now also records that edit's
+    observation, but only when the bytes are provably the step's own: a
+    `write_file` whose file still holds exactly its `Content`. An `edit_file`,
+    a file changed since, or an interval an earlier Stop already closed keeps
+    the `turn-ended` expiry. These observations are optional work. They run
+    only in the Stop's last root, so no root's recovery waits on them, and
+    within the remaining budget. A timed-out observer's process group is
+    killed, so it cannot write afterwards.
   - Calls that never get a Post (a denied or failed call) are closed as
     `turn-ended` before Stop finalization. A command still running at the
     final Stop allowance keeps its interval open.

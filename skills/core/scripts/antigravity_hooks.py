@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -135,6 +136,26 @@ EDITS = {"write_to_file", "replace_file_content", "multi_replace_file_content"}
 # App edit tools with captured typed native evidence (successful built-in edits).
 APP_EDITS = set(app_store.EDIT_TOOLS)
 PROTECTED = {".agents", "_agents", ".agent", ".mycelium", ".living"}
+
+
+def file_sha256(path, limit=app_store.MAX_SCAN_BYTES):
+    """SHA-256 of a regular file read without following a final link, or None."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return None
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1 << 20):
+            digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
 
 
 def tracker_ignores(relative):
@@ -270,7 +291,7 @@ def hook_environment(host, plugin, *, batch=False):
     return env
 
 
-def run_hook(name, data, root, plugin, *, timeout=12, batch=False, last_stop=False):
+def run_hook(name, data, root, plugin, *, timeout=12, batch=False, last_stop=False, kill_group=False):
     host = active_host()
     env = hook_environment(host, plugin, batch=batch)
     # On the last allowed Stop a block cannot reach the agent, so the shared
@@ -288,8 +309,25 @@ def run_hook(name, data, root, plugin, *, timeout=12, batch=False, last_stop=Fal
     script = plugin / "skills/core/hooks" / name
     marker = root / ".mycelium/run" / host / data["session_id"] / "active-session-log.tmp"
     had_marker = marker.is_file()
-    result = subprocess.run(["bash", str(script)], input=json.dumps(data), text=True,
-                            capture_output=True, cwd=root, env=env, timeout=timeout)
+    if kill_group:
+        # Its own process group, killed whole on timeout: a child left running
+        # (the observer's Python) must not write after the adapter moved on.
+        process = subprocess.Popen(["bash", str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, cwd=root, env=env,
+                                   start_new_session=True)
+        try:
+            stdout, stderr = process.communicate(json.dumps(data), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            process.communicate()
+            raise
+        result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+    else:
+        result = subprocess.run(["bash", str(script)], input=json.dumps(data), text=True,
+                                capture_output=True, cwd=root, env=env, timeout=timeout)
     if result.returncode:
         raise RuntimeError(f"{name} failed ({result.returncode}): {result.stderr[-1000:]}")
     decoded = json.loads(result.stdout) if result.stdout.strip() else {}
@@ -831,7 +869,7 @@ def _dispatch(event, payload, plugin_root, host):
                         # Callers pass only edits whose success the native record already
                         # proved (a DONE step without error, or a typed App FileEdit).
                         tool_response={"success": True, "exit_code": 0}), root, plugin_root,
-                        timeout=timeout)
+                        timeout=timeout, kill_group=True)
                 except Exception as exc:
                     print(f"Mycelium Antigravity: edit observation for step {step_index}: "
                           f"{one_line(exc, 300)}", file=sys.stderr)
@@ -920,23 +958,30 @@ def _dispatch(event, payload, plugin_root, host):
 
                 The App can deliver an edit's PostToolUse while its step row is still
                 running, so the callback credits nothing and recovery credits it at Stop.
-                Its PreToolUse interval must still close with an edit observation (made now,
-                so it overlaps every call after it), as the direct callback's does. Only
-                edits with recorded activity (or that the tracker ignores, which the callback
-                observes too) qualify; best effort, and only within the Stop's budget.
+                Its PreToolUse interval should still close with an edit observation, but
+                the observation is made at Stop, when the file may hold a later call's
+                bytes. So only a `write_file` whose file still holds exactly the step's
+                own Content qualifies (the App writes Content verbatim); an `edit_file`
+                or a changed file keeps the conservative turn-ended expiry. Only edits
+                with recorded activity (or that the tracker ignores, which the callback
+                observes too) qualify. Optional work: it runs only in the Stop's last
+                root, so no later root's required recovery waits on it, and only within
+                the budget left before finalization.
                 """
+                if root != roots[-1]:
+                    return
                 for found in scan["edits"]:
                     step, path = found["step"], found["path"]
                     if not edit_target(found, step) or f"{step}:io-observer" in turn["actions"]:
                         continue
-                    if any(c in path for c in "\0\r\n"):
+                    if not found.get("content_sha256") or any(c in path for c in "\0\r\n"):
                         continue
                     credited = turn["actions"].get(f"{step}:{ACTIVITY_HOOK}") == "done"
                     if not credited and not tracker_ignores(Path(path).relative_to(root).as_posix()):
                         continue
-                    # Optional work: leave a later root's required recovery batch its minimum.
-                    spare = (app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
-                             - APP_RECOVERY_BATCH_MIN_SECONDS)
+                    if file_sha256(path) != found["content_sha256"]:
+                        continue  # not provably this step's bytes any more
+                    spare = app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
                     if spare < APP_RECOVERY_OBSERVE_MIN_SECONDS:
                         return  # the rest close as turn-ended, never as a guessed edit
                     observe_edit(step, path, timeout=min(APP_RECOVERY_ACTION_SECONDS, spare))

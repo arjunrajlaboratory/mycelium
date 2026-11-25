@@ -607,3 +607,51 @@ def test_optional_edit_observations_never_defer_another_roots_recovery(project, 
         db.close()
     state = json.loads((second / ".mycelium" / ag.APP_HOST / APP_CID / "native-state.json").read_text())
     assert state["turns"]["0"]["edit_recovery"]["credited"] == [7], state["turns"]["0"]["edit_recovery"]
+
+
+@pytest.mark.parametrize("case", ["overwritten-later", "edit-file"])
+def test_stop_recovery_never_credits_bytes_it_cannot_tie_to_the_step(app_project, case):
+    """Codex review P2: a Stop-time observation hashes the file as it is at Stop.
+    Unless those bytes are exactly the write_file step's own Content, the interval
+    keeps its turn-ended expiry and no hash is credited to the step."""
+    from test_antigravity_app_native import edit_args, edit_payload, replace_args
+    from antigravity_app_store import EDIT_EDIT
+    home, repo, payload, db, session = app_project
+    target = repo / "notes.txt"
+    name, args = ("edit_file", replace_args(str(target))) if case == "edit-file" else (
+        "write_file", edit_args(str(target)))
+    call = {"stepIdx": 7, "toolCall": {"name": name, "args": args}}
+    run_wrapper(json.dumps(dict(payload, **call)), host=ag.APP_HOST, env={"HOME": str(home)})
+    row = dict(name=name, args=args, **({"kind": EDIT_EDIT} if case == "edit-file" else {}))
+    db.put(7, edit_payload(str(target), step=7, **row), status=2)
+    ag.dispatch("PostToolUse", dict(payload, error="", **call), host=ag.APP_HOST)
+    target.write_text("new text" if case == "edit-file" else "bytes from a later call")
+    db.put(7, edit_payload(str(target), step=7, **row))
+    append(Path(payload["transcriptPath"]), step_index=7, source="MODEL", type="GENERIC", status="DONE")
+    ag.dispatch("Stop", dict(payload, fullyIdle=True, terminationReason="NO_TOOL_CALL", error="",
+                             executionNum=0), host=ag.APP_HOST)
+    assert io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session)) == []
+    turn = json.loads(next((repo / ".mycelium" / ag.APP_HOST).glob("*/native-state.json")).read_text())
+    assert turn["turns"]["0"]["actions"].get(f"7:{ag.ACTIVITY_HOOK}") == "done"  # recovery did credit it
+    events = [r["ev"] for r in io._read_lines(repo / ".mycelium/io/calls.ndjson")
+              if r.get("call") == ag.observer_call_id(7)]
+    assert events[-1] == "expire", events
+
+
+def test_run_hook_kill_group_reaps_a_child_left_running_at_timeout(tmp_path):
+    """Codex review P2: a timed-out observer hook must not leave its Python child
+    writing after the adapter has moved on."""
+    plugin = tmp_path / "plugin"
+    hooks = plugin / "skills/core/hooks"
+    hooks.mkdir(parents=True)
+    marker = tmp_path / "late-write"
+    (hooks / "slow.sh").write_text(
+        f'"{sys.executable}" -c "import time; time.sleep(1.5); open({str(marker)!r}, \'w\').write(\'late\')"\n')
+    root = tmp_path / "repo"
+    root.mkdir()
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        ag.run_hook("slow.sh", {"session_id": "s"}, root, plugin, timeout=0.3, kill_group=True)
+    assert time.monotonic() - started < 1.5
+    time.sleep(2.0)
+    assert not marker.exists()
