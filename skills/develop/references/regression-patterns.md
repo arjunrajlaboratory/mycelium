@@ -1201,7 +1201,7 @@ preserved. A complete legacy-schema handoff is accepted without a block, a
 validator error fails open, and a marker from another transaction does not
 suppress the block.
 
-## 53. A list stage that can fail kills a hook under pipefail
+## 54. A list stage that can fail kills a hook under pipefail
 
 **Failure:** Stop shortened lists that grow with the repository (the changed
 files behind the block reason, the registry summary and the fallback
@@ -1225,8 +1225,10 @@ which can grow with the repository or the session may fail because of the
 list's length or content. Never take a prefix with a consumer that stops
 reading early (`head`, `sed Nq`, `grep -q`, `awk ... exit`), and never pass
 list items through `xargs` or a per-item command that can reject a name.
-Use `mycelium_first_names N` (one awk that reads to the end and takes each
-last path component), or one reader of the whole input. A producer bounded
+Use `mycelium_first_names N` or another reader that drains the whole input.
+Extract basenames in byte mode and escape invalid UTF-8 before formatting
+the display. BSD awk in a UTF-8 locale can abort on the parent directory
+even when the basename is valid. A producer bounded
 by construction, or one whose failure is absorbed inside its own group
 (`{ git log ... || true; } | head`), is not a hazard, and the review records
 why.
@@ -1240,4 +1242,6 @@ names, blocks again on a retry, then finalizes after a `.living/` update
 triage on more than 128 KiB of activity paths that also hold a name with a
 quote, a name starting with `-` and a path of 255 bytes or more. Block once
 on the Codex host too, and run a lone `-only.py` edit through block and
-finalize. Reverting any one of the four readers fails a test.
+finalize. Include a Git commit with invalid UTF-8 in a basename and in a
+parent directory under a UTF-8 locale. Check that Stop still blocks and
+shows the valid basename and the escaped invalid byte.

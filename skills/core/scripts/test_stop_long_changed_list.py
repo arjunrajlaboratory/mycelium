@@ -82,6 +82,7 @@ def _run(name: str, root: Path, payload: dict, restore_signals: bool,
         cwd=root,
         input=json.dumps(payload),
         text=True,
+        errors="replace",
         capture_output=True,
         env=env,
         check=False,
@@ -247,3 +248,28 @@ def test_a_lone_name_starting_with_a_dash_blocks_then_finalizes(tmp_path):
     stop = _stop(root, True, True)
     assert not _blocked(stop), stop.stdout
     _finalized(root)
+
+
+def test_stop_displays_git_paths_with_non_utf8_bytes(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    _start(root, True)
+    (root / "café.py").write_text("x = 2\n")
+    blob = subprocess.check_output(
+        ["git", "hash-object", "-w", "--stdin"], cwd=root, input=b"x = 3\n"
+    ).strip()
+    # APFS cannot create these names. Git can carry them in a commit made
+    # on a filesystem that allows arbitrary bytes in path components.
+    paths = (b"nonutf\xffparent/good.py", b"nonutf/bad\xffname.py")
+    subprocess.run(
+        ["git", "update-index", "-z", "--index-info"], cwd=root, check=True,
+        input=b"".join(b"100644 " + blob + b"\t" + path + b"\0" for path in paths),
+    )
+    subprocess.run(["git", "commit", "-qm", "import paths"], cwd=root, check=True)
+
+    stop = _stop(root, active=False, restore_signals=True)
+    assert _blocked(stop), stop.stdout
+    reason = json.loads(stop.stdout)["reason"]
+    assert "good.py" in reason
+    assert r"bad\xffname.py" in reason
+    assert "café.py" in reason

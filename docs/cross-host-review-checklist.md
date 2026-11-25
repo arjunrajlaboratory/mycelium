@@ -512,8 +512,8 @@ hook, filesystem, or lifecycle boundaries.
       list's length or content: no consumer that stops reading early (`head`,
       `sed Nq`, `grep -q`, `awk ... exit`), and no `xargs` or per-item
       `basename` that rejects quotes, long lines or a leading `-`. Under
-      `pipefail` either exits the hook; use `mycelium_first_names` or one
-      reader of the whole input.
+      `pipefail` either exits the hook. Process Git paths as bytes through
+      extraction and escape invalid UTF-8 before displaying names.
 - [ ] Shell fallbacks do not use `command || echo fallback` when the command can
       emit stdout before failing; captured values are single-line and encoded
       for their JSON, YAML, Markdown, or path destination.

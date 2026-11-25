@@ -1230,11 +1230,29 @@ print(html.escape(" ".join(value.split()), quote=True).replace("|", "&#124;"))
 # pipe buffer (64 KiB on macOS) then fails with EPIPE or dies of SIGPIPE.
 # `xargs -I {}` fails on a line of 255 bytes or more or one with a quote,
 # and `basename` fails on a name that starts with "-" (fatal when it is the
-# last name read, otherwise the name is lost). Each fatal case exited Stop 1
-# with no output; Stop failed open, and every retry failed again because the
-# list only grows. One awk, reading everything, cannot fail.
+# last name read, otherwise the name is lost). Parse path components as bytes:
+# Git permits non-UTF-8 names, and BSD awk can fail even when only the parent
+# directory contains the invalid byte. Escape bytes that cannot be displayed
+# as UTF-8 before passing the basenames to the message formatters.
 mycelium_first_names() {
-  awk -v n="${1:?}" 'NR <= n + 0 { sub(/\/+$/, ""); sub(/.*\//, ""); print }'
+  local LC_ALL=C
+  local names=""
+  # A sentinel preserves the newlines that command substitution would trim.
+  names=$(LC_ALL=C awk -v n="${1:?}" '
+    NR <= n + 0 { sub(/\/+$/, ""); sub(/.*\//, ""); print }
+    END { printf "." }
+  ') || return
+  names="${names%.}"
+  if [[ "$names" == *[$'\200'-$'\377']* ]]; then
+    printf '%s' "$names" | python3 -c '
+import sys
+
+text = sys.stdin.buffer.read().decode("utf-8", "backslashreplace")
+sys.stdout.buffer.write(text.encode("utf-8"))
+'
+  else
+    printf '%s' "$names"
+  fi
 }
 
 mycelium_registry_cell() {

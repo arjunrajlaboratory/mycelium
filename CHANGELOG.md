@@ -256,8 +256,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stopped halfway. Nothing reset the work cycle, so every later Stop in that
   session failed the same way. A bulk copy, or a job that writes a few
   thousand outputs into the repository, was enough to start it. The four
-  readers now use `mycelium_first_names`, one awk that reads its input to the
-  end (regression pattern 53).
+  readers now use `mycelium_first_names`, which drains the input, extracts
+  basenames as bytes, and escapes invalid UTF-8 before displaying them.
 
 - **Static lineage now resolves standard-library I/O** in Python scripts
   (`extract_data_lineage_event.py`). Previously only pandas-style readers and
