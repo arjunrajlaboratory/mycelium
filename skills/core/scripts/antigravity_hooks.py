@@ -817,6 +817,11 @@ def _dispatch(event, payload, plugin_root, host):
                 action = f"{step_index}:io-observer"
                 if action in turn["actions"]:
                     return
+                if step_index <= turn.get("observer_ended_through", -1):
+                    # An earlier Stop already closed this call's interval as turn-ended;
+                    # an edit observation now would credit it with whatever later calls
+                    # wrote to the file, with no overlap recorded after that expiry.
+                    return
                 turn["actions"][action] = "done"
                 save()
                 try:
@@ -929,10 +934,12 @@ def _dispatch(event, payload, plugin_root, host):
                     credited = turn["actions"].get(f"{step}:{ACTIVITY_HOOK}") == "done"
                     if not credited and not tracker_ignores(Path(path).relative_to(root).as_posix()):
                         continue
-                    remaining = app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
-                    if remaining < APP_RECOVERY_OBSERVE_MIN_SECONDS:
+                    # Optional work: leave a later root's required recovery batch its minimum.
+                    spare = (app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
+                             - APP_RECOVERY_BATCH_MIN_SECONDS)
+                    if spare < APP_RECOVERY_OBSERVE_MIN_SECONDS:
                         return  # the rest close as turn-ended, never as a guessed edit
-                    observe_edit(step, path, timeout=min(APP_RECOVERY_ACTION_SECONDS, remaining))
+                    observe_edit(step, path, timeout=min(APP_RECOVERY_ACTION_SECONDS, spare))
 
             def complete_commands():
                 for step_key, command in list(turn["pending_commands"].items()):
@@ -1119,6 +1126,7 @@ def _dispatch(event, payload, plugin_root, host):
                         # Claude's Stop does, so they stop marking later calls as overlapping. A
                         # command still running at the final allowance keeps its interval open.
                         observer_turn_end(root, session_id)
+                        turn["observer_ended_through"] = max(boundary, turn.get("observer_ended_through", -1))
                     number = turn.get("stop_attempt", {}).get("number", 0) + 1
                     turn["stop_attempt"] = {"status": "running", "number": number}
                     save()

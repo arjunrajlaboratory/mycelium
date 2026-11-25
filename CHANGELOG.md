@@ -40,9 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     instead of being credited with its writes.
   - An App edit whose callback arrived while its step was still running is
     credited by Stop-time recovery, and that recovery now also records its
-    edit observation (at most once per step, within the Stop's time budget).
-    The observation is made at Stop, so it overlaps every call after the
-    edit; a failed or unverified edit gets none.
+    edit observation (at most once per step, and only with time to spare, so
+    another root's recovery is never deferred). The observation is made at
+    Stop, so it overlaps every call after the edit. A failed or unverified
+    edit gets none, and neither does an edit whose interval an earlier Stop
+    already closed as `turn-ended`.
   - Calls that never get a Post (a denied or failed call) are closed as
     `turn-ended` before Stop finalization. A command still running at the
     final Stop allowance keeps its interval open.

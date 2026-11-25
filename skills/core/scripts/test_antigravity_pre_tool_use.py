@@ -542,3 +542,68 @@ def test_stop_recovery_observes_no_edit_it_cannot_prove_or_has_no_time_for(app_p
     assert "7:io-observer" not in actions
     # The no-time case is not vacuous: recovery did credit the edit's activity.
     assert actions.get(f"7:{ag.ACTIVITY_HOOK}") == (None if case == "failed-edit" else "done")
+
+
+def test_stop_retry_never_observes_an_edit_whose_interval_an_earlier_stop_ended(app_project, monkeypatch):
+    """Review P2: Stop 1 credits the edit but has no time to observe it, closes the
+    interval as turn-ended, and is blocked. Stop 2 must not observe it: the file may
+    since hold another call's bytes, and the expired interval records no overlap."""
+    from test_antigravity_app_native import edit_args, edit_payload
+    home, repo, payload, db, session = app_project
+    target = repo / "notes.txt"
+    call = {"stepIdx": 7, "toolCall": {"name": "write_file", "args": edit_args(str(target))}}
+    run_wrapper(json.dumps(dict(payload, **call)), host=ag.APP_HOST, env={"HOME": str(home)})
+    db.put(7, edit_payload(str(target), step=7), status=2)
+    ag.dispatch("PostToolUse", dict(payload, error="", **call), host=ag.APP_HOST)
+    target.write_text("synthetic content")
+    db.put(7, edit_payload(str(target), step=7))
+    append(Path(payload["transcriptPath"]), step_index=7, source="MODEL", type="GENERIC", status="DONE")
+    stop = dict(payload, fullyIdle=True, terminationReason="NO_TOOL_CALL", error="", executionNum=0)
+    with monkeypatch.context() as patch:
+        patch.setattr(ag, "APP_RECOVERY_OBSERVE_MIN_SECONDS", ag.APP_STOP_BUDGET_SECONDS)
+        assert ag.dispatch("Stop", stop, host=ag.APP_HOST)["decision"] == "continue"
+    events = [r["ev"] for r in io._read_lines(repo / ".mycelium/io/calls.ndjson")
+              if r.get("call") == ag.observer_call_id(7)]
+    assert events[-1] == "expire", events
+    target.write_text("bytes from a later call")
+    ag.dispatch("Stop", dict(stop, executionNum=1), host=ag.APP_HOST)
+    assert io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session)) == []
+
+
+def test_optional_edit_observations_never_defer_another_roots_recovery(project, tmp_path, monkeypatch):
+    """Observations are best effort; a later root's recovery batch is required. Slow
+    observations in the first root must leave the second root its batch minimum."""
+    from test_antigravity_app import CID as APP_CID
+    from test_antigravity_app_native import Store, edit_args, edit_payload
+    home, repo = project
+    second = tmp_path / "second"
+    second.mkdir()
+    subprocess.run(["git", "init", "-q", str(second)], check=True)
+    (second / ".living").mkdir()
+    transcript, payload = native(home, repo, parts=APP_ROOT, cid=APP_CID)
+    payload["workspacePaths"] = [str(repo), str(second)]
+    ag.dispatch("PreInvocation", payload, host=ag.APP_HOST)
+    db = Store(home)
+    try:
+        for step, root in ((5, repo), (6, repo), (7, second)):
+            target = root / f"f{step}.txt"
+            call = {"stepIdx": step, "toolCall": {"name": "write_file", "args": edit_args(str(target))}}
+            ag.pre_tool_use(dict(payload, **call), ag.APP_HOST)
+            target.write_text("synthetic content")
+            db.put(step, edit_payload(str(target), step=step, call_id=f"call-{step}"))
+        append(transcript, step_index=8, source="MODEL", type="GENERIC", status="DONE")
+        clock = [1000.0]
+        monkeypatch.setattr(ag.time, "monotonic", lambda: clock[0])
+        original = ag.run_hook
+
+        def slow(name, data, root, plugin, **kwargs):
+            if name == "mycelium-io-observer.sh":
+                clock[0] += kwargs.get("timeout", 12)  # each observation uses its whole allowance
+            return original(name, data, root, plugin, **kwargs)
+        monkeypatch.setattr(ag, "run_hook", slow)
+        ag.dispatch("Stop", dict(payload, fullyIdle=True, terminationReason="NO_TOOL_CALL", error="",
+                                 executionNum=0), host=ag.APP_HOST)
+    finally:
+        db.close()
+    state = json.loads((second / ".mycelium" / ag.APP_HOST / APP_CID / "native-state.json").read_text())
+    assert state["turns"]["0"]["edit_recovery"]["credited"] == [7], state["turns"]["0"]["edit_recovery"]
