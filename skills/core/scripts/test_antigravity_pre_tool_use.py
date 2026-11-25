@@ -881,7 +881,7 @@ def test_stop_recovery_digest_probe_is_given_a_deadline_inside_the_budget(app_pr
     assert deadline is not None
     # Never past the point where finalization's reserve and one observation begin.
     assert deadline - now <= ag.APP_STOP_BUDGET_SECONDS - ag.APP_FINALIZE_RESERVE_SECONDS \
-        - ag.APP_RECOVERY_OBSERVE_MIN_SECONDS
+        - 2 * ag.APP_RECOVERY_OBSERVE_MIN_SECONDS
 
 
 def test_failed_turn_end_does_not_suppress_a_later_edit_observation(app_project, monkeypatch):
@@ -1051,3 +1051,47 @@ def test_direct_app_edit_callback_is_marked_single_path(app_project):
     ag.dispatch("PostToolUse", dict(payload, error="", **call), host=ag.APP_HOST)
     (obs,) = io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session))
     assert obs.get("single_path") is True, obs
+
+
+@pytest.mark.parametrize("case", ["vanished-alias", "hard-link"])
+def test_single_path_mark_needs_a_present_singly_linked_target(tmp_path, monkeypatch, case):
+    """Review P2 (Codex) and P3: an edit observed at Stop through a directory alias
+    that is gone by then, or of a file hard-linked elsewhere, may have changed
+    another path's bytes, so it is not marked single-path."""
+    repo = tmp_path / "repo"
+    (repo / "data").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".mycelium/io").mkdir(parents=True)
+    (repo / "data/out.csv").write_text("x")
+    target = repo / "alias/out.csv"
+    # As on a case-sensitive volume, where no casefold refusal stands in.
+    monkeypatch.setattr(io, "_case_insensitive", lambda _root: False)
+    if case == "hard-link":
+        target = repo / "copy.csv"
+        os.link(repo / "data/out.csv", target)
+    payload = {"hook_event_name": "PostToolUse", "session_id": "s", "tool_name": "Write",
+               "tool_use_id": "t1", "cwd": str(repo), "tool_input": {"file_path": str(target)},
+               "tool_response": {"success": True, "exit_code": 0, "mycelium_bytes_unknown": True,
+                                 "mycelium_single_path_edit": True}}
+    io.hook(repo / ".mycelium", repo, "antigravity-app", json.dumps(dict(payload, hook_event_name="PreToolUse")))
+    io.hook(repo / ".mycelium", repo, "antigravity-app", json.dumps(payload))
+    (obs,) = io._read_lines(io.observations_path(repo / ".mycelium", "antigravity-app", "s"))
+    assert obs["status"] == "edit" and "single_path" not in obs, obs
+
+
+def test_digest_probe_timeout_still_leaves_time_for_the_unknown_bytes_observation(app_project, monkeypatch):
+    """Review P2 (Codex): a probe that runs to its deadline must leave the edit
+    observation its minimum, so the edit is still observed with unknown bytes."""
+    home, repo, payload, db, session = app_project
+    _running_edit(app_project)
+    clock = [1000.0]
+    monkeypatch.setattr(ag.time, "monotonic", lambda: clock[0])
+
+    def to_deadline(path, deadline=None, **_):
+        clock[0] = max(clock[0], deadline) + 0.01  # a real probe overshoots a little
+        return None
+    monkeypatch.setattr(ag, "file_sha256", to_deadline)
+    ag.dispatch("Stop", _stop(payload), host=ag.APP_HOST)
+    observations = io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session))
+    (edit,) = observations
+    assert edit["changes"]["edited"][0]["after"]["sha256"] is None, edit

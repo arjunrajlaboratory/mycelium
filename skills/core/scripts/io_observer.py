@@ -2510,12 +2510,24 @@ def _publish_edit(
         ),
         "repo_root": os.path.realpath(repo_root),
     }
-    if single_path and outcome == "success" and len(written) == 1 and not deleted and not refused:
+    if (single_path and outcome == "success" and len(written) == 1 and not deleted and not refused
+            and _sole_link(os.path.join(os.path.realpath(repo_root), written[0]["path"]))):
         observation["single_path"] = True
     with contextlib.suppress(OSError):
         append_line(observations_path(state_dir, host, session), observation,
                     io_root=state_dir / "io")
     return observation
+
+
+def _sole_link(path: str) -> bool:
+    """Whether ``path`` is, right now, a regular file with no other hard link.
+    A target that is gone (an edit through a directory alias removed since) or
+    shares its inode with another name may have changed bytes elsewhere."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
 
 
 def _publish(

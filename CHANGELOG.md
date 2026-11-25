@@ -97,7 +97,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     PreToolUse never ran and its interval's start is unknown. Unrelated
     writes keep `current-in-record` instead of `coverage-unproven`. It never
     vouches for its own path, a case or Unicode alias of it, an ancestor, or
-    a descendant. The lineage index cache is rebuilt once (builder version 5).
+    a descendant, and the mark is withheld unless the target is, when
+    observed, a regular file with no other hard link (an edit through a
+    since-removed directory alias, or of a hard-linked file, may have changed
+    another path). The lineage index cache is rebuilt once (builder version 5).
   - On a case-insensitive volume, an edit whose target no longer exists at
     observation time (for example an App edit named `OUT.CSV` whose
     `out.csv` was deleted before Stop) makes every spelling of the name

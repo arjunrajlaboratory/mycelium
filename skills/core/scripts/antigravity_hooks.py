@@ -1018,9 +1018,11 @@ def _dispatch(event, payload, plugin_root, host):
                     if spare < APP_RECOVERY_OBSERVE_MIN_SECONDS:
                         return  # the rest close as turn-ended, never as a guessed edit
                     digest = found.get("content_sha256")
-                    # The probe ends early enough to leave one observation its minimum.
+                    # The probe ends with one observation's minimum to spare beyond the
+                    # observation's own, so a probe that overshoots its deadline a little
+                    # still leaves the edit observed (with its bytes unknown).
                     probe_deadline = (app_stop_deadline - APP_FINALIZE_RESERVE_SECONDS
-                                      - APP_RECOVERY_OBSERVE_MIN_SECONDS)
+                                      - 2 * APP_RECOVERY_OBSERVE_MIN_SECONDS)
                     proven = bool(digest) and file_sha256(path, deadline=probe_deadline) == digest
                     spare = app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
                     if spare < APP_RECOVERY_OBSERVE_MIN_SECONDS:
