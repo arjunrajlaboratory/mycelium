@@ -110,6 +110,7 @@ APP_FINALIZE_RESERVE_SECONDS = 20
 APP_RECOVERY_ACTION_SECONDS = 12  # the shared per-hook default
 # A recovery batch starts only with at least this much real tracker allowance.
 APP_RECOVERY_BATCH_MIN_SECONDS = 5
+APP_RECOVERY_OBSERVE_MIN_SECONDS = 1  # one edit observation (a few hashes, no walk)
 ACTIVITY_HOOK = "mycelium-activity-tracker.sh"
 # Set only by this adapter, only for its Stop-recovery batch. The shared tracker
 # chooses batch mode from this flag plus the App host, never from payload text.
@@ -809,7 +810,7 @@ def _dispatch(event, payload, plugin_root, host):
                         pending.pop(step_key, None)
                         save()
 
-            def observe_edit(step_index, path):
+            def observe_edit(step_index, path, timeout=12):
                 """Close a successful edit's observer interval (opened by PreToolUse) with its
                 edit observation. At most once per step, and never a lifecycle failure: an
                 observation that cannot be made leaves the interval open until turn end."""
@@ -824,7 +825,8 @@ def _dispatch(event, payload, plugin_root, host):
                         tool_use_id=observer_call_id(step_index), tool_input={"file_path": path},
                         # Callers pass only edits whose success the native record already
                         # proved (a DONE step without error, or a typed App FileEdit).
-                        tool_response={"success": True, "exit_code": 0}), root, plugin_root)
+                        tool_response={"success": True, "exit_code": 0}), root, plugin_root,
+                        timeout=timeout)
                 except Exception as exc:
                     print(f"Mycelium Antigravity: edit observation for step {step_index}: "
                           f"{one_line(exc, 300)}", file=sys.stderr)
@@ -907,6 +909,30 @@ def _dispatch(event, payload, plugin_root, host):
                 for step in steps:
                     turn["actions"][f"{step}:{ACTIVITY_HOOK}"] = "done"
                 return ("truncated" if capped else scan["status"]), scan.get("reason", ""), steps, rejected
+
+            def observe_recovered_edits(scan):
+                """Edit observations for verified edits that only Stop recovery credited.
+
+                The App can deliver an edit's PostToolUse while its step row is still
+                running, so the callback credits nothing and recovery credits it at Stop.
+                Its PreToolUse interval must still close with an edit observation (made now,
+                so it overlaps every call after it), as the direct callback's does. Only
+                edits with recorded activity (or that the tracker ignores, which the callback
+                observes too) qualify; best effort, and only within the Stop's budget.
+                """
+                for found in scan["edits"]:
+                    step, path = found["step"], found["path"]
+                    if not edit_target(found, step) or f"{step}:io-observer" in turn["actions"]:
+                        continue
+                    if any(c in path for c in "\0\r\n"):
+                        continue
+                    credited = turn["actions"].get(f"{step}:{ACTIVITY_HOOK}") == "done"
+                    if not credited and not tracker_ignores(Path(path).relative_to(root).as_posix()):
+                        continue
+                    remaining = app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
+                    if remaining < APP_RECOVERY_OBSERVE_MIN_SECONDS:
+                        return  # the rest close as turn-ended, never as a guessed edit
+                    observe_edit(step, path, timeout=min(APP_RECOVERY_ACTION_SECONDS, remaining))
 
             def complete_commands():
                 for step_key, command in list(turn["pending_commands"].items()):
@@ -1039,6 +1065,7 @@ def _dispatch(event, payload, plugin_root, host):
                     # for this explicit-user turn only, before shared finalization.
                     scan = app_recovery(user_step, boundary)
                     status, reason, credited, extra = recover_app_edits(scan)
+                    observe_recovered_edits(scan)
                     rejected = dict(list({**scan["rejected"], **extra}.items())[:64])
                     turn["edit_recovery"] = {"status": status, "after": user_step, "through": boundary,
                                              "credited": credited, "rejected": rejected, "reason": reason}

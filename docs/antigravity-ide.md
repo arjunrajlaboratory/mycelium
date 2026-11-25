@@ -258,7 +258,10 @@ and `.agents`. The observer's call id is `ag-step-<stepIdx>` in the session
 `<conversation>-turn-<user step>`, the same keys the adapter's PostToolUse
 derives, so the data tracker's Post closes the same call. That includes a
 `RUNNING` command settled later, an App command settled from its step record,
-and a successful edit, which gets an edit observation. When a work cycle
+and a successful edit, which gets an edit observation. The App can deliver an
+edit's PostToolUse while its step is still running; Stop-time recovery then
+credits the edit and records its edit observation too, made at Stop, so it
+overlaps every call after the edit. When a work cycle
 reaches Stop finalization, the intervals of calls that never got a Post
 (denied, failed or unrecorded) are closed as `turn-ended`. A command still
 `RUNNING` at the final Stop allowance keeps its interval open. With this, an

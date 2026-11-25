@@ -484,3 +484,61 @@ def test_command_after_its_work_cycle_ended_is_journaled_unobserved(project):
     (pre,) = [r for r in journal if r.get("ev") == "pre"]
     assert pre["call"] == ag.observer_call_id(1) and pre["background"] is True
     assert not list((repo / ".mycelium/io").rglob("*.snap"))
+
+
+@pytest.mark.parametrize("name", ["notes.txt", "deps.lock"])
+def test_app_edit_credited_by_stop_recovery_closes_its_interval_with_an_edit_observation(app_project, name):
+    """Live App 2.34: the edit's PostToolUse arrived while its step row was still running,
+    so only Stop-time recovery credited it. The Pre interval must still end in an edit
+    observation, not `expire(turn-ended)`. A tracker-ignored path gets one too, as on
+    the direct callback."""
+    from test_antigravity_app_native import edit_args, edit_payload
+    home, repo, payload, db, session = app_project
+    target = repo / name
+    call = {"stepIdx": 7, "toolCall": {"name": "write_file", "args": edit_args(str(target))}}
+    run_wrapper(json.dumps(dict(payload, **call)), host=ag.APP_HOST, env={"HOME": str(home)})
+    db.put(7, edit_payload(str(target), step=7), status=2)  # still running at the callback
+    ag.dispatch("PostToolUse", dict(payload, error="", **call), host=ag.APP_HOST)
+    store = io.observations_path(repo / ".mycelium", ag.APP_HOST, session)
+    assert io._read_lines(store) == []
+    target.write_text("synthetic content")
+    db.put(7, edit_payload(str(target), step=7))
+    stop = dict(payload, fullyIdle=True, terminationReason="NO_TOOL_CALL", error="", executionNum=0)
+    append(Path(payload["transcriptPath"]), step_index=7, source="MODEL", type="GENERIC", status="DONE")
+    ag.dispatch("Stop", stop, host=ag.APP_HOST)
+    (obs,) = io._read_lines(store)
+    assert (obs["status"], obs["outcome"]) == ("edit", "success"), obs
+    assert obs["observation_id"] == f"{ag.APP_HOST}:{ag.observer_call_id(7)}"
+    assert [c["path"] for c in obs["changes"]["edited"]] == [name]
+    assert not [p for p in (repo / ".mycelium/io/open").rglob("*") if p.is_file()]
+    events = [r["ev"] for r in io._read_lines(repo / ".mycelium/io/calls.ndjson")
+              if r.get("call") == ag.observer_call_id(7)]
+    assert "expire" not in events, events
+    ag.dispatch("Stop", dict(stop, executionNum=1), host=ag.APP_HOST)
+    assert len(io._read_lines(store)) == 1  # at most once per step
+
+
+@pytest.mark.parametrize("case", ["failed-edit", "no-stop-time-left"])
+def test_stop_recovery_observes_no_edit_it_cannot_prove_or_has_no_time_for(app_project, monkeypatch, case):
+    from test_antigravity_app_native import edit_args, edit_payload
+    home, repo, payload, db, session = app_project
+    target = repo / "notes.txt"
+    call = {"stepIdx": 7, "toolCall": {"name": "write_file", "args": edit_args(str(target))}}
+    run_wrapper(json.dumps(dict(payload, **call)), host=ag.APP_HOST, env={"HOME": str(home)})
+    db.put(7, edit_payload(str(target), step=7), status=2)
+    ag.dispatch("PostToolUse", dict(payload, error="", **call), host=ag.APP_HOST)
+    if case == "failed-edit":
+        db.put(7, edit_payload(str(target), step=7, status=7, result=False))
+    else:
+        target.write_text("synthetic content")
+        db.put(7, edit_payload(str(target), step=7))
+        monkeypatch.setattr(ag, "APP_RECOVERY_OBSERVE_MIN_SECONDS", ag.APP_STOP_BUDGET_SECONDS)
+    append(Path(payload["transcriptPath"]), step_index=7, source="MODEL", type="GENERIC", status="DONE")
+    ag.dispatch("Stop", dict(payload, fullyIdle=True, terminationReason="NO_TOOL_CALL", error="",
+                             executionNum=0), host=ag.APP_HOST)
+    assert io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session)) == []
+    turn = json.loads(next((repo / ".mycelium" / ag.APP_HOST).glob("*/native-state.json")).read_text())
+    actions = turn["turns"]["0"]["actions"]
+    assert "7:io-observer" not in actions
+    # The no-time case is not vacuous: recovery did credit the edit's activity.
+    assert actions.get(f"7:{ag.ACTIVITY_HOOK}") == (None if case == "failed-edit" else "done")
