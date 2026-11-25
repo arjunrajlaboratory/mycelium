@@ -260,10 +260,12 @@ derives, so the data tracker's Post closes the same call. That includes a
 `RUNNING` command settled later, an App command settled from its step record,
 and a successful edit, which gets an edit observation. The App can deliver an
 edit's PostToolUse while its step is still running; Stop-time recovery then
-credits the edit. It also records the edit observation, but only for a
-`write_file` whose file still holds exactly its `Content`, since the
-observation is made at Stop. An `edit_file`, or a file changed since then,
-keeps the `turn-ended` expiry. When a work cycle
+credits the edit and records its edit observation. That observation
+vouches for every other path, because an App edit changes only its one
+verified `Path`. Its own path is hashed only for a `write_file` whose file
+still holds exactly its `Content`, since the observation is made at Stop.
+An `edit_file`, or a file changed since then, is recorded as written with
+its bytes unknown (`write-hash-unknown`). When a work cycle
 reaches Stop finalization, the intervals of calls that never got a Post
 (denied, failed or unrecorded) are closed as `turn-ended`. A command still
 `RUNNING` at the final Stop allowance keeps its interval open. With this, an

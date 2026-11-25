@@ -609,33 +609,56 @@ def test_optional_edit_observations_never_defer_another_roots_recovery(project, 
     assert state["turns"]["0"]["edit_recovery"]["credited"] == [7], state["turns"]["0"]["edit_recovery"]
 
 
-@pytest.mark.parametrize("case", ["overwritten-later", "edit-file"])
-def test_stop_recovery_never_credits_bytes_it_cannot_tie_to_the_step(app_project, case):
-    """Codex review P2: a Stop-time observation hashes the file as it is at Stop.
-    Unless those bytes are exactly the write_file step's own Content, the interval
-    keeps its turn-ended expiry and no hash is credited to the step."""
-    from test_antigravity_app_native import edit_args, edit_payload, replace_args
+@pytest.mark.parametrize("case", ["edit-file", "overwritten-later"])
+def test_stop_recovery_observes_unprovable_bytes_as_unknown_and_still_proves_other_writes(app_project, case):
+    """Live App run ag-observer-7 (step 26): a recovered edit_file got no edit
+    observation, so its expired interval left `coverage-unproven` on every earlier
+    write in the turn. Stop recovery must observe it, with its bytes unknown (a
+    Stop-time hash is never the step's), so other paths keep their proof and its
+    own path never reaches current-in-record. The same holds for a write_file whose
+    file no longer holds its Content."""
+    from test_antigravity_app_native import command_payload, edit_args, edit_payload, replace_args
     from antigravity_app_store import EDIT_EDIT
     home, repo, payload, db, session = app_project
-    target = repo / "notes.txt"
+    # An earlier command's write elsewhere, observed directly (step 5).
+    command = app_command_call(5)
+    run_wrapper(json.dumps(dict(payload, **command)), host=ag.APP_HOST, env={"HOME": str(home)})
+    run_analysis(repo)
+    db.put(5, command_payload(str(repo), step=5, command="python3 analysis.py"))
+    ag.dispatch("PostToolUse", dict(payload, error="", **command), host=ag.APP_HOST)
+    # The edit (step 7): its callback arrives while the row is still running.
+    target = repo / "MANIFEST.md"
+    target.write_text("old text\n")
     name, args = ("edit_file", replace_args(str(target))) if case == "edit-file" else (
         "write_file", edit_args(str(target)))
     call = {"stepIdx": 7, "toolCall": {"name": name, "args": args}}
     run_wrapper(json.dumps(dict(payload, **call)), host=ag.APP_HOST, env={"HOME": str(home)})
     row = dict(name=name, args=args, **({"kind": EDIT_EDIT} if case == "edit-file" else {}))
-    db.put(7, edit_payload(str(target), step=7, **row), status=2)
+    db.put(7, edit_payload(str(target), step=7, call_id="call-edit", **row), status=2)
     ag.dispatch("PostToolUse", dict(payload, error="", **call), host=ag.APP_HOST)
-    target.write_text("new text" if case == "edit-file" else "bytes from a later call")
-    db.put(7, edit_payload(str(target), step=7, **row))
+    target.write_text("new text\n" if case == "edit-file" else "bytes from a later call")
+    db.put(7, edit_payload(str(target), step=7, call_id="call-edit", **row))
     append(Path(payload["transcriptPath"]), step_index=7, source="MODEL", type="GENERIC", status="DONE")
     ag.dispatch("Stop", dict(payload, fullyIdle=True, terminationReason="NO_TOOL_CALL", error="",
                              executionNum=0), host=ag.APP_HOST)
-    assert io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session)) == []
     turn = json.loads(next((repo / ".mycelium" / ag.APP_HOST).glob("*/native-state.json")).read_text())
-    assert turn["turns"]["0"]["actions"].get(f"7:{ag.ACTIVITY_HOOK}") == "done"  # recovery did credit it
+    assert turn["turns"]["0"]["actions"].get(f"7:{ag.ACTIVITY_HOOK}") == "done"  # recovery credited it
+    observations = io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session))
+    (edit,) = [o for o in observations if o["observation_id"] == f"{ag.APP_HOST}:{ag.observer_call_id(7)}"]
+    assert (edit["status"], edit["outcome"]) == ("edit", "success"), edit
+    (written,) = edit["changes"]["edited"]
+    assert written["path"] == "MANIFEST.md"
+    assert written["after"]["sha256"] is None and "identity" not in written["after"], written
     events = [r["ev"] for r in io._read_lines(repo / ".mycelium/io/calls.ndjson")
               if r.get("call") == ag.observer_call_id(7)]
-    assert events[-1] == "expire", events
+    assert "expire" not in events, events
+    # 2. The earlier command's write elsewhere keeps its positive proof.
+    write = index_status(repo, "out.csv")
+    assert (write["attribution"], write["record"]["status"]) == ("sole", "current-in-record"), write
+    # 3. The edited path itself is never current-in-record.
+    answer = li.query_path(li.load(repo, write=False), "MANIFEST.md")
+    statuses = [w["record"]["status"] for w in answer["writes"]]
+    assert statuses and "current-in-record" not in statuses, answer
 
 
 def test_run_hook_kill_group_reaps_a_child_left_running_at_timeout(tmp_path):
@@ -689,7 +712,9 @@ def test_stop_recovery_digest_check_never_blocks_on_a_fifo(app_project):
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
-    assert observations == [] and elapsed < 20, elapsed
+    assert elapsed < 20, elapsed
+    # Unprovable bytes: observed as an edit of the path, with no hash.
+    assert all(w["after"]["sha256"] is None for o in observations for w in o["changes"]["edited"])
 
 
 def test_observer_publishes_no_hash_when_the_file_changed_after_the_digest_check(app_project, monkeypatch):
@@ -723,7 +748,8 @@ def test_expected_digest_is_honoured_only_on_the_antigravity_app_host(tmp_path):
     for host in ("claude", "antigravity-app"):
         payload = {"hook_event_name": "PostToolUse", "session_id": f"s-{host}", "tool_name": "Write",
                    "tool_use_id": "t1", "cwd": str(repo), "tool_input": {"file_path": str(repo / "f.txt")},
-                   "tool_response": {"success": True, "exit_code": 0, "mycelium_expected_sha256": "0" * 64}}
+                   "tool_response": {"success": True, "exit_code": 0, "mycelium_expected_sha256": "0" * 64,
+                                     "mycelium_bytes_unknown": True}}
         io.hook(repo / ".mycelium", repo, host, json.dumps(dict(payload, hook_event_name="PreToolUse")))
         io.hook(repo / ".mycelium", repo, host, json.dumps(payload))
     real = hashlib.sha256(b"real bytes").hexdigest()

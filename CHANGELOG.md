@@ -40,15 +40,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     instead of being credited with its writes.
   - An App edit whose callback arrived while its step was still running is
     credited by Stop-time recovery. Recovery now also records that edit's
-    observation, but only when the bytes are provably the step's own: a
+    observation, so its interval no longer expires and leaves every other
+    write of the turn `coverage-unproven`. The App's `write_file` and
+    `edit_file` change only their one verified path, so the observation
+    vouches for every other path. The edited path is hashed only for a
     `write_file` whose file still holds exactly its `Content`. The observer
-    checks that digest again on the bytes it hashes. If the file changed in
-    between, the path is recorded as written with no hash. An `edit_file`,
-    a file changed since, or an interval an earlier Stop already closed keeps
-    the `turn-ended` expiry. These observations are optional work. They run
-    only in the Stop's last root, so no root's recovery waits on them, and
-    within the remaining budget. A timed-out observer's process group is
-    killed, so it cannot write afterwards.
+    checks that digest again on the bytes it hashes. Otherwise (an
+    `edit_file`, or a file changed since) the path is recorded as written
+    with its bytes unknown (`write-hash-unknown`), never with bytes observed
+    at Stop. An interval an earlier Stop already closed is not observed.
+    These observations are optional work. They run only in the Stop's last
+    root, so no root's recovery waits on them, and within the remaining
+    budget. A timed-out observer's process group is killed, so it cannot
+    write afterwards.
   - Calls that never get a Post (a denied or failed call) are closed as
     `turn-ended` before Stop finalization. A command still running at the
     final Stop allowance keeps its interval open.

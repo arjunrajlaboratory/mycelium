@@ -849,7 +849,7 @@ def _dispatch(event, payload, plugin_root, host):
                         pending.pop(step_key, None)
                         save()
 
-            def observe_edit(step_index, path, timeout=12, expected_sha256=None):
+            def observe_edit(step_index, path, timeout=12, expected_sha256=None, bytes_unknown=False):
                 """Close a successful edit's observer interval (opened by PreToolUse) with its
                 edit observation. At most once per step, and never a lifecycle failure: an
                 observation that cannot be made leaves the interval open until turn end."""
@@ -870,7 +870,8 @@ def _dispatch(event, payload, plugin_root, host):
                         # Callers pass only edits whose success the native record already
                         # proved (a DONE step without error, or a typed App FileEdit).
                         tool_response=dict({"success": True, "exit_code": 0}, **(
-                            {"mycelium_expected_sha256": expected_sha256} if expected_sha256 else {}))),
+                            {"mycelium_expected_sha256": expected_sha256} if expected_sha256 else {}), **(
+                            {"mycelium_bytes_unknown": True} if bytes_unknown else {}))),
                         root, plugin_root, timeout=timeout, kill_group=True)
                 except Exception as exc:
                     print(f"Mycelium Antigravity: edit observation for step {step_index}: "
@@ -960,15 +961,18 @@ def _dispatch(event, payload, plugin_root, host):
 
                 The App can deliver an edit's PostToolUse while its step row is still
                 running, so the callback credits nothing and recovery credits it at Stop.
-                Its PreToolUse interval should still close with an edit observation, but
-                the observation is made at Stop, when the file may hold a later call's
-                bytes. So only a `write_file` whose file still holds exactly the step's
-                own Content qualifies (the App writes Content verbatim); an `edit_file`
-                or a changed file keeps the conservative turn-ended expiry. Only edits
-                with recorded activity (or that the tracker ignores, which the callback
-                observes too) qualify. Optional work: it runs only in the Stop's last
-                root, so no later root's required recovery waits on it, and only within
-                the budget left before finalization.
+                Its PreToolUse interval must still close with an edit observation: an
+                expired interval leaves every other write of the turn coverage-unproven.
+                The App's write_file and edit_file change only their one verified,
+                canonical Path, so the observation vouches for every other path. Its own
+                bytes are observed at Stop, when the file may hold a later call's bytes:
+                only a `write_file` whose file still holds exactly its Content is hashed
+                (the observer re-checks that digest); any other edit is recorded as a
+                write of the path with its bytes unknown. Only edits with recorded
+                activity (or that the tracker ignores, which the callback observes too)
+                qualify. Optional work: it runs only in the Stop's last root, so no later
+                root's required recovery waits on it, and only within the budget left
+                before finalization.
                 """
                 if root != roots[-1]:
                     return
@@ -976,7 +980,7 @@ def _dispatch(event, payload, plugin_root, host):
                     step, path = found["step"], found["path"]
                     if not edit_target(found, step) or f"{step}:io-observer" in turn["actions"]:
                         continue
-                    if not found.get("content_sha256") or any(c in path for c in "\0\r\n"):
+                    if any(c in path for c in "\0\r\n"):
                         continue
                     credited = turn["actions"].get(f"{step}:{ACTIVITY_HOOK}") == "done"
                     if not credited and not tracker_ignores(Path(path).relative_to(root).as_posix()):
@@ -984,15 +988,13 @@ def _dispatch(event, payload, plugin_root, host):
                     spare = app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
                     if spare < APP_RECOVERY_OBSERVE_MIN_SECONDS:
                         return  # the rest close as turn-ended, never as a guessed edit
-                    if file_sha256(path) != found["content_sha256"]:
-                        continue  # not provably this step's bytes any more
+                    digest = found.get("content_sha256")
+                    proven = bool(digest) and file_sha256(path) == digest
                     spare = app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
                     if spare < APP_RECOVERY_OBSERVE_MIN_SECONDS:
                         return  # hashing used the allowance; finalization keeps its reserve
-                    # The observer re-checks the digest on the bytes it publishes: a
-                    # rewrite in between leaves the path written but without a hash.
                     observe_edit(step, path, timeout=min(APP_RECOVERY_ACTION_SECONDS, spare),
-                                 expected_sha256=found["content_sha256"])
+                                 expected_sha256=digest if proven else None, bytes_unknown=not proven)
 
             def complete_commands():
                 for step_key, command in list(turn["pending_commands"].items()):
