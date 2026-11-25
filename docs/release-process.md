@@ -56,8 +56,15 @@ The summary's next steps restate the canonical sequence:
 
 1. Before merge: verify `claude plugin tag --dry-run` resolves
    `mycelium--vX.Y.Z`.
-2. After merge: `git tag mycelium--vX.Y.Z && git push origin
+2. After merge, from a clean clone and after `git fetch`, tag the gated commit
+   explicitly (a bare `git tag` tags whatever the local checkout is on):
+   `git tag -a mycelium--vX.Y.Z -m "Mycelium X.Y.Z" <sha> && git push origin
    mycelium--vX.Y.Z`.
+3. Publish the GitHub release for the tag (see
+   [`maintainer-runbook.md`](maintainer-runbook.md#6-releasing)).
+
+Lessons from past releases (stale plugin caches, flaky gates, macOS CI queue
+cancellations) are in [`maintainer-runbook.md`](maintainer-runbook.md#6-releasing).
 
 ## CI platform coverage
 
