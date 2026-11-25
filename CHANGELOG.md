@@ -63,6 +63,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     slow or silent hook. The approval-preservation check in the App audit
     profile must pass on each App version.
 
+- **Maintainer runbook and agent instruction files.**
+  - `docs/maintainer-runbook.md` collects the operational knowledge behind
+    developing, live-testing, reviewing, merging and releasing Mycelium.
+  - Root `AGENTS.md` (imported by `CLAUDE.md`) points agents at it and at the
+    `develop` skill.
+  - The release gate's next steps now tag the gated commit explicitly
+    (`git tag -a ... <sha>`) and include the GitHub release step. A bare
+    `git tag` tags whatever the local checkout is on.
+
 ### Fixed
 
 - **Static stdlib I/O reading resolves paths anchored on `__file__`.**
