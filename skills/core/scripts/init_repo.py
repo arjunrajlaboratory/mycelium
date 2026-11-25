@@ -1563,7 +1563,7 @@ def main():
     )
     print(
         "  3. Choose the scientific linters (ask the user; recommend yes): "
-        "setup_linters.py status"
+        "see the core skill's linter step"
     )
     print("  4. Run validate_structure.py to confirm setup")
     print("  5. Start working — the repo is now alive!")
