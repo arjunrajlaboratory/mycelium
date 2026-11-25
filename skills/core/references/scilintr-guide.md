@@ -36,6 +36,8 @@ The linter is fast (sub-second on most files), so there is no reason to defer it
 
 ## Install
 
+Each repository records once whether it uses Mycelium's linters, in `.living/linters.json`. `python3 skills/core/scripts/setup_linters.py status` exits 2 while undecided: ask the user, recommending yes, and record the answer with `setup_linters.py enable` or `disable`. Once the user has opted in, install a missing linter without asking again. Upgrades still need their agreement (see below).
+
 If `scilintr` is not already importable on the PATH, install it.
 
 **Python (Python analysis code)** — published on PyPI (no runtime dependencies):

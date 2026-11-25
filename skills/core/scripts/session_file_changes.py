@@ -15,12 +15,41 @@ import argparse
 import hashlib
 import json
 import os
+import stat as stat_module
 import subprocess
 import tempfile
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+# Schema 2 baselines (a content hash for every dirty and untracked file) are
+# still read, so a transaction opened by the previous runtime keeps its precise
+# accounting after an upgrade. Schema 3 records metadata for every path and a
+# content hash only for a bounded, deterministic subset; earlier runtimes reject
+# it and use their documented timestamp fallback, which keeps rollback safe.
+SUPPORTED_SCHEMA_VERSIONS = (2, 3)
+# A path whose metadata changed this close to the snapshot may change again
+# inside one timestamp granule (HFS+ keeps whole seconds) without moving its
+# ctime, so its content is fingerprinted rather than trusted to metadata.
+RACY_MARGIN_NS = 2_000_000_000
+# Reading every untracked byte made SessionStart and Stop exceed their host
+# timeouts on large output trees. Content hashing is therefore bounded. A path
+# whose ctime or inode moved and that cannot be verified within the bound is
+# reported as changed (so a metadata-only touch of an unhashed file costs a
+# redundant reminder); a write that moves no timestamp outside the fingerprinted
+# set is not seen.
+# Each budget can be overridden by the environment variable of the same name
+# prefixed with MYCELIUM_ (a non-negative decimal integer of at most 18 digits).
+SNAPSHOT_CONTENT_BUDGET_FILES = 20_000
+SNAPSHOT_CONTENT_BUDGET_BYTES = 256 * 1024 * 1024
+# Stop re-reads every fingerprinted file it can afford, not only the ones whose
+# metadata moved: some writes move no timestamp at all (FAT and exFAT mirror
+# ctime from mtime; shared mmap stores may never touch either). Keeping these
+# at least as large as the snapshot budgets lets Stop re-verify the whole
+# fingerprinted set.
+COLLECT_CONTENT_BUDGET_FILES = 20_000
+COLLECT_CONTENT_BUDGET_BYTES = 256 * 1024 * 1024
 LIVING_FILES = ("learnings.md", "decisions.md", "conventions.md")
 
 
@@ -58,21 +87,43 @@ def _is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
     return result.returncode == 0
 
 
-def _stat_fingerprint(repo_root: Path, relative_path: str) -> dict[str, Any] | None:
+def _metadata(repo_root: Path, relative_path: str) -> dict[str, Any] | None:
+    """Return the cheap identity of one path; reading its bytes is separate.
+
+    ``utime`` can restore mtime after a same-size rewrite, but on ordinary
+    filesystems nothing short of changing the clock restores ctime, and an
+    atomic replacement changes the inode. Those two fields let unchanged files
+    be proven unchanged without reading them. Two kinds of write move neither
+    field: FAT and exFAT report ctime as a copy of mtime, and stores through a
+    shared mmap may never update either timestamp. Stop therefore also
+    re-reads the fingerprinted files it can afford; outside that set such a
+    write goes unseen.
+    """
     try:
-        path = repo_root / relative_path
-        stat = path.lstat()
+        stat = (repo_root / relative_path).lstat()
     except OSError:
         return None
     return {
         "mode": stat.st_mode,
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
-        # Metadata alone is not a content identity: a same-size rewrite can
-        # restore its original mtime (intentionally or through a coarse
-        # filesystem) and would otherwise disappear from the session delta.
-        "content": _content_fingerprint(path),
+        "ctime_ns": stat.st_ctime_ns,
+        "ino": stat.st_ino,
     }
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    # The length cap keeps every interpreter on the same answer: some have no
+    # limit on int() digits, others raise ValueError past 4300 (3.11+, and the
+    # 3.9.14 / 3.10.7 security releases).
+    if raw is None or not (raw.isascii() and raw.isdigit()) or len(raw) > 18:
+        return default
+    return int(raw)
 
 
 def _decode_path(raw: bytes) -> str:
@@ -176,7 +227,11 @@ def _session_reflog_change_paths(
 
 
 def read_worktree_state(repo_root: Path) -> dict[str, dict[str, Any]]:
-    """Return porcelain status plus file metadata, keyed by repository path."""
+    """Return porcelain status plus file metadata, keyed by repository path.
+
+    No file content is read here; see ``_record_snapshot_content`` and
+    ``_ContentComparator`` for the bounded content checks.
+    """
     payload = _run_git(
         repo_root,
         "status",
@@ -202,32 +257,261 @@ def read_worktree_state(repo_root: Path) -> dict[str, dict[str, Any]]:
         entries[path] = {
             "status": status,
             "previous_path": previous_path,
-            "stat": _stat_fingerprint(repo_root, path),
+            "stat": _metadata(repo_root, path),
         }
     return entries
 
 
-def _content_fingerprint(path: Path) -> dict[str, Any] | None:
+def _is_racy(stat: dict[str, Any], reference_ns: int, margin_ns: int) -> bool:
+    # ctime only: mtime can be set to any value, including the future, and a
+    # future mtime would otherwise keep a path racy at every Stop.
+    return stat["ctime_ns"] >= reference_ns - margin_ns
+
+
+def _content_priority(entry: dict[str, Any], racy: bool) -> tuple[int, int]:
+    """Order paths for a content budget: tracked dirty, racy, then newest."""
+    stat = entry["stat"]
+    if entry.get("status") != "??":
+        rank = 0
+    elif racy:
+        rank = 1
+    else:
+        rank = 2
+    return rank, -stat["mtime_ns"]
+
+
+def _record_snapshot_content(
+    repo_root: Path,
+    entries: dict[str, dict[str, Any]],
+    reference_ns: int,
+) -> None:
+    """Attach content fingerprints to a bounded, deterministic set of paths.
+
+    Symlinks and non-regular paths are fingerprinted without reading. Regular
+    files are hashed in priority order until the file or byte budget runs out:
+    tracked dirty files, then racy files, then the most recently modified
+    untracked files. Every other path stores ``content: None``; Stop proves it
+    unchanged from metadata alone or, when its metadata moved or it was racy
+    at the snapshot, counts it as changed because its content cannot be
+    verified.
+    """
+    margin_ns = RACY_MARGIN_NS
+    candidates: list[tuple[tuple[int, int], str]] = []
+    for path, entry in entries.items():
+        stat = entry["stat"]
+        if stat is None:
+            continue
+        stat["content"] = None
+        if not stat_module.S_ISREG(stat["mode"]):
+            stat["content"] = _content_fingerprint(repo_root / path, scanned=stat)
+            continue
+        racy = _is_racy(stat, reference_ns, margin_ns)
+        candidates.append((_content_priority(entry, racy), path))
+
+    files_left = _env_int(
+        "MYCELIUM_SNAPSHOT_CONTENT_BUDGET_FILES", SNAPSHOT_CONTENT_BUDGET_FILES
+    )
+    bytes_left = _env_int(
+        "MYCELIUM_SNAPSHOT_CONTENT_BUDGET_BYTES", SNAPSHOT_CONTENT_BUDGET_BYTES
+    )
+    for _, path in sorted(candidates):
+        stat = entries[path]["stat"]
+        if files_left <= 0 or stat["size"] > bytes_left:
+            continue
+        files_left -= 1
+        bytes_left -= stat["size"]
+        stat["content"] = _content_fingerprint(repo_root / path, scanned=stat)
+
+
+_CHANGED = "changed"
+_UNCHANGED = "unchanged"
+_MUST_VERIFY = "must-verify"
+_MAY_VERIFY = "may-verify"
+
+
+class _ContentComparator:
+    """Decide which paths differ from their baseline, reading a bounded amount.
+
+    ``classify`` uses metadata only. A path whose ctime or inode moved (or that
+    was racy at the snapshot) must have its content verified; past the budget
+    it counts as changed. Every other fingerprinted regular file may be
+    verified while budget remains, which catches writes that move no timestamp;
+    past the budget it is trusted to its metadata. Reads happen in a fixed
+    order so consecutive Stops verify the same files.
+
+    Any malformed or unrecognised baseline value counts as changed: an
+    exception here would surface as an empty change list in the Stop hook,
+    which reads as "nothing happened".
+    """
+
+    def __init__(
+        self,
+        repo_root: Path,
+        baseline: dict[str, Any],
+        start_ts: int | None,
+        legacy_reference_ns: int | None,
+    ) -> None:
+        self.repo_root = repo_root
+        self.version = baseline.get("schema_version")
+        self.margin_ns = RACY_MARGIN_NS
+        self.bytes_left = _env_int(
+            "MYCELIUM_COLLECT_CONTENT_BUDGET_BYTES", COLLECT_CONTENT_BUDGET_BYTES
+        )
+        self.files_left = _env_int(
+            "MYCELIUM_COLLECT_CONTENT_BUDGET_FILES", COLLECT_CONTENT_BUDGET_FILES
+        )
+        self.snapshot_ns = baseline.get("snapshot_started_ns")
+        # Schema 2 records no snapshot time. The session start (written before
+        # SessionStart took the snapshot) bounds it from below; the baseline
+        # file's own write time is the fallback when no start is known.
+        self.legacy_threshold_ns: int | None = None
+        if _is_int(start_ts):
+            self.legacy_threshold_ns = start_ts * 1_000_000_000 - self.margin_ns
+        elif _is_int(legacy_reference_ns):
+            self.legacy_threshold_ns = legacy_reference_ns - self.margin_ns
+
+    def classify(self, before: Any, after: dict[str, Any] | None) -> str:
+        try:
+            return self._classify(before, after)
+        except Exception:  # noqa: BLE001 - a decision must never abort Stop
+            return _CHANGED
+
+    def _classify(self, before: Any, after: dict[str, Any] | None) -> str:
+        if before is None or after is None:
+            return _UNCHANGED if before is after else _CHANGED
+        if not isinstance(before, dict):
+            return _CHANGED
+        if before.get("status") != after["status"]:
+            return _CHANGED
+        if before.get("previous_path") != after["previous_path"]:
+            return _CHANGED
+        old = before.get("stat")
+        new = after["stat"]
+        if old is None or new is None:
+            return _UNCHANGED if old is new else _CHANGED
+        if not isinstance(old, dict):
+            return _CHANGED
+        for key in ("mode", "size", "mtime_ns"):
+            if not _is_int(old.get(key)) or old[key] != new[key]:
+                return _CHANGED
+        if self.version == 3:
+            if not _is_int(old.get("ctime_ns")) or not _is_int(old.get("ino")):
+                return _CHANGED
+            suspect = (
+                old["ctime_ns"] != new["ctime_ns"]
+                or old["ino"] != new["ino"]
+                or _is_racy(old, self.snapshot_ns, self.margin_ns)
+            )
+        else:
+            suspect = (
+                self.legacy_threshold_ns is None
+                or new["ctime_ns"] >= self.legacy_threshold_ns
+            )
+        if suspect:
+            return _MUST_VERIFY
+        content = old.get("content")
+        if isinstance(content, dict) and content.get("kind") == "file":
+            return _MAY_VERIFY
+        return _UNCHANGED
+
+    def content_differs(
+        self, path: str, before: dict[str, Any], after: dict[str, Any], required: bool
+    ) -> bool:
+        try:
+            return self._content_differs(path, before, after, required)
+        except Exception:  # noqa: BLE001 - a decision must never abort Stop
+            return True
+
+    def _content_differs(
+        self, path: str, before: dict[str, Any], after: dict[str, Any], required: bool
+    ) -> bool:
+        expected = before["stat"].get("content")
+        metadata = after["stat"]
+        if not isinstance(expected, dict):
+            return required
+        full = self.repo_root / path
+        is_regular = stat_module.S_ISREG(metadata["mode"])
+        if expected.get("kind") == "file":
+            if not is_regular:
+                return True
+            if self.files_left <= 0 or metadata["size"] > self.bytes_left:
+                return required
+            self.files_left -= 1
+            self.bytes_left -= metadata["size"]
+        elif is_regular:
+            return True
+        return _content_fingerprint(full, scanned=metadata) != expected
+
+
+def _content_fingerprint(
+    path: Path, *, scanned: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
     """Return a content identity that does not depend on timestamp precision."""
     try:
         stat = path.lstat()
     except OSError:
         return None
-    if path.is_symlink():
+    # The caller charged the size of the scanned file against its budget. If
+    # that file changed type, size, or identity in the meantime, leave it
+    # unverified. A scanned non-regular path was charged no bytes or files.
+    if scanned is not None and (
+        stat.st_mode != scanned["mode"]
+        or stat.st_size != scanned["size"]
+        or stat.st_ino != scanned["ino"]
+    ):
+        return None
+    if stat_module.S_ISLNK(stat.st_mode):
         try:
             target = os.readlink(path)
         except OSError:
             target = ""
         return {"kind": "symlink", "target": target}
-    if not path.is_file():
+    if not stat_module.S_ISREG(stat.st_mode):
         return {"kind": "other", "mode": stat.st_mode}
+    # The path can be replaced between the checks above and the open. Open
+    # without following links or blocking (a FIFO opened for reading with no
+    # writer would otherwise wait forever), then hash only the regular file
+    # that was inspected.
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     digest = hashlib.sha256()
     try:
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(65536), b""):
-                digest.update(chunk)
+        fd = os.open(path, flags)
     except OSError:
         return None
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat_module.S_ISREG(opened.st_mode)
+            or opened.st_ino != stat.st_ino
+            or opened.st_dev != stat.st_dev
+            or opened.st_size != stat.st_size
+        ):
+            return None
+        # A writer can also append after fstat. Read at most the charged size
+        # and discard the hash if the file changed during the read. Unbuffered
+        # I/O keeps read-ahead from exceeding the limit.
+        handle = os.fdopen(fd, "rb", buffering=0)
+        fd = -1
+        with handle:
+            unread = opened.st_size
+            while unread:
+                chunk = handle.read(min(65536, unread))
+                if not chunk:
+                    return None
+                digest.update(chunk)
+                unread -= len(chunk)
+            finished = os.fstat(handle.fileno())
+            if (
+                finished.st_size != opened.st_size
+                or finished.st_mtime_ns != opened.st_mtime_ns
+                or finished.st_ctime_ns != opened.st_ctime_ns
+            ):
+                return None
+    except OSError:
+        return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
     return {
         "kind": "file",
         "size": stat.st_size,
@@ -385,12 +669,18 @@ def _baseline_nested_roots(baseline: dict[str, Any]) -> list[str]:
 
 
 def build_snapshot(repo_root: Path, session_dirs: Iterable[str] = ()) -> dict[str, Any]:
+    # Taken before any path is observed, so every write that lands after a
+    # path's metadata was read has a ctime at or beyond this reference.
+    started_ns = time.time_ns()
     reflog = _head_reflog(repo_root)
+    files = read_worktree_state(repo_root)
+    _record_snapshot_content(repo_root, files, started_ns)
     return {
         "schema_version": SCHEMA_VERSION,
+        "snapshot_started_ns": started_ns,
         "head": _head(repo_root),
         "head_reflog_entries": len(reflog) if reflog is not None else None,
-        "files": read_worktree_state(repo_root),
+        "files": files,
         "living_files": read_living_state(repo_root),
         **_nested_living_baseline(repo_root, session_dirs),
     }
@@ -427,6 +717,7 @@ def write_living_snapshot(
         output,
         {
             "schema_version": SCHEMA_VERSION,
+            "snapshot_started_ns": time.time_ns(),
             "files": {},
             "living_files": read_living_state(repo_root),
             **_nested_living_baseline(repo_root, session_dirs),
@@ -443,8 +734,13 @@ def load_snapshot(path: Path | None) -> dict[str, Any] | None:
         return None
     if not isinstance(value, dict):
         return None
-    if value.get("schema_version") != SCHEMA_VERSION:
+    version = value.get("schema_version")
+    if not _is_int(version) or version not in SUPPORTED_SCHEMA_VERSIONS:
         return None
+    if version == 3:
+        started = value.get("snapshot_started_ns")
+        if not _is_int(started) or started < 0:
+            return None
     if not isinstance(value.get("files"), dict):
         return None
     return value
@@ -571,6 +867,7 @@ def collect_changes(
     start_ts: int | None = None,
     excludes: set[str] | None = None,
     exclude_prefixes: tuple[str, ...] = (".mycelium/",),
+    legacy_reference_ns: int | None = None,
 ) -> list[str]:
     """Return a sorted, de-duplicated list of session-local paths."""
     excludes = excludes or set()
@@ -579,8 +876,29 @@ def collect_changes(
     changed: set[str] = _activity_paths(repo_root, activity_file)
 
     if baseline is not None:
-        for path in set(current) | set(baseline_files):
-            if current.get(path) != baseline_files.get(path):
+        comparator = _ContentComparator(
+            repo_root, baseline, start_ts, legacy_reference_ns
+        )
+        must_verify: list[str] = []
+        may_verify: list[tuple[tuple[int, int], str]] = []
+        for path in sorted(set(current) | set(baseline_files)):
+            before = baseline_files.get(path)
+            decision = comparator.classify(before, current.get(path))
+            if decision == _CHANGED:
+                changed.add(path)
+            elif decision == _MUST_VERIFY:
+                must_verify.append(path)
+            elif decision == _MAY_VERIFY:
+                may_verify.append((_content_priority(before, racy=False), path))
+        for path in must_verify:
+            if comparator.content_differs(
+                path, baseline_files[path], current[path], required=True
+            ):
+                changed.add(path)
+        for _, path in sorted(may_verify):
+            if comparator.content_differs(
+                path, baseline_files[path], current[path], required=False
+            ):
                 changed.add(path)
     elif start_ts is not None:
         threshold_ns = start_ts * 1_000_000_000
@@ -671,6 +989,12 @@ def main() -> int:
         return 0 if changed else 1
 
     baseline = load_snapshot(args.baseline)
+    legacy_reference_ns = None
+    if baseline is not None and args.baseline is not None:
+        try:
+            legacy_reference_ns = args.baseline.stat().st_mtime_ns
+        except OSError:
+            legacy_reference_ns = None
     changes = collect_changes(
         repo_root,
         baseline,
@@ -678,6 +1002,7 @@ def main() -> int:
         start_ts=args.start_ts,
         excludes=set(args.exclude),
         exclude_prefixes=(".mycelium/", *args.exclude_prefix),
+        legacy_reference_ns=legacy_reference_ns,
     )
     for path in changes:
         print(path)

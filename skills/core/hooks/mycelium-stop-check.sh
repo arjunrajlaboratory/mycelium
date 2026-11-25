@@ -901,7 +901,7 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
     fi
     FILES_CHANGED=0
     if [ -n "$SESSION_CHANGED_FILES" ]; then
-      FILES_CHANGED=$(printf '%s\n' "$SESSION_CHANGED_FILES" | grep -c . || true)
+      FILES_CHANGED=$(printf '%s\n' "$SESSION_CHANGED_FILES" | LC_ALL=C grep -c . || true)
       FILES_CHANGED=${FILES_CHANGED:-0}
     fi
 
@@ -909,7 +909,7 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
     # file set already includes committed and Bash-mutated paths.
     ACTIVITY_COUNT=0
     if [ -f "$ACTIVITY_FILE_CHECK" ]; then
-      ACTIVITY_COUNT=$(sort -u "$ACTIVITY_FILE_CHECK" | grep -c . 2>/dev/null || true)
+      ACTIVITY_COUNT=$(LC_ALL=C sort -u "$ACTIVITY_FILE_CHECK" | LC_ALL=C grep -c . 2>/dev/null || true)
       ACTIVITY_COUNT=${ACTIVITY_COUNT:-0}
     fi
     REMINDER_COUNT=0
@@ -937,9 +937,8 @@ if [[ "$ACTIVE_MARKER_VALID" == true ]]; then
       fi
       if ! mycelium_living_changed \
         "$REPO_ROOT" "$LIVING_BASELINE_FILE" "$SESSION_CHANGES_SCRIPT" "$WORK_TS"; then
-        FILE_NAMES=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -15 \
-          | while IFS= read -r changed_path; do basename "$changed_path"; done \
-          | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+        FILE_NAMES=$(printf '%s\n' "$SESSION_CHANGED_FILES" | mycelium_first_names 15 \
+          | LC_ALL=C tr '\n' ',' | LC_ALL=C sed 's/,$//; s/,/, /g')
         REASON="STOP BLOCKED — ${FILES_CHANGED} files changed (${FILE_NAMES}) but .living/ not updated. Run mycelium session-end protocol: triage to learnings/decisions/conventions/findings, then update ${HANDOFF_PATH}."
         REASON=$(mycelium_with_unrecorded "$REASON" "$FILES_CHANGED")
         REASON=$(mycelium_with_lineage_gap "$REASON")
@@ -1039,9 +1038,8 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
       # Summary from the first 3 paths in the same unique session file set.
       SUMMARY=""
       if [ -n "$SESSION_CHANGED_FILES" ]; then
-        SUMMARY=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -3 \
-          | while IFS= read -r changed_path; do basename "$changed_path"; done \
-          | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+        SUMMARY=$(printf '%s\n' "$SESSION_CHANGED_FILES" | mycelium_first_names 3 \
+          | LC_ALL=C tr '\n' ',' | LC_ALL=C sed 's/,$//; s/,/, /g')
         if [ "$FILES_CHANGED" -gt 3 ]; then
           SUMMARY="${SUMMARY} (+$((FILES_CHANGED - 3)) more)"
         fi
@@ -1128,7 +1126,7 @@ print(value if isinstance(value, str) and "\n" not in value else "unknown")
         fi
         # Fall back to the de-duplicated modified file list.
         if [ -z "$_WORK_LINES" ] && [ -n "$SESSION_CHANGED_FILES" ]; then
-          _WORK_LINES=$(printf '%s\n' "$SESSION_CHANGED_FILES" | head -10 | while IFS= read -r _f; do echo "- Modified \`$(basename "$_f")\`"; done)
+          _WORK_LINES=$(printf '%s\n' "$SESSION_CHANGED_FILES" | mycelium_first_names 10 | while IFS= read -r _f; do printf '%s\n' "- Modified \`$_f\`"; done)
         fi
         if [ -z "$_WORK_LINES" ] && [ "$LINEAGE_EVENT_COUNT" -gt 0 ]; then
           _WORK_LINES="- Captured data-lineage provenance"
@@ -1359,9 +1357,10 @@ fi
 FILE_COUNT=0
 FILE_NAMES=""
 if [ -f "$ACTIVITY_FILE" ]; then
-  FILE_COUNT=$(sort -u "$ACTIVITY_FILE" | grep -c . || true)
+  FILE_COUNT=$(LC_ALL=C sort -u "$ACTIVITY_FILE" | LC_ALL=C grep -c . || true)
   FILE_COUNT=${FILE_COUNT:-0}
-  FILE_NAMES=$(sort -u "$ACTIVITY_FILE" | head -15 | xargs -I {} basename {} 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+  FILE_NAMES=$(LC_ALL=C sort -u "$ACTIVITY_FILE" | mycelium_first_names 15 \
+    | LC_ALL=C tr '\n' ',' | LC_ALL=C sed 's/,$//')
 fi
 
 # --- Session-end triage (short signals — full protocol is in the mycelium skill) ---

@@ -377,6 +377,19 @@ hook, filesystem, or lifecycle boundaries.
       for a change.
 - [ ] Pre-existing dirty and untracked files use a content identity, so a
       same-size rewrite whose mtime is restored still counts as session work.
+- [ ] Session accounting reads a bounded amount of work-tree content:
+      each snapshot hashes at most its file and byte budget, including when
+      an output grows between scanning and reading, and each Stop
+      comparison reads at most its own (a Stop that also carries a baseline
+      into the next turn runs one of each). Stop verifies paths whose ctime or inode moved (or that
+      were racy at the snapshot) first, and charges any it cannot verify; it
+      spends the rest of its budget re-reading other fingerprinted files,
+      because FAT/exFAT and unflushed shared mmap writes move no timestamp.
+      Such a write outside the fingerprinted set is not detected; that limit
+      is pinned by a test, so changing it is deliberate. Baselines from the
+      previous schema keep comparing, and a malformed baseline value counts as
+      changed rather than raising, because the Stop hook reads a crash as "no
+      changes". The `.living/` tree is still read in full.
 - [ ] Every lifecycle hook resolves the repository from the payload's session
       `cwd`, not the hook process's directory. After `cd` into a nested
       non-opted repository, Stop, its in-process lineage finalizer and
@@ -540,6 +553,13 @@ hook, filesystem, or lifecycle boundaries.
       registry-cell encoders) is byte-identical to it, exit status included,
       across bash 3.2 and 5.x, locales, `PYTHONIOENCODING`/`PYTHONUTF8`, and
       `patsub_replacement`, or falls back to the interpreter.
+- [ ] No stage of a pipeline over a list that can grow with the repository or
+      the session (changed files, activity, events, logs) can fail on the
+      list's length or content: no consumer that stops reading early (`head`,
+      `sed Nq`, `grep -q`, `awk ... exit`), and no `xargs` or per-item
+      `basename` that rejects quotes, long lines or a leading `-`. Under
+      `pipefail` either exits the hook. Process Git paths as bytes through
+      extraction and escape invalid UTF-8 before displaying names.
 - [ ] Shell fallbacks do not use `command || echo fallback` when the command can
       emit stdout before failing; captured values are single-line and encoded
       for their JSON, YAML, Markdown, or path destination.
@@ -647,7 +667,8 @@ exercise them.
 | A script's direct reader/writer literals are already resolved | Repository fallback is not invoked; dynamic discovery has a fixed fail-safe entry bound. |
 | Active-log marker points outside `.living/log` | PostToolUse omits the unsafe log directive; Stop still enforces outstanding work and never reveals or follows the path. |
 | A dirty or untracked file is rewritten with the same size and restored mtime | Session accounting detects the content change. |
-| A Claude Code or Codex session (Codex through its dispatcher, which runs hooks from the repository root) started in a subfolder of a multi-project repository updates that subfolder's `.living/learnings.md`; a second session updates only another project's `.living/`; an earlier runtime reads the new baseline | The first Stop accepts; the second blocks; the earlier runtime's verdicts are unchanged (root-only). |
+| The work tree holds hundreds of thousands of untracked files, some of them only re-tagged (ctime moved, content identical) | each snapshot and each Stop comparison reads at most its content budget, and Stop opens no file outside the fingerprinted set on an unchanged tree; a metadata-only change to a fingerprinted file is not charged, one with no stored content is charged, and so is an unhashed file that was racy at the snapshot; a fingerprinted file rewritten with no timestamp change is detected; a schema 2 baseline from the previous runtime compares. |
+| A Claude Code or Codex session (Codex through its dispatcher, which runs hooks from the repository root) started in a subfolder of a multi-project repository updates that subfolder's `.living/learnings.md`; a second session updates only another project's `.living/`; an earlier runtime reads the new baseline | The first Stop accepts; the second blocks; earlier runtimes use root-only verdicts with schema 2 and their timestamp fallback with schema 3. |
 | `true && python failed.py` exits nonzero, or Python is a pipeline component | The provably executed analysis is recorded; an unknown failed AND prefix remains omitted. |
 | Shell operators and Python text occur only after an unquoted `#` comment marker | No reminder or lineage event is created; quoted and escaped hashes remain valid arguments. |
 | Registry summary contains `|`, or the registry/lineage helper fails | Table cells remain valid; helper failure blocks Stop and preserves retry state without duplicate finalization. |
@@ -698,6 +719,7 @@ exercise them.
 | Codex has skipped every Mycelium hook because an upgrade invalidated its approval | The root agent finds no `SESSION HANDOFF PATH:` line in its context and tells the user the hooks are probably not running and to re-trust the `mycelium@mycelium` hooks (from the desktop app on Codex 0.169.0); `hooks/list` confirms `trustStatus` `trusted` before an audit; migration delivers that check to existing projects, and renaming the SessionStart sentinel fails a test. |
 | A hook state check, lock attempt, or encoder moves out of its own interpreter | A differential test runs the moved code and the code it replaced on the same adversarial state and requires identical statuses, variables, output, and filesystem effects; launch counts per hook are pinned. |
 | Integration stress suite runs in CI | CI invokes `skills/core/tests/test_integration_stress.sh` and fails if it fails. |
+| Stop runs with more than 128 KiB of changed-file or activity path text, including a name with a quote, a name starting with `-` and a path of 255 bytes or more, with SIGPIPE inherited ignored and default | Stop exits 0 with no "Broken pipe": it blocks with the full count and 15 names (the `-` name among them), blocks again on retry, then finalizes after a `.living/` update with `ended:`, the counted registry summary and a published handoff. |
 
 ## Validation Gate
 

@@ -1561,8 +1561,12 @@ def main():
         "  2. Install domain conventions if needed "
         "(/mycelium:core or $mycelium:core)"
     )
-    print("  3. Run validate_structure.py to confirm setup")
-    print("  4. Start working — the repo is now alive!")
+    print(
+        "  3. Choose the scientific linters (ask the user; recommend yes): "
+        "see the core skill's linter step"
+    )
+    print("  4. Run validate_structure.py to confirm setup")
+    print("  5. Start working — the repo is now alive!")
 
 
 if __name__ == "__main__":

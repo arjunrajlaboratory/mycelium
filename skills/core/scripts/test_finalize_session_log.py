@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import os
 import re
 from pathlib import Path
@@ -416,7 +417,7 @@ def test_cli_reports_frontmatter_defect_as_one_line_and_distinct_status(
 ):
     path = tmp_path / "session.md"
     path.write_text(content)
-    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(""))
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO()))
 
     status = MODULE.main(["--log-path", str(path), *_CLI_ARGS])
 
@@ -435,7 +436,7 @@ def test_cli_does_not_report_other_failures_as_frontmatter_defects(
     _log(target)
     link = tmp_path / "session.md"
     os.symlink(target, link)
-    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(""))
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO()))
 
     with pytest.raises(ValueError, match="regular file"):
         MODULE.main(["--log-path", str(link), *_CLI_ARGS])
@@ -445,7 +446,7 @@ def test_cli_does_not_report_other_failures_as_frontmatter_defects(
 def test_cli_finalizes_intact_log_with_status_zero(tmp_path, monkeypatch):
     path = tmp_path / "session.md"
     _log(path)
-    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(""))
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO()))
 
     assert MODULE.main(["--log-path", str(path), *_CLI_ARGS]) == 0
     assert "### 18:42 — Session ended (7m, 0 files)" in path.read_text()

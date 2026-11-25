@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Scientific linters are recommended by default, with one question per
+  repository.** `init` asks whether to use `scilintr` (Python and R analysis
+  code) and `scitexlintr` (reports), recommends yes, and installs them on yes.
+  `skills/core/scripts/setup_linters.py` records the answer in a committed
+  `.living/linters.json`. Repositories initialized earlier are asked on first
+  use by the analyze and report skills. An analysis in a repository that opted
+  out skips linting and says so; the report-generator pack still needs
+  `scitexlintr`, so the report skill offers to enable it or use the fallback.
+  Upgrades still need the user's agreement.
 - **Antigravity (IDE and App) now observes I/O the way Claude Code and Codex
   do.** The 0.10.0 live run showed that static script reading, the only
   lineage Antigravity had, covers almost nothing in real agent scripts. The
@@ -78,6 +87,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Antigravity App Stop-time edit observations: five follow-ups from the
+  PreToolUse observer.** None of these made a false lineage claim; each lost
+  proof or delayed finalization.
+  - Recovered edit activity is saved as acknowledged before the optional
+    edit observations run, so a Stop killed during them no longer leaves the
+    steps `running` and the turn held as uncertain.
+  - The Stop-time digest check reads at most its byte limit, even from a file
+    that grows after its size check, and gives up early enough to leave
+    finalization its reserve and one observation its minimum.
+  - A Stop advances `observer_ended_through` (which suppresses later edit
+    observations of that work cycle) only after the observer confirmed its
+    turn end. After a journal lock timeout, a later valid edit callback still
+    closes its open interval.
+  - A verified App `write_file` or `edit_file` changes only its one named
+    path, so its edit observation (marked `single_path` by the App adapter
+    only) now accounts for every provably disjoint path even when its
+    PreToolUse never ran and its interval's start is unknown. Unrelated
+    writes keep `current-in-record` instead of `coverage-unproven`. It never
+    vouches for its own path, a case or Unicode alias of it, an ancestor, or
+    a descendant, and the mark is withheld unless the target is, when
+    observed, a regular file with no other hard link (an edit through a
+    since-removed directory alias, or of a hard-linked file, may have changed
+    another path). An edit Post that arrives after its interval already
+    expired records its paths with no hash and no `single_path` mark. The lineage index cache is rebuilt once (builder version 5).
+  - On a case-insensitive volume, an edit whose target no longer exists at
+    observation time (for example an App edit named `OUT.CSV` whose
+    `out.csv` was deleted before Stop) makes every spelling of the name
+    uncertain, as a deletion already did.
+
+- **Wrong or lost paths in static script reading.** Found by a Codex
+  review of the `__file__` change below:
+  - A script that assigns `__file__` itself (a notebook-cell habit) lost the
+    input it had recorded before. The name now resolves as any module
+    constant does when the script rebinds it, unless the script reads it
+    before that assignment.
+  - A `type=Path` option with string `choices` is declined: argparse
+    converts before checking the choices, so it rejects every value.
+  - A `type=Path` argparse value or string default kept its raw text, so
+    `--run-dir analysis/` with `str(args.run_dir) + ".json"` recorded
+    `analysis/.json`. The text is now normalised as `Path()` does, and
+    `analysis.json` is recorded.
+  - `env -C` (or another wrapper's directory) through a symlink followed by
+    `..` was collapsed as text, but the kernel follows the symlink first,
+    so a script's `__file__` and relative paths were bound to the wrong
+    directory. Such a directory is now declined unless both readings agree
+    and every component exists. A glob word, or a second `env -C`, is
+    declined too.
+- **Stop no longer fails open on a long changed-file list or an unusual file
+  name** (`mycelium-stop-check.sh`). Stop built its short file lists (the
+  block reason, the registry summary, the fallback handoff and the
+  session-end triage) by piping the whole list into `head`, then into
+  `basename` or `xargs`. With more path text than a pipe holds (64 KiB on
+  macOS; every run failed from about 128 KiB), `head` exited while `printf`
+  or `sort` was still writing, and under `pipefail` Stop exited 1 with no
+  output. A name starting with `-` did the same when it was the last one
+  listed (otherwise it was dropped), and so did a path with a quote or one of
+  255 bytes or more in the session-end triage. The host logged a hook
+  error and the turn ended: the block that was due was lost, or finalization
+  stopped halfway. Nothing reset the work cycle, so every later Stop in that
+  session failed the same way. A bulk copy, or a job that writes a few
+  thousand outputs into the repository, was enough to start it. The four
+  readers now use `mycelium_first_names`, which drains the input, extracts
+  basenames as bytes, and escapes invalid UTF-8 before displaying them.
+  The session log escapes those bytes in full paths as well.
+
 - **Static stdlib I/O reading resolves paths anchored on `__file__`.**
   Agent-written analysis scripts build every path from the script's own
   location (`Path(__file__).resolve().parents[2] / "data" / ...`). In the
@@ -100,6 +174,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and `resolve()` after a joined component all stay unresolved. Every
     existing rule of the scan still applies: additive only, the shared work
     budget and deadline, and repository containment.
+- **Session accounting no longer reads every untracked file.** SessionStart's
+  baseline and Stop's comparison used to SHA-256 the full content of every
+  dirty and untracked file. On a repository with about 211,000 untracked
+  outputs (9 GB) both hooks ran past their configured hook timeouts, so Stop
+  was killed before finalising and repeated the whole scan at the end of
+  every turn. `session_file_changes.py` now records
+  metadata (mode, size, mtime, ctime, inode) for every path and hashes content
+  only for a bounded, deterministic set (changed tracked files first, then files
+  changed within two seconds of the snapshot, then the most recently modified
+  untracked files; at most 20,000 files and 256 MiB). Stop first verifies the
+  content of every path whose ctime or inode moved; a path it cannot verify
+  within budget counts as changed, never hidden. It then re-reads the other
+  fingerprinted files while its budget lasts (20,000 files and 256 MiB), which
+  catches writes that move no timestamp (FAT and exFAT, unflushed shared
+  mmap). A same-size rewrite with a restored mtime is detected everywhere on
+  ordinary filesystems, because it moves ctime. The cost of keeping that
+  guarantee outside the fingerprinted set is that a metadata-only change there
+  (an xattr write, a chmod round trip, a macOS provenance re-tag) cannot be
+  told apart from such a rewrite and counts as session work, so Stop asks for
+  a reflection. For the same reason, a file left unhashed that changed within
+  two seconds before the snapshot counts as changed even if the session never
+  touches it. A repository whose dirty and untracked files fit the default
+  budgets fingerprints every file, so neither case arises there. A write that
+  moves no timestamp is detected only within the fingerprinted set. The budgets can be
+  set with `MYCELIUM_SNAPSHOT_CONTENT_BUDGET_FILES`,
+  `MYCELIUM_SNAPSHOT_CONTENT_BUDGET_BYTES`,
+  `MYCELIUM_COLLECT_CONTENT_BUDGET_FILES` and
+  `MYCELIUM_COLLECT_CONTENT_BUDGET_BYTES`. Hashing no longer follows a
+  symlink or blocks on a FIFO swapped in after the type check. Content reads
+  stay within the charged byte count even when a writer appends during hashing.
+- Baselines are now `schema_version` 3. Schema 2 baselines from the previous
+  runtime are still read, using the session start to decide which unchanged
+  files need no read, so open sessions keep their accounting through an
+  upgrade. Earlier runtimes reject schema 3 and use their timestamp fallback.
+  The `.living/` tree is still read in full, as before.
+
 - **argparse replay models the `parse_args(argv=None)` wrapper.** This is a
   module function returning `parser.parse_args(argv)`, called once as
   `args = parse_args(argv)` (or `parse_args()`) from `main(argv=None)`. The
@@ -136,8 +246,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new or changed subproject artifact. Removing the folder or replacing it
   with a symlink leaves reflection outstanding. The root-only
   `living_files` mapping is unchanged and the
-  subfolder state is stored under new keys, so earlier runtimes read new
-  baselines exactly as before and a rollback stays safe. Stop's own
+  subfolder state is stored under new keys. Earlier runtimes accept schema 2
+  baselines as before and use the existing timestamp fallback for schema 3. Stop's own
   snapshots (the baseline it carries into the next turn, its refresh after a
   notes-only turn, and the work cycle it starts for unrecorded work) use the
   same folder, so subfolder notes keep counting on later turns, and a turn
