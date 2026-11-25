@@ -1230,3 +1230,49 @@ user-facing line.
 accepted Stop emits only `systemMessage`, with no empty line. It records the
 gap in the log footer, publishes the handoff byte-for-byte as main does, and
 leaves nothing that starts another transaction.
+
+## 54. A list stage that can fail kills a hook under pipefail
+
+**Failure:** Stop shortened lists that grow with the repository (the changed
+files behind the block reason, the registry summary and the fallback
+handoff, and the activity list behind the session-end triage) with
+`producer | head -N`, then took each name with `basename` or
+`xargs -I {} basename {}`. Once the producer's output outlasts the pipe
+buffer (64 KiB on macOS), `head` exits first, `printf` fails with EPIPE (or
+the producer dies of SIGPIPE), `pipefail` fails the substitution, and
+`set -e` exits Stop 1 with no output. The host treats that as a non-blocking
+error. The later stages fail on content in the same way: BSD `xargs -I`
+exits 1 on a line of 255 bytes or more or one with a quote, and `basename`
+exits 1 on a name that starts with `-`, which fails the loop when it is the
+last name read and otherwise drops the name. The crash came before the block
+and before the work cycle was closed, so it latched: one real session failed 33
+Stops in a row with 409 KB of names, nearly all written by a bulk copy and a
+scoring job. Pattern 51 had already avoided the early reader for
+moved-checkout changes; the older sites kept it.
+
+**Invariant:** No stage of a pipeline under `pipefail` that reads a list
+which can grow with the repository or the session may fail because of the
+list's length or content. Never take a prefix with a consumer that stops
+reading early (`head`, `sed Nq`, `grep -q`, `awk ... exit`), and never pass
+list items through `xargs` or a per-item command that can reject a name.
+Use `mycelium_first_names N` or another reader that drains the whole input.
+Extract basenames in byte mode and escape invalid UTF-8 before formatting
+the display. BSD awk in a UTF-8 locale can abort on the parent directory
+even when the basename is valid. A producer bounded
+by construction, or one whose failure is absorbed inside its own group
+(`{ git log ... || true; } | head`), is not a hazard, and the review records
+why.
+
+**Regression evidence:** Run the real hooks with more than 128 KiB of
+changed-file path text, written from the shell, with SIGPIPE inherited both
+ignored and default. Stop exits 0 and blocks with the full count and 15
+names, blocks again on a retry, then finalizes after a `.living/` update
+(`ended:`, the counted registry summary, a published fallback handoff with
+10 file lines that include a name starting with `-`). Run the session-end
+triage on more than 128 KiB of activity paths that also hold a name with a
+quote, a name starting with `-` and a path of 255 bytes or more. Block once
+on the Codex host too, and run a lone `-only.py` edit through block and
+finalize. Include a Git commit with invalid UTF-8 in a basename and in a
+parent directory under a UTF-8 locale. Check that Stop still blocks and
+shows the valid basename and the escaped invalid byte, then accepts after
+reflection and preserves the escaped full paths in the finalized log.

@@ -134,6 +134,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     directory. Such a directory is now declined unless both readings agree
     and every component exists. A glob word, or a second `env -C`, is
     declined too.
+- **Stop no longer fails open on a long changed-file list or an unusual file
+  name** (`mycelium-stop-check.sh`). Stop built its short file lists (the
+  block reason, the registry summary, the fallback handoff and the
+  session-end triage) by piping the whole list into `head`, then into
+  `basename` or `xargs`. With more path text than a pipe holds (64 KiB on
+  macOS; every run failed from about 128 KiB), `head` exited while `printf`
+  or `sort` was still writing, and under `pipefail` Stop exited 1 with no
+  output. A name starting with `-` did the same when it was the last one
+  listed (otherwise it was dropped), and so did a path with a quote or one of
+  255 bytes or more in the session-end triage. The host logged a hook
+  error and the turn ended: the block that was due was lost, or finalization
+  stopped halfway. Nothing reset the work cycle, so every later Stop in that
+  session failed the same way. A bulk copy, or a job that writes a few
+  thousand outputs into the repository, was enough to start it. The four
+  readers now use `mycelium_first_names`, which drains the input, extracts
+  basenames as bytes, and escapes invalid UTF-8 before displaying them.
+  The session log escapes those bytes in full paths as well.
+
 - **Static stdlib I/O reading resolves paths anchored on `__file__`.**
   Agent-written analysis scripts build every path from the script's own
   location (`Path(__file__).resolve().parents[2] / "data" / ...`). In the

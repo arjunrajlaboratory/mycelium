@@ -26,6 +26,10 @@ something new and durable, add it here in the same PR.
   directory containing `bash -> /bin/bash` first on `PATH`. Hook code must work
   on both 3.2 and current bash (regression pattern 43).
 - macOS has no `timeout` binary.
+- To test Stop with Git path bytes that APFS cannot create, stage the raw
+  path with `git update-index -z --index-info` and commit it after
+  SessionStart. Run Stop in a UTF-8 locale. The commit supplies the path
+  even when the worktree cannot materialize it.
 
 ## 2. Live-testing a candidate on each host
 
