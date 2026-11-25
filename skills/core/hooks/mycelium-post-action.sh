@@ -121,7 +121,7 @@ mkdir -p "$STATE_DIR"
 
 SESSION_CHANGES_HELPER="${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"
 SHOULD_REMIND=false
-if mycelium_refresh_work_cycle "$REPO_ROOT" "$SESSION_CHANGES_HELPER"; then
+if mycelium_refresh_work_cycle "$REPO_ROOT" "$SESSION_CHANGES_HELPER" "$SESSION_CWD"; then
   SHOULD_REMIND=true
 fi
 

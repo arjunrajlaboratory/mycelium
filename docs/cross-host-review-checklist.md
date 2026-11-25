@@ -398,6 +398,18 @@ hook, filesystem, or lifecycle boundaries.
       otherwise fall back to the process directory; an unrelated enclosing
       project gains no state. A session in a linked worktree is judged on, and
       writes into, that worktree.
+- [ ] A Stop check for an updated `.living/` accepts the notes folder of the
+      project the session works in, not only the repository root's: folders
+      on the path from the session's folder up to the root count, folders
+      elsewhere in the tree and symlinked `.living` folders do not. The
+      session's folder comes from the host-reported payload `cwd`, not only the
+      hook process's directory, because a dispatcher may run hooks from the
+      repository root. Reopening a transaction preserves that folder when it
+      belongs to the selected checkout. The folder list is recorded in the
+      baseline and compared as recorded. A missing or symlinked notes folder
+      supplies no update. Fields that
+      earlier runtimes compare exactly (`living_files`) keep their meaning, so
+      new state goes under new keys.
 
 ## 7. Data Lineage Integrity
 
@@ -656,6 +668,7 @@ exercise them.
 | Active-log marker points outside `.living/log` | PostToolUse omits the unsafe log directive; Stop still enforces outstanding work and never reveals or follows the path. |
 | A dirty or untracked file is rewritten with the same size and restored mtime | Session accounting detects the content change. |
 | The work tree holds hundreds of thousands of untracked files, some of them only re-tagged (ctime moved, content identical) | each snapshot and each Stop comparison reads at most its content budget, and Stop opens no file outside the fingerprinted set on an unchanged tree; a metadata-only change to a fingerprinted file is not charged, one with no stored content is charged, and so is an unhashed file that was racy at the snapshot; a fingerprinted file rewritten with no timestamp change is detected; a schema 2 baseline from the previous runtime compares. |
+| A Claude Code or Codex session (Codex through its dispatcher, which runs hooks from the repository root) started in a subfolder of a multi-project repository updates that subfolder's `.living/learnings.md`; a second session updates only another project's `.living/`; an earlier runtime reads the new baseline | The first Stop accepts; the second blocks; earlier runtimes use root-only verdicts with schema 2 and their timestamp fallback with schema 3. |
 | `true && python failed.py` exits nonzero, or Python is a pipeline component | The provably executed analysis is recorded; an unknown failed AND prefix remains omitted. |
 | Shell operators and Python text occur only after an unquoted `#` comment marker | No reminder or lineage event is created; quoted and escaped hashes remain valid arguments. |
 | Registry summary contains `|`, or the registry/lineage helper fails | Table cells remain valid; helper failure blocks Stop and preserves retry state without duplicate finalization. |

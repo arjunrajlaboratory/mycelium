@@ -21,12 +21,23 @@ source "$HERE/mycelium-hook-lib.sh"
 INPUT=$(cat)
 mycelium_payload_preload INPUT 'opt:session_id' 'get:cwd'
 HOST_SESSION_ID=$(mycelium_json_get_optional_string 'session_id' INPUT) || exit 0
+# The working directory the host reported for this session, read once and
+# used twice: the repository root is resolved from it (below), and it is the
+# session's own folder for Stop's snapshots, which record a subproject's
+# .living/ from it because the Codex dispatcher runs this hook from the
+# repository root. A missing or unusable cwd (an empty payload) leaves the
+# root to mycelium_session_repo_root's own fallback (the hook's git toplevel)
+# and makes the hook's own directory the session folder.
+PAYLOAD_CWD=$(mycelium_json_get 'cwd' INPUT)
+SESSION_CWD="$PAYLOAD_CWD"
+if [[ -z "$SESSION_CWD" || ! -d "$SESSION_CWD" ]]; then
+  SESSION_CWD=$(pwd)
+fi
 
 # Determine repo root early (used by both log finalization and .living/ checks)
 # from the session's own directory, as SessionStart and the PostToolUse
 # trackers do (issue #144: a worktree session's hooks run in the main checkout).
-REPO_ROOT=$(mycelium_session_repo_root "$(mycelium_json_get 'cwd' INPUT)" \
-  "$HOST_SESSION_ID")
+REPO_ROOT=$(mycelium_session_repo_root "$PAYLOAD_CWD" "$HOST_SESSION_ID")
 if [ -z "$REPO_ROOT" ]; then
   exit 0
 fi
@@ -95,6 +106,9 @@ mycelium_stop_reopen_for_shell_changes() {
   local changed=""
   local changed_path=""
   local project_changed=false
+  local nested_roots=""
+  local nested_root=""
+  local on_notes=false
   local collect_args=()
   [[ "${MYCELIUM_SESSION_SCOPED:-false}" == true && -n "$state_dir" \
     && "$state_dir" != "${MYCELIUM_SHARED_STATE_DIR:-}" ]] || return 1
@@ -107,17 +121,29 @@ mycelium_stop_reopen_for_shell_changes() {
   fi
   changed=$(python3 "$helper" "${collect_args[@]}" 2>/dev/null) || return 1
   [[ -n "$changed" ]] || return 1
+  # A subproject's own .living/ on the session's path (recorded in the
+  # carried baseline) holds notes too, not project work. Unreadable: none.
+  nested_roots=$(python3 "$helper" nested-living-roots --repo-root "$REPO_ROOT" \
+    --baseline "$carried" 2>/dev/null) || nested_roots=""
   while IFS= read -r changed_path; do
     case "$changed_path" in
-      ""|.living/*) ;;
-      *) project_changed=true ;;
+      ""|.living/*) continue ;;
     esac
+    on_notes=false
+    while IFS= read -r nested_root; do
+      if [[ -n "$nested_root" && "$changed_path" == "$nested_root/.living/"* ]]; then
+        on_notes=true
+        break
+      fi
+    done <<<"$nested_roots"
+    [[ "$on_notes" == true ]] || project_changed=true
   done <<<"$changed"
   if [[ "$project_changed" == true ]]; then
     mycelium_reopen_post_tool_transaction "$REPO_ROOT" "$INPUT"
     return $?
   fi
-  python3 "$helper" snapshot --repo-root "$REPO_ROOT" --output "$carried.tmp" \
+  python3 "$helper" snapshot --repo-root "$REPO_ROOT" \
+    ${SESSION_CWD:+--session-dir "$SESSION_CWD"} --output "$carried.tmp" \
     >/dev/null 2>&1 && mv -f "$carried.tmp" "$carried" \
     && printf '%s\n' "$(date +%s)" > "$state_dir/next-turn-start-ts.tmp"
   rm -f "$carried.tmp"
@@ -459,7 +485,8 @@ if [[ -e "$UNRECORDED_FILE" || -L "$UNRECORDED_FILE" ]]; then
   fi
   if (( _UNRECORDED_WORK > 0 )); then
     if ! mycelium_start_work_cycle "$REPO_ROOT" \
-      "${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"; then
+      "${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}" \
+      "$SESSION_CWD"; then
       # Without a fresh fingerprint and reminder an earlier .living/ update
       # could satisfy this work. Keep the evidence and retry.
       mycelium_emit_stop_block \
@@ -506,7 +533,8 @@ if [[ -f "$MOVED_CHANGES_FILE" && ! -L "$MOVED_CHANGES_FILE" ]]; then
   _MOVED_NAMES=$(awk 'NF && ++n <= 15 { printf "%s%s", (n > 1 ? ", " : ""), $0 }' \
     "$MOVED_CHANGES_FILE" 2>/dev/null || true)
   if ! mycelium_start_work_cycle "$REPO_ROOT" \
-    "${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}"; then
+    "${MYCELIUM_SESSION_CHANGES_HELPER:-$HERE/../scripts/session_file_changes.py}" \
+    "$SESSION_CWD"; then
     mycelium_emit_stop_block \
       "STOP BLOCKED — changes this session left in the checkout it moved from need a fresh .living/ fingerprint and reminder, and writing them failed. The evidence was preserved; repair ${STATE_DIR} if needed, then retry Stop." || true
     exit 0
@@ -593,7 +621,8 @@ mycelium_prepare_carried_baseline() {
   mycelium__carry_is_scoped || return 0
   [[ "$TURN_HAD_WORK" == 0 ]] && return 0
   [[ -f "$helper" ]] || return 1
-  python3 "$helper" snapshot --repo-root "$REPO_ROOT" --output "$next" \
+  python3 "$helper" snapshot --repo-root "$REPO_ROOT" \
+    ${SESSION_CWD:+--session-dir "$SESSION_CWD"} --output "$next" \
     >/dev/null 2>&1 && [[ -f "$next" && ! -L "$next" ]] || {
     rm -f "$next"
     return 1
