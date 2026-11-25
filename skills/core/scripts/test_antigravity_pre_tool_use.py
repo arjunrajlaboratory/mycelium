@@ -655,3 +655,47 @@ def test_run_hook_kill_group_reaps_a_child_left_running_at_timeout(tmp_path):
     assert time.monotonic() - started < 1.5
     time.sleep(2.0)
     assert not marker.exists()
+
+
+def _recovered_write(app_project, content_on_disk):
+    from test_antigravity_app_native import edit_args, edit_payload
+    home, repo, payload, db, session = app_project
+    target = repo / "notes.txt"
+    call = {"stepIdx": 7, "toolCall": {"name": "write_file", "args": edit_args(str(target))}}
+    run_wrapper(json.dumps(dict(payload, **call)), host=ag.APP_HOST, env={"HOME": str(home)})
+    db.put(7, edit_payload(str(target), step=7), status=2)
+    ag.dispatch("PostToolUse", dict(payload, error="", **call), host=ag.APP_HOST)
+    content_on_disk(target)
+    db.put(7, edit_payload(str(target), step=7))
+    append(Path(payload["transcriptPath"]), step_index=7, source="MODEL", type="GENERIC", status="DONE")
+    started = time.monotonic()
+    ag.dispatch("Stop", dict(payload, fullyIdle=True, terminationReason="NO_TOOL_CALL", error="",
+                             executionNum=0), host=ag.APP_HOST)
+    return io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session)), \
+        time.monotonic() - started
+
+
+def test_stop_recovery_digest_check_never_blocks_on_a_fifo(app_project):
+    """Codex review P2: the digest check runs in the Stop process; a FIFO swapped in
+    for the written file must not block it on open."""
+    observations, elapsed = _recovered_write(app_project, lambda t: os.mkfifo(t))
+    assert observations == [] and elapsed < 20, elapsed
+
+
+def test_observer_publishes_no_hash_when_the_file_changed_after_the_digest_check(app_project, monkeypatch):
+    """Codex review P2: a rewrite between the adapter's digest check and the
+    observer's own hash must not publish the rewriter's bytes as the step's."""
+    import hashlib
+    expected = hashlib.sha256(b"synthetic content").hexdigest()
+    monkeypatch.setattr(ag, "file_sha256", lambda path, **_: expected)  # the check saw the step's bytes
+    (obs,), _ = _recovered_write(app_project, lambda t: t.write_text("bytes from a later call"))
+    (written,) = obs["changes"]["edited"]
+    assert written["path"] == "notes.txt"
+    assert written["after"]["sha256"] is None and written["after"]["hash_status"] == "unavailable"
+
+
+def test_observer_publishes_the_hash_when_it_matches_the_expected_digest(app_project):
+    import hashlib
+    (obs,), _ = _recovered_write(app_project, lambda t: t.write_text("synthetic content"))
+    (written,) = obs["changes"]["edited"]
+    assert written["after"]["sha256"] == hashlib.sha256(b"synthetic content").hexdigest()

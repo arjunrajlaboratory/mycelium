@@ -141,7 +141,8 @@ PROTECTED = {".agents", "_agents", ".agent", ".mycelium", ".living"}
 def file_sha256(path, limit=app_store.MAX_SCAN_BYTES):
     """SHA-256 of a regular file read without following a final link, or None."""
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        # Nonblocking, so a FIFO swapped in for the file cannot hold Stop on open.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None
     try:
@@ -848,7 +849,7 @@ def _dispatch(event, payload, plugin_root, host):
                         pending.pop(step_key, None)
                         save()
 
-            def observe_edit(step_index, path, timeout=12):
+            def observe_edit(step_index, path, timeout=12, expected_sha256=None):
                 """Close a successful edit's observer interval (opened by PreToolUse) with its
                 edit observation. At most once per step, and never a lifecycle failure: an
                 observation that cannot be made leaves the interval open until turn end."""
@@ -868,8 +869,9 @@ def _dispatch(event, payload, plugin_root, host):
                         tool_use_id=observer_call_id(step_index), tool_input={"file_path": path},
                         # Callers pass only edits whose success the native record already
                         # proved (a DONE step without error, or a typed App FileEdit).
-                        tool_response={"success": True, "exit_code": 0}), root, plugin_root,
-                        timeout=timeout, kill_group=True)
+                        tool_response=dict({"success": True, "exit_code": 0}, **(
+                            {"mycelium_expected_sha256": expected_sha256} if expected_sha256 else {}))),
+                        root, plugin_root, timeout=timeout, kill_group=True)
                 except Exception as exc:
                     print(f"Mycelium Antigravity: edit observation for step {step_index}: "
                           f"{one_line(exc, 300)}", file=sys.stderr)
@@ -979,12 +981,15 @@ def _dispatch(event, payload, plugin_root, host):
                     credited = turn["actions"].get(f"{step}:{ACTIVITY_HOOK}") == "done"
                     if not credited and not tracker_ignores(Path(path).relative_to(root).as_posix()):
                         continue
-                    if file_sha256(path) != found["content_sha256"]:
-                        continue  # not provably this step's bytes any more
                     spare = app_stop_deadline - time.monotonic() - APP_FINALIZE_RESERVE_SECONDS
                     if spare < APP_RECOVERY_OBSERVE_MIN_SECONDS:
                         return  # the rest close as turn-ended, never as a guessed edit
-                    observe_edit(step, path, timeout=min(APP_RECOVERY_ACTION_SECONDS, spare))
+                    if file_sha256(path) != found["content_sha256"]:
+                        continue  # not provably this step's bytes any more
+                    # The observer re-checks the digest on the bytes it publishes: a
+                    # rewrite in between leaves the path written but without a hash.
+                    observe_edit(step, path, timeout=min(APP_RECOVERY_ACTION_SECONDS, spare),
+                                 expected_sha256=found["content_sha256"])
 
             def complete_commands():
                 for step_key, command in list(turn["pending_commands"].items()):

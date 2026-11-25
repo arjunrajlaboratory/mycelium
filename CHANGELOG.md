@@ -41,7 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - An App edit whose callback arrived while its step was still running is
     credited by Stop-time recovery. Recovery now also records that edit's
     observation, but only when the bytes are provably the step's own: a
-    `write_file` whose file still holds exactly its `Content`. An `edit_file`,
+    `write_file` whose file still holds exactly its `Content`. The observer
+    checks that digest again on the bytes it hashes. If the file changed in
+    between, the path is recorded as written with no hash. An `edit_file`,
     a file changed since, or an interval an earlier Stop already closed keeps
     the `turn-ended` expiry. These observations are optional work. They run
     only in the Stop's last root, so no root's recovery waits on them, and
