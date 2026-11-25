@@ -377,6 +377,19 @@ hook, filesystem, or lifecycle boundaries.
       for a change.
 - [ ] Pre-existing dirty and untracked files use a content identity, so a
       same-size rewrite whose mtime is restored still counts as session work.
+- [ ] Session accounting reads a bounded amount of work-tree content:
+      each snapshot hashes at most its file and byte budget, including when
+      an output grows between scanning and reading, and each Stop
+      comparison reads at most its own (a Stop that also carries a baseline
+      into the next turn runs one of each). Stop verifies paths whose ctime or inode moved (or that
+      were racy at the snapshot) first, and charges any it cannot verify; it
+      spends the rest of its budget re-reading other fingerprinted files,
+      because FAT/exFAT and unflushed shared mmap writes move no timestamp.
+      Such a write outside the fingerprinted set is not detected; that limit
+      is pinned by a test, so changing it is deliberate. Baselines from the
+      previous schema keep comparing, and a malformed baseline value counts as
+      changed rather than raising, because the Stop hook reads a crash as "no
+      changes". The `.living/` tree is still read in full.
 - [ ] Every lifecycle hook resolves the repository from the payload's session
       `cwd`, not the hook process's directory. After `cd` into a nested
       non-opted repository, Stop, its in-process lineage finalizer and
@@ -642,6 +655,7 @@ exercise them.
 | A script's direct reader/writer literals are already resolved | Repository fallback is not invoked; dynamic discovery has a fixed fail-safe entry bound. |
 | Active-log marker points outside `.living/log` | PostToolUse omits the unsafe log directive; Stop still enforces outstanding work and never reveals or follows the path. |
 | A dirty or untracked file is rewritten with the same size and restored mtime | Session accounting detects the content change. |
+| The work tree holds hundreds of thousands of untracked files, some of them only re-tagged (ctime moved, content identical) | each snapshot and each Stop comparison reads at most its content budget, and Stop opens no file outside the fingerprinted set on an unchanged tree; a metadata-only change to a fingerprinted file is not charged, one with no stored content is charged, and so is an unhashed file that was racy at the snapshot; a fingerprinted file rewritten with no timestamp change is detected; a schema 2 baseline from the previous runtime compares. |
 | `true && python failed.py` exits nonzero, or Python is a pipeline component | The provably executed analysis is recorded; an unknown failed AND prefix remains omitted. |
 | Shell operators and Python text occur only after an unquoted `#` comment marker | No reminder or lineage event is created; quoted and escaped hashes remain valid arguments. |
 | Registry summary contains `|`, or the registry/lineage helper fails | Table cells remain valid; helper failure blocks Stop and preserves retry state without duplicate finalization. |

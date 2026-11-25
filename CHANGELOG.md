@@ -174,6 +174,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and `resolve()` after a joined component all stay unresolved. Every
     existing rule of the scan still applies: additive only, the shared work
     budget and deadline, and repository containment.
+- **Session accounting no longer reads every untracked file.** SessionStart's
+  baseline and Stop's comparison used to SHA-256 the full content of every
+  dirty and untracked file. On a repository with about 211,000 untracked
+  outputs (9 GB) both hooks ran past their configured hook timeouts, so Stop
+  was killed before finalising and repeated the whole scan at the end of
+  every turn. `session_file_changes.py` now records
+  metadata (mode, size, mtime, ctime, inode) for every path and hashes content
+  only for a bounded, deterministic set (changed tracked files first, then files
+  changed within two seconds of the snapshot, then the most recently modified
+  untracked files; at most 20,000 files and 256 MiB). Stop first verifies the
+  content of every path whose ctime or inode moved; a path it cannot verify
+  within budget counts as changed, never hidden. It then re-reads the other
+  fingerprinted files while its budget lasts (20,000 files and 256 MiB), which
+  catches writes that move no timestamp (FAT and exFAT, unflushed shared
+  mmap). A same-size rewrite with a restored mtime is detected everywhere on
+  ordinary filesystems, because it moves ctime. The cost of keeping that
+  guarantee outside the fingerprinted set is that a metadata-only change there
+  (an xattr write, a chmod round trip, a macOS provenance re-tag) cannot be
+  told apart from such a rewrite and counts as session work, so Stop asks for
+  a reflection. For the same reason, a file left unhashed that changed within
+  two seconds before the snapshot counts as changed even if the session never
+  touches it. A repository whose dirty and untracked files fit the default
+  budgets fingerprints every file, so neither case arises there. A write that
+  moves no timestamp is detected only within the fingerprinted set. The budgets can be
+  set with `MYCELIUM_SNAPSHOT_CONTENT_BUDGET_FILES`,
+  `MYCELIUM_SNAPSHOT_CONTENT_BUDGET_BYTES`,
+  `MYCELIUM_COLLECT_CONTENT_BUDGET_FILES` and
+  `MYCELIUM_COLLECT_CONTENT_BUDGET_BYTES`. Hashing no longer follows a
+  symlink or blocks on a FIFO swapped in after the type check. Content reads
+  stay within the charged byte count even when a writer appends during hashing.
+- Baselines are now `schema_version` 3. Schema 2 baselines from the previous
+  runtime are still read, using the session start to decide which unchanged
+  files need no read, so open sessions keep their accounting through an
+  upgrade. Earlier runtimes reject schema 3 and use their timestamp fallback.
+  The `.living/` tree is still read in full, as before.
+
 - **argparse replay models the `parse_args(argv=None)` wrapper.** This is a
   module function returning `parser.parse_args(argv)`, called once as
   `args = parse_args(argv)` (or `parse_args()`) from `main(argv=None)`. The

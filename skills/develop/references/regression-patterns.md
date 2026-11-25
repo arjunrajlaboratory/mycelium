@@ -908,6 +908,30 @@ fast path with the plain computation (pruned scan against `finditer`,
 cached prefix folds against whole-prefix tokenization, each rewritten
 regex against its previous version).
 
+**Recurrence (session accounting):** `session_file_changes.py` hashed the
+full content of every dirty and untracked file at SessionStart and again at
+every Stop. A repository with 211,000 untracked output files
+(9 GB) pushed both hooks past their host timeouts; the killed Stop never
+finalised, so every turn ended in the same three-minute scan. The cost was
+proportional to repository bytes, not to session work. The fix keeps the
+content-identity guarantee with metadata that `utime` cannot restore (ctime,
+inode), hashes only a bounded, deterministic subset at the snapshot, and
+verifies content at Stop first for paths whose metadata moved, then
+re-reads other fingerprinted files while its budget lasts. Measure the real
+churn before trusting a metadata proxy: on macOS the system re-tags files
+(`com.apple.provenance`) without changing them, which moved ctime on dozens
+of files a day in the affected repository, so stored content is what keeps those
+from being charged within the fingerprinted set; outside it they count as
+changed, which is the price of still catching a restored-mtime rewrite
+there. Check what the proxy cannot see: FAT and exFAT copy
+ctime from mtime, and stores through a shared mmap may move no timestamp at
+all, so a metadata-only comparison misses them and the re-read pass is what
+keeps them visible within the fingerprinted set. Pin the bound with a read
+spy that also patches `os.open` and has a positive control (reads happen,
+up to the budget, only on fingerprinted paths), not only a timing test.
+Grow one output both before open and after the descriptor's initial stat.
+Measure bytes read and require the changing file to remain unverified.
+
 ## 43. A shell fast path imitates the interpreter it skips
 
 **Failure:** Moving work out of a `python3` start into bash looks like a pure
