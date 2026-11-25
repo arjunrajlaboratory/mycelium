@@ -55,6 +55,10 @@ changes its inputs, and complete the normal session protocol if a native
 transaction started. The core skill's global knowledge bootstrap applies if
 needed; domain choices and optional external skillpack clones follow their
 normal authorization and can be listed as deferred choices after base setup.
+Then settle the scientific linters (the core skill's step 4a): ask the user,
+recommending yes, and record the answer with
+`"$MYCELIUM_PYTHON" "$MYCELIUM_PLUGIN_ROOT/skills/core/scripts/setup_linters.py" --target-dir "$MYCELIUM_WORKSPACE" enable`
+(or `disable`).
 Do not invoke external coding agents to generate the index or initialize the
 project. An offline setup pass does not prove native skill selection, automatic
 hook dispatch or session completion.

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Scientific linters are recommended by default, with one question per
+  repository.** `init` asks whether to use `scilintr` (Python and R analysis
+  code) and `scitexlintr` (reports), recommends yes, and installs them on yes.
+  `skills/core/scripts/setup_linters.py` records the answer in a committed
+  `.living/linters.json`. Repositories initialized earlier are asked on first
+  use by the analyze and report skills. An analysis in a repository that opted
+  out skips linting and says so; the report-generator pack still needs
+  `scitexlintr`, so the report skill offers to enable it or use the fallback.
+  Upgrades still need the user's agreement.
 - **Antigravity (IDE and App) now observes I/O the way Claude Code and Codex
   do.** The 0.10.0 live run showed that static script reading, the only
   lineage Antigravity had, covers almost nothing in real agent scripts. The
