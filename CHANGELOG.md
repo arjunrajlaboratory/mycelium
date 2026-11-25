@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-25
+
 ### Added
 
 - **Scientific linters are recommended by default, with one question per
@@ -18,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out skips linting and says so; the report-generator pack still needs
   `scitexlintr`, so the report skill offers to enable it or use the fallback.
   Upgrades still need the user's agreement.
+
 - **Antigravity (IDE and App) now observes I/O the way Claude Code and Codex
   do.** The 0.10.0 live run showed that static script reading, the only
   lineage Antigravity had, covers almost nothing in real agent scripts. The
@@ -134,6 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     directory. Such a directory is now declined unless both readings agree
     and every component exists. A glob word, or a second `env -C`, is
     declined too.
+
 - **Stop no longer fails open on a long changed-file list or an unusual file
   name** (`mycelium-stop-check.sh`). Stop built its short file lists (the
   block reason, the registry summary, the fallback handoff and the
@@ -174,6 +178,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and `resolve()` after a joined component all stay unresolved. Every
     existing rule of the scan still applies: additive only, the shared work
     budget and deadline, and repository containment.
+
 - **Session accounting no longer reads every untracked file.** SessionStart's
   baseline and Stop's comparison used to SHA-256 the full content of every
   dirty and untracked file. On a repository with about 211,000 untracked
@@ -222,6 +227,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   straight-line (anything before the final return other than assignments
   and expression statements, or any `return`, `raise`, `yield` or nested
   scope), because it could return another namespace first.
+
 - **Main's static result is never lost.** The scan main already runs goes
   first, unchanged. `__file__` and wrapper resolution run in a second pass,
   with their own path cap, work budget and deadline. That pass adds only
