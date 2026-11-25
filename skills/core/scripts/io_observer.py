@@ -2477,6 +2477,15 @@ def _publish_edit(
     written, deleted, refused = edit_changes
     own_key = interval_key(host, session, call_id)
     own = intervals.get(own_key)
+    if own is not None and own.expired:
+        # The journal closed this call before its Post (a turn end or the age
+        # bound): the target may since hold a later call's bytes, and that
+        # call is not recorded as overlapping. Its writes keep their paths
+        # only, and it asserts nothing about other paths.
+        written = [{"path": w["path"], "after": {"sha256": None, "hash_status": "unavailable"}}
+                   for w in written]
+        single_path = False
+        journal_error = journal_error or "own-interval-expired"
     observation: dict[str, Any] = {
         "kind": "observation",
         "version": OBSERVATION_VERSION,

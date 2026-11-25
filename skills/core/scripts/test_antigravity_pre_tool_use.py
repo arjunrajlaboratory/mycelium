@@ -1095,3 +1095,26 @@ def test_digest_probe_timeout_still_leaves_time_for_the_unknown_bytes_observatio
     observations = io._read_lines(io.observations_path(repo / ".mycelium", ag.APP_HOST, session))
     (edit,) = observations
     assert edit["changes"]["edited"][0]["after"]["sha256"] is None, edit
+
+
+def test_edit_post_after_its_interval_expired_claims_no_bytes(tmp_path):
+    """Review P2 (Codex): after a partial turn-end failure, the adapter's suppression
+    may not have advanced although this call's interval was expired. A late edit
+    Post must not hash bytes a later call may have written, nor be marked single-path."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".mycelium/io").mkdir(parents=True)
+    target = repo / "notes.txt"
+    payload = {"hook_event_name": "PostToolUse", "session_id": "s", "tool_name": "Write",
+               "tool_use_id": "t1", "cwd": str(repo), "tool_input": {"file_path": str(target)},
+               "tool_response": {"success": True, "exit_code": 0, "mycelium_single_path_edit": True}}
+    io.hook(repo / ".mycelium", repo, "antigravity-app", json.dumps(dict(payload, hook_event_name="PreToolUse")))
+    io.turn_end(repo / ".mycelium", host="antigravity-app", session="s")
+    target.write_text("bytes from a later call")
+    io.hook(repo / ".mycelium", repo, "antigravity-app", json.dumps(payload))
+    edits = [o for o in io._read_lines(io.observations_path(repo / ".mycelium", "antigravity-app", "s"))
+             if o.get("status") == "edit"]
+    for obs in edits:
+        assert all(w["after"]["sha256"] is None for w in obs["changes"]["edited"]), obs
+        assert "single_path" not in obs, obs
