@@ -474,4 +474,7 @@ def test_summary_identifies_release_facts() -> None:
     assert "`abc1234`" in summary
     assert "mycelium--v0.7.0" in summary
     assert "claude plugin tag --dry-run" in summary
-    assert "git tag mycelium--v0.7.0" in summary
+    # The tag names the gated commit explicitly: a bare `git tag` tags
+    # whatever the local checkout is on.
+    assert 'git tag -a mycelium--v0.7.0 -m "Mycelium 0.7.0" abc1234' in summary
+    assert "git tag mycelium--v0.7.0 " not in summary

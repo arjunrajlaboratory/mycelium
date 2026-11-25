@@ -298,7 +298,7 @@ not enter `summary.unique_inputs`/`unique_outputs`.
 ## Event schema (NDJSON, one line per detected script)
 
 The authoritative field definitions for every record below, for v1 (0.9.7
-and earlier) and v2 (0.9.8 onward), are in
+and earlier) and v2 (0.10.0 onward), are in
 [`provenance-schema.json`](provenance-schema.json) (JSON Schema 2020-12).
 That file is what Warrant and other readers validate against. This section
 describes the fields; where the two differ, the schema file wins.
@@ -331,7 +331,7 @@ describes the fields; where the two differ, the schema file wins.
 }
 ```
 
-### v2 identity and frame (0.9.8)
+### v2 identity and frame (0.10.0)
 
 - **`event_id`, `host`, `host_session_id`, `ts_ns`.** Every analysis event
   and data command now has an identity. `ts_ns` orders records within a
@@ -799,11 +799,14 @@ outside that:
   not who wrote it.
 - Edits made outside the agent. A disk query finds them, but the record cannot
   say who made them.
-- Hosts with no observer. The Antigravity adapters install no `PreToolUse`
-  hook, because a pre-hook there would sit on the approval path. Their runs
-  still reach the manifest, but no call is observed. With no observation
-  store at all, a query answers `no-recorded-write` with the reason
-  `no-observations`: the absence of a write proves nothing.
+- Calls with no observer. An Antigravity package older than this observer
+  installs no `PreToolUse` hook; its runs still reach the manifest, but no call
+  is observed. (Current Antigravity packages observe `run_command` and the
+  edit tools through an observation-only `PreToolUse` that always answers
+  `allow`; an App command whose working directory or exit the App's own step
+  record cannot prove is still unobserved.) With no observation store at all,
+  a query answers `no-recorded-write` with the reason `no-observations`: the
+  absence of a write proves nothing.
 
 **Readers.** Readers are listed with their `hash_origin`, proven first. A
 hook cannot see reads, so every read stays inferred.

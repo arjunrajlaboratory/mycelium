@@ -19,6 +19,7 @@ a small dict of verified values. Callers treat ``Unverified`` as unresolved.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -411,7 +412,14 @@ def _edit_from(cid, step, status, payload, tool_names, expected_path=None):
         raise UnrecognizedShape("native edit record has no single text path field") from error
     if recorded != path or not os.path.isabs(path) or os.path.normpath(path) != path:
         raise Unverified("native edit path is not canonical or differs from its arguments")
-    return {"call_id": call_id, "path": path, "kind": kind, "tool": name, "source_step": source_step}
+    content = args.get("Content") if name == "write_file" else None
+    try:
+        # Only a digest, never the content: it ties a later observed file to these bytes.
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest() if isinstance(content, str) else None
+    except UnicodeEncodeError:
+        digest = None
+    return {"call_id": call_id, "path": path, "kind": kind, "tool": name, "source_step": source_step,
+            "content_sha256": digest}
 
 
 def edit(cid, step, tool_name, expected_path):

@@ -211,12 +211,84 @@ captures used to resolve documentation differences.
 | Native event | Mycelium behavior |
 | --- | --- |
 | `PreInvocation` | Start one lifecycle transaction per explicit user turn and inject project and private-handoff context. |
+| `PreToolUse` | Observation only: take the I/O observer's pre-snapshot for `run_command`, or open the journal interval for an edit, then always answer `{"decision": "allow"}`. |
 | `PostToolUse` | Translate native commands, reads, and successful file edits into the existing base hooks. |
 | `PostInvocation` | Observe a supported lifecycle boundary without treating invocation counters as turn identities. |
 | `Stop` | Check a fully idle, normal completion; request continuation when base Mycelium blocks; publish only after base finalization succeeds. |
 
-No `PreToolUse` hook is installed. The adapter does not grant command approval
-or change the IDE's permissions. The native plugin hook working directory is
+### PreToolUse: observation only, always `allow`
+
+Antigravity requires every `PreToolUse` hook to return a `decision`. Mycelium's
+handler always returns exactly `{"decision": "allow"}` and exits 0. The host's
+hook documentation defines `allow` as letting the call proceed by "delegating
+to the next hook or default policy", so approval prompts, "Always Allow"
+grants and denials stay the user's and the host's. The handler never returns
+`auto_approve`, `deny`, `ask`, `force_ask` or `deny_unless_prior_grant`, and
+never sets `overwrite` or `permissionOverrides`. Mycelium does not grant
+command approval or change the host's permissions.
+
+The guarantee does not depend on the observer working. The registered command
+is a shell wrapper, `skills/core/hooks/mycelium-antigravity-pre.sh`. It
+discards the Python helper's output and prints the `allow` itself after the
+helper exits, crashes, prints something else, or cannot start. A watchdog
+kills a helper still running after about 1.8 s, so the hook ends in about 2 s,
+well inside its registered 10 s timeout and the host's 30 s default. The
+helper has its own 1.5 s deadline. It waits at most 0.5 s for the
+observation journal lock and spends the rest, at most the observer's usual
+3 s, on the snapshot walk. A walk cut short leaves an `unavailable` observation
+(`…-walk-timeout`), never "nothing changed".
+
+It is matched only to `run_command` and the profile's edit tools
+(`write_to_file`, `replace_file_content` and `multi_replace_file_content` in
+the IDE; `write_file` and `edit_file` in the App). It observes a call only
+when the PostToolUse path would credit it: the same host-profile proof and
+exact native conversation directory, an opted-in Git root, a supported tool
+shape, and an active work cycle. A late event never starts one, and it never
+writes native state. A command it cannot snapshot but that can still run (an
+App daemon, sandbox bypass or unrecognised argument, an IDE `Cwd` outside the
+project, or a command arriving after its work cycle ended) is journaled
+without a snapshot as a background call in every opted-in root. Calls that run
+beside it are then marked overlapping, so none of them is credited with its
+writes. Turn end leaves such an interval open; only the journal's age bound
+closes it. In the IDE, a command is observed in the root that holds
+its `Cwd`. In the App, a command without `BypassSandbox` or `IsDaemon` is
+snapshotted in every opted-in root, because only the App's step record later
+proves where it ran. An edit is observed only outside `.living`, `.mycelium`
+and `.agents`. The observer's call id is `ag-step-<stepIdx>` in the session
+`<conversation>-turn-<user step>`, the same keys the adapter's PostToolUse
+derives, so the data tracker's Post closes the same call. That includes a
+`RUNNING` command settled later, an App command settled from its step record,
+and a successful edit, which gets an edit observation. The App can deliver an
+edit's PostToolUse while its step is still running; Stop-time recovery then
+credits the edit and records its edit observation. That observation
+vouches for every other path, because an App edit changes only its one
+verified `Path`. Its own path is hashed only for a `write_file` whose file
+still holds exactly its `Content`, since the observation is made at Stop.
+An `edit_file`, or a file changed since then, is recorded as written with
+its bytes unknown (`write-hash-unknown`). When a work cycle
+reaches Stop finalization, the intervals of calls that never got a Post
+(denied, failed or unrecorded) are closed as `turn-ended`. A command still
+`RUNNING` at the final Stop allowance keeps its interval open. With this, an
+Antigravity run gets the same observed I/O lineage as Claude Code and Codex
+(`lineage_index.py query --path …` → `current-in-record` with sole
+attribution) for synchronous commands that ran in one opted-in root.
+
+For live verification only, a word in `<project>/.mycelium/antigravity-pre-fault`
+(or the `MYCELIUM_ANTIGRAVITY_PRE_FAULT` environment variable) makes the
+helper fail on purpose. `crash` raises, `exit` exits without output, `slow`
+sleeps past its own deadline, and `hang` ignores that deadline so only the
+wrapper's watchdog ends it. Each still answers `allow`. Delete the file
+afterwards: while it is present, nothing is observed.
+
+The host documentation does not say what Antigravity does when a hook fails,
+times out or prints nothing, or whether a hook's presence changes the
+approval UI. That is why the wrapper never lets those cases happen and why
+each App version needs the approval-preservation check in the
+[App audit profile](../skills/lifecycle-audit/references/antigravity-app.md).
+
+### Other events
+
+The native plugin hook working directory is
 the installed package root. The observed `PostToolUse.toolCall` supplies
 arguments; `error: ""` does not imply process exit zero. A structured exit code
 is retained when the transcript provides one. Commands observed as `RUNNING`

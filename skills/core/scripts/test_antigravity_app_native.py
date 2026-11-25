@@ -510,7 +510,9 @@ def test_verified_native_create_overwrite_and_edit_kinds_are_tracked(native, nam
     args = replace_args(target) if name == "edit_file" else dict(edit_args(target), Overwrite=kind == 2)
     db.put(7, edit_payload(target, name=name, kind=kind, args=args))
     app("PostToolUse", edit_event(payload, target, args=args, name=name))
-    assert [(n, d["tool_input"]) for _, n, d in calls] == [("mycelium-activity-tracker.sh", {"file_path": target})]
+    # Activity credit, then the I/O observer's edit observation (closing its PreToolUse interval).
+    assert [(n, d["tool_input"]) for _, n, d in calls] == [("mycelium-activity-tracker.sh", {"file_path": target}),
+                                                         ("mycelium-io-observer.sh", {"file_path": target})]
 
 
 @pytest.mark.parametrize("case", ["write-as-edit-kind", "edit-as-create-kind", "edit-as-overwrite-kind",
@@ -536,9 +538,12 @@ def test_verified_native_edit_is_tracked(native):
     db.put(7, edit_payload(target))
     app("PostToolUse", edit_event(payload, target))
     assert [(n, d["tool_name"], d["tool_input"]) for _, n, d in calls] == [
-        ("mycelium-activity-tracker.sh", "Write", {"file_path": target})]
+        ("mycelium-activity-tracker.sh", "Write", {"file_path": target}),
+        ("mycelium-io-observer.sh", "Write", {"file_path": target})]
+    observed = calls[1][2]
+    assert (observed["hook_event_name"], observed["tool_use_id"]) == ("PostToolUse", ag.observer_call_id(7))
     app("PostToolUse", edit_event(payload, target))
-    assert len(calls) == 1
+    assert len(calls) == 2  # a redelivered event observes nothing twice
 
 
 @pytest.mark.parametrize("case", ["failed-edit", "no-result", "wrong-type", "outside-root", "protected",

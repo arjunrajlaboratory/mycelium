@@ -77,10 +77,12 @@ def profile_spec(profile):
     if profile == "ide":
         return {"owner": "mycelium-antigravity-ide", "host": "antigravity-ide", "guidance": HOST_GUIDANCE,
                 "matcher": "run_command|view_file|write_to_file|replace_file_content|multi_replace_file_content",
+                "pre_matcher": "run_command|write_to_file|replace_file_content|multi_replace_file_content",
                 "host_argument": ""}
     if profile == "app":
         return {"owner": "mycelium-antigravity-app", "host": "antigravity-app", "guidance": APP_GUIDANCE,
-                "matcher": "run_command|read_file|write_file|edit_file", "host_argument": "--host antigravity-app "}
+                "matcher": "run_command|read_file|write_file|edit_file",
+                "pre_matcher": "run_command|write_file|edit_file", "host_argument": "--host antigravity-app "}
     raise ValueError("Unknown Antigravity package profile")
 
 
@@ -358,6 +360,14 @@ def candidate_files(source, python, profile="ide"):
         handler = {"type": "command", "command": command, "timeout": 45}
         handlers[event] = ([{"matcher": spec["matcher"], "hooks": [handler]}]
                            if event == "PostToolUse" else [handler])
+    # PreToolUse is observation only. Antigravity requires a decision from it; the wrapper always
+    # prints {"decision": "allow"} (defer to the host's own policy) and exits 0, whatever the
+    # observer does, and its watchdog ends it in about 2 s, well inside this timeout.
+    pre = ("PATH=" + shlex.quote(str(python.parent)) + ':"$PATH" /bin/bash '
+           "skills/core/hooks/mycelium-antigravity-pre.sh " + shlex.quote(str(python)) + " " +
+           spec["host_argument"]).rstrip()
+    handlers["PreToolUse"] = [{"matcher": spec["pre_matcher"],
+                               "hooks": [{"type": "command", "command": pre, "timeout": 10}]}]
     files["hooks.json"] = (json.dumps({"mycelium": handlers}, indent=2).encode() + b"\n", 0o644)
     commit = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5)
     manifest = {"owner": spec["owner"], "schema": 2, "version": version,
