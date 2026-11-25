@@ -90,14 +90,17 @@ ts_ancient() {
   echo $(( $(date +%s) - 3600 ))
 }
 
-# Touch a file with an old timestamp (60 seconds ago)
+# Touch a file with an old timestamp: 120 seconds ago, strictly older than
+# a ts_old reminder (60 s ago). The two take separate clock readings, so at
+# the same 60 s offset a sub-second mtime lands after the reminder's whole
+# second and the "old" file reads as updated.
 touch_old() {
   local file="$1"
   python3 - "$file" <<'PY'
 import os, sys, time
 if not os.path.exists(sys.argv[1]):
     open(sys.argv[1], "a").close()
-stamp = time.time() - 60
+stamp = time.time() - 120
 os.utime(sys.argv[1], (stamp, stamp))
 PY
 }
@@ -148,14 +151,12 @@ echo "TEST 2: Work done, nothing updated → should BLOCK"
   mkdir -p "$REPO/.living"
   mkdir -p "$REPO/.living/findings"
 
-  # Create .living files FIRST, then wait 2 seconds, then write the reminder timestamp.
-  # This guarantees file mtimes < WORK_TS (reminder is written after the files exist).
+  # .living files are two hours old and the reminder one hour old, so every
+  # file is older than WORK_TS without waiting for the clock.
   touch_very_old "$REPO/.living/learnings.md"
   touch_very_old "$REPO/.living/decisions.md"
   touch_very_old "$REPO/.living/conventions.md"
   touch_very_old "$REPO/.living/findings"
-  # Ensure the directory itself is also old
-  sleep 2
 
   # Use an old work timestamp so every .living file is clearly older.
   ts_ancient > "$REPO/.mycelium/mycelium-reminded.tmp"
@@ -191,8 +192,7 @@ echo "TEST 3: Work done, only learnings.md updated → should PASS"
   mkdir -p "$REPO/.living/findings"
   touch_old "$REPO/.living/findings"
 
-  # learnings.md touched NOW (after the reminder timestamp)
-  sleep 1
+  # learnings.md touched NOW (60 s after the reminder timestamp)
   touch_now "$REPO/.living/learnings.md"
 
   run_hook "$REPO"
@@ -222,7 +222,6 @@ echo "TEST 4: Work done, only decisions.md updated → should PASS"
   mkdir -p "$REPO/.living/findings"
   touch_old "$REPO/.living/findings"
 
-  sleep 1
   touch_now "$REPO/.living/decisions.md"
 
   run_hook "$REPO"
@@ -252,7 +251,6 @@ echo "TEST 5: Work done, only conventions.md updated → should PASS"
   mkdir -p "$REPO/.living/findings"
   touch_old "$REPO/.living/findings"
 
-  sleep 1
   touch_now "$REPO/.living/conventions.md"
 
   run_hook "$REPO"
@@ -283,7 +281,6 @@ echo "TEST 6: Work done, only findings/ dir updated → should PASS"
   touch_very_old "$REPO/.living/conventions.md"
   touch_very_old "$REPO/.living/findings"
 
-  sleep 1
   # Adding a new file into findings/ updates the directory mtime
   touch_now "$REPO/.living/findings/new-finding.md"
 
@@ -307,17 +304,22 @@ echo "TEST 7: Subagent detection → should skip, exit 0"
   REPO=$(make_repo)
   mkdir -p "$REPO/.living"
 
-  # Create active-session-log.tmp: line 1 = log path, line 2 = owner_ts
-  LOG_FILE="$REPO/.mycelium/fake-session.log"
-  touch "$LOG_FILE"
+  # Create active-session-log.tmp: line 1 = log path, line 2 = owner_ts.
+  # The log must be a valid marker target (an .md under .living/log/), or
+  # the hook discards the marker and never reaches the subagent check.
+  LOG_FILE="$REPO/.living/log/2026-01-01-001-test.md"
+  mkdir -p "$(dirname "$LOG_FILE")"
+  printf -- '---\nsession_id: 2026-01-01-001\nended:\n---\n' > "$LOG_FILE"
   printf '%s\n%s\n' "$LOG_FILE" "111" > "$REPO/.mycelium/active-session-log.tmp"
 
   # session-start-ts.tmp holds OUR timestamp — different from owner
   echo "222" > "$REPO/.mycelium/session-start-ts.tmp"
 
-  # Also set up reminder so the .living/ check would normally trigger
+  # Work is outstanding and .living/ is stale, so only the subagent skip
+  # keeps this Stop from blocking.
   ts_old > "$REPO/.mycelium/mycelium-reminded.tmp"
-  touch_old "$REPO/.living/learnings.md"
+  echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
+  touch_very_old "$REPO/.living/learnings.md"
 
   run_hook "$REPO"
 
@@ -368,7 +370,6 @@ echo "TEST 9: Block JSON contains correct routing rule text"
   touch_very_old "$REPO/.living/decisions.md"
   touch_very_old "$REPO/.living/conventions.md"
   touch_very_old "$REPO/.living/findings"
-  sleep 2
   ts_ancient > "$REPO/.mycelium/mycelium-reminded.tmp"
 
   run_hook "$REPO"
@@ -413,7 +414,6 @@ echo "TEST 10: learnings.md + findings/ both updated → should PASS"
   touch_old "$REPO/.living/conventions.md"
   touch_old "$REPO/.living/findings"
 
-  sleep 1
   touch_now "$REPO/.living/learnings.md"
   touch_now "$REPO/.living/findings/topic.md"
 
@@ -554,8 +554,6 @@ echo "TEST 14: Activity file only, .living not updated → should BLOCK"
   touch_very_old "$REPO/.living/conventions.md"
   touch_very_old "$REPO/.living/findings"
 
-  # Sleep so that session-start-ts written AFTER is newer than all .living files
-  sleep 2
 
   # Activity file exists, no reminded.tmp → hook uses session-start-ts as WORK_TS
   echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
@@ -603,7 +601,6 @@ LOG_EOF
   echo "src/foo.py" > "$REPO/.mycelium/mycelium-session-activity.tmp"
 
   # Update .living/ so the hook passes (not blocked)
-  sleep 1
   touch_now "$REPO/.living/learnings.md"
 
   run_hook "$REPO"

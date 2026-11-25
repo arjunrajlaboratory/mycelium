@@ -13,6 +13,7 @@ import time
 import pytest
 
 from test_codex_compatibility import HOOKS_DIR, _repo, _run_claude_hook, _run_hook
+from test_hook_state_port import _lock_wait_signal, _wait_for as _wait_for_signal
 
 pytestmark = pytest.mark.platform
 
@@ -41,6 +42,16 @@ def _non_exclusive_mkdir_path(tmp_path: Path) -> str:
     )
     shim.chmod(0o755)
     return f"{shim_dir}{os.pathsep}{os.environ['PATH']}"
+
+
+# Hooks wait up to MYCELIUM_SESSION_LOCK_MAX_ATTEMPTS polls (default 600, at
+# least 50 ms each) for a session lock. Tests that run many hooks against one
+# transaction raise it so a loaded runner does not drop events by design.
+_PATIENT_SESSION_LOCK = {"MYCELIUM_SESSION_LOCK_MAX_ATTEMPTS": "6000"}
+_UNRECORDED_DIAGNOSTIC = (
+    "Mycelium: mycelium-activity-tracker.sh could not take the session lock; "
+    "this tool event was not recorded; Stop will report it.\n"
+)
 
 
 def _run_state(repo: Path, host: str, session_id: str) -> Path:
@@ -592,6 +603,7 @@ def test_waiting_post_tool_revalidates_after_transaction_is_accepted(tmp_path):
     }
     env = os.environ.copy()
     env["MYCELIUM_HOOK_HOST"] = "codex"
+    waiting = _lock_wait_signal(tmp_path, env)
     hook = Path(__file__).resolve().parent.parent / "hooks" / "mycelium-activity-tracker.sh"
     process = subprocess.Popen(
         [str(hook)],
@@ -605,8 +617,9 @@ def test_waiting_post_tool_revalidates_after_transaction_is_accepted(tmp_path):
     assert process.stdin is not None
     process.stdin.write(json.dumps(payload))
     process.stdin.close()
-    time.sleep(1.0)
-    assert process.poll() is None, "PostToolUse bypassed the session event lock"
+    # Its validation before the lock has passed once it polls the held lock;
+    # only then does modelling the accepted Stop test the revalidation.
+    _wait_for_signal(waiting, process, "the session-lock wait (PostToolUse bypassed the lock)")
 
     # Model the accepted Stop critical section while PostToolUse is queued.
     accepted_log = Path(
@@ -617,7 +630,7 @@ def test_waiting_post_tool_revalidates_after_transaction_is_accepted(tmp_path):
     (state / "active-session-owner-id.tmp").unlink()
     (lock / "owner").unlink()
     lock.rmdir()
-    returncode = process.wait(timeout=15)
+    returncode = process.wait(timeout=60)
 
     assert returncode == 0
     # The queued event revalidated after the lock and did not write into the
@@ -981,6 +994,15 @@ def test_parent_identity_collects_subagent_activity_without_a_new_transaction(tm
 
 
 def test_parallel_subagent_events_are_serialized_into_parent_transaction(tmp_path):
+    """Parallel events for one transaction are serialized, never lost.
+
+    Each event either lands in the parent's activity file exactly once or,
+    when its hook could not take the session lock, is accounted for: a
+    stderr diagnostic plus one line in the transaction's unrecorded-events
+    file, which Stop reports. A silent loss (a lost update in the activity
+    file, or a dropped event with no evidence) fails. The session-lock wait
+    is raised so a loaded runner rarely drops an event at all.
+    """
     repo = _repo(tmp_path)
     parent_id = "parallel-parent-root"
     assert _run_hook(
@@ -1011,17 +1033,38 @@ def test_parallel_subagent_events_are_serialized_into_parent_transaction(tmp_pat
                 },
                 "tool_response": {"exit_code": 0},
             },
+            extra_env=_PATIENT_SESSION_LOCK,
         )
 
     with ThreadPoolExecutor(max_workers=12) as pool:
         results = list(pool.map(record_child, child_paths))
 
     assert all(result.returncode == 0 for result in results)
-    assert all(result.stderr == "" for result in results), [
-        result.stderr for result in results if result.stderr
-    ]
+    dropped = {
+        path
+        for path, result in zip(child_paths, results)
+        if result.stderr == _UNRECORDED_DIAGNOSTIC
+    }
+    assert all(
+        result.stderr in ("", _UNRECORDED_DIAGNOSTIC) for result in results
+    ), [result.stderr for result in results if result.stderr]
     recorded = (parent_state / "mycelium-session-activity.tmp").read_text().splitlines()
-    assert sorted(recorded) == child_paths
+    assert len(recorded) == len(set(recorded)), recorded
+    assert sorted(recorded) == sorted(set(child_paths) - dropped)
+    # With the wait raised to minutes, a drop is a freak event: accept at most
+    # one, so a hook that stops waiting (19 of 24 dropped at 2 attempts) fails.
+    assert len(dropped) <= 1, sorted(dropped)
+    unrecorded = parent_state / "mycelium-unrecorded-events.tmp"
+    lines = (
+        [json.loads(line) for line in unrecorded.read_text().splitlines() if line]
+        if unrecorded.exists()
+        else []
+    )
+    assert len(lines) == len(dropped), (lines, sorted(dropped))
+    assert all(
+        line["kind"] == "work" and line["tool_name"] == "apply_patch"
+        for line in lines
+    ), lines
     assert len(_session_logs(repo)) == 1
 
 

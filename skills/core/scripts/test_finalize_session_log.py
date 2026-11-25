@@ -449,3 +449,26 @@ def test_cli_finalizes_intact_log_with_status_zero(tmp_path, monkeypatch):
 
     assert MODULE.main(["--log-path", str(path), *_CLI_ARGS]) == 0
     assert "### 18:42 — Session ended (7m, 0 files)" in path.read_text()
+
+
+def _finalize_with_gap(path: Path, gap: str, files: list[str]) -> None:
+    MODULE.finalize_session_log(
+        path, ended="2026-08-01T18:42:00-0400", duration_minutes=7,
+        files_changed=len(files), end_time="18:42", changed_paths=files, lineage_gap=gap)
+
+
+@pytest.mark.parametrize("files", [[], ["src/a.py"]])
+def test_a_lineage_gap_is_one_footer_line_and_a_retry_replaces_it(tmp_path, files):
+    path = tmp_path / "session.md"
+    _log(path)
+    _finalize_with_gap(path, "LINEAGE GAP: 2 data command(s)\nnot recorded", files)
+    first = path.read_text()
+    assert "- Lineage gaps: LINEAGE GAP: 2 data command(s) not recorded\n" in first
+
+    _finalize_with_gap(path, "LINEAGE GAP: 3 data command(s)", files)
+    again = path.read_text()
+    assert again.count("- Lineage gaps:") == 1 and "3 data command(s)" in again
+    _finalize_with_gap(path, "", files)
+    assert "- Lineage gaps:" not in path.read_text()
+    if files:
+        assert path.read_text().count("### Files Modified") == 1

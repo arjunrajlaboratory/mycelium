@@ -9,6 +9,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Antigravity (IDE and App) now observes I/O the way Claude Code and Codex
+  do.** The 0.10.0 live run showed that static script reading, the only
+  lineage Antigravity had, covers almost nothing in real agent scripts. The
+  index honestly answered `no-recorded-write` / `no-observations`. Both
+  Antigravity packages now register a `PreToolUse` hook for `run_command` and
+  their edit tools. It takes the existing I/O observer's pre-snapshot (or
+  opens the edit's journal interval), and the adapter's PostToolUse closes
+  the same call: the data tracker for commands, including `RUNNING` IDE
+  commands and App commands settled from the App's step record, and an edit
+  observation for verified edits. A synchronous command's output can now
+  reach `current-in-record` with sole attribution.
+  - **It never influences approvals.** Antigravity requires a `decision`;
+    the hook always answers exactly `{"decision": "allow"}`, which defers to
+    the next hook or the host's default policy, and exits 0. The shell
+    wrapper `mycelium-antigravity-pre.sh` prints that itself, whatever the
+    Python helper does (crash, wrong output, missing interpreter), and a
+    watchdog kills a helper still running after about 1.8 s. It never sends
+    `auto_approve`, `deny`, `ask`, `overwrite` or `permissionOverrides`.
+  - The helper applies the PostToolUse path's own rules before observing:
+    host-profile proof, the exact native conversation directory, an opted-in
+    root, a supported tool shape (no App `BypassSandbox` or `IsDaemon`), and
+    an active work cycle. A late event never observes. It writes no native
+    state. Its call id is `ag-step-<stepIdx>` in the session
+    `<conversation>-turn-<user step>`.
+  - A command the Pre cannot snapshot but that can still run (an App daemon,
+    sandbox bypass or unrecognised argument, an IDE `Cwd` outside the
+    project, or a command after its work cycle ended) is journaled as a
+    background call, so a later call running beside it is marked overlapping
+    instead of being credited with its writes.
+  - An App edit whose callback arrived while its step was still running is
+    credited by Stop-time recovery. Recovery now also records that edit's
+    observation, so its interval no longer expires and leaves every other
+    write of the turn `coverage-unproven`. The App's `write_file` and
+    `edit_file` change only their one verified path, so the observation
+    vouches for every other path. The edited path is hashed only for a
+    `write_file` whose file still holds exactly its `Content`. The observer
+    checks that digest again on the bytes it hashes. Otherwise (an
+    `edit_file`, or a file changed since) the path is recorded as written
+    with its bytes unknown (`write-hash-unknown`), never with bytes observed
+    at Stop. An interval an earlier Stop already closed is not observed.
+    These observations are optional work. They run only in the Stop's last
+    root, so no root's recovery waits on them, and within the remaining
+    budget. A timed-out observer's process group is killed, so it cannot
+    write afterwards.
+  - Calls that never get a Post (a denied or failed call) are closed as
+    `turn-ended` before Stop finalization. A command still running at the
+    final Stop allowance keeps its interval open.
+  - `<project>/.mycelium/antigravity-pre-fault` (`crash`, `exit`, `slow`,
+    `hang`) or `MYCELIUM_ANTIGRAVITY_PRE_FAULT` makes the helper fail on
+    purpose, for the live check that approvals are unchanged.
+  - Upgrade: reinstall the package with `tools/antigravity.py install`
+    (add `--profile app --destination …` for the App), then start a new
+    conversation. No project migration is needed. Older packages keep working
+    without observations.
+  - The host's documentation does not say how Antigravity treats a failed,
+    slow or silent hook. The approval-preservation check in the App audit
+    profile must pass on each App version.
+
+- **Maintainer runbook and agent instruction files.**
+  - `docs/maintainer-runbook.md` collects the operational knowledge behind
+    developing, live-testing, reviewing, merging and releasing Mycelium.
+  - Root `AGENTS.md` (imported by `CLAUDE.md`) points agents at it and at the
+    `develop` skill.
+  - The release gate's next steps now tag the gated commit explicitly
+    (`git tag -a ... <sha>`) and include the GitHub release step. A bare
+    `git tag` tags whatever the local checkout is on.
+
+### Fixed
+
+- **Stop no longer fails open on a long changed-file list or an unusual file
+  name** (`mycelium-stop-check.sh`). Stop built its short file lists (the
+  block reason, the registry summary, the fallback handoff and the
+  session-end triage) by piping the whole list into `head`, then into
+  `basename` or `xargs`. With more path text than a pipe holds (64 KiB on
+  macOS; every run failed from about 128 KiB), `head` exited while `printf`
+  or `sort` was still writing, and under `pipefail` Stop exited 1 with no
+  output. A name starting with `-` did the same when it was the last one
+  listed (otherwise it was dropped), and so did a path with a quote or one of
+  255 bytes or more in the session-end triage. The host logged a hook
+  error and the turn ended: the block that was due was lost, or finalization
+  stopped halfway. Nothing reset the work cycle, so every later Stop in that
+  session failed the same way. A bulk copy, or a job that writes a few
+  thousand outputs into the repository, was enough to start it. The four
+  readers now use `mycelium_first_names`, which drains the input, extracts
+  basenames as bytes, and escapes invalid UTF-8 before displaying them.
+
+- **Static stdlib I/O reading resolves paths anchored on `__file__`.**
+  Agent-written analysis scripts build every path from the script's own
+  location (`Path(__file__).resolve().parents[2] / "data" / ...`). In the
+  2026-11-24 live runs this left every run without a runtime observer
+  recording `io_detection: unresolved`.
+  - `__file__` is now bound to the script's path when Python ran it
+    directly (`python path/run.py`) and that path is certain. The word must
+    be in normal form (no `.`, `..` or doubled `/`), must name the detected
+    script, and no component of the path, working directory included, may
+    be a symlink. Otherwise nothing changes.
+  - Supported: `Path(__file__)`, `.resolve()`, `.absolute()`, `.parent`,
+    `.parents[<literal int>]`, and `os.path.abspath`/`realpath`/`dirname`
+    (nested), through module constants, `/`, `os.path.join` and argparse
+    defaults.
+  - A relative script word is used only through `abspath`, `realpath`,
+    `resolve()` or `absolute()` of `__file__` itself, since Python before 3.9
+    leaves it relative. With a relative word, a `chdir` anywhere in the
+    script leaves `__file__` unbound.
+  - `__file__` rebound anywhere, a non-literal or negative `parents` index,
+    and `resolve()` after a joined component all stay unresolved. Every
+    existing rule of the scan still applies: additive only, the shared work
+    budget and deadline, and repository containment.
+- **argparse replay models the `parse_args(argv=None)` wrapper.** This is a
+  module function returning `parser.parse_args(argv)`, called once as
+  `args = parse_args(argv)` (or `parse_args()`) from `main(argv=None)`. The
+  main guard calls `main` with no arguments: `main()`, `sys.exit(main())`
+  or `raise SystemExit(main())`. `argv` is then provably None, and the
+  existing replay rules apply unchanged. Each `argv` is resolved in its own
+  function and must not be used anywhere else there. Any other caller, a
+  non-None default, a rebound or mutated `argv`, `sys.argv` touched, or a
+  second parse call anywhere declines. So does a wrapper body that is not
+  straight-line (anything before the final return other than assignments
+  and expression statements, or any `return`, `raise`, `yield` or nested
+  scope), because it could return another namespace first.
+- **Main's static result is never lost.** The scan main already runs goes
+  first, unchanged. `__file__` and wrapper resolution run in a second pass,
+  with their own path cap, work budget and deadline. That pass adds only
+  paths the first did not find. Over any of its bounds it adds nothing, and
+  main's records stand.
+
+## [0.10.0] - 2026-11-24
+
+### Added
+
 - **A transcript replay for data lineage** (`tools/lineage_replay.py`). It
   feeds every Bash call in a project's Claude Code and Codex transcripts
   through the lineage detector the way the PostToolUse hook does (without
@@ -49,6 +179,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The index is a derived, per-checkout cache rebuilt incrementally on query.
   It never runs on the hook path.
+
 - **v2 lineage records.**
   - Every analysis event and data command gets an identity: `event_id`,
     `host`, `host_session_id`, `ts_ns` and `repo_root`.
@@ -62,6 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     interval closes.
 
   0.9.7 manifests and observations still load, as v1.
+
 - **Step settings.** Each event has a `step`: the matched stage's own argv,
   interpreter, script arguments, environment assignments, config files and
   literal seeds.
@@ -70,6 +202,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     budget per call, and are proven against the Pre snapshot like inputs.
   - A call with more than 64 analysis stages records the first 64 and says
     so.
+
 - **Hash-linked report values.**
   - `register_value(..., source={"path", "locator"})` records the source
     file's repository-relative path, SHA-256 and locator.
@@ -82,6 +215,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     entries.
   - The fix for a stale number is to rerun its analysis, never to refresh
     the hash.
+
 - **A standard sample ledger.** `samples.tsv` with a `samples.ledger.json`
   spec (templates in `skills/core/templates/`) names the sample id, group,
   replication nesting and crossed batch variables. The ingest skill writes it.
@@ -125,10 +259,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     batch columns a check uses, are spelling-checked, so `site1` and `site1 `
     no longer split a batch silently. This warns rather than blocks, so a
     contract that passed before still passes.
+
 - **`skills/core/references/provenance-schema.json`**, one JSON Schema file
   for manifests (v1 and v2), events, data commands, skips, observations, index
   results, report fragments, numbers, findings and the ledger. Tests validate
   real outputs against it, and CI requires the validator.
+
 - **Row and feature access records (item 7).** `record_ids(name, ids,
   axis=row|feature, role=read|used|written|excluded)` in `register_value.py`
   records which cells, samples or genes a step used or dropped. It stores a
@@ -137,6 +273,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it shares the Python implementation through `register_value.py record-ids`.
   The analyze skill recommends it at filter, subset and split steps. Design and
   decisions: `docs/plans/row-feature-access.md`.
+
 - **Stop-time access note (item 7 follow-up).** When a script this session
   wrote a table (.csv, .tsv, .parquet or .h5ad, observed created or
   modified) and no `record_ids` record covers its last run, the accepting
@@ -150,6 +287,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skips foreign `access.json` files, follows no symlinks, reads under file
   count, byte and time budgets, and fails open; the phase that writes it
   cannot fail Stop.
+
 - **Multi-file report sources.** `register_value(..., source=[...])` links a
   number to several files, for example the table and the config that set its
   threshold. The number is stale when any of them changes. Live runs showed
@@ -177,6 +315,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Each of these cases used to leave a data-touching call with no record at
   all.
+
 - **Committed lineage manifests keep only allowlisted words**
   (`text_policy: "allowlist-v1"`). Six review rounds kept finding secrets
   that survived the denylist redaction, which can never cover every shell,
@@ -193,6 +332,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `filters_detected` is dropped from new manifests. Manifests without
   `text_policy` (0.9.7 and earlier) still load. Events recorded before an
   upgrade get the allowlist when they are consolidated into a new manifest.
+
 - **The allowlist is the only text policy.** The blocklist redaction
   (`redact_command` and friends, and `script_sha256_of: "sanitized"`
   digests) is deleted. Stores that outlive a session keep allowlisted text
@@ -241,23 +381,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is always either the dead lock under claim, free, or a successor's lock.
   This affected released versions and showed up as a rare failure of the
   `[dead]` lock-concurrency test under load.
-
-- **Stop no longer fails open on a long changed-file list or an unusual file
-  name** (`mycelium-stop-check.sh`). Stop built its short file lists (the
-  block reason, the registry summary, the fallback handoff and the
-  session-end triage) by piping the whole list into `head`, then into
-  `basename` or `xargs`. With more path text than a pipe holds (64 KiB on
-  macOS; every run failed from about 128 KiB), `head` exited while `printf`
-  or `sort` was still writing, and under `pipefail` Stop exited 1 with no
-  output. A name starting with `-` did the same when it was the last one
-  listed (otherwise it was dropped), and so did a path with a quote or one of
-  255 bytes or more in the session-end triage. The host logged a hook
-  error and the turn ended: the block that was due was lost, or finalization
-  stopped halfway. Nothing reset the work cycle, so every later Stop in that
-  session failed the same way. A bulk copy, or a job that writes a few
-  thousand outputs into the repository, was enough to start it. The four
-  readers now use `mycelium_first_names`, which drains the input, extracts
-  basenames as bytes, and escapes invalid UTF-8 before displaying them.
 
 - **Static lineage now resolves standard-library I/O** in Python scripts
   (`extract_data_lineage_event.py`). Previously only pandas-style readers and
@@ -326,6 +449,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bullet besides its `###` subheadings (`- None.` when there is nothing to
   report), since a section holding only a subheading counts as empty, and
   that `## Current state` describes the project, not Stop status.
+
 - **Stop now explains a handoff it would replace, once, instead of replacing
   it silently.** When the agent wrote a handoff during the session that
   fails the completeness check, Stop blocks with the handoff's path and its
@@ -352,16 +476,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `finalize_handoff.py --diagnose` reports the problems: exit 0 for a
   complete handoff, 3 with a one-line diagnosis, 1 on error. Existing projects pick up the new rule 10 the next time
   `init_repo.py` or migration refreshes their `MYCELIUM.md`.
+
 - **A routine accepted Stop no longer gives Claude another turn.** On
   Claude Code, `additionalContext` on a Stop hook continues the conversation.
   Mycelium used it for the ".living/ updated" confirmation, so every accepted
   Stop with an update made the model reply again (confirmed in a live
   `claude -p` run). That confirmation and the access note are for the user,
-  so they now go only to `systemMessage`. Provenance-gap warnings (lineage
-  gaps, detector failures, unrecorded events) are for the agent, which may
-  need to say its results' provenance is unknown. They stay in
-  `additionalContext` on Claude, as before, on the rare Stop that has one.
-  Codex output and blocked Stops are unchanged.
+  so they now go only to `systemMessage`. (Provenance-gap warnings first
+  stayed in `additionalContext`; see the next entry.) Codex output and
+  blocked Stops are unchanged.
+
+- **An accepted Stop never continues the conversation.** A live
+  `claude -p` run on main showed the cost of the lineage-gap split above:
+  - The agent ran Mycelium's helpers with `--help` through a variable chain.
+    The detector logged them as `script-unreadable` skips.
+  - The accepted Stop sent that LINEAGE GAP through `additionalContext`,
+    which on Claude continues the conversation.
+  - The extra turn ran a Bash command, which opened a new transaction. That
+    transaction's Stop had no handoff of its own, so it published the
+    generic fallback over the handoff accepted minutes earlier.
+
+  Every accepted Stop now emits only `systemMessage`, on every host. That
+  covers lineage-gap and unrecorded-event warnings as well as the routine
+  messages. Its parts are one line apart, because Claude Code shows each
+  line as its own "Stop says:" line. When the Stop finalizes a transaction,
+  the gap is also written as a `- Lineage gaps:` line in the finalized
+  session log's end footer, and a retry replaces that line rather than
+  adding another. Handoff publication and block decisions are unchanged.
+  Helper chains still report their skips, which now only inform the user.
+  No new state files, and existing projects need no migration.
+
+- **A Claude Code background launch no longer claims writes as done.**
+  Claude Code runs PostToolUse when a background job starts
+  (`run_in_background`, or a command moved to the background with a
+  `backgroundTaskId`). The data tracker passed exit 0 for it. A redirection
+  or `cp`/`mv` target that already existed was then recorded as the job's
+  output, with its old content, while the job was still waiting to run. This
+  affected 0.9.7 for data-extension paths too. The tracker now passes no exit
+  status for a launch, plus `--background-launch`. A launch records no
+  `outputs` at all, including a script's statically inferred outputs, which
+  0.9.7 also hashed at launch. Only the host's launch evidence counts; the
+  observer's `background` status alone does not (`python3 fit.py && nohup
+  true` keeps fit.py's output).
+
+- After `printf -v NAME`, `read`, `readarray`, `mapfile`, `getopts`, or
+  `let`, any of which can set `PATH`, a later `cp`/`mv` in the same `&&` list
+  no longer counts as proven; the setter's own redirections still do. 0.9.7
+  recorded a copy that a `PATH`-shadowed `cp` never made. The attached form
+  `printf -vPATH` is not recognized.
+
+- A data command's `step` no longer tokenizes a stage longer than 16 KB.
+  `shlex` built a 250 KB quoted argument one character at a time, taking
+  seconds on the hook path. Such a stage is recorded as `partial` with
+  `reason: "stage-too-long"`, and a named path over 1 KB is not matched
+  against a stage's words.
 
 ## [0.9.7] - 2026-11-21
 
@@ -392,28 +560,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A Claude Code background launch no longer claims writes as done.**
-  Claude Code runs PostToolUse when a background job starts
-  (`run_in_background`, or a command moved to the background with a
-  `backgroundTaskId`). The data tracker passed exit 0 for it. A redirection
-  or `cp`/`mv` target that already existed was then recorded as the job's
-  output, with its old content, while the job was still waiting to run. This
-  affected 0.9.7 for data-extension paths too. The tracker now passes no exit
-  status for a launch, plus `--background-launch`. A launch records no
-  `outputs` at all, including a script's statically inferred outputs, which
-  0.9.7 also hashed at launch. Only the host's launch evidence counts; the
-  observer's `background` status alone does not (`python3 fit.py && nohup
-  true` keeps fit.py's output).
-- After `printf -v NAME`, `read`, `readarray`, `mapfile`, `getopts`, or
-  `let`, any of which can set `PATH`, a later `cp`/`mv` in the same `&&` list
-  no longer counts as proven; the setter's own redirections still do. 0.9.7
-  recorded a copy that a `PATH`-shadowed `cp` never made. The attached form
-  `printf -vPATH` is not recognized.
-- A data command's `step` no longer tokenizes a stage longer than 16 KB.
-  `shlex` built a 250 KB quoted argument one character at a time, taking
-  seconds on the hook path. Such a stage is recorded as `partial` with
-  `reason: "stage-too-long"`, and a named path over 1 KB is not matched
-  against a stage's words.
 - A Claude Code session working in a linked git worktree (such as the
   desktop app's `.claude/worktrees/<name>/` side sessions) is now judged on
   that worktree. Stop and the Bash post-action hook took the repository root

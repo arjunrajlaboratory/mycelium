@@ -2399,6 +2399,11 @@ mycelium__json_escape_piece() {
   [[ "$piece" =~ $ascii_re ]]
 }
 
+# On a Stop, every host gets `systemMessage` only (CONTEXT, then
+# SYSTEM_MESSAGE, one line apart: Claude shows each line as its own "Stop
+# says:" line): on Claude, `additionalContext` on a Stop makes the model
+# take another turn, and nothing Stop reports without blocking may do that.
+# Anything the agent must act on is a block (mycelium_emit_stop_block).
 mycelium_emit_context() {
   local event="$1"
   local context="$2"
@@ -2408,8 +2413,12 @@ mycelium_emit_context() {
   host=$(mycelium_hook_host)
 
   # Same bytes as the interpreter below, built without one when exact.
-  if [[ "$host" == "codex" && "$event" == "Stop" ]]; then
-    if mycelium__json_literal argv "${system_message:-$context}"; then
+  if [[ "$event" == "Stop" ]]; then
+    payload="$context"
+    if [[ -n "$system_message" ]]; then
+      payload="${payload:+$payload$'\n'}$system_message"
+    fi
+    if mycelium__json_literal argv "$payload"; then
       mycelium__fast_write "{\"systemMessage\": $MYCELIUM__JSON}"$'\n' && return 0
     fi
   elif mycelium__json_literal argv "$event"; then
@@ -2429,8 +2438,8 @@ import json
 import sys
 
 host, event, context, system_message = sys.argv[1:]
-if host == "codex" and event == "Stop":
-    payload = {"systemMessage": system_message or context}
+if event == "Stop":
+    payload = {"systemMessage": "\n".join(p for p in (context, system_message) if p)}
 else:
     payload = {
         "hookSpecificOutput": {

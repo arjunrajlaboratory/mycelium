@@ -394,7 +394,7 @@ def test_record_refuses_a_linked_ancestor_swapped_in_during_the_wait(tmp_path, h
     )
     result = subprocess.run(["bash", "-c", command], capture_output=True, text=True,
                             env={**os.environ, "MYCELIUM_HOOK_HOST": host},
-                            check=False, timeout=30)
+                            check=False, timeout=60)
     assert result.returncode == 0
     assert "could not take the session lock" in result.stderr
     assert not (outside / sid / UNRECORDED).exists()
@@ -462,7 +462,8 @@ def test_a_fifo_at_the_evidence_name_cannot_hang_the_hook(tmp_path, host):
                   extra_env=FAST_TIMEOUT)
 
     assert result.returncode == 0
-    assert time.monotonic() - started < 30
+    # Sanity bound only: _run's own timeout is the hang guard.
+    assert time.monotonic() - started < 60
 
 
 @pytest.mark.parametrize("host", HOSTS)
@@ -620,15 +621,15 @@ def test_drain_other_leaves_a_file_holding_work(tmp_path):
     command = (f'source "{HOOKS_DIR / "mycelium-hook-lib.sh"}"\n'
                f'mycelium_unrecorded_events drain-other "{evidence}"\n')
     result = subprocess.run(["bash", "-c", command], capture_output=True,
-                            text=True, check=False, timeout=30)
+                            text=True, check=False, timeout=60)
     assert result.stdout.strip() == "0"
     assert evidence.read_text().count("\n") == 2
 
 
-def _lib(*args, cwd=None):
+def _lib(*args, cwd=None, timeout=60):
     command = f'source "{HOOKS_DIR / "mycelium-hook-lib.sh"}"\nmycelium_unrecorded_events "$@"\n'
     return subprocess.run(["bash", "-c", command, "lib", *map(str, args)],
-                          capture_output=True, text=True, check=False, timeout=30)
+                          capture_output=True, text=True, check=False, timeout=timeout)
 
 
 def test_consume_never_applies_a_count_to_a_replaced_generation(tmp_path):
@@ -691,9 +692,11 @@ def test_a_held_evidence_flock_is_bounded(tmp_path):
     with evidence.open("r") as holder:
         fcntl.flock(holder, fcntl.LOCK_EX)
         started = time.monotonic()
-        result = _lib("take", evidence)
+        # An unbounded flock would block until this timeout; exit 75 (busy)
+        # is the deterministic proof that the wait gave up on its own.
+        result = _lib("take", evidence, timeout=120)
     assert result.returncode == 75
-    assert time.monotonic() - started < 20
+    assert time.monotonic() - started < 60  # sanity bound; the wait is ~5 s
 
 
 @pytest.mark.parametrize("host", HOSTS)

@@ -380,30 +380,29 @@ if [[ -f "$ACCESS_NOTE_FILE" && ! -L "$ACCESS_NOTE_FILE" ]] \
 fi
 rm -f "$ACCESS_NOTE_FILE" 2>/dev/null || true
 # mycelium_emit_accepted_stop MESSAGE [GAP]: the accepting Stop's output.
-# MESSAGE (the routine ".living/ updated" confirmation) and the access note
-# are for the user, so they go to `systemMessage`. On Claude,
-# `additionalContext` on a Stop makes the model take another turn, which a
-# routine accept must never do. GAP, a lineage gap or unrecorded-events
-# warning, is for the agent: its provenance is unknown and it may need to say
-# so. GAP stays in `additionalContext` on Claude, as before, and so takes one
-# more turn on the rare Stop that has one. Codex has only `systemMessage`,
-# which never continues a turn, so it gets everything there. A Stop with none
-# of these stays silent. The note's keys are then remembered so the same
-# script at the same content is not named again. Never fails.
+# Everything an accepted Stop says goes to `systemMessage`, on every host:
+# MESSAGE (the routine ".living/ updated" confirmation), GAP (a lineage gap
+# or unrecorded-events warning) and the access note. On Claude,
+# `additionalContext` on a Stop makes the model take another turn; a live run
+# showed that turn opening a new transaction whose fallback handoff replaced
+# the one just accepted. A Stop that finalized a transaction has already
+# written GAP into its session log and published handoff, which the next
+# session reads. A Stop with none of these stays silent. The note's keys are
+# then remembered so the same script at the same content is not named again.
+# Never fails.
 mycelium_emit_accepted_stop() {
   local message="$1" gap="${2:-}" seen="" escaped="" user=""
+  # One line per part: Claude Code shows each line of a Stop's
+  # `systemMessage` as its own "Stop says:" line, so a blank separator line
+  # would show as an empty one.
   user="$message"
-  if [[ -n "$ACCESS_NOTE" ]]; then
-    user="${user:+$user$'\n\n'}$ACCESS_NOTE"
-  fi
   if [[ -n "$gap" ]]; then
-    if [[ "$(mycelium_hook_host)" == codex ]]; then
-      message="${message:+$message$'\n\n'}$gap"
-      mycelium_emit_context "Stop" "$message${ACCESS_NOTE:+$'\n\n'$ACCESS_NOTE}" || return 0
-    else
-      mycelium_emit_context "Stop" "$gap" "$user" || return 0
-    fi
-  elif [[ -n "$user" ]]; then
+    user="${user:+$user$'\n'}$gap"
+  fi
+  if [[ -n "$ACCESS_NOTE" ]]; then
+    user="${user:+$user$'\n'}$ACCESS_NOTE"
+  fi
+  if [[ -n "$user" ]]; then
     escaped=$(mycelium_json_dumps_stdin "$user" 2>/dev/null) || return 0
     [[ -n "$escaped" ]] || return 0
     mycelium__fast_write "{\"systemMessage\": $escaped}"$'\n' || return 0
@@ -1206,6 +1205,7 @@ LAST_SESSION_EOF
             --duration-minutes "$DURATION_MIN" \
             --files-changed "$FILES_CHANGED" \
             --end-time "$END_TIME_SHORT" \
+            --lineage-gap "$LINEAGE_GAP_MSG" \
             >/dev/null 2>"$LOG_DIR/.finalize_session_log.err" \
           || _FINALIZE_LOG_STATUS=$?
       fi

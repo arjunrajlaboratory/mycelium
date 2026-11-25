@@ -128,7 +128,7 @@ def _silent_helper(tmp_path: Path) -> dict:
 
 
 def _without_note(text: str) -> str:
-    return "\n\n".join(p for p in text.split("\n\n") if not p.startswith("ACCESS NOTE:"))
+    return "\n".join(p for p in text.splitlines() if p and not p.startswith("ACCESS NOTE:"))
 
 
 @pytest.mark.parametrize("host", HOSTS)
