@@ -929,6 +929,8 @@ all, so a metadata-only comparison misses them and the re-read pass is what
 keeps them visible within the fingerprinted set. Pin the bound with a read
 spy that also patches `os.open` and has a positive control (reads happen,
 up to the budget, only on fingerprinted paths), not only a timing test.
+Grow one output both before open and after the descriptor's initial stat.
+Measure bytes read and require the changing file to remain unverified.
 
 ## 43. A shell fast path imitates the interpreter it skips
 

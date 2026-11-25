@@ -510,28 +510,35 @@ def test_file_with_future_mtime_is_not_charged_at_every_stop(
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs POSIX FIFOs")
+@pytest.mark.parametrize("replacement", ["fifo", "symlink"])
 def test_hashing_never_blocks_on_or_follows_a_swapped_in_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str
 ) -> None:
     # A path can be replaced between the type check and the open. A FIFO with
     # no writer would block a plain open forever; a symlink would be followed.
-    fifo = tmp_path / "pipe"
-    os.mkfifo(fifo)
+    path = tmp_path / "input.txt"
+    path.write_text("original\n")
     target = tmp_path / "target.txt"
     target.write_text("outside\n")
-    link = tmp_path / "link"
-    link.symlink_to(target)
-    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
-    monkeypatch.setattr(Path, "is_file", lambda self: True)
+    original_open = os.open
 
+    def swapped_open(name, *args, **kwargs):
+        if name == path:
+            path.unlink()
+            if replacement == "fifo":
+                os.mkfifo(path)
+            else:
+                path.symlink_to(target)
+        return original_open(name, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swapped_open)
     def timed_out(*_: Any) -> None:
         raise TimeoutError("hashing blocked on a FIFO")
 
     previous = signal.signal(signal.SIGALRM, timed_out)
     signal.alarm(5)
     try:
-        assert sfc._content_fingerprint(fifo) is None
-        assert sfc._content_fingerprint(link) is None
+        assert sfc._content_fingerprint(path) is None
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
@@ -752,3 +759,79 @@ def test_unknown_future_schema_is_rejected(tmp_path: Path) -> None:
     path.write_text(json.dumps(snapshot))
 
     assert load_snapshot(path) is None
+
+
+@pytest.mark.parametrize("phase", ["snapshot", "collect"])
+@pytest.mark.parametrize("grow_after_open", [False, True])
+def test_content_budget_caps_reads_from_a_growing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str, grow_after_open: bool
+) -> None:
+    repo = _repo(tmp_path)
+    path = repo / "output.bin"
+    path.write_bytes(b"x")
+    baseline = build_snapshot(repo)
+    monkeypatch.setenv("MYCELIUM_SNAPSHOT_CONTENT_BUDGET_BYTES", "1")
+    monkeypatch.setenv("MYCELIUM_COLLECT_CONTENT_BUDGET_BYTES", "1")
+    original_open = os.open
+    original_fstat = os.fstat
+    original_fdopen = os.fdopen
+    opened_fd = None
+    bytes_read = 0
+    grew = False
+
+    def grow() -> None:
+        nonlocal grew
+        with path.open("ab") as handle:
+            handle.write(b"y" * (1024 * 1024))
+        grew = True
+
+    def open_file(name, *args, **kwargs):
+        nonlocal opened_fd
+        if name != path:
+            return original_open(name, *args, **kwargs)
+        if not grow_after_open:
+            grow()
+        opened_fd = original_open(name, *args, **kwargs)
+        return opened_fd
+
+    def stat_open_file(fd):
+        state = original_fstat(fd)
+        if fd == opened_fd and grow_after_open and not grew:
+            grow()
+        return state
+
+    class ObserveReads:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, size):
+            nonlocal bytes_read
+            data = self.handle.read(size)
+            bytes_read += len(data)
+            return data
+
+    def observe_reads(fd, *args, **kwargs):
+        handle = original_fdopen(fd, *args, **kwargs)
+        return ObserveReads(handle) if fd == opened_fd else handle
+
+    monkeypatch.setattr(os, "open", open_file)
+    monkeypatch.setattr(os, "fstat", stat_open_file)
+    monkeypatch.setattr(os, "fdopen", observe_reads)
+    if phase == "snapshot":
+        fingerprint = build_snapshot(repo)["files"]["output.bin"]["stat"]["content"]
+    else:
+        assert collect_changes(repo, baseline) == ["output.bin"]
+    assert grew
+    assert bytes_read <= 1
+    if phase == "snapshot":
+        assert fingerprint is None

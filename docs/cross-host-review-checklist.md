@@ -371,7 +371,8 @@ hook, filesystem, or lifecycle boundaries.
 - [ ] Pre-existing dirty and untracked files use a content identity, so a
       same-size rewrite whose mtime is restored still counts as session work.
 - [ ] Session accounting reads a bounded amount of work-tree content:
-      each snapshot hashes at most its file and byte budget, and each Stop
+      each snapshot hashes at most its file and byte budget, including when
+      an output grows between scanning and reading, and each Stop
       comparison reads at most its own (a Stop that also carries a baseline
       into the next turn runs one of each). Stop verifies paths whose ctime or inode moved (or that
       were racy at the snapshot) first, and charges any it cannot verify; it

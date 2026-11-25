@@ -390,7 +390,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MYCELIUM_SNAPSHOT_CONTENT_BUDGET_BYTES`,
   `MYCELIUM_COLLECT_CONTENT_BUDGET_FILES` and
   `MYCELIUM_COLLECT_CONTENT_BUDGET_BYTES`. Hashing no longer follows a
-  symlink or blocks on a FIFO swapped in after the type check.
+  symlink or blocks on a FIFO swapped in after the type check. Content reads
+  stay within the charged byte count even when a writer appends during hashing.
 - Baselines are now `schema_version` 3. Schema 2 baselines from the previous
   runtime are still read, using the session start to decide which unchanged
   files need no read, so open sessions keep their accounting through an

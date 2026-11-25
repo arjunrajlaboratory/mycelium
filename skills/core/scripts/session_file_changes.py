@@ -303,7 +303,7 @@ def _record_snapshot_content(
             continue
         stat["content"] = None
         if not stat_module.S_ISREG(stat["mode"]):
-            stat["content"] = _content_fingerprint(repo_root / path)
+            stat["content"] = _content_fingerprint(repo_root / path, scanned=stat)
             continue
         racy = _is_racy(stat, reference_ns, margin_ns)
         candidates.append((_content_priority(entry, racy), path))
@@ -320,7 +320,7 @@ def _record_snapshot_content(
             continue
         files_left -= 1
         bytes_left -= stat["size"]
-        stat["content"] = _content_fingerprint(repo_root / path)
+        stat["content"] = _content_fingerprint(repo_root / path, scanned=stat)
 
 
 _CHANGED = "changed"
@@ -440,22 +440,33 @@ class _ContentComparator:
             self.bytes_left -= metadata["size"]
         elif is_regular:
             return True
-        return _content_fingerprint(full) != expected
+        return _content_fingerprint(full, scanned=metadata) != expected
 
 
-def _content_fingerprint(path: Path) -> dict[str, Any] | None:
+def _content_fingerprint(
+    path: Path, *, scanned: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
     """Return a content identity that does not depend on timestamp precision."""
     try:
         stat = path.lstat()
     except OSError:
         return None
-    if path.is_symlink():
+    # The caller charged the size of the scanned file against its budget. If
+    # that file changed type, size, or identity in the meantime, leave it
+    # unverified. A scanned non-regular path was charged no bytes or files.
+    if scanned is not None and (
+        stat.st_mode != scanned["mode"]
+        or stat.st_size != scanned["size"]
+        or stat.st_ino != scanned["ino"]
+    ):
+        return None
+    if stat_module.S_ISLNK(stat.st_mode):
         try:
             target = os.readlink(path)
         except OSError:
             target = ""
         return {"kind": "symlink", "target": target}
-    if not path.is_file():
+    if not stat_module.S_ISREG(stat.st_mode):
         return {"kind": "other", "mode": stat.st_mode}
     # The path can be replaced between the checks above and the open. Open
     # without following links or blocking (a FIFO opened for reading with no
@@ -473,13 +484,29 @@ def _content_fingerprint(path: Path) -> dict[str, Any] | None:
             not stat_module.S_ISREG(opened.st_mode)
             or opened.st_ino != stat.st_ino
             or opened.st_dev != stat.st_dev
+            or opened.st_size != stat.st_size
         ):
             return None
-        handle = os.fdopen(fd, "rb")
+        # A writer can also append after fstat. Read at most the charged size
+        # and discard the hash if the file changed during the read. Unbuffered
+        # I/O keeps read-ahead from exceeding the limit.
+        handle = os.fdopen(fd, "rb", buffering=0)
         fd = -1
         with handle:
-            for chunk in iter(lambda: handle.read(65536), b""):
+            unread = opened.st_size
+            while unread:
+                chunk = handle.read(min(65536, unread))
+                if not chunk:
+                    return None
                 digest.update(chunk)
+                unread -= len(chunk)
+            finished = os.fstat(handle.fileno())
+            if (
+                finished.st_size != opened.st_size
+                or finished.st_mtime_ns != opened.st_mtime_ns
+                or finished.st_ctime_ns != opened.st_ctime_ns
+            ):
+                return None
     except OSError:
         return None
     finally:
