@@ -979,6 +979,8 @@ class Index:
             if post is None and not interval.get("background"):
                 continue  # still running: reported as an open call
             placed.add(call)
+            if interval.get("end_reason") == "denied":
+                continue  # the host refused it before it ran: it changed nothing
             if (isinstance(post, int) and post < start
                     and not (interval.get("expired")
                              and interval.get("end_reason") != "turn-ended")):

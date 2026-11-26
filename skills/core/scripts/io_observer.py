@@ -662,6 +662,11 @@ def _intervals(records: list[dict[str, Any]]) -> dict[str, Interval]:
             calls[key] = calls[key]._replace(
                 post_seq=record["seq"], expired=False, background=True,
                 end_reason=str(record.get("reason") or "task-finished"))
+        elif event == "deny" and key in calls and calls[key].post_seq is None:
+            # The host's own record shows it refused the call before it ran
+            # (`close_denied`): an interval that changed nothing.
+            calls[key] = calls[key]._replace(post_seq=record["seq"], expired=False,
+                                             end_reason="denied")
         elif event in ("post", "expire") and key in calls and calls[key].post_seq is None:
             current = calls[key]
             calls[key] = current._replace(
@@ -1024,6 +1029,146 @@ def turn_end(state_dir: Path, *, host: str, session: str) -> int:
     return len(closed)
 
 
+# --------------------------------------------------------------------------
+# Calls the host refused (issue #178)
+#
+# Claude Code runs PreToolUse before its permission check. A call it then
+# refuses (an ask it cannot put to anyone in `-p`, a deny rule, a PreToolUse
+# hook's deny) gets no Post and no other hook event. Its transcript records
+# the refusal: a user line holding exactly one tool_result for the call, with
+# `is_error` true, and `permissionDecision.decision` "reject" on the line.
+# Only that record closes a call early, as `deny`; a call that ran and failed
+# is recorded with "accept", and an interrupted one with no decision. Any
+# doubt (no record yet, a record past the tail read, an unreadable line
+# naming the call, another result for the same id) leaves the call open, to
+# close at turn end as before.
+
+# How much of the transcript's end is read. A refusal is written right after
+# the call's Pre, so it sits near the end when the next hook runs.
+TRANSCRIPT_TAIL_BYTES = 8 * 1024 * 1024
+
+
+def transcript_refusals(transcript: Any, session: str, calls: set[str]) -> set[str]:
+    """The ids in ``calls`` that this session's Claude transcript shows the
+    host refused before running. Never follows a link or blocks on a FIFO."""
+    if not calls or not isinstance(transcript, str) or not os.path.isabs(transcript):
+        return set()
+    try:
+        fd = os.open(transcript, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return set()
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return set()
+        start = max(0, info.st_size - TRANSCRIPT_TAIL_BYTES)
+        os.lseek(fd, start, os.SEEK_SET)
+        chunks, left = [], info.st_size - start
+        while left > 0:
+            chunk = os.read(fd, min(left, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+    except OSError:
+        return set()
+    finally:
+        os.close(fd)
+    lines = b"".join(chunks).split(b"\n")
+    if start > 0:
+        lines = lines[1:]  # the first line may begin mid-record
+    needles = {call: call.encode("utf-8") for call in calls}
+    refused: set[str] = set()
+    doubtful: set[str] = set()
+    for raw in lines:
+        named = {call for call, needle in needles.items() if needle in raw}
+        if not named:
+            continue
+        try:
+            line = json.loads(raw)
+        except ValueError:
+            doubtful |= named  # torn or unreadable: proves nothing either way
+            continue
+        message = line.get("message") if isinstance(line, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+        hits = {b.get("tool_use_id") for b in results} & calls
+        if not hits:
+            continue
+        decision = line.get("permissionDecision")
+        refusal = (line.get("type") == "user" and line.get("sessionId") == session
+                   and line.get("isSidechain") is not True and len(results) == 1
+                   and results[0].get("is_error") is True
+                   and isinstance(decision, dict) and decision.get("decision") == "reject")
+        (refused if refusal else doubtful).update(hits)
+    return refused - doubtful
+
+
+def close_denied(state_dir: Path, *, host: str, session: str, transcript: Any,
+                 exclude: str | None = None) -> list[str]:
+    """Close this Claude session's open main-agent foreground calls that its
+    transcript shows the host refused (`transcript_refusals`) as `deny`,
+    removing their snapshot and open marker. Returns the calls closed.
+
+    Background calls and subagents' calls are never closed here: a
+    subagent's refusals are in its own transcript, and a background call
+    has a Post on record. ``exclude`` is the calling hook's own call.
+    """
+    if host != "claude":
+        return []
+    path = journal_path(state_dir)
+    io_root = state_dir / "io"
+
+    def candidates(records: list[dict[str, Any]]) -> dict[str, Interval]:
+        return {i.call: i for i in _intervals(records).values()
+                if i.post_seq is None and not i.background and i.agent is None
+                and i.host == host and i.session == session and i.call != exclude}
+
+    if not path.exists() or not _io_dir_chain_safe(io_root, path.parent):
+        return []
+    open_calls = candidates(_journal_records(path))  # lock-free: a hint only
+    refused = transcript_refusals(transcript, session, set(open_calls))
+    if not refused:
+        return []
+    closed: list[str] = []
+    with _locked(path):
+        records = _journal_records(path)
+        seq = max((r["seq"] for r in records), default=0)
+        jid = next((r["jid"] for r in reversed(records) if isinstance(r.get("jid"), str)),
+                   None)
+        now_ns = time.time_ns()
+        lines = []
+        for call, interval in sorted(candidates(records).items()):
+            if call not in refused:
+                continue
+            seq += 1
+            lines.append(json.dumps({"seq": seq, "ev": "deny", "call": call, "host": host,
+                                     "session": session, "tool": interval.tool,
+                                     "wall_ns": now_ns, "reason": "permission-denied",
+                                     **({"jid": jid} if jid else {})},
+                                    sort_keys=True) + "\n")
+            closed.append(call)
+        if lines:
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise OSError("journal is not a regular file")
+                _write_all(fd, "".join(lines).encode("utf-8"))
+            finally:
+                os.close(fd)
+    for call in closed:
+        clear_open_marker(state_dir, host, session, call)
+        # The call never ran, so its Pre snapshot is no unresolved call.
+        snap = snapshot_path(state_dir, host, session, call)
+        if _io_dir_chain_safe(io_root, snap.parent):
+            with contextlib.suppress(OSError):
+                if stat.S_ISREG(os.lstat(snap).st_mode):
+                    os.unlink(snap)
+    return closed
+
+
 def overlapping(intervals: dict[str, Interval], key: str) -> list[dict[str, Any]]:
     """Every other interval that intersects this call's [pre, post].
     ``key`` is the call's `interval_key`."""
@@ -1039,8 +1184,8 @@ def overlapping(intervals: dict[str, Interval], key: str) -> list[dict[str, Any]
     own_end = own.post_seq if own.post_seq is not None else float("inf")
     found = []
     for other_key, other in intervals.items():
-        if other_key == key:
-            continue
+        if other_key == key or other.end_reason == "denied":
+            continue  # a call the host refused never ran beside anything
         other_end = other.post_seq if other.post_seq is not None else float("inf")
         if other.pre_seq < own_end and own.pre_seq < other_end:
             found.append(
@@ -2019,6 +2164,12 @@ def hook(state_dir: Path, repo_root: Path, host: str, raw: str) -> int:
              expected_sha256=expected if isinstance(expected, str) and _SHA256_RX.fullmatch(expected) else None,
              bytes_unknown=adapter.get(BYTES_UNKNOWN_KEY) is True,
              single_path=adapter.get(SINGLE_PATH_KEY) is True)
+    if host == "claude" and event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+        # A call this session's host refused since the last hook ran: closed
+        # now, so it is not counted as running beside the calls that follow.
+        with contextlib.suppress(Exception):
+            close_denied(state_dir, host=host, session=session,
+                         transcript=payload.get("transcript_path"), exclude=call_id)
     return 0
 
 
@@ -2600,12 +2751,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "turn-end":
         if not _SESSION_ID_RX.fullmatch(args.session) or args.session in (".", ".."):
             return 64
-        turn_end(args.state_dir, host=args.host, session=args.session)
+        payload = None
         if args.stop_payload_stdin:
             try:
                 payload = json.loads(sys.stdin.read())
             except ValueError:
                 payload = None
+        if isinstance(payload, dict) and payload.get("session_id") == args.session:
+            # Refused calls close as denied before the rest close as turn-ended.
+            # Nothing here may keep the turn end below from running.
+            with contextlib.suppress(Exception):
+                close_denied(args.state_dir, host=args.host, session=args.session,
+                             transcript=payload.get("transcript_path"))
+        turn_end(args.state_dir, host=args.host, session=args.session)
+        if args.stop_payload_stdin:
             tasks = payload.get("background_tasks") if isinstance(payload, dict) else None
             if isinstance(tasks, list):
                 with contextlib.suppress(OSError, LockTimeout):
