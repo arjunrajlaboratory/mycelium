@@ -662,11 +662,13 @@ def _intervals(records: list[dict[str, Any]]) -> dict[str, Interval]:
             calls[key] = calls[key]._replace(
                 post_seq=record["seq"], expired=False, background=True,
                 end_reason=str(record.get("reason") or "task-finished"))
-        elif event == "deny" and key in calls and calls[key].post_seq is None:
+        elif (event == "post" and record.get("denied") is True and key in calls
+              and calls[key].post_seq is None):
             # The host's own record shows it refused the call before it ran
-            # (`close_denied`): an interval that changed nothing.
+            # (`close_denied`): an interval that changed nothing. It is a
+            # `post` so a release that does not know `denied` still ends it.
             calls[key] = calls[key]._replace(post_seq=record["seq"], expired=False,
-                                             end_reason="denied")
+                                             background=False, end_reason="denied")
         elif event in ("post", "expire") and key in calls and calls[key].post_seq is None:
             current = calls[key]
             calls[key] = current._replace(
@@ -1037,8 +1039,9 @@ def turn_end(state_dir: Path, *, host: str, session: str) -> int:
 # hook's deny) gets no Post and no other hook event. Its transcript records
 # the refusal: a user line holding exactly one tool_result for the call, with
 # `is_error` true, and `permissionDecision.decision` "reject" on the line.
-# Only that record closes a call early, as `deny`; a call that ran and failed
-# is recorded with "accept", and an interrupted one with no decision. Any
+# Only that record closes a call early, as a `post` record with `denied: true`
+# (a release that predates it still reads that as an end). A call that ran
+# and failed is recorded with "accept", an interrupted one with no decision. Any
 # doubt (no record yet, a record past the tail read, an unreadable line
 # naming the call, another result for the same id) leaves the call open, to
 # close at turn end as before.
@@ -1061,7 +1064,9 @@ def transcript_refusals(transcript: Any, session: str, calls: set[str]) -> set[s
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             return set()
-        start = max(0, info.st_size - TRANSCRIPT_TAIL_BYTES)
+        # One byte before the tail, so a tail that starts on a line's first
+        # byte keeps that line (the partial first line is dropped below).
+        start = max(0, info.st_size - TRANSCRIPT_TAIL_BYTES - 1)
         os.lseek(fd, start, os.SEEK_SET)
         chunks, left = [], info.st_size - start
         while left > 0:
@@ -1108,13 +1113,14 @@ def transcript_refusals(transcript: Any, session: str, calls: set[str]) -> set[s
 
 def close_denied(state_dir: Path, *, host: str, session: str, transcript: Any,
                  exclude: str | None = None) -> list[str]:
-    """Close this Claude session's open main-agent foreground calls that its
-    transcript shows the host refused (`transcript_refusals`) as `deny`,
-    removing their snapshot and open marker. Returns the calls closed.
+    """Close this Claude session's open main-agent calls that its transcript
+    shows the host refused (`transcript_refusals`) as denied, removing their
+    snapshot and open marker. Returns the calls closed.
 
-    Background calls and subagents' calls are never closed here: a
-    subagent's refusals are in its own transcript, and a background call
-    has a Post on record. ``exclude`` is the calling hook's own call.
+    A call asked to run in the background is included: refused, it never
+    launched (a launched one is recorded as accepted). Subagents' calls are
+    not: their refusals are in their own transcripts. ``exclude`` is the
+    calling hook's own call.
     """
     if host != "claude":
         return []
@@ -1123,7 +1129,7 @@ def close_denied(state_dir: Path, *, host: str, session: str, transcript: Any,
 
     def candidates(records: list[dict[str, Any]]) -> dict[str, Interval]:
         return {i.call: i for i in _intervals(records).values()
-                if i.post_seq is None and not i.background and i.agent is None
+                if i.post_seq is None and i.agent is None
                 and i.host == host and i.session == session and i.call != exclude}
 
     if not path.exists() or not _io_dir_chain_safe(io_root, path.parent):
@@ -1144,8 +1150,8 @@ def close_denied(state_dir: Path, *, host: str, session: str, transcript: Any,
             if call not in refused:
                 continue
             seq += 1
-            lines.append(json.dumps({"seq": seq, "ev": "deny", "call": call, "host": host,
-                                     "session": session, "tool": interval.tool,
+            lines.append(json.dumps({"seq": seq, "ev": "post", "denied": True, "call": call,
+                                     "host": host, "session": session, "tool": interval.tool,
                                      "wall_ns": now_ns, "reason": "permission-denied",
                                      **({"jid": jid} if jid else {})},
                                     sort_keys=True) + "\n")
@@ -1734,14 +1740,21 @@ def post(
     expected_sha256: str | None = None,
     bytes_unknown: bool = False,
     single_path: bool = False,
+    transcript: Any = None,
 ) -> dict[str, Any] | None:
     """Close the call's interval and, for Bash, build its observation.
 
     The walk runs before the interval is closed: a call whose Pre lands
     during the walk still overlaps this one. Returns the observation (also
     appended to the session's observation store), or None for a tool call
-    that only needed its interval closed.
+    that only needed its interval closed. ``transcript`` is a Claude
+    session's transcript path: a call it shows refused (one run in parallel
+    with this one) is closed first, so it is not listed as overlapping.
     """
+    if host == "claude" and transcript is not None:
+        with contextlib.suppress(Exception):
+            close_denied(state_dir, host=host, session=session, transcript=transcript,
+                         exclude=call_id)
     if bash_cmd and starts_background_job(bash_cmd):
         background = True
     snap_file = snapshot_path(state_dir, host, session, call_id)
@@ -2163,8 +2176,9 @@ def hook(state_dir: Path, repo_root: Path, host: str, raw: str) -> int:
              outcome=edit_result,
              expected_sha256=expected if isinstance(expected, str) and _SHA256_RX.fullmatch(expected) else None,
              bytes_unknown=adapter.get(BYTES_UNKNOWN_KEY) is True,
-             single_path=adapter.get(SINGLE_PATH_KEY) is True)
-    if host == "claude" and event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+             single_path=adapter.get(SINGLE_PATH_KEY) is True,
+             transcript=payload.get("transcript_path"))
+    if host == "claude" and event == "PreToolUse":
         # A call this session's host refused since the last hook ran: closed
         # now, so it is not counted as running beside the calls that follow.
         with contextlib.suppress(Exception):
@@ -2739,6 +2753,8 @@ def _build_parser() -> argparse.ArgumentParser:
             p.add_argument("--bash-exit", type=int)
             p.add_argument("--bash-cmd")
             p.add_argument("--task-id", help="The host's id for a background job.")
+            p.add_argument("--transcript-path",
+                           help="Claude's session transcript: refused calls close first.")
             p.add_argument("--inputs-json", type=Path,
                            help="File holding a JSON list of inferred input paths.")
     return parser
@@ -2755,7 +2771,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.stop_payload_stdin:
             try:
                 payload = json.loads(sys.stdin.read())
-            except ValueError:
+            except Exception:  # noqa: BLE001 - nothing here may skip the turn end
                 payload = None
         if isinstance(payload, dict) and payload.get("session_id") == args.session:
             # Refused calls close as denied before the rest close as turn-ended.
@@ -2793,6 +2809,7 @@ def main(argv: list[str] | None = None) -> int:
         outcome=args.outcome, bash_exit=args.bash_exit, bash_cmd=args.bash_cmd,
         background=args.background, inputs=inputs,
         task_id=args.task_id if args.task_id and _TASK_ID_RX.fullmatch(args.task_id) else None,
+        transcript=args.transcript_path,
     )
     if observation is not None:
         # The calling hook reads this one line to link its lineage record.

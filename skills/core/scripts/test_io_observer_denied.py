@@ -97,7 +97,8 @@ def _post(project: Path, call: str, session: str = SID) -> dict:
 
 
 def _events(project: Path, call: str) -> list[str]:
-    return [r["ev"] for r in io._journal_records(io.journal_path(_state(project)))
+    return ["deny" if r.get("denied") is True else r["ev"]
+            for r in io._journal_records(io.journal_path(_state(project)))
             if r.get("call") == call]
 
 
@@ -206,16 +207,24 @@ def test_a_symlinked_transcript_is_not_read(project: Path, tmp_path: Path) -> No
     assert _events(project, "toolu_A") == ["pre"]
 
 
-def test_background_and_subagent_calls_are_never_closed_from_the_transcript(
+def test_a_refused_background_request_closes_but_a_subagents_call_does_not(
         project: Path, tmp_path: Path) -> None:
+    """Refused, a background request never launched; turn end skips
+    background calls, so without this it stayed open for a day. A subagent's
+    refusal is in its own transcript, never the main one."""
     transcript = _transcript(tmp_path)
-    _hook(project, "PreToolUse", "toolu_bg", transcript,
-          tool_input={"command": "sleep 9", "run_in_background": True})
+    payload = {"session_id": SID, "hook_event_name": "PreToolUse", "tool_name": "Bash",
+               "tool_use_id": "toolu_bg", "cwd": str(project),
+               "tool_input": {"command": "sleep 9", "run_in_background": True},
+               "transcript_path": str(transcript)}
+    io.hook(_state(project), project, "claude", json.dumps(payload))
     _hook(project, "PreToolUse", "toolu_sub", transcript, agent_id="agent-1")
     _transcript(tmp_path, _result_line("toolu_bg"), _result_line("toolu_sub"))
     _hook(project, "PreToolUse", "toolu_B", transcript)
-    assert _events(project, "toolu_bg") == ["pre"]
+    assert _events(project, "toolu_bg") == ["pre", "deny"]
     assert _events(project, "toolu_sub") == ["pre"]
+    observation = _post(project, "toolu_B")
+    assert [o["call"] for o in observation["overlapping"]] == ["toolu_sub"]
 
 
 def test_another_sessions_call_is_never_closed(project: Path, tmp_path: Path) -> None:
@@ -265,16 +274,106 @@ def test_a_denied_call_closed_once_is_not_closed_again(project: Path,
 # ---------- what a denial means to the journal readers ----------
 
 
-def test_an_old_reader_treats_a_deny_record_as_still_open(project: Path) -> None:
-    """A release without this fix ignores `deny`: the call stays open there,
-    which is that release's conservative behaviour, never a false end."""
-    state = _state(project)
-    io.journal_event(state, "pre", "A", host="claude", session=SID, tool="Bash")
-    io.journal_event(state, "deny", "A", host="claude", session=SID, tool="Bash")
-    interval = io._intervals(io._journal_records(io.journal_path(state)))[
-        io.interval_key("claude", SID, "A")]
+def _released_observer(tmp_path: Path):
+    """io_observer.py as released in 0.10.1, the last release without denials."""
+    import importlib.util
+    import subprocess
+
+    source = subprocess.run(
+        ["git", "-C", str(HERE), "show", "mycelium--v0.10.1:skills/core/scripts/io_observer.py"],
+        capture_output=True, text=True)
+    if source.returncode != 0:
+        pytest.skip("the mycelium--v0.10.1 tag is not in this clone")
+    path = tmp_path / "released" / "io_observer_0_10_1.py"
+    path.parent.mkdir()
+    path.write_text(source.stdout)
+    spec = importlib.util.spec_from_file_location("io_observer_0_10_1", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_both_readers_end_a_denied_call(project: Path, tmp_path: Path) -> None:
+    """This release reads the denial as a call that never ran; 0.10.1, sharing
+    the journal (another session, another host), still reads it as an end, so
+    it never expires the call a day later as an unbounded gap."""
+    transcript = _transcript(tmp_path, _tool_use_line("toolu_A"))
+    _hook(project, "PreToolUse", "toolu_A", transcript)
+    _transcript(tmp_path, _result_line("toolu_A"))
+    _hook(project, "PreToolUse", "toolu_B", transcript)
+    records = io._journal_records(io.journal_path(_state(project)))
+    key = io.interval_key("claude", SID, "toolu_A")
+    interval = io._intervals(records)[key]
     assert interval.post_seq is not None and interval.end_reason == "denied"
     assert not interval.expired and not interval.observe
+    old = _released_observer(tmp_path)._intervals(records)[key]
+    assert old.post_seq == interval.post_seq and not old.expired
+
+
+def test_a_refusal_written_after_the_parallel_calls_pre_is_seen_at_its_post(
+        project: Path, tmp_path: Path) -> None:
+    """Parallel calls: B's Pre runs before A's refusal is written, B's Post
+    after it. The Post closes A first, so B is not marked overlap."""
+    transcript = _transcript(tmp_path, _tool_use_line("toolu_A"), _tool_use_line("toolu_B"))
+    _hook(project, "PreToolUse", "toolu_A", transcript)
+    _hook(project, "PreToolUse", "toolu_B", transcript)
+    _transcript(tmp_path, _result_line("toolu_A"))
+    observation = io.post(_state(project), host="claude", session=SID, call_id="toolu_B",
+                          tool="Bash", repo_root=project, outcome="success", bash_exit=0,
+                          transcript=str(transcript))
+    assert observation["overlapping"] == [] and observation["status"] == "no-known-overlap"
+    assert _events(project, "toolu_A") == ["pre", "deny"]
+
+
+def test_without_the_transcript_the_parallel_call_still_overlaps(
+        project: Path, tmp_path: Path) -> None:
+    transcript = _transcript(tmp_path, _tool_use_line("toolu_A"), _tool_use_line("toolu_B"))
+    _hook(project, "PreToolUse", "toolu_A", transcript)
+    _hook(project, "PreToolUse", "toolu_B", transcript)
+    _transcript(tmp_path, _result_line("toolu_A"))
+    assert _post(project, "toolu_B")["status"] == "overlap"
+
+
+def test_a_tail_starting_on_a_line_boundary_keeps_that_line(
+        project: Path, tmp_path: Path, monkeypatch) -> None:
+    accept = json.dumps(_result_line("toolu_A", decision="accept", is_error=False,
+                                     content="ok"))
+    reject = json.dumps(_result_line("toolu_A"))
+    transcript = _transcript(tmp_path, {"type": "summary", "pad": "p" * 200})
+    _hook(project, "PreToolUse", "toolu_A", transcript)
+    _transcript(tmp_path, accept, reject)
+    # The tail begins exactly on the accept line's first byte.
+    monkeypatch.setattr(io, "TRANSCRIPT_TAIL_BYTES", len(accept) + len(reject) + 2)
+    _hook(project, "PreToolUse", "toolu_B", transcript)
+    assert _events(project, "toolu_A") == ["pre"]
+
+
+def test_an_unreadable_stop_payload_still_ends_the_turn(project: Path, monkeypatch) -> None:
+    class Broken:
+        def read(self) -> str:
+            raise OSError("stdin closed")
+
+    _hook(project, "PreToolUse", "toolu_A", None)
+    monkeypatch.setattr(sys, "stdin", Broken())
+    assert io.main(["turn-end", "--state-dir", str(_state(project)), "--host", "claude",
+                    "--session", SID, "--stop-payload-stdin"]) == 0
+    assert _events(project, "toolu_A") == ["pre", "expire"]
+
+
+def test_compaction_drops_a_denied_call_once_nothing_open_precedes_it(
+        project: Path, tmp_path: Path, monkeypatch) -> None:
+    transcript = _transcript(tmp_path, _tool_use_line("toolu_A"))
+    _hook(project, "PreToolUse", "toolu_A", transcript)
+    _transcript(tmp_path, _result_line("toolu_A"))
+    _hook(project, "PreToolUse", "toolu_B", transcript)
+    _post(project, "toolu_B")
+    monkeypatch.setattr(io, "JOURNAL_COMPACT_LINES", 3)
+    io.journal_event(_state(project), "pre", "toolu_C", host="claude", session=SID,
+                     tool="Bash")
+    # The denied call no longer holds the horizon back.
+    assert _events(project, "toolu_A") == []
+    assert _events(project, "toolu_C") == ["pre"]
 
 
 def test_a_denied_call_never_clouds_a_write_in_the_lineage_index(
@@ -374,13 +473,15 @@ def test_the_real_hooks_close_a_refused_call(tmp_path: Path) -> None:
 
     run("mycelium-health.sh", {"hook_event_name": "SessionStart", "source": "startup"})
     bash("PreToolUse", "toolu_A", "env -C out python3 x.py")
-    _transcript(tmp_path, _result_line("toolu_A"), _tool_use_line("toolu_B", "touch out/b"))
-    bash("PreToolUse", "toolu_B", "touch out/b")
+    _transcript(tmp_path, _tool_use_line("toolu_B", "touch out/b"))
+    bash("PreToolUse", "toolu_B", "touch out/b")  # in parallel: A not refused yet
+    _transcript(tmp_path, _result_line("toolu_A"))
     (repo / "out" / "b").write_text("")
     bash("PostToolUse", "toolu_B", "touch out/b", tool_response={"exit_code": 0})
-    run("mycelium-stop-check.sh", {"hook_event_name": "Stop", "stop_hook_active": False})
     state = repo / ".mycelium"
+    # The data tracker's Post closed A before it computed B's overlap.
     assert _events(repo, "toolu_A") == ["pre", "deny"]
+    run("mycelium-stop-check.sh", {"hook_event_name": "Stop", "stop_hook_active": False})
     store = [json.loads(line) for line in
              io.observations_path(state, "claude", SID).read_text().splitlines()]
     (observation,) = [r for r in store if r.get("observation_id") == "claude:toolu_B"]

@@ -48,7 +48,8 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
   INPUT=$(cat)
   mycelium_payload_preload INPUT 'get:tool_input.command' 'get:cwd' 'opt:session_id' \
     'get:agent_id' 'get:agent_type' 'exit:' 'opt:tool_use_id' 'opt:hook_event_name' \
-    'get:tool_input.run_in_background' 'opt:error' 'get:tool_response.backgroundTaskId'
+    'get:tool_input.run_in_background' 'opt:error' 'get:tool_response.backgroundTaskId' \
+    'opt:transcript_path'
 
   COMMAND=$(mycelium_json_get 'tool_input.command' INPUT)
   if [[ -z "$COMMAND" ]]; then exit 0; fi
@@ -123,6 +124,15 @@ MYCELIUM_POST_TOOL_EVENT_KIND=lineage
       --session "$OBS_SID" --call-id "$OBS_CALL" --tool Bash
       --repo-root "$REPO_ROOT" --outcome "$OUTCOME" --bash-cmd "$COMMAND")
     if [[ -n "$AGENT_ID" ]]; then OBS_ARGS+=(--agent-id "$AGENT_ID"); fi
+    # Claude's transcript names calls the host refused (one run beside this
+    # one in parallel): they are closed first, so they never count as overlap.
+    if [[ "$(mycelium_hook_host)" == "claude" ]]; then
+      OBS_TRANSCRIPT=$(mycelium_json_get_optional_string 'transcript_path' INPUT) \
+        || OBS_TRANSCRIPT=""
+      if [[ "$OBS_TRANSCRIPT" == /* ]]; then
+        OBS_ARGS+=(--transcript-path "$OBS_TRANSCRIPT")
+      fi
+    fi
     if [[ "$BASH_EXIT" =~ ^-?[0-9]+$ ]]; then OBS_ARGS+=(--bash-exit "$BASH_EXIT"); fi
     # Background evidence from either side: the agent asked for it, or the
     # host moved a long foreground command to the background at its
