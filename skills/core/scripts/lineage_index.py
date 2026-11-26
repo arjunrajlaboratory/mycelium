@@ -783,6 +783,16 @@ class Index:
                 "observed_change": cand.get("observed_change"),
             })
 
+    def _never_ran(self, other: dict[str, Any], journal: dict[str, Any] | None) -> bool:
+        """Whether an observation's overlapping call is one the current
+        journal, the one the observation was made in, closed as refused."""
+        if not journal or not self.journal_id or journal.get("id") != self.journal_id:
+            return False
+        now = self.journal_now.get(io_observer.interval_key(
+            str(other.get("host") or ""), str(other.get("session") or ""),
+            str(other.get("call") or "")))
+        return bool(now) and now.get("end_reason") == "denied"
+
     def _add_observation(self, key: str, item: dict[str, Any], events: list[str]) -> None:
         """Credit an observation's writes. What it could not see (no change
         list, a capped diff, an unwatched, racy, refused or moved path, an
@@ -805,8 +815,15 @@ class Index:
             return
         attribution = {"no-known-overlap": "sole", "overlap": "shared",
                        "background": "uncertain", "edit": "sole"}.get(status, "uncertain")
-        overlapping = [o.get("call") for o in record.get("overlapping") or []
-                       if isinstance(o, dict)]
+        listed = [o for o in record.get("overlapping") or [] if isinstance(o, dict)]
+        # A call the journal now shows the host refused never ran: it was
+        # open when this observation was made (run in parallel, or another
+        # session's), but it wrote nothing beside this call.
+        beside = [o for o in listed if not self._never_ran(o, journal)]
+        if (status == "overlap" and listed and not beside
+                and record.get("reason") != "own-interval-expired"):
+            attribution = "sole"
+        overlapping = [o.get("call") for o in beside]
         if overlapping and attribution == "sole":
             attribution = "shared"
         # A change seen while a background job ran beside the observing call
@@ -816,8 +833,7 @@ class Index:
         # the candidates.
         background_beside = [
             _obs_key(o.get("session"), f"{o.get('host')}:{o.get('call')}")
-            for o in record.get("overlapping") or []
-            if isinstance(o, dict) and o.get("background")]
+            for o in beside if o.get("background")]
         background_beside = [c for c in background_beside if c]
         candidates = None
         if background_beside:
@@ -979,6 +995,8 @@ class Index:
             if post is None and not interval.get("background"):
                 continue  # still running: reported as an open call
             placed.add(call)
+            if interval.get("end_reason") == "denied":
+                continue  # the host refused it before it ran: it changed nothing
             if (isinstance(post, int) and post < start
                     and not (interval.get("expired")
                              and interval.get("end_reason") != "turn-ended")):

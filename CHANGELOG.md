@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Bash or edit call that Claude Code refuses no longer marks the rest of
+  the turn as overlapping (#178).** Claude Code runs `PreToolUse` before its
+  permission check. A call it then refuses gets no Post and no other hook
+  event: an ask it cannot put to anyone in `claude -p`, a deny rule, or
+  another hook's deny. The call's observed-I/O interval stayed open until
+  Stop. Every observation made meanwhile was `overlap`, the call was listed
+  under `summary.unresolved_calls`, and a `.unresolved` claim file stayed
+  behind. The session transcript records each refusal. On every Claude hook
+  event and at Stop, the observer now closes a call as denied when the
+  session's own transcript holds that refusal record for it. A denied call
+  has no snapshot, open marker, or claim file, and neither the overlap check
+  nor the lineage index's coverage proof counts it. Anything short of that
+  exact record leaves the call open, to close at turn end as before. This
+  includes an interrupted call, a call that ran and failed, an unreadable
+  line, and a subagent's call. Codex and Antigravity are unchanged.
+
 ## [0.10.1] - 2026-11-25
 
 ### Added
