@@ -170,6 +170,18 @@ These recipes are for development checks. The release lifecycle audit
 - **Migration smoke tests** (`migrate_existing_repos.py --repo <tmp>`) update
   every `~/.claude/projects/*/memory/MEMORY.md` unless you pass `--skip-memory`.
   Always pass it for disposable repos, and dry-run first.
+- **What Claude Code tells hooks about a refused call.** A real `claude -p`
+  run with a narrow allow-list (2.1.332) shows `PreToolUse`, then nothing for
+  that call: no Post, no `PostToolUseFailure`, no `PermissionDenied`, which
+  fires only for auto-mode classifier denials. A refused ask also fires
+  `PermissionRequest`, but with no `tool_use_id`. Only the transcript
+  (`transcript_path`) records the outcome. The refusal is a `type: user` line
+  with one `is_error` tool_result for the id and `permissionDecision.decision:
+  "reject"`. A call that ran is recorded with `accept`, even when it failed.
+  To see this, register a logging hook for every event in a scratch repo's
+  `.claude/settings.local.json`. Pass `--permission-mode default` too: a
+  session otherwise inherits the user's default mode, such as `auto`, and the
+  call may simply run.
 - **Worktree guards.** Some agent setups refuse shell commands that run `git`
   against another directory, or heredocs that mention git. Put the steps in a
   scratch script and run that.

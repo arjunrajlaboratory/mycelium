@@ -489,3 +489,33 @@ def test_the_real_hooks_close_a_refused_call(tmp_path: Path) -> None:
     assert not any(r.get("observation_id") == "claude:toolu_A" for r in store)
     pre_dir = io.snapshot_path(state, "claude", SID, "toolu_A").parent
     assert not pre_dir.exists() or not any(pre_dir.iterdir())
+
+
+def test_the_index_drops_a_refused_call_from_a_saved_overlap_list(
+        project: Path, tmp_path: Path) -> None:
+    """B's observation was made while A was still open (its refusal not yet
+    written), so it lists A. Once the journal shows A refused, the index
+    credits B's write to B alone."""
+    transcript = _transcript(tmp_path, _tool_use_line("toolu_A"))
+    _hook(project, "PreToolUse", "toolu_A", transcript)
+    _hook(project, "PreToolUse", "toolu_B", transcript)
+    (project / "out" / "x").write_text("A")
+    assert _post(project, "toolu_B")["status"] == "overlap"  # A not refused yet
+    _transcript(tmp_path, _result_line("toolu_A"))
+    io.close_denied(_state(project), host="claude", session=SID, transcript=str(transcript))
+    write = li.query_hash(li.load(project, write=False), _sha("A"),
+                          disk=False)["paths"][0]["writes"][0]
+    assert write["attribution"] == "sole" and write["overlapping"] == []
+
+
+def test_the_index_keeps_an_overlap_the_journal_does_not_show_refused(
+        project: Path, tmp_path: Path) -> None:
+    transcript = _transcript(tmp_path)
+    _hook(project, "PreToolUse", "toolu_A", transcript)
+    _hook(project, "PreToolUse", "toolu_B", transcript)
+    (project / "out" / "x").write_text("A")
+    _post(project, "toolu_B")
+    io.turn_end(_state(project), host="claude", session=SID)  # A: turn-ended, not refused
+    write = li.query_hash(li.load(project, write=False), _sha("A"),
+                          disk=False)["paths"][0]["writes"][0]
+    assert write["attribution"] == "shared" and write["overlapping"]
