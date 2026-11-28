@@ -57,6 +57,13 @@ These recipes are for development checks. The release lifecycle audit
   '{"enabledPlugins":{"mycelium@mycelium":false}}'` so the installed copy cannot
   answer instead. Prove which copy ran from the trace (the agent reads files
   under `<scratch>/cand`).
+- **An uncommitted candidate** can be tried the same way from a copy:
+  `git ls-files -z | rsync -a --from0 --files-from=- . <scratch>/cand/`
+  (after `git add -N` for new files).
+- With `-p` and a narrow allow-list, the agent's shell cannot read or copy
+  files from the plugin directory (the Read tool can). A failed
+  `cp .../register_value.py analysis/_lib/` in such a run is the harness,
+  not a Mycelium defect.
 - Useful flags: `--output-format stream-json --verbose --disable-slash-commands
   < /dev/null`. Allow-list Bash narrowly; `Bash(bash run.sh)` does not cover
   `bash analysis/x/run.sh`.

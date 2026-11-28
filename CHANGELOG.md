@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Setup offers a declared workflow tool.** A repository can choose
+  Snakemake, DVC, or neither for its analysis steps; the answer is recorded
+  once in `.living/workflow.json` by `setup_workflow.py`. With a tool chosen,
+  the `analyze` skill has every kept result come from a declared step run
+  through the tool, as `skills/core/references/workflow-guide.md` describes.
+  Mycelium's lineage record does not yet read either tool's own record, and
+  the automatic reminder to record an analysis does not yet fire for
+  `dvc repro` (it does for `snakemake`); the guide tells the agent to
+  complete the protocol unprompted. The
+  file-change observer now skips `.dvc/`, as it already skipped
+  `.snakemake/`. Existing repositories are asked the first time an analysis
+  runs; nothing changes for one that answers "neither".
+
 ### Fixed
 
 - **A Bash or edit call that Claude Code refuses no longer marks the rest of

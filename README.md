@@ -180,6 +180,13 @@ memory layer, canonical `MYCELIUM.md` guidance, and thin `CLAUDE.md` and
 `AGENTS.md` adapters. **Core convention packs** (`robust-analysis`,
 `report-generator`, and `idea-generator`) are installed automatically.
 
+Setup also offers a declared workflow tool for analysis steps: Snakemake, DVC,
+or neither. With one chosen, results that are kept come from steps whose
+inputs and outputs are declared and that are run through the tool, so what a
+result depends on is stated, and only out-of-date steps rerun. The answer is
+recorded in `.living/workflow.json`; see
+[`workflow-guide.md`](skills/core/references/workflow-guide.md).
+
 Setup also asks whether the project should use Mycelium's scientific linters
 ([`scilintr`](https://github.com/arjunrajlaboratory/scilintr) for Python and R
 analysis code, `scitexlintr` for reports), recommends yes, and installs them on
