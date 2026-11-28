@@ -59,6 +59,12 @@ Then settle the scientific linters (the core skill's step 4a): ask the user,
 recommending yes, and record the answer with
 `"$MYCELIUM_PYTHON" "$MYCELIUM_PLUGIN_ROOT/skills/core/scripts/setup_linters.py" --target-dir "$MYCELIUM_WORKSPACE" enable`
 (or `disable`).
+Then settle the workflow tool (the core skill's step 4b). Run
+`"$MYCELIUM_PYTHON" "$MYCELIUM_PLUGIN_ROOT/skills/core/scripts/setup_workflow.py" --target-dir "$MYCELIUM_WORKSPACE" status`.
+Exit 0 means it is already chosen. On exit 2, ask the user (proposing a tool
+the output says is already in use) and record the answer with the same
+command ending in `choose snakemake`, `choose dvc`, or `choose none`. Set the
+three variables again in that shell call; they do not carry over.
 Do not invoke external coding agents to generate the index or initialize the
 project. An offline setup pass does not prove native skill selection, automatic
 hook dispatch or session completion.

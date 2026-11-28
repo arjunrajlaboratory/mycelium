@@ -66,6 +66,7 @@ EXCLUDED_DIR_NAMES = frozenset(
         "__pycache__",
         ".ipynb_checkpoints",
         ".snakemake",
+        ".dvc",
         ".pytest_cache",
         ".mypy_cache",
         ".ruff_cache",

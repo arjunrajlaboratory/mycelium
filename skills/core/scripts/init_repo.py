@@ -1565,8 +1565,12 @@ def main():
         "  3. Choose the scientific linters (ask the user; recommend yes): "
         "see the core skill's linter step"
     )
-    print("  4. Run validate_structure.py to confirm setup")
-    print("  5. Start working — the repo is now alive!")
+    print(
+        "  4. Offer a workflow tool (Snakemake, DVC, or neither): "
+        "see the core skill's workflow step"
+    )
+    print("  5. Run validate_structure.py to confirm setup")
+    print("  6. Start working — the repo is now alive!")
 
 
 if __name__ == "__main__":
