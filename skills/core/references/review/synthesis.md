@@ -1,12 +1,12 @@
 # Synthesis and severity calibration
 
-This file is consulted by the main `/mycelium:review` skill after the six
-sub-agents return findings. The aim of synthesis is to convert raw output
-from six independent reviewers into a single report the user trusts enough
+This file is consulted by the main `/mycelium:review` skill after the
+sub-agents return findings for the seven specialist checklists. The aim of
+synthesis is to convert raw output from seven specialist reviews into a single report the user trusts enough
 to act on.
 
 The dominant failure mode of multi-agent review is *false-positive
-inflation* — every agent has a checklist, the same line gets flagged six
+inflation* — every agent has a checklist, the same line gets flagged seven
 different ways, the user gets a wall of low-quality findings, and the
 genuinely critical item is buried. Synthesis is what prevents that.
 
@@ -17,6 +17,13 @@ For each sub-agent that ran:
   `evidence`, `why_it_matters`, `suggested_fix`, `confidence`)
 - An optional `not_flagged` list (things considered and skipped, with
   reason)
+- For a scoped review, the focus set and the cleared set the orchestrator
+  passed (see "Scoped reviews" below)
+
+The `results-and-claims` specialist works top down from the stated
+conclusions and the output tables. Its evidence may be results prose plus
+table rows or a recomputation result rather than code lines (see
+`README.md`); render that evidence as it was returned.
 
 ## Output
 
@@ -76,6 +83,13 @@ no separate "Nit" bucket — those just don't make the report.
 Read all sub-agent outputs. For each finding, attach the sub-agent name
 so you can attribute and dedupe.
 
+Synthesis judges and merges; it does not redo the specialists' work. Do not
+rerun their recomputations or reread whole scripts to check them. Open a
+file only to pull the verbatim lines a finding's evidence needs, or to settle
+a factual disagreement between two specialists, and batch those reads into
+as few calls as you can. A finding you cannot trust without redoing it
+follows the low-confidence rules below.
+
 ### Step 2 — Dedupe
 
 Two findings are duplicates if they refer to the same `file:line` range
@@ -91,6 +105,14 @@ exist:
 - If one root cause affects several files or creates several downstream
   consequences, keep one finding ID and list those locations/consequences
   inside it. Finding IDs count distinct remediations, not prose framings.
+- `results-and-claims` and a code-level specialist often reach the same
+  root from opposite ends (a flat model in a script, and the conclusion
+  whose p-value collapses when it is clustered). Keep one finding. Place it
+  under **Empirical claims & results** when the decisive evidence is a
+  recomputation or a table, and under the code-level category when it is
+  the code line; cross-reference the other.
+- A cross-conclusion contradiction is one finding at its root, listing every
+  conclusion it affects.
 
 ### Step 3 — Recalibrate severity
 
@@ -105,6 +127,31 @@ recalibrations:
 - A `minor` finding flagged independently by multiple agents may be
   worth promoting — duplicate signal across agents is a reliability
   boost
+- A `results-and-claims` finding stays Major only if a concrete check
+  shows a conclusion's number, direction, or scope changes. A finding
+  about wording, a qualifier, or a missing sensitivity analysis whose
+  effect was not shown is Minor. When the core verdict of a conclusion
+  still holds, say so in the finding ("the conclusion stands; the second
+  sentence does not") rather than letting the finding read as a
+  rejection.
+- Findings against a conclusion labelled exploratory or conjecture are
+  Major only when its data are invalid or its own text is dishonest, not
+  because it lacks confirmatory power.
+
+### Scoped reviews
+
+When the review ran with `--focus` (and optionally `--cleared`):
+
+- Keep findings on the focused conclusions and files, their producing
+  scripts, and their tables.
+- Drop any standalone finding about a cleared item. Keep it only if it is a
+  boundary invalidation: a shared input, definition mismatch, or direct
+  contradiction found inside the focus that undermines the cleared item.
+  Title such a finding with the prefix `Boundary:` and name the cleared item.
+- Findings outside both sets that do not touch the focus are out of scope;
+  mention them in Notes in one line at most, without a finding ID.
+- The tally still has every category row, so the validator treats scoped
+  and full reports identically.
 
 ### Step 4 — Identify key decisions
 
@@ -169,6 +216,11 @@ For each sub-agent that ran, include one sentence in "What was checked
 but is fine." If the sub-agent returned nothing, that's the message. If
 it returned only minor things, summarize the *categories* it covered
 without findings. This builds trust by making absent findings legible.
+Keep unavailable evidence and skipped recomputations (such as untracked
+tables whose revision could not be verified, missing input files, or
+missing packages) out of "What was checked but is fine"; list them
+separately under **Checks not run / unavailable evidence** in `## Notes`
+so a zero tally never implies unverified claims were checked.
 
 ### Step 7 — Render
 
@@ -180,12 +232,17 @@ a `file:line` reference.
 
 Count the rendered `##### F<n>.` headings, not the pre-synthesis agent lists.
 Require unique consecutive IDs beginning at F1. Add a final `## Finding tally`
-table with one row per category and a bold Total row, and derive both row and
+table with one row per category (all seven, including any whose specialist
+self-skipped, which gets `0 | 0 | 0`) and a bold Total row, and derive both row and
 global counts from those headings. Run:
 
 ```bash
-python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/validate_review_report.py" <report>
+python3 "<plugin-root>/skills/core/scripts/validate_review_report.py" <report>
 ```
+
+Resolve `<plugin-root>` from the active skill bundle (two directories above
+`skills/review/SKILL.md`), not from `.mycelium/plugin-root`, which may still
+point to an earlier installed bundle after a plugin upgrade.
 
 Repair the report until it exits zero. Chat summaries and session handoffs must
 reuse this validated tally; never maintain a second hand-count.
@@ -195,9 +252,11 @@ reuse this validated tally; never maintain a second hand-count.
 ```markdown
 # Review — <scope> — YYYY-MM-DD
 
-**Scope**: <PR / commit range / working tree / pasted diff>
+**Scope**: <PR / commit range / working tree / pasted diff / analysis directory>
+  (scoped review: add `; focus: <IDs or files>; cleared: <IDs or files>`)
 **Files reviewed**: N
-**Sub-agents run**: 6 (or list which were skipped and why)
+**Sub-agents run**: 7 specialists in <n> sub-agents (lighter tier: <names>,
+  or "all on the primary model"; list any skipped and why)
 
 ## Key decisions in this analysis
 
@@ -223,11 +282,30 @@ rework.
 
 ## Findings
 
-### Statistics & causal inference
+### Empirical claims & results
 
 #### Major
 
 ##### F1. <short description>
+
+`<results doc>:<line>`; table `<outputs/tables/file.csv>`
+```text
+<1-5 lines of results prose, verbatim>
+<contradicting table rows, or a compact recomputation result>
+```
+**Why it matters here**: <which conclusion changes, and whether its core
+verdict still holds>.
+**Fix**: <one sentence>.
+
+#### Minor
+
+...
+
+### Statistics & causal inference
+
+#### Major
+
+##### F2. <short description>
 
 `<file>:<line>`
 ```python
@@ -237,17 +315,17 @@ rework.
 analysis>.
 **Fix**: <one sentence — what to do>.
 
-##### F2. ...
+##### F3. ...
 
 #### Minor
 
-##### F3. ...
+##### F4. ...
 
 ### Data pipeline & leakage
 
 #### Major
 
-##### F4. ...
+##### F5. ...
 
 #### Minor
 
@@ -271,6 +349,8 @@ analysis>.
 
 ## What was checked but is fine
 
+- **Empirical claims & results**: <one sentence, or "no empirical results
+  or output tables in scope" when it self-skipped>
 - **Statistics & causal inference**: <one sentence>
 - **Data pipeline & leakage**: ...
 - **Bioinformatics**: ...
@@ -282,6 +362,7 @@ analysis>.
 
 | Category | Major | Minor | Total |
 | --- | ---: | ---: | ---: |
+| Empirical claims & results | N | N | N |
 | Statistics & causal inference | N | N | N |
 | Data pipeline & leakage | N | N | N |
 | Bioinformatics | N | N | N |
@@ -304,7 +385,11 @@ the analysis process itself, sub-agents that struggled.>
 2. **First line under the heading** is the file path and line range only.
 3. **The code block** must contain 1–5 lines copied verbatim from the
    source — enough that a reader sees the issue without opening the
-   file. If the issue is a missing thing (no doublet detection, no
+   file. For a `results-and-claims` finding rooted in a table or a
+   cross-conclusion contradiction, the block (fenced as `text`) holds the
+   quoted results prose plus either the contradicting table rows, the compact
+   recomputation result, or (for a purely textual contradiction between two
+   conclusions) the two cited prose excerpts themselves, as described in `README.md`. If the issue is a missing thing (no doublet detection, no
    multiple-comparison correction), show the surrounding code where
    the missing thing should appear and add a comment line marking the
    absence: `# (no doublet detection step before this)`.
@@ -367,6 +452,19 @@ No findings.
 
 - **Statistics & causal inference**: ... (one sentence per agent)
 - ...
+
+## Finding tally
+
+| Category | Major | Minor | Total |
+| --- | ---: | ---: | ---: |
+| Empirical claims & results | 0 | 0 | 0 |
+| Statistics & causal inference | 0 | 0 | 0 |
+| Data pipeline & leakage | 0 | 0 | 0 |
+| Bioinformatics | 0 | 0 | 0 |
+| LLM coding antipatterns | 0 | 0 | 0 |
+| Documentation & schema fidelity | 0 | 0 | 0 |
+| Code quality | 0 | 0 | 0 |
+| **Total** | **0** | **0** | **0** |
 
 ## Notes
 

@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`/mycelium:review` checks each stated conclusion against its output
+  tables.** A seventh specialist, `results-and-claims`, works from the
+  results document down: it reads every row of each cited table, checks
+  conclusions against one another, and runs read-only recomputations
+  (leave-one-out, rank correlation, bootstrap, cluster-robust refits,
+  noise-floor estimates) where they could change a number, direction, or
+  scope. It is exempt from the diff-only rule, runs without seeing the other
+  specialists' findings, and self-skips when nothing in scope reports
+  results. Reports gain an **Empirical claims & results** category, and
+  `validate_review_report.py` now requires its tally row (`0 | 0 | 0` when
+  it skipped), so a report written to the six-category template no longer
+  validates.
+- **Scoped re-review.** `--focus C7,C8` (conclusion IDs or files), with an
+  optional `--cleared` list, reviews part of a large analysis in depth and
+  treats the rest as boundary context, filing findings outside the focus
+  only when something in the focus invalidates them. It runs in the main
+  session, with the `results-and-claims` pass done and recorded first,
+  because starting five sub-agents costs more than a narrow focus saves.
+- **Model tiers for review specialists.** `llm-failure-modes`,
+  `doc-schema-fidelity`, and `code-quality` run on the host's lighter model
+  when its sub-agent tool offers a per-agent model choice, and on the
+  primary model otherwise or with `--all-frontier`. The three share one
+  sub-agent by default, so a full review dispatches five. The orchestrator
+  writes one context pack (in-scope files, numbered conclusions, tables) that
+  every sub-agent reads first, and each works to a rough call budget with
+  batched reads. The report header records which tier each ran on.
+- Review checklists gain in-sample empirical-null leakage, baseline-mask
+  row drops, subject overlap across compared groups, clustering carried
+  across sibling scripts, small-`n` correlation leverage, noise-dominated
+  derived classifications, dropped signs, and inline numbers no script
+  computes.
+
 ### Fixed
 
 - **A Bash or edit call that Claude Code refuses no longer marks the rest of

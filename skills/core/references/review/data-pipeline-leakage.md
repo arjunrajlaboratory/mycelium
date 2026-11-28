@@ -47,6 +47,15 @@ You do NOT own:
 - Embargo violation in finance-style backtests (release-lag overlap)
 - Repeated reuse of the test set across model iterations
   (multi-test leakage)
+- In-sample empirical null or reference: a baseline rate, background
+  distribution, or null parameter (`p0`, expected frequency) estimated on
+  the same units that are then tested against it when the inference treats
+  that fitted reference as fixed or independent without accounting for how
+  it was estimated (unlike a parametric bootstrap that refits the null in
+  every replicate or a test with adjusted degrees of freedom)
+- The same subjects, patients, or samples appearing in both groups of a
+  comparison (primary vs metastatic, pre vs post) without deduplication or
+  a paired analysis
 
 ### Time-series look-ahead
 
@@ -86,6 +95,11 @@ You do NOT own:
 - `groupby` with NaN keys silently dropping rows (pandas default)
 - Aggregation function on the wrong axis
 - Mean of percentages when a weighted mean is correct
+- A robustness, union, or alternative-definition comparison that keeps only
+  units passing the baseline definition's mask (`y_base > 0`, rows present
+  in the baseline table), silently dropping events the new definition adds;
+  check that counts before and after the filter reconcile and that every
+  drop is logged
 
 ### Cross-input comparability
 
@@ -214,6 +228,11 @@ You do NOT own:
 - `.ipynb` cell metadata for execution order
 - `requirements.txt`, `environment.yml`, `pyproject.toml`,
   `Dockerfile`, `Makefile`, `run.sh`
+- When the context pack lists a results document, the script behind each
+  comparison it reports: where its baseline, null, or reference rate is
+  estimated (on which units), and whether any subject, patient, or sample
+  falls in both groups. Grep the comparison groups' ID columns across the
+  scripts in one call.
 
 ## Severity
 

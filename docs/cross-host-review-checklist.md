@@ -616,6 +616,12 @@ hook, filesystem, or lifecycle boundaries.
       unrelated tables in later appendices.
 - [ ] All required category rows are validated, including zero-finding
       categories, and unexpected finding or tally categories are rejected.
+- [ ] The report templates in `skills/review/SKILL.md` and `synthesis.md`
+      list exactly the validator's categories, and every specialist in the
+      dispatch table has a checklist file (a contract test pins both).
+- [ ] Review instructions name model tiers by role or host alias, never a
+      versioned model ID, and fall back to the primary model when a host
+      has no per-agent model choice.
 
 ## Required Adversarial Regression Matrix
 

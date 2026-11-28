@@ -1,7 +1,7 @@
 # Deep tripwires — behavioral follow-up to static review
 
 This file is consulted by the main `/mycelium:review` skill at Step 5
-("Offer deep behavioral checks"), after the six static sub-agents have
+("Offer deep behavioral checks"), after the seven static sub-agents have
 returned findings and synthesis has rendered the report. Static review
 reads code; tripwires perturb inputs and observe pipeline behavior.
 They are intentionally heavier, so the user opts in.
@@ -18,7 +18,7 @@ metamorphic tripwire", "the missing-counts fault-injection tripwire").
 ```text
 Cheap, frequent (already in the skill):
   static lint
-  six review sub-agents
+  seven review sub-agents
   synthesis
 
 Heavier, opt-in (this file):

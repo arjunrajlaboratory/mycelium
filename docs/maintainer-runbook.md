@@ -140,6 +140,26 @@ These recipes are for development checks. The release lifecycle audit
   heuristic: an exact-grammar reader that refuses everything else, an allowlist
   instead of a blocklist, positive proof instead of gap-by-default, warn-only
   instead of blocking.
+- **Live-testing changes to `/mycelium:review` itself.** Run
+  `claude -p "/mycelium:review <scope> --no-tripwires" --plugin-dir <frozen
+  candidate> --settings '{"enabledPlugins":{"mycelium@mycelium":false}}'
+  --output-format stream-json --verbose` in a disposable repository whose
+  `.mycelium/plugin-root` points at the same frozen candidate (otherwise the
+  installed validator checks the report). The final `result` event carries
+  `total_cost_usd`, `duration_api_ms` and per-model `modelUsage`; the main
+  thread's `Agent` tool calls show each specialist's `model` (absent means it
+  inherited the primary). For regression runs on an earlier benchmark repo,
+  APFS-clone it (`cp -c -R`) and remove the earlier review's own outputs
+  first: its report, its session logs, and any learnings entry its Step 6
+  wrote. Score a synthetic fixture with planted defects and sound controls
+  before the expensive real-repo runs. Run it with `--permission-mode auto`,
+  not `--allowedTools "Bash(python3:*)"`: prefix rules do not match the
+  compound commands specialists write (`cd … && python3 …`, loops, variable
+  assignments), headless `-p` refuses the rest, and `results-and-claims`
+  then silently loses its recomputations. Check the `result` event's
+  `permission_denials` is empty before scoring a run. A full seven-specialist
+  run on a real analysis costs several dollars; check the org's spend
+  headroom before launching several in parallel.
 - When rewriting a test (for example to remove flakiness), run a mutation check:
   reintroduce the original bug and confirm the new test still fails.
 - **Codex on GitHub** (`chatgpt-codex-connector[bot]`) reviews on PR open, on

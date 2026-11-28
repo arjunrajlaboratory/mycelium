@@ -4,9 +4,9 @@ description: >
   Review or audit analytical code and scientific changes in statistics, ML,
   bioinformatics, or data pipelines. Use for PRs, commits, diffs, sanity checks,
   correctness questions, pre-merge review, tripwire testing, or conversational
-  grill mode. Consult the bundled statistical, leakage, bioinformatics,
-  documentation, LLM-failure, and code-quality checklists; synthesize prioritized
-  findings. Do not use for writing new analysis, reports, brainstorming, project
+  grill mode. Check stated results against output tables, and consult the
+  bundled statistical, leakage, bioinformatics, documentation, LLM-failure, and
+  code-quality checklists; synthesize prioritized findings. Do not use for writing new analysis, reports, brainstorming, project
   initialization, or pure software review with no analytical component.
 ---
 
@@ -19,9 +19,11 @@ relative to the user's working repository.
 Review code, analysis, or documentation changes for the kinds of mistakes that
 matter in scientific data work. Two modes plus one opt-in follow-up:
 
-- **Default**: dispatch six specialized sub-agents, parallelized up to the
+- **Default**: run seven specialist checklists in sub-agents (the three
+  mechanical ones share one lighter-tier sub-agent), parallelized up to the
   host capacity and run in waves when necessary, then synthesize a single
-  prioritized report.
+  prioritized report. Add `--focus` (and optionally `--cleared`) to re-review
+  only some conclusions or files of a large analysis; see "Scoped review".
 - **`grill`**: walk the user through every consequential analytical decision
   conversationally, one question at a time.
 - **Tripwires (opt-in, offered after default)**: perturb inputs and verify
@@ -44,8 +46,13 @@ debugging the skill — pass the file paths to the sub-agents.
 LLM coding agents tend to make the same kinds of mistakes when generating
 analysis code, and many are silent: code that runs cleanly and produces a
 confidently wrong number. This skill encodes the catalog of those failure
-modes, partitions them across six specialists so each can hold a tight prompt,
-and aggressively prunes false positives in synthesis. Severity calibration
+modes, partitions them across seven specialists so each can hold a tight prompt,
+and aggressively prunes false positives in synthesis. Six specialists read
+the code from the bottom up. The seventh, `results-and-claims`, works from the
+top down: it starts from each stated conclusion and the output tables and
+recomputes, read-only, what the prose asserts, because defects such as
+omitted table rows or contradictions between conclusions never appear on a
+code line. Severity calibration
 matters more than raw recall — a list of fifty nits buries the one critical
 finding.
 
@@ -56,18 +63,41 @@ specify, ask once which scope they want.
 
 | Scope | How to obtain the diff |
 |-------|------------------------|
-| **PR** (`/mycelium:review <PR#>` or PR URL) | `gh pr diff <num>` plus `gh pr view <num> --json files,body,title` for context |
+| **PR** (`/mycelium:review <PR#>` or PR URL) | Resolve `baseRefOid` and `headRefOid` via `gh pr view <num> --json baseRefOid,headRefOid,files,body,title`, then derive both the diff (`git diff <base>..<head>` or commit-pinned PR diff) and tracked evidence from that exact `<head>` SHA |
 | **Commit / commit range** (`/mycelium:review <sha>` or `<sha1>..<sha2>`) | `git show <sha>` or `git diff <sha1>..<sha2>` |
 | **Working tree** (default if no scope given on a dirty repo) | `git diff HEAD` plus `git status` |
 | **Branch vs main** | `git diff main...HEAD` |
 | **Pasted diff** (user dumped a diff into chat) | Use the diff verbatim |
 | **Whole analysis directory** (`/mycelium:review analysis/<name>`) | Read the directory; treat all files as "added" |
+| **Scoped re-review** (`/mycelium:review analysis/<name> --focus C7,C8 [--cleared C1,C2]`) | Any scope above, narrowed to the focused conclusions or files; see "Scoped review" |
 
 For all scopes: also collect the relevant context — the analysis's
 `UPPER_SNAKE_CASE.md` documentation file, `specification.md` if present,
 `.living/decisions.md`, and any installed convention packs in
 `.living/conventions/` — and pass these into each sub-agent so it can ground
 findings in the project's stated intent rather than inferring from code alone.
+Also list the analysis's results document(s), `outputs/tables/*`, and
+`outputs/numbers.json` (or their equivalents) for `results-and-claims`, even
+when the diff did not touch them: the conclusions they state are in scope.
+For every revision-based scope (PR, commit, commit range, or branch vs main),
+resolve tracked results documents, scripts, and tables against the reviewed
+revision SHA (e.g., `git show <rev>:<path>` or a read-only export of that SHA)
+rather than reading live working-tree files that may carry uncommitted local
+edits; read live files only for working-tree or whole-directory reviews, and
+treat untracked or generated artifacts as unavailable unless they can be tied
+to the reviewed revision.
+
+### Invocation options
+
+| Option | Effect |
+|--------|--------|
+| `--focus <items>` | Comma-separated conclusion IDs as the results document numbers them (`C7,C8`, `Conclusion 7`) or repository paths (`scripts/05_overdispersion.py`). Review those in depth. |
+| `--cleared <items>` | Conclusions or files already reviewed and cleared. Read-only boundary context; requires `--focus`. |
+| `--all-frontier` | Run every specialist on the primary model; disables the lighter tier. |
+| `--no-tripwires` | Skip Step 5. |
+
+The user may also say these in words ("only re-review conclusions 7 and 8;
+1–6 were fine last time"). Treat that as the same options.
 
 ## Default mode protocol
 
@@ -77,31 +107,77 @@ Determine the scope from the user's invocation. If unclear, ask one short
 question ("review the working tree, last commit, or a specific PR?") rather
 than guessing. For PRs, fetch with `gh`. For commits/working tree, use `git`.
 
-Capture the diff, the list of touched files, and any relevant context files
-into local variables (or a scratch file in `/tmp/`) so the sub-agents share a
-common substrate.
+Write a **context pack**: one scratch file in a temporary directory outside
+the repository that every sub-agent reads first, so none of them spends calls
+rediscovering the tree. Keep it to an index, not file contents:
 
-### Step 2 — Dispatch six sub-agents in parallel (or run their checklists in-line)
+- the scope, reviewed revision (SHA/ref when reviewing a PR, commit, or range),
+  and how the diff was obtained, plus the diff itself (or the path to a saved
+  copy when it is large);
+- the in-scope files with their line counts;
+- the results document(s), with each stated conclusion's ID (or section
+  heading and line number when unnumbered), heading, and line number;
+- the output tables and registered-values files, with their row counts;
+- the context files (`.living/decisions.md`, `.living/learnings.md`,
+  specifications, convention packs);
+- for a scoped review, the resolved focus and boundary sets.
 
-If the `Agent` tool is available to you, schedule all six specialists while
+For a scoped review, resolve the focus before dispatch:
+
+1. Map each focused conclusion ID to its section in the results document, the
+   scripts that produce its numbers, and the tables it cites (use the
+   document's own citations, `run.sh`, `outputs/numbers.json`, and any
+   recorded lineage). Map each focused file to the conclusions that use it.
+2. Do the same for `--cleared` items, as boundary context only.
+3. If a focus item cannot be resolved (no such conclusion or file), ask one
+   short question rather than guessing.
+4. Without `--cleared`, everything outside the focus is still boundary
+   context: read it where it bears on the focus, but file nothing standalone
+   about it.
+
+### Step 2 — Dispatch the specialists in parallel (or run their checklists in-line)
+
+The seven specialist checklists run in five sub-agents: one each for
+`results-and-claims`, `stats-causal`, `data-pipeline-leakage`, and
+`bioinformatics`, and one **lighter pass** that applies the
+`llm-failure-modes`, `doc-schema-fidelity`, and `code-quality` checklists in
+turn and returns their findings under their own categories. Split the
+lighter pass into three sub-agents only with `--all-frontier` or when the
+change is mostly software (no results document in scope), where those
+checklists carry the review.
+
+If the `Agent` tool is available to you, schedule these sub-agents while
 respecting the host capacity (subagent_type `general-purpose` is fine; for very
 large diffs prefer `Explore`). Run as many concurrently as the host permits,
 wait for that wave to finish, and dispatch the remaining specialists in later
-waves. Do not assume that six slots are available. If dispatch reports
+waves. Do not assume that five slots are available. When slots are
+limited, put `results-and-claims` and `stats-causal` in the first wave.
+In a full review, do not run the checklists in-line to save cost or to fit
+a spend cap when the `Agent` tool works: `results-and-claims` must stay
+independent of the code-level reading, and in-line runs share one context.
+If a cap cannot cover the dispatch, say so and offer a scoped review instead.
+A scoped review is the exception: it runs in-line by default (see "Scoped
+review" below). If dispatch reports
 `agent thread limit reached`, wait for an active specialist to finish and retry
 the undispatched specialist once; if capacity remains unavailable, run that
 checklist in-line. If the `Agent` tool is *not* available (common when this
 skill runs from inside a sub-agent context that doesn't expose it), execute
 each specialist's checklist in-line: read each checklist file in turn, apply it
-to the diff, collect findings, then proceed to synthesis. Either way the output
+to the diff, collect findings, then proceed to synthesis. In-line, run
+`results-and-claims` first and write its findings down before reading the
+other checklists, so its top-down reading is not anchored to the code-level
+one. Either way the output
 contract and the synthesis steps are the same, and every applicable checklist
 must run exactly once.
 
 Each sub-agent (or in-line pass) gets:
 
-1. The diff (or path to it if large)
-2. The list of context files to read
+1. The path to the context pack (which holds or points to the diff), and an
+   instruction to read it first and to follow the effort budget in
+   `skills/core/references/review/README.md`
+2. Any context files the pack does not already list
 3. The path to its checklist reference: `skills/core/references/review/<agent>.md`
+   (three paths for the lighter pass)
 4. A clear instruction to follow the output contract in
    `skills/core/references/review/README.md` exactly. The required
    fields per finding are `severity` (`major | minor`), `file`, `line`
@@ -119,22 +195,103 @@ Each sub-agent (or in-line pass) gets:
    evidence is weak — false positives are more costly than false negatives at
    this stage because synthesis can ask follow-up questions but cannot
    reconstruct missing certainty.
+6. For a scoped review, the resolved focus set and boundary set, with the
+   scoping contract under "Scoped review" below.
 
-The six sub-agents and their checklist files:
+Give `results-and-claims` the results document(s), the output tables, and the
+registered values in addition to the diff, and do not give it any other
+specialist's findings. Tell it that it may run read-only Python or R against
+those files from a temporary directory outside the repository, and that it
+is exempt from the diff-only rule (its checklist states the boundaries).
 
-| # | Sub-agent | Checklist file | Focus |
-|---|-----------|----------------|-------|
-| 1 | **stats-causal** | `skills/core/references/review/stats-causal.md` | Test selection, multiple comparisons, p-hacking, causal claims, effect-size reporting, study design |
-| 2 | **data-pipeline-leakage** | `skills/core/references/review/data-pipeline-leakage.md` | Train/test contamination, time-series look-ahead, joins, missing values, dedup, units, batch effects, ML evaluation |
-| 3 | **bioinformatics** | `skills/core/references/review/bioinformatics.md` | Gene names, reference genome, scRNA-seq pipeline, RNA-seq DE, double dipping, pseudoreplication |
-| 4 | **llm-failure-modes** | `skills/core/references/review/llm-failure-modes.md` | Try/except antipatterns, hallucinated APIs, default-parameter smuggling, sycophancy/forking-paths drift, fabricated tool output |
-| 5 | **doc-schema-fidelity** | `skills/core/references/review/doc-schema-fidelity.md` | Docstrings/specs/schemas/READMEs vs reality, definition drift, comment freshness, undocumented behavior |
-| 6 | **code-quality** | `skills/core/references/review/code-quality.md` | Duplicate sources of truth, boolean flag pairs, misleading names, premature abstractions, secrets, import hacks, BC cruft, file organization, logging consistency |
+The seven specialists, their checklist files, and their default tier
+(rows 5–7 share the lighter pass):
+
+| # | Sub-agent | Checklist file | Tier | Focus |
+|---|-----------|----------------|------|-------|
+| 1 | **results-and-claims** | `skills/core/references/review/results-and-claims.md` | primary | Each stated conclusion against every row of its output tables; cross-conclusion consistency; read-only sensitivity, clustering, and noise-floor recomputation; per-sentence prose fidelity |
+| 2 | **stats-causal** | `skills/core/references/review/stats-causal.md` | primary | Test selection, multiple comparisons, p-hacking, causal claims, effect-size reporting, study design |
+| 3 | **data-pipeline-leakage** | `skills/core/references/review/data-pipeline-leakage.md` | primary | Train/test contamination, time-series look-ahead, joins, missing values, dedup, units, batch effects, ML evaluation |
+| 4 | **bioinformatics** | `skills/core/references/review/bioinformatics.md` | primary | Gene names, reference genome, scRNA-seq pipeline, RNA-seq DE, double dipping, pseudoreplication |
+| 5 | **llm-failure-modes** | `skills/core/references/review/llm-failure-modes.md` | lighter | Try/except antipatterns, hallucinated APIs, default-parameter smuggling, sycophancy/forking-paths drift, fabricated tool output |
+| 6 | **doc-schema-fidelity** | `skills/core/references/review/doc-schema-fidelity.md` | lighter | Docstrings/specs/schemas/READMEs vs reality, definition drift, comment freshness, undocumented behavior |
+| 7 | **code-quality** | `skills/core/references/review/code-quality.md` | lighter | Duplicate sources of truth, boolean flag pairs, misleading names, premature abstractions, secrets, import hacks, BC cruft, file organization, logging consistency |
+
+`results-and-claims` and `stats-causal` are the primary reviewers of an
+analysis, not optional extras. When host capacity or budget forces a choice,
+and in scoped or lightweight runs, those two always run, on the primary tier;
+the mechanical specialists (`llm-failure-modes`, `doc-schema-fidelity`,
+`code-quality`) run on the lighter tier or on the changed or focused files
+only. `results-and-claims` self-skips with the one line "no empirical
+results or output tables in scope" when there is no results document, output table, or
+registered-values file in scope (a pure software or infrastructure change).
 
 The bioinformatics agent should self-skip with a one-line "no biology here" if
 the diff doesn't touch genomic data — don't spawn it if the project clearly
 isn't biology, but err on the side of running it for any project that has ever
 touched a sequence file, gene table, or single-cell object.
+
+A self-skipped specialist still gets its category's `0 | 0 | 0` row in the
+Finding tally.
+
+#### Model tiers
+
+The specialists whose checks need the most judgement run on the
+**primary** tier: the model this session already uses. That is
+`results-and-claims`, `stats-causal`, `data-pipeline-leakage`,
+`bioinformatics`, and the Step 3 synthesis, which you do yourself.
+
+The more mechanical specialists, `llm-failure-modes`, `doc-schema-fidelity`,
+and `code-quality`, run on the **lighter** tier when the host lets you choose
+a model per sub-agent. Pick the host's faster, cheaper general model by the
+alias the host documents (on Claude Code, for example, the sub-agent tool's
+`sonnet` alias). Never write a versioned model ID into a dispatch. Fall back
+to the primary model, without failing the review, when:
+
+- the sub-agent tool has no model choice, or rejects the lighter model;
+- you are running the checklists in-line;
+- the user passed `--all-frontier`, or asked for every specialist on the
+  primary model;
+- the session's primary model is already the host's lighter model.
+
+Record what actually ran in the report header's **Sub-agents run** line,
+for example `7 specialists in 5 sub-agents (lighter tier, one pass:
+llm-failure-modes, doc-schema-fidelity, code-quality)` or `7 specialists in
+5 sub-agents, all on the primary model (no per-agent model choice on this
+host)`, plus any self-skips.
+
+#### Scoped review
+
+A scoped review runs every checklist **in-line, in this session**, unless
+the user asks for sub-agents. Starting five sub-agents costs more than a
+narrow focus saves: each one rereads the context and its checklist, and they
+overlap on the same few scripts. To keep `results-and-claims` independent
+in-line:
+
+1. Run the `results-and-claims` checklist first, on the primary model,
+   before reading any other checklist, and write its findings to a scratch
+   file outside the repository.
+2. Then run `stats-causal`, `data-pipeline-leakage`, `bioinformatics`, and
+   the three lighter-tier checklists on the focused files, adding their
+   findings without editing the first pass's.
+3. Synthesize as usual. Record the mode on the **Sub-agents run** line, for
+   example `7 specialists in-line (scoped review; results-and-claims run
+   first)`.
+
+With `--focus`, every specialist pass receives the same contract:
+
+- Review the focused conclusions, their producing scripts, and their tables
+  (or the focused files and the conclusions that use them) in full.
+- Treat `--cleared` items, and everything else outside the focus, as
+  read-only boundary context. Do not file standalone findings on them.
+- Exception: when something inside the focus exposes a shared-input flaw, a
+  definition mismatch, or a direct logical contradiction that invalidates a
+  cleared or out-of-focus item, file it as a boundary finding (category
+  starting `boundary:`) that names the affected item.
+
+A scoped review is cheaper, not a substitute for a full one: dependencies
+nobody declared are exactly what it can miss. Recommend a full review before
+the results are reported or shared.
 
 ### Step 3 — Synthesize
 
@@ -167,14 +324,17 @@ form:
    verbatim from the source so the user sees the issue without opening
    the file, why it matters *for this analysis specifically*, and a
    one-sentence fix.
-6. Group findings by category (the six sub-agent areas), and within each
-   category list Major findings first, then Minor.
+6. Group findings by category (the seven specialist areas), and within each
+   category list Major findings first, then Minor. For a scoped review, apply
+   the scoping rules in `synthesis.md` before numbering.
 7. Number findings F1, F2, F3 ... globally so the Key decisions and
    Questions sections can link to them where useful.
 8. Derive every reported count from the final `##### F<n>.` headings. Add the
-   required Finding tally table, then run the deterministic validator before
-   reporting or writing a handoff:
-   `python3 "$(cat .mycelium/plugin-root)/skills/core/scripts/validate_review_report.py" <report>`.
+   required Finding tally table, then run the deterministic validator from the
+   active skill bundle (resolving `skills/core/scripts/validate_review_report.py`
+   relative to the plugin root two directories above this `SKILL.md`, not
+   `.mycelium/plugin-root`) before reporting or writing a handoff:
+   `python3 "<plugin-root>/skills/core/scripts/validate_review_report.py" <report>`.
    If it fails, repair IDs, severities, or tallies and rerun it. Never copy an
    earlier draft's hand-count into chat or `.mycelium/last-session.md`.
 
@@ -182,14 +342,17 @@ form:
 
 Write the report to a file under `.living/outputs/reviews/` named
 `YYYY-MM-DD-<scope-slug>.md` (e.g., `2026-04-24-pr-127.md`,
-`2026-04-24-working-tree.md`). The structure:
+`2026-04-24-working-tree.md`, `2026-04-24-melanoma-focus-c7-c8.md` for a
+scoped review). The structure:
 
 ```markdown
 # Review — <scope> — YYYY-MM-DD
 
-**Scope**: <PR / commit range / working tree / pasted diff>
+**Scope**: <PR / commit range / working tree / pasted diff / analysis directory>
+  (scoped review: add `; focus: C7, C8; cleared: C1–C6`)
 **Files reviewed**: N
-**Sub-agents run**: 6 (or list which were skipped and why)
+**Sub-agents run**: 7 specialists in <n> sub-agents (lighter tier: <names>,
+  or "all on the primary model"; list any skipped and why)
 
 ## Key decisions in this analysis
 
@@ -209,9 +372,20 @@ context). The diff can't answer these — only the analyst can.
 
 ## Findings
 
-### Statistics & causal inference
+### Empirical claims & results
 #### Major
 ##### F1. <short description>
+`<results doc>:<line>`; table `<outputs/tables/file.csv>`
+```text
+<1-5 lines of results prose, verbatim>
+<contradicting table rows, or a compact recomputation result>
+```
+**Why it matters here**: ... (say whether the conclusion's core verdict holds)
+**Fix**: ...
+
+### Statistics & causal inference
+#### Major
+##### F2. <short description>
 `<file>:<line>`
 ```python
 <1-5 lines verbatim>
@@ -220,7 +394,7 @@ context). The diff can't answer these — only the analyst can.
 **Fix**: ...
 
 #### Minor
-##### F2. ...
+##### F3. ...
 
 ### Data pipeline & leakage
 ... (Major / Minor under each category)
@@ -238,6 +412,7 @@ context). The diff can't answer these — only the analyst can.
 ...
 
 ## What was checked but is fine
+- **Empirical claims & results**: <one sentence, or the self-skip line>
 - **Statistics & causal inference**: <one sentence>
 - ...
 
@@ -245,6 +420,7 @@ context). The diff can't answer these — only the analyst can.
 
 | Category | Major | Minor | Total |
 | --- | ---: | ---: | ---: |
+| Empirical claims & results | N | N | N |
 | Statistics & causal inference | N | N | N |
 | Data pipeline & leakage | N | N | N |
 | Bioinformatics | N | N | N |
@@ -393,7 +569,7 @@ believe about each choice without exhausting them. If at any point they say
 - `skills/core/references/review/grill-mode.md` — grill protocol detail
 - `skills/core/references/review/deep-tripwires.md` — behavioral
   follow-up (Step 5)
-- Per-agent checklists under `skills/core/references/review/` (six files;
+- Per-agent checklists under `skills/core/references/review/` (seven files;
   loaded by sub-agents, not by you)
 - The mycelium core `Post-Action Hook Protocol` from `../core/SKILL.md`
   governs what to log to `.living/` when a review surfaces a recurring

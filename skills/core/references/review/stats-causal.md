@@ -141,6 +141,16 @@ You do NOT own (other agents handle these):
 - Pseudoreplication: cells, repeated measurements, or wells treated as
   independent observations
 - Hierarchical / clustered data analyzed with a flat model
+- Clustering not carried across scripts: one script in the analysis models
+  site, donor, patient, or batch clustering, while a sibling script fits a
+  flat model to the same cohort without a cluster-robust or cluster-bootstrap
+  sensitivity check (grep the sibling scripts for the grouping column even
+  when the changed script never loads it)
+- Correlation on small `n` (≤ 20) reported as Pearson alone, with no rank
+  correlation, leave-one-out influence, or bootstrap CI
+- Derived ratios or per-item classifications whose upstream measurement
+  noise is as large as the gap they rely on, so individual calls are
+  noise-dominated and associations are attenuated
 - Sample size in the figure caption does not match the code
 - "n" reported but ambiguous (cells vs samples vs subjects)
 

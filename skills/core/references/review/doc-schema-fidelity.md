@@ -117,6 +117,10 @@ Your job is consistency, not correctness of the underlying choice.
   don't exist or showed something different
 - Numerical claims in docs that disagree with numbers in the code
   outputs or `outputs/` files
+- Sign or direction lost between output and prose: a negative correlation or
+  effect reported without its minus sign, or `|r|` reported as `r`
+- Specific counts or percentages in results prose ("49 of 69") that no
+  script computes and no registered-values file records
 - Outdated "current state of the art" / "as of {date}" claims
   where the date is now stale
 
@@ -195,6 +199,11 @@ Your job is consistency, not correctness of the underlying choice.
 - Type stubs and `__init__.py` re-exports
 - Schema files: `schema.yaml`, Pandera definitions, Pydantic
   models, dataclass definitions
+
+When `results-and-claims` is running, it sweeps every number in the results
+prose against the output tables. Flag lost signs and uncomputed numbers where
+you meet them while checking docs against code, but do not sweep the tables
+yourself.
 
 ## Severity
 

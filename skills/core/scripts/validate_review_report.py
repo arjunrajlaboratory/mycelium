@@ -18,6 +18,7 @@ EXPECTED_CATEGORIES = {
     "LLM coding antipatterns",
     "Documentation & schema fidelity",
     "Code quality",
+    "Empirical claims & results",
 }
 
 
