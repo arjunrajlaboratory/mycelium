@@ -34,16 +34,21 @@ step, and the step is run through the tool.**
   call of an analysis in one step and declare `numbers.json` as that step's
   output. In a one-step analysis that is the step itself. With several
   steps, add a final `register` step that reads the earlier outputs.
-- **The same holds for `outputs/access.json`.** `record_ids` needs the ids
-  a filter kept and dropped, which a later step cannot work out from the
-  filtered table. When filters live in more than one step, have each write
-  the id lists as declared outputs, and call `record_ids` on those files in
-  the one step that declares `access.json`.
-- **A declared output that already exists is deleted on the first run.**
-  Before declaring a file that is already there (when converting an
-  existing analysis, or an `access.json` or `numbers.json` written
-  earlier), check that the step recreates everything in it and that the
-  current copy is committed or saved. Otherwise ask the user.
+- **The same holds for `outputs/access.json`**, which may have a different
+  writer from `numbers.json`. `record_ids` needs the ids a filter kept and
+  dropped, which a later step cannot work out from the filtered table, so
+  the step that filters calls it and declares `access.json`. When filters
+  live in more than one step, ask the user how to pass the ids along: files
+  of raw ids (sample names, cell barcodes) must not be committed, and
+  `access.json` exists to keep only counts and fingerprints.
+- **Converting an analysis that already has outputs.** Check first that
+  the steps recreate everything in the existing files (above all
+  `numbers.json` and `access.json`) and that the current copies are
+  committed or saved; otherwise ask the user. DVC deletes a declared
+  output before the first run. Snakemake does the opposite and keeps
+  existing outputs that are newer than their inputs without running the
+  rule, so force the first run (`snakemake --cores 1 --forceall <targets>`)
+  and check the outputs were rewritten.
 - **Scripts create the folder they write to**, for example
   `Path(out).parent.mkdir(parents=True, exist_ok=True)`. Git does not keep
   an empty `outputs/` folder, so a step that relies on one fails on a fresh
@@ -71,8 +76,10 @@ Install it in the project environment and record it in
 
 One rule file per analysis, included from the repository's main Snakefile.
 If one already exists (at the root or as `workflow/Snakefile`), add the
-`include:` line and the targets to it; a second Snakefile at the root would
-hide the existing one. Otherwise create a root `Snakefile`:
+`include:` line and the targets to it, keeping its name and place; a second
+Snakefile at the root would hide the existing one. An `include:` path is
+relative to the file that contains it, so from `workflow/Snakefile` write
+`../analysis/<name>/workflow.smk`. Otherwise create a root `Snakefile`:
 
 ```python
 # Snakefile
@@ -108,6 +115,10 @@ rule expression_fit_fit:
   `all`. Snakemake refuses to run without `--cores`.
   In `run.sh`, name the analysis's own final outputs as targets.
 - `snakemake -n` lists what is out of date and why, without running it.
+- In a sandbox that only allows writes inside the repository (Codex's
+  default), Snakemake fails at startup because it keeps a cache in the
+  user's cache folder. Prefix its commands with
+  `XDG_CACHE_HOME="$PWD/.snakemake/cache"`, from the repository root.
 - `snakemake --detailed-summary <target>` lists the outputs behind that
   target with their rule and inputs. It reads `.snakemake/`, which is not
   committed, so on a fresh clone it shows no inputs until the steps run.
@@ -157,17 +168,16 @@ stages:
   `dvc.yaml`.
 - `dvc status` lists what is out of date and why.
 - In a sandbox that only allows writes inside the repository (Codex's
-  default), `dvc init` and `dvc repro` fail because DVC keeps a cache
-  outside it. Prefix `dvc init` with
-  `DVC_SITE_CACHE_DIR="$PWD/.dvc/tmp/site-cache"`, then run
+  default), DVC fails because it keeps a cache outside it. Prefix
+  `dvc init` with `DVC_SITE_CACHE_DIR="$PWD/.dvc/tmp/site-cache"`, then run
   `dvc config --local core.site_cache_dir "$PWD/.dvc/tmp/site-cache"` once
   from the repository root. `--local` keeps the setting out of the
-  committed `.dvc/config`.
-- Do not edit `dvc.lock` by hand, including to tidy whitespace. A `cmd`
-  written on one line, as above, leaves none to tidy.
-- Commit `dvc.lock`. It records a hash of every dependency and output file
-  of each stage. With `cache: false`, commit the outputs too if the
-  repository commits its outputs.
+  committed `.dvc/config`. Where the sandbox also protects `.git`,
+  `dvc init` still ends with a permission error after creating its files:
+  it could not stage them. Stage them when you commit.
+- Do not edit `dvc.lock` by hand, including to tidy whitespace. DVC wraps
+  long commands there and leaves trailing spaces; if a whitespace check
+  rejects the file, exclude `dvc.lock` from the check.
 
 ## What Mycelium records
 

@@ -172,7 +172,9 @@ tool's record is translated into Mycelium's, not handed to Warrant as is.
    has run: tool, step name, command, and inputs and outputs with sha256
    and size. For DVC it is derived from `dvc.lock` (hash each listed file
    once, computing md5 and sha256 together; where the md5 matches the lock,
-   the sha256 is the content the step used). For Snakemake it is written
+   the sha256 is the content the step used). Lock paths are relative to
+   the stage's `wdir`, which only `dvc.yaml` records, so the reader needs
+   both files. For Snakemake it is written
    by an exporter at the end of a run.
 2. **The exporter runs off the hook path.** `export_declared_steps.py` is
    run by the workflow itself (an `onsuccess:` handler in the Snakefile

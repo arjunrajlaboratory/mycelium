@@ -59,7 +59,8 @@ These recipes are for development checks. The release lifecycle audit
   under `<scratch>/cand`).
 - **An uncommitted candidate** can be tried the same way from a copy:
   `git ls-files -z | rsync -a --from0 --files-from=- . <scratch>/cand/`
-  (after `git add -N` for new files).
+  (after `git add -N` for new files; stage any deletions first, or rsync
+  stops on the missing file).
 - With `-p` and a narrow allow-list, the agent's shell cannot read or copy
   files from the plugin directory (the Read tool can). A failed
   `cp .../register_value.py analysis/_lib/` in such a run is the harness,
@@ -105,7 +106,9 @@ These recipes are for development checks. The release lifecycle audit
   `turn/completed` by the main thread id, because a subagent's completion arrives
   first. Codex subagent hooks carry the parent `session_id`.
 - Under `-s workspace-write`, tools that write outside the project fail.
-  DVC is one (its site cache); see `workflow-guide.md` for the setting.
+  DVC and Snakemake both do (their caches); see `workflow-guide.md` for
+  the settings. `codex sandbox -c 'sandbox_mode="workspace-write"' --
+  <command>` reproduces such a failure without a model turn.
 - `codex exec --json` shows only the `wait` item for subagents, not
   `spawn_agent`. Confirm subagent probes from `~/.codex/sessions/<date>/rollout-*.jsonl`.
 
