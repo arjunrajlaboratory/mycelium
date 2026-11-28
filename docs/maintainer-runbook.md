@@ -104,6 +104,8 @@ These recipes are for development checks. The release lifecycle audit
   `codex app-server` (`thread/start`, then `turn/start` twice). Filter
   `turn/completed` by the main thread id, because a subagent's completion arrives
   first. Codex subagent hooks carry the parent `session_id`.
+- Under `-s workspace-write`, tools that write outside the project fail.
+  DVC is one (its site cache); see `workflow-guide.md` for the setting.
 - `codex exec --json` shows only the `wait` item for subagents, not
   `spawn_agent`. Confirm subagent probes from `~/.codex/sessions/<date>/rollout-*.jsonl`.
 

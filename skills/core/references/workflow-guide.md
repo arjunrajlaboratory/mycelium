@@ -156,6 +156,15 @@ stages:
   for every pipeline. A bare `dvc repro` fails when there is no root
   `dvc.yaml`.
 - `dvc status` lists what is out of date and why.
+- In a sandbox that only allows writes inside the repository (Codex's
+  default), `dvc init` and `dvc repro` fail because DVC keeps a cache
+  outside it. Prefix `dvc init` with
+  `DVC_SITE_CACHE_DIR="$PWD/.dvc/tmp/site-cache"`, then run
+  `dvc config --local core.site_cache_dir "$PWD/.dvc/tmp/site-cache"` once
+  from the repository root. `--local` keeps the setting out of the
+  committed `.dvc/config`.
+- Do not edit `dvc.lock` by hand, including to tidy whitespace. A `cmd`
+  written on one line, as above, leaves none to tidy.
 - Commit `dvc.lock`. It records a hash of every dependency and output file
   of each stage. With `cache: false`, commit the outputs too if the
   repository commits its outputs.
