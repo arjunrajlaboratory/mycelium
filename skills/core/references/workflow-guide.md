@@ -25,6 +25,9 @@ step, and the step is run through the tool.**
   anything in a temporary directory. Do not write a step for these.
 - **Declare every input:** the data files, the script itself, and any
   config file. Declaring the script makes a code change mark the step stale.
+  That includes helpers the script imports: keep the copy of
+  `register_value.py` in `analysis/_lib/` and list it as an input. A step
+  that loads it from the plugin folder fails on a fresh clone.
 - **Declare every output.** Each output file has exactly one step that
   writes it.
 - **One step per analysis writes `outputs/numbers.json`.** Both tools refuse
@@ -38,9 +41,12 @@ step, and the step is run through the tool.**
   writer from `numbers.json`. `record_ids` needs the ids a filter kept and
   dropped, which a later step cannot work out from the filtered table, so
   the step that filters calls it and declares `access.json`. When filters
-  live in more than one step, ask the user how to pass the ids along: files
-  of raw ids (sample names, cell barcodes) must not be committed, and
-  `access.json` exists to keep only counts and fingerprints.
+  live in more than one step, each may write a kept/dropped table that a
+  final `register` step reads, provided the ids are ones the committed
+  output tables already show, such as gene names. If the ids are sensitive
+  (patient or sample identifiers, cell barcodes), ask the user how to pass
+  them along: `access.json` exists so that only counts and fingerprints
+  are kept.
 - **Converting an analysis that already has outputs.** Check first that
   the steps recreate everything in the existing files (above all
   `numbers.json` and `access.json`) and that the current copies are
@@ -48,7 +54,12 @@ step, and the step is run through the tool.**
   output before the first run. Snakemake does the opposite and keeps
   existing outputs that are newer than their inputs without running the
   rule, so force the first run (`snakemake --cores 1 --forceall <targets>`)
-  and check the outputs were rewritten.
+  and check the outputs were rewritten. In `numbers.json` and
+  `access.json`, expect only timestamps and run details to differ.
+- **Ignore the helper's lock files.** `register_value` leaves
+  `numbers.json.lock` and `access.json.lock` beside the outputs. Add
+  `analysis/*/outputs/*.lock` to `.gitignore`; do not declare or commit
+  them.
 - **Scripts create the folder they write to**, for example
   `Path(out).parent.mkdir(parents=True, exist_ok=True)`. Git does not keep
   an empty `outputs/` folder, so a step that relies on one fails on a fresh
